@@ -25,7 +25,7 @@ jobs:
     - name: Install Rust toolchain
       uses: dtolnay/rust-toolchain@stable
       with:
-        components: clippy, fmt
+        components: clippy, rustfmt
 
     - name: Cache Cargo dependencies
       uses: actions/cache@v4
