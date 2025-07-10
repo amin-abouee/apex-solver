@@ -1,4 +1,5 @@
 pub mod io;
+pub mod manifold;
 
 pub use io::*;
 
