@@ -8,12 +8,12 @@
 //! where rho is the translational component and theta is the rotational component.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
-//! conventions and provides all operations required by the Manifold and Tangent traits.
+//! conventions and provides all operations required by the LieGroup and LieAlgebra traits.
 
-use crate::manifold::{Manifold, ManifoldResult, Tangent};
+use crate::manifold::{LieAlgebra, LieGroup, ManifoldResult};
 use nalgebra::{
-    DMatrix, Isometry3, Matrix3, Matrix4, Matrix6, Point3, Quaternion, Translation3,
-    UnitQuaternion, Vector3, Vector6,
+    DMatrix, Isometry3, Matrix3, Matrix4, Matrix6, Point3, Translation3, UnitQuaternion, Vector3,
+    Vector6,
 };
 use std::fmt::Debug;
 
@@ -153,26 +153,14 @@ impl SE3Tangent {
     pub fn theta(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(3).into_owned()
     }
-
-    /// Legacy accessor: Get the translational part (alias for rho).
-    #[deprecated(note = "Use rho() instead for correct terminology")]
-    pub fn linear(&self) -> Vector3<f64> {
-        self.rho()
-    }
-
-    /// Legacy accessor: Get the rotational part (alias for theta).
-    #[deprecated(note = "Use theta() instead for correct terminology")]
-    pub fn angular(&self) -> Vector3<f64> {
-        self.theta()
-    }
 }
 
-// Implement basic trait requirements for Manifold
-impl Manifold for SE3 {
+// Implement basic trait requirements for LieGroup
+impl LieGroup for SE3 {
     type Element = SE3;
     type TangentVector = Vector6<f64>;
     type JacobianMatrix = Matrix6<f64>;
-    type Tangent = SE3Tangent;
+    type LieAlgebra = SE3Tangent;
 
     // Dimension constants following manif conventions
     const DIM: usize = 3; // Space dimension (3D space)
@@ -451,7 +439,7 @@ impl Manifold for SE3 {
             let rotation_matrix = self.rotation().to_rotation_matrix();
             let r = rotation_matrix.matrix();
             jac_self.fill(0.0);
-            jac_self.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
+            jac_self.fixed_view_mut::<3, 3>(0, 0).copy_from(r);
             jac_self
                 .fixed_view_mut::<3, 3>(0, 3)
                 .copy_from(&(-r * skew_symmetric(vector)));
@@ -460,7 +448,7 @@ impl Manifold for SE3 {
         if let Some(jac_vector) = jacobian_vector {
             // Jacobian wrt vector
             let rotation_matrix = self.rotation().to_rotation_matrix();
-            jac_vector.copy_from(&rotation_matrix.matrix());
+            jac_vector.copy_from(rotation_matrix.matrix());
         }
 
         result
@@ -474,10 +462,10 @@ impl Manifold for SE3 {
         let mut adj = Matrix6::zeros();
 
         // Top-left block: R
-        adj.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_matrix);
+        adj.fixed_view_mut::<3, 3>(0, 0).copy_from(r_matrix);
 
         // Bottom-right block: R
-        adj.fixed_view_mut::<3, 3>(3, 3).copy_from(&r_matrix);
+        adj.fixed_view_mut::<3, 3>(3, 3).copy_from(r_matrix);
 
         // Top-right block: [t]_× R (skew-symmetric of translation times rotation)
         let t_skew = skew_symmetric(&translation);
@@ -530,8 +518,8 @@ impl Manifold for SE3 {
     }
 }
 
-// Implement Tangent trait for SE3Tangent
-impl Tangent<SE3> for SE3Tangent {
+// Implement LieAlgebra trait for SE3Tangent
+impl LieAlgebra<SE3> for SE3Tangent {
     fn add(&self, other: &Vector6<f64>) -> Vector6<f64> {
         self.data + other
     }
@@ -636,6 +624,7 @@ impl Tangent<SE3> for SE3Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::Quaternion;
     use nalgebra::Vector3;
     use std::f64::consts::PI;
 

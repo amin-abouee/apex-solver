@@ -143,8 +143,7 @@ pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError
         "graph" => ToroLoader::load(path),
         "txt" | "csv" => TumLoader::load(path),
         _ => Err(ApexSolverIoError::UnsupportedFormat(format!(
-            "Unsupported extension: {}",
-            extension
+            "Unsupported extension: {extension}"
         ))),
     }
 }
@@ -161,7 +160,7 @@ mod tests {
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 1 1.0 0.0 0.0")?;
         writeln!(temp_file, "# This is a comment")?;
-        writeln!(temp_file, "")?; // Empty line
+        writeln!(temp_file)?; // Empty line
         writeln!(temp_file, "VERTEX_SE3:QUAT 2 0.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
 
         let graph = G2oLoader::load(temp_file.path())?;
@@ -183,7 +182,7 @@ mod tests {
             graph.vertex_count(),
             graph.edge_count()
         );
-        assert!(graph.vertices_se2.len() > 0);
+        assert!(!graph.vertices_se2.is_empty());
         Ok(())
     }
 
@@ -195,7 +194,7 @@ mod tests {
             graph.vertex_count(),
             graph.edge_count()
         );
-        assert!(graph.vertices_se3.len() > 0);
+        assert!(!graph.vertices_se3.is_empty());
         Ok(())
     }
 
@@ -207,7 +206,7 @@ mod tests {
             graph.vertex_count(),
             graph.edge_count()
         );
-        assert!(graph.vertices_se3.len() > 0);
+        assert!(!graph.vertices_se3.is_empty());
         Ok(())
     }
 
