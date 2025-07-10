@@ -1,0 +1,169 @@
+stages:
+  - check
+  - test
+  - build
+  - doc
+
+.variables: &common-variables
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  RUST_BACKTRACE: 1
+
+cache: &common-cache
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .cargo/registry
+    - .cargo/git
+    - target/
+
+# Template for Linux jobs
+.linux-job: &linux-job
+  image: $CI_IMAGE
+  variables:
+    <<: *common-variables
+  cache: *common-cache
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq curl build-essential
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    - export PATH="$HOME/.cargo/bin:$PATH"
+
+# Template for macOS jobs
+.macos-job: &macos-job
+  tags:
+    - macos
+  variables:
+    <<: *common-variables
+  cache: *common-cache
+  before_script:
+    - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+    - export PATH="$HOME/.cargo/bin:$PATH"
+
+# Template for Windows jobs
+.windows-job: &windows-job
+  tags:
+    - windows
+  variables:
+    <<: *common-variables
+  cache: *common-cache
+  before_script:
+    - choco install rustup -y
+    - rustup default stable
+    - $env:PATH += ";$env:USERPROFILE\.cargo\bin"
+
+# Formatting check
+fmt:
+  stage: check
+  extends: .linux-job
+  script:
+    - cargo fmt --all -- --check
+  parallel:
+    matrix:
+      - CI_IMAGE: ["ubuntu:22.04", "ubuntu:24.04"]
+
+fmt-macos:
+  extends: .macos-job
+  stage: check
+  script:
+    - cargo fmt --all -- --check
+
+fmt-windows:
+  extends: .windows-job
+  stage: check
+  script:
+    - cargo fmt --all -- --check
+
+# Clippy linting
+clippy:
+  stage: check
+  extends: .linux-job
+  script:
+    - rustup component add clippy
+    - cargo clippy --all-targets --all-features -- -D warnings
+  parallel:
+    matrix:
+      - CI_IMAGE: ["ubuntu:22.04", "ubuntu:24.04"]
+
+clippy-macos:
+  extends: .macos-job
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --all-targets --all-features -- -D warnings
+
+clippy-windows:
+  extends: .windows-job
+  stage: check
+  script:
+    - rustup component add clippy
+    - cargo clippy --all-targets --all-features -- -D warnings
+
+# Testing
+test:
+  stage: test
+  extends: .linux-job
+  script:
+    - cargo test --all-features
+  parallel:
+    matrix:
+      - CI_IMAGE: ["ubuntu:22.04", "ubuntu:24.04"]
+
+test-macos:
+  extends: .macos-job
+  stage: test
+  script:
+    - cargo test --all-features
+
+test-windows:
+  extends: .windows-job
+  stage: test
+  script:
+    - cargo test --all-features
+
+# Build
+build:
+  stage: build
+  extends: .linux-job
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/
+    expire_in: 1 week
+  parallel:
+    matrix:
+      - CI_IMAGE: ["ubuntu:22.04", "ubuntu:24.04"]
+
+build-macos:
+  extends: .macos-job
+  stage: build
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/
+    expire_in: 1 week
+
+build-windows:
+  extends: .windows-job
+  stage: build
+  script:
+    - cargo build --release
+  artifacts:
+    paths:
+      - target/release/
+    expire_in: 1 week
+
+# Documentation
+doc:
+  stage: doc
+  extends: .linux-job
+  script:
+    - cargo doc --no-deps
+  artifacts:
+    paths:
+      - target/doc/
+    expire_in: 1 week
+  only:
+    - main
+  parallel:
+    matrix:
+      - CI_IMAGE: ["ubuntu:22.04"] 
