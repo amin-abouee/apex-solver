@@ -15,7 +15,7 @@ use nalgebra::{
     DMatrix, Isometry3, Matrix3, Matrix4, Matrix6, Point3, Translation3, UnitQuaternion, Vector3,
     Vector6,
 };
-use std::fmt::Debug;
+use std::fmt;
 
 /// Create a skew-symmetric matrix from a 3D vector.
 /// For vector v = [x, y, z], returns:
@@ -35,6 +35,18 @@ pub struct SE3 {
     isometry: Isometry3<f64>,
 }
 
+impl fmt::Display for SE3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let t = self.translation();
+        let q = self.rotation();
+        write!(
+            f,
+            "SE3(translation: [{:.4}, {:.4}, {:.4}], rotation: [w: {:.4}, x: {:.4}, y: {:.4}, z: {:.4}])",
+            t.x, t.y, t.z, q.w, q.i, q.j, q.k
+        )
+    }
+}
+
 /// SE(3) tangent space element representing elements in the Lie algebra se(3).
 ///
 /// Following manif conventions, internally represented as [rho(3), theta(3)] where:
@@ -44,6 +56,18 @@ pub struct SE3 {
 pub struct SE3Tangent {
     /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
     data: Vector6<f64>,
+}
+
+impl fmt::Display for SE3Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rho = self.rho();
+        let theta = self.theta();
+        write!(
+            f,
+            "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
+            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
+        )
+    }
 }
 
 impl SE3 {
