@@ -8,6 +8,7 @@ thiserror = "1.0"
 nalgebra = "0.33"
 memmap2 = "0.9"
 rayon = "1.8"
+rand = "0.8"
 
 [dev-dependencies]
 criterion = "0.5"
