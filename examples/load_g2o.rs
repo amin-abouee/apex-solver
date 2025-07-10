@@ -162,7 +162,7 @@ fn display_file_statistics(file_path: &Path, stats: &FileStatistics) {
         .unwrap_or("unknown");
     let format = get_format_name(extension);
 
-    println!("Loading {} ({}):", filename, format);
+    println!("Loading {filename} ({format}):");
     println!("Successfully loaded!");
     println!("Statistics:");
     println!("  - SE2 vertices: {}", stats.se2_vertices);
@@ -220,6 +220,7 @@ fn display_first_vertex_info(file_path: &Path) {
 }
 
 /// Display error message for failed file load
+#[allow(clippy::borrowed_box)]
 fn display_load_error(file_path: &Path, error: &Box<dyn std::error::Error>) {
     let filename = file_path.file_name().unwrap().to_string_lossy();
     let extension = file_path
@@ -228,8 +229,8 @@ fn display_load_error(file_path: &Path, error: &Box<dyn std::error::Error>) {
         .unwrap_or("unknown");
     let format = get_format_name(extension);
 
-    println!("Loading {} ({}):", filename, format);
-    println!("  ❌ Failed to load: {}", error);
+    println!("Loading {filename} ({format}):");
+    println!("  ❌ Failed to load: {error}");
 }
 
 /// Accumulate statistics from a single file into the summary

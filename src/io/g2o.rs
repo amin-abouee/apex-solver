@@ -13,7 +13,7 @@ impl GraphLoader for G2oLoader {
         let mmap = unsafe { Mmap::map(&file)? };
         let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
             line: 0,
-            message: format!("Invalid UTF-8: {}", e),
+            message: format!("Invalid UTF-8: {e}"),
         })?;
 
         Self::parse_content(content)
@@ -90,7 +90,7 @@ impl G2oLoader {
                     graph.edges_se2.push(edge);
                 }
                 ParsedItem::EdgeSE3(edge) => {
-                    graph.edges_se3.push(edge);
+                    graph.edges_se3.push(*edge);
                 }
             }
         }
@@ -172,7 +172,9 @@ impl G2oLoader {
                 &parts, line_num,
             )?)),
             "EDGE_SE2" => Some(ParsedItem::EdgeSE2(Self::parse_edge_se2(&parts, line_num)?)),
-            "EDGE_SE3:QUAT" => Some(ParsedItem::EdgeSE3(Self::parse_edge_se3(&parts, line_num)?)),
+            "EDGE_SE3:QUAT" => Some(ParsedItem::EdgeSE3(Box::new(Self::parse_edge_se3(
+                &parts, line_num,
+            )?))),
             _ => None, // Skip unknown types
         };
 
@@ -390,7 +392,7 @@ enum ParsedItem {
     VertexSE2(VertexSE2),
     VertexSE3(VertexSE3),
     EdgeSE2(EdgeSE2),
-    EdgeSE3(EdgeSE3),
+    EdgeSE3(Box<EdgeSE3>),
 }
 
 #[cfg(test)]

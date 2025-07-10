@@ -59,15 +59,14 @@ impl std::fmt::Display for ManifoldError {
             ManifoldError::InvalidTangentDimension { expected, actual } => {
                 write!(
                     f,
-                    "Invalid tangent dimension: expected {}, got {}",
-                    expected, actual
+                    "Invalid tangent dimension: expected {expected}, got {actual}"
                 )
             }
             ManifoldError::NumericalInstability(msg) => {
-                write!(f, "Numerical instability: {}", msg)
+                write!(f, "Numerical instability: {msg}")
             }
             ManifoldError::InvalidElement(msg) => {
-                write!(f, "Invalid manifold element: {}", msg)
+                write!(f, "Invalid manifold element: {msg}")
             }
         }
     }
@@ -78,12 +77,12 @@ impl std::error::Error for ManifoldError {}
 /// Result type for manifold operations.
 pub type ManifoldResult<T> = Result<T, ManifoldError>;
 
-/// Core trait for Lie group manifold operations.
+/// Core trait for Lie group operations.
 ///
 /// This trait provides the fundamental operations for Lie groups, including:
 /// - Group operations (composition, inverse, identity)
 /// - Exponential and logarithmic maps
-/// - Manifold plus/minus operations with Jacobians
+/// - Lie group plus/minus operations with Jacobians
 /// - Adjoint operations
 /// - Random sampling and normalization
 ///
@@ -92,19 +91,19 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 /// # Type Parameters
 ///
 /// Associated types define the mathematical structure:
-/// - `Element`: The manifold element type (e.g., `Isometry3<f64>` for SE(3))
+/// - `Element`: The Lie group element type (e.g., `Isometry3<f64>` for SE(3))
 /// - `TangentVector`: The tangent space vector type (e.g., `Vector6<f64>` for SE(3))
-/// - `JacobianMatrix`: The Jacobian matrix type for this manifold
-/// - `Tangent`: Associated tangent space type
+/// - `JacobianMatrix`: The Jacobian matrix type for this Lie group
+/// - `LieAlgebra`: Associated Lie algebra type
 ///
 /// # Dimensions
 ///
-/// Three key dimensions characterize each manifold:
+/// Three key dimensions characterize each Lie group:
 /// - `DIM`: Space dimension - dimension of ambient space (e.g., 3 for SE(3))
 /// - `DOF`: Degrees of freedom - tangent space dimension (e.g., 6 for SE(3))
 /// - `REP_SIZE`: Representation size - underlying data size (e.g., 7 for SE(3))
-pub trait Manifold: Clone + Debug + PartialEq {
-    /// The manifold element type
+pub trait LieGroup: Clone + Debug + PartialEq {
+    /// The Lie group element type
     type Element: Clone + Debug + PartialEq;
 
     /// The tangent space vector type
@@ -113,8 +112,8 @@ pub trait Manifold: Clone + Debug + PartialEq {
     /// The Jacobian matrix type
     type JacobianMatrix: Clone + Debug + PartialEq;
 
-    /// Associated tangent space type
-    type Tangent: Tangent<Self>;
+    /// Associated Lie algebra type
+    type LieAlgebra: LieAlgebra<Self>;
 
     // Dimension constants (following manif conventions)
 
@@ -328,39 +327,39 @@ pub trait Manifold: Clone + Debug + PartialEq {
     }
 }
 
-/// Trait for tangent space (Lie algebra) operations.
+/// Trait for Lie algebra operations.
 ///
-/// This trait provides operations for vectors in the tangent space of a Lie group,
+/// This trait provides operations for vectors in the Lie algebra of a Lie group,
 /// including vector space operations, adjoint actions, and conversions to matrix form.
 ///
 /// # Type Parameters
 ///
-/// - `M`: The associated manifold type
-pub trait Tangent<M: Manifold>: Clone + Debug + PartialEq {
+/// - `G`: The associated Lie group type
+pub trait LieAlgebra<G: LieGroup>: Clone + Debug + PartialEq {
     // Dimension constants
 
-    /// Dimension of the tangent space (same as manifold DOF)
-    const DIM: usize = M::DOF;
+    /// Dimension of the tangent space (same as Lie group DOF)
+    const DIM: usize = G::DOF;
 
     /// Vector space operations
-
+    ///
     /// Vector space addition: φ₁ + φ₂.
     ///
     /// # Arguments
     /// * `other` - The tangent vector to add
-    fn add(&self, other: &M::TangentVector) -> M::TangentVector;
+    fn add(&self, other: &G::TangentVector) -> G::TangentVector;
 
     /// Scalar multiplication: α · φ.
     ///
     /// # Arguments  
     /// * `scalar` - Scalar multiplier
-    fn scale(&self, scalar: f64) -> M::TangentVector;
+    fn scale(&self, scalar: f64) -> G::TangentVector;
 
     /// Additive inverse: -φ.
-    fn negate(&self) -> M::TangentVector;
+    fn negate(&self) -> G::TangentVector;
 
     /// Vector subtraction: φ₁ - φ₂.
-    fn subtract(&self, other: &M::TangentVector) -> M::TangentVector;
+    fn subtract(&self, other: &G::TangentVector) -> G::TangentVector;
 
     // Norms and inner products
 
@@ -374,45 +373,45 @@ pub trait Tangent<M: Manifold>: Clone + Debug + PartialEq {
     ///
     /// # Arguments
     /// * `weight` - Weight matrix W
-    fn weighted_norm(&self, weight: &M::JacobianMatrix) -> f64;
+    fn weighted_norm(&self, weight: &G::JacobianMatrix) -> f64;
 
     /// Squared weighted norm: φᵀ W φ.
-    fn squared_weighted_norm(&self, weight: &M::JacobianMatrix) -> f64;
+    fn squared_weighted_norm(&self, weight: &G::JacobianMatrix) -> f64;
 
     /// Inner product: ⟨φ₁, φ₂⟩.
     ///
     /// # Arguments
     /// * `other` - The second tangent vector
-    fn inner(&self, other: &M::TangentVector) -> f64;
+    fn inner(&self, other: &G::TangentVector) -> f64;
 
     /// Weighted inner product: ⟨φ₁, W φ₂⟩.
-    fn weighted_inner(&self, other: &M::TangentVector, weight: &M::JacobianMatrix) -> f64;
+    fn weighted_inner(&self, other: &G::TangentVector, weight: &G::JacobianMatrix) -> f64;
 
     // Exponential map and Jacobians
 
-    /// Exponential map to manifold: exp(φ^∧).
+    /// Exponential map to Lie group: exp(φ^∧).
     ///
     /// # Arguments
     /// * `jacobian` - Optional Jacobian ∂exp(φ^∧)/∂φ
-    fn exp(&self, jacobian: Option<&mut M::JacobianMatrix>) -> M::Element;
+    fn exp(&self, jacobian: Option<&mut G::JacobianMatrix>) -> G::Element;
 
     /// Right Jacobian Jr.
     ///
     /// Matrix Jr such that for small δφ:
     /// exp((φ + δφ)^∧) ≈ exp(φ^∧) ∘ exp((Jr δφ)^∧)
-    fn right_jacobian(&self) -> M::JacobianMatrix;
+    fn right_jacobian(&self) -> G::JacobianMatrix;
 
     /// Left Jacobian Jl.  
     ///
     /// Matrix Jl such that for small δφ:
     /// exp((φ + δφ)^∧) ≈ exp((Jl δφ)^∧) ∘ exp(φ^∧)
-    fn left_jacobian(&self) -> M::JacobianMatrix;
+    fn left_jacobian(&self) -> G::JacobianMatrix;
 
     /// Inverse of right Jacobian Jr⁻¹.
-    fn right_jacobian_inv(&self) -> M::JacobianMatrix;
+    fn right_jacobian_inv(&self) -> G::JacobianMatrix;
 
     /// Inverse of left Jacobian Jl⁻¹.
-    fn left_jacobian_inv(&self) -> M::JacobianMatrix;
+    fn left_jacobian_inv(&self) -> G::JacobianMatrix;
 
     // Matrix representations
 
@@ -426,22 +425,22 @@ pub trait Tangent<M: Manifold>: Clone + Debug + PartialEq {
     /// Vee operator: φ^∨ (matrix to vector).
     ///
     /// Inverse of the hat operator.
-    fn vee(matrix: &DMatrix<f64>) -> ManifoldResult<M::TangentVector>;
+    fn vee(matrix: &DMatrix<f64>) -> ManifoldResult<G::TangentVector>;
 
     // Adjoint operations
 
     /// Small adjoint: ad(φ).
     ///
     /// The adjoint representation of the Lie algebra: ad(φ) ψ = [φ^∧, ψ^∧]^∨.
-    fn small_adjoint(&self) -> M::JacobianMatrix;
+    fn small_adjoint(&self) -> G::JacobianMatrix;
 
     // Utility functions
 
     /// Zero tangent vector.
-    fn zero() -> M::TangentVector;
+    fn zero() -> G::TangentVector;
 
     /// Random tangent vector (useful for testing).
-    fn random() -> M::TangentVector;
+    fn random() -> G::TangentVector;
 
     /// Check if the tangent vector is approximately zero.
     fn is_zero(&self, tolerance: f64) -> bool;
@@ -450,11 +449,11 @@ pub trait Tangent<M: Manifold>: Clone + Debug + PartialEq {
     fn normalize(&mut self);
 
     /// Return a unit tangent vector in the same direction.
-    fn normalized(&self) -> M::TangentVector;
+    fn normalized(&self) -> G::TangentVector;
 }
 
-/// Trait for manifolds that support interpolation.
-pub trait Interpolatable: Manifold {
+/// Trait for Lie groups that support interpolation.
+pub trait Interpolatable: LieGroup {
     /// Linear interpolation in the manifold.
     ///
     /// For parameter t ∈ [0,1]: interp(g₁, g₂, 0) = g₁, interp(g₁, g₂, 1) = g₂.

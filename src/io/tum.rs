@@ -11,7 +11,7 @@ impl GraphLoader for TumLoader {
         let mmap = unsafe { Mmap::map(&file)? };
         let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
             line: 0,
-            message: format!("Invalid UTF-8: {}", e),
+            message: format!("Invalid UTF-8: {e}"),
         })?;
 
         Self::parse_content(content)
