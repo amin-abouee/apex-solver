@@ -5,7 +5,7 @@ use rerun::{
     RecordingStreamBuilder,
     Transform3D,
     components::{Color},
-    archetypes::{Arrows2D, Pinhole},
+    archetypes::{Points2D, Pinhole},
 };
 use std::path::PathBuf;
 
@@ -25,7 +25,7 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     se2_height: f32,
     
-    /// Size of camera frustums for visualization
+    /// Size of camera frustums for SE3 visualization and points for SE2 visualization
     #[arg(long, default_value_t = 0.5)]
     frustum_size: f32,
     
@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         visualize_se3_poses(&graph, &rec, args.scale, args.frustum_size, args.fov_degrees)?;
     }
     
-    // Visualize SE2 vertices as 2D arrows
+    // Visualize SE2 vertices as 2D points
     if !graph.vertices_se2.is_empty() {
         visualize_se2_poses(&graph, &rec, args.scale, args.se2_height, args.frustum_size)?;
     }
@@ -132,47 +132,38 @@ fn visualize_se3_poses(
     Ok(())
 }
 
-/// Visualize SE2 poses as 2D arrows
+/// Visualize SE2 poses as 2D points
 fn visualize_se2_poses(
     graph: &G2oGraph,
     rec: &rerun::RecordingStream,
     scale: f32,
     _height: f32,
-    arrow_size: f32,
+    point_size: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Visualizing {} SE2 poses as 2D arrows...", graph.vertices_se2.len());
+    println!("Visualizing {} SE2 poses as 2D points...", graph.vertices_se2.len());
     
-    // Collect all vectors for arrow directions
-    let mut vectors = Vec::new();
-    let mut origins = Vec::new();
+    // Collect all positions for the points
+    let mut positions = Vec::new();
     let mut colors = Vec::new();
     
     for (_id, pose) in &graph.vertices_se2 {
         // Extract position (only X and Y for 2D)
-        let position = glam::Vec2::new(
+        let position = [
             (pose.x as f32) * scale, 
             (pose.y as f32) * scale
-        );
+        ];
         
-        // Create direction vector from theta (rotation around Z axis)
-        let direction = glam::Vec2::new(
-            pose.theta.cos() as f32,
-            pose.theta.sin() as f32,
-        ) * arrow_size * scale;
-        
-        origins.push([position.x, position.y]);
-        vectors.push([direction.x, direction.y]);
+        positions.push(position);
         colors.push(Color::from_rgb(255, 170, 0));
     }
     
-    // Log all arrows as a batch using the correct constructor
-    if !vectors.is_empty() {
+    // Log all points as a batch
+    if !positions.is_empty() {
         rec.log(
             "se2_poses",
-            &Arrows2D::from_vectors(vectors)
-                .with_origins(origins)
+            &Points2D::new(positions)
                 .with_colors(colors)
-                .with_radii([scale * 0.05])
+                .with_radii([point_size * scale])
         )?;
     }
     
