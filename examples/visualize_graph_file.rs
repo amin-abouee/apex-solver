@@ -1,11 +1,10 @@
-use apex_solver::{load_graph, G2oGraph};
+use apex_solver::{G2oGraph, load_graph};
 use clap::Parser;
 use rerun::{
+    RecordingStreamBuilder, Transform3D,
+    archetypes::{Pinhole, Points2D},
+    components::Color,
     external::glam,
-    RecordingStreamBuilder,
-    Transform3D,
-    components::{Color},
-    archetypes::{Points2D, Pinhole},
 };
 use std::path::PathBuf;
 
@@ -24,11 +23,11 @@ struct Args {
     /// Height for SE2 poses (Z coordinate)
     #[arg(long, default_value_t = 0.0)]
     se2_height: f32,
-    
+
     /// Size of camera frustums for SE3 visualization and points for SE2 visualization
     #[arg(long, default_value_t = 0.5)]
     frustum_size: f32,
-    
+
     /// Field of view (in degrees) for camera frustums
     #[arg(long, default_value_t = 30.0)]
     fov_degrees: f32,
@@ -36,29 +35,35 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    
+
     println!("Loading graph from: {}", args.file_path.display());
     let graph = load_graph(&args.file_path)?;
-    
+
     // Initialize Rerun
     let rec = RecordingStreamBuilder::new("apex-solver-graph-visualization").spawn()?;
-    
+
     // Print statistics
     println!("Graph loaded successfully:");
     println!("  - SE2 vertices: {}", graph.vertices_se2.len());
     println!("  - SE3 vertices: {}", graph.vertices_se3.len());
     println!("  - Total vertices: {}", graph.vertex_count());
-    
+
     // Visualize SE3 vertices as camera frustums
     if !graph.vertices_se3.is_empty() {
-        visualize_se3_poses(&graph, &rec, args.scale, args.frustum_size, args.fov_degrees)?;
+        visualize_se3_poses(
+            &graph,
+            &rec,
+            args.scale,
+            args.frustum_size,
+            args.fov_degrees,
+        )?;
     }
-    
+
     // Visualize SE2 vertices as 2D points
     if !graph.vertices_se2.is_empty() {
         visualize_se2_poses(&graph, &rec, args.scale, args.se2_height, args.frustum_size)?;
     }
-    
+
     if graph.vertices_se3.is_empty() && graph.vertices_se2.is_empty() {
         println!("No poses found in the graph file.");
         Ok(())
@@ -66,7 +71,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Keep the program running until user interrupts
         println!("Visualization ready! The Rerun viewer should open automatically.");
         println!("Press Ctrl+C to exit.");
-        
+
         #[allow(unreachable_code)]
         {
             loop {
@@ -85,50 +90,39 @@ fn visualize_se3_poses(
     _frustum_size: f32,
     fov_degrees: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Visualizing {} SE3 poses as camera frustums...", graph.vertices_se3.len());
-    
+    println!(
+        "Visualizing {} SE3 poses as camera frustums...",
+        graph.vertices_se3.len()
+    );
+
     for (id, pose) in &graph.vertices_se3 {
         // Extract position
         let position = glam::Vec3::new(
-            pose.translation.x as f32, 
-            pose.translation.y as f32, 
-            pose.translation.z as f32
+            pose.translation.x as f32,
+            pose.translation.y as f32,
+            pose.translation.z as f32,
         ) * scale;
-        
+
         // Convert quaternion
         let nq = pose.rotation.as_ref();
-        let quaternion = glam::Quat::from_xyzw(
-            nq.i as f32,
-            nq.j as f32,
-            nq.k as f32,
-            nq.w as f32,
-        );
-        
+        let quaternion = glam::Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
+
         // Create transform from position and rotation
-        let transform = Transform3D::from_translation_rotation(
-            position,
-            quaternion,
-        );
-        
+        let transform = Transform3D::from_translation_rotation(position, quaternion);
+
         // Create entity path for this pose
         let entity_path = format!("se3_poses/{}", id);
-        
+
         // Log transform first
-        rec.log(
-            entity_path.as_str(),
-            &transform
-        )?;
-        
+        rec.log(entity_path.as_str(), &transform)?;
+
         // Log pinhole camera with field of view
         let fov_radians = fov_degrees.to_radians();
         let pinhole = Pinhole::from_fov_and_aspect_ratio(fov_radians, 1.0);
-        
-        rec.log(
-            entity_path.as_str(),
-            &pinhole
-        )?;
+
+        rec.log(entity_path.as_str(), &pinhole)?;
     }
-    
+
     Ok(())
 }
 
@@ -140,32 +134,32 @@ fn visualize_se2_poses(
     _height: f32,
     point_size: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Visualizing {} SE2 poses as 2D points...", graph.vertices_se2.len());
-    
+    println!(
+        "Visualizing {} SE2 poses as 2D points...",
+        graph.vertices_se2.len()
+    );
+
     // Collect all positions for the points
     let mut positions = Vec::new();
     let mut colors = Vec::new();
-    
+
     for (_id, pose) in &graph.vertices_se2 {
         // Extract position (only X and Y for 2D)
-        let position = [
-            (pose.x as f32) * scale, 
-            (pose.y as f32) * scale
-        ];
-        
+        let position = [(pose.x as f32) * scale, (pose.y as f32) * scale];
+
         positions.push(position);
         colors.push(Color::from_rgb(255, 170, 0));
     }
-    
+
     // Log all points as a batch
     if !positions.is_empty() {
         rec.log(
             "se2_poses",
             &Points2D::new(positions)
                 .with_colors(colors)
-                .with_radii([point_size * scale])
+                .with_radii([point_size * scale]),
         )?;
     }
-    
+
     Ok(())
-} 
+}
