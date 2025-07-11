@@ -500,21 +500,21 @@ impl LieGroup for SE3 {
     }
 
     fn random() -> Self::Element {
-        use rand::prelude::*;
-        let mut rng = thread_rng();
+        use rand::Rng;
+        let mut rng = rand::rng();
 
         // Random translation in [-1, 1]³
         let translation = Vector3::new(
-            rng.gen_range(-1.0..1.0),
-            rng.gen_range(-1.0..1.0),
-            rng.gen_range(-1.0..1.0),
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-1.0..1.0),
         );
 
         // Random unit quaternion
         let rotation = UnitQuaternion::new(Vector3::new(
-            rng.gen_range(-std::f64::consts::PI..std::f64::consts::PI),
-            rng.gen_range(-std::f64::consts::PI..std::f64::consts::PI),
-            rng.gen_range(-std::f64::consts::PI..std::f64::consts::PI),
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI),
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI),
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI),
         ));
 
         SE3::new(translation, rotation)
