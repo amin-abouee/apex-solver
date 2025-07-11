@@ -7,6 +7,16 @@
 //! - **SE(2)**: Rigid transformations in 2D
 //! - **SO(2)**: Rotations in 2D
 //!
+//! Lie group M,° | size   | dim | X ∈ M                   | Constraint      | T_E M             | T_X M                 | Exp(T)             | Comp. | Action
+//! ------------- | ------ | --- | ----------------------- | --------------- | ----------------- | --------------------- | ------------------ | ----- | ------
+//! n-D vector    | Rⁿ,+   | n   | n   | v ∈ Rⁿ            | |v-v|=0         | v ∈ Rⁿ            | v ∈ Rⁿ                | v = exp(v)         | v₁+v₂ | v + x
+//! Circle        | S¹,.   | 2   | 1   | z ∈ C             | z*z = 1         | iθ ∈ iR           | θ ∈ R                 | z = exp(iθ)        | z₁z₂  | zx
+//! Rotation      | SO(2),.| 4   | 1   | R                 | RᵀR = I         | [θ]x ∈ so(2)      | [θ] ∈ R²              | R = exp([θ]x)      | R₁R₂  | Rx
+//! Rigid motion  | SE(2),.| 9   | 3   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(2)       | [v̂] ∈ R³              | Exp([v̂])           | M₁M₂  | Rx+t
+//! 3-sphere      | S³,.   | 4   | 3   | q ∈ H             | q*q = 1         | θ/2 ∈ Hp          | θ ∈ R³                | q = exp(uθ/2)      | q₁q₂  | qxq*
+//! Rotation      | SO(3),.| 9   | 3   | R                 | RᵀR = I         | [θ]x ∈ so(3)      | [θ] ∈ R³              | R = exp([θ]x)      | R₁R₂  | Rx
+//! Rigid motion  | SE(3),.| 16  | 6   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(3)       | [v̂] ∈ R⁶              | Exp([v̂])           | M₁M₂  | Rx+t
+//!
 //! The design is inspired by the [manif](https://github.com/artivis/manif) C++ library
 //! and provides:
 //! - Analytic Jacobian computations for all operations
@@ -41,6 +51,7 @@ use nalgebra::{DMatrix, Matrix3, Vector3};
 use std::fmt::Debug;
 
 pub mod se3;
+pub mod so3;
 
 /// Errors that can occur during manifold operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -425,7 +436,7 @@ pub trait LieAlgebra<G: LieGroup>: Clone + Debug + PartialEq {
     /// Vee operator: φ^∨ (matrix to vector).
     ///
     /// Inverse of the hat operator.
-    fn vee(matrix: &DMatrix<f64>) -> ManifoldResult<G::TangentVector>;
+    fn vee(matrix: &DMatrix<f64>) -> G::TangentVector;
 
     // Adjoint operations
 
