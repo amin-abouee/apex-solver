@@ -169,4 +169,4 @@ All code follows Rust best practices and is regularly checked for formatting, li
 
 ## License
 
-Licensed under the MIT License. See `LICENSE` for details.
+Licensed under the Apache Ver. 2.0 License. See `LICENSE` for details.

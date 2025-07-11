@@ -111,7 +111,7 @@ fn visualize_se3_poses(
         let transform = Transform3D::from_translation_rotation(position, quaternion);
 
         // Create entity path for this pose
-        let entity_path = format!("se3_poses/{}", id);
+        let entity_path = format!("se3_poses/{id}");
 
         // Log transform first
         rec.log(entity_path.as_str(), &transform)?;
@@ -143,7 +143,7 @@ fn visualize_se2_poses(
     let mut positions = Vec::new();
     let mut colors = Vec::new();
 
-    for (_id, pose) in &graph.vertices_se2 {
+    for pose in graph.vertices_se2.values() {
         // Extract position (only X and Y for 2D)
         let position = [(pose.x as f32) * scale, (pose.y as f32) * scale];
 
