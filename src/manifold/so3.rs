@@ -8,10 +8,10 @@
 //! where the direction gives the axis of rotation and the magnitude gives the angle.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
-//! conventions and provides all operations required by the LieGroup and LieAlgebra traits.
+//! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::{LieAlgebra, LieGroup};
-use nalgebra::{DMatrix, Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
+use crate::manifold::{LieGroup, Tangent};
+use nalgebra::{Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
 use std::fmt;
 
 /// SO(3) group element representing rotations in 3D.
@@ -135,85 +135,25 @@ impl SO3 {
         self.quaternion.to_homogeneous()
     }
 
-    /// Set the quaternion from coefficients array [x, y, z, w].
+    /// Set the quaternion from coefficients array [w, x, y, z].
     pub fn set_quaternion(&mut self, coeffs: &[f64; 4]) {
-        let q = Quaternion::new(coeffs[3], coeffs[0], coeffs[1], coeffs[2]);
+        let q = Quaternion::new(coeffs[0], coeffs[1], coeffs[2], coeffs[3]);
         self.quaternion = UnitQuaternion::from_quaternion(q);
     }
 
     /// Get coefficients as array [x, y, z, w].
     pub fn coeffs(&self) -> [f64; 4] {
         let q = self.quaternion.quaternion();
-        [q.i, q.j, q.k, q.w]
-    }
-}
-
-impl SO3Tangent {
-    /// Create a new SO3Tangent from axis-angle vector.
-    ///
-    /// # Arguments
-    /// * `axis_angle` - Axis-angle vector [θx, θy, θz]
-    pub fn new(axis_angle: Vector3<f64>) -> Self {
-        SO3Tangent { data: axis_angle }
-    }
-
-    /// Create SO3Tangent from individual components.
-    pub fn from_components(x: f64, y: f64, z: f64) -> Self {
-        SO3Tangent::new(Vector3::new(x, y, z))
-    }
-
-    /// Get the axis-angle vector.
-    pub fn axis_angle(&self) -> Vector3<f64> {
-        self.data
-    }
-
-    /// Get the angle of rotation.
-    pub fn angle(&self) -> f64 {
-        self.data.norm()
-    }
-
-    /// Get the axis of rotation (normalized).
-    pub fn axis(&self) -> Vector3<f64> {
-        let norm = self.data.norm();
-        if norm < f64::EPSILON {
-            Vector3::x() // Default axis when angle is zero
-        } else {
-            self.data / norm
-        }
-    }
-
-    /// Get the x component.
-    pub fn x(&self) -> f64 {
-        self.data.x
-    }
-
-    /// Get the y component.
-    pub fn y(&self) -> f64 {
-        self.data.y
-    }
-
-    /// Get the z component.
-    pub fn z(&self) -> f64 {
-        self.data.z
-    }
-
-    /// Get the coefficients as a vector.
-    pub fn coeffs(&self) -> Vector3<f64> {
-        self.data
-    }
-
-    /// Get angular velocity representation (alias for axis_angle).
-    pub fn ang(&self) -> Vector3<f64> {
-        self.data
+        [q.w, q.i, q.j, q.k]
     }
 }
 
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SO3 {
     type Element = SO3;
-    type TangentVector = Vector3<f64>;
+    type TangentVector = SO3Tangent;
     type JacobianMatrix = Matrix3<f64>;
-    type LieAlgebra = SO3Tangent;
+    type LieAlgebra = Matrix3<f64>;
 
     // Dimension constants following manif conventions
     const DIM: usize = 3; // Space dimension (3D space)
@@ -278,8 +218,9 @@ impl LieGroup for SO3 {
 
         if let Some(jac_self) = jacobian_self {
             // Jacobian wrt first element: R2^T
-            let other_rotation = other.quaternion.to_rotation_matrix().into_inner();
-            jac_self.copy_from(&other_rotation.transpose());
+            // let other_rotation = other.quaternion.to_rotation_matrix().into_inner();
+            // jac_self.copy_from(&other_rotation.transpose());
+            *jac_self = other.rotation().transpose();
         }
 
         if let Some(jac_other) = jacobian_other {
@@ -288,39 +229,6 @@ impl LieGroup for SO3 {
         }
 
         result
-    }
-
-    /// SO3 exponential map.
-    ///
-    /// # Arguments
-    /// * `tangent` - Tangent vector [θx, θy, θz]
-    /// * `jacobian` - Optional Jacobian matrix of the SO3 element wrt self.
-    ///
-    /// # Notes
-    /// # Equation 132: Exponential map for unit quaternions (S³)
-    /// q = Exp(θu) = cos(θ/2) + u sin(θ/2) ∈ H
-    ///
-    /// # Equation 143: Right Jacobian for SO(3) Exp map
-    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
-    ///
-    fn exp(
-        tangent: &Self::TangentVector,
-        jacobian: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let angle = tangent.norm_squared();
-
-        let quaternion = if angle < f64::EPSILON {
-            UnitQuaternion::identity()
-        } else {
-            UnitQuaternion::from_scaled_axis(*tangent)
-        };
-
-        if let Some(jac) = jacobian {
-            // Right Jacobian for SO(3)
-            Self::compute_right_jacobian(tangent, jac);
-        }
-
-        SO3 { quaternion }
     }
 
     /// Get the SO3 corresponding Lie algebra element in vector form.
@@ -336,16 +244,59 @@ impl LieGroup for SO3 {
     /// J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        let axis_angle = self.quaternion.scaled_axis();
+        // let mut log_coeff;
+
+        // Extract quaternion components
+        let q = self.quaternion.quaternion();
+        let sin_angle_squared = q.i * q.i + q.j * q.j + q.k * q.k;
+
+        let log_coeff = if sin_angle_squared > f64::EPSILON {
+            let sin_angle = sin_angle_squared.sqrt();
+            let cos_angle = q.w;
+
+            // Handle the case where cos_angle < 0, which means angle >= pi/2
+            // In that case, we need to adjust the computation to get a normalized angle_axis vector
+            let two_angle = 2.0
+                * if cos_angle < 0.0 {
+                    f64::atan2(-sin_angle, -cos_angle)
+                } else {
+                    f64::atan2(sin_angle, cos_angle)
+                };
+
+            two_angle / sin_angle
+        } else {
+            // Small-angle approximation
+            2.0
+        };
+
+        // Compute the tangent vector (axis-angle representation)
+        let axis_angle = SO3Tangent::new(Vector3::new(
+            q.i * log_coeff,
+            q.j * log_coeff,
+            q.k * log_coeff,
+        ));
 
         if let Some(jac) = jacobian {
-            // Right Jacobian inverse for SO(3)
-            Self::compute_right_jacobian_inverse(&axis_angle, jac);
+            // Compute the right Jacobian inverse for SO(3)
+            // Self::compute_right_jacobian_inverse(&axis_angle, jac);
+            *jac = axis_angle.right_jacobian_inv();
         }
 
         axis_angle
     }
 
+    /// Right plus: R ⊕ φ = R * exp(φ)
+    ///
+    /// # Arguments
+    /// * `tangent` - Tangent vector [θx, θy, θz]
+    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
+    /// * `jacobian_tangent` - Optional Jacobian matrix of the composition wrt tangent.
+    ///
+    /// # Notes
+    /// # Equation 148:
+    /// J_R⊕θ_R = R(θ)ᵀ
+    /// J_R⊕θ_θ = J_r(θ)
+    ///
     fn right_plus(
         &self,
         tangent: &Self::TangentVector,
@@ -353,10 +304,32 @@ impl LieGroup for SO3 {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
         // Right plus: R ⊕ φ = R * exp(φ)
-        let exp_tangent = Self::exp(tangent, jacobian_tangent);
-        self.compose(&exp_tangent, jacobian_self, None)
+        let exp_tangent = tangent.exp(jacobian_tangent);
+        let result = self.compose(&exp_tangent, None, None);
+
+        if let Some(jac_self) = jacobian_self {
+            *jac_self = self.rotation().transpose();
+        }
+
+        if let Some(jac_tangent) = jacobian_tangent {
+            *jac_tangent = tangent.right_jacobian();
+        }
+
+        result
     }
 
+    /// Right minus: R1 ⊖ R2 = log(R2^T * R1)
+    ///
+    /// # Arguments
+    /// * `other` - Another SO3 element.
+    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
+    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
+    ///
+    /// # Notes
+    /// # Equation 149:
+    /// J_Q⊖R_Q = J_r⁻¹(θ)
+    /// J_Q⊖R_R = -J_l⁻¹(θ)
+    ///
     fn right_minus(
         &self,
         other: &Self::Element,
@@ -368,12 +341,12 @@ impl LieGroup for SO3 {
         let result_group = other_inv.compose(self, None, None);
         let result = result_group.log(jacobian_self);
 
+        if let Some(jac_self) = jacobian_self {
+            *jac_self = self.log(None).right_jacobian_inv();
+        }
+
         if let Some(jac_other) = jacobian_other {
-            // Jacobian wrt other: -Jr^{-1}(-φ) where φ = log(R2^T * R1)
-            let neg_result = -result;
-            let mut temp_jac = Matrix3::identity();
-            Self::compute_right_jacobian_inverse(&neg_result, &mut temp_jac);
-            jac_other.copy_from(&(-temp_jac));
+            *jac_other = -self.log(None).left_jacobian_inv();
         }
 
         result
@@ -382,17 +355,22 @@ impl LieGroup for SO3 {
     fn left_plus(
         &self,
         tangent: &Self::TangentVector,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
+        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
         // Left plus: φ ⊕ R = exp(φ) * R
-        let exp_tangent = Self::exp(tangent, jacobian_tangent);
+        let exp_tangent = tangent.exp(jacobian_tangent);
+        let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = Matrix3::identity();
         }
 
-        exp_tangent.compose(self, None, None)
+        if let Some(jac_tangent) = jacobian_tangent {
+            *jac_tangent = tangent.left_jacobian();
+        }
+
+        result
     }
 
     fn left_minus(
@@ -403,15 +381,15 @@ impl LieGroup for SO3 {
     ) -> Self::TangentVector {
         // Left minus: R1 ⊖ R2 = log(R1 * R2^T)
         let other_inv = other.inverse(None);
-        let result_group = self.compose(&other_inv, jacobian_self, None);
+        let result_group = self.compose(&other_inv, None, None);
         let result = result_group.log(None);
 
         if let Some(jac_other) = jacobian_other {
-            // Jacobian wrt other: -Ad(R2) * Jr^{-1}(φ)
-            let adj_other = other.adjoint();
-            let mut jr_inv = Matrix3::identity();
-            Self::compute_right_jacobian_inverse(&result, &mut jr_inv);
-            jac_other.copy_from(&(-adj_other * jr_inv));
+            *jac_other = -self.log(None).left_jacobian_inv();
+        }
+
+        if let Some(jac_self) = jacobian_self {
+            *jac_self = self.log(None).right_jacobian_inv();
         }
 
         result
@@ -447,15 +425,15 @@ impl LieGroup for SO3 {
 
         if let Some(jac_self) = jacobian_self {
             // Jacobian wrt SO(3) element: -R * [v]×
-            let rotation_matrix = self.quaternion.to_rotation_matrix().into_inner();
-            let vector_skew = Self::skew_symmetric(vector);
-            jac_self.copy_from(&(-rotation_matrix * vector_skew));
+            let skew_matrix = Matrix3::new(
+                0.0, -vector.z, vector.y, vector.z, 0.0, -vector.x, -vector.y, vector.x, 0.0,
+            );
+            *jac_self = -self.rotation() * skew_matrix;
         }
 
         if let Some(jac_vector) = jacobian_vector {
             // Jacobian wrt vector: R
-            let rotation_matrix = self.quaternion.to_rotation_matrix().into_inner();
-            jac_vector.copy_from(&rotation_matrix);
+            *jac_vector = self.rotation();
         }
 
         result
@@ -478,7 +456,7 @@ impl LieGroup for SO3 {
 
     fn normalize(&mut self) {
         // Normalize the quaternion
-        self.quaternion = UnitQuaternion::from_quaternion(self.quaternion.quaternion().normalize());
+        self.quaternion.normalize();
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
@@ -486,195 +464,245 @@ impl LieGroup for SO3 {
         let q = self.quaternion.quaternion();
         (q.norm() - 1.0).abs() < tolerance
     }
-
-    fn distance(&self, other: &Self::Element) -> f64 {
-        self.right_minus(other, None, None).norm()
-    }
-
-    fn weighted_distance(&self, other: &Self::Element, weight: &Self::JacobianMatrix) -> f64 {
-        let diff = self.right_minus(other, None, None);
-        (diff.transpose() * weight * diff)[0].sqrt()
-    }
 }
 
-impl SO3 {
-    /// Compute the right Jacobian for SO(3).
-    fn compute_right_jacobian(tangent: &Vector3<f64>, jacobian: &mut Matrix3<f64>) {
-        let angle = tangent.norm();
+impl SO3Tangent {
+    /// Create a new SO3Tangent from axis-angle vector.
+    ///
+    /// # Arguments
+    /// * `axis_angle` - Axis-angle vector [θx, θy, θz]
+    pub fn new(axis_angle: Vector3<f64>) -> Self {
+        SO3Tangent { data: axis_angle }
+    }
 
-        if angle < 1e-12 {
-            *jacobian = Matrix3::identity();
+    /// Create SO3Tangent from individual components.
+    pub fn from_components(x: f64, y: f64, z: f64) -> Self {
+        SO3Tangent::new(Vector3::new(x, y, z))
+    }
+
+    /// Get the axis-angle vector.
+    pub fn axis_angle(&self) -> Vector3<f64> {
+        self.data
+    }
+
+    /// Get the angle of rotation.
+    pub fn angle(&self) -> f64 {
+        self.data.norm()
+    }
+
+    /// Get the axis of rotation (normalized).
+    pub fn axis(&self) -> Vector3<f64> {
+        let norm = self.data.norm();
+        if norm < f64::EPSILON {
+            Vector3::identity()
         } else {
-            let c = angle.cos();
-
-            let tangent_skew = Self::skew_symmetric(tangent);
-
-            *jacobian = Matrix3::identity() - 0.5 * tangent_skew
-                + ((1.0 - c) / (angle * angle)) * tangent_skew * tangent_skew;
+            self.data / norm
         }
     }
 
-    /// Compute the right Jacobian inverse for SO(3).
-    fn compute_right_jacobian_inverse(tangent: &Vector3<f64>, jacobian: &mut Matrix3<f64>) {
-        let angle = tangent.norm();
-
-        if angle < 1e-12 {
-            *jacobian = Matrix3::identity();
-        } else {
-            let half_angle = 0.5 * angle;
-            let cot_half = half_angle.cos() / half_angle.sin();
-
-            let tangent_skew = Self::skew_symmetric(tangent);
-
-            *jacobian = Matrix3::identity()
-                + 0.5 * tangent_skew
-                + ((1.0 / (angle * angle)) * (1.0 - half_angle * cot_half))
-                    * tangent_skew
-                    * tangent_skew;
-        }
+    /// Get the x component.
+    pub fn x(&self) -> f64 {
+        self.data.x
     }
 
-    /// Create skew-symmetric matrix from vector.
-    fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
-        Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
+    /// Get the y component.
+    pub fn y(&self) -> f64 {
+        self.data.y
+    }
+
+    /// Get the z component.
+    pub fn z(&self) -> f64 {
+        self.data.z
+    }
+
+    /// Get the coefficients as a vector.
+    pub fn coeffs(&self) -> Vector3<f64> {
+        self.data
+    }
+
+    /// Get angular velocity representation (alias for axis_angle).
+    pub fn ang(&self) -> Vector3<f64> {
+        self.data
     }
 }
 
 // Implement LieAlgebra trait for SO3Tangent
-impl LieAlgebra<SO3> for SO3Tangent {
-    fn add(&self, other: &Vector3<f64>) -> Vector3<f64> {
-        self.data + other
-    }
+impl Tangent<SO3> for SO3Tangent {
+    /// SO3 exponential map.
+    ///
+    /// # Arguments
+    /// * `tangent` - Tangent vector [θx, θy, θz]
+    /// * `jacobian` - Optional Jacobian matrix of the SO3 element wrt self.
+    ///
+    /// # Notes
+    /// # Equation 132: Exponential map for unit quaternions (S³)
+    /// q = Exp(θu) = cos(θ/2) + u sin(θ/2) ∈ H
+    ///
+    /// # Equation 143: Right Jacobian for SO(3) Exp map
+    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
+    fn exp(
+        &self,
+        jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>,
+    ) -> <SO3 as LieGroup>::Element {
+        let theta_squared = self.data.norm_squared();
 
-    fn scale(&self, scalar: f64) -> Vector3<f64> {
-        self.data * scalar
-    }
-
-    fn negate(&self) -> Vector3<f64> {
-        -self.data
-    }
-
-    fn subtract(&self, other: &Vector3<f64>) -> Vector3<f64> {
-        self.data - other
-    }
-
-    fn norm(&self) -> f64 {
-        self.data.norm()
-    }
-
-    fn squared_norm(&self) -> f64 {
-        self.data.norm_squared()
-    }
-
-    fn weighted_norm(&self, weight: &Matrix3<f64>) -> f64 {
-        (self.data.transpose() * weight * self.data)[0].sqrt()
-    }
-
-    fn squared_weighted_norm(&self, weight: &Matrix3<f64>) -> f64 {
-        (self.data.transpose() * weight * self.data)[0]
-    }
-
-    fn inner(&self, other: &Vector3<f64>) -> f64 {
-        self.data.dot(other)
-    }
-
-    fn weighted_inner(&self, other: &Vector3<f64>, weight: &Matrix3<f64>) -> f64 {
-        (self.data.transpose() * weight * other)[0]
-    }
-
-    fn exp(&self, jacobian: Option<&mut Matrix3<f64>>) -> SO3 {
-        SO3::exp(&self.data, jacobian)
-    }
-
-    fn right_jacobian(&self) -> Matrix3<f64> {
-        let mut jac = Matrix3::identity();
-        SO3::compute_right_jacobian(&self.data, &mut jac);
-        jac
-    }
-
-    fn left_jacobian(&self) -> Matrix3<f64> {
-        let angle = self.data.norm();
-
-        if angle < 1e-12 {
-            Matrix3::identity()
+        let quaternion = if theta_squared > f64::EPSILON {
+            UnitQuaternion::from_scaled_axis(self.data)
         } else {
-            let s = angle.sin();
-            let c = angle.cos();
+            UnitQuaternion::from_quaternion(Quaternion::new(
+                1.0,
+                self.data.x / 2.0,
+                self.data.y / 2.0,
+                self.data.z / 2.0,
+            ))
+        };
 
-            let tangent_skew = SO3::skew_symmetric(&self.data);
+        if let Some(jac) = jacobian {
+            // Right Jacobian for SO(3)
+            *jac = self.right_jacobian();
+        }
+
+        SO3 { quaternion }
+    }
+
+    /// Right Jacobian for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 143: Right Jacobian for SO(3) Exp map
+    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
+    fn right_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
+        self.left_jacobian().transpose()
+    }
+
+    /// Left Jacobian for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 144: Left Jacobian for SO(3) Exp map
+    /// J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
+    fn left_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
+        let angle = self.data.norm_squared();
+        let tangent_skew = self.hat();
+
+        if angle <= f64::EPSILON {
+            Matrix3::identity() + 0.5 * tangent_skew
+        } else {
+            let theta = angle.sqrt(); // rotation angle
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
 
             Matrix3::identity()
-                + (s / angle) * tangent_skew
-                + ((1.0 - c) / (angle * angle)) * tangent_skew * tangent_skew
+                + (1.0 - cos_theta) / angle * tangent_skew
+                + (theta - sin_theta) / (angle * angle) * tangent_skew * tangent_skew
         }
     }
 
-    fn right_jacobian_inv(&self) -> Matrix3<f64> {
-        let mut jac = Matrix3::identity();
-        SO3::compute_right_jacobian_inverse(&self.data, &mut jac);
-        jac
+    /// Right Jacobian inverse for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 145: Right Jacobian inverse for SO(3) Exp map
+    /// J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
+    fn right_jacobian_inv(&self) -> <SO3 as LieGroup>::JacobianMatrix {
+        self.left_jacobian_inv().transpose()
     }
 
-    fn left_jacobian_inv(&self) -> Matrix3<f64> {
-        let angle = self.data.norm();
+    /// Left Jacobian inverse for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 146: Left Jacobian inverse for SO(3) Exp map
+    /// J_R⁻¹(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
+    fn left_jacobian_inv(&self) -> <SO3 as LieGroup>::JacobianMatrix {
+        let angle = self.data.norm_squared();
+        let tangent_skew = self.hat();
 
-        if angle < 1e-12 {
-            Matrix3::identity()
-        } else {
-            let half_angle = 0.5 * angle;
-            let cot_half = half_angle.cos() / half_angle.sin();
-
-            let tangent_skew = SO3::skew_symmetric(&self.data);
-
+        if angle <= f64::EPSILON {
             Matrix3::identity() - 0.5 * tangent_skew
-                + ((1.0 / (angle * angle)) * (1.0 - half_angle * cot_half))
+        } else {
+            let theta = angle.sqrt(); // rotation angle
+            let sin_theta = theta.sin();
+            let cos_theta = theta.cos();
+
+            Matrix3::identity() - (0.5 * tangent_skew)
+                + (1.0 / angle - (1.0 + cos_theta) / (2.0 * theta * sin_theta))
                     * tangent_skew
                     * tangent_skew
         }
     }
 
-    fn hat(&self) -> DMatrix<f64> {
-        let mut lie_alg = DMatrix::zeros(3, 3);
-        let skew = SO3::skew_symmetric(&self.data);
-        lie_alg.copy_from(&skew);
-        lie_alg
-    }
-
-    fn vee(matrix: &DMatrix<f64>) -> Vector3<f64> {
-        Vector3::new(matrix[(2, 1)], matrix[(0, 2)], matrix[(1, 0)])
-    }
-
-    fn small_adjoint(&self) -> Matrix3<f64> {
-        SO3::skew_symmetric(&self.data)
-    }
-
-    fn zero() -> Vector3<f64> {
-        Vector3::zeros()
-    }
-
-    fn random() -> Vector3<f64> {
-        Vector3::new(
-            rand::random::<f64>() * 0.2 - 0.1,
-            rand::random::<f64>() * 0.2 - 0.1,
-            rand::random::<f64>() * 0.2 - 0.1,
+    /// Hat map for SO(3)
+    ///
+    /// # Notes
+    /// [θ]ₓ = [0 -θz θy; θz 0 -θx; -θy θx 0]
+    ///
+    fn hat(&self) -> <SO3 as LieGroup>::LieAlgebra {
+        Matrix3::new(
+            0.0,
+            -self.data.z,
+            self.data.y,
+            self.data.z,
+            0.0,
+            -self.data.x,
+            -self.data.y,
+            self.data.x,
+            0.0,
         )
     }
 
-    fn is_zero(&self, tolerance: f64) -> bool {
-        self.norm() < tolerance
+    /// Zero tangent vector for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 147: Zero tangent vector for SO(3)
+    /// [0, 0, 0]
+    ///
+    fn zero() -> <SO3 as LieGroup>::TangentVector {
+        Self::new(Vector3::zeros())
     }
 
+    /// Random tangent vector for SO(3)
+    ///
+    /// # Notes
+    /// # Equation 147: Random tangent vector for SO(3)
+    /// [0, 0, 0]
+    ///
+    fn random() -> <SO3 as LieGroup>::TangentVector {
+        Self::new(Vector3::new(
+            rand::random::<f64>() * 0.2 - 0.1,
+            rand::random::<f64>() * 0.2 - 0.1,
+            rand::random::<f64>() * 0.2 - 0.1,
+        ))
+    }
+
+    /// Check if tangent vector is zero
+    ///
+    /// # Notes
+    /// # Equation 147: Check if tangent vector is zero
+    /// [0, 0, 0]
+    ///
+    fn is_zero(&self, tolerance: f64) -> bool {
+        self.data.norm() < tolerance
+    }
+
+    /// Normalize tangent vector
+    ///
+    /// # Notes
+    /// # Equation 147: Normalize tangent vector
+    /// [0, 0, 0]
+    ///
     fn normalize(&mut self) {
-        let norm = self.norm();
+        let norm = self.data.norm();
         if norm > f64::EPSILON {
             self.data /= norm;
         }
     }
 
-    fn normalized(&self) -> Vector3<f64> {
-        let norm = self.norm();
+    fn normalized(&self) -> <SO3 as LieGroup>::TangentVector {
+        let norm = self.data.norm();
         if norm > f64::EPSILON {
-            self.data / norm
+            SO3Tangent::new(self.data / norm)
         } else {
             Self::zero()
         }
@@ -832,7 +860,7 @@ mod tests {
     fn test_so3_rplus() {
         // Adding zero to identity
         let so3a = SO3::identity();
-        let so3b = Vector3::zeros();
+        let so3b = SO3Tangent::new(Vector3::zeros());
         let so3c = so3a.right_plus(&so3b, None, None);
         assert_eq!(0.0, so3c.x());
         assert_eq!(0.0, so3c.y());
@@ -852,7 +880,7 @@ mod tests {
     fn test_so3_lplus() {
         // Adding zero to identity
         let so3a = SO3::identity();
-        let so3t = Vector3::zeros();
+        let so3t = SO3Tangent::new(Vector3::zeros());
         let so3c = so3a.left_plus(&so3t, None, None);
         assert_eq!(0.0, so3c.x());
         assert_eq!(0.0, so3c.y());
@@ -872,7 +900,7 @@ mod tests {
     fn test_so3_plus() {
         // plus() is the same as right_plus()
         let so3a = SO3::random();
-        let so3t = Vector3::new(0.1, 0.2, 0.3);
+        let so3t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
         let so3c = so3a.plus(&so3t, None, None);
         let so3d = so3a.right_plus(&so3t, None, None);
         assert!((so3c.x() - so3d.x()).abs() < TOLERANCE);
@@ -895,7 +923,7 @@ mod tests {
         let so3a = SO3::random();
         let so3b = so3a.clone();
         let so3c = so3a.right_minus(&so3b, None, None);
-        assert!(so3c.norm() < TOLERANCE);
+        assert!(so3c.data.norm() < TOLERANCE);
     }
 
     #[test]
@@ -911,18 +939,18 @@ mod tests {
     #[test]
     fn test_so3_exp_log() {
         // exp of zero is identity
-        let so3t = Vector3::zeros();
-        let so3 = SO3::exp(&so3t, None);
+        let so3t = SO3Tangent::new(Vector3::zeros());
+        let so3 = so3t.exp(None);
         assert_eq!(0.0, so3.x());
         assert_eq!(0.0, so3.y());
         assert_eq!(0.0, so3.z());
         assert_eq!(1.0, so3.w());
 
         // exp of negative is inverse of exp
-        let so3t = Vector3::new(0.1, 0.2, 0.3);
-        let so3 = SO3::exp(&so3t, None);
-        let so3n = Vector3::new(-0.1, -0.2, -0.3);
-        let so3_inv = SO3::exp(&so3n, None);
+        let so3t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+        let so3 = so3t.exp(None);
+        let so3n = SO3Tangent::new(Vector3::new(-0.1, -0.2, -0.3));
+        let so3_inv = so3n.exp(None);
         assert!((so3_inv.x() + so3.x()).abs() < TOLERANCE);
         assert!((so3_inv.y() + so3.y()).abs() < TOLERANCE);
         assert!((so3_inv.z() + so3.z()).abs() < TOLERANCE);
@@ -1000,8 +1028,8 @@ mod tests {
 
     #[test]
     fn test_so3_exp_log_consistency() {
-        let tangent = Vector3::new(0.1, 0.2, 0.3);
-        let so3 = SO3::exp(&tangent, None);
+        let tangent = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+        let so3 = tangent.exp(None);
         let recovered_tangent = so3.log(None);
         assert!((tangent - recovered_tangent).norm() < TOLERANCE);
     }
@@ -1042,34 +1070,19 @@ mod tests {
     }
 
     #[test]
-    fn test_so3_tangent_operations() {
-        let tangent = SO3Tangent::new(Vector3::new(1.0, 2.0, 3.0));
-        let other = Vector3::new(0.5, 0.5, 0.5);
-
-        let sum = tangent.add(&other);
-        assert!((sum - Vector3::new(1.5, 2.5, 3.5)).norm() < TOLERANCE);
-
-        let scaled = tangent.scale(2.0);
-        assert!((scaled - Vector3::new(2.0, 4.0, 6.0)).norm() < TOLERANCE);
-
-        let negated = tangent.negate();
-        assert!((negated - Vector3::new(-1.0, -2.0, -3.0)).norm() < TOLERANCE);
-    }
-
-    #[test]
     fn test_so3_tangent_norms() {
         let tangent = SO3Tangent::new(Vector3::new(3.0, 4.0, 0.0));
-        let norm = tangent.norm();
+        let norm = tangent.data.norm();
         assert!((norm - 5.0).abs() < TOLERANCE);
 
-        let squared_norm = tangent.squared_norm();
+        let squared_norm = tangent.data.norm_squared();
         assert!((squared_norm - 25.0).abs() < TOLERANCE);
     }
 
     #[test]
     fn test_so3_tangent_zero() {
         let zero = SO3Tangent::zero();
-        assert!(zero.norm() < TOLERANCE);
+        assert!(zero.data.norm() < TOLERANCE);
 
         let tangent = SO3Tangent::new(Vector3::zeros());
         assert!(tangent.is_zero(TOLERANCE));
@@ -1079,7 +1092,7 @@ mod tests {
     fn test_so3_tangent_normalize() {
         let mut tangent = SO3Tangent::new(Vector3::new(3.0, 4.0, 0.0));
         tangent.normalize();
-        assert!((tangent.norm() - 1.0).abs() < TOLERANCE);
+        assert!((tangent.data.norm() - 1.0).abs() < TOLERANCE);
     }
 
     #[test]
@@ -1096,10 +1109,10 @@ mod tests {
 
     #[test]
     fn test_so3_small_angle_approximations() {
-        let small_tangent = Vector3::new(1e-8, 2e-8, 3e-8);
-        let so3 = SO3::exp(&small_tangent, None);
+        let small_tangent = SO3Tangent::new(Vector3::new(1e-8, 2e-8, 3e-8));
+        let so3 = small_tangent.exp(None);
         let recovered = so3.log(None);
-        assert!((small_tangent - recovered).norm() < TOLERANCE);
+        assert!((small_tangent.data - recovered.data).norm() < TOLERANCE);
     }
 
     #[test]
@@ -1148,14 +1161,6 @@ mod tests {
         let right_assoc = so3_1.compose(&so3_2.compose(&so3_3, None, None), None, None);
 
         assert!(left_assoc.distance(&right_assoc) < 1e-10);
-    }
-
-    #[test]
-    fn test_so3_hat_vee_consistency() {
-        let tangent = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
-        let hat_result = tangent.hat();
-        let vee_result = SO3Tangent::vee(&hat_result);
-        assert!((vee_result - tangent.data).norm() < TOLERANCE);
     }
 
     #[test]
