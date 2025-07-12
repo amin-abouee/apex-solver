@@ -47,7 +47,7 @@
 //! let perturbed = pose.plus(&tangent, Some(&mut jacobian), None);
 //! ```
 
-use nalgebra::{DMatrix, Matrix3, Vector3};
+use nalgebra::{Matrix3, Vector3};
 use std::fmt::Debug;
 
 pub mod se3;
@@ -117,14 +117,14 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// The Lie group element type
     type Element: Clone + Debug + PartialEq;
 
-    /// The tangent space vector type
-    type TangentVector: Clone + Debug + PartialEq;
+    // /// The tangent space vector type
+    type TangentVector: Tangent<Self>;
 
     /// The Jacobian matrix type
     type JacobianMatrix: Clone + Debug + PartialEq;
 
     /// Associated Lie algebra type
-    type LieAlgebra: LieAlgebra<Self>;
+    type LieAlgebra: Clone + Debug + PartialEq;
 
     // Dimension constants (following manif conventions)
 
@@ -165,20 +165,6 @@ pub trait LieGroup: Clone + Debug + PartialEq {
         other: &Self::Element,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element;
-
-    // Exponential and logarithmic maps
-
-    /// Exponential map from tangent space to manifold.
-    ///
-    /// Maps a tangent vector φ ∈ 𝔤 to the group element exp(φ^∧) ∈ G.
-    ///
-    /// # Arguments
-    /// * `tangent` - Tangent vector in the Lie algebra
-    /// * `jacobian` - Optional Jacobian ∂exp(φ^∧)/∂φ
-    fn exp(
-        tangent: &Self::TangentVector,
-        jacobian: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element;
 
     /// Logarithmic map from manifold to tangent space.
@@ -319,23 +305,6 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 
     /// Check if the element is approximately on the manifold.
     fn is_valid(&self, tolerance: f64) -> bool;
-
-    // Distance and norms
-
-    /// Riemannian distance between two manifold elements.
-    ///
-    /// Computes ||log(g₁⁻¹ ∘ g₂)||.
-    fn distance(&self, other: &Self::Element) -> f64;
-
-    /// Weighted distance with a metric tensor.
-    fn weighted_distance(&self, other: &Self::Element, weight: &Self::JacobianMatrix) -> f64;
-
-    /// Test if this element is approximately equal to another.
-    ///
-    /// Uses the Riemannian distance with a tolerance threshold.
-    fn is_approx(&self, other: &Self::Element, tolerance: f64) -> bool {
-        self.distance(other) < tolerance
-    }
 }
 
 /// Trait for Lie algebra operations.
@@ -346,57 +315,11 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 /// # Type Parameters
 ///
 /// - `G`: The associated Lie group type
-pub trait LieAlgebra<G: LieGroup>: Clone + Debug + PartialEq {
+pub trait Tangent<G: LieGroup>: Clone + Debug + PartialEq {
     // Dimension constants
 
     /// Dimension of the tangent space (same as Lie group DOF)
     const DIM: usize = G::DOF;
-
-    /// Vector space operations
-    ///
-    /// Vector space addition: φ₁ + φ₂.
-    ///
-    /// # Arguments
-    /// * `other` - The tangent vector to add
-    fn add(&self, other: &G::TangentVector) -> G::TangentVector;
-
-    /// Scalar multiplication: α · φ.
-    ///
-    /// # Arguments  
-    /// * `scalar` - Scalar multiplier
-    fn scale(&self, scalar: f64) -> G::TangentVector;
-
-    /// Additive inverse: -φ.
-    fn negate(&self) -> G::TangentVector;
-
-    /// Vector subtraction: φ₁ - φ₂.
-    fn subtract(&self, other: &G::TangentVector) -> G::TangentVector;
-
-    // Norms and inner products
-
-    /// Euclidean norm: ||φ||.
-    fn norm(&self) -> f64;
-
-    /// Squared norm: ||φ||².
-    fn squared_norm(&self) -> f64;
-
-    /// Weighted norm: √(φᵀ W φ).
-    ///
-    /// # Arguments
-    /// * `weight` - Weight matrix W
-    fn weighted_norm(&self, weight: &G::JacobianMatrix) -> f64;
-
-    /// Squared weighted norm: φᵀ W φ.
-    fn squared_weighted_norm(&self, weight: &G::JacobianMatrix) -> f64;
-
-    /// Inner product: ⟨φ₁, φ₂⟩.
-    ///
-    /// # Arguments
-    /// * `other` - The second tangent vector
-    fn inner(&self, other: &G::TangentVector) -> f64;
-
-    /// Weighted inner product: ⟨φ₁, W φ₂⟩.
-    fn weighted_inner(&self, other: &G::TangentVector, weight: &G::JacobianMatrix) -> f64;
 
     // Exponential map and Jacobians
 
@@ -431,19 +354,12 @@ pub trait LieAlgebra<G: LieGroup>: Clone + Debug + PartialEq {
     /// Maps the tangent vector to its matrix representation in the Lie algebra.
     /// For SO(3): 3×1 vector → 3×3 skew-symmetric matrix
     /// For SE(3): 6×1 vector → 4×4 transformation matrix
-    fn hat(&self) -> DMatrix<f64>;
+    fn hat(&self) -> G::LieAlgebra;
 
-    /// Vee operator: φ^∨ (matrix to vector).
-    ///
-    /// Inverse of the hat operator.
-    fn vee(matrix: &DMatrix<f64>) -> G::TangentVector;
-
-    // Adjoint operations
-
-    /// Small adjoint: ad(φ).
-    ///
-    /// The adjoint representation of the Lie algebra: ad(φ) ψ = [φ^∧, ψ^∧]^∨.
-    fn small_adjoint(&self) -> G::JacobianMatrix;
+    // /// Vee operator: φ^∨ (matrix to vector).
+    // ///
+    // /// Inverse of the hat operator.
+    // fn vee(matrix: &G::LieAlgebra) -> G::LieAlgebra;
 
     // Utility functions
 
