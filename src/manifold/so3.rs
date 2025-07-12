@@ -226,14 +226,25 @@ impl LieGroup for SO3 {
         }
     }
 
+    /// SO3 inverse.
+    ///
+    /// # Arguments
+    /// * `jacobian` - Optional Jacobian matrix of the inverse wrt self.
+    ///
+    /// # Notes
+    /// R⁻¹ = Rᵀ, for quaternions: q⁻¹ = q*
+    ///
+    /// # Equation 140: Jacobian of Inverse for SO(3)
+    /// J_R⁻¹_R = -Adj(R) = -R
+    ///
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::Element {
         // For SO(3): R^{-1} = R^T, for quaternions: q^{-1} = q*
         let inverse_quat = self.quaternion.inverse();
 
         if let Some(jac) = jacobian {
-            // Jacobian of inverse operation: -R^T = -R^{-1}
+            // Jacobian of inverse operation: -R^T = -R
             let rotation_matrix = self.quaternion.to_rotation_matrix().into_inner();
-            jac.copy_from(&(-rotation_matrix.transpose()));
+            jac.copy_from(&(-rotation_matrix));
         }
 
         SO3 {
@@ -241,6 +252,20 @@ impl LieGroup for SO3 {
         }
     }
 
+    /// SO3 composition.
+    ///
+    /// # Arguments
+    /// * `other` - Another SO3 element.
+    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
+    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
+    ///
+    /// # Notes
+    /// # Equation 141: Jacobian of the composition wrt self.
+    /// J_QR_R = Adj(R⁻¹) = Rᵀ
+    ///
+    /// # Equation 142: Jacobian of the composition wrt other.
+    /// J_QR_Q = I
+    ///
     fn compose(
         &self,
         other: &Self::Element,
@@ -265,13 +290,26 @@ impl LieGroup for SO3 {
         result
     }
 
+    /// SO3 exponential map.
+    ///
+    /// # Arguments
+    /// * `tangent` - Tangent vector [θx, θy, θz]
+    /// * `jacobian` - Optional Jacobian matrix of the SO3 element wrt self.
+    ///
+    /// # Notes
+    /// # Equation 132: Exponential map for unit quaternions (S³)
+    /// q = Exp(θu) = cos(θ/2) + u sin(θ/2) ∈ H
+    ///
+    /// # Equation 143: Right Jacobian for SO(3) Exp map
+    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    ///
     fn exp(
         tangent: &Self::TangentVector,
         jacobian: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
-        let angle = tangent.norm();
+        let angle = tangent.norm_squared();
 
-        let quaternion = if angle < 1e-12 {
+        let quaternion = if angle < f64::EPSILON {
             UnitQuaternion::identity()
         } else {
             UnitQuaternion::from_scaled_axis(*tangent)
@@ -285,6 +323,18 @@ impl LieGroup for SO3 {
         SO3 { quaternion }
     }
 
+    /// Get the SO3 corresponding Lie algebra element in vector form.
+    ///
+    /// # Arguments
+    /// * `jacobian` - Optional Jacobian matrix of the tangent wrt to self.
+    ///
+    /// # Notes
+    /// # Equation 133: Logarithmic map for unit quaternions (S³)
+    /// θu = Log(q) = (2 / ||v||) * v * arctan(||v||, w) ∈ R³
+    ///
+    /// # Equation 144: Inverse of Right Jacobian for SO(3) Exp map
+    /// J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
+    ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         let axis_angle = self.quaternion.scaled_axis();
 
