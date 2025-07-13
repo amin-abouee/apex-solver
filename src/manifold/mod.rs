@@ -355,12 +355,6 @@ pub trait Tangent<G: LieGroup>: Clone + Debug + PartialEq {
     /// For SO(3): 3×1 vector → 3×3 skew-symmetric matrix
     /// For SE(3): 6×1 vector → 4×4 transformation matrix
     fn hat(&self) -> G::LieAlgebra;
-
-    // /// Vee operator: φ^∨ (matrix to vector).
-    // ///
-    // /// Inverse of the hat operator.
-    // fn vee(matrix: &G::LieAlgebra) -> G::LieAlgebra;
-
     // Utility functions
 
     /// Zero tangent vector.
