@@ -141,10 +141,18 @@ impl SO3 {
         self.quaternion = UnitQuaternion::from_quaternion(q);
     }
 
-    /// Get coefficients as array [x, y, z, w].
+    /// Get coefficients as array [w, x, y, z].
     pub fn coeffs(&self) -> [f64; 4] {
         let q = self.quaternion.quaternion();
         [q.w, q.i, q.j, q.k]
+    }
+
+    /// Calculate the distance between two SO3 elements
+    ///
+    /// Computes the geodesic distance, which is the norm of the log map
+    /// of the relative rotation between the two elements.
+    pub fn distance(&self, other: &Self) -> f64 {
+        self.between(other, None, None).log(None).angle()
     }
 }
 
@@ -456,7 +464,8 @@ impl LieGroup for SO3 {
 
     fn normalize(&mut self) {
         // Normalize the quaternion
-        self.quaternion.normalize();
+        let q = self.quaternion.into_inner().normalize();
+        self.quaternion = UnitQuaternion::from_quaternion(q);
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
@@ -516,7 +525,7 @@ impl SO3Tangent {
     }
 
     /// Get the coefficients as a vector.
-    pub fn coefficients(&self) -> Vector3<f64> {
+    pub fn coeffs(&self) -> Vector3<f64> {
         self.data
     }
 
@@ -758,20 +767,20 @@ mod tests {
         // Create from normalized coefficients
         let so3 = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
         let coeffs = so3.coeffs();
-        assert!((coeffs[0] - 0.0).abs() < TOLERANCE);
-        assert!((coeffs[1] - 0.0).abs() < TOLERANCE);
-        assert!((coeffs[2] - 0.0).abs() < TOLERANCE);
-        assert!((coeffs[3] - 1.0).abs() < TOLERANCE);
+        assert!((coeffs[0] - 1.0).abs() < TOLERANCE); // w
+        assert!((coeffs[1] - 0.0).abs() < TOLERANCE); // x
+        assert!((coeffs[2] - 0.0).abs() < TOLERANCE); // y
+        assert!((coeffs[3] - 0.0).abs() < TOLERANCE); // z
 
         // Test with non-normalized input - should get normalized output
         let so3 = SO3::from_quaternion_coeffs(0.1, 0.2, 0.3, 0.4);
         let coeffs = so3.coeffs();
         let original_quat = Quaternion::new(0.4, 0.1, 0.2, 0.3);
         let normalized_quat = original_quat.normalize();
-        assert!((coeffs[0] - normalized_quat.i).abs() < TOLERANCE);
-        assert!((coeffs[1] - normalized_quat.j).abs() < TOLERANCE);
-        assert!((coeffs[2] - normalized_quat.k).abs() < TOLERANCE);
-        assert!((coeffs[3] - normalized_quat.w).abs() < TOLERANCE);
+        assert!((coeffs[0] - normalized_quat.w).abs() < TOLERANCE);
+        assert!((coeffs[1] - normalized_quat.i).abs() < TOLERANCE);
+        assert!((coeffs[2] - normalized_quat.j).abs() < TOLERANCE);
+        assert!((coeffs[3] - normalized_quat.k).abs() < TOLERANCE);
     }
 
     #[test]
@@ -897,27 +906,14 @@ mod tests {
     }
 
     #[test]
-    fn test_so3_plus() {
-        // plus() is the same as right_plus()
-        let so3a = SO3::random();
-        let so3t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
-        let so3c = so3a.plus(&so3t, None, None);
-        let so3d = so3a.right_plus(&so3t, None, None);
-        assert!((so3c.x() - so3d.x()).abs() < TOLERANCE);
-        assert!((so3c.y() - so3d.y()).abs() < TOLERANCE);
-        assert!((so3c.z() - so3d.z()).abs() < TOLERANCE);
-        assert!((so3c.w() - so3d.w()).abs() < TOLERANCE);
-    }
-
-    #[test]
     fn test_so3_rminus() {
         // identity minus identity is zero
         let so3a = SO3::identity();
         let so3b = SO3::identity();
         let so3c = so3a.right_minus(&so3b, None, None);
-        assert!(so3c[0].abs() < TOLERANCE);
-        assert!(so3c[1].abs() < TOLERANCE);
-        assert!(so3c[2].abs() < TOLERANCE);
+        assert!(so3c.x().abs() < TOLERANCE);
+        assert!(so3c.y().abs() < TOLERANCE);
+        assert!(so3c.z().abs() < TOLERANCE);
 
         // random minus the same is zero
         let so3a = SO3::random();
@@ -933,7 +929,7 @@ mod tests {
         let so3b = SO3::random();
         let so3c = so3a.minus(&so3b, None, None);
         let so3d = so3a.right_minus(&so3b, None, None);
-        assert!((so3c - so3d).norm() < TOLERANCE);
+        assert!((so3c.data - so3d.data).norm() < TOLERANCE);
     }
 
     #[test]
@@ -962,17 +958,17 @@ mod tests {
         // log of identity is zero
         let so3 = SO3::identity();
         let so3_log = so3.log(None);
-        assert!(so3_log[0].abs() < TOLERANCE);
-        assert!(so3_log[1].abs() < TOLERANCE);
-        assert!(so3_log[2].abs() < TOLERANCE);
+        assert!(so3_log.x().abs() < TOLERANCE);
+        assert!(so3_log.y().abs() < TOLERANCE);
+        assert!(so3_log.z().abs() < TOLERANCE);
 
         // log of inverse is negative log
         let so3 = SO3::random();
         let so3_log = so3.log(None);
         let so3_inv_log = so3.inverse(None).log(None);
-        assert!((so3_inv_log[0] + so3_log[0]).abs() < TOLERANCE);
-        assert!((so3_inv_log[1] + so3_log[1]).abs() < TOLERANCE);
-        assert!((so3_inv_log[2] + so3_log[2]).abs() < TOLERANCE);
+        assert!((so3_inv_log.x() + so3_log.x()).abs() < TOLERANCE);
+        assert!((so3_inv_log.y() + so3_log.y()).abs() < TOLERANCE);
+        assert!((so3_inv_log.z() + so3_log.z()).abs() < TOLERANCE);
     }
 
     #[test]
@@ -1031,7 +1027,7 @@ mod tests {
         let tangent = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
         let so3 = tangent.exp(None);
         let recovered_tangent = so3.log(None);
-        assert!((tangent - recovered_tangent).norm() < TOLERANCE);
+        assert!((tangent.data - recovered_tangent.data).norm() < TOLERANCE);
     }
 
     #[test]
