@@ -126,7 +126,7 @@ impl SO3 {
     }
 
     /// Get the rotation matrix (3x3).
-    pub fn rotation(&self) -> Matrix3<f64> {
+    pub fn rotation_matrix(&self) -> Matrix3<f64> {
         self.quaternion.to_rotation_matrix().into_inner()
     }
 
@@ -220,7 +220,7 @@ impl LieGroup for SO3 {
             // Jacobian wrt first element: R2^T
             // let other_rotation = other.quaternion.to_rotation_matrix().into_inner();
             // jac_self.copy_from(&other_rotation.transpose());
-            *jac_self = other.rotation().transpose();
+            *jac_self = other.rotation_matrix().transpose();
         }
 
         if let Some(jac_other) = jacobian_other {
@@ -304,11 +304,11 @@ impl LieGroup for SO3 {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
         // Right plus: R ⊕ φ = R * exp(φ)
-        let exp_tangent = tangent.exp(jacobian_tangent);
+        let exp_tangent = tangent.exp(None);
         let result = self.compose(&exp_tangent, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = self.rotation().transpose();
+            *jac_self = self.rotation_matrix().transpose();
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
@@ -339,7 +339,7 @@ impl LieGroup for SO3 {
         // Right minus: R1 ⊖ R2 = log(R2^T * R1)
         let other_inv = other.inverse(None);
         let result_group = other_inv.compose(self, None, None);
-        let result = result_group.log(jacobian_self);
+        let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = self.log(None).right_jacobian_inv();
@@ -359,7 +359,7 @@ impl LieGroup for SO3 {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
         // Left plus: φ ⊕ R = exp(φ) * R
-        let exp_tangent = tangent.exp(jacobian_tangent);
+        let exp_tangent = tangent.exp(None);
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
@@ -428,12 +428,12 @@ impl LieGroup for SO3 {
             let skew_matrix = Matrix3::new(
                 0.0, -vector.z, vector.y, vector.z, 0.0, -vector.x, -vector.y, vector.x, 0.0,
             );
-            *jac_self = -self.rotation() * skew_matrix;
+            *jac_self = -self.rotation_matrix() * skew_matrix;
         }
 
         if let Some(jac_vector) = jacobian_vector {
             // Jacobian wrt vector: R
-            *jac_vector = self.rotation();
+            *jac_vector = self.rotation_matrix();
         }
 
         result
@@ -516,7 +516,7 @@ impl SO3Tangent {
     }
 
     /// Get the coefficients as a vector.
-    pub fn coeffs(&self) -> Vector3<f64> {
+    pub fn coefficients(&self) -> Vector3<f64> {
         self.data
     }
 
@@ -803,7 +803,7 @@ mod tests {
     #[test]
     fn test_so3_rotation() {
         let so3 = SO3::identity();
-        let rotation = so3.rotation();
+        let rotation = so3.rotation_matrix();
 
         assert_eq!(3, rotation.nrows());
         assert_eq!(3, rotation.ncols());
