@@ -263,7 +263,7 @@ impl LieGroup for SE3 {
     ///
     /// # Equation 174: V(θ) function for SE(3) Log/Exp maps
     /// V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
-
+    ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         // Log of rotation (axis-angle representation)
         let theta = self.rotation.log(None);
@@ -634,7 +634,7 @@ impl Tangent<SE3> for SE3Tangent {
         jac.fixed_view_mut::<3, 3>(3, 3)
             .copy_from(&theta_left_inv_jac);
         // Bottom-right block: J_r^{-1}(theta)
-        let bottom_right = -1.0 * &theta_left_inv_jac * &q_block_jac * &theta_left_inv_jac;
+        let bottom_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
         jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&bottom_right);
         jac
     }
@@ -651,7 +651,7 @@ impl Tangent<SE3> for SE3Tangent {
         let theta = self.theta();
         let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(rho, theta);
-        let top_right_block = -1.0 * &theta_left_inv_jac * &q_block_jac * &theta_left_inv_jac;
+        let top_right_block = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
         jac.fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&theta_left_inv_jac);
         jac.fixed_view_mut::<3, 3>(3, 3)

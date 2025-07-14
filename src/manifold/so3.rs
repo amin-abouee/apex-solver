@@ -721,6 +721,7 @@ impl Tangent<SO3> for SO3Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::f64;
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 1e-12;
@@ -998,7 +999,7 @@ mod tests {
         let so3 = SO3::from_euler_angles(PI, PI / 2.0, PI / 4.0);
         let transformed_point = so3.act(&Vector3::new(1.0, 1.0, 1.0), None, None);
         assert!((transformed_point.x - 0.0).abs() < TOLERANCE);
-        assert!((transformed_point.y + 1.414213562373).abs() < 1e-10);
+        assert!((transformed_point.y + f64::consts::SQRT_2).abs() < 1e-10);
         assert!((transformed_point.z + 1.0).abs() < TOLERANCE);
     }
 
