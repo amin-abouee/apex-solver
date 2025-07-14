@@ -1032,7 +1032,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore] // TODO: Fix the Jacobian relationship - needs more investigation
     fn test_so3_right_left_jacobian_relationship() {
         // For zero tangent, left and right Jacobians should be equal (both identity)
         let tangent = SO3Tangent::new(Vector3::zeros());
