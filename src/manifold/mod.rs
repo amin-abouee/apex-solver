@@ -50,6 +50,7 @@
 use nalgebra::{Matrix3, Vector3};
 use std::fmt::Debug;
 
+pub mod se2;
 pub mod se3;
 pub mod so2;
 pub mod so3;
