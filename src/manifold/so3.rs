@@ -1,4 +1,4 @@
-//! SO(3) - Special Orthogonal Group in 3D
+//! SO3 - Special Orthogonal Group in 3D
 //!
 //! This module implements the Special Orthogonal group SO(3), which represents
 //! rotations in 3D space.
@@ -191,8 +191,7 @@ impl LieGroup for SO3 {
 
         if let Some(jac) = jacobian {
             // Jacobian of inverse operation: -R^T = -R
-            let rotation_matrix = self.quaternion.to_rotation_matrix().into_inner();
-            jac.copy_from(&(-rotation_matrix));
+            *jac = -self.adjoint();
         }
 
         SO3 {
@@ -226,9 +225,7 @@ impl LieGroup for SO3 {
 
         if let Some(jac_self) = jacobian_self {
             // Jacobian wrt first element: R2^T
-            // let other_rotation = other.quaternion.to_rotation_matrix().into_inner();
-            // jac_self.copy_from(&other_rotation.transpose());
-            *jac_self = other.rotation_matrix().transpose();
+            *jac_self = other.inverse(None).adjoint();
         }
 
         if let Some(jac_other) = jacobian_other {
@@ -316,7 +313,7 @@ impl LieGroup for SO3 {
         let result = self.compose(&exp_tangent, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = self.rotation_matrix().transpose();
+            *jac_self = exp_tangent.inverse(None).adjoint();
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
@@ -350,11 +347,11 @@ impl LieGroup for SO3 {
         let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = self.log(None).right_jacobian_inv();
+            *jac_self = -self.log(None).left_jacobian_inv();
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = -self.log(None).left_jacobian_inv();
+            *jac_other = self.log(None).right_jacobian_inv();
         }
 
         result
@@ -433,10 +430,8 @@ impl LieGroup for SO3 {
 
         if let Some(jac_self) = jacobian_self {
             // Jacobian wrt SO(3) element: -R * [v]×
-            let skew_matrix = Matrix3::new(
-                0.0, -vector.z, vector.y, vector.z, 0.0, -vector.x, -vector.y, vector.x, 0.0,
-            );
-            *jac_self = -self.rotation_matrix() * skew_matrix;
+            let vector_hat = SO3Tangent::new(*vector).hat();
+            *jac_self = -self.rotation_matrix() * vector_hat;
         }
 
         if let Some(jac_vector) = jacobian_vector {
@@ -449,7 +444,7 @@ impl LieGroup for SO3 {
 
     fn adjoint(&self) -> Self::JacobianMatrix {
         // Adjoint matrix for SO(3) is just the rotation matrix
-        self.quaternion.to_rotation_matrix().into_inner()
+        self.rotation_matrix()
     }
 
     fn random() -> Self::Element {
