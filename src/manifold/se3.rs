@@ -272,7 +272,6 @@ impl LieGroup for SE3 {
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
         let result = SE3Tangent { data };
         if let Some(jac) = jacobian {
-            // TODO: right or left?
             *jac = result.right_jacobian_inv();
         }
 
