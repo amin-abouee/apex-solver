@@ -51,6 +51,7 @@ use nalgebra::{Matrix3, Vector3};
 use std::fmt::Debug;
 
 pub mod se3;
+pub mod so2;
 pub mod so3;
 
 /// Errors that can occur during manifold operations.
