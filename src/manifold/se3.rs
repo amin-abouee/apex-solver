@@ -199,8 +199,7 @@ impl LieGroup for SE3 {
 
         // Eqs. 176
         if let Some(jac) = jacobian {
-            // Jacobian of inverse operation: -Ad(g^)
-            *jac = self.adjoint();
+            *jac = -self.adjoint();
         }
 
         SE3::from_translation_so3(trans_inv, rot_inv)
@@ -240,7 +239,7 @@ impl LieGroup for SE3 {
 
         if let Some(jac_self) = jacobian_self {
             // Jacobian wrt first element: Ad(g2^{-1})
-            *jac_self = -other.inverse(None).adjoint();
+            *jac_self = other.inverse(None).adjoint();
         }
 
         if let Some(jac_other) = jacobian_other {
@@ -273,7 +272,8 @@ impl LieGroup for SE3 {
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
         let result = SE3Tangent { data };
         if let Some(jac) = jacobian {
-            *jac = result.left_jacobian_inv();
+            // TODO: right or left?
+            *jac = result.right_jacobian_inv();
         }
 
         result
@@ -290,7 +290,8 @@ impl LieGroup for SE3 {
         let result = self.compose(&exp_tangent, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = tangent.right_jacobian() * tangent.left_jacobian_inv();
+            // TODO: which one is correct? tangent.right_jacobian() * tangent.left_jacobian_inv()
+            *jac_self = exp_tangent.inverse(None).adjoint();
         }
         if let Some(jac_tangent) = jacobian_tangent {
             *jac_tangent = tangent.right_jacobian();
@@ -586,9 +587,9 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_jac = SO3Tangent::new(-theta).left_jacobian();
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_left_jac);
+        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
+        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
+        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
         jac.fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&SE3Tangent::q_block_jacobian_matrix(-rho, -theta));
         jac
