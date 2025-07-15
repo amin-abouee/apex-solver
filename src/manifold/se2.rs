@@ -265,7 +265,11 @@ impl LieGroup for SE2 {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
     ) -> Self::Element {
         let exp_tangent = tangent.exp(None);
-        let result = self.compose(&exp_tangent, jacobian_self, None);
+        let result = self.compose(&exp_tangent, None, None);
+
+        if let Some(jac_self) = jacobian_self {
+            *jac_self = exp_tangent.inverse(None).adjoint();
+        }
 
         if let Some(jac_tangent) = jacobian_tangent {
             *jac_tangent = tangent.right_jacobian();
@@ -285,11 +289,11 @@ impl LieGroup for SE2 {
         let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = result.right_jacobian_inv();
+            *jac_self = -result.left_jacobian_inv();
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = -result.left_jacobian_inv();
+            *jac_other = result.right_jacobian_inv();
         }
 
         result
@@ -326,10 +330,12 @@ impl LieGroup for SE2 {
         let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
+            // TODO: check this jacobian
             *jac_self = result.right_jacobian_inv();
         }
 
         if let Some(jac_other) = jacobian_other {
+            // TODO: check this jacobian
             *jac_other = -result.left_jacobian_inv();
         }
 
@@ -378,9 +384,11 @@ impl LieGroup for SE2 {
 
     fn adjoint(&self) -> Self::JacobianMatrix {
         let mut adjoint_matrix = Matrix3::identity();
-        let r = self.rotation_matrix();
+        let rotation_matrix = self.rotation_matrix();
 
-        adjoint_matrix.fixed_view_mut::<2, 2>(0, 0).copy_from(&r);
+        adjoint_matrix
+            .fixed_view_mut::<2, 2>(0, 0)
+            .copy_from(&rotation_matrix);
         adjoint_matrix[(0, 2)] = self.y();
         adjoint_matrix[(1, 2)] = -self.x();
 

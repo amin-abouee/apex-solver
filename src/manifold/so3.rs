@@ -347,11 +347,11 @@ impl LieGroup for SO3 {
         let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = -self.log(None).left_jacobian_inv();
+            *jac_self = -result.left_jacobian_inv();
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = self.log(None).right_jacobian_inv();
+            *jac_other = result.right_jacobian_inv();
         }
 
         result
