@@ -158,7 +158,6 @@ impl SO3 {
 
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SO3 {
-    type Element = SO3;
     type TangentVector = SO3Tangent;
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
@@ -168,10 +167,15 @@ impl LieGroup for SO3 {
     const DOF: usize = 3; // Degrees of freedom (3 rotation parameters)
     const REP_SIZE: usize = 4; // Representation size (4 quaternion components)
 
-    fn identity() -> Self::Element {
+    fn identity() -> Self {
         SO3 {
             quaternion: UnitQuaternion::identity(),
         }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
     }
 
     /// SO3 inverse.
@@ -185,7 +189,7 @@ impl LieGroup for SO3 {
     /// # Equation 140: Jacobian of Inverse for SO(3)
     /// J_R⁻¹_R = -Adj(R) = -R
     ///
-    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::Element {
+    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         // For SO(3): R^{-1} = R^T, for quaternions: q^{-1} = q*
         let inverse_quat = self.quaternion.inverse();
 
@@ -215,10 +219,10 @@ impl LieGroup for SO3 {
     ///
     fn compose(
         &self,
-        other: &Self::Element,
+        other: &Self,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
+    ) -> Self {
         let result = SO3 {
             quaternion: self.quaternion * other.quaternion,
         };
@@ -290,135 +294,6 @@ impl LieGroup for SO3 {
         axis_angle
     }
 
-    /// Right plus: R ⊕ φ = R * exp(φ)
-    ///
-    /// # Arguments
-    /// * `tangent` - Tangent vector [θx, θy, θz]
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_tangent` - Optional Jacobian matrix of the composition wrt tangent.
-    ///
-    /// # Notes
-    /// # Equation 148:
-    /// J_R⊕θ_R = R(θ)ᵀ
-    /// J_R⊕θ_θ = J_r(θ)
-    ///
-    fn right_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Right plus: R ⊕ φ = R * exp(φ)
-        let exp_tangent = tangent.exp(None);
-        let result = self.compose(&exp_tangent, None, None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = exp_tangent.inverse(None).adjoint();
-        }
-
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.right_jacobian();
-        }
-
-        result
-    }
-
-    /// Right minus: R1 ⊖ R2 = log(R2^T * R1)
-    ///
-    /// # Arguments
-    /// * `other` - Another SO3 element.
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
-    ///
-    /// # Notes
-    /// # Equation 149:
-    /// J_Q⊖R_Q = J_r⁻¹(θ)
-    /// J_Q⊖R_R = -J_l⁻¹(θ)
-    ///
-    fn right_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        // Right minus: R1 ⊖ R2 = log(R2^T * R1)
-        let other_inv = other.inverse(None);
-        let result_group = other_inv.compose(self, None, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = -result.left_jacobian_inv();
-        }
-
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = result.right_jacobian_inv();
-        }
-
-        result
-    }
-
-    fn left_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Left plus: φ ⊕ R = exp(φ) * R
-        let exp_tangent = tangent.exp(None);
-        let result = exp_tangent.compose(self, None, None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = Matrix3::identity();
-        }
-
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.left_jacobian();
-        }
-
-        result
-    }
-
-    fn left_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        // Left minus: R1 ⊖ R2 = log(R1 * R2^T)
-        let other_inv = other.inverse(None);
-        let result_group = self.compose(&other_inv, None, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = -self.log(None).left_jacobian_inv();
-        }
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = self.log(None).right_jacobian_inv();
-        }
-
-        result
-    }
-
-    fn between(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Between: R1.between(R2) = R1^T * R2
-        let self_inv = self.inverse(None);
-        self_inv.compose(
-            other,
-            jacobian_self.map(|j| {
-                let other_rotation = other.quaternion.to_rotation_matrix().into_inner();
-                *j = -other_rotation.transpose();
-                j
-            }),
-            jacobian_other,
-        )
-    }
-
     fn act(
         &self,
         vector: &Vector3<f64>,
@@ -447,7 +322,7 @@ impl LieGroup for SO3 {
         self.rotation_matrix()
     }
 
-    fn random() -> Self::Element {
+    fn random() -> Self {
         SO3 {
             quaternion: UnitQuaternion::from_scaled_axis(Vector3::new(
                 rand::random::<f64>() * 2.0 - 1.0,
@@ -464,9 +339,27 @@ impl LieGroup for SO3 {
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        // Check if quaternion is properly normalized
-        let q = self.quaternion.quaternion();
-        (q.norm() - 1.0).abs() < tolerance
+        // Check if the quaternion is normalized
+        let norm_diff = (self.quaternion.norm() - 1.0).abs();
+        norm_diff < tolerance
+    }
+
+    /// Vee operator: log(g)^∨.
+    ///
+    /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
+    /// For SO(3), this is the same as log().
+    fn vee(&self) -> Self::TangentVector {
+        self.log(None)
+    }
+
+    /// Check if the element is approximately equal to another element.
+    ///
+    /// # Arguments
+    /// * `other` - The other element to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        let difference = self.right_minus(other, None, None);
+        difference.is_zero(tolerance)
     }
 }
 
@@ -545,10 +438,7 @@ impl Tangent<SO3> for SO3Tangent {
     /// # Equation 143: Right Jacobian for SO(3) Exp map
     /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
     ///
-    fn exp(
-        &self,
-        jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>,
-    ) -> <SO3 as LieGroup>::Element {
+    fn exp(&self, jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>) -> SO3 {
         let theta_squared = self.data.norm_squared();
 
         let quaternion = if theta_squared > f64::EPSILON {
@@ -709,6 +599,57 @@ impl Tangent<SO3> for SO3Tangent {
             SO3Tangent::new(self.data / norm)
         } else {
             Self::zero()
+        }
+    }
+
+    /// Small adjoint matrix for SO(3).
+    ///
+    /// For SO(3), the small adjoint is the skew-symmetric matrix (hat operator).
+    fn small_adj(&self) -> <SO3 as LieGroup>::JacobianMatrix {
+        self.hat()
+    }
+
+    /// Lie bracket for SO(3).
+    ///
+    /// Computes the Lie bracket [this, other] = this.small_adj() * other.
+    fn lie_bracket(&self, other: &Self) -> <SO3 as LieGroup>::TangentVector {
+        let bracket_result = self.small_adj() * other.data;
+        SO3Tangent::new(bracket_result)
+    }
+
+    /// Check if this tangent vector is approximately equal to another.
+    ///
+    /// # Arguments
+    /// * `other` - The other tangent vector to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        (self.data - other.data).norm() < tolerance
+    }
+
+    /// Get the ith generator of the SO(3) Lie algebra.
+    ///
+    /// # Arguments
+    /// * `i` - Index of the generator (0, 1, or 2 for SO(3))
+    ///
+    /// # Returns
+    /// The generator matrix
+    fn generator(&self, i: usize) -> <SO3 as LieGroup>::LieAlgebra {
+        assert!(i < 3, "SO(3) only has generators for indices 0, 1, 2");
+
+        match i {
+            0 => {
+                // Generator E1 for x-axis rotation
+                Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0)
+            }
+            1 => {
+                // Generator E2 for y-axis rotation
+                Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0)
+            }
+            2 => {
+                // Generator E3 for z-axis rotation
+                Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -1179,13 +1120,129 @@ mod tests {
     #[test]
     fn test_so3_distance() {
         let so3_1 = SO3::random();
+        let so3_2 = SO3::random();
+        let distance = so3_1.distance(&so3_2);
+        assert!(distance >= 0.0);
+        assert!(so3_1.distance(&so3_1) < TOLERANCE);
+    }
+
+    // New tests for the additional functions
+
+    #[test]
+    fn test_so3_vee() {
+        let so3 = SO3::random();
+        let tangent_log = so3.log(None);
+        let tangent_vee = so3.vee();
+
+        assert!((tangent_log.data - tangent_vee.data).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_so3_is_approx() {
+        let so3_1 = SO3::random();
         let so3_2 = so3_1.clone();
 
-        // Distance to self should be zero
-        assert!(so3_1.distance(&so3_2) < TOLERANCE);
+        assert!(so3_1.is_approx(&so3_1, 1e-10));
+        assert!(so3_1.is_approx(&so3_2, 1e-10));
 
-        // Distance should be positive for different elements
-        let so3_3 = SO3::random();
-        assert!(so3_1.distance(&so3_3) >= 0.0);
+        // Test with small perturbation
+        let small_tangent = SO3Tangent::new(Vector3::new(1e-12, 1e-12, 1e-12));
+        let so3_perturbed = so3_1.right_plus(&small_tangent, None, None);
+        assert!(so3_1.is_approx(&so3_perturbed, 1e-10));
+    }
+
+    #[test]
+    fn test_so3_tangent_small_adj() {
+        let axis_angle = Vector3::new(0.1, 0.2, 0.3);
+        let tangent = SO3Tangent::new(axis_angle);
+        let small_adj = tangent.small_adj();
+        let hat_matrix = tangent.hat();
+
+        // For SO(3), small adjoint equals hat matrix
+        assert!((small_adj - hat_matrix).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_so3_tangent_lie_bracket() {
+        let tangent_a = SO3Tangent::new(Vector3::new(0.1, 0.0, 0.0));
+        let tangent_b = SO3Tangent::new(Vector3::new(0.0, 0.2, 0.0));
+
+        let bracket_ab = tangent_a.lie_bracket(&tangent_b);
+        let bracket_ba = tangent_b.lie_bracket(&tangent_a);
+
+        // Anti-symmetry test: [a,b] = -[b,a]
+        assert!((bracket_ab.data + bracket_ba.data).norm() < 1e-10);
+
+        // [a,a] = 0
+        let bracket_aa = tangent_a.lie_bracket(&tangent_a);
+        assert!(bracket_aa.is_zero(1e-10));
+
+        // Verify bracket relationship with hat operator
+        let bracket_hat = bracket_ab.hat();
+        let expected = tangent_a.hat() * tangent_b.hat() - tangent_b.hat() * tangent_a.hat();
+        assert!((bracket_hat - expected).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_so3_tangent_is_approx() {
+        let tangent_1 = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+        let tangent_2 = SO3Tangent::new(Vector3::new(0.1 + 1e-12, 0.2, 0.3));
+        let tangent_3 = SO3Tangent::new(Vector3::new(0.5, 0.6, 0.7));
+
+        assert!(tangent_1.is_approx(&tangent_1, 1e-10));
+        assert!(tangent_1.is_approx(&tangent_2, 1e-10));
+        assert!(!tangent_1.is_approx(&tangent_3, 1e-10));
+    }
+
+    #[test]
+    fn test_so3_generators() {
+        let tangent = SO3Tangent::new(Vector3::new(1.0, 1.0, 1.0));
+
+        // Test all three generators
+        for i in 0..3 {
+            let generator = tangent.generator(i);
+
+            // Generator should be skew-symmetric
+            assert!((generator + generator.transpose()).norm() < 1e-10);
+
+            // Generator should have trace zero
+            assert!(generator.trace().abs() < 1e-10);
+        }
+
+        // Test specific values for the generators
+        let e1 = tangent.generator(0);
+        let e2 = tangent.generator(1);
+        let e3 = tangent.generator(2);
+
+        // Expected generators based on C++ manif implementation
+        let expected_e1 = Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, -1.0, 0.0, 1.0, 0.0);
+        let expected_e2 = Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0);
+        let expected_e3 = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+        assert!((e1 - expected_e1).norm() < 1e-10);
+        assert!((e2 - expected_e2).norm() < 1e-10);
+        assert!((e3 - expected_e3).norm() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_so3_generator_invalid_index() {
+        let tangent = SO3Tangent::new(Vector3::new(1.0, 1.0, 1.0));
+        let _generator = tangent.generator(3); // Should panic for SO(3)
+    }
+
+    #[test]
+    fn test_so3_jacobi_identity() {
+        // Test Jacobi identity: [x,[y,z]]+[y,[z,x]]+[z,[x,y]]=0
+        let x = SO3Tangent::new(Vector3::new(0.1, 0.0, 0.0));
+        let y = SO3Tangent::new(Vector3::new(0.0, 0.2, 0.0));
+        let z = SO3Tangent::new(Vector3::new(0.0, 0.0, 0.3));
+
+        let term1 = x.lie_bracket(&y.lie_bracket(&z));
+        let term2 = y.lie_bracket(&z.lie_bracket(&x));
+        let term3 = z.lie_bracket(&x.lie_bracket(&y));
+
+        let jacobi_sum = SO3Tangent::new(term1.data + term2.data + term3.data);
+        assert!(jacobi_sum.is_zero(1e-10));
     }
 }
