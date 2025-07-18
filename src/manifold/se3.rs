@@ -162,7 +162,6 @@ impl SE3 {
 
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE3 {
-    type Element = SE3;
     type TangentVector = SE3Tangent;
     type JacobianMatrix = Matrix6<f64>;
     type LieAlgebra = Matrix4<f64>;
@@ -172,11 +171,16 @@ impl LieGroup for SE3 {
     const DOF: usize = 6; // Degrees of freedom (6-DOF: 3 translation + 3 rotation)
     const REP_SIZE: usize = 7; // Representation size (3 translation + 4 quaternion)
 
-    fn identity() -> Self::Element {
+    fn identity() -> Self {
         SE3 {
             rotation: SO3::identity(),
             translation: Vector3::zeros(),
         }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix6::<f64>::identity()
     }
 
     /// Get the inverse.
@@ -192,7 +196,7 @@ impl LieGroup for SE3 {
     /// # Equation 176: Jacobian of inverse operation
     /// J_M⁻¹_M = - [ R [t]ₓ R ]
     ///             [ 0    R   ]
-    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::Element {
+    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         // For SE(3): g^{-1} = [R^T, -R^T * t; 0, 1]
         let rot_inv = self.rotation.inverse(None);
         let trans_inv = -rot_inv.act(&self.translation, None, None);
@@ -226,10 +230,10 @@ impl LieGroup for SE3 {
     ///
     fn compose(
         &self,
-        other: &Self::Element,
+        other: &Self,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
+    ) -> Self {
         // Eqs. 171
         let composed_rotation = self.rotation.compose(&other.rotation, None, None);
         let composed_translation =
@@ -276,106 +280,6 @@ impl LieGroup for SE3 {
         }
 
         result
-    }
-
-    fn right_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Right plus: g ⊕ τ = g * exp(τ)
-        let exp_tangent = tangent.exp(None);
-        let result = self.compose(&exp_tangent, None, None);
-
-        if let Some(jac_self) = jacobian_self {
-            // TODO: which one is correct? tangent.right_jacobian() * tangent.left_jacobian_inv()
-            *jac_self = exp_tangent.inverse(None).adjoint();
-        }
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.right_jacobian();
-        }
-
-        result
-    }
-
-    fn right_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        // Right minus: g1 ⊖ g2 = log(g2^{-1} * g1)
-        let g2_inv = other.inverse(None);
-        let result_group = g2_inv.compose(self, None, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = -result.left_jacobian_inv();
-        }
-
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = result.right_jacobian_inv();
-        }
-
-        result
-    }
-
-    fn left_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Left plus: τ ⊕ g = exp(τ) * g
-        let exp_tangent = tangent.exp(None);
-        let result = exp_tangent.compose(self, None, None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = Matrix6::identity();
-        }
-
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = Matrix6::identity();
-        }
-
-        result
-    }
-
-    fn left_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        // Left minus: g1 ⊖ g2 = log(g1 * g2^{-1})
-        let g2_inv = other.inverse(None);
-        let result_group = self.compose(&g2_inv, jacobian_self, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = Matrix6::identity();
-        }
-
-        result
-    }
-
-    fn between(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        // Between: g1.between(g2) = g1^{-1} * g2
-        let self_inv = self.inverse(None);
-        self_inv.compose(
-            other,
-            jacobian_self.map(|j| {
-                *j = -other.inverse(None).adjoint();
-                j
-            }),
-            jacobian_other,
-        )
     }
 
     fn act(
@@ -430,7 +334,7 @@ impl LieGroup for SE3 {
         adjoint_matrix
     }
 
-    fn random() -> Self::Element {
+    fn random() -> Self {
         use rand::Rng;
         let mut rng = rand::rng();
 
@@ -455,6 +359,24 @@ impl LieGroup for SE3 {
     fn is_valid(&self, tolerance: f64) -> bool {
         // Check if rotation is valid
         self.rotation.is_valid(tolerance)
+    }
+
+    /// Vee operator: log(g)^∨.
+    ///
+    /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
+    /// For SE(3), this is the same as log().
+    fn vee(&self) -> Self::TangentVector {
+        self.log(None)
+    }
+
+    /// Check if the element is approximately equal to another element.
+    ///
+    /// # Arguments
+    /// * `other` - The other element to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        let difference = self.right_minus(other, None, None);
+        difference.is_zero(tolerance)
     }
 }
 
@@ -554,10 +476,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Equation 172: SE(3) exponential map
     /// M = exp(τ) = [ R(θ)   t(ρ) ]
     ///              [ 0       1   ]
-    fn exp(
-        &self,
-        jacobian: Option<&mut <SE3 as LieGroup>::JacobianMatrix>,
-    ) -> <SE3 as LieGroup>::Element {
+    fn exp(&self, jacobian: Option<&mut <SE3 as LieGroup>::JacobianMatrix>) -> SE3 {
         let rho = self.rho();
         let theta = self.theta();
 
@@ -758,6 +677,99 @@ impl Tangent<SE3> for SE3Tangent {
         } else {
             SE3Tangent::new(self.rho(), Vector3::zeros())
         }
+    }
+
+    /// Small adjoint matrix for SE(3).
+    ///
+    /// For SE(3), the small adjoint matrix has the structure:
+    /// [ Omega  V   ]
+    /// [   0  Omega ]
+    /// where Omega is the skew-symmetric matrix of the angular part
+    /// and V is the skew-symmetric matrix of the linear part.
+    fn small_adj(&self) -> <SE3 as LieGroup>::JacobianMatrix {
+        let mut small_adj = Matrix6::zeros();
+        let rho_skew = SO3Tangent::new(self.rho()).hat();
+        let theta_skew = SO3Tangent::new(self.theta()).hat();
+
+        // Top-left and bottom-right blocks: theta_skew (skew-symmetric of angular part)
+        small_adj
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&theta_skew);
+        small_adj
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&theta_skew);
+
+        // Top-right block: rho_skew (skew-symmetric of linear part)
+        small_adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&rho_skew);
+
+        // Bottom-left block: zeros (already set)
+
+        small_adj
+    }
+
+    /// Lie bracket for SE(3).
+    ///
+    /// Computes the Lie bracket [this, other] = this.small_adj() * other.
+    fn lie_bracket(&self, other: &Self) -> <SE3 as LieGroup>::TangentVector {
+        let bracket_result = self.small_adj() * other.data;
+        SE3Tangent {
+            data: bracket_result,
+        }
+    }
+
+    /// Check if this tangent vector is approximately equal to another.
+    ///
+    /// # Arguments
+    /// * `other` - The other tangent vector to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        (self.data - other.data).norm() < tolerance
+    }
+
+    /// Get the ith generator of the SE(3) Lie algebra.
+    ///
+    /// # Arguments
+    /// * `i` - Index of the generator (0-5 for SE(3))
+    ///
+    /// # Returns
+    /// The generator matrix
+    fn generator(&self, i: usize) -> <SE3 as LieGroup>::LieAlgebra {
+        assert!(i < 6, "SE(3) only has generators for indices 0-5");
+
+        let mut generator = Matrix4::zeros();
+
+        match i {
+            0 => {
+                // Generator for rho_x (translation in x)
+                generator[(0, 3)] = 1.0;
+            }
+            1 => {
+                // Generator for rho_y (translation in y)
+                generator[(1, 3)] = 1.0;
+            }
+            2 => {
+                // Generator for rho_z (translation in z)
+                generator[(2, 3)] = 1.0;
+            }
+            3 => {
+                // Generator for theta_x (rotation around x-axis)
+                generator[(1, 2)] = -1.0;
+                generator[(2, 1)] = 1.0;
+            }
+            4 => {
+                // Generator for theta_y (rotation around y-axis)
+                generator[(0, 2)] = 1.0;
+                generator[(2, 0)] = -1.0;
+            }
+            5 => {
+                // Generator for theta_z (rotation around z-axis)
+                generator[(0, 1)] = -1.0;
+                generator[(1, 0)] = 1.0;
+            }
+            _ => unreachable!(),
+        }
+
+        generator
     }
 }
 
@@ -1146,5 +1158,184 @@ mod tests {
 
         let non_zero_tangent = SE3Tangent::new(Vector3::new(1e-5, 0.0, 0.0), Vector3::zeros());
         assert!(!non_zero_tangent.is_zero(1e-10));
+    }
+
+    // New tests for the additional functions
+
+    #[test]
+    fn test_se3_vee() {
+        let se3 = SE3::random();
+        let tangent_log = se3.log(None);
+        let tangent_vee = se3.vee();
+
+        assert!((tangent_log.data - tangent_vee.data).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se3_is_approx() {
+        let se3_1 = SE3::random();
+        let se3_2 = se3_1.clone();
+
+        assert!(se3_1.is_approx(&se3_1, 1e-10));
+        assert!(se3_1.is_approx(&se3_2, 1e-10));
+
+        // Test with small perturbation
+        let small_tangent = SE3Tangent::new(
+            Vector3::new(1e-12, 1e-12, 1e-12),
+            Vector3::new(1e-12, 1e-12, 1e-12),
+        );
+        let se3_perturbed = se3_1.right_plus(&small_tangent, None, None);
+        assert!(se3_1.is_approx(&se3_perturbed, 1e-10));
+    }
+
+    #[test]
+    fn test_se3_tangent_small_adj() {
+        let tangent = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
+        let small_adj = tangent.small_adj();
+
+        // Verify the structure of the small adjoint matrix for SE(3)
+        // Should be:
+        // [ Omega  V   ]
+        // [   0  Omega ]
+        let rho_skew = SO3Tangent::new(tangent.rho()).hat();
+        let theta_skew = SO3Tangent::new(tangent.theta()).hat();
+
+        // Check top-left and bottom-right blocks (theta_skew)
+        let top_left = small_adj.fixed_view::<3, 3>(0, 0);
+        let bottom_right = small_adj.fixed_view::<3, 3>(3, 3);
+        assert!((top_left - theta_skew).norm() < 1e-10);
+        assert!((bottom_right - theta_skew).norm() < 1e-10);
+
+        // Check top-right block (rho_skew)
+        let top_right = small_adj.fixed_view::<3, 3>(0, 3);
+        assert!((top_right - rho_skew).norm() < 1e-10);
+
+        // Check bottom-left block (zeros)
+        let bottom_left = small_adj.fixed_view::<3, 3>(3, 0);
+        assert!(bottom_left.norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se3_tangent_lie_bracket() {
+        let tangent_a = SE3Tangent::new(Vector3::new(0.1, 0.0, 0.0), Vector3::new(0.0, 0.2, 0.0));
+        let tangent_b = SE3Tangent::new(Vector3::new(0.0, 0.3, 0.0), Vector3::new(0.0, 0.0, 0.4));
+
+        let bracket_ab = tangent_a.lie_bracket(&tangent_b);
+        let bracket_ba = tangent_b.lie_bracket(&tangent_a);
+
+        // Anti-symmetry test: [a,b] = -[b,a]
+        assert!((bracket_ab.data + bracket_ba.data).norm() < 1e-10);
+
+        // [a,a] = 0
+        let bracket_aa = tangent_a.lie_bracket(&tangent_a);
+        assert!(bracket_aa.is_zero(1e-10));
+
+        // Verify bracket relationship with hat operator
+        let bracket_hat = bracket_ab.hat();
+        let expected = tangent_a.hat() * tangent_b.hat() - tangent_b.hat() * tangent_a.hat();
+        assert!((bracket_hat - expected).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se3_tangent_is_approx() {
+        let tangent_1 = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
+        let tangent_2 = SE3Tangent::new(
+            Vector3::new(0.1 + 1e-12, 0.2, 0.3),
+            Vector3::new(0.4, 0.5, 0.6),
+        );
+        let tangent_3 = SE3Tangent::new(Vector3::new(0.7, 0.8, 0.9), Vector3::new(1.0, 1.1, 1.2));
+
+        assert!(tangent_1.is_approx(&tangent_1, 1e-10));
+        assert!(tangent_1.is_approx(&tangent_2, 1e-10));
+        assert!(!tangent_1.is_approx(&tangent_3, 1e-10));
+    }
+
+    #[test]
+    fn test_se3_generators() {
+        let tangent = SE3Tangent::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 1.0, 1.0));
+
+        // Test all six generators
+        for i in 0..6 {
+            let generator = tangent.generator(i);
+
+            // Verify that generators are 4x4 matrices
+            assert_eq!(generator.nrows(), 4);
+            assert_eq!(generator.ncols(), 4);
+
+            // Bottom row should always be zeros for SE(3) generators
+            assert_eq!(generator[(3, 0)], 0.0);
+            assert_eq!(generator[(3, 1)], 0.0);
+            assert_eq!(generator[(3, 2)], 0.0);
+            assert_eq!(generator[(3, 3)], 0.0);
+        }
+
+        // Test specific values for translation generators
+        let e1 = tangent.generator(0); // rho_x
+        let e2 = tangent.generator(1); // rho_y  
+        let e3 = tangent.generator(2); // rho_z
+
+        assert_eq!(e1[(0, 3)], 1.0);
+        assert_eq!(e2[(1, 3)], 1.0);
+        assert_eq!(e3[(2, 3)], 1.0);
+
+        // Test specific values for rotation generators
+        let e4 = tangent.generator(3); // theta_x
+        let e5 = tangent.generator(4); // theta_y
+        let e6 = tangent.generator(5); // theta_z
+
+        // Rotation generators should be skew-symmetric in top-left 3x3 block
+        assert_eq!(e4[(1, 2)], -1.0);
+        assert_eq!(e4[(2, 1)], 1.0);
+        assert_eq!(e5[(0, 2)], 1.0);
+        assert_eq!(e5[(2, 0)], -1.0);
+        assert_eq!(e6[(0, 1)], -1.0);
+        assert_eq!(e6[(1, 0)], 1.0);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_se3_generator_invalid_index() {
+        let tangent = SE3Tangent::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 1.0, 1.0));
+        let _generator = tangent.generator(6); // Should panic for SE(3)
+    }
+
+    #[test]
+    fn test_se3_jacobi_identity() {
+        // Test Jacobi identity: [x,[y,z]]+[y,[z,x]]+[z,[x,y]]=0
+        let x = SE3Tangent::new(Vector3::new(0.1, 0.0, 0.0), Vector3::new(0.0, 0.1, 0.0));
+        let y = SE3Tangent::new(Vector3::new(0.0, 0.2, 0.0), Vector3::new(0.0, 0.0, 0.2));
+        let z = SE3Tangent::new(Vector3::new(0.0, 0.0, 0.3), Vector3::new(0.3, 0.0, 0.0));
+
+        let term1 = x.lie_bracket(&y.lie_bracket(&z));
+        let term2 = y.lie_bracket(&z.lie_bracket(&x));
+        let term3 = z.lie_bracket(&x.lie_bracket(&y));
+
+        let jacobi_sum = SE3Tangent {
+            data: term1.data + term2.data + term3.data,
+        };
+        assert!(jacobi_sum.is_zero(1e-10));
+    }
+
+    #[test]
+    fn test_se3_hat_matrix_structure() {
+        let tangent = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
+        let hat_matrix = tangent.hat();
+
+        // Verify hat matrix structure for SE(3)
+        // Top-right should be translation part
+        assert_eq!(hat_matrix[(0, 3)], tangent.rho()[0]);
+        assert_eq!(hat_matrix[(1, 3)], tangent.rho()[1]);
+        assert_eq!(hat_matrix[(2, 3)], tangent.rho()[2]);
+
+        // Top-left should be skew-symmetric matrix of rotation part
+        let theta_hat = SO3Tangent::new(tangent.theta()).hat();
+        let top_left = hat_matrix.fixed_view::<3, 3>(0, 0);
+        assert!((top_left - theta_hat).norm() < 1e-10);
+
+        // Bottom row should be zeros
+        assert_eq!(hat_matrix[(3, 0)], 0.0);
+        assert_eq!(hat_matrix[(3, 1)], 0.0);
+        assert_eq!(hat_matrix[(3, 2)], 0.0);
+        assert_eq!(hat_matrix[(3, 3)], 0.0);
     }
 }
