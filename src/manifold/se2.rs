@@ -164,7 +164,6 @@ impl SE2 {
 
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE2 {
-    type Element = SE2;
     type TangentVector = SE2Tangent;
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
@@ -174,11 +173,16 @@ impl LieGroup for SE2 {
     const DOF: usize = 3; // Degrees of freedom (3-DOF: 2 translation + 1 rotation)
     const REP_SIZE: usize = 4; // Representation size (2 translation + 2 complex)
 
-    fn identity() -> Self::Element {
+    fn identity() -> Self {
         SE2 {
             translation: Vector2::zeros(),
             rotation: UnitComplex::identity(),
         }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
     }
 
     /// Get the inverse.
@@ -188,7 +192,7 @@ impl LieGroup for SE2 {
     ///
     /// # Notes
     /// For SE(2): g^{-1} = [R^T, -R^T * t; 0, 1]
-    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::Element {
+    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         let rot_inv = self.rotation.inverse();
         let trans_inv = -(rot_inv * self.translation);
 
@@ -203,12 +207,16 @@ impl LieGroup for SE2 {
     /// Composition of this and another SE2 element.
     fn compose(
         &self,
-        other: &Self::Element,
+        other: &Self,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
+    ) -> Self {
         let composed_rotation = self.rotation * other.rotation;
-        let composed_translation = self.rotation * other.translation + self.translation;
+        let composed_translation = self
+            .rotation
+            .transform_point(&nalgebra::Point2::from(other.translation))
+            .coords
+            + self.translation;
 
         let result = SE2::new(composed_translation, composed_rotation);
 
@@ -258,100 +266,6 @@ impl LieGroup for SE2 {
         result
     }
 
-    fn right_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let exp_tangent = tangent.exp(None);
-        let result = self.compose(&exp_tangent, None, None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = exp_tangent.inverse(None).adjoint();
-        }
-
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.right_jacobian();
-        }
-
-        result
-    }
-
-    fn right_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        let other_inv = other.inverse(None);
-        let result_group = other_inv.compose(self, None, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = -result.left_jacobian_inv();
-        }
-
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = result.right_jacobian_inv();
-        }
-
-        result
-    }
-
-    fn left_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let exp_tangent = tangent.exp(None);
-        let result = exp_tangent.compose(self, None, None);
-
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.left_jacobian();
-        }
-
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = Matrix3::identity();
-        }
-
-        result
-    }
-
-    fn left_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        let other_inv = other.inverse(None);
-        let result_group = self.compose(&other_inv, None, None);
-        let result = result_group.log(None);
-
-        if let Some(jac_self) = jacobian_self {
-            // TODO: check this jacobian
-            *jac_self = result.right_jacobian_inv();
-        }
-
-        if let Some(jac_other) = jacobian_other {
-            // TODO: check this jacobian
-            *jac_other = -result.left_jacobian_inv();
-        }
-
-        result
-    }
-
-    fn between(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let self_inv = self.inverse(None);
-        self_inv.compose(other, jacobian_self, jacobian_other)
-    }
-
     fn act(
         &self,
         vector: &Vector3<f64>,
@@ -360,7 +274,11 @@ impl LieGroup for SE2 {
     ) -> Vector3<f64> {
         // For SE(2), we operate on 2D vectors but maintain 3D interface compatibility
         let point2d = Vector2::new(vector.x, vector.y);
-        let transformed_2d = self.rotation * point2d + self.translation;
+        let transformed_2d = self
+            .rotation
+            .transform_point(&nalgebra::Point2::from(point2d))
+            .coords
+            + self.translation;
         let result = Vector3::new(transformed_2d.x, transformed_2d.y, vector.z);
 
         if let Some(jac_self) = jacobian_self {
@@ -395,7 +313,7 @@ impl LieGroup for SE2 {
         adjoint_matrix
     }
 
-    fn random() -> Self::Element {
+    fn random() -> Self {
         use rand::Rng;
         let mut rng = rand::rng();
 
@@ -415,6 +333,24 @@ impl LieGroup for SE2 {
 
     fn is_valid(&self, tolerance: f64) -> bool {
         (self.rotation.norm() - 1.0).abs() < tolerance
+    }
+
+    /// Vee operator: log(g)^∨.
+    ///
+    /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
+    /// For SE(2), this is the same as log().
+    fn vee(&self) -> Self::TangentVector {
+        self.log(None)
+    }
+
+    /// Check if the element is approximately equal to another element.
+    ///
+    /// # Arguments
+    /// * `other` - The other element to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        let difference = self.right_minus(other, None, None);
+        difference.is_zero(tolerance)
     }
 }
 
@@ -449,10 +385,7 @@ impl SE2Tangent {
 
 impl Tangent<SE2> for SE2Tangent {
     /// Get the SE2 element.
-    fn exp(
-        &self,
-        jacobian: Option<&mut <SE2 as LieGroup>::JacobianMatrix>,
-    ) -> <SE2 as LieGroup>::Element {
+    fn exp(&self, jacobian: Option<&mut <SE2 as LieGroup>::JacobianMatrix>) -> SE2 {
         let theta = self.angle();
         let cos_theta = theta.cos();
         let sin_theta = theta.sin();
@@ -691,6 +624,75 @@ impl Tangent<SE2> for SE2Tangent {
             }
         } else {
             SE2Tangent::zero()
+        }
+    }
+
+    /// Small adjoint matrix for SE(2).
+    ///
+    /// For SE(2), the small adjoint involves the angular component.
+    fn small_adj(&self) -> <SE2 as LieGroup>::JacobianMatrix {
+        let _theta = self.angle();
+        let x = self.x();
+        let y = self.y();
+
+        let mut small_adj = Matrix3::zeros();
+
+        // Following the C++ manif implementation structure:
+        // smallAdj(0,1) = -angle();
+        // smallAdj(1,0) =  angle();
+        // smallAdj(0,2) =  y();
+        // smallAdj(1,2) = -x();
+        small_adj[(0, 1)] = -self.angle();
+        small_adj[(1, 0)] = self.angle();
+        small_adj[(0, 2)] = y;
+        small_adj[(1, 2)] = -x;
+
+        small_adj
+    }
+
+    /// Lie bracket for SE(2).
+    ///
+    /// Computes the Lie bracket [this, other] = this.small_adj() * other.
+    fn lie_bracket(&self, other: &Self) -> <SE2 as LieGroup>::TangentVector {
+        let bracket_result = self.small_adj() * other.data;
+        SE2Tangent {
+            data: bracket_result,
+        }
+    }
+
+    /// Check if this tangent vector is approximately equal to another.
+    ///
+    /// # Arguments
+    /// * `other` - The other tangent vector to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        (self.data - other.data).norm() < tolerance
+    }
+
+    /// Get the ith generator of the SE(2) Lie algebra.
+    ///
+    /// # Arguments
+    /// * `i` - Index of the generator (0, 1, or 2 for SE(2))
+    ///
+    /// # Returns
+    /// The generator matrix
+    fn generator(&self, i: usize) -> <SE2 as LieGroup>::LieAlgebra {
+        assert!(i < 3, "SE(2) only has generators for indices 0, 1, 2");
+
+        match i {
+            0 => {
+                // Generator E1 for x translation
+                Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            }
+            1 => {
+                // Generator E2 for y translation
+                Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+            }
+            2 => {
+                // Generator E3 for rotation
+                Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            }
+            _ => unreachable!(),
         }
     }
 }
@@ -1231,28 +1233,147 @@ mod tests {
         assert!((norm - 5.0).abs() < TOLERANCE); // sqrt(3^2 + 4^2) = 5
     }
 
+    // New tests for the additional functions
+
     #[test]
-    fn test_se2_with_jacobians() {
+    fn test_se2_vee() {
+        let se2 = SE2::random();
+        let tangent_log = se2.log(None);
+        let tangent_vee = se2.vee();
+
+        assert!((tangent_log.data - tangent_vee.data).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_is_approx() {
         let se2_1 = SE2::random();
-        let se2_2 = SE2::random();
-        let tangent = SE2Tangent::random();
+        let se2_2 = se2_1.clone();
 
-        // Test that Jacobian computations don't panic
-        let mut jac = Matrix3::zeros();
+        assert!(se2_1.is_approx(&se2_1, 1e-10));
+        assert!(se2_1.is_approx(&se2_2, 1e-10));
 
-        let _inv = se2_1.inverse(Some(&mut jac));
-        let _comp = se2_1.compose(&se2_2, Some(&mut jac), None);
-        let _log = se2_1.log(Some(&mut jac));
-        let _rplus = se2_1.right_plus(&tangent, Some(&mut jac), None);
-        let _rminus = se2_1.right_minus(&se2_2, Some(&mut jac), None);
-        let _lplus = se2_1.left_plus(&tangent, None, Some(&mut jac));
-        let _lminus = se2_1.left_minus(&se2_2, Some(&mut jac), None);
-        let _between = se2_1.between(&se2_2, Some(&mut jac), None);
+        // Test with small perturbation
+        let small_tangent = SE2Tangent::new(1e-12, 1e-12, 1e-12);
+        let se2_perturbed = se2_1.right_plus(&small_tangent, None, None);
+        assert!(se2_1.is_approx(&se2_perturbed, 1e-10));
+    }
 
-        let point = Vector3::new(1.0, 1.0, 0.0);
-        let mut point_jac = Matrix3::zeros();
-        let _act = se2_1.act(&point, Some(&mut jac), Some(&mut point_jac));
+    #[test]
+    fn test_se2_tangent_small_adj() {
+        let tangent = SE2Tangent::new(0.1, 0.2, 0.3);
+        let small_adj = tangent.small_adj();
 
-        let _exp = tangent.exp(Some(&mut jac));
+        // Verify the structure of the small adjoint matrix for SE(2)
+        // Following C++ manif implementation:
+        // [ 0  -θ   y ]
+        // [ θ   0  -x ]
+        // [ 0   0   0 ]
+        assert_eq!(small_adj[(0, 0)], 0.0);
+        assert_eq!(small_adj[(1, 1)], 0.0);
+        assert_eq!(small_adj[(2, 2)], 0.0);
+        assert_eq!(small_adj[(0, 1)], -tangent.angle());
+        assert_eq!(small_adj[(1, 0)], tangent.angle());
+        assert_eq!(small_adj[(0, 2)], tangent.y());
+        assert_eq!(small_adj[(1, 2)], -tangent.x());
+    }
+
+    #[test]
+    fn test_se2_tangent_lie_bracket() {
+        let tangent_a = SE2Tangent::new(0.1, 0.0, 0.0); // Pure x translation
+        let tangent_b = SE2Tangent::new(0.0, 0.0, 0.2); // Pure rotation
+
+        let bracket_ab = tangent_a.lie_bracket(&tangent_b);
+        let bracket_ba = tangent_b.lie_bracket(&tangent_a);
+
+        // Anti-symmetry test: [a,b] = -[b,a]
+        assert!((bracket_ab.data + bracket_ba.data).norm() < 1e-10);
+
+        // [a,a] = 0
+        let bracket_aa = tangent_a.lie_bracket(&tangent_a);
+        assert!(bracket_aa.is_zero(1e-10));
+
+        // Verify bracket relationship with hat operator
+        let bracket_hat = bracket_ab.hat();
+        let expected = tangent_a.hat() * tangent_b.hat() - tangent_b.hat() * tangent_a.hat();
+        assert!((bracket_hat - expected).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_tangent_is_approx() {
+        let tangent_1 = SE2Tangent::new(0.1, 0.2, 0.3);
+        let tangent_2 = SE2Tangent::new(0.1 + 1e-12, 0.2, 0.3);
+        let tangent_3 = SE2Tangent::new(0.5, 0.6, 0.7);
+
+        assert!(tangent_1.is_approx(&tangent_1, 1e-10));
+        assert!(tangent_1.is_approx(&tangent_2, 1e-10));
+        assert!(!tangent_1.is_approx(&tangent_3, 1e-10));
+    }
+
+    #[test]
+    fn test_se2_generators() {
+        let tangent = SE2Tangent::new(1.0, 1.0, 1.0);
+
+        // Test all three generators
+        for i in 0..3 {
+            let generator = tangent.generator(i);
+
+            // Verify that generators are 3x3 matrices
+            assert_eq!(generator.nrows(), 3);
+            assert_eq!(generator.ncols(), 3);
+        }
+
+        // Test specific values for the generators
+        let e1 = tangent.generator(0); // x translation
+        let e2 = tangent.generator(1); // y translation  
+        let e3 = tangent.generator(2); // rotation
+
+        // Expected generators for SE(2)
+        let expected_e1 = Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let expected_e2 = Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+        let expected_e3 = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+
+        assert!((e1 - expected_e1).norm() < 1e-10);
+        assert!((e2 - expected_e2).norm() < 1e-10);
+        assert!((e3 - expected_e3).norm() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_se2_generator_invalid_index() {
+        let tangent = SE2Tangent::new(1.0, 1.0, 1.0);
+        let _generator = tangent.generator(3); // Should panic for SE(2)
+    }
+
+    #[test]
+    fn test_se2_jacobi_identity() {
+        // Test Jacobi identity: [x,[y,z]]+[y,[z,x]]+[z,[x,y]]=0
+        let x = SE2Tangent::new(0.1, 0.0, 0.0);
+        let y = SE2Tangent::new(0.0, 0.2, 0.0);
+        let z = SE2Tangent::new(0.0, 0.0, 0.3);
+
+        let term1 = x.lie_bracket(&y.lie_bracket(&z));
+        let term2 = y.lie_bracket(&z.lie_bracket(&x));
+        let term3 = z.lie_bracket(&x.lie_bracket(&y));
+
+        let jacobi_sum = SE2Tangent {
+            data: term1.data + term2.data + term3.data,
+        };
+        assert!(jacobi_sum.is_zero(1e-10));
+    }
+
+    #[test]
+    fn test_se2_hat_vee_consistency() {
+        let tangent = SE2Tangent::new(0.1, 0.2, 0.3);
+        let hat_matrix = tangent.hat();
+
+        // For SE(2), verify hat matrix structure
+        // The hat matrix should be 3x3, not 4x4 like SE(3)
+        assert_eq!(hat_matrix[(0, 2)], tangent.x());
+        assert_eq!(hat_matrix[(1, 2)], tangent.y());
+        assert_eq!(hat_matrix[(0, 1)], -tangent.angle());
+        assert_eq!(hat_matrix[(1, 0)], tangent.angle());
+        assert_eq!(hat_matrix[(2, 0)], 0.0);
+        assert_eq!(hat_matrix[(2, 1)], 0.0);
+        assert_eq!(hat_matrix[(2, 2)], 0.0);
     }
 }
