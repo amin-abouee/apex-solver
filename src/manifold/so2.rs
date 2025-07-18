@@ -77,20 +77,24 @@ impl SO2 {
 }
 
 impl LieGroup for SO2 {
-    type Element = SO2;
     type TangentVector = SO2Tangent;
     type JacobianMatrix = nalgebra::Matrix1<f64>;
     type LieAlgebra = Matrix2<f64>;
 
+    // Dimension constants following manif conventions
     const DIM: usize = 2; // Space dimension (2D space)
-    const DOF: usize = 1; // Degrees of freedom (1 rotation parameter)
+    const DOF: usize = 1; // Degrees of freedom (1-DOF: rotation angle)
     const REP_SIZE: usize = 2; // Representation size (2 complex components)
 
-    /// Get the identity element.
-    fn identity() -> Self::Element {
+    fn identity() -> Self {
         SO2 {
             complex: UnitComplex::identity(),
         }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        nalgebra::Matrix1::<f64>::identity()
     }
 
     /// SO2 inverse.
@@ -104,7 +108,7 @@ impl LieGroup for SO2 {
     ///
     /// # Equation 124: Jacobian of Inverse for SO(2)
     /// J_R⁻¹_R = -I
-    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::Element {
+    fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
@@ -126,10 +130,10 @@ impl LieGroup for SO2 {
     /// J_C_B = I
     fn compose(
         &self,
-        other: &Self::Element,
+        other: &Self,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
+    ) -> Self {
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
         }
@@ -159,102 +163,6 @@ impl LieGroup for SO2 {
         SO2Tangent {
             data: self.complex.angle(),
         }
-    }
-
-    /// Right plus: R ⊕ φ = R * exp(φ)
-    ///
-    /// # Arguments
-    /// * `tangent` - Tangent vector
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_tangent` - Optional Jacobian matrix of the composition wrt tangent.
-    fn right_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let result = self.compose(&tangent.exp(None), jacobian_self, None);
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.right_jacobian();
-        }
-        result
-    }
-
-    /// Right minus: R1 ⊖ R2 = log(R2^T * R1)
-    ///
-    /// # Arguments
-    /// * `other` - Another SO2 element.
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
-    fn right_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        let result = other.inverse(None).compose(self, None, None).log(None);
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = result.right_jacobian_inv();
-        }
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = -result.left_jacobian_inv();
-        }
-        result
-    }
-
-    /// Left plus: φ ⊕ R = exp(φ) * R
-    ///
-    /// # Arguments
-    /// * `tangent` - Tangent vector
-    /// * `jacobian_tangent` - Optional Jacobian matrix of the composition wrt tangent.
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    fn left_plus(
-        &self,
-        tangent: &Self::TangentVector,
-        jacobian_tangent: Option<&mut Self::JacobianMatrix>,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        let result = tangent.exp(None).compose(self, None, None);
-        if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = tangent.left_jacobian();
-        }
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = nalgebra::Matrix1::identity();
-        }
-        result
-    }
-
-    /// Left minus: R1 ⊖ R2 = log(R1 * R2^T)
-    ///
-    /// # Arguments
-    /// * `other` - Another SO2 element.
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
-    fn left_minus(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::TangentVector {
-        let result = self.compose(&other.inverse(None), None, None).log(None);
-        if let Some(jac_self) = jacobian_self {
-            *jac_self = result.right_jacobian_inv();
-        }
-        if let Some(jac_other) = jacobian_other {
-            *jac_other = -result.left_jacobian_inv();
-        }
-        result
-    }
-
-    /// Between: R1.between(R2) = R1^T * R2
-    fn between(
-        &self,
-        other: &Self::Element,
-        jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_other: Option<&mut Self::JacobianMatrix>,
-    ) -> Self::Element {
-        self.inverse(None)
-            .compose(other, jacobian_self, jacobian_other)
     }
 
     /// Rotation action on a 3-vector.
@@ -289,18 +197,37 @@ impl LieGroup for SO2 {
     }
 
     /// Generate a random element.
-    fn random() -> Self::Element {
+    fn random() -> Self {
         SO2::from_angle(rand::random::<f64>() * 2.0 * std::f64::consts::PI)
     }
 
     /// Normalize the underlying complex number.
     fn normalize(&mut self) {
-        self.complex.renormalize_fast();
+        self.complex.renormalize();
     }
 
     /// Check if the element is valid.
     fn is_valid(&self, tolerance: f64) -> bool {
-        (self.complex.norm_sqr() - 1.0).abs() < tolerance
+        let norm_diff = (self.complex.norm() - 1.0).abs();
+        norm_diff < tolerance
+    }
+
+    /// Vee operator: log(g)^∨.
+    ///
+    /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
+    /// For SO(2), this is the same as log().
+    fn vee(&self) -> Self::TangentVector {
+        self.log(None)
+    }
+
+    /// Check if the element is approximately equal to another element.
+    ///
+    /// # Arguments
+    /// * `other` - The other element to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        let difference = self.right_minus(other, None, None);
+        difference.is_zero(tolerance)
     }
 }
 
@@ -323,67 +250,43 @@ impl Tangent<SO2> for SO2Tangent {
     /// SO2 exponential map.
     ///
     /// # Arguments
-    /// * `jacobian` - Optional Jacobian matrix of the SO2 element wrt self.
-    ///
-    /// # Notes
-    /// # Equation 114: Exponential map for SO(2)
-    /// R = [cos(θ) -sin(θ); sin(θ) cos(θ)]
-    ///
-    /// # Equation 128: Jacobian of Exponential map for SO(2)
-    /// J_exp_θ = I
-    fn exp(
-        &self,
-        jacobian: Option<&mut <SO2 as LieGroup>::JacobianMatrix>,
-    ) -> <SO2 as LieGroup>::Element {
+    /// * `tangent` - Tangent vector (angle)
+    /// * `jacobian` - Optional Jacobian matrix of the SE(3) element wrt this.
+    fn exp(&self, jacobian: Option<&mut <SO2 as LieGroup>::JacobianMatrix>) -> SO2 {
+        let angle = self.angle();
+        let complex = UnitComplex::new(angle);
+
         if let Some(jac) = jacobian {
-            *jac = self.right_jacobian();
+            *jac = nalgebra::Matrix1::identity();
         }
-        SO2::from_angle(self.data)
+
+        SO2::new(complex)
     }
 
-    /// Right Jacobian for SO2
-    ///
-    /// # Notes
-    /// # Equation 126: Right Jacobian for SO(2)
-    /// J_r(θ) = I
+    /// Right Jacobian for SO(2) is identity.
     fn right_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
         nalgebra::Matrix1::identity()
     }
 
-    /// Left Jacobian for SO2
-    ///
-    /// # Notes
-    /// # Equation 126: Left Jacobian for SO(2)
-    /// J_l(θ) = I
+    /// Left Jacobian for SO(2) is identity.
     fn left_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
         nalgebra::Matrix1::identity()
     }
 
-    /// Right Jacobian inverse for SO2
-    ///
-    /// # Notes
-    /// # Equation 127: Right Jacobian inverse for SO(2)
-    /// J_r(θ)⁻¹ = I
+    /// Inverse of right Jacobian for SO(2) is identity.
     fn right_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
         nalgebra::Matrix1::identity()
     }
 
-    /// Left Jacobian inverse for SO2
-    ///
-    /// # Notes
-    /// # Equation 127: Left Jacobian inverse for SO(2)
-    /// J_l(θ)⁻¹ = I
+    /// Inverse of left Jacobian for SO(2) is identity.
     fn left_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
         nalgebra::Matrix1::identity()
     }
 
-    /// Hat map for SO2
-    ///
-    /// # Notes
-    /// # Equation 112: Hat map for so(2)
-    /// [θ]ₓ = [0 -θ; θ 0]
+    /// Hat operator: θ^∧ (scalar to skew-symmetric matrix).
     fn hat(&self) -> <SO2 as LieGroup>::LieAlgebra {
-        Matrix2::new(0.0, -self.data, self.data, 0.0)
+        let theta = self.data;
+        Matrix2::new(0.0, -theta, theta, 0.0)
     }
 
     /// Zero tangent vector for SO2
@@ -409,9 +312,51 @@ impl Tangent<SO2> for SO2Tangent {
         // For an angle, this is a no-op.
     }
 
-    /// Return a normalized tangent vector
+    /// Return a unit tangent vector in the same direction.
     fn normalized(&self) -> Self {
-        self.clone()
+        if self.data.abs() > f64::EPSILON {
+            SO2Tangent::new(self.data.signum())
+        } else {
+            SO2Tangent::new(0.0)
+        }
+    }
+
+    /// Small adjoint matrix for SO(2).
+    ///
+    /// For SO(2), the small adjoint is zero (since it's commutative).
+    fn small_adj(&self) -> <SO2 as LieGroup>::JacobianMatrix {
+        nalgebra::Matrix1::zeros()
+    }
+
+    /// Lie bracket for SO(2).
+    ///
+    /// For SO(2), the Lie bracket is always zero since it's commutative.
+    fn lie_bracket(&self, _other: &Self) -> <SO2 as LieGroup>::TangentVector {
+        SO2Tangent::zero()
+    }
+
+    /// Check if this tangent vector is approximately equal to another.
+    ///
+    /// # Arguments
+    /// * `other` - The other tangent vector to compare with
+    /// * `tolerance` - The tolerance for the comparison
+    fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
+        (self.data - other.data).abs() < tolerance
+    }
+
+    /// Get the ith generator of the SO(2) Lie algebra.
+    ///
+    /// # Arguments
+    /// * `i` - Index of the generator (must be 0 for SO(2))
+    ///
+    /// # Returns
+    /// The generator matrix
+    fn generator(&self, i: usize) -> <SO2 as LieGroup>::LieAlgebra {
+        assert_eq!(i, 0, "SO(2) only has one generator (index 0)");
+        // The generator for SO(2) is the skew-symmetric matrix:
+        // E = | 0 -1 |
+        //     | 1  0 |
+        Matrix2::new(0.0, -1.0, 1.0, 0.0)
     }
 }
 
@@ -445,9 +390,102 @@ mod tests {
 
     #[test]
     fn test_so2_exp_log_consistency() {
-        let tangent = SO2Tangent::new(0.4);
+        let angle = PI / 4.0;
+        let tangent = SO2Tangent::new(angle);
         let so2 = tangent.exp(None);
         let recovered_tangent = so2.log(None);
-        assert!((tangent.data - recovered_tangent.data).abs() < TOLERANCE);
+
+        assert!((tangent.angle() - recovered_tangent.angle()).abs() < 1e-10);
+    }
+
+    // New tests for the additional functions
+
+    #[test]
+    fn test_so2_vee() {
+        let so2 = SO2::from_angle(PI / 3.0);
+        let tangent_log = so2.log(None);
+        let tangent_vee = so2.vee();
+
+        assert!((tangent_log.angle() - tangent_vee.angle()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_is_approx() {
+        let so2_1 = SO2::from_angle(PI / 4.0);
+        let so2_2 = SO2::from_angle(PI / 4.0 + 1e-12);
+        let so2_3 = SO2::from_angle(PI / 2.0);
+
+        assert!(so2_1.is_approx(&so2_1, 1e-10));
+        assert!(so2_1.is_approx(&so2_2, 1e-10));
+        assert!(!so2_1.is_approx(&so2_3, 1e-10));
+    }
+
+    #[test]
+    fn test_so2_tangent_small_adj() {
+        let tangent = SO2Tangent::new(PI / 6.0);
+        let small_adj = tangent.small_adj();
+
+        // For SO(2), small adjoint should be zero (commutative group)
+        assert!((small_adj[(0, 0)]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_tangent_lie_bracket() {
+        let tangent_a = SO2Tangent::new(0.1);
+        let tangent_b = SO2Tangent::new(0.2);
+
+        let bracket = tangent_a.lie_bracket(&tangent_b);
+
+        // For SO(2), Lie bracket should be zero (commutative group)
+        assert!(bracket.is_zero(1e-10));
+
+        // Anti-symmetry test: [a,b] = -[b,a]
+        let bracket_ba = tangent_b.lie_bracket(&tangent_a);
+        assert!(bracket.lie_bracket(&tangent_b).is_zero(1e-10)); // [a,a] = 0
+
+        // Since SO(2) is commutative, both should be zero
+        assert!(bracket_ba.is_zero(1e-10));
+    }
+
+    #[test]
+    fn test_so2_tangent_is_approx() {
+        let tangent_1 = SO2Tangent::new(0.5);
+        let tangent_2 = SO2Tangent::new(0.5 + 1e-12);
+        let tangent_3 = SO2Tangent::new(1.0);
+
+        assert!(tangent_1.is_approx(&tangent_1, 1e-10));
+        assert!(tangent_1.is_approx(&tangent_2, 1e-10));
+        assert!(!tangent_1.is_approx(&tangent_3, 1e-10));
+    }
+
+    #[test]
+    fn test_so2_generator() {
+        let tangent = SO2Tangent::new(1.0);
+        let generator = tangent.generator(0);
+
+        // SO(2) generator should be the skew-symmetric matrix
+        let expected = Matrix2::new(0.0, -1.0, 1.0, 0.0);
+
+        assert!((generator - expected).norm() < 1e-10);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_so2_generator_invalid_index() {
+        let tangent = SO2Tangent::new(1.0);
+        let _generator = tangent.generator(1); // Should panic for SO(2)
+    }
+
+    #[test]
+    fn test_so2_bracket_hat_relationship() {
+        let a = SO2Tangent::new(0.1);
+        let b = SO2Tangent::new(0.2);
+
+        // For SO(2): [a,b]^ = a^ * b^ - b^ * a^ should be zero (commutative)
+        let bracket_hat = a.lie_bracket(&b).hat();
+        let expected = a.hat() * b.hat() - b.hat() * a.hat();
+
+        assert!((bracket_hat - expected).norm() < 1e-10);
+        assert!(expected.norm() < 1e-10); // Should be zero for SO(2)
     }
 }
