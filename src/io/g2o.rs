@@ -218,7 +218,7 @@ impl G2oLoader {
                 value: parts[4].to_string(),
             })?;
 
-        Ok(VertexSE2 { id, x, y, theta })
+        Ok(VertexSE2::new(id, x, y, theta))
     }
 
     /// Parse VERTEX_SE3:QUAT line
@@ -286,14 +286,9 @@ impl G2oLoader {
                 value: parts[8].to_string(),
             })?;
 
-        let translation = Vector3::new(x, y, z);
-        let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
-
-        Ok(VertexSE3 {
-            id,
-            translation,
-            rotation,
-        })
+        Ok(VertexSE3::from_translation_quaternion(
+            id, x, y, z, qw, qx, qy, qz,
+        ))
     }
 
     /// Parse EDGE_SE2 line
@@ -336,8 +331,6 @@ impl G2oLoader {
                 value: parts[5].to_string(),
             })?;
 
-        let measurement = Vector3::new(dx, dy, dtheta);
-
         // Parse information matrix (upper triangular: i11, i12, i13, i22, i23, i33)
         let info_values: Result<Vec<f64>, _> =
             parts[6..12].iter().map(|s| s.parse::<f64>()).collect();
@@ -359,12 +352,7 @@ impl G2oLoader {
             info_values[5],
         );
 
-        Ok(EdgeSE2 {
-            from,
-            to,
-            measurement,
-            information,
-        })
+        Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
 
     /// Parse EDGE_SE3:QUAT line (placeholder implementation)
@@ -376,13 +364,7 @@ impl G2oLoader {
         let rotation = UnitQuaternion::identity();
         let information = Matrix6::identity();
 
-        Ok(EdgeSE3 {
-            from,
-            to,
-            translation,
-            rotation,
-            information,
-        })
+        Ok(EdgeSE3::new(from, to, translation, rotation, information))
     }
 }
 
@@ -404,10 +386,10 @@ mod tests {
         let parts = vec!["VERTEX_SE2", "0", "1.0", "2.0", "0.5"];
         let vertex = G2oLoader::parse_vertex_se2(&parts, 1).unwrap();
 
-        assert_eq!(vertex.id, 0);
-        assert_eq!(vertex.x, 1.0);
-        assert_eq!(vertex.y, 2.0);
-        assert_eq!(vertex.theta, 0.5);
+        assert_eq!(vertex.id(), 0);
+        assert_eq!(vertex.x(), 1.0);
+        assert_eq!(vertex.y(), 2.0);
+        assert_eq!(vertex.theta(), 0.5);
     }
 
     #[test]
@@ -425,9 +407,9 @@ mod tests {
         ];
         let vertex = G2oLoader::parse_vertex_se3(&parts, 1).unwrap();
 
-        assert_eq!(vertex.id, 1);
-        assert_eq!(vertex.translation, Vector3::new(1.0, 2.0, 3.0));
-        assert!(vertex.rotation.quaternion().w > 0.99); // Should be identity quaternion
+        assert_eq!(vertex.id(), 1);
+        assert_eq!(vertex.translation(), Vector3::new(1.0, 2.0, 3.0));
+        assert!(vertex.rotation().quaternion().w > 0.99); // Should be identity quaternion
     }
 
     #[test]

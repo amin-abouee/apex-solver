@@ -107,7 +107,7 @@ impl ToroLoader {
                 value: parts[4].to_string(),
             })?;
 
-        Ok(VertexSE2 { id, x, y, theta })
+        Ok(VertexSE2::new(id, x, y, theta))
     }
 
     fn parse_edge2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, ApexSolverIoError> {
@@ -149,8 +149,6 @@ impl ToroLoader {
                 value: parts[5].to_string(),
             })?;
 
-        let measurement = Vector3::new(dx, dy, dtheta);
-
         // Parse TORO information matrix (I11, I12, I22, I33, I13, I23)
         let i11 = parts[6]
             .parse::<f64>()
@@ -191,11 +189,6 @@ impl ToroLoader {
 
         let information = Matrix3::new(i11, i12, i13, i12, i22, i23, i13, i23, i33);
 
-        Ok(EdgeSE2 {
-            from,
-            to,
-            measurement,
-            information,
-        })
+        Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
 }

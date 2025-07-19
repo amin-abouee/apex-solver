@@ -3,6 +3,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
 
+// Import manifold types
+use crate::manifold::se2::SE2;
+use crate::manifold::se3::SE3;
+
 // Module declarations
 pub mod g2o;
 pub mod toro;
@@ -41,29 +45,132 @@ pub enum ApexSolverIoError {
     UnsupportedFormat(String),
 }
 
-/// 2D pose vertex (x, y, theta)
+/// SE2 vertex with ID (x, y, theta)
 #[derive(Debug, Clone, PartialEq)]
 pub struct VertexSE2 {
     pub id: usize,
-    pub x: f64,
-    pub y: f64,
-    pub theta: f64,
+    pub pose: SE2,
 }
 
-/// 3D pose vertex with quaternion (x, y, z, qx, qy, qz, qw)
+impl VertexSE2 {
+    pub fn new(id: usize, x: f64, y: f64, theta: f64) -> Self {
+        Self {
+            id,
+            pose: SE2::from_xy_angle(x, y, theta),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn x(&self) -> f64 {
+        self.pose.x()
+    }
+
+    pub fn y(&self) -> f64 {
+        self.pose.y()
+    }
+
+    pub fn theta(&self) -> f64 {
+        self.pose.angle()
+    }
+}
+
+/// SE3 vertex with ID (x, y, z, qx, qy, qz, qw)
 #[derive(Debug, Clone, PartialEq)]
 pub struct VertexSE3 {
     pub id: usize,
-    pub translation: Vector3<f64>,
-    pub rotation: UnitQuaternion<f64>,
+    pub pose: SE3,
+}
+
+impl VertexSE3 {
+    pub fn new(id: usize, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
+        Self {
+            id,
+            pose: SE3::new(translation, rotation),
+        }
+    }
+
+    pub fn from_translation_quaternion(
+        id: usize,
+        x: f64,
+        y: f64,
+        z: f64,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+    ) -> Self {
+        Self {
+            id,
+            pose: SE3::from_translation_quaternion(x, y, z, qw, qx, qy, qz),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+
+    pub fn translation(&self) -> Vector3<f64> {
+        self.pose.translation()
+    }
+
+    pub fn rotation(&self) -> UnitQuaternion<f64> {
+        self.pose.rotation_quaternion()
+    }
+
+    pub fn x(&self) -> f64 {
+        self.pose.x()
+    }
+
+    pub fn y(&self) -> f64 {
+        self.pose.y()
+    }
+
+    pub fn z(&self) -> f64 {
+        self.pose.z()
+    }
 }
 
 /// TUM trajectory vertex with timestamp
 #[derive(Debug, Clone, PartialEq)]
 pub struct VertexTUM {
     pub timestamp: f64,
-    pub translation: Vector3<f64>,
-    pub rotation: UnitQuaternion<f64>,
+    pub pose: SE3,
+}
+
+impl VertexTUM {
+    pub fn new(timestamp: f64, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
+        Self {
+            timestamp,
+            pose: SE3::new(translation, rotation),
+        }
+    }
+
+    pub fn from_translation_quaternion(
+        timestamp: f64,
+        x: f64,
+        y: f64,
+        z: f64,
+        qw: f64,
+        qx: f64,
+        qy: f64,
+        qz: f64,
+    ) -> Self {
+        Self {
+            timestamp,
+            pose: SE3::from_translation_quaternion(x, y, z, qw, qx, qy, qz),
+        }
+    }
+
+    pub fn translation(&self) -> Vector3<f64> {
+        self.pose.translation()
+    }
+
+    pub fn rotation(&self) -> UnitQuaternion<f64> {
+        self.pose.rotation_quaternion()
+    }
 }
 
 /// 2D edge constraint between two SE2 vertices
@@ -71,8 +178,26 @@ pub struct VertexTUM {
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
-    pub measurement: Vector3<f64>, // dx, dy, dtheta
+    pub measurement: SE2,          // Relative transformation
     pub information: Matrix3<f64>, // 3x3 information matrix
+}
+
+impl EdgeSE2 {
+    pub fn new(
+        from: usize,
+        to: usize,
+        dx: f64,
+        dy: f64,
+        dtheta: f64,
+        information: Matrix3<f64>,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            measurement: SE2::from_xy_angle(dx, dy, dtheta),
+            information,
+        }
+    }
 }
 
 /// 3D edge constraint between two SE3 vertices
@@ -80,9 +205,25 @@ pub struct EdgeSE2 {
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
-    pub translation: Vector3<f64>,
-    pub rotation: UnitQuaternion<f64>,
+    pub measurement: SE3,          // Relative transformation
     pub information: Matrix6<f64>, // 6x6 information matrix
+}
+
+impl EdgeSE3 {
+    pub fn new(
+        from: usize,
+        to: usize,
+        translation: Vector3<f64>,
+        rotation: UnitQuaternion<f64>,
+        information: Matrix6<f64>,
+    ) -> Self {
+        Self {
+            from,
+            to,
+            measurement: SE3::new(translation, rotation),
+            information,
+        }
+    }
 }
 
 /// Main graph structure containing vertices and edges

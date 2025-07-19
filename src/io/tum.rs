@@ -118,13 +118,8 @@ impl TumLoader {
                 value: parts[7].to_string(),
             })?;
 
-        let translation = Vector3::new(x, y, z);
-        let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
-
-        Ok(VertexTUM {
-            timestamp,
-            translation,
-            rotation,
-        })
+        Ok(VertexTUM::from_translation_quaternion(
+            timestamp, x, y, z, qw, qx, qy, qz,
+        ))
     }
 }
