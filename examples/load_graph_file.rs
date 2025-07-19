@@ -188,32 +188,39 @@ fn display_first_vertex_info(file_path: &Path) {
         if let Some(vertex_0) = graph.vertices_se2.get(&0) {
             println!(
                 "  - First SE2 vertex: id={}, x={:.3}, y={:.3}, θ={:.3}",
-                vertex_0.id, vertex_0.x, vertex_0.y, vertex_0.theta
+                vertex_0.id(),
+                vertex_0.x(),
+                vertex_0.y(),
+                vertex_0.theta()
             );
         } else if let Some(vertex_0) = graph.vertices_se3.get(&0) {
+            let translation = vertex_0.translation();
+            let rotation = vertex_0.rotation();
             println!(
                 "  - First SE3 vertex: id={}, translation=({:.3}, {:.3}, {:.3}), rotation=({:.3}, {:.3}, {:.3}, {:.3})",
-                vertex_0.id,
-                vertex_0.translation.x,
-                vertex_0.translation.y,
-                vertex_0.translation.z,
-                vertex_0.rotation.coords.w,
-                vertex_0.rotation.coords.x,
-                vertex_0.rotation.coords.y,
-                vertex_0.rotation.coords.z,
+                vertex_0.id(),
+                translation.x,
+                translation.y,
+                translation.z,
+                rotation.coords.w,
+                rotation.coords.x,
+                rotation.coords.y,
+                rotation.coords.z,
             );
         } else if !graph.vertices_tum.is_empty() {
             let vertex_0 = &graph.vertices_tum[0];
+            let translation = vertex_0.translation();
+            let rotation = vertex_0.rotation();
             println!(
                 "  - First TUM vertex: timestamp={:.3}, translation=({:.3}, {:.3}, {:.3}), rotation=({:.3}, {:.3}, {:.3}, {:.3})",
                 vertex_0.timestamp,
-                vertex_0.translation.x,
-                vertex_0.translation.y,
-                vertex_0.translation.z,
-                vertex_0.rotation.coords.w,
-                vertex_0.rotation.coords.x,
-                vertex_0.rotation.coords.y,
-                vertex_0.rotation.coords.z,
+                translation.x,
+                translation.y,
+                translation.z,
+                rotation.coords.w,
+                rotation.coords.x,
+                rotation.coords.y,
+                rotation.coords.z,
             );
         }
     }

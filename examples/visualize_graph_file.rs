@@ -97,14 +97,16 @@ fn visualize_se3_poses(
 
     for (id, pose) in &graph.vertices_se3 {
         // Extract position
+        let translation = pose.translation();
         let position = glam::Vec3::new(
-            pose.translation.x as f32,
-            pose.translation.y as f32,
-            pose.translation.z as f32,
+            translation.x as f32,
+            translation.y as f32,
+            translation.z as f32,
         ) * scale;
 
         // Convert quaternion
-        let nq = pose.rotation.as_ref();
+        let rotation = pose.rotation();
+        let nq = rotation.as_ref();
         let quaternion = glam::Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
 
         // Create transform from position and rotation
@@ -145,7 +147,7 @@ fn visualize_se2_poses(
 
     for pose in graph.vertices_se2.values() {
         // Extract position (only X and Y for 2D)
-        let position = [(pose.x as f32) * scale, (pose.y as f32) * scale];
+        let position = [(pose.x() as f32) * scale, (pose.y() as f32) * scale];
 
         positions.push(position);
         colors.push(Color::from_rgb(255, 170, 0));
