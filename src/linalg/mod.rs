@@ -24,7 +24,7 @@ pub trait SparseLinearSolver {
     ) -> Option<Mat<f64>>;
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverType {
     #[default]
     SparseCholesky,
