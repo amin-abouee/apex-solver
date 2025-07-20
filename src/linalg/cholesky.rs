@@ -24,121 +24,30 @@ impl Default for SparseCholeskySolver {
     }
 }
 impl SparseLinearSolver for SparseCholeskySolver {
-    fn solve(
-        &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>> {
-        let jtj = jacobians
-            .as_ref()
-            .transpose()
-            .to_col_major()
-            .unwrap()
-            .mul(jacobians.as_ref());
-        let jtr = jacobians.as_ref().transpose().mul(-residuals);
-
-        self.solve_jtj(&jtr, &jtj)
-    }
-
-    fn solve_weighted(
+    fn solve_normal_equation(
         &mut self,
         residuals: &faer::Mat<f64>,
         jacobians: &faer::sparse::SparseColMat<usize, f64>,
         weights: &faer::Mat<f64>,
     ) -> Option<faer::Mat<f64>> {
-        // For weighted least squares, we need to apply weights to the system
-        // W^(1/2) * J and W^(1/2) * r
-
-        // Apply weights to residuals: W^(1/2) * r
-        let mut weighted_residuals = residuals.clone();
-        for i in 0..residuals.nrows() {
-            weighted_residuals.write(i, 0, residuals.read(i, 0) * weights.read(i, 0).sqrt());
-        }
-
-        // We'll construct W^(1/2) * J directly in the J^T * J computation
-        // Note: A more efficient implementation would modify the sparse matrix directly
-
-        // Compute J^T * W * J and J^T * W * r for the normal equations
-        let n_cols = jacobians.ncols();
-        let n_rows = jacobians.nrows();
-
-        // Create a dense matrix for J^T * W * J since we're manually computing it
-        let mut weighted_jtj = faer::sparse::SparseColMat::<usize, f64>::zeros(
-            n_cols,
-            n_cols,
-            jacobians.nnz(), // This is an approximation, might need more space
-        );
-
-        // Manually compute J^T * W * J
-        // This is a simplified approach - a production implementation would
-        // be more efficient with the sparse matrix structure
-
-        // Compute J^T * W * r
-        let mut weighted_jtr = faer::Mat::<f64>::zeros(n_cols, 1);
-        for i in 0..n_rows {
-            let weight_sqrt = weights.read(i, 0).sqrt();
-
-            // For each row of J, apply the weight and accumulate into J^T * W * r
-            for j in 0..n_cols {
-                // This is inefficient for sparse matrices but illustrates the concept
-                if let Some(val) = jacobians.get(i, j) {
-                    let weighted_val = val * weight_sqrt;
-                    weighted_jtr.write(
-                        j,
-                        0,
-                        weighted_jtr.read(j, 0) - weighted_val * residuals.read(i, 0) * weight_sqrt,
-                    );
-                }
-            }
-        }
-
-        // Extract sparse structure from original jacobian
-        let jtj = jacobians
+        let hessian = jacobians
             .as_ref()
             .transpose()
             .to_col_major()
             .unwrap()
             .mul(jacobians.as_ref());
+        let gradient = jacobians.as_ref().transpose().mul(-residuals);
 
-        // Create a copy of jtj with weighted values
-        let mut weighted_jtj_values = jtj.values().to_vec();
-
-        // Apply weights to the values (this is a simplification)
-        // In a real implementation, you would correctly apply weights to the matrix structure
-        for i in 0..weighted_jtj_values.len() {
-            // This is an approximation - ideally we would track which weight applies to which entry
-            weighted_jtj_values[i] *= weights.read(0, 0); // Using first weight as an example
-        }
-
-        // Create weighted jtj from the original structure but with new values
-        let weighted_jtj = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(
-            jtj.nrows(),
-            jtj.ncols(),
-            jtj.row_indices().to_vec(),
-            jtj.col_ptrs().to_vec(),
-            weighted_jtj_values,
-        )
-        .unwrap();
-
-        self.solve_jtj(&weighted_jtr, &weighted_jtj)
-    }
-
-    fn solve_jtj(
-        &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>> {
-        // initialize the pattern
         if self.symbolic_pattern.is_none() {
             self.symbolic_pattern =
-                Some(solvers::SymbolicLlt::try_new(jtj.symbolic(), faer::Side::Lower).unwrap());
+                Some(solvers::SymbolicLlt::try_new(hessian.symbolic(), faer::Side::Lower).unwrap());
         }
 
         let sym = self.symbolic_pattern.as_ref().unwrap();
         if let Ok(cholesky) =
-            solvers::Llt::try_new_with_symbolic(sym.clone(), jtj.as_ref(), faer::Side::Lower)
+            solvers::Llt::try_new_with_symbolic(sym.clone(), hessian.as_ref(), faer::Side::Lower)
         {
-            let dx = cholesky.solve(jtr);
+            let dx = cholesky.solve(gradient);
 
             Some(dx)
         } else {
@@ -146,49 +55,60 @@ impl SparseLinearSolver for SparseCholeskySolver {
         }
     }
 
-    fn solve_jtj_weighted(
+    fn solve_augmented_equation(
         &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
+        residuals: &faer::Mat<f64>,
+        jacobians: &faer::sparse::SparseColMat<usize, f64>,
         weights: &faer::Mat<f64>,
+        lambda: f64,
     ) -> Option<faer::Mat<f64>> {
-        // For the weighted JtJ case, we need to incorporate weights into the system
-        // If JtJ and Jtr are already weighted, we can just solve directly
+        let m = jacobians.nrows();
+        let n = jacobians.ncols();
 
-        // Here we assume JtJ and Jtr need to be weighted
-        // In a real implementation, this would depend on how solve_jtj_weighted is used
-
-        // For now, we'll create a simple approximation - scaling JtJ by weights
-        let n = jtj.nrows();
-        let nnz = jtj.nnz();
-
-        // Create a copy of jtj with weighted values
-        let mut weighted_jtj_values = jtj.values().to_vec();
-
-        // Apply weights to the values (this is a simplification)
-        // In a real implementation, you would correctly apply weights to the matrix structure
-        for i in 0..weighted_jtj_values.len() {
-            // This is an approximation - ideally we would track which weight applies to which entry
-            weighted_jtj_values[i] *= weights.read(0, 0); // Using first weight as an example
+        // Create a sparse diagonal matrix from weights
+        let mut w_triplets = Vec::with_capacity(m);
+        for i in 0..m {
+            w_triplets.push((i, i, weights.read(i, 0)));
         }
+        let weights_diag =
+            faer::sparse::SparseColMat::try_new_from_triplets(m, m, &w_triplets).unwrap();
 
-        // Create weighted jtr
-        let mut weighted_jtr = jtr.clone();
-        for i in 0..jtr.nrows() {
-            weighted_jtr.write(i, 0, jtr.read(i, 0) * weights.read(0, 0)); // Using first weight as example
+        // H = J^T * W * J
+        let hessian = jacobians
+            .as_ref()
+            .transpose()
+            .to_col_major()
+            .unwrap()
+            .mul(weights_diag.as_ref().mul(jacobians.as_ref()));
+
+        // g = J^T * W * -r
+        let gradient = jacobians
+            .as_ref()
+            .transpose()
+            .mul(weights_diag.as_ref().mul(-residuals));
+
+        // H_aug = H + lambda * I
+        let mut lambda_i_triplets = Vec::with_capacity(n);
+        for i in 0..n {
+            lambda_i_triplets.push((i, i, lambda));
         }
+        let lambda_i =
+            faer::sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
 
-        // Create weighted jtj from the original structure but with new values
-        let weighted_jtj = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(
-            jtj.nrows(),
-            jtj.ncols(),
-            jtj.row_indices().to_vec(),
-            jtj.col_ptrs().to_vec(),
-            weighted_jtj_values,
-        )
-        .unwrap();
+        let augmented_hessian = hessian + lambda_i;
 
-        // Now solve using the regular solve_jtj method
-        self.solve_jtj(&weighted_jtr, &weighted_jtj)
+        // The sparsity pattern of the augmented Hessian might change between iterations
+        // if weights or lambda change, so we don't cache the symbolic factorization.
+        let sym =
+            solvers::SymbolicLlt::try_new(augmented_hessian.symbolic(), faer::Side::Lower).unwrap();
+        if let Ok(cholesky) =
+            solvers::Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), faer::Side::Lower)
+        {
+            let dx = cholesky.solve(gradient);
+
+            Some(dx)
+        } else {
+            None
+        }
     }
 }

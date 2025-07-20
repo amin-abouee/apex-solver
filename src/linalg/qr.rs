@@ -1,10 +1,16 @@
+use std::ops::Mul;
+
 use super::sparse::SparseLinearSolver;
-use faer::linalg::solvers::SolveLstsqCore;
-// use faer::prelude::{SpSolver, SpSolverLstsq};
-use faer::sparse::linalg::solvers;
+use faer::{
+    Mat,
+    linalg::solvers::SolveLstsqCore,
+    sparse::{SparseColMat, linalg::solvers},
+};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
+    // Symbolic factorization can be cached if the sparsity pattern of the matrix is constant.
+    // For augmented systems where lambda changes, this might not be safe to reuse.
     symbolic_pattern: Option<solvers::SymbolicQr<usize>>,
 }
 
@@ -15,172 +21,113 @@ impl SparseQRSolver {
         }
     }
 }
+
 impl Default for SparseQRSolver {
     fn default() -> Self {
         Self::new()
     }
 }
+
 impl SparseLinearSolver for SparseQRSolver {
-    fn solve(
+    fn solve_normal_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>> {
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        weights: &Mat<f64>,
+    ) -> Option<Mat<f64>> {
+        let m = jacobians.nrows();
+
+        // Create a sparse diagonal matrix from the weights vector.
+        let mut w_triplets = Vec::with_capacity(m);
+        for i in 0..m {
+            w_triplets.push((i, i, weights.read(i, 0)));
+        }
+        let weights_diag = SparseColMat::try_new_from_triplets(m, m, &w_triplets).unwrap();
+
+        // Form the normal equations explicitly: H = J^T * W * J
+        let hessian = jacobians
+            .as_ref()
+            .transpose()
+            .to_col_major()
+            .unwrap()
+            .mul(weights_diag.as_ref().mul(jacobians.as_ref()));
+
+        // g = J^T * W * -r
+        let gradient = jacobians
+            .as_ref()
+            .transpose()
+            .mul(weights_diag.as_ref().mul(-residuals));
+
+        // Solve the square system H * dx = g using QR decomposition.
+        // The symbolic factorization can be cached since the sparsity of H is constant.
         if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern =
-                Some(solvers::SymbolicQr::try_new(jacobians.symbolic()).unwrap());
+            self.symbolic_pattern = Some(solvers::SymbolicQr::try_new(hessian.symbolic()).unwrap());
         }
 
         let sym = self.symbolic_pattern.as_ref().unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), jacobians.as_ref()) {
-            let mut minus_residuals = -residuals;
-            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, minus_residuals.as_mut());
-            Some(minus_residuals)
+        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), hessian.as_ref()) {
+            let mut solution = gradient;
+            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, solution.as_mut());
+            Some(solution)
         } else {
             None
         }
     }
 
-    fn solve_weighted(
+    fn solve_augmented_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-        weights: &faer::Mat<f64>,
-    ) -> Option<faer::Mat<f64>> {
-        // Create sqrt-weighted versions of Jacobian and residuals
-        let n_rows = jacobians.nrows();
-        let n_cols = jacobians.ncols();
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        weights: &Mat<f64>,
+        lambda: f64,
+    ) -> Option<Mat<f64>> {
+        let m = jacobians.nrows();
+        let n = jacobians.ncols();
 
-        // Apply weights to residuals
-        let mut weighted_residuals = residuals.clone();
-        for i in 0..n_rows {
-            let weight_sqrt = weights.read(i, 0).sqrt();
-            weighted_residuals.write(i, 0, residuals.read(i, 0) * weight_sqrt);
+        // This problem (J'*W*J + lambda*I)x = -J'*W*r can be solved by constructing
+        // an augmented least squares system.
+
+        // 1. Create the sqrt of the weights diagonal matrix: sqrt(W)
+        let mut sqrt_w_triplets = Vec::with_capacity(m);
+        for i in 0..m {
+            sqrt_w_triplets.push((i, i, weights.read(i, 0).sqrt()));
         }
+        let sqrt_weights_diag =
+            SparseColMat::try_new_from_triplets(m, m, &sqrt_w_triplets).unwrap();
 
-        // For weighted QR, we need to apply weights to Jacobian matrix
-        // In a production implementation, we would create a weighted sparse Jacobian
-        // more efficiently, but for demonstration we'll use a simplified approach
+        // 2. Form the top part of the augmented Jacobian: J_top = sqrt(W) * J
+        let weighted_jacobians = sqrt_weights_diag.as_ref() * jacobians.as_ref();
 
-        // Extract triplets from the Jacobian
-        let mut row_indices = Vec::new();
-        let mut col_indices = Vec::new();
-        let mut values = Vec::new();
-
-        // Approximate estimation of non-zero elements
-        let nnz_estimate = jacobians.nnz();
-        row_indices.reserve(nnz_estimate);
-        col_indices.reserve(nnz_estimate);
-        values.reserve(nnz_estimate);
-
-        // Extract and weight the values
-        for i in 0..n_rows {
-            let weight_sqrt = weights.read(i, 0).sqrt();
-
-            for j in 0..n_cols {
-                if let Some(val) = jacobians.get(i, j) {
-                    row_indices.push(i);
-                    col_indices.push(j);
-                    values.push(val * weight_sqrt);
-                }
-            }
+        // 3. Form the bottom part of the augmented Jacobian: J_bottom = sqrt(lambda) * I
+        let mut lambda_i_triplets = Vec::with_capacity(n);
+        let sqrt_lambda = lambda.sqrt();
+        for i in 0..n {
+            lambda_i_triplets.push((i, i, sqrt_lambda));
         }
+        let lambda_i = SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
 
-        // Create weighted Jacobian
-        let weighted_jacobian = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(
-            n_rows,
-            n_cols,
-            row_indices,
-            col_indices,
-            values,
-        )
+        // 4. Stack J_top and J_bottom to create the augmented Jacobian J_aug
+        let j_aug = SparseColMat::from_blocks(&[
+            [Some(weighted_jacobians.as_ref())],
+            [Some(lambda_i.as_ref())],
+        ])
         .unwrap();
 
-        // Solve using the weighted system
-        if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern =
-                Some(solvers::SymbolicQr::try_new(weighted_jacobian.symbolic()).unwrap());
-        }
+        // 5. Form the augmented residual vector: r_aug = [ -sqrt(W)*r; 0 ]
+        let weighted_residuals = sqrt_weights_diag.as_ref() * residuals.as_ref();
+        let mut r_aug = Mat::<f64>::zeros(m + n, 1);
+        r_aug
+            .as_mut()
+            .submatrix_mut(0, 0, m, 1)
+            .copy_from(&(-weighted_residuals));
 
-        let sym = self.symbolic_pattern.as_ref().unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), weighted_jacobian.as_ref())
-        {
-            let mut minus_weighted_residuals = -weighted_residuals;
-            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, minus_weighted_residuals.as_mut());
-            Some(minus_weighted_residuals)
-        } else {
-            None
-        }
-    }
-
-    fn solve_jtj(
-        &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>> {
-        if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern = Some(solvers::SymbolicQr::try_new(jtj.symbolic()).unwrap());
-        }
-
-        let sym = self.symbolic_pattern.as_ref().unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), jtj.as_ref()) {
-            let mut minus_jtr = -jtr;
-            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, minus_jtr.as_mut());
-            Some(minus_jtr)
-        } else {
-            None
-        }
-    }
-
-    fn solve_jtj_weighted(
-        &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
-        weights: &faer::Mat<f64>,
-    ) -> Option<faer::Mat<f64>> {
-        // For weighted JtJ, we need to apply weights to normal equations
-        // This is an approximation - in a real implementation we would
-        // handle the application of weights to the sparse structure more carefully
-
-        let n = jtj.nrows();
-
-        // Create a modified Jtr with weights applied
-        let mut weighted_jtr = faer::Mat::<f64>::zeros(jtr.nrows(), jtr.ncols());
-        for i in 0..jtr.nrows() {
-            // Here we're using the first weight as an approximation
-            // In a real implementation, we'd know which weights apply to which elements
-            weighted_jtr.write(i, 0, jtr.read(i, 0) * weights.read(0, 0));
-        }
-
-        // Extract and weight JtJ values
-        let mut weighted_jtj_values = jtj.values().to_vec();
-        for i in 0..weighted_jtj_values.len() {
-            // This is a simplified approach - in reality, we need to know
-            // which weights apply to each element of JtJ
-            weighted_jtj_values[i] *= weights.read(0, 0);
-        }
-
-        // Create weighted JtJ matrix
-        let weighted_jtj = faer::sparse::SparseColMat::<usize, f64>::try_new_from_triplets(
-            jtj.nrows(),
-            jtj.ncols(),
-            jtj.row_indices().to_vec(),
-            jtj.col_ptrs().to_vec(),
-            weighted_jtj_values,
-        )
-        .unwrap();
-
-        // Solve using weighted JtJ and weighted Jtr
-        if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern =
-                Some(solvers::SymbolicQr::try_new(weighted_jtj.symbolic()).unwrap());
-        }
-
-        let sym = self.symbolic_pattern.as_ref().unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), weighted_jtj.as_ref()) {
-            let mut minus_weighted_jtr = -weighted_jtr;
-            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, minus_weighted_jtr.as_mut());
-            Some(minus_weighted_jtr)
+        // 6. Solve the least squares problem: J_aug * dx = r_aug
+        // We don't cache the symbolic factorization because the structure of J_aug
+        // depends on lambda and the weights, which can change.
+        if let Ok(qr) = solvers::Qr::try_new(j_aug.as_ref()) {
+            qr.solve_lstsq_in_place_with_conj(faer::Conj::No, r_aug.as_mut());
+            // The solution dx is in the top n rows of the result.
+            Some(r_aug.submatrix(0, 0, n, 1).to_owned())
         } else {
             None
         }

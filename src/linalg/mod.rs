@@ -6,29 +6,18 @@ pub enum LinearSolverType {
 }
 
 pub trait SparseLinearSolver {
-    fn solve(
-        &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>>;
-
-    fn solve_weighted(
+    fn solve_normal_equation(
         &mut self,
         residuals: &faer::Mat<f64>,
         jacobians: &faer::sparse::SparseColMat<usize, f64>,
         weights: &faer::Mat<f64>,
     ) -> Option<faer::Mat<f64>>;
 
-    fn solve_jtj(
+    fn solve_augmented_equation(
         &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
-    ) -> Option<faer::Mat<f64>>;
-
-    fn solve_jtj_weighted(
-        &mut self,
-        jtr: &faer::Mat<f64>,
-        jtj: &faer::sparse::SparseColMat<usize, f64>,
+        residuals: &faer::Mat<f64>,
+        jacobians: &faer::sparse::SparseColMat<usize, f64>,
         weights: &faer::Mat<f64>,
+        lambda: f64,
     ) -> Option<faer::Mat<f64>>;
 }
