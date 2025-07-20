@@ -1,4 +1,4 @@
-use apex_solver::{G2oGraph, load_graph};
+use apex_solver::io::{G2oGraph, load_graph};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,

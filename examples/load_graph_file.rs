@@ -1,4 +1,4 @@
-use apex_solver::load_graph;
+use apex_solver::io::load_graph;
 use std::fs;
 use std::path::{Path, PathBuf};
 
