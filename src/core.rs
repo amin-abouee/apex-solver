@@ -32,14 +32,14 @@ pub enum ApexError {
 impl fmt::Display for ApexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ApexError::LinearAlgebra(msg) => write!(f, "Linear algebra error: {}", msg),
-            ApexError::Io(msg) => write!(f, "IO error: {}", msg),
-            ApexError::Manifold(msg) => write!(f, "Manifold error: {}", msg),
-            ApexError::Solver(msg) => write!(f, "Solver error: {}", msg),
-            ApexError::Computation(msg) => write!(f, "Computation error: {}", msg),
-            ApexError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
-            ApexError::Memory(msg) => write!(f, "Memory error: {}", msg),
-            ApexError::Convergence(msg) => write!(f, "Convergence error: {}", msg),
+            ApexError::LinearAlgebra(msg) => write!(f, "Linear algebra error: {msg}"),
+            ApexError::Io(msg) => write!(f, "IO error: {msg}"),
+            ApexError::Manifold(msg) => write!(f, "Manifold error: {msg}"),
+            ApexError::Solver(msg) => write!(f, "Solver error: {msg}"),
+            ApexError::Computation(msg) => write!(f, "Computation error: {msg}"),
+            ApexError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
+            ApexError::Memory(msg) => write!(f, "Memory error: {msg}"),
+            ApexError::Convergence(msg) => write!(f, "Convergence error: {msg}"),
         }
     }
 }
@@ -67,13 +67,13 @@ impl From<std::io::Error> for ApexError {
 
 impl From<std::num::ParseFloatError> for ApexError {
     fn from(err: std::num::ParseFloatError) -> Self {
-        ApexError::InvalidInput(format!("Failed to parse float: {}", err))
+        ApexError::InvalidInput(format!("Failed to parse float: {err}"))
     }
 }
 
 impl From<std::num::ParseIntError> for ApexError {
     fn from(err: std::num::ParseIntError) -> Self {
-        ApexError::InvalidInput(format!("Failed to parse integer: {}", err))
+        ApexError::InvalidInput(format!("Failed to parse integer: {err}"))
     }
 }
 
@@ -146,7 +146,7 @@ impl fmt::Display for OptimizationStatus {
             OptimizationStatus::NumericalFailure => write!(f, "Numerical failure"),
             OptimizationStatus::UserTerminated => write!(f, "User terminated"),
             OptimizationStatus::Timeout => write!(f, "Timeout"),
-            OptimizationStatus::Failed(msg) => write!(f, "Failed: {}", msg),
+            OptimizationStatus::Failed(msg) => write!(f, "Failed: {msg}"),
         }
     }
 }

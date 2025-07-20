@@ -286,8 +286,12 @@ impl G2oLoader {
                 value: parts[8].to_string(),
             })?;
 
+        let translation = Vector3::new(x, y, z);
+        let quaternion = Quaternion::new(qw, qx, qy, qz);
         Ok(VertexSE3::from_translation_quaternion(
-            id, x, y, z, qw, qx, qy, qz,
+            id,
+            translation,
+            quaternion,
         ))
     }
 

@@ -1,4 +1,4 @@
-use nalgebra::{Matrix3, Matrix6, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
 use std::collections::HashMap;
 use std::path::Path;
 use thiserror::Error;
@@ -94,17 +94,12 @@ impl VertexSE3 {
 
     pub fn from_translation_quaternion(
         id: usize,
-        x: f64,
-        y: f64,
-        z: f64,
-        qw: f64,
-        qx: f64,
-        qy: f64,
-        qz: f64,
+        translation: Vector3<f64>,
+        quaternion: Quaternion<f64>,
     ) -> Self {
         Self {
             id,
-            pose: SE3::from_translation_quaternion(x, y, z, qw, qx, qy, qz),
+            pose: SE3::from_translation_quaternion(translation, quaternion),
         }
     }
 
@@ -150,17 +145,12 @@ impl VertexTUM {
 
     pub fn from_translation_quaternion(
         timestamp: f64,
-        x: f64,
-        y: f64,
-        z: f64,
-        qw: f64,
-        qx: f64,
-        qy: f64,
-        qz: f64,
+        translation: Vector3<f64>,
+        quaternion: Quaternion<f64>,
     ) -> Self {
         Self {
             timestamp,
-            pose: SE3::from_translation_quaternion(x, y, z, qw, qx, qy, qz),
+            pose: SE3::from_translation_quaternion(translation, quaternion),
         }
     }
 

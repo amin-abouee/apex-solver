@@ -79,17 +79,10 @@ impl SE3 {
 
     /// Create SE3 from translation components and Euler angles.
     pub fn from_translation_quaternion(
-        x: f64,
-        y: f64,
-        z: f64,
-        qw: f64,
-        qx: f64,
-        qy: f64,
-        qz: f64,
+        translation: Vector3<f64>,
+        quaternion: Quaternion<f64>,
     ) -> Self {
-        let translation = Vector3::new(x, y, z);
-        let quaternion =
-            UnitQuaternion::from_quaternion(Quaternion::new(qw, qx, qy, qz).normalize());
+        let quaternion = UnitQuaternion::from_quaternion(quaternion.normalize());
         Self::new(translation, quaternion)
     }
 
@@ -1027,7 +1020,9 @@ mod tests {
 
     #[test]
     fn test_se3_from_components() {
-        let se3 = SE3::from_translation_quaternion(1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0);
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let quaternion = Quaternion::new(1.0, 0.0, 0.0, 0.0);
+        let se3 = SE3::from_translation_quaternion(translation, quaternion);
         assert!(se3.is_valid(TOLERANCE));
         assert_eq!(se3.x(), 1.0);
         assert_eq!(se3.y(), 2.0);
@@ -1271,7 +1266,7 @@ mod tests {
 
         // Test specific values for translation generators
         let e1 = tangent.generator(0); // rho_x
-        let e2 = tangent.generator(1); // rho_y  
+        let e2 = tangent.generator(1); // rho_y
         let e3 = tangent.generator(2); // rho_z
 
         assert_eq!(e1[(0, 3)], 1.0);
