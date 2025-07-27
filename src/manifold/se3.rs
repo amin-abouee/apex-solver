@@ -13,7 +13,7 @@
 use crate::manifold::so3::{SO3, SO3Tangent};
 use crate::manifold::{LieGroup, Tangent};
 use nalgebra::{
-    Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion, Vector3,
+    DVector, Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion, Vector3,
     Vector6,
 };
 use std::fmt;
@@ -408,6 +408,24 @@ impl SE3Tangent {
     /// Get the theta (rotational) part.
     pub fn theta(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(3).into_owned()
+    }
+
+    /// Create SE3Tangent from a 6-dimensional vector
+    pub fn from_vector(vector: DVector<f64>) -> Self {
+        if vector.len() != 6 {
+            panic!("SE3Tangent::from_vector expects 6-dimensional vector");
+        }
+        SE3Tangent {
+            data: Vector6::new(vector[0], vector[1], vector[2], vector[3], vector[4], vector[5]),
+        }
+    }
+
+    /// Convert SE3Tangent to a 6-dimensional vector
+    pub fn to_vector(&self) -> DVector<f64> {
+        DVector::from_vec(vec![
+            self.data[0], self.data[1], self.data[2],
+            self.data[3], self.data[4], self.data[5],
+        ])
     }
 
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians

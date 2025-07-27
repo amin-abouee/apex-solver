@@ -244,6 +244,19 @@ impl SO2Tangent {
     pub fn angle(&self) -> f64 {
         self.data
     }
+
+    /// Create SO2Tangent from a 1-dimensional vector
+    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
+        if vector.len() != 1 {
+            panic!("SO2Tangent::from_vector expects 1-dimensional vector");
+        }
+        SO2Tangent { data: vector[0] }
+    }
+
+    /// Convert SO2Tangent to a 1-dimensional vector
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
+        nalgebra::DVector::from_element(1, self.data)
+    }
 }
 
 impl Tangent<SO2> for SO2Tangent {

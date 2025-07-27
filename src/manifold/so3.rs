@@ -100,6 +100,16 @@ impl SO3 {
         self.quaternion
     }
 
+    /// Create SO3 from quaternion (alias for new)
+    pub fn from_quaternion(quaternion: UnitQuaternion<f64>) -> Self {
+        Self::new(quaternion)
+    }
+
+    /// Get the quaternion representation (alias for quaternion)
+    pub fn to_quaternion(&self) -> UnitQuaternion<f64> {
+        self.quaternion
+    }
+
     /// Get the raw quaternion coefficients.
     pub fn quat(&self) -> Quaternion<f64> {
         *self.quaternion.quaternion()
@@ -380,6 +390,21 @@ impl SO3Tangent {
     /// Get the axis-angle vector.
     pub fn axis_angle(&self) -> Vector3<f64> {
         self.data
+    }
+
+    /// Create SO3Tangent from a 3-dimensional vector
+    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
+        if vector.len() != 3 {
+            panic!("SO3Tangent::from_vector expects 3-dimensional vector");
+        }
+        SO3Tangent {
+            data: Vector3::new(vector[0], vector[1], vector[2]),
+        }
+    }
+
+    /// Convert SO3Tangent to a 3-dimensional vector
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
+        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
     }
 
     /// Get the angle of rotation.

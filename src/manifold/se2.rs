@@ -116,6 +116,11 @@ impl SE2 {
         self.rotation
     }
 
+    /// Get the rotation angle.
+    pub fn rotation_angle(&self) -> f64 {
+        self.rotation.angle()
+    }
+
     /// Get the rotation part as SO2.
     pub fn rotation_so2(&self) -> SO2 {
         SO2::new(self.rotation)
@@ -380,6 +385,21 @@ impl SE2Tangent {
     /// Get the translation part as Vector2.
     pub fn translation(&self) -> Vector2<f64> {
         Vector2::new(self.x(), self.y())
+    }
+
+    /// Create SE2Tangent from a 3-dimensional vector
+    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
+        if vector.len() != 3 {
+            panic!("SE2Tangent::from_vector expects 3-dimensional vector");
+        }
+        SE2Tangent {
+            data: Vector3::new(vector[0], vector[1], vector[2]),
+        }
+    }
+
+    /// Convert SE2Tangent to a 3-dimensional vector
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
+        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
     }
 }
 
