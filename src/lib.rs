@@ -46,6 +46,7 @@
 //! - **Sparse QR**: More robust for rank-deficient or ill-conditioned systems
 
 pub mod core;
+pub mod factors;
 pub mod io;
 pub mod linalg;
 pub mod manifold;
