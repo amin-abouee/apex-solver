@@ -26,8 +26,6 @@ impl Default for Problem {
     }
 }
 
-
-
 type JacobianValue = f64;
 
 impl Problem {
@@ -41,8 +39,6 @@ impl Problem {
             variable_manifold: HashMap::new(),
         }
     }
-
-
 
     pub fn get_variable_name_to_col_idx_dict(
         &self,
@@ -58,6 +54,7 @@ impl Problem {
             });
         variable_name_to_col_idx_dict
     }
+
     pub fn add_residual_block(
         &mut self,
         dim_residual: usize,
@@ -83,6 +80,7 @@ impl Problem {
 
         block_id
     }
+
     pub fn remove_residual_block(
         &mut self,
         block_id: ResidualBlockId,
@@ -94,6 +92,7 @@ impl Problem {
             None
         }
     }
+
     pub fn fix_variable(&mut self, var_to_fix: &str, idx: usize) {
         if let Some(var_mut) = self.fixed_variable_indexes.get_mut(var_to_fix) {
             var_mut.insert(idx);
@@ -102,9 +101,11 @@ impl Problem {
                 .insert(var_to_fix.to_owned(), HashSet::from([idx]));
         }
     }
+
     pub fn unfix_variable(&mut self, var_to_unfix: &str) {
         self.fixed_variable_indexes.remove(var_to_unfix);
     }
+
     pub fn set_variable_bounds(
         &mut self,
         var_to_bound: &str,
@@ -123,6 +124,7 @@ impl Problem {
             );
         }
     }
+
     pub fn set_variable_manifold(
         &mut self,
         var_name: &str,
@@ -131,9 +133,11 @@ impl Problem {
         self.variable_manifold
             .insert(var_name.to_string(), manifold);
     }
+
     pub fn remove_variable_bounds(&mut self, var_to_unbound: &str) {
         self.variable_bounds.remove(var_to_unbound);
     }
+
     pub fn initialize_parameter_blocks(
         &self,
         initial_values: &HashMap<String, na::DVector<f64>>,
@@ -157,8 +161,6 @@ impl Problem {
             .collect();
         parameter_blocks
     }
-
-
 
     pub fn compute_residual_and_jacobian(
         &self,
@@ -204,7 +206,10 @@ impl Problem {
                                     (residual_block.residual_row_start_idx, *col_idx),
                                     (residual_block.dim_residual, tangent_size),
                                 )
-                                .copy_from(&jac.view((0, current_col), (residual_block.dim_residual, tangent_size)));
+                                .copy_from(&jac.view(
+                                    (0, current_col),
+                                    (residual_block.dim_residual, tangent_size),
+                                ));
                             current_col += tangent_size;
                         }
                     }
@@ -222,8 +227,4 @@ impl Problem {
 
         (total_residual.into_faer().to_owned(), total_jacobian)
     }
-
-
-
-
 }
