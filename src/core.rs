@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+pub mod factors;
+
 /// Main result type used throughout the apex-solver library
 pub type ApexResult<T> = Result<T, ApexError>;
 

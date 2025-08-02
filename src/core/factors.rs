@@ -1,6 +1,6 @@
 pub use nalgebra as na;
 
-use crate::manifold::{LieGroup, se2::SE2, se3::SE3, Tangent};
+use crate::manifold::{LieGroup, Tangent, se2::SE2, se3::SE3};
 
 pub trait Factor: Send + Sync {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
@@ -8,8 +8,23 @@ pub trait Factor: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE2 {
-    measurement: SE2::TangentVector,
+    pub dx: f64,
+    pub dy: f64,
+    pub dtheta: f64,
+    pub information: na::Matrix3<f64>,
 }
+
+impl BetweenFactorSE2 {
+    pub fn new(dx: f64, dy: f64, dtheta: f64, information: na::Matrix3<f64>) -> Self {
+        Self {
+            dx,
+            dy,
+            dtheta,
+            information,
+        }
+    }
+}
+
 impl Factor for BetweenFactorSE2 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
         let t_origin_k0 = &params[0];
@@ -54,26 +69,56 @@ impl Factor for BetweenFactorSE2 {
 
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE3 {
-    measurement: SE3::TangentVector,
+    pub dtx: f64,
+    pub dty: f64,
+    pub dtz: f64,
+    pub dqx: f64,
+    pub dqy: f64,
+    pub dqz: f64,
+    pub dqw: f64,
+    pub information: na::Matrix6<f64>,
 }
+
+impl BetweenFactorSE3 {
+    pub fn new(
+        dtx: f64,
+        dty: f64,
+        dtz: f64,
+        dqx: f64,
+        dqy: f64,
+        dqz: f64,
+        dqw: f64,
+        information: na::Matrix6<f64>,
+    ) -> Self {
+        Self {
+            dtx,
+            dty,
+            dtz,
+            dqx,
+            dqy,
+            dqz,
+            dqw,
+            information,
+        }
+    }
+}
+
 impl Factor for BetweenFactorSE3 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
         let p0 = &params[0];
         let p1 = &params[1];
         let se3_origin_k0 = SE3::from_translation_quaternion(
             na::Vector3::new(p0[0], p0[1], p0[2]),
-            na::UnitQuaternion::from_quaternion(na::Quaternion::new(p0[6], p0[3], p0[4], p0[5])),
+            na::Quaternion::new(p0[6], p0[3], p0[4], p0[5]),
         );
         let se3_origin_k1 = SE3::from_translation_quaternion(
             na::Vector3::new(p1[0], p1[1], p1[2]),
-            na::UnitQuaternion::from_quaternion(na::Quaternion::new(p1[6], p1[3], p1[4], p1[5])),
+            na::Quaternion::new(p1[6], p1[3], p1[4], p1[5]),
         );
 
         let se3_k0_k1_measured = SE3::from_translation_quaternion(
             na::Vector3::new(self.dtx, self.dty, self.dtz),
-            na::UnitQuaternion::from_quaternion(na::Quaternion::new(
-                self.dqw, self.dqx, self.dqy, self.dqz,
-            )),
+            na::Quaternion::new(self.dqw, self.dqx, self.dqy, self.dqz),
         );
 
         // Predicted measurement: T_k0_k1 = (T_w_k0)^-1 * T_w_k1
