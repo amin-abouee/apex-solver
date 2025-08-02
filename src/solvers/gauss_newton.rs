@@ -119,7 +119,10 @@ where
         let mut previous_cost = current_cost;
 
         if self.config.verbose {
-            println!("Starting Gauss-Newton optimization with {} max iterations", self.config.max_iterations);
+            println!(
+                "Starting Gauss-Newton optimization with {} max iterations",
+                self.config.max_iterations
+            );
             println!("Initial cost: {:.6e}", current_cost);
         }
 
@@ -168,8 +171,10 @@ where
             previous_cost = current_cost;
 
             if self.config.verbose {
-                println!("Iteration {}: cost = {:.6e}, cost_change = {:.6e}",
-                        iteration, current_cost, cost_change);
+                println!(
+                    "Iteration {}: cost = {:.6e}, cost_change = {:.6e}",
+                    iteration, current_cost, cost_change
+                );
             }
 
             // Simulate convergence for testing

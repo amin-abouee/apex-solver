@@ -192,13 +192,19 @@ impl AnySolver {
     pub fn new(config: SolverConfig) -> Self {
         match config.solver_type {
             SolverType::GaussNewton => AnySolver::GaussNewton(GaussNewton::with_config(config)),
-            SolverType::LevenbergMarquardt => AnySolver::LevenbergMarquardt(LevenbergMarquardt::with_config(config)),
+            SolverType::LevenbergMarquardt => {
+                AnySolver::LevenbergMarquardt(LevenbergMarquardt::with_config(config))
+            }
             SolverType::DogLeg => AnySolver::DogLeg(DogLeg::with_config(config)),
         }
     }
 
     /// Solve the optimization problem
-    pub fn solve<T, P>(&mut self, problem: &T, initial_params: P) -> Result<SolverResult<P>, crate::core::ApexError>
+    pub fn solve<T, P>(
+        &mut self,
+        problem: &T,
+        initial_params: P,
+    ) -> Result<SolverResult<P>, crate::core::ApexError>
     where
         T: crate::core::Optimizable<Parameters = P>,
         P: Clone,
@@ -212,17 +218,17 @@ impl AnySolver {
 }
 
 // Submodules for specific solver implementations
+pub mod dog_leg;
 pub mod gauss_newton;
 pub mod levenberg_marquardt;
-pub mod dog_leg;
 pub mod trust_region;
 
 #[cfg(test)]
 mod tests;
 
+pub use dog_leg::DogLeg;
 pub use gauss_newton::GaussNewton;
 pub use levenberg_marquardt::LevenbergMarquardt;
-pub use dog_leg::DogLeg;
 pub use trust_region::TrustRegion;
 
 /// Factory for creating solvers based on configuration

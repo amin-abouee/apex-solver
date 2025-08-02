@@ -69,12 +69,13 @@ impl DogLeg {
     fn update_trust_region(&mut self, rho: f64, step_norm: f64) {
         if rho > 0.75 {
             // Good step, increase trust region
-            self.trust_region_radius = (self.trust_region_radius * self.trust_region_increase_factor)
+            self.trust_region_radius = (self.trust_region_radius
+                * self.trust_region_increase_factor)
                 .min(self.trust_region_max);
         } else if rho < 0.25 {
             // Poor step, decrease trust region
-            self.trust_region_radius = (step_norm * self.trust_region_decrease_factor)
-                .max(self.trust_region_min);
+            self.trust_region_radius =
+                (step_norm * self.trust_region_decrease_factor).max(self.trust_region_min);
         }
         // For 0.25 <= rho <= 0.75, keep trust region unchanged
     }
@@ -155,8 +156,14 @@ where
         let mut previous_cost = current_cost;
 
         if self.config.verbose {
-            println!("Starting Dog Leg optimization with {} max iterations", self.config.max_iterations);
-            println!("Initial cost: {:.6e}, initial trust region: {:.6e}", current_cost, self.trust_region_radius);
+            println!(
+                "Starting Dog Leg optimization with {} max iterations",
+                self.config.max_iterations
+            );
+            println!(
+                "Initial cost: {:.6e}, initial trust region: {:.6e}",
+                current_cost, self.trust_region_radius
+            );
         }
 
         loop {
@@ -208,8 +215,10 @@ where
             previous_cost = current_cost;
 
             if self.config.verbose {
-                println!("Iteration {}: cost = {:.6e}, cost_change = {:.6e}, trust_region = {:.6e}",
-                        iteration, current_cost, cost_change, self.trust_region_radius);
+                println!(
+                    "Iteration {}: cost = {:.6e}, cost_change = {:.6e}, trust_region = {:.6e}",
+                    iteration, current_cost, cost_change, self.trust_region_radius
+                );
             }
 
             // Simulate convergence for testing
@@ -255,8 +264,7 @@ mod tests {
 
     #[test]
     fn test_trust_region_factors() {
-        let solver = DogLeg::new()
-            .with_trust_region_factors(3.0, 0.25);
+        let solver = DogLeg::new().with_trust_region_factors(3.0, 0.25);
 
         assert_eq!(solver.trust_region_increase_factor, 3.0);
         assert_eq!(solver.trust_region_decrease_factor, 0.25);
