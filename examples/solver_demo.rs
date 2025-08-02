@@ -54,63 +54,63 @@ impl Optimizable for QuadraticProblem {
 /// Demonstrate Gauss-Newton solver
 fn demo_gauss_newton() -> Result<(), ApexError> {
     println!("=== Gauss-Newton Solver Demo ===");
-    
+
     let problem = QuadraticProblem::new(5.0);
     let initial_params = 0.0;
-    
+
     let config = SolverConfig::new()
         .with_solver_type(SolverType::GaussNewton)
         .with_linear_solver_type(LinearSolverType::SparseQR)
         .with_max_iterations(50)
         .with_verbose(true);
-    
+
     let mut solver = AnySolver::new(config);
     let result = solver.solve(&problem, initial_params)?;
-    
+
     println!("Result: {:?}", result.status);
     println!("Final parameters: {}", result.parameters);
     println!("Final cost: {:.6e}", result.final_cost);
     println!("Iterations: {}", result.iterations);
     println!("Elapsed time: {:?}", result.elapsed_time);
     println!();
-    
+
     Ok(())
 }
 
 /// Demonstrate Levenberg-Marquardt solver
 fn demo_levenberg_marquardt() -> Result<(), ApexError> {
     println!("=== Levenberg-Marquardt Solver Demo ===");
-    
+
     let problem = QuadraticProblem::new(3.14);
     let initial_params = 10.0;
-    
+
     let config = SolverConfig::new()
         .with_solver_type(SolverType::LevenbergMarquardt)
         .with_linear_solver_type(LinearSolverType::SparseCholesky)
         .with_max_iterations(100)
         .with_cost_tolerance(1e-10)
         .with_verbose(true);
-    
+
     let mut solver = AnySolver::new(config);
     let result = solver.solve(&problem, initial_params)?;
-    
+
     println!("Result: {:?}", result.status);
     println!("Final parameters: {}", result.parameters);
     println!("Final cost: {:.6e}", result.final_cost);
     println!("Iterations: {}", result.iterations);
     println!("Elapsed time: {:?}", result.elapsed_time);
     println!();
-    
+
     Ok(())
 }
 
 /// Demonstrate Dog Leg solver
 fn demo_dog_leg() -> Result<(), ApexError> {
     println!("=== Dog Leg Solver Demo ===");
-    
+
     let problem = QuadraticProblem::new(-2.5);
     let initial_params = 8.0;
-    
+
     let config = SolverConfig::new()
         .with_solver_type(SolverType::DogLeg)
         .with_linear_solver_type(LinearSolverType::SparseQR)
@@ -118,48 +118,45 @@ fn demo_dog_leg() -> Result<(), ApexError> {
         .with_parameter_tolerance(1e-12)
         .with_timeout(Duration::from_secs(10))
         .with_verbose(true);
-    
+
     let mut solver = AnySolver::new(config);
     let result = solver.solve(&problem, initial_params)?;
-    
+
     println!("Result: {:?}", result.status);
     println!("Final parameters: {}", result.parameters);
     println!("Final cost: {:.6e}", result.final_cost);
     println!("Iterations: {}", result.iterations);
     println!("Elapsed time: {:?}", result.elapsed_time);
     println!();
-    
+
     Ok(())
 }
 
 /// Compare different solver configurations
 fn compare_solvers() -> Result<(), ApexError> {
     println!("=== Solver Comparison ===");
-    
+
     let problem = QuadraticProblem::new(1.0);
     let initial_params = 100.0;
-    
+
     let solver_types = [
         SolverType::GaussNewton,
         SolverType::LevenbergMarquardt,
         SolverType::DogLeg,
     ];
-    
-    let linear_solver_types = [
-        LinearSolverType::SparseCholesky,
-        LinearSolverType::SparseQR,
-    ];
-    
+
+    let linear_solver_types = [LinearSolverType::SparseCholesky, LinearSolverType::SparseQR];
+
     for &solver_type in &solver_types {
         for &linear_solver_type in &linear_solver_types {
             let config = SolverConfig::new()
                 .with_solver_type(solver_type)
                 .with_linear_solver_type(linear_solver_type)
                 .with_max_iterations(20);
-            
+
             let mut solver = AnySolver::new(config);
             let result = solver.solve(&problem, initial_params)?;
-            
+
             println!(
                 "{:?} + {:?}: {} iterations, {:.6e} cost, {:?}",
                 solver_type,
@@ -170,19 +167,19 @@ fn compare_solvers() -> Result<(), ApexError> {
             );
         }
     }
-    
+
     Ok(())
 }
 
 fn main() -> Result<(), ApexError> {
     println!("Apex Solver Demonstration\n");
-    
+
     demo_gauss_newton()?;
     demo_levenberg_marquardt()?;
     demo_dog_leg()?;
     compare_solvers()?;
-    
+
     println!("All demos completed successfully!");
-    
+
     Ok(())
 }
