@@ -11,28 +11,6 @@
 //! - **High Performance**: Built on the faer linear algebra library for optimal performance
 //! - **Comprehensive Testing**: Extensive test suite ensuring correctness and reliability
 //!
-//! ## Quick Start
-//!
-//! ```rust
-//! use apex_solver::{
-//!     solvers::{SolverConfig, SolverType, AnySolver},
-//!     linalg::LinearSolverType,
-//!     core::Optimizable,
-//! };
-//!
-//! // Configure the solver
-//! let config = SolverConfig::new()
-//!     .with_solver_type(SolverType::LevenbergMarquardt)
-//!     .with_linear_solver_type(LinearSolverType::SparseCholesky)
-//!     .with_max_iterations(100)
-//!     .with_cost_tolerance(1e-8);
-//!
-//! // Create the solver
-//! let mut solver = AnySolver::new(config);
-//!
-//! // Solve your optimization problem
-//! // let result = solver.solve(&problem, initial_parameters)?;
-//! ```
 //!
 //! ## Solver Types
 //!
@@ -50,8 +28,8 @@ pub mod g2o_optimizer;
 pub mod io;
 pub mod linalg;
 pub mod manifold;
-pub mod solvers;
+pub mod optimizer;
 
 pub use core::*;
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-pub use solvers::{AnySolver, SolverConfig, SolverFactory, SolverType};
+pub use optimizer::{AnySolver, OptimizerConfig, OptimizerType, SolverFactory};

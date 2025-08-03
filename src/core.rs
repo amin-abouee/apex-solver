@@ -162,6 +162,9 @@ pub trait Optimizable {
     /// Jacobian type (e.g., nalgebra::DMatrix<f64>)
     type Jacobian;
 
+    /// Get the weight matrix for the problem.
+    fn weights(&self) -> faer::Mat<f64>;
+
     /// Evaluate the residuals at the given parameters
     fn evaluate(&self, parameters: &Self::Parameters) -> ApexResult<Self::Residuals>;
 
