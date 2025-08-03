@@ -58,3 +58,6 @@ pub trait SparseLinearSolver {
 
 pub use cholesky::SparseCholeskySolver;
 pub use qr::SparseQRSolver;
+
+#[cfg(test)]
+mod integration_tests;

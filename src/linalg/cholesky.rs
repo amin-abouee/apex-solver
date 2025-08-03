@@ -53,12 +53,50 @@ impl SparseCholeskySolver {
         self.gradient.as_ref()
     }
 
-    pub fn compute_covariance_matrix(&self) -> Option<&Mat<f64>> {
+    pub fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        // Only compute if we have a factorizer and hessian, but no covariance matrix yet
+        if self.factorizer.is_some() && self.hessian.is_some() && self.covariance_matrix.is_none() {
+            if let (Some(factorizer), Some(hessian)) = (&self.factorizer, &self.hessian) {
+                let n = hessian.ncols();
+                // Create identity matrix
+                let identity = Mat::identity(n, n);
+
+                // Solve H * X = I to get X = H^(-1) = covariance matrix
+                let cov_matrix = factorizer.solve(&identity);
+                self.covariance_matrix = Some(cov_matrix);
+            }
+        }
         self.covariance_matrix.as_ref()
     }
 
-    pub fn compute_standard_errors(&self) -> Option<&Mat<f64>> {
+    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
+        // // Ensure covariance matrix is computed first
+        if self.covariance_matrix.is_none() {
+            self.compute_covariance_matrix();
+        }
+        
+        let n = self.hessian.as_ref().unwrap().ncols();
+        // Compute standard errors as sqrt of diagonal elements
+        if let Some(cov) = &self.covariance_matrix {
+            let mut std_errors = Mat::zeros(n, 1);
+            for i in 0..n {
+                let diag_val = cov[(i, i)];
+                if diag_val >= 0.0 {
+                    std_errors[(i, 0)] = diag_val.sqrt();
+                } else {
+                    // Negative diagonal indicates numerical issues
+                    return None;
+                }
+            }
+            self.standard_errors = Some(std_errors);
+        }
         self.standard_errors.as_ref()
+    }
+
+    /// Reset covariance computation state (useful for iterative optimization)
+    pub fn reset_covariance(&mut self) {
+        self.covariance_matrix = None;
+        self.standard_errors = None;
     }
 }
 
@@ -401,5 +439,216 @@ mod tests {
 
         assert!(solver1.factorizer.is_none());
         assert!(solver2.factorizer.is_none());
+    }
+
+    /// Test covariance matrix computation
+    #[test]
+    fn test_cholesky_covariance_computation() {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals, weights) = create_test_data();
+
+        // First solve to set up factorizer and hessian
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        // Now compute covariance matrix
+        let cov_matrix = solver.compute_covariance_matrix();
+        assert!(cov_matrix.is_some());
+
+        let cov = cov_matrix.unwrap();
+        assert_eq!(cov.nrows(), 3); // Should be n x n where n is number of variables
+        assert_eq!(cov.ncols(), 3);
+
+        // Covariance matrix should be symmetric
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (cov[(i, j)] - cov[(j, i)]).abs() < TOLERANCE,
+                    "Covariance matrix should be symmetric"
+                );
+            }
+        }
+
+        // Diagonal elements should be positive (variances)
+        for i in 0..3 {
+            assert!(
+                cov[(i, i)] > 0.0,
+                "Diagonal elements (variances) should be positive"
+            );
+        }
+    }
+
+    /// Test standard errors computation
+    #[test]
+    fn test_cholesky_standard_errors_computation() {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals, weights) = create_test_data();
+
+        // First solve to set up factorizer and hessian
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        // Compute covariance matrix first (this also computes standard errors)
+        solver.compute_standard_errors();
+
+        // Now check that both covariance matrix and standard errors are available
+        assert!(solver.covariance_matrix.is_some());
+        assert!(solver.standard_errors.is_some());
+
+        let cov = solver.covariance_matrix.as_ref().unwrap();
+        let errors = solver.standard_errors.as_ref().unwrap();
+
+        assert_eq!(errors.nrows(), 3); // Should be n x 1 where n is number of variables
+        assert_eq!(errors.ncols(), 1);
+
+        // All standard errors should be positive
+        for i in 0..3 {
+            assert!(
+                errors[(i, 0)] > 0.0,
+                "Standard errors should be positive"
+            );
+        }
+
+        // Verify relationship: std_error = sqrt(covariance_diagonal)
+        for i in 0..3 {
+            let expected_std_error = cov[(i, i)].sqrt();
+            assert!(
+                (errors[(i, 0)] - expected_std_error).abs() < TOLERANCE,
+                "Standard error should equal sqrt of covariance diagonal"
+            );
+        }
+    }
+
+    /// Test covariance computation with well-conditioned positive definite system
+    #[test]
+    fn test_cholesky_covariance_positive_definite() {
+        let mut solver = SparseCholeskySolver::new();
+
+        // Create a well-conditioned positive definite system
+        let triplets = vec![
+            faer::sparse::Triplet::new(0, 0, 3.0),
+            faer::sparse::Triplet::new(0, 1, 1.0),
+            faer::sparse::Triplet::new(1, 0, 1.0),
+            faer::sparse::Triplet::new(1, 1, 2.0),
+        ];
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
+        let weights = Mat::from_fn(2, 1, |_, _| 1.0);
+
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        let cov_matrix = solver.compute_covariance_matrix();
+        assert!(cov_matrix.is_some());
+
+        let cov = cov_matrix.unwrap();
+        // For this system, H = J^T * W * J = [[10, 5], [5, 5]]
+        // Covariance = H^(-1) = (1/25) * [[5, -5], [-5, 10]] = [[0.2, -0.2], [-0.2, 0.4]]
+        assert!((cov[(0, 0)] - 0.2).abs() < TOLERANCE);
+        assert!((cov[(1, 1)] - 0.4).abs() < TOLERANCE);
+        assert!((cov[(0, 1)] - (-0.2)).abs() < TOLERANCE);
+        assert!((cov[(1, 0)] - (-0.2)).abs() < TOLERANCE);
+    }
+
+    /// Test covariance computation caching
+    #[test]
+    fn test_cholesky_covariance_caching() {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals, weights) = create_test_data();
+
+        // First solve
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        // First covariance computation
+        solver.compute_covariance_matrix();
+        assert!(solver.covariance_matrix.is_some());
+
+        // Get pointer to first computation
+        let cov1_ptr = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+
+        // Second covariance computation should return cached result
+        solver.compute_covariance_matrix();
+        assert!(solver.covariance_matrix.is_some());
+
+        // Get pointer to second computation
+        let cov2_ptr = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+
+        // Should be the same pointer (cached)
+        assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
+    }
+
+    /// Test Cholesky decomposition properties
+    #[test]
+    fn test_cholesky_decomposition_properties() {
+        let mut solver = SparseCholeskySolver::new();
+
+        // Create a simple positive definite system
+        let triplets = vec![
+            faer::sparse::Triplet::new(0, 0, 2.0),
+            faer::sparse::Triplet::new(1, 1, 3.0),
+        ];
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
+        let weights = Mat::from_fn(2, 1, |_, _| 1.0);
+
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        // Verify that we have a factorizer and hessian
+        assert!(solver.factorizer.is_some());
+        assert!(solver.hessian.is_some());
+
+        // The hessian should be positive definite for Cholesky to work
+        let hessian = solver.hessian.as_ref().unwrap();
+        assert_eq!(hessian.nrows(), 2);
+        assert_eq!(hessian.ncols(), 2);
+    }
+
+    /// Test numerical stability with different condition numbers
+    #[test]
+    fn test_cholesky_numerical_stability() {
+        let mut solver = SparseCholeskySolver::new();
+
+        // Create a well-conditioned system
+        let triplets = vec![
+            faer::sparse::Triplet::new(0, 0, 1.0),
+            faer::sparse::Triplet::new(1, 1, 1.0),
+            faer::sparse::Triplet::new(2, 2, 1.0),
+        ];
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap();
+        let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
+        let weights = Mat::from_fn(3, 1, |_, _| 1.0);
+
+        let result = solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        assert!(result.is_some());
+
+        let solution = result.unwrap();
+        // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]
+        for i in 0..3 {
+            let expected = (i + 1) as f64;
+            assert!(
+                (solution[(i, 0)] - expected).abs() < TOLERANCE,
+                "Expected {}, got {}",
+                expected,
+                solution[(i, 0)]
+            );
+        }
+
+        // Covariance should be identity matrix (inverse of identity)
+        let cov_matrix = solver.compute_covariance_matrix();
+        assert!(cov_matrix.is_some());
+        let cov = cov_matrix.unwrap();
+
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (cov[(i, j)] - expected).abs() < TOLERANCE,
+                    "Covariance[{}, {}] expected {}, got {}",
+                    i, j, expected, cov[(i, j)]
+                );
+            }
+        }
     }
 }
