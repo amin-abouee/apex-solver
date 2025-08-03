@@ -1,22 +1,67 @@
 use std::ops::Mul;
 
-use faer::linalg::solvers::Solve;
-use faer::sparse::linalg::solvers;
+use faer::{
+    Mat,
+    linalg::solvers::Solve,
+    sparse::{SparseColMat, linalg::solvers},
+};
 
-use super::SparseLinearSolver;
+use crate::linalg::SparseLinearSolver;
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
-    symbolic_pattern: Option<solvers::SymbolicLlt<usize>>,
+    factorizer: Option<solvers::Llt<usize, f64>>,
+
+    /// The Hessian matrix, computed as `(J^T * W * J)`.
+    ///
+    /// This is `None` if the Hessian could not be computed.
+    hessian: Option<SparseColMat<usize, f64>>,
+
+    /// The gradient vector, computed as `J^T * W * r`.
+    ///
+    /// This is `None` if the gradient could not be computed.
+    gradient: Option<Mat<f64>>,
+
+    /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
+    ///
+    /// This is `None` if the Hessian is singular or ill-conditioned.
+    covariance_matrix: Option<Mat<f64>>,
+    /// Asymptotic standard errors of the parameters.
+    ///
+    /// This is `None` if the covariance matrix could not be computed.
+    /// Each error is the square root of the corresponding diagonal element
+    /// of the covariance matrix.
+    standard_errors: Option<Mat<f64>>,
 }
 
 impl SparseCholeskySolver {
     pub fn new() -> Self {
         SparseCholeskySolver {
-            symbolic_pattern: None,
+            factorizer: None,
+            hessian: None,
+            gradient: None,
+            covariance_matrix: None,
+            standard_errors: None,
         }
     }
+
+    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    pub fn gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    pub fn compute_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
+    }
+
+    pub fn compute_standard_errors(&self) -> Option<&Mat<f64>> {
+        self.standard_errors.as_ref()
+    }
 }
+
 impl Default for SparseCholeskySolver {
     fn default() -> Self {
         Self::new()
@@ -25,10 +70,10 @@ impl Default for SparseCholeskySolver {
 impl SparseLinearSolver for SparseCholeskySolver {
     fn solve_normal_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-        weights: &faer::Mat<f64>,
-    ) -> Option<faer::Mat<f64>> {
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        weights: &Mat<f64>,
+    ) -> Option<Mat<f64>> {
         let m = jacobians.nrows();
 
         // Create a sparse diagonal matrix from the weights vector
@@ -53,16 +98,14 @@ impl SparseLinearSolver for SparseCholeskySolver {
             .transpose()
             .mul(weights_diag.as_ref().mul(-residuals));
 
-        if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern =
-                Some(solvers::SymbolicLlt::try_new(hessian.symbolic(), faer::Side::Lower).unwrap());
-        }
-
-        let sym = self.symbolic_pattern.as_ref().unwrap();
+        let sym = solvers::SymbolicLlt::try_new(hessian.symbolic(), faer::Side::Lower).unwrap();
         if let Ok(cholesky) =
             solvers::Llt::try_new_with_symbolic(sym.clone(), hessian.as_ref(), faer::Side::Lower)
         {
-            let dx = cholesky.solve(gradient);
+            let dx = cholesky.solve(&gradient);
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+            self.factorizer = Some(cholesky);
             Some(dx)
         } else {
             None
@@ -71,11 +114,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
 
     fn solve_augmented_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &faer::sparse::SparseColMat<usize, f64>,
-        weights: &faer::Mat<f64>,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        weights: &Mat<f64>,
         lambda: f64,
-    ) -> Option<faer::Mat<f64>> {
+    ) -> Option<Mat<f64>> {
         let m = jacobians.nrows();
         let n = jacobians.ncols();
 
@@ -109,7 +152,7 @@ impl SparseLinearSolver for SparseCholeskySolver {
         let lambda_i =
             faer::sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
 
-        let augmented_hessian = hessian + lambda_i;
+        let augmented_hessian = &hessian + lambda_i;
 
         // Don't cache symbolic pattern for augmented system as sparsity may change
         let sym =
@@ -117,7 +160,10 @@ impl SparseLinearSolver for SparseCholeskySolver {
         if let Ok(cholesky) =
             solvers::Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), faer::Side::Lower)
         {
-            let dx = cholesky.solve(gradient);
+            let dx = cholesky.solve(&gradient);
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+            self.factorizer = Some(cholesky);
             Some(dx)
         } else {
             None
@@ -166,10 +212,10 @@ mod tests {
     #[test]
     fn test_solver_creation() {
         let solver = SparseCholeskySolver::new();
-        assert!(solver.symbolic_pattern.is_none());
+        assert!(solver.factorizer.is_none());
 
         let default_solver = SparseCholeskySolver::default();
-        assert!(default_solver.symbolic_pattern.is_none());
+        assert!(default_solver.factorizer.is_none());
     }
 
     /// Test normal equation solving with well-conditioned matrix
@@ -186,7 +232,7 @@ mod tests {
         assert_eq!(solution.ncols(), 1);
 
         // Verify the symbolic pattern was cached
-        assert!(solver.symbolic_pattern.is_some());
+        assert!(solver.factorizer.is_some());
     }
 
     /// Test that symbolic pattern is reused on subsequent calls
@@ -198,7 +244,7 @@ mod tests {
         // First solve
         let result1 = solver.solve_normal_equation(&residuals, &jacobian, &weights);
         assert!(result1.is_some());
-        assert!(solver.symbolic_pattern.is_some());
+        assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let result2 = solver.solve_normal_equation(&residuals, &jacobian, &weights);
@@ -353,7 +399,7 @@ mod tests {
         let solver1 = SparseCholeskySolver::new();
         let solver2 = solver1.clone();
 
-        assert!(solver1.symbolic_pattern.is_none());
-        assert!(solver2.symbolic_pattern.is_none());
+        assert!(solver1.factorizer.is_none());
+        assert!(solver2.factorizer.is_none());
     }
 }

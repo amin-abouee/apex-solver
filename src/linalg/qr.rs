@@ -1,24 +1,66 @@
 use std::ops::Mul;
 
-use super::SparseLinearSolver;
 use faer::{
     Mat,
     linalg::solvers::Solve,
     sparse::{SparseColMat, linalg::solvers},
 };
 
+use crate::linalg::SparseLinearSolver;
+
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
     // Symbolic factorization can be cached if the sparsity pattern of the matrix is constant.
     // For augmented systems where lambda changes, this might not be safe to reuse.
-    symbolic_pattern: Option<solvers::SymbolicQr<usize>>,
+    factorizer: Option<solvers::Qr<usize, f64>>,
+
+    /// The Hessian matrix, computed as `(J^T * W * J)`.
+    ///
+    /// This is `None` if the Hessian could not be computed.
+    hessian: Option<SparseColMat<usize, f64>>,
+
+    /// The gradient vector, computed as `J^T * W * r`.
+    ///
+    /// This is `None` if the gradient could not be computed.
+    gradient: Option<Mat<f64>>,
+
+    /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
+    ///
+    /// This is `None` if the Hessian is singular or ill-conditioned.
+    covariance_matrix: Option<Mat<f64>>,
+    /// Asymptotic standard errors of the parameters.
+    ///
+    /// This is `None` if the covariance matrix could not be computed.
+    /// Each error is the square root of the corresponding diagonal element
+    /// of the covariance matrix.
+    standard_errors: Option<Mat<f64>>,
 }
 
 impl SparseQRSolver {
     pub fn new() -> Self {
         SparseQRSolver {
-            symbolic_pattern: None,
+            factorizer: None,
+            hessian: None,
+            gradient: None,
+            covariance_matrix: None,
+            standard_errors: None,
         }
+    }
+
+    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    pub fn gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    pub fn compute_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
+    }
+
+    pub fn compute_standard_errors(&self) -> Option<&Mat<f64>> {
+        self.standard_errors.as_ref()
     }
 }
 
@@ -58,13 +100,12 @@ impl SparseLinearSolver for SparseQRSolver {
             .transpose()
             .mul(weights_diag.as_ref().mul(-residuals));
 
-        if self.symbolic_pattern.is_none() {
-            self.symbolic_pattern = Some(solvers::SymbolicQr::try_new(hessian.symbolic()).unwrap());
-        }
-
-        let sym = self.symbolic_pattern.as_ref().unwrap();
+        let sym = solvers::SymbolicQr::try_new(hessian.symbolic()).unwrap();
         if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), hessian.as_ref()) {
-            let dx = qr.solve(gradient);
+            let dx = qr.solve(&gradient);
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+            self.factorizer = Some(qr);
             Some(dx)
         } else {
             None
@@ -109,12 +150,15 @@ impl SparseLinearSolver for SparseQRSolver {
         }
         let lambda_i = SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
 
-        let augmented_hessian = hessian + lambda_i;
+        let augmented_hessian = hessian.as_ref() + lambda_i;
 
         // Don't cache symbolic pattern for augmented system as sparsity may change
         let sym = solvers::SymbolicQr::try_new(augmented_hessian.symbolic()).unwrap();
         if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()) {
-            let dx = qr.solve(gradient);
+            let dx = qr.solve(&gradient);
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+            self.factorizer = Some(qr);
             Some(dx)
         } else {
             None
@@ -159,10 +203,10 @@ mod tests {
     #[test]
     fn test_qr_solver_creation() {
         let solver = SparseQRSolver::new();
-        assert!(solver.symbolic_pattern.is_none());
+        assert!(solver.factorizer.is_none());
 
         let default_solver = SparseQRSolver::default();
-        assert!(default_solver.symbolic_pattern.is_none());
+        assert!(default_solver.factorizer.is_none());
     }
 
     /// Test normal equation solving with QR decomposition
@@ -179,19 +223,19 @@ mod tests {
         assert_eq!(solution.ncols(), 1);
 
         // Verify symbolic pattern was cached
-        assert!(solver.symbolic_pattern.is_some());
+        assert!(solver.factorizer.is_some());
     }
 
     /// Test QR symbolic pattern caching
     #[test]
-    fn test_qr_symbolic_pattern_caching() {
+    fn test_qr_factorizer_caching() {
         let mut solver = SparseQRSolver::new();
         let (jacobian, residuals, weights) = create_test_data();
 
         // First solve
         let result1 = solver.solve_normal_equation(&residuals, &jacobian, &weights);
         assert!(result1.is_some());
-        assert!(solver.symbolic_pattern.is_some());
+        assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let result2 = solver.solve_normal_equation(&residuals, &jacobian, &weights);
@@ -367,8 +411,8 @@ mod tests {
         let solver1 = SparseQRSolver::new();
         let solver2 = solver1.clone();
 
-        assert!(solver1.symbolic_pattern.is_none());
-        assert!(solver2.symbolic_pattern.is_none());
+        assert!(solver1.factorizer.is_none());
+        assert!(solver2.factorizer.is_none());
     }
 
     /// Test zero lambda in augmented system (should behave like normal equation)
