@@ -5,7 +5,7 @@
 
 use crate::core::{ApexError, Optimizable, OptimizationStatus};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::solvers::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
+use crate::optimizer::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
 // Note: faer types will be used when implementing the full algorithm
 use std::time::Instant;
 

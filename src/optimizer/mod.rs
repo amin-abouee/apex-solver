@@ -5,7 +5,6 @@
 //! - Levenberg-Marquardt algorithm
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
-//! - Trust region methods
 
 use crate::core::OptimizationStatus;
 use crate::linalg::LinearSolverType;
@@ -13,7 +12,7 @@ use std::time::Duration;
 
 /// Type of optimization solver algorithm to use
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SolverType {
+pub enum OptimizerType {
     /// Gauss-Newton algorithm (fast convergence, may be unstable)
     GaussNewton,
     /// Levenberg-Marquardt algorithm (robust, adaptive damping)
@@ -22,17 +21,17 @@ pub enum SolverType {
     DogLeg,
 }
 
-impl Default for SolverType {
+impl Default for OptimizerType {
     fn default() -> Self {
-        SolverType::LevenbergMarquardt
+        OptimizerType::LevenbergMarquardt
     }
 }
 
 /// Configuration parameters for optimization solvers.
 #[derive(Debug, Clone)]
-pub struct SolverConfig {
-    /// Type of solver algorithm to use
-    pub solver_type: SolverType,
+pub struct OptimizerConfig {
+    /// Type of optimizer algorithm to use
+    pub optimizer_type: OptimizerType,
     /// Type of linear solver for the linear systems
     pub linear_solver_type: LinearSolverType,
     /// Maximum number of iterations
@@ -49,10 +48,10 @@ pub struct SolverConfig {
     pub verbose: bool,
 }
 
-impl Default for SolverConfig {
+impl Default for OptimizerConfig {
     fn default() -> Self {
         Self {
-            solver_type: SolverType::default(),
+            optimizer_type: OptimizerType::default(),
             linear_solver_type: LinearSolverType::default(),
             max_iterations: 100,
             cost_tolerance: 1e-8,
@@ -64,15 +63,15 @@ impl Default for SolverConfig {
     }
 }
 
-impl SolverConfig {
+impl OptimizerConfig {
     /// Create a new solver configuration with default values
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Set the solver algorithm type
-    pub fn with_solver_type(mut self, solver_type: SolverType) -> Self {
-        self.solver_type = solver_type;
+    pub fn with_solver_type(mut self, optimizer_type: OptimizerType) -> Self {
+        self.optimizer_type = optimizer_type;
         self
     }
 
@@ -189,13 +188,13 @@ pub enum AnySolver {
 
 impl AnySolver {
     /// Create a new solver based on the configuration
-    pub fn new(config: SolverConfig) -> Self {
-        match config.solver_type {
-            SolverType::GaussNewton => AnySolver::GaussNewton(GaussNewton::with_config(config)),
-            SolverType::LevenbergMarquardt => {
+    pub fn new(config: OptimizerConfig) -> Self {
+        match config.optimizer_type {
+            OptimizerType::GaussNewton => AnySolver::GaussNewton(GaussNewton::with_config(config)),
+            OptimizerType::LevenbergMarquardt => {
                 AnySolver::LevenbergMarquardt(LevenbergMarquardt::with_config(config))
             }
-            SolverType::DogLeg => AnySolver::DogLeg(DogLeg::with_config(config)),
+            OptimizerType::DogLeg => AnySolver::DogLeg(DogLeg::with_config(config)),
         }
     }
 
@@ -221,7 +220,6 @@ impl AnySolver {
 pub mod dog_leg;
 pub mod gauss_newton;
 pub mod levenberg_marquardt;
-pub mod trust_region;
 
 #[cfg(test)]
 mod tests;
@@ -229,14 +227,13 @@ mod tests;
 pub use dog_leg::DogLeg;
 pub use gauss_newton::GaussNewton;
 pub use levenberg_marquardt::LevenbergMarquardt;
-pub use trust_region::TrustRegion;
 
 /// Factory for creating solvers based on configuration
 pub struct SolverFactory;
 
 impl SolverFactory {
     /// Create a solver based on the configuration
-    pub fn create_solver(config: SolverConfig) -> AnySolver {
+    pub fn create_solver(config: OptimizerConfig) -> AnySolver {
         AnySolver::new(config)
     }
 }

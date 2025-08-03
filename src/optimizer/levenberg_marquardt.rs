@@ -6,7 +6,7 @@
 
 use crate::core::OptimizationStatus;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::solvers::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
+use crate::optimizer::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
 use std::time::Instant;
 
 /// Levenberg-Marquardt solver for nonlinear least squares optimization.
