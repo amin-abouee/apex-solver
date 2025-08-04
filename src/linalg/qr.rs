@@ -76,7 +76,7 @@ impl SparseQRSolver {
         if self.covariance_matrix.is_none() {
             self.compute_covariance_matrix();
         }
-        
+
         let n = self.hessian.as_ref().unwrap().ncols();
         // Compute standard errors as sqrt of diagonal elements
         if let Some(cov) = &self.covariance_matrix {
@@ -553,10 +553,7 @@ mod tests {
 
         // All standard errors should be positive
         for i in 0..3 {
-            assert!(
-                errors[(i, 0)] > 0.0,
-                "Standard errors should be positive"
-            );
+            assert!(errors[(i, 0)] > 0.0, "Standard errors should be positive");
         }
 
         // Verify relationship: std_error = sqrt(covariance_diagonal)
@@ -595,7 +592,7 @@ mod tests {
         // For this system, H = J^T * W * J = [[4, 0], [0, 9]]
         // So covariance = H^(-1) = [[1/4, 0], [0, 1/9]]
         assert!((cov[(0, 0)] - 0.25).abs() < TOLERANCE);
-        assert!((cov[(1, 1)] - 1.0/9.0).abs() < TOLERANCE);
+        assert!((cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE);
         assert!(cov[(0, 1)].abs() < TOLERANCE);
         assert!(cov[(1, 0)].abs() < TOLERANCE);
     }

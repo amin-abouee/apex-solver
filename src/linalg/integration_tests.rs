@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod integration_tests {
-    use crate::linalg::{SparseLinearSolver, SparseCholeskySolver, SparseQRSolver};
+    use crate::linalg::{SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
     use faer::{Mat, sparse::SparseColMat};
 
     const TOLERANCE: f64 = 1e-10;
@@ -46,12 +46,12 @@ mod integration_tests {
 
         // Create weights (could represent measurement uncertainties)
         let weights = Mat::from_fn(6, 1, |i, _| match i {
-            0 => 2.0,  // High confidence
+            0 => 2.0, // High confidence
             1 => 1.5,
-            2 => 1.0,  // Medium confidence
+            2 => 1.0, // Medium confidence
             3 => 1.0,
-            4 => 0.5,  // Low confidence
-            5 => 1.8,  // High confidence
+            4 => 0.5, // Low confidence
+            5 => 1.8, // High confidence
             _ => 1.0,
         });
 
@@ -68,7 +68,8 @@ mod integration_tests {
 
         // Solve with both methods
         let qr_result = qr_solver.solve_normal_equation(&residuals, &jacobian, &weights);
-        let cholesky_result = cholesky_solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        let cholesky_result =
+            cholesky_solver.solve_normal_equation(&residuals, &jacobian, &weights);
 
         assert!(qr_result.is_some());
         assert!(cholesky_result.is_some());
@@ -154,10 +155,7 @@ mod integration_tests {
 
         // Diagonal elements should be positive
         for i in 0..4 {
-            assert!(
-                cov[(i, i)] > 0.0,
-                "Diagonal elements should be positive"
-            );
+            assert!(cov[(i, i)] > 0.0, "Diagonal elements should be positive");
         }
     }
 
@@ -165,7 +163,7 @@ mod integration_tests {
     #[test]
     fn test_covariance_with_weight_variations() {
         let (jacobian, residuals, _) = create_optimization_problem();
-        
+
         // Test with uniform weights
         let uniform_weights = Mat::from_fn(6, 1, |_, _| 1.0);
         let mut solver1 = SparseQRSolver::new();
@@ -187,9 +185,14 @@ mod integration_tests {
                     break;
                 }
             }
-            if different { break; }
+            if different {
+                break;
+            }
         }
-        assert!(different, "Different weights should produce different covariance matrices");
+        assert!(
+            different,
+            "Different weights should produce different covariance matrices"
+        );
 
         // Both should still be valid covariance matrices
         for cov in [cov1, cov2] {
@@ -225,7 +228,7 @@ mod integration_tests {
         assert!(cov_matrix.is_some());
 
         let cov = cov_matrix.unwrap();
-        
+
         // Verify properties
         assert_eq!(cov.nrows(), 4);
         assert_eq!(cov.ncols(), 4);
@@ -243,10 +246,7 @@ mod integration_tests {
         // Diagonal elements should be positive but smaller than normal equation
         // (due to regularization)
         for i in 0..4 {
-            assert!(
-                cov[(i, i)] > 0.0,
-                "Diagonal elements should be positive"
-            );
+            assert!(cov[(i, i)] > 0.0, "Diagonal elements should be positive");
         }
 
         // Compare with normal equation solution
