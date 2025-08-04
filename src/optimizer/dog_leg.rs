@@ -4,14 +4,15 @@
 //! direction with the steepest descent direction to find an optimal step within
 //! a trust region.
 
-use crate::core::{ApexError, Optimizable, OptimizationStatus};
+use crate::core::{ApexError, Optimizable};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
+use crate::optimizer::OptimizationStatus;
+use crate::optimizer::{ConvergenceInfo, OptimizerConfig, Solver, SolverResult};
 use std::time::Instant;
 
 /// Dog Leg solver for nonlinear least squares optimization.
 pub struct DogLeg {
-    config: SolverConfig,
+    config: OptimizerConfig,
     trust_region_radius: f64,
     trust_region_min: f64,
     trust_region_max: f64,
@@ -22,11 +23,11 @@ pub struct DogLeg {
 impl DogLeg {
     /// Create a new Dog Leg solver with default configuration.
     pub fn new() -> Self {
-        Self::with_config(SolverConfig::default())
+        Self::with_config(OptimizerConfig::default())
     }
 
     /// Create a new Dog Leg solver with the given configuration.
-    pub fn with_config(config: SolverConfig) -> Self {
+    pub fn with_config(config: OptimizerConfig) -> Self {
         Self {
             config,
             trust_region_radius: 1.0,
@@ -130,7 +131,7 @@ impl<P> Solver<P> for DogLeg
 where
     P: Clone,
 {
-    type Config = SolverConfig;
+    type Config = OptimizerConfig;
     type Error = ApexError;
 
     fn new(config: Self::Config) -> Self {
@@ -194,6 +195,8 @@ where
                             cost_evaluations,
                             jacobian_evaluations,
                         },
+                        final_gradient: None,
+                        final_hessian: None,
                     });
                 }
             }
@@ -235,6 +238,8 @@ where
                         cost_evaluations,
                         jacobian_evaluations,
                     },
+                    final_gradient: None,
+                    final_hessian: None,
                 });
             }
         }

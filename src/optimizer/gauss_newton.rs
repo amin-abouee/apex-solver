@@ -3,26 +3,27 @@
 //! The Gauss-Newton algorithm is an iterative method for solving non-linear least squares problems.
 //! It approximates the Hessian using only first-order derivatives.
 
-use crate::core::{ApexError, Optimizable, OptimizationStatus};
+use crate::core::{ApexError, Optimizable};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
+use crate::optimizer::OptimizationStatus;
+use crate::optimizer::{ConvergenceInfo, OptimizerConfig, Solver, SolverResult};
 // Note: faer types will be used when implementing the full algorithm
 use std::time::Instant;
 
 /// Gauss-Newton solver for nonlinear least squares optimization.
 pub struct GaussNewton {
-    config: SolverConfig,
+    config: OptimizerConfig,
     min_step_norm: f64,
 }
 
 impl GaussNewton {
     /// Create a new Gauss-Newton solver with default configuration.
     pub fn new() -> Self {
-        Self::with_config(SolverConfig::default())
+        Self::with_config(OptimizerConfig::default())
     }
 
     /// Create a new Gauss-Newton solver with the given configuration.
-    pub fn with_config(config: SolverConfig) -> Self {
+    pub fn with_config(config: OptimizerConfig) -> Self {
         Self {
             config,
             min_step_norm: 1e-12,
@@ -93,7 +94,7 @@ impl<P> Solver<P> for GaussNewton
 where
     P: Clone,
 {
-    type Config = SolverConfig;
+    type Config = OptimizerConfig;
     type Error = ApexError;
 
     fn new(config: Self::Config) -> Self {
@@ -154,6 +155,8 @@ where
                             cost_evaluations,
                             jacobian_evaluations,
                         },
+                        final_gradient: None,
+                        final_hessian: None,
                     });
                 }
             }
@@ -191,6 +194,8 @@ where
                         cost_evaluations,
                         jacobian_evaluations,
                     },
+                    final_gradient: None,
+                    final_hessian: None,
                 });
             }
         }

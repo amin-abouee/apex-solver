@@ -4,14 +4,14 @@
 //! nonlinear least squares problems. It interpolates between the Gauss-Newton
 //! algorithm and gradient descent by adding a damping parameter.
 
-use crate::core::OptimizationStatus;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, Solver, SolverConfig, SolverResult};
+use crate::optimizer::OptimizationStatus;
+use crate::optimizer::{ConvergenceInfo, OptimizerConfig, Solver, SolverResult};
 use std::time::Instant;
 
 /// Levenberg-Marquardt solver for nonlinear least squares optimization.
 pub struct LevenbergMarquardt {
-    config: SolverConfig,
+    config: OptimizerConfig,
     damping: f64,
     damping_min: f64,
     damping_max: f64,
@@ -22,11 +22,11 @@ pub struct LevenbergMarquardt {
 impl LevenbergMarquardt {
     /// Create a new Levenberg-Marquardt solver with default configuration.
     pub fn new() -> Self {
-        Self::with_config(SolverConfig::default())
+        Self::with_config(OptimizerConfig::default())
     }
 
     /// Create a new Levenberg-Marquardt solver with the given configuration.
-    pub fn with_config(config: SolverConfig) -> Self {
+    pub fn with_config(config: OptimizerConfig) -> Self {
         Self {
             config,
             damping: 1e-3,
@@ -127,7 +127,7 @@ impl<P> Solver<P> for LevenbergMarquardt
 where
     P: Clone,
 {
-    type Config = SolverConfig;
+    type Config = OptimizerConfig;
     type Error = crate::core::ApexError;
 
     fn new(config: Self::Config) -> Self {
@@ -190,6 +190,8 @@ where
                             cost_evaluations,
                             jacobian_evaluations,
                         },
+                        final_gradient: None,
+                        final_hessian: None,
                     });
                 }
             }
@@ -230,6 +232,8 @@ where
                         cost_evaluations,
                         jacobian_evaluations,
                     },
+                    final_gradient: None,
+                    final_hessian: None,
                 });
             }
         }
