@@ -4,9 +4,6 @@
 //! including error handling and result types.
 
 use std::fmt;
-
-use crate::optimizer::OptimizationStatus;
-
 pub mod factors;
 
 /// Main result type used throughout the apex-solver library
