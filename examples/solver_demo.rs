@@ -6,7 +6,7 @@
 use apex_solver::{
     core::{ApexError, Optimizable},
     linalg::LinearSolverType,
-    solvers::{AnySolver, SolverConfig, SolverType},
+    optimizer::{AnySolver, OptimizerConfig, OptimizerType},
 };
 use std::time::Duration;
 
@@ -25,6 +25,10 @@ impl Optimizable for QuadraticProblem {
     type Parameters = f64;
     type Residuals = f64;
     type Jacobian = f64;
+
+    fn weights(&self) -> faer::Mat<f64> {
+        faer::Mat::from_fn(1, 1, |_, _| 1.0)
+    }
 
     fn evaluate(&self, parameters: &Self::Parameters) -> Result<Self::Residuals, ApexError> {
         Ok(parameters - self.target)
@@ -58,8 +62,8 @@ fn demo_gauss_newton() -> Result<(), ApexError> {
     let problem = QuadraticProblem::new(5.0);
     let initial_params = 0.0;
 
-    let config = SolverConfig::new()
-        .with_solver_type(SolverType::GaussNewton)
+    let config = OptimizerConfig::new()
+        .with_optimizer_type(OptimizerType::GaussNewton)
         .with_linear_solver_type(LinearSolverType::SparseQR)
         .with_max_iterations(50)
         .with_verbose(true);
@@ -84,8 +88,8 @@ fn demo_levenberg_marquardt() -> Result<(), ApexError> {
     let problem = QuadraticProblem::new(3.14);
     let initial_params = 10.0;
 
-    let config = SolverConfig::new()
-        .with_solver_type(SolverType::LevenbergMarquardt)
+    let config = OptimizerConfig::new()
+        .with_optimizer_type(OptimizerType::LevenbergMarquardt)
         .with_linear_solver_type(LinearSolverType::SparseCholesky)
         .with_max_iterations(100)
         .with_cost_tolerance(1e-10)
@@ -111,8 +115,8 @@ fn demo_dog_leg() -> Result<(), ApexError> {
     let problem = QuadraticProblem::new(-2.5);
     let initial_params = 8.0;
 
-    let config = SolverConfig::new()
-        .with_solver_type(SolverType::DogLeg)
+    let config = OptimizerConfig::new()
+        .with_optimizer_type(OptimizerType::DogLeg)
         .with_linear_solver_type(LinearSolverType::SparseQR)
         .with_max_iterations(75)
         .with_parameter_tolerance(1e-12)
@@ -139,18 +143,18 @@ fn compare_solvers() -> Result<(), ApexError> {
     let problem = QuadraticProblem::new(1.0);
     let initial_params = 100.0;
 
-    let solver_types = [
-        SolverType::GaussNewton,
-        SolverType::LevenbergMarquardt,
-        SolverType::DogLeg,
+    let optimizer_types = [
+        OptimizerType::GaussNewton,
+        OptimizerType::LevenbergMarquardt,
+        OptimizerType::DogLeg,
     ];
 
     let linear_solver_types = [LinearSolverType::SparseCholesky, LinearSolverType::SparseQR];
 
-    for &solver_type in &solver_types {
+    for &optimizer_type in &optimizer_types {
         for &linear_solver_type in &linear_solver_types {
-            let config = SolverConfig::new()
-                .with_solver_type(solver_type)
+            let config = OptimizerConfig::new()
+                .with_optimizer_type(optimizer_type)
                 .with_linear_solver_type(linear_solver_type)
                 .with_max_iterations(20);
 
@@ -159,7 +163,7 @@ fn compare_solvers() -> Result<(), ApexError> {
 
             println!(
                 "{:?} + {:?}: {} iterations, {:.6e} cost, {:?}",
-                solver_type,
+                optimizer_type,
                 linear_solver_type,
                 result.iterations,
                 result.final_cost,
