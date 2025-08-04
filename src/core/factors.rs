@@ -1,6 +1,6 @@
 pub use nalgebra as na;
 
-use crate::manifold::{LieGroup, Tangent, se2::SE2, se3::SE3};
+use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
 
 pub trait Factor: Send + Sync {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
@@ -57,10 +57,10 @@ impl Factor for BetweenFactorSE2 {
 
         let mut jacobian = na::DMatrix::<f64>::zeros(3, 6);
         jacobian
-            .fixed_slice_mut::<3, 3>(0, 0)
+            .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&jacobian_wrt_k0);
         jacobian
-            .fixed_slice_mut::<3, 3>(0, 3)
+            .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&jacobian_wrt_k1);
 
         (residual.to_vector(), jacobian)
@@ -145,10 +145,10 @@ impl Factor for BetweenFactorSE3 {
 
         let mut jacobian = na::DMatrix::<f64>::zeros(6, 12);
         jacobian
-            .fixed_slice_mut::<6, 6>(0, 0)
+            .fixed_view_mut::<6, 6>(0, 0)
             .copy_from(&jacobian_wrt_k0);
         jacobian
-            .fixed_slice_mut::<6, 6>(0, 6)
+            .fixed_view_mut::<6, 6>(0, 6)
             .copy_from(&jacobian_wrt_k1);
 
         (residual.to_vector(), jacobian)
