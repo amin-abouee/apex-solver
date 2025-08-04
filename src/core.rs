@@ -5,6 +5,8 @@
 
 use std::fmt;
 
+use crate::optimizer::OptimizationStatus;
+
 pub mod factors;
 
 /// Main result type used throughout the apex-solver library
@@ -110,47 +112,6 @@ macro_rules! computation_error {
     ($fmt:expr, $($arg:tt)*) => {
         $crate::core::ApexError::Computation(format!($fmt, $($arg)*))
     };
-}
-
-/// Status of an optimization process
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum OptimizationStatus {
-    /// Optimization converged successfully
-    Converged,
-    /// Maximum number of iterations reached
-    MaxIterationsReached,
-    /// Cost function tolerance reached
-    CostToleranceReached,
-    /// Parameter tolerance reached
-    ParameterToleranceReached,
-    /// Gradient tolerance reached
-    GradientToleranceReached,
-    /// Optimization failed due to numerical issues
-    NumericalFailure,
-    /// User requested termination
-    UserTerminated,
-    /// Timeout reached
-    Timeout,
-    /// Other failure
-    Failed(String),
-}
-
-impl fmt::Display for OptimizationStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OptimizationStatus::Converged => write!(f, "Converged"),
-            OptimizationStatus::MaxIterationsReached => write!(f, "Maximum iterations reached"),
-            OptimizationStatus::CostToleranceReached => write!(f, "Cost tolerance reached"),
-            OptimizationStatus::ParameterToleranceReached => {
-                write!(f, "Parameter tolerance reached")
-            }
-            OptimizationStatus::GradientToleranceReached => write!(f, "Gradient tolerance reached"),
-            OptimizationStatus::NumericalFailure => write!(f, "Numerical failure"),
-            OptimizationStatus::UserTerminated => write!(f, "User terminated"),
-            OptimizationStatus::Timeout => write!(f, "Timeout"),
-            OptimizationStatus::Failed(msg) => write!(f, "Failed: {msg}"),
-        }
-    }
 }
 
 /// Trait for problems that can be optimized

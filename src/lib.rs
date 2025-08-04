@@ -24,12 +24,10 @@
 //! - **Sparse QR**: More robust for rank-deficient or ill-conditioned systems
 
 pub mod core;
-pub mod g2o_optimizer;
 pub mod io;
 pub mod linalg;
 pub mod manifold;
 pub mod optimizer;
 
-pub use core::*;
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 pub use optimizer::{AnySolver, OptimizerConfig, OptimizerType, SolverFactory};
