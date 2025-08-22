@@ -54,10 +54,10 @@ impl GaussNewton {
         elapsed: std::time::Duration,
     ) -> Option<OptimizationStatus> {
         // Check timeout
-        if let Some(timeout) = self.config.timeout {
-            if elapsed >= timeout {
-                return Some(OptimizationStatus::Timeout);
-            }
+        if let Some(timeout) = self.config.timeout
+            && elapsed >= timeout
+        {
+            return Some(OptimizationStatus::Timeout);
         }
 
         // Check maximum iterations
@@ -135,30 +135,28 @@ where
 
             // Check convergence criteria (but allow at least one iteration)
             let cost_change = (previous_cost - current_cost).abs();
-            if iteration > 1 {
-                if let Some(status) = self.check_convergence(
+            if iteration > 1
+                && let Some(status) = self.check_convergence(
                     iteration,
                     cost_change,
                     0.0, // Will be updated with actual parameter update norm
                     0.0, // Will be updated with actual gradient norm
                     elapsed,
-                ) {
-                    return Ok(SolverResult {
-                        parameters: params,
-                        status,
-                        final_cost: current_cost,
-                        iterations: iteration,
-                        elapsed_time: elapsed,
-                        convergence_info: ConvergenceInfo {
-                            final_gradient_norm: 0.0,
-                            final_parameter_update_norm: 0.0,
-                            cost_evaluations,
-                            jacobian_evaluations,
-                        },
-                        final_gradient: None,
-                        final_hessian: None,
-                    });
-                }
+                )
+            {
+                return Ok(SolverResult {
+                    parameters: params,
+                    status,
+                    final_cost: current_cost,
+                    iterations: iteration,
+                    elapsed_time: elapsed,
+                    convergence_info: ConvergenceInfo {
+                        final_gradient_norm: 0.0,
+                        final_parameter_update_norm: 0.0,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    },
+                });
             }
 
             // TODO: Implement the full Gauss-Newton algorithm
@@ -194,8 +192,6 @@ where
                         cost_evaluations,
                         jacobian_evaluations,
                     },
-                    final_gradient: None,
-                    final_hessian: None,
                 });
             }
         }

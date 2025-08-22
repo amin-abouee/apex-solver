@@ -7,7 +7,6 @@
 //! - Dog Leg algorithm
 
 use crate::linalg::LinearSolverType;
-use faer::prelude::*;
 use std::fmt;
 use std::time::Duration;
 
@@ -21,6 +20,16 @@ pub enum OptimizerType {
     GaussNewton,
     /// Dog Leg algorithm (trust region method)
     DogLeg,
+}
+
+impl fmt::Display for OptimizerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OptimizerType::LevenbergMarquardt => write!(f, "Levenberg-Marquardt"),
+            OptimizerType::GaussNewton => write!(f, "Gauss-Newton"),
+            OptimizerType::DogLeg => write!(f, "Dog Leg"),
+        }
+    }
 }
 
 /// Configuration parameters for optimization solvers.
@@ -114,21 +123,37 @@ impl OptimizerConfig {
     }
 }
 
-/// State information during iterative optimization.
-#[derive(Debug, Clone)]
-pub struct IterativeState {
-    /// Current iteration number
-    pub iteration: usize,
-    /// Current cost value
-    pub cost: f64,
-    /// Current gradient norm
-    pub gradient_norm: f64,
-    /// Current parameter update norm
-    pub parameter_update_norm: f64,
-    /// Time elapsed since start
-    pub elapsed_time: Duration,
+impl fmt::Display for OptimizerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "OptimizerConfig {{ optimizer_type: {:?}, linear_solver_type: {:?}, max_iterations: {}, cost_tolerance: {}, parameter_tolerance: {}, gradient_tolerance: {}, timeout: {:?}, verbose: {} }}",
+            self.optimizer_type,
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
+            self.verbose
+        )
+    }
 }
 
+/// State information during iterative optimization.
+// #[derive(Debug, Clone)]
+// pub struct IterativeState {
+//     /// Current iteration number
+//     pub iteration: usize,
+//     /// Current cost value
+//     pub cost: f64,
+//     /// Current gradient norm
+//     pub gradient_norm: f64,
+//     /// Current parameter update norm
+//     pub parameter_update_norm: f64,
+//     /// Time elapsed since start
+//     pub elapsed_time: Duration,
+// }
 /// Detailed convergence information.
 #[derive(Debug, Clone)]
 pub struct ConvergenceInfo {
@@ -140,6 +165,19 @@ pub struct ConvergenceInfo {
     pub cost_evaluations: usize,
     /// Jacobian evaluation count
     pub jacobian_evaluations: usize,
+}
+
+impl fmt::Display for ConvergenceInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Final gradient norm: {:.2e}, Final parameter update norm: {:.2e}, Cost evaluations: {}, Jacobian evaluations: {}",
+            self.final_gradient_norm,
+            self.final_parameter_update_norm,
+            self.cost_evaluations,
+            self.jacobian_evaluations
+        )
+    }
 }
 
 /// Status of an optimization process
@@ -198,10 +236,6 @@ pub struct SolverResult<T> {
     pub elapsed_time: Duration,
     /// Convergence statistics
     pub convergence_info: ConvergenceInfo,
-    /// Final gradient vector of the objective function.
-    pub final_gradient: Option<Col<f64>>,
-    /// Final approximate Hessian matrix (`J^T * W * J`).
-    pub final_hessian: Option<Mat<f64>>,
 }
 
 /// Core trait for optimization solvers.
@@ -261,9 +295,6 @@ impl AnySolver {
 pub mod dog_leg;
 pub mod gauss_newton;
 pub mod levenberg_marquardt;
-
-// #[cfg(test)]
-// mod tests;
 
 pub use dog_leg::DogLeg;
 pub use gauss_newton::GaussNewton;

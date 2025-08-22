@@ -3,12 +3,22 @@ pub mod qr;
 
 use faer::Mat;
 use faer::sparse::SparseColMat;
+use std::fmt;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverType {
     #[default]
     SparseCholesky,
     SparseQR,
+}
+
+impl fmt::Display for LinearSolverType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LinearSolverType::SparseCholesky => write!(f, "Sparse Cholesky"),
+            LinearSolverType::SparseQR => write!(f, "Sparse QR"),
+        }
+    }
 }
 
 // /// Contains statistical information about the quality of the optimization solution.
