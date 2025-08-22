@@ -251,7 +251,8 @@ pub trait Solver<P> {
     /// Solve the optimization problem
     fn solve<T>(&mut self, problem: &T, initial_params: P) -> Result<SolverResult<P>, Self::Error>
     where
-        T: crate::core::Optimizable<Parameters = P>;
+        T: crate::core::Optimizable<Parameters = P>,
+        P: Clone;
 }
 
 /// Enum wrapper for different solver types to enable dynamic dispatch
@@ -281,7 +282,7 @@ impl AnySolver {
     ) -> Result<SolverResult<P>, crate::core::ApexError>
     where
         T: crate::core::Optimizable<Parameters = P>,
-        P: Clone,
+        P: Clone + std::ops::AddAssign<P> + std::ops::Sub<Output = P>,
     {
         match self {
             AnySolver::GaussNewton(solver) => solver.solve(problem, initial_params),

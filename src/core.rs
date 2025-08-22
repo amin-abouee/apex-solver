@@ -115,10 +115,10 @@ macro_rules! computation_error {
 pub trait Optimizable {
     /// Parameter type (e.g., Vec<f64>, nalgebra::DVector<f64>)
     type Parameters;
-    /// Residuals type (e.g., Vec<f64>, nalgebra::DVector<f64>)
-    type Residuals;
-    /// Jacobian type (e.g., nalgebra::DMatrix<f64>)
-    type Jacobian;
+    /// Residuals type - uses faer dense matrix
+    type Residuals: AsRef<faer::Mat<f64>>;
+    /// Jacobian type - uses faer sparse matrix
+    type Jacobian: AsRef<faer::sparse::SparseColMat<usize, f64>>;
 
     /// Get the weight matrix for the problem.
     fn weights(&self) -> faer::Mat<f64>;
