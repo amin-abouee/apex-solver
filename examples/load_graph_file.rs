@@ -61,11 +61,10 @@ fn find_graph_files() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     for entry in fs::read_dir(data_dir)? {
         let entry = entry?;
         let path = entry.path();
-        if let Some(extension) = path.extension().and_then(|s| s.to_str()) {
-            if is_supported_format(extension) {
+        if let Some(extension) = path.extension().and_then(|s| s.to_str())
+            && is_supported_format(extension) {
                 graph_files.push(path);
             }
-        }
     }
 
     // Sort files for consistent output

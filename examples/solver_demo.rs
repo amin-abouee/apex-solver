@@ -85,7 +85,7 @@ fn demo_gauss_newton() -> Result<(), ApexError> {
 fn demo_levenberg_marquardt() -> Result<(), ApexError> {
     println!("=== Levenberg-Marquardt Solver Demo ===");
 
-    let problem = QuadraticProblem::new(3.14);
+    let problem = QuadraticProblem::new(std::f64::consts::PI);
     let initial_params = 10.0;
 
     let config = OptimizerConfig::new()

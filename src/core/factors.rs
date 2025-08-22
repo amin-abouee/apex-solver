@@ -80,6 +80,7 @@ pub struct BetweenFactorSE3 {
 }
 
 impl BetweenFactorSE3 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         dtx: f64,
         dty: f64,

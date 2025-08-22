@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod integration_tests {
     use crate::linalg::{SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
     use faer::{Mat, sparse::SparseColMat};
@@ -124,7 +125,7 @@ mod integration_tests {
                     _ => 0.0,
                 };
                 // Residuals should decrease with iterations
-                base_residual * (0.8_f64).powi(iteration as i32)
+                base_residual * (0.8_f64).powi(iteration)
             });
 
             let result = solver.solve_normal_equation(&modified_residuals, &jacobian, &weights);
