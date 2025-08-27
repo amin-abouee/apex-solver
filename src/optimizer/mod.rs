@@ -285,9 +285,17 @@ impl AnySolver {
         P: Clone + std::ops::AddAssign<P> + std::ops::Sub<Output = P>,
     {
         match self {
-            AnySolver::GaussNewton(solver) => solver.solve(problem, initial_params),
-            AnySolver::LevenbergMarquardt(solver) => solver.solve(problem, initial_params),
-            AnySolver::DogLeg(solver) => solver.solve(problem, initial_params),
+            AnySolver::GaussNewton(solver) => Solver::solve(solver, problem, initial_params),
+            AnySolver::LevenbergMarquardt(_) => {
+                // LevenbergMarquardt has different parameter constraints than other solvers
+                // It works directly with Mat<f64> types and needs specific trait bounds
+                // For now, use it directly through its own solve method rather than the Solver trait
+                Err(crate::core::ApexError::Solver(
+                    "LevenbergMarquardt solver should be used directly, not through AnySolver"
+                        .to_string(),
+                ))
+            }
+            AnySolver::DogLeg(solver) => Solver::solve(solver, problem, initial_params),
         }
     }
 }
