@@ -3,22 +3,20 @@ use std::sync::{Arc, Mutex};
 
 use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
 use faer_ext::IntoFaer;
-use nalgebra as na;
+use nalgebra;
 use rayon::prelude::*;
 
-use crate::manifold::Manifold;
-use crate::parameter_block::ParameterBlock;
+use crate::variable::Variable;
 use crate::{factors, loss_functions, residual_block};
 
 type ResidualBlockId = usize;
-
+type JacobianValue = f64;
 pub struct Problem {
     pub total_residual_dimension: usize,
     residual_id_count: usize,
     residual_blocks: HashMap<ResidualBlockId, residual_block::ResidualBlock>,
     pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
     pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
-    pub variable_manifold: HashMap<String, Arc<dyn Manifold + Sync + Send>>,
 }
 impl Default for Problem {
     fn default() -> Self {
@@ -26,7 +24,6 @@ impl Default for Problem {
     }
 }
 
-type JacobianValue = f64;
 
 impl Problem {
     pub fn new() -> Problem {
@@ -36,21 +33,20 @@ impl Problem {
             residual_blocks: HashMap::new(),
             fixed_variable_indexes: HashMap::new(),
             variable_bounds: HashMap::new(),
-            variable_manifold: HashMap::new(),
         }
     }
 
     pub fn get_variable_name_to_col_idx_dict(
         &self,
-        parameter_blocks: &HashMap<String, ParameterBlock>,
+        variables: &HashMap<String, Variable>,
     ) -> HashMap<String, usize> {
         let mut count_col_idx = 0;
         let mut variable_name_to_col_idx_dict = HashMap::new();
-        parameter_blocks
+        variables
             .iter()
-            .for_each(|(param_name, param_block)| {
-                variable_name_to_col_idx_dict.insert(param_name.to_owned(), count_col_idx);
-                count_col_idx += param_block.tangent_size();
+            .for_each(|(var_name, variable)| {
+                variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
+                count_col_idx += variable.tangent_size();
             });
         variable_name_to_col_idx_dict
     }
@@ -125,46 +121,34 @@ impl Problem {
         }
     }
 
-    pub fn set_variable_manifold(
-        &mut self,
-        var_name: &str,
-        manifold: Arc<dyn Manifold + Sync + Send>,
-    ) {
-        self.variable_manifold
-            .insert(var_name.to_string(), manifold);
-    }
-
     pub fn remove_variable_bounds(&mut self, var_to_unbound: &str) {
         self.variable_bounds.remove(var_to_unbound);
     }
 
-    pub fn initialize_parameter_blocks(
+    pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, na::DVector<f64>>,
-    ) -> HashMap<String, ParameterBlock> {
-        let parameter_blocks: HashMap<String, ParameterBlock> = initial_values
+    ) -> HashMap<String, Variable> {
+        let variables: HashMap<String, Variable> = initial_values
             .iter()
             .map(|(k, v)| {
-                let mut p_block = ParameterBlock::from_vec(v.clone());
+                let mut variable = Variable::from_vec(v.clone());
                 if let Some(indexes) = self.fixed_variable_indexes.get(k) {
-                    p_block.fixed_variables = indexes.clone();
+                    variable.fixed_indices = indexes.clone();
                 }
                 if let Some(bounds) = self.variable_bounds.get(k) {
-                    p_block.variable_bounds = bounds.clone();
-                }
-                if let Some(manifold) = self.variable_manifold.get(k) {
-                    p_block.manifold = Some(manifold.clone())
+                    variable.bounds = bounds.clone();
                 }
 
-                (k.to_owned(), p_block)
+                (k.to_owned(), variable)
             })
             .collect();
-        parameter_blocks
+        variables
     }
 
     pub fn compute_residual_and_jacobian(
         &self,
-        parameter_blocks: &HashMap<String, ParameterBlock>,
+        variables: &HashMap<String, Variable>,
         variable_name_to_col_idx_dict: &HashMap<String, usize>,
     ) -> (faer::Mat<f64>, na::DMatrix<f64>) {
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
@@ -178,13 +162,13 @@ impl Problem {
         self.residual_blocks
             .par_iter()
             .for_each(|(_, residual_block)| {
-                let mut params = Vec::new();
+                let mut vars = Vec::new();
                 for var_key in &residual_block.variable_key_list {
-                    if let Some(param) = parameter_blocks.get(var_key) {
-                        params.push(param);
+                    if let Some(variable) = variables.get(var_key) {
+                        vars.push(variable);
                     };
                 }
-                let (res, jac) = residual_block.residual_and_jacobian(&params);
+                let (res, jac) = residual_block.residual_and_jacobian(&vars);
                 {
                     let mut total_residual = total_residual.lock().unwrap();
                     total_residual
@@ -199,8 +183,8 @@ impl Problem {
                     let mut current_col = 0;
                     for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
                         if let Some(col_idx) = variable_name_to_col_idx_dict.get(var_key) {
-                            let param = parameter_blocks.get(var_key).unwrap();
-                            let tangent_size = param.tangent_size();
+                            let variable = variables.get(var_key).unwrap();
+                            let tangent_size = variable.tangent_size();
                             total_jacobian
                                 .view_mut(
                                     (residual_block.residual_row_start_idx, *col_idx),

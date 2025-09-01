@@ -4,7 +4,7 @@ use rayon::prelude::*;
 use crate::corrector::Corrector;
 use crate::factors::FactorImpl;
 use crate::loss_functions::Loss;
-use crate::parameter_block::ParameterBlock;
+use crate::variable::Variable;
 
 pub struct ResidualBlock {
     pub residual_block_id: usize,
@@ -14,6 +14,7 @@ pub struct ResidualBlock {
     pub factor: Box<dyn FactorImpl + Send>,
     pub loss_func: Option<Box<dyn Loss + Send>>,
 }
+
 impl ResidualBlock {
     pub fn new(
         residual_block_id: usize,
@@ -36,12 +37,11 @@ impl ResidualBlock {
         }
     }
 
-
     pub fn residual_and_jacobian(
         &self,
-        params: &[&ParameterBlock],
+        variables: &[&Variable],
     ) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let param_vec: Vec<_> = params.iter().map(|p| p.params.clone()).collect();
+        let param_vec: Vec<_> = variables.iter().map(|v| v.values.clone()).collect();
         let (mut residual, mut jacobian) = self.factor.residual_with_jacobian(&param_vec);
         let squared_norm = residual.norm_squared();
         if let Some(loss_func) = self.loss_func.as_ref() {

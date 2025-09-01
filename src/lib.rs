@@ -29,5 +29,8 @@ pub mod linalg;
 pub mod manifold;
 pub mod optimizer;
 
+// Re-export core types
+pub use core::variable::Variable;
+
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 pub use optimizer::{AnySolver, OptimizerConfig, OptimizerType, SolverFactory};
