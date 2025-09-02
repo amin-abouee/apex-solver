@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::manifold::{LieGroup, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+use crate::manifold::{se2::SE2, se3::SE3, so2::SO2, so3::SO3};
 use nalgebra as na;
 
 /// Represents the different types of values a Variable can hold
