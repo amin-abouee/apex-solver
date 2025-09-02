@@ -44,6 +44,31 @@ impl fmt::Display for SO2Tangent {
 }
 
 impl SO2 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 2;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 1;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 2;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SO2 {
+            complex: UnitComplex::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> nalgebra::Matrix1<f64> {
+        nalgebra::Matrix1::<f64>::identity()
+    }
+
     /// Create a new SO(2) element from a unit complex number.
     ///
     /// # Arguments
@@ -81,21 +106,7 @@ impl LieGroup for SO2 {
     type JacobianMatrix = nalgebra::Matrix1<f64>;
     type LieAlgebra = Matrix2<f64>;
 
-    // Dimension constants following manif conventions
-    const DIM: usize = 2; // Space dimension (2D space)
-    const DOF: usize = 1; // Degrees of freedom (1-DOF: rotation angle)
-    const REP_SIZE: usize = 2; // Representation size (2 complex components)
 
-    fn identity() -> Self {
-        SO2 {
-            complex: UnitComplex::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        nalgebra::Matrix1::<f64>::identity()
-    }
 
     /// SO2 inverse.
     ///
@@ -260,6 +271,9 @@ impl SO2Tangent {
 }
 
 impl Tangent<SO2> for SO2Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 1;
+
     /// SO2 exponential map.
     ///
     /// # Arguments

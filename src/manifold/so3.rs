@@ -56,6 +56,31 @@ impl fmt::Display for SO3Tangent {
 }
 
 impl SO3 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 3;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 3;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 4;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SO3 {
+            quaternion: UnitQuaternion::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix3<f64> {
+        Matrix3::<f64>::identity()
+    }
+
     /// Create a new SO(3) element from a unit quaternion.
     ///
     /// # Arguments
@@ -172,21 +197,7 @@ impl LieGroup for SO3 {
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
 
-    // Dimension constants following manif conventions
-    const DIM: usize = 3; // Space dimension (3D space)
-    const DOF: usize = 3; // Degrees of freedom (3 rotation parameters)
-    const REP_SIZE: usize = 4; // Representation size (4 quaternion components)
 
-    fn identity() -> Self {
-        SO3 {
-            quaternion: UnitQuaternion::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix3::<f64>::identity()
-    }
 
     /// SO3 inverse.
     ///
@@ -450,6 +461,9 @@ impl SO3Tangent {
 
 // Implement LieAlgebra trait for SO3Tangent
 impl Tangent<SO3> for SO3Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 3;
+
     /// SO3 exponential map.
     ///
     /// # Arguments

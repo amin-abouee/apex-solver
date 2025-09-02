@@ -60,6 +60,34 @@ impl fmt::Display for RnTangent {
 }
 
 impl Rn {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    /// Note: For Rⁿ this is dynamic and determined at runtime
+    pub const DIM: usize = 0;
+
+    /// Degrees of freedom - dimension of the tangent space
+    /// Note: For Rⁿ this is dynamic and determined at runtime
+    pub const DOF: usize = 0;
+
+    /// Representation size - size of the underlying data representation
+    /// Note: For Rⁿ this is dynamic and determined at runtime
+    pub const REP_SIZE: usize = 0;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    /// Note: Default to 3D identity for compatibility, but this should be created with specific dimension
+    pub fn identity() -> Self {
+        Rn::new(DVector::zeros(3))
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    /// Note: Default to 3x3 identity, but this should be created with specific dimension
+    pub fn jacobian_identity() -> DMatrix<f64> {
+        DMatrix::identity(3, 3)
+    }
+
     /// Create a new Rⁿ element from a vector.
     ///
     /// # Arguments
@@ -79,21 +107,6 @@ impl Rn {
     /// Create Rⁿ from individual components (up to 6D for convenience).
     pub fn from_vec(components: Vec<f64>) -> Self {
         Rn::new(DVector::from_vec(components))
-    }
-
-    /// Create 1D Euclidean space element.
-    pub fn from_x(x: f64) -> Self {
-        Rn::new(DVector::from_element(1, x))
-    }
-
-    /// Create 2D Euclidean space element.
-    pub fn from_xy(x: f64, y: f64) -> Self {
-        Rn::new(DVector::from_vec(vec![x, y]))
-    }
-
-    /// Create 3D Euclidean space element.
-    pub fn from_xyz(x: f64, y: f64, z: f64) -> Self {
-        Rn::new(DVector::from_vec(vec![x, y, z]))
     }
 
     /// Get the underlying vector.
@@ -132,22 +145,7 @@ impl LieGroup for Rn {
     type JacobianMatrix = DMatrix<f64>;
     type LieAlgebra = DMatrix<f64>;
 
-    // Dimension constants - these are dynamic for Rⁿ
-    // We'll use the actual vector dimension at runtime
-    const DIM: usize = 0; // Dynamic - will be determined at runtime
-    const DOF: usize = 0; // Dynamic - will be determined at runtime  
-    const REP_SIZE: usize = 0; // Dynamic - will be determined at runtime
 
-    fn identity() -> Self {
-        // Default to 3D identity for compatibility, but this should be created with specific dimension
-        Rn::new(DVector::zeros(3))
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        // Default to 3x3 identity, but this should be created with specific dimension
-        DMatrix::identity(3, 3)
-    }
 
     /// Rⁿ inverse (negation for additive group).
     ///
@@ -464,21 +462,6 @@ impl RnTangent {
         RnTangent::new(DVector::from_vec(components))
     }
 
-    /// Create 1D tangent element.
-    pub fn from_x(x: f64) -> Self {
-        RnTangent::new(DVector::from_element(1, x))
-    }
-
-    /// Create 2D tangent element.
-    pub fn from_xy(x: f64, y: f64) -> Self {
-        RnTangent::new(DVector::from_vec(vec![x, y]))
-    }
-
-    /// Create 3D tangent element.
-    pub fn from_xyz(x: f64, y: f64, z: f64) -> Self {
-        RnTangent::new(DVector::from_vec(vec![x, y, z]))
-    }
-
     /// Get the underlying vector.
     pub fn data(&self) -> &DVector<f64> {
         &self.data
@@ -516,6 +499,10 @@ impl RnTangent {
 }
 
 impl Tangent<Rn> for RnTangent {
+    /// Dimension of the tangent space
+    /// Note: For Rⁿ this is dynamic and determined at runtime
+    const DIM: usize = 0;
+
     /// Exponential map for Euclidean space (identity).
     ///
     /// # Arguments
@@ -686,6 +673,8 @@ impl Rn {
     pub fn jacobian_identity_with_dim(dim: usize) -> DMatrix<f64> {
         DMatrix::identity(dim, dim)
     }
+
+
 }
 
 impl RnTangent {
@@ -704,6 +693,8 @@ impl RnTangent {
         let data = DVector::from_fn(dim, |_, _| rand::random::<f64>() * 2.0 - 1.0);
         RnTangent::new(data)
     }
+
+
 }
 
 #[cfg(test)]
@@ -714,8 +705,8 @@ mod tests {
     #[test]
     fn test_rn_basic_operations() {
         // Test 3D Euclidean space
-        let v1 = Rn::from_xyz(1.0, 2.0, 3.0);
-        let v2 = Rn::from_xyz(4.0, 5.0, 6.0);
+        let v1 = Rn::from_vec(vec![1.0, 2.0, 3.0]);
+        let v2 = Rn::from_vec(vec![4.0, 5.0, 6.0]);
 
         // Test composition (addition)
         let sum = v1.compose(&v2, None, None);
@@ -746,8 +737,8 @@ mod tests {
 
     #[test]
     fn test_rn_tangent_operations() {
-        let t1 = RnTangent::from_xyz(1.0, 2.0, 3.0);
-        let t2 = RnTangent::from_xyz(4.0, 5.0, 6.0);
+        let t1 = RnTangent::from_vec(vec![1.0, 2.0, 3.0]);
+        let t2 = RnTangent::from_vec(vec![4.0, 5.0, 6.0]);
 
         // Test Lie bracket (should be zero for abelian group)
         let bracket = t1.lie_bracket(&t2);
@@ -758,15 +749,15 @@ mod tests {
         assert!(zero.is_zero(1e-10));
 
         // Test normalization
-        let mut t = RnTangent::from_xyz(3.0, 4.0, 0.0);
+        let mut t = RnTangent::from_vec(vec![3.0, 4.0, 0.0]);
         t.normalize();
         assert!((t.norm() - 1.0).abs() < 1e-10);
     }
 
     #[test]
     fn test_rn_interpolation() {
-        let v1 = Rn::from_xyz(0.0, 0.0, 0.0);
-        let v2 = Rn::from_xyz(10.0, 20.0, 30.0);
+        let v1 = Rn::from_vec(vec![0.0, 0.0, 0.0]);
+        let v2 = Rn::from_vec(vec![10.0, 20.0, 30.0]);
 
         // Test interpolation at t=0.5
         let mid = v1.interp(&v2, 0.5);
@@ -784,11 +775,11 @@ mod tests {
     #[test]
     fn test_rn_different_dimensions() {
         // Test 2D
-        let v2d = Rn::from_xy(1.0, 2.0);
+        let v2d = Rn::from_vec(vec![1.0, 2.0]);
         assert_eq!(v2d.dim(), 2);
 
         // Test 1D
-        let v1d = Rn::from_x(5.0);
+        let v1d = Rn::from_vec(vec![5.0]);
         assert_eq!(v1d.dim(), 1);
 
         // Test higher dimensions
@@ -800,7 +791,7 @@ mod tests {
     #[test]
     fn test_rn_action() {
         // Test action on 3D vector (translation)
-        let translation = Rn::from_xyz(1.0, 2.0, 3.0);
+        let translation = Rn::from_vec(vec![1.0, 2.0, 3.0]);
         let point = Vector3::new(4.0, 5.0, 6.0);
         let transformed = translation.act(&point, None, None);
 
@@ -811,8 +802,8 @@ mod tests {
 
     #[test]
     fn test_rn_right_plus_operations() {
-        let v = Rn::from_xyz(1.0, 2.0, 3.0);
-        let delta = RnTangent::from_xyz(0.1, 0.2, 0.3);
+        let v = Rn::from_vec(vec![1.0, 2.0, 3.0]);
+        let delta = RnTangent::from_vec(vec![0.1, 0.2, 0.3]);
 
         // Test right plus without Jacobians
         let result = v.right_plus(&delta, None, None);
@@ -838,8 +829,8 @@ mod tests {
 
     #[test]
     fn test_rn_right_minus_operations() {
-        let v1 = Rn::from_xyz(5.0, 7.0, 9.0);
-        let v2 = Rn::from_xyz(1.0, 2.0, 3.0);
+        let v1 = Rn::from_vec(vec![5.0, 7.0, 9.0]);
+        let v2 = Rn::from_vec(vec![1.0, 2.0, 3.0]);
 
         // Test right minus without Jacobians
         let result = v1.right_minus(&v2, None, None);
@@ -866,8 +857,8 @@ mod tests {
 
     #[test]
     fn test_rn_left_plus_operations() {
-        let v = Rn::from_xyz(1.0, 2.0, 3.0);
-        let delta = RnTangent::from_xyz(0.1, 0.2, 0.3);
+        let v = Rn::from_vec(vec![1.0, 2.0, 3.0]);
+        let delta = RnTangent::from_vec(vec![0.1, 0.2, 0.3]);
 
         // Test left plus without Jacobians
         let result = v.left_plus(&delta, None, None);
@@ -893,8 +884,8 @@ mod tests {
 
     #[test]
     fn test_rn_left_minus_operations() {
-        let v1 = Rn::from_xyz(5.0, 7.0, 9.0);
-        let v2 = Rn::from_xyz(1.0, 2.0, 3.0);
+        let v1 = Rn::from_vec(vec![5.0, 7.0, 9.0]);
+        let v2 = Rn::from_vec(vec![1.0, 2.0, 3.0]);
 
         // Test left minus without Jacobians
         let result = v1.left_minus(&v2, None, None);
@@ -922,9 +913,9 @@ mod tests {
     #[test]
     fn test_rn_left_right_equivalence() {
         // For abelian groups, left and right operations should be equivalent
-        let v1 = Rn::from_xyz(1.0, 2.0, 3.0);
-        let v2 = Rn::from_xyz(4.0, 5.0, 6.0);
-        let delta = RnTangent::from_xyz(0.1, 0.2, 0.3);
+        let v1 = Rn::from_vec(vec![1.0, 2.0, 3.0]);
+        let v2 = Rn::from_vec(vec![4.0, 5.0, 6.0]);
+        let delta = RnTangent::from_vec(vec![0.1, 0.2, 0.3]);
 
         // Test plus operations equivalence
         let right_plus = v1.right_plus(&delta, None, None);
@@ -940,8 +931,8 @@ mod tests {
     #[test]
     fn test_rn_plus_minus_different_dimensions() {
         // Test 2D operations
-        let v2d = Rn::from_xy(1.0, 2.0);
-        let delta2d = RnTangent::from_xy(0.5, 1.0);
+        let v2d = Rn::from_vec(vec![1.0, 2.0]);
+        let delta2d = RnTangent::from_vec(vec![0.5, 1.0]);
         let result2d = v2d.right_plus(&delta2d, None, None);
         assert_eq!(result2d.dim(), 2);
         assert!((result2d.component(0) - 1.5).abs() < 1e-10);
@@ -961,7 +952,7 @@ mod tests {
 
     #[test]
     fn test_rn_plus_minus_edge_cases() {
-        let v = Rn::from_xyz(1.0, 2.0, 3.0);
+        let v = Rn::from_vec(vec![1.0, 2.0, 3.0]);
 
         // Test with zero tangent vector
         let zero_tangent = RnTangent::zeros(3);
@@ -973,7 +964,7 @@ mod tests {
         assert!(self_minus.is_zero(1e-10));
 
         // Test plus then minus (should recover original)
-        let delta = RnTangent::from_xyz(0.5, 1.0, 1.5);
+        let delta = RnTangent::from_vec(vec![0.5, 1.0, 1.5]);
         let plus_result = v.right_plus(&delta, None, None);
         let recovered_delta = plus_result.right_minus(&v, None, None);
         assert!(delta.is_approx(&recovered_delta, 1e-10));
@@ -982,8 +973,8 @@ mod tests {
     #[test]
     fn test_rn_jacobian_dimensions() {
         // Test that Jacobians have correct dimensions for different vector sizes
-        let v1d = Rn::from_x(1.0);
-        let delta1d = RnTangent::from_x(0.1);
+        let v1d = Rn::from_vec(vec![1.0]);
+        let delta1d = RnTangent::from_vec(vec![0.1]);
         let mut jac1d = DMatrix::zeros(1, 1);
         v1d.right_plus(&delta1d, Some(&mut jac1d), None);
         assert_eq!(jac1d.nrows(), 1);

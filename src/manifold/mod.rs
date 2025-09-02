@@ -116,28 +116,9 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// Associated Lie algebra type
     type LieAlgebra: Clone + Debug + PartialEq;
 
-    // Dimension constants (following manif conventions)
 
-    /// Space dimension - dimension of the ambient space that the group acts on
-    const DIM: usize;
-
-    /// Degrees of freedom - dimension of the tangent space
-    const DOF: usize;
-
-    /// Representation size - size of the underlying data representation
-    const REP_SIZE: usize;
 
     // Core group operations
-
-    /// Get the identity element of the group.
-    ///
-    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
-    fn identity() -> Self;
-
-    /// Get the identity matrix for Jacobians.
-    ///
-    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
-    fn jacobian_identity() -> Self::JacobianMatrix;
 
     /// Compute the inverse of this manifold element.
     ///
@@ -302,7 +283,9 @@ pub trait LieGroup: Clone + Debug + PartialEq {
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = Self::jacobian_identity();
+            // Note: jacobian_identity() is now implemented in concrete types
+            // This will be handled by the concrete implementation
+            *jac_self = self.adjoint();
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
@@ -385,7 +368,9 @@ pub trait LieGroup: Clone + Debug + PartialEq {
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = Self::jacobian_identity();
+            // Note: jacobian_identity() is now implemented in concrete types
+            // This will be handled by the concrete implementation
+            *jac_other = other.adjoint();
         }
 
         result
@@ -403,8 +388,8 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 pub trait Tangent<Group: LieGroup>: Clone + Debug + PartialEq {
     // Dimension constants
 
-    /// Dimension of the tangent space (same as Lie group DOF)
-    const DIM: usize = Group::DOF;
+    /// Dimension of the tangent space
+    const DIM: usize;
 
     // Exponential map and Jacobians
 

@@ -65,6 +65,32 @@ impl fmt::Display for SE3Tangent {
 }
 
 impl SE3 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 3;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 6;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 7;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SE3 {
+            rotation: SO3::identity(),
+            translation: Vector3::zeros(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix6<f64> {
+        Matrix6::<f64>::identity()
+    }
+
     /// Create a new SE3 element from translation and rotation.
     ///
     /// # Arguments
@@ -159,22 +185,7 @@ impl LieGroup for SE3 {
     type JacobianMatrix = Matrix6<f64>;
     type LieAlgebra = Matrix4<f64>;
 
-    // Dimension constants following manif conventions
-    const DIM: usize = 3; // Space dimension (3D space)
-    const DOF: usize = 6; // Degrees of freedom (6-DOF: 3 translation + 3 rotation)
-    const REP_SIZE: usize = 7; // Representation size (3 translation + 4 quaternion)
 
-    fn identity() -> Self {
-        SE3 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix6::<f64>::identity()
-    }
 
     /// Get the inverse.
     ///
@@ -483,6 +494,9 @@ impl SE3Tangent {
 
 // Implement LieAlgebra trait for SE3Tangent
 impl Tangent<SE3> for SE3Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 6;
+
     /// Get the SE3 element.
     ///
     /// # Arguments

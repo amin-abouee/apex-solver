@@ -63,6 +63,32 @@ impl fmt::Display for SE2Tangent {
 }
 
 impl SE2 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 2;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 3;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 4;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SE2 {
+            translation: Vector2::zeros(),
+            rotation: UnitComplex::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix3<f64> {
+        Matrix3::<f64>::identity()
+    }
+
     /// Create a new SE2 element from translation and rotation.
     ///
     /// # Arguments
@@ -173,22 +199,7 @@ impl LieGroup for SE2 {
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
 
-    // Dimension constants following manif conventions
-    const DIM: usize = 2; // Space dimension (2D space)
-    const DOF: usize = 3; // Degrees of freedom (3-DOF: 2 translation + 1 rotation)
-    const REP_SIZE: usize = 4; // Representation size (2 translation + 2 complex)
 
-    fn identity() -> Self {
-        SE2 {
-            translation: Vector2::zeros(),
-            rotation: UnitComplex::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix3::<f64>::identity()
-    }
 
     /// Get the inverse.
     ///
@@ -404,6 +415,9 @@ impl SE2Tangent {
 }
 
 impl Tangent<SE2> for SE2Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 3;
+
     /// Get the SE2 element.
     fn exp(&self, jacobian: Option<&mut <SE2 as LieGroup>::JacobianMatrix>) -> SE2 {
         let theta = self.angle();
