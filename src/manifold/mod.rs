@@ -36,6 +36,7 @@ use nalgebra::{Matrix3, Vector3};
 use std::fmt::Debug;
 use std::ops::{Mul, Neg};
 
+pub mod rn;
 pub mod se2;
 pub mod se3;
 pub mod so2;
