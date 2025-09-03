@@ -106,8 +106,6 @@ impl LieGroup for SO2 {
     type JacobianMatrix = nalgebra::Matrix1<f64>;
     type LieAlgebra = Matrix2<f64>;
 
-
-
     /// SO2 inverse.
     ///
     /// # Arguments

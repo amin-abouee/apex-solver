@@ -116,8 +116,6 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// Associated Lie algebra type
     type LieAlgebra: Clone + Debug + PartialEq;
 
-
-
     // Core group operations
 
     /// Compute the inverse of this manifold element.

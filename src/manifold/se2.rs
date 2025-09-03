@@ -199,8 +199,6 @@ impl LieGroup for SE2 {
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
 
-
-
     /// Get the inverse.
     ///
     /// # Arguments

@@ -197,8 +197,6 @@ impl LieGroup for SO3 {
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
 
-
-
     /// SO3 inverse.
     ///
     /// # Arguments

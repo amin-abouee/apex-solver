@@ -138,14 +138,17 @@ impl Rn {
     pub fn norm_squared(&self) -> f64 {
         self.data.norm_squared()
     }
+
+    /// Convert Rn to a DVector
+    pub fn to_vector(&self) -> DVector<f64> {
+        self.data.clone()
+    }
 }
 
 impl LieGroup for Rn {
     type TangentVector = RnTangent;
     type JacobianMatrix = DMatrix<f64>;
     type LieAlgebra = DMatrix<f64>;
-
-
 
     /// Rⁿ inverse (negation for additive group).
     ///
@@ -496,6 +499,11 @@ impl RnTangent {
     pub fn to_vector(&self) -> DVector<f64> {
         self.data.clone()
     }
+
+    /// Create RnTangent from a DVector
+    pub fn from_vector(data: DVector<f64>) -> Self {
+        RnTangent::new(data)
+    }
 }
 
 impl Tangent<Rn> for RnTangent {
@@ -673,8 +681,6 @@ impl Rn {
     pub fn jacobian_identity_with_dim(dim: usize) -> DMatrix<f64> {
         DMatrix::identity(dim, dim)
     }
-
-
 }
 
 impl RnTangent {
@@ -693,8 +699,6 @@ impl RnTangent {
         let data = DVector::from_fn(dim, |_, _| rand::random::<f64>() * 2.0 - 1.0);
         RnTangent::new(data)
     }
-
-
 }
 
 #[cfg(test)]
