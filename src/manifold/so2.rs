@@ -514,3 +514,19 @@ mod tests {
         assert!(expected.norm() < 1e-10); // Should be zero for SO(2)
     }
 }
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SO2 {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
+        if data.len() != 1 {
+            panic!("SO2::from expects 1-dimensional vector [angle]");
+        }
+        SO2::from_angle(data[0])
+    }
+}
+
+impl Into<nalgebra::DVector<f64>> for SO2 {
+    fn into(self) -> nalgebra::DVector<f64> {
+        nalgebra::DVector::from_element(1, self.angle())
+    }
+}

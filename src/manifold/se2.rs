@@ -1409,3 +1409,19 @@ mod tests {
         assert_eq!(hat_matrix[(2, 2)], 0.0);
     }
 }
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SE2 {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
+        if data.len() != 3 {
+            panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
+        }
+        SE2::from_xy_angle(data[0], data[1], data[2])
+    }
+}
+
+impl Into<nalgebra::DVector<f64>> for SE2 {
+    fn into(self) -> nalgebra::DVector<f64> {
+        nalgebra::DVector::from_vec(vec![self.x(), self.y(), self.angle()])
+    }
+}
