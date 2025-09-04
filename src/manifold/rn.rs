@@ -36,6 +36,13 @@ impl fmt::Display for Rn {
     }
 }
 
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for Rn {
+    fn from(data: DVector<f64>) -> Self {
+        Rn::new(data)
+    }
+}
+
 /// Rⁿ tangent space element representing elements in the Lie algebra rⁿ.
 ///
 /// For Euclidean space, the tangent space is isomorphic to the manifold itself,
@@ -994,18 +1001,5 @@ mod tests {
         // Verify they are identity matrices
         assert!((jac1d - DMatrix::identity(1, 1)).norm() < 1e-10);
         assert!((jac4d - DMatrix::identity(4, 4)).norm() < 1e-10);
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for Rn {
-    fn from(data: DVector<f64>) -> Self {
-        Rn::new(data)
-    }
-}
-
-impl Into<DVector<f64>> for Rn {
-    fn into(self) -> DVector<f64> {
-        self.data
     }
 }

@@ -39,6 +39,16 @@ impl fmt::Display for SE2 {
     }
 }
 
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SE2 {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
+        if data.len() != 3 {
+            panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
+        }
+        SE2::from_xy_angle(data[0], data[1], data[2])
+    }
+}
+
 /// SE(2) tangent space element representing elements in the Lie algebra se(2).
 ///
 /// Following manif conventions, internally represented as [x, y, theta] where:
@@ -1356,7 +1366,7 @@ mod tests {
 
         // Test specific values for the generators
         let e1 = tangent.generator(0); // x translation
-        let e2 = tangent.generator(1); // y translation  
+        let e2 = tangent.generator(1); // y translation
         let e3 = tangent.generator(2); // rotation
 
         // Expected generators for SE(2)
@@ -1407,21 +1417,5 @@ mod tests {
         assert_eq!(hat_matrix[(2, 0)], 0.0);
         assert_eq!(hat_matrix[(2, 1)], 0.0);
         assert_eq!(hat_matrix[(2, 2)], 0.0);
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<nalgebra::DVector<f64>> for SE2 {
-    fn from(data: nalgebra::DVector<f64>) -> Self {
-        if data.len() != 3 {
-            panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
-        }
-        SE2::from_xy_angle(data[0], data[1], data[2])
-    }
-}
-
-impl Into<nalgebra::DVector<f64>> for SE2 {
-    fn into(self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_vec(vec![self.x(), self.y(), self.angle()])
     }
 }
