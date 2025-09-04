@@ -1,10 +1,11 @@
 use nalgebra as na;
-use rayon::prelude::*;
+// use rayon::prelude::*;
 
-use crate::corrector::Corrector;
-use crate::factors::FactorImpl;
-use crate::loss_functions::Loss;
-use crate::variable::Variable;
+use crate::core::corrector::Corrector;
+use crate::core::factors::FactorImpl;
+use crate::core::loss_functions::Loss;
+use crate::core::variable::Variable;
+use crate::manifold::LieGroup;
 
 pub struct ResidualBlock {
     pub residual_block_id: usize,
@@ -37,11 +38,15 @@ impl ResidualBlock {
         }
     }
 
-    pub fn residual_and_jacobian(
+    pub fn residual_and_jacobian<M>(
         &self,
-        variables: &[&Variable],
-    ) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let param_vec: Vec<_> = variables.iter().map(|v| v.values.clone()).collect();
+        variables: &[&Variable<M>],
+    ) -> (na::DVector<f64>, na::DMatrix<f64>)
+    where
+        M: LieGroup + Clone + Into<na::DVector<f64>>,
+        M::TangentVector: crate::manifold::Tangent<M>,
+    {
+        let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
         let (mut residual, mut jacobian) = self.factor.residual_with_jacobian(&param_vec);
         let squared_norm = residual.norm_squared();
         if let Some(loss_func) = self.loss_func.as_ref() {
@@ -54,14 +59,4 @@ impl ResidualBlock {
     }
 }
 
-fn get_variable_rows(variable_rows: &[usize]) -> Vec<Vec<usize>> {
-    let mut result = Vec::with_capacity(variable_rows.len());
-    let mut current = 0;
-    for &num in variable_rows {
-        let next = current + num;
-        let range = (current..next).collect();
-        result.push(range);
-        current = next;
-    }
-    result
-}
+

@@ -4,7 +4,11 @@
 //! including error handling and result types.
 
 use std::fmt;
+pub mod corrector;
 pub mod factors;
+pub mod loss_functions;
+pub mod problem;
+pub mod residual_block;
 pub mod variable;
 
 /// Main result type used throughout the apex-solver library

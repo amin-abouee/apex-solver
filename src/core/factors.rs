@@ -6,6 +6,18 @@ pub trait Factor: Send + Sync {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
 }
 
+// Bridge trait to match the expected interface in residual_block.rs
+pub trait FactorImpl: Send + Sync {
+    fn residual_with_jacobian(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
+}
+
+// Implement FactorImpl for any type that implements Factor
+impl<T: Factor> FactorImpl for T {
+    fn residual_with_jacobian(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
+        self.linearize(params)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE2 {
     pub dx: f64,

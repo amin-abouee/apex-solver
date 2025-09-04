@@ -1,44 +1,59 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
+// use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
 use faer_ext::IntoFaer;
-use nalgebra;
+use nalgebra as na;
 use rayon::prelude::*;
 
-use crate::variable::Variable;
-use crate::{factors, loss_functions, residual_block};
+use crate::core::variable::Variable;
+use crate::core::{factors, residual_block, loss_functions};
+use crate::manifold::LieGroup;
 
 type ResidualBlockId = usize;
-type JacobianValue = f64;
-pub struct Problem {
+
+/// Generic Problem struct that works with any manifold type M
+///
+/// This struct represents an optimization problem where all variables
+/// live on the same manifold type M. For problems with mixed manifold types,
+/// multiple Problem instances can be used or a higher-level coordinator.
+pub struct Problem<M: LieGroup> {
     pub total_residual_dimension: usize,
     residual_id_count: usize,
     residual_blocks: HashMap<ResidualBlockId, residual_block::ResidualBlock>,
     pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
     pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
+    _phantom: std::marker::PhantomData<M>,
 }
-impl Default for Problem {
+impl<M> Default for Problem<M>
+where
+    M: LieGroup + Clone + Send + Sync + 'static + Into<na::DVector<f64>>,
+    M::TangentVector: crate::manifold::Tangent<M>,
+{
     fn default() -> Self {
         Self::new()
     }
 }
 
-
-impl Problem {
-    pub fn new() -> Problem {
-        Problem {
+impl<M> Problem<M>
+where
+    M: LieGroup + Clone + Send + Sync + 'static + Into<na::DVector<f64>>,
+    M::TangentVector: crate::manifold::Tangent<M>,
+{
+    pub fn new() -> Self {
+        Self {
             total_residual_dimension: 0,
             residual_id_count: 0,
             residual_blocks: HashMap::new(),
             fixed_variable_indexes: HashMap::new(),
             variable_bounds: HashMap::new(),
+            _phantom: std::marker::PhantomData,
         }
     }
 
     pub fn get_variable_name_to_col_idx_dict(
         &self,
-        variables: &HashMap<String, Variable>,
+        variables: &HashMap<String, Variable<M>>,
     ) -> HashMap<String, usize> {
         let mut count_col_idx = 0;
         let mut variable_name_to_col_idx_dict = HashMap::new();
@@ -46,7 +61,7 @@ impl Problem {
             .iter()
             .for_each(|(var_name, variable)| {
                 variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
-                count_col_idx += variable.tangent_size();
+                count_col_idx += variable.get_size();
             });
         variable_name_to_col_idx_dict
     }
@@ -55,7 +70,7 @@ impl Problem {
         &mut self,
         dim_residual: usize,
         variable_key_size_list: &[&str],
-        factor: Box<dyn factors::Factor + Send>,
+        factor: Box<dyn factors::FactorImpl + Send>,
         loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
     ) -> ResidualBlockId {
         self.residual_blocks.insert(
@@ -125,14 +140,24 @@ impl Problem {
         self.variable_bounds.remove(var_to_unbound);
     }
 
+    /// Initialize variables from initial values
+    ///
+    /// This method requires that the manifold type M can be constructed from
+    /// a vector representation. For most manifolds, this means the vector
+    /// should contain the appropriate number of parameters.
     pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, na::DVector<f64>>,
-    ) -> HashMap<String, Variable> {
-        let variables: HashMap<String, Variable> = initial_values
+    ) -> HashMap<String, Variable<M>>
+    where
+        M: From<na::DVector<f64>>,
+    {
+        let variables: HashMap<String, Variable<M>> = initial_values
             .iter()
             .map(|(k, v)| {
-                let mut variable = Variable::from_vec(v.clone());
+                let manifold_value = M::from(v.clone());
+                let mut variable = Variable::new(manifold_value);
+
                 if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                     variable.fixed_indices = indexes.clone();
                 }
@@ -148,7 +173,7 @@ impl Problem {
 
     pub fn compute_residual_and_jacobian(
         &self,
-        variables: &HashMap<String, Variable>,
+        variables: &HashMap<String, Variable<M>>,
         variable_name_to_col_idx_dict: &HashMap<String, usize>,
     ) -> (faer::Mat<f64>, na::DMatrix<f64>) {
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
@@ -162,7 +187,7 @@ impl Problem {
         self.residual_blocks
             .par_iter()
             .for_each(|(_, residual_block)| {
-                let mut vars = Vec::new();
+                let mut vars: Vec<&Variable<M>> = Vec::new();
                 for var_key in &residual_block.variable_key_list {
                     if let Some(variable) = variables.get(var_key) {
                         vars.push(variable);
@@ -181,10 +206,10 @@ impl Problem {
                 {
                     let mut total_jacobian = total_jacobian.lock().unwrap();
                     let mut current_col = 0;
-                    for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
+                    for (_i, var_key) in residual_block.variable_key_list.iter().enumerate() {
                         if let Some(col_idx) = variable_name_to_col_idx_dict.get(var_key) {
                             let variable = variables.get(var_key).unwrap();
-                            let tangent_size = variable.tangent_size();
+                            let tangent_size = variable.get_size();
                             total_jacobian
                                 .view_mut(
                                     (residual_block.residual_row_start_idx, *col_idx),
@@ -209,6 +234,7 @@ impl Problem {
             .into_inner()
             .unwrap();
 
-        (total_residual.into_faer().to_owned(), total_jacobian)
+        let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
+        (residual_faer, total_jacobian)
     }
 }

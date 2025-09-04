@@ -37,7 +37,7 @@ pub struct Variable<M: LieGroup> {
 
 impl<M> Variable<M>
 where
-    M: LieGroup + Clone,
+    M: LieGroup + Clone + 'static,
     M::TangentVector: Tangent<M>,
 {
     /// Create a new Variable from a manifold value.
@@ -77,7 +77,24 @@ where
     /// # Returns
     /// The tangent space dimension (degrees of freedom)
     pub fn get_size(&self) -> usize {
-        M::TangentVector::DIM
+        // For most manifolds, use the compile-time constant
+        if M::TangentVector::DIM > 0 {
+            M::TangentVector::DIM
+        } else {
+            // For dynamically sized manifolds like Rn, we need a different approach
+            // This is a bit of a hack, but works for our current needs
+            match std::any::type_name::<M>() {
+                name if name.contains("Rn") => {
+                    // For Rn manifold, get the dynamic size
+                    if let Some(rn_var) = (self as &dyn std::any::Any).downcast_ref::<Variable<crate::manifold::rn::Rn>>() {
+                        rn_var.dynamic_size()
+                    } else {
+                        0
+                    }
+                }
+                _ => M::TangentVector::DIM,
+            }
+        }
     }
 
     /// Plus operation: apply tangent space perturbation to the manifold value.
@@ -135,6 +152,8 @@ where
     pub fn minus(&self, other: &Self) -> M::TangentVector {
         self.value.minus(&other.value, None, None)
     }
+
+
 }
 
 // Extension implementation for Rn manifold (special case since it's Euclidean)
