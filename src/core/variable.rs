@@ -86,7 +86,9 @@ where
             match std::any::type_name::<M>() {
                 name if name.contains("Rn") => {
                     // For Rn manifold, get the dynamic size
-                    if let Some(rn_var) = (self as &dyn std::any::Any).downcast_ref::<Variable<crate::manifold::rn::Rn>>() {
+                    if let Some(rn_var) = (self as &dyn std::any::Any)
+                        .downcast_ref::<Variable<crate::manifold::rn::Rn>>()
+                    {
                         rn_var.dynamic_size()
                     } else {
                         0
@@ -152,8 +154,6 @@ where
     pub fn minus(&self, other: &Self) -> M::TangentVector {
         self.value.minus(&other.value, None, None)
     }
-
-
 }
 
 // Extension implementation for Rn manifold (special case since it's Euclidean)

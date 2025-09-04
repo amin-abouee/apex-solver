@@ -7,7 +7,7 @@ use nalgebra as na;
 use rayon::prelude::*;
 
 use crate::core::variable::Variable;
-use crate::core::{factors, residual_block, loss_functions};
+use crate::core::{factors, loss_functions, residual_block};
 use crate::manifold::LieGroup;
 
 type ResidualBlockId = usize;
@@ -57,12 +57,10 @@ where
     ) -> HashMap<String, usize> {
         let mut count_col_idx = 0;
         let mut variable_name_to_col_idx_dict = HashMap::new();
-        variables
-            .iter()
-            .for_each(|(var_name, variable)| {
-                variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
-                count_col_idx += variable.get_size();
-            });
+        variables.iter().for_each(|(var_name, variable)| {
+            variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
+            count_col_idx += variable.get_size();
+        });
         variable_name_to_col_idx_dict
     }
 
@@ -206,7 +204,7 @@ where
                 {
                     let mut total_jacobian = total_jacobian.lock().unwrap();
                     let mut current_col = 0;
-                    for (_i, var_key) in residual_block.variable_key_list.iter().enumerate() {
+                    for var_key in residual_block.variable_key_list.iter() {
                         if let Some(col_idx) = variable_name_to_col_idx_dict.get(var_key) {
                             let variable = variables.get(var_key).unwrap();
                             let tangent_size = variable.get_size();

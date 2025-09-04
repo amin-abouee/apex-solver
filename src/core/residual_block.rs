@@ -58,5 +58,3 @@ impl ResidualBlock {
         (residual, jacobian)
     }
 }
-
-
