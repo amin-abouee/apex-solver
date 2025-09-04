@@ -135,16 +135,6 @@ where
     pub fn minus(&self, other: &Self) -> M::TangentVector {
         self.value.minus(&other.value, None, None)
     }
-
-    /// Create a tangent vector perturbation and apply constraints.
-    ///
-    /// This method takes a tangent vector and applies bounds and fixed constraints.
-    ///
-    /// # Arguments
-    /// * `tangent` - The tangent vector to apply
-    pub fn apply_tangent_perturbation(&mut self, tangent: &M::TangentVector) {
-        self.value = self.value.plus(tangent, None, None);
-    }
 }
 
 // Extension implementation for Rn manifold (special case since it's Euclidean)
@@ -167,27 +157,18 @@ impl Variable<Rn> {
     }
 
     /// Update the Rn variable with bounds and fixed constraints.
-    pub fn update_variable(&mut self, tangent_delta: na::DVector<f64>) {
-        let mut constrained_delta = tangent_delta;
-
-        // Apply bounds constraints
+    pub fn update_variable(&mut self, mut tangent_delta: na::DVector<f64>) {
+        // bound
         for (&idx, &(lower, upper)) in &self.bounds {
-            if idx < constrained_delta.len() {
-                constrained_delta[idx] = constrained_delta[idx].max(lower).min(upper);
-            }
+            tangent_delta[idx] = tangent_delta[idx].max(lower).min(upper);
         }
 
-        // Apply fixed indices (set delta to zero for fixed components)
+        // fix
         for &index_to_fix in &self.fixed_indices {
-            if index_to_fix < constrained_delta.len() {
-                constrained_delta[index_to_fix] = 0.0;
-            }
+            tangent_delta[index_to_fix] = self.value.data()[index_to_fix];
         }
 
-        // For Rn, the tangent is the same as the manifold, so we can directly add
-        let current_data = self.value.data().clone();
-        let new_data = current_data + constrained_delta;
-        self.value = Rn::new(new_data);
+        self.value = Rn::new(tangent_delta);
     }
 }
 
@@ -272,17 +253,43 @@ mod tests {
 
     #[test]
     fn test_variable_plus_minus_operations() {
+        // Test SE2 manifold plus/minus operations
         let se2_1 = SE2::from_xy_angle(2.0, 3.0, PI / 2.0);
         let se2_2 = SE2::from_xy_angle(1.0, 1.0, PI / 4.0);
         let var1 = Variable::new(se2_1);
         let var2 = Variable::new(se2_2);
 
         let diff_tangent = var1.minus(&var2);
-
         let var2_updated = var2.plus(&diff_tangent);
-
         let final_diff = var1.minus(&Variable::new(var2_updated));
 
+        assert!(final_diff.to_vector().norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_variable_rn_plus_minus_operations() {
+        // Test Rn manifold plus/minus operations
+        let rn_1 = Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0]));
+        let rn_2 = Rn::new(na::DVector::from_vec(vec![4.0, 5.0, 6.0]));
+        let var1 = Variable::new(rn_1);
+        let var2 = Variable::new(rn_2);
+
+        // Test minus operation
+        let diff_tangent = var1.minus(&var2);
+        assert_eq!(
+            diff_tangent.to_vector(),
+            na::DVector::from_vec(vec![-3.0, -3.0, -3.0])
+        );
+
+        // Test plus operation
+        let var2_updated = var2.plus(&diff_tangent);
+        assert_eq!(
+            var2_updated.data(),
+            &na::DVector::from_vec(vec![1.0, 2.0, 3.0])
+        );
+
+        // Test roundtrip consistency
+        let final_diff = var1.minus(&Variable::new(var2_updated));
         assert!(final_diff.to_vector().norm() < 1e-10);
     }
 
@@ -372,8 +379,8 @@ mod tests {
         // Test Rn manifold operations (has vector conversion methods)
         let rn_initial = Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0]));
         let mut rn_var = Variable::new(rn_initial);
-        let rn_delta = na::DVector::from_vec(vec![1.0, 1.0, 1.0]);
-        rn_var.update_variable(rn_delta);
+        let rn_new_values = na::DVector::from_vec(vec![2.0, 3.0, 4.0]);
+        rn_var.update_variable(rn_new_values);
 
         let rn_result = rn_var.to_vector();
         assert_eq!(rn_result, na::DVector::from_vec(vec![2.0, 3.0, 4.0]));
@@ -390,20 +397,6 @@ mod tests {
 
         // The final difference should be small (close to identity in tangent space)
         assert!(final_diff.to_vector().norm() < 1e-10);
-    }
-
-    #[test]
-    fn test_variable_tangent_operations() {
-        // Test that we can apply tangent perturbations directly
-        let se2 = SE2::from_xy_angle(1.0, 2.0, PI / 4.0);
-        let mut variable = Variable::new(se2);
-
-        // Create a tangent vector and apply it
-        let tangent = crate::manifold::se2::SE2Tangent::new(0.1, 0.1, 0.1);
-        variable.apply_tangent_perturbation(&tangent);
-
-        // Verify the variable was updated (should have different value than original)
-        assert_eq!(variable.get_size(), SE2::DOF);
     }
 
     #[test]
