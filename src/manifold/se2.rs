@@ -49,6 +49,16 @@ impl From<nalgebra::DVector<f64>> for SE2 {
     }
 }
 
+impl From<SE2> for nalgebra::DVector<f64> {
+    fn from(se2: SE2) -> Self {
+        nalgebra::DVector::from_vec(vec![
+            se2.translation.x,
+            se2.translation.y,
+            se2.rotation.angle(),
+        ])
+    }
+}
+
 /// SE(2) tangent space element representing elements in the Lie algebra se(2).
 ///
 /// Following manif conventions, internally represented as [x, y, theta] where:

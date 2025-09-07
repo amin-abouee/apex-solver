@@ -38,6 +38,12 @@ impl From<nalgebra::DVector<f64>> for SO2 {
     }
 }
 
+impl From<SO2> for nalgebra::DVector<f64> {
+    fn from(so2: SO2) -> Self {
+        nalgebra::DVector::from_vec(vec![so2.complex.angle()])
+    }
+}
+
 /// SO(2) tangent space element representing elements in the Lie algebra so(2).
 ///
 /// Internally represented as a single scalar (angle in radians).

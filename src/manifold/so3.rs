@@ -93,7 +93,7 @@ impl SO3 {
     ///
     /// # Arguments
     /// * `x` - i component of quaternion
-    /// * `y` - j component of quaternion  
+    /// * `y` - j component of quaternion
     /// * `z` - k component of quaternion
     /// * `w` - w (real) component of quaternion
     pub fn from_quaternion_coeffs(x: f64, y: f64, z: f64, w: f64) -> Self {
@@ -188,6 +188,22 @@ impl SO3 {
     /// of the relative rotation between the two elements.
     pub fn distance(&self, other: &Self) -> f64 {
         self.between(other, None, None).log(None).angle()
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SO3 {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
+        if data.len() != 4 {
+            panic!("SO3::from expects 4-dimensional vector [w, i, j, k]");
+        }
+        SO3::from_quaternion_coeffs(data[0], data[1], data[2], data[3])
+    }
+}
+
+impl From<SO3> for nalgebra::DVector<f64> {
+    fn from(so3: SO3) -> Self {
+        nalgebra::DVector::from_vec(so3.coeffs().to_vec())
     }
 }
 

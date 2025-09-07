@@ -177,6 +177,39 @@ impl SE3 {
     pub fn z(&self) -> f64 {
         self.translation.z
     }
+
+    /// Get coefficients as array [tx, ty, tz, qw, qx, qy, qz].
+    pub fn coeffs(&self) -> [f64; 7] {
+        let q = self.rotation.quaternion();
+        [
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+        ]
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SE3 {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
+        if data.len() != 7 {
+            panic!("SE3::from expects 7-dimensional vector [x, y, z, w, x, y, z]");
+        }
+        let translation = Vector3::new(data[0], data[1], data[2]);
+        let quaternion = Quaternion::new(data[6], data[3], data[4], data[5]);
+        let rotation = SO3::new(UnitQuaternion::from_quaternion(quaternion.normalize()));
+        SE3::from_translation_so3(translation, rotation)
+    }
+}
+
+impl From<SE3> for nalgebra::DVector<f64> {
+    fn from(se3: SE3) -> Self {
+        nalgebra::DVector::from_vec(se3.coeffs().to_vec())
+    }
 }
 
 // Implement basic trait requirements for LieGroup
