@@ -2,32 +2,29 @@ use nalgebra as na;
 // use rayon::prelude::*;
 
 use crate::core::corrector::Corrector;
-use crate::core::factors::FactorImpl;
+use crate::core::factors::Factor;
 use crate::core::loss_functions::Loss;
 use crate::core::variable::Variable;
 use crate::manifold::LieGroup;
 
 pub struct ResidualBlock {
     pub residual_block_id: usize,
-    pub dim_residual: usize,
     pub residual_row_start_idx: usize,
     pub variable_key_list: Vec<String>,
-    pub factor: Box<dyn FactorImpl + Send>,
+    pub factor: Box<dyn Factor + Send>,
     pub loss_func: Option<Box<dyn Loss + Send>>,
 }
 
 impl ResidualBlock {
     pub fn new(
         residual_block_id: usize,
-        dim_residual: usize,
         residual_row_start_idx: usize,
         variable_key_size_list: &[&str],
-        factor: Box<dyn FactorImpl + Send>,
+        factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn Loss + Send>>,
     ) -> Self {
         ResidualBlock {
             residual_block_id,
-            dim_residual,
             residual_row_start_idx,
             variable_key_list: variable_key_size_list
                 .iter()
@@ -47,7 +44,7 @@ impl ResidualBlock {
         M::TangentVector: crate::manifold::Tangent<M>,
     {
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
-        let (mut residual, mut jacobian) = self.factor.residual_with_jacobian(&param_vec);
+        let (mut residual, mut jacobian) = self.factor.linearize(&param_vec);
         let squared_norm = residual.norm_squared();
         if let Some(loss_func) = self.loss_func.as_ref() {
             let rho = loss_func.evaluate(squared_norm);
