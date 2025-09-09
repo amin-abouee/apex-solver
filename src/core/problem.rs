@@ -8,38 +8,27 @@ use rayon::prelude::*;
 
 use crate::core::variable::Variable;
 use crate::core::{factors, loss_functions, residual_block};
-use crate::manifold::LieGroup;
+use crate::manifold::rn::Rn;
+use crate::manifold::se2::SE2;
+use crate::manifold::se3::SE3;
+use crate::manifold::so2::SO2;
+use crate::manifold::so3::SO3;
+use crate::manifold::{LieGroup, ManifoldType};
 
-type ResidualBlockId = usize;
-
-/// Generic Problem struct that works with any manifold type M
-///
-/// This struct represents an optimization problem where all variables
-/// live on the same manifold type M. For problems with mixed manifold types,
-/// multiple Problem instances can be used or a higher-level coordinator.
-pub struct Problem<M: LieGroup> {
+pub struct Problem {
     pub total_residual_dimension: usize,
     residual_id_count: usize,
-    residual_blocks: HashMap<ResidualBlockId, residual_block::ResidualBlock>,
+    residual_blocks: HashMap<usize, residual_block::ResidualBlock>,
     pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
     pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
-    _phantom: std::marker::PhantomData<M>,
 }
-impl<M> Default for Problem<M>
-where
-    M: LieGroup + Clone + Send + Sync + 'static + Into<na::DVector<f64>>,
-    M::TangentVector: crate::manifold::Tangent<M>,
-{
+impl Default for Problem {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<M> Problem<M>
-where
-    M: LieGroup + Clone + Send + Sync + 'static + Into<na::DVector<f64>>,
-    M::TangentVector: crate::manifold::Tangent<M>,
-{
+impl Problem {
     pub fn new() -> Self {
         Self {
             total_residual_dimension: 0,
@@ -47,35 +36,34 @@ where
             residual_blocks: HashMap::new(),
             fixed_variable_indexes: HashMap::new(),
             variable_bounds: HashMap::new(),
-            _phantom: std::marker::PhantomData,
         }
     }
 
-    pub fn get_variable_name_to_col_idx_dict(
-        &self,
-        variables: &HashMap<String, Variable<M>>,
-    ) -> HashMap<String, usize> {
-        let mut count_col_idx = 0;
-        let mut variable_name_to_col_idx_dict = HashMap::new();
-        variables.iter().for_each(|(var_name, variable)| {
-            variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
-            count_col_idx += variable.get_size();
-        });
-        variable_name_to_col_idx_dict
-    }
+    // pub fn get_variable_name_to_col_idx_dict(
+    //     &self,
+    //     variables: &HashMap<String, Variable<M>>,
+    // ) -> HashMap<String, usize> {
+    //     let mut count_col_idx = 0;
+    //     let mut variable_name_to_col_idx_dict = HashMap::new();
+    //     variables.iter().for_each(|(var_name, variable)| {
+    //         variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
+    //         count_col_idx += variable.get_size();
+    //     });
+    //     variable_name_to_col_idx_dict
+    // }
 
     pub fn add_residual_block(
         &mut self,
         dim_residual: usize,
         variable_key_size_list: &[&str],
-        factor: Box<dyn factors::FactorImpl + Send>,
+        factor: Box<dyn factors::Factor + Send>,
         loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
-    ) -> ResidualBlockId {
+    ) -> usize {
+        let new_residual_dimension = factor.get_dimension();
         self.residual_blocks.insert(
             self.residual_id_count,
             residual_block::ResidualBlock::new(
                 self.residual_id_count,
-                dim_residual,
                 self.total_residual_dimension,
                 variable_key_size_list,
                 factor,
@@ -85,17 +73,17 @@ where
         let block_id = self.residual_id_count;
         self.residual_id_count += 1;
 
-        self.total_residual_dimension += dim_residual;
+        self.total_residual_dimension += new_residual_dimension;
 
         block_id
     }
 
     pub fn remove_residual_block(
         &mut self,
-        block_id: ResidualBlockId,
+        block_id: usize,
     ) -> Option<residual_block::ResidualBlock> {
         if let Some(residual_block) = self.residual_blocks.remove(&block_id) {
-            self.total_residual_dimension -= residual_block.dim_residual;
+            self.total_residual_dimension -= residual_block.factor.get_dimension();
             Some(residual_block)
         } else {
             None
@@ -143,18 +131,22 @@ where
     /// This method requires that the manifold type M can be constructed from
     /// a vector representation. For most manifolds, this means the vector
     /// should contain the appropriate number of parameters.
-    pub fn initialize_variables(
+    pub fn initialize_variables<M>(
         &self,
-        initial_values: &HashMap<String, na::DVector<f64>>,
+        initial_values: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
     ) -> HashMap<String, Variable<M>>
     where
-        M: From<na::DVector<f64>>,
+        M: LieGroup,
     {
         let variables: HashMap<String, Variable<M>> = initial_values
             .iter()
             .map(|(k, v)| {
-                let manifold_value = M::from(v.clone());
-                let mut variable = Variable::new(manifold_value);
+                let mut variable = match v.0 {
+                    SO2 => SO2::from(v.1.clone()),
+                    SO3 => SO3::from(v.1.clone()),
+                    SE3 => SE3::from(v.1.clone()),
+                    Rn => Rn::from(v.1.clone()),
+                };
 
                 if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                     variable.fixed_indices = indexes.clone();
@@ -169,11 +161,14 @@ where
         variables
     }
 
-    pub fn compute_residual_and_jacobian(
+    pub fn compute_residual_and_jacobian<M>(
         &self,
         variables: &HashMap<String, Variable<M>>,
         variable_name_to_col_idx_dict: &HashMap<String, usize>,
-    ) -> (faer::Mat<f64>, na::DMatrix<f64>) {
+    ) -> (faer::Mat<f64>, na::DMatrix<f64>)
+    where
+        M: LieGroup,
+    {
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
             self.total_residual_dimension,
         )));
@@ -197,7 +192,7 @@ where
                     total_residual
                         .rows_mut(
                             residual_block.residual_row_start_idx,
-                            residual_block.dim_residual,
+                            residual_block.factor.get_dimension(),
                         )
                         .copy_from(&res);
                 }
@@ -211,11 +206,11 @@ where
                             total_jacobian
                                 .view_mut(
                                     (residual_block.residual_row_start_idx, *col_idx),
-                                    (residual_block.dim_residual, tangent_size),
+                                    (residual_block.factor.get_dimension(), tangent_size),
                                 )
                                 .copy_from(&jac.view(
                                     (0, current_col),
-                                    (residual_block.dim_residual, tangent_size),
+                                    (residual_block.factor.get_dimension(), tangent_size),
                                 ));
                             current_col += tangent_size;
                         }
