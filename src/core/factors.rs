@@ -4,24 +4,7 @@ use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
 
 pub trait Factor: Send + Sync {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
-}
-
-// Bridge trait to match the expected interface in residual_block.rs
-pub trait FactorImpl: Send + Sync {
-    fn residual_with_jacobian(
-        &self,
-        params: &[na::DVector<f64>],
-    ) -> (na::DVector<f64>, na::DMatrix<f64>);
-}
-
-// Implement FactorImpl for any type that implements Factor
-impl<T: Factor> FactorImpl for T {
-    fn residual_with_jacobian(
-        &self,
-        params: &[na::DVector<f64>],
-    ) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        self.linearize(params)
-    }
+    fn get_dimension(&self) -> usize;
 }
 
 #[derive(Debug, Clone)]
@@ -29,17 +12,11 @@ pub struct BetweenFactorSE2 {
     pub dx: f64,
     pub dy: f64,
     pub dtheta: f64,
-    pub information: na::Matrix3<f64>,
 }
 
 impl BetweenFactorSE2 {
-    pub fn new(dx: f64, dy: f64, dtheta: f64, information: na::Matrix3<f64>) -> Self {
-        Self {
-            dx,
-            dy,
-            dtheta,
-            information,
-        }
+    pub fn new(dx: f64, dy: f64, dtheta: f64) -> Self {
+        Self { dx, dy, dtheta }
     }
 }
 
@@ -83,6 +60,10 @@ impl Factor for BetweenFactorSE2 {
 
         (residual.to_vector(), jacobian)
     }
+
+    fn get_dimension(&self) -> usize {
+        3
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -90,34 +71,22 @@ pub struct BetweenFactorSE3 {
     pub dtx: f64,
     pub dty: f64,
     pub dtz: f64,
+    pub dqw: f64,
     pub dqx: f64,
     pub dqy: f64,
     pub dqz: f64,
-    pub dqw: f64,
-    pub information: na::Matrix6<f64>,
 }
 
 impl BetweenFactorSE3 {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        dtx: f64,
-        dty: f64,
-        dtz: f64,
-        dqx: f64,
-        dqy: f64,
-        dqz: f64,
-        dqw: f64,
-        information: na::Matrix6<f64>,
-    ) -> Self {
+    pub fn new(dtx: f64, dty: f64, dtz: f64, dqw: f64, dqx: f64, dqy: f64, dqz: f64) -> Self {
         Self {
             dtx,
             dty,
             dtz,
+            dqw,
             dqx,
             dqy,
             dqz,
-            dqw,
-            information,
         }
     }
 }
@@ -172,6 +141,10 @@ impl Factor for BetweenFactorSE3 {
 
         (residual.to_vector(), jacobian)
     }
+
+    fn get_dimension(&self) -> usize {
+        6
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -183,5 +156,9 @@ impl Factor for PriorFactor {
         let residual = params[0].clone() - self.v.clone();
         let jacobian = na::DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
         (residual, jacobian)
+    }
+
+    fn get_dimension(&self) -> usize {
+        self.v.len()
     }
 }
