@@ -53,6 +53,14 @@ pub enum ManifoldError {
     InvalidElement(String),
 }
 
+pub enum ManifoldType {
+    RN,
+    SE2,
+    SE3,
+    SO2,
+    SO3,
+}
+
 impl std::fmt::Display for ManifoldError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -132,7 +140,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// # Arguments
     /// * `other` - The right operand for composition
-    /// * `jacobian_self` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₁  
+    /// * `jacobian_self` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₁
     /// * `jacobian_other` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₂
     fn compose(
         &self,
@@ -163,7 +171,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// # Arguments
     /// * `vector` - Vector to transform
-    /// * `jacobian_self` - Optional Jacobian ∂(g ⊙ v)/∂g  
+    /// * `jacobian_self` - Optional Jacobian ∂(g ⊙ v)/∂g
     /// * `jacobian_vector` - Optional Jacobian ∂(g ⊙ v)/∂v
     fn act(
         &self,
@@ -206,7 +214,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// Applies a tangent space perturbation to this manifold element.
     ///
-    /// # Arguments  
+    /// # Arguments
     /// * `tangent` - Tangent vector perturbation
     /// * `jacobian_self` - Optional Jacobian ∂(g ⊞ φ)/∂g
     /// * `jacobian_tangent` - Optional Jacobian ∂(g ⊞ φ)/∂φ
@@ -214,7 +222,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Notes
     /// # Equation 148:
     /// J_R⊕θ_R = R(θ)ᵀ
-    /// J_R⊕θ_θ = J_r(θ)  
+    /// J_R⊕θ_θ = J_r(θ)
     fn right_plus(
         &self,
         tangent: &Self::TangentVector,
@@ -242,7 +250,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Notes
     /// # Equation 149:
     /// J_Q⊖R_Q = J_r⁻¹(θ)
-    /// J_Q⊖R_R = -J_l⁻¹(θ)  
+    /// J_Q⊖R_R = -J_l⁻¹(θ)
     fn right_minus(
         &self,
         other: &Self,
@@ -267,7 +275,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// Left plus operation: φ ⊞ g = exp(φ^∧) ∘ g.
     ///
     /// # Arguments
-    /// * `tangent` - Tangent vector perturbation  
+    /// * `tangent` - Tangent vector perturbation
     /// * `jacobian_tangent` - Optional Jacobian ∂(φ ⊞ g)/∂φ
     /// * `jacobian_self` - Optional Jacobian ∂(φ ⊞ g)/∂g
     fn left_plus(
@@ -298,7 +306,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Arguments
     /// * `other` - The reference element g₂
     /// * `jacobian_self` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₁
-    /// * `jacobian_other` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₂  
+    /// * `jacobian_other` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₂
     fn left_minus(
         &self,
         other: &Self,
@@ -403,7 +411,7 @@ pub trait Tangent<Group: LieGroup>: Clone + Debug + PartialEq {
     /// exp((φ + δφ)^∧) ≈ exp(φ^∧) ∘ exp((Jr δφ)^∧)
     fn right_jacobian(&self) -> Group::JacobianMatrix;
 
-    /// Left Jacobian Jl.  
+    /// Left Jacobian Jl.
     ///
     /// Matrix Jl such that for small δφ:
     /// exp((φ + δφ)^∧) ≈ exp((Jl δφ)^∧) ∘ exp(φ^∧)
