@@ -8,12 +8,41 @@ use rayon::prelude::*;
 
 use crate::core::variable::Variable;
 use crate::core::{factors, loss_functions, residual_block};
-use crate::manifold::rn::Rn;
-use crate::manifold::se2::SE2;
-use crate::manifold::se3::SE3;
-use crate::manifold::so2::SO2;
-use crate::manifold::so3::SO3;
-use crate::manifold::{LieGroup, ManifoldType};
+use crate::manifold::{ManifoldType, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+
+/// Enum to handle mixed manifold variable types
+#[derive(Clone, Debug)]
+pub enum VariableEnum {
+    Rn(Variable<Rn>),
+    SE2(Variable<SE2>),
+    SE3(Variable<SE3>),
+    SO2(Variable<SO2>),
+    SO3(Variable<SO3>),
+}
+
+impl VariableEnum {
+    /// Get the tangent space size for this variable
+    pub fn get_size(&self) -> usize {
+        match self {
+            VariableEnum::Rn(var) => var.get_size(),
+            VariableEnum::SE2(var) => var.get_size(),
+            VariableEnum::SE3(var) => var.get_size(),
+            VariableEnum::SO2(var) => var.get_size(),
+            VariableEnum::SO3(var) => var.get_size(),
+        }
+    }
+
+    /// Convert to DVector for use with Factor trait
+    pub fn to_vector(&self) -> na::DVector<f64> {
+        match self {
+            VariableEnum::Rn(var) => var.value.clone().into(),
+            VariableEnum::SE2(var) => var.value.clone().into(),
+            VariableEnum::SE3(var) => var.value.clone().into(),
+            VariableEnum::SO2(var) => var.value.clone().into(),
+            VariableEnum::SO3(var) => var.value.clone().into(),
+        }
+    }
+}
 
 pub struct Problem {
     pub total_residual_dimension: usize,
@@ -54,7 +83,6 @@ impl Problem {
 
     pub fn add_residual_block(
         &mut self,
-        dim_residual: usize,
         variable_key_size_list: &[&str],
         factor: Box<dyn factors::Factor + Send>,
         loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
@@ -126,67 +154,108 @@ impl Problem {
         self.variable_bounds.remove(var_to_unbound);
     }
 
-    /// Initialize variables from initial values
+    /// Initialize variables from initial values with mixed manifold types
     ///
-    /// This method requires that the manifold type M can be constructed from
-    /// a vector representation. For most manifolds, this means the vector
-    /// should contain the appropriate number of parameters.
-    pub fn initialize_variables<M>(
+    /// This method handles a collection of different manifold types and creates
+    /// appropriate Variable instances for each based on the ManifoldType.
+    pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
-    ) -> HashMap<String, Variable<M>>
-    where
-        M: LieGroup,
-    {
-        let variables: HashMap<String, Variable<M>> = initial_values
+    ) -> HashMap<String, VariableEnum> {
+        let variables: HashMap<String, VariableEnum> = initial_values
             .iter()
             .map(|(k, v)| {
-                let mut variable = match v.0 {
-                    SO2 => SO2::from(v.1.clone()),
-                    SO3 => SO3::from(v.1.clone()),
-                    SE3 => SE3::from(v.1.clone()),
-                    Rn => Rn::from(v.1.clone()),
+                let variable_enum = match v.0 {
+                    ManifoldType::SO2 => {
+                        let mut var = Variable::new(SO2::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SO2(var)
+                    }
+                    ManifoldType::SO3 => {
+                        let mut var = Variable::new(SO3::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SO3(var)
+                    }
+                    ManifoldType::SE2 => {
+                        let mut var = Variable::new(SE2::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SE2(var)
+                    }
+                    ManifoldType::SE3 => {
+                        let mut var = Variable::new(SE3::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SE3(var)
+                    }
+                    ManifoldType::RN => {
+                        let mut var = Variable::new(Rn::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::Rn(var)
+                    }
                 };
 
-                if let Some(indexes) = self.fixed_variable_indexes.get(k) {
-                    variable.fixed_indices = indexes.clone();
-                }
-                if let Some(bounds) = self.variable_bounds.get(k) {
-                    variable.bounds = bounds.clone();
-                }
-
-                (k.to_owned(), variable)
+                (k.to_owned(), variable_enum)
             })
             .collect();
         variables
     }
 
-    pub fn compute_residual_and_jacobian<M>(
+    /// Compute residual and jacobian for mixed manifold types
+    pub fn compute_residual_and_jacobian_mixed(
         &self,
-        variables: &HashMap<String, Variable<M>>,
+        variables: &HashMap<String, VariableEnum>,
         variable_name_to_col_idx_dict: &HashMap<String, usize>,
-    ) -> (faer::Mat<f64>, na::DMatrix<f64>)
-    where
-        M: LieGroup,
-    {
+    ) -> (faer::Mat<f64>, na::DMatrix<f64>) {
+        // Calculate total degrees of freedom
+        let total_dof: usize = variables.values().map(|var| var.get_size()).sum();
+
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
             self.total_residual_dimension,
         )));
         let total_jacobian = Arc::new(Mutex::new(na::DMatrix::<f64>::zeros(
             self.total_residual_dimension,
-            variable_name_to_col_idx_dict.len(),
+            total_dof,
         )));
 
         self.residual_blocks
             .par_iter()
             .for_each(|(_, residual_block)| {
-                let mut vars: Vec<&Variable<M>> = Vec::new();
+                let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
+                let mut var_sizes: Vec<usize> = Vec::new();
+
                 for var_key in &residual_block.variable_key_list {
                     if let Some(variable) = variables.get(var_key) {
-                        vars.push(variable);
-                    };
+                        param_vectors.push(variable.to_vector());
+                        var_sizes.push(variable.get_size());
+                    }
                 }
-                let (res, jac) = residual_block.residual_and_jacobian(&vars);
+
+                let (res, jac) = residual_block.factor.linearize(&param_vectors);
+
                 {
                     let mut total_residual = total_residual.lock().unwrap();
                     total_residual
@@ -199,10 +268,9 @@ impl Problem {
                 {
                     let mut total_jacobian = total_jacobian.lock().unwrap();
                     let mut current_col = 0;
-                    for var_key in residual_block.variable_key_list.iter() {
+                    for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
                         if let Some(col_idx) = variable_name_to_col_idx_dict.get(var_key) {
-                            let variable = variables.get(var_key).unwrap();
-                            let tangent_size = variable.get_size();
+                            let tangent_size = var_sizes[i];
                             total_jacobian
                                 .view_mut(
                                     (residual_block.residual_row_start_idx, *col_idx),

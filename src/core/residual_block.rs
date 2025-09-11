@@ -37,7 +37,7 @@ impl ResidualBlock {
 
     pub fn residual_and_jacobian<M>(
         &self,
-        variables: &[&Variable<M>],
+        variables: &Vec<&Variable<M>>,
     ) -> (na::DVector<f64>, na::DMatrix<f64>)
     where
         M: LieGroup + Clone + Into<na::DVector<f64>>,

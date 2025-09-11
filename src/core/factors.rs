@@ -9,24 +9,26 @@ pub trait Factor: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE2 {
-    pub dx: f64,
-    pub dy: f64,
-    pub dtheta: f64,
+    // pub dx: f64,
+    // pub dy: f64,
+    // pub dtheta: f64,
+    pub relative_pose: SE2,
 }
 
 impl BetweenFactorSE2 {
-    pub fn new(dx: f64, dy: f64, dtheta: f64) -> Self {
-        Self { dx, dy, dtheta }
+    pub fn new(relative_pose: SE2) -> Self {
+        Self { relative_pose }
     }
 }
 
 impl Factor for BetweenFactorSE2 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let t_origin_k0 = &params[0];
-        let t_origin_k1 = &params[1];
-        let se2_origin_k0 = SE2::from_xy_angle(t_origin_k0[1], t_origin_k0[2], t_origin_k0[0]);
-        let se2_origin_k1 = SE2::from_xy_angle(t_origin_k1[1], t_origin_k1[2], t_origin_k1[0]);
-        let se2_k0_k1_measured = SE2::from_xy_angle(self.dx, self.dy, self.dtheta);
+        let se2_origin_k0 = SE2::from(params[0].clone());
+        let se2_origin_k1 = SE2::from(params[1].clone());
+        // let se2_origin_k0 = SE2::from_xy_angle(t_origin_k0[1], t_origin_k0[2], t_origin_k0[0]);
+        // let se2_origin_k1 = SE2::from_xy_angle(t_origin_k1[1], t_origin_k1[2], t_origin_k1[0]);
+        // let se2_k0_k1_measured = SE2::from_xy_angle(self.dx, self.dy, self.dtheta);
+        let se2_k0_k1_measured = &self.relative_pose;
 
         // Predicted measurement: T_k0_k1 = (T_w_k0)^-1 * T_w_k1
         let mut j_predicted_wrt_k0 = na::Matrix3::zeros();
@@ -41,7 +43,7 @@ impl Factor for BetweenFactorSE2 {
         // residual = log( (T_k0_k1_measured)^-1 * T_k0_k1_predicted )
         let mut j_residual_wrt_predicted = na::Matrix3::zeros();
         let residual = se2_k0_k1_predicted.right_minus(
-            &se2_k0_k1_measured,
+            se2_k0_k1_measured,
             Some(&mut j_residual_wrt_predicted),
             None,
         );
@@ -68,46 +70,27 @@ impl Factor for BetweenFactorSE2 {
 
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE3 {
-    pub dtx: f64,
-    pub dty: f64,
-    pub dtz: f64,
-    pub dqw: f64,
-    pub dqx: f64,
-    pub dqy: f64,
-    pub dqz: f64,
+    pub relative_pose: SE3,
 }
 
 impl BetweenFactorSE3 {
-    pub fn new(dtx: f64, dty: f64, dtz: f64, dqw: f64, dqx: f64, dqy: f64, dqz: f64) -> Self {
-        Self {
-            dtx,
-            dty,
-            dtz,
-            dqw,
-            dqx,
-            dqy,
-            dqz,
-        }
+    pub fn new(relative_pose: SE3) -> Self {
+        Self { relative_pose }
     }
 }
 
 impl Factor for BetweenFactorSE3 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let p0 = &params[0];
-        let p1 = &params[1];
-        let se3_origin_k0 = SE3::from_translation_quaternion(
-            na::Vector3::new(p0[0], p0[1], p0[2]),
-            na::Quaternion::new(p0[6], p0[3], p0[4], p0[5]),
-        );
-        let se3_origin_k1 = SE3::from_translation_quaternion(
-            na::Vector3::new(p1[0], p1[1], p1[2]),
-            na::Quaternion::new(p1[6], p1[3], p1[4], p1[5]),
-        );
+        // let p0 = &params[0];
+        // let p1 = &params[1];
+        let se3_origin_k0 = SE3::from(params[0].clone());
+        let se3_origin_k1 = SE3::from(params[1].clone());
 
-        let se3_k0_k1_measured = SE3::from_translation_quaternion(
-            na::Vector3::new(self.dtx, self.dty, self.dtz),
-            na::Quaternion::new(self.dqw, self.dqx, self.dqy, self.dqz),
-        );
+        // let se3_k0_k1_measured = SE3::from_translation_quaternion(
+        //     na::Vector3::new(self.dtx, self.dty, self.dtz),
+        //     na::Quaternion::new(self.dqw, self.dqx, self.dqy, self.dqz),
+        // );
+        let se3_k0_k1_measured = &self.relative_pose;
 
         // Predicted measurement: T_k0_k1 = (T_w_k0)^-1 * T_w_k1
         let mut j_predicted_wrt_k0 = na::Matrix6::zeros();
@@ -122,7 +105,7 @@ impl Factor for BetweenFactorSE3 {
         // residual = log( (T_k0_k1_measured)^-1 * T_k0_k1_predicted )
         let mut j_residual_wrt_predicted = na::Matrix6::zeros();
         let residual = se3_k0_k1_predicted.right_minus(
-            &se3_k0_k1_measured,
+            se3_k0_k1_measured,
             Some(&mut j_residual_wrt_predicted),
             None,
         );
@@ -149,16 +132,16 @@ impl Factor for BetweenFactorSE3 {
 
 #[derive(Debug, Clone)]
 pub struct PriorFactor {
-    pub v: na::DVector<f64>,
+    pub data: na::DVector<f64>,
 }
 impl Factor for PriorFactor {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let residual = params[0].clone() - self.v.clone();
+        let residual = &params[0] - &self.data;
         let jacobian = na::DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
         (residual, jacobian)
     }
 
     fn get_dimension(&self) -> usize {
-        self.v.len()
+        self.data.len()
     }
 }
