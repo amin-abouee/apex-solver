@@ -43,6 +43,12 @@ impl From<DVector<f64>> for Rn {
     }
 }
 
+impl From<Rn> for DVector<f64> {
+    fn from(rn: Rn) -> Self {
+        rn.data
+    }
+}
+
 /// Rⁿ tangent space element representing elements in the Lie algebra rⁿ.
 ///
 /// For Euclidean space, the tangent space is isomorphic to the manifold itself,
