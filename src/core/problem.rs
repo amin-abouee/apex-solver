@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-// use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
+use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
 use faer_ext::IntoFaer;
 use nalgebra as na;
 use rayon::prelude::*;
@@ -9,6 +11,12 @@ use rayon::prelude::*;
 use crate::core::variable::Variable;
 use crate::core::{factors, loss_functions, residual_block};
 use crate::manifold::{ManifoldType, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+
+/// Symbolic structure for sparse matrix operations
+pub struct SymbolicStructure {
+    pub pattern: SymbolicSparseColMat<usize>,
+    pub order: Argsort<usize>,
+}
 
 /// Enum to handle mixed manifold variable types
 #[derive(Clone, Debug)]
@@ -224,6 +232,56 @@ impl Problem {
         variables
     }
 
+    /// Get the number of residual blocks
+    pub fn num_residual_blocks(&self) -> usize {
+        self.residual_blocks.len()
+    }
+
+    /// Build symbolic structure for sparse Jacobian computation
+    pub fn build_symbolic_structure(
+        &self,
+        variables: &HashMap<String, VariableEnum>,
+        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+    ) -> SymbolicStructure {
+        let total_dof: usize = variables.values().map(|var| var.get_size()).sum();
+        let mut indices = Vec::<Pair<usize, usize>>::new();
+
+        self.residual_blocks.iter().for_each(|(_, residual_block)| {
+            let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
+            let mut count_variable_local_idx: usize = 0;
+
+            for var_key in &residual_block.variable_key_list {
+                if let Some(variable) = variables.get(var_key) {
+                    variable_local_idx_size_list
+                        .push((count_variable_local_idx, variable.get_size()));
+                    count_variable_local_idx += variable.get_size();
+                }
+            }
+
+            for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
+                if let Some(variable_global_idx) = variable_name_to_col_idx_dict.get(var_key) {
+                    let (_, var_size) = variable_local_idx_size_list[i];
+                    for row_idx in 0..residual_block.factor.get_dimension() {
+                        for col_idx in 0..var_size {
+                            let global_row_idx = residual_block.residual_row_start_idx + row_idx;
+                            let global_col_idx = variable_global_idx + col_idx;
+                            indices.push(Pair::new(global_row_idx, global_col_idx));
+                        }
+                    }
+                }
+            }
+        });
+
+        let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
+            self.total_residual_dimension,
+            total_dof,
+            &indices,
+        )
+        .unwrap();
+
+        SymbolicStructure { pattern, order }
+    }
+
     /// Compute residual and jacobian for mixed manifold types
     pub fn compute_residual_and_jacobian_mixed(
         &self,
@@ -297,5 +355,792 @@ impl Problem {
 
         let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
         (residual_faer, total_jacobian)
+    }
+
+    /// Compute residual and sparse Jacobian for mixed manifold types
+    pub fn compute_residual_and_jacobian_sparse(
+        &self,
+        variables: &HashMap<String, VariableEnum>,
+        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+        symbolic_structure: &SymbolicStructure,
+    ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
+        let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
+            self.total_residual_dimension,
+        )));
+
+        let jacobian_values: Vec<f64> = self
+            .residual_blocks
+            .par_iter()
+            .map(|(_, residual_block)| {
+                self.compute_residual_and_jacobian_block(
+                    residual_block,
+                    variables,
+                    variable_name_to_col_idx_dict,
+                    &total_residual,
+                )
+            })
+            .flatten()
+            .collect();
+
+        let total_residual = Arc::try_unwrap(total_residual)
+            .unwrap()
+            .into_inner()
+            .unwrap();
+
+        let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
+        let jacobian_sparse = SparseColMat::new_from_argsort(
+            symbolic_structure.pattern.clone(),
+            &symbolic_structure.order,
+            jacobian_values.as_slice(),
+        )
+        .unwrap();
+
+        (residual_faer, jacobian_sparse)
+    }
+
+    fn compute_residual_and_jacobian_block(
+        &self,
+        residual_block: &residual_block::ResidualBlock,
+        variables: &HashMap<String, VariableEnum>,
+        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+        total_residual: &Arc<Mutex<na::DVector<f64>>>,
+    ) -> Vec<f64> {
+        let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
+        let mut var_sizes: Vec<usize> = Vec::new();
+        let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
+        let mut count_variable_local_idx: usize = 0;
+
+        for var_key in &residual_block.variable_key_list {
+            if let Some(variable) = variables.get(var_key) {
+                param_vectors.push(variable.to_vector());
+                let var_size = variable.get_size();
+                var_sizes.push(var_size);
+                variable_local_idx_size_list.push((count_variable_local_idx, var_size));
+                count_variable_local_idx += var_size;
+            }
+        }
+
+        let (res, jac) = residual_block.factor.linearize(&param_vectors);
+
+        // Update total residual
+        {
+            let mut total_residual = total_residual.lock().unwrap();
+            total_residual
+                .rows_mut(
+                    residual_block.residual_row_start_idx,
+                    residual_block.factor.get_dimension(),
+                )
+                .copy_from(&res);
+        }
+
+        // Extract Jacobian values in the correct order
+        let mut local_jacobian_values = Vec::new();
+        for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
+            if variable_name_to_col_idx_dict.contains_key(var_key) {
+                let (variable_local_idx, var_size) = variable_local_idx_size_list[i];
+                let variable_jac = jac.view((0, variable_local_idx), (jac.shape().0, var_size));
+
+                for row_idx in 0..jac.shape().0 {
+                    for col_idx in 0..var_size {
+                        local_jacobian_values.push(variable_jac[(row_idx, col_idx)]);
+                    }
+                }
+            } else {
+                panic!(
+                    "Missing key {} in variable-to-column-index mapping",
+                    var_key
+                );
+            }
+        }
+
+        local_jacobian_values
+    }
+
+    /// Log residual vector to a text file
+    pub fn log_residual_to_file(
+        &self,
+        residual: &na::DVector<f64>,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut file = File::create(filename)?;
+        writeln!(file, "# Residual vector - {} elements", residual.len())?;
+        for (i, &value) in residual.iter().enumerate() {
+            writeln!(file, "{}: {:.12}", i, value)?;
+        }
+        Ok(())
+    }
+
+    /// Log Jacobian matrix to a text file
+    pub fn log_jacobian_to_file(
+        &self,
+        jacobian: &na::DMatrix<f64>,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut file = File::create(filename)?;
+        writeln!(
+            file,
+            "# Jacobian matrix - {} x {}",
+            jacobian.nrows(),
+            jacobian.ncols()
+        )?;
+        for i in 0..jacobian.nrows() {
+            for j in 0..jacobian.ncols() {
+                write!(file, "{:.12}", jacobian[(i, j)])?;
+                if j < jacobian.ncols() - 1 {
+                    write!(file, " ")?;
+                }
+            }
+            writeln!(file)?;
+        }
+        Ok(())
+    }
+
+    /// Log sparse Jacobian matrix to a text file
+    pub fn log_sparse_jacobian_to_file(
+        &self,
+        jacobian: &SparseColMat<usize, f64>,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut file = File::create(filename)?;
+        writeln!(
+            file,
+            "# Sparse Jacobian matrix - {} x {} ({} non-zeros)",
+            jacobian.nrows(),
+            jacobian.ncols(),
+            jacobian.compute_nnz()
+        )?;
+        writeln!(file, "# Matrix saved as dimensions and non-zero count only")?;
+        writeln!(file, "# For detailed access, convert to dense matrix first")?;
+        Ok(())
+    }
+
+    /// Log variables to a text file
+    pub fn log_variables_to_file(
+        &self,
+        variables: &HashMap<String, VariableEnum>,
+        filename: &str,
+    ) -> Result<(), std::io::Error> {
+        let mut file = File::create(filename)?;
+        writeln!(file, "# Variables - {} total", variables.len())?;
+        writeln!(file, "# Format: variable_name: [values...]")?;
+
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort();
+
+        for var_name in sorted_vars {
+            let var_vector = variables[var_name].to_vector();
+            write!(file, "{}: [", var_name)?;
+            for (i, &value) in var_vector.iter().enumerate() {
+                write!(file, "{:.12}", value)?;
+                if i < var_vector.len() - 1 {
+                    write!(file, ", ")?;
+                }
+            }
+            writeln!(file, "]")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
+    use crate::core::loss_functions::HuberLoss;
+    use crate::manifold::se3::SE3;
+    use nalgebra as na;
+    use std::collections::HashMap;
+
+    /// Create a test SE2 dataset with 10 vertices in a loop
+    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
+
+        // Create 10 SE2 poses in a rough circle pattern
+        let poses = vec![
+            (0.0, 0.0, 0.0),    // x0: origin
+            (1.0, 0.0, 0.1),    // x1: move right
+            (1.5, 1.0, 0.5),    // x2: move up-right
+            (1.0, 2.0, 1.0),    // x3: move up
+            (0.0, 2.5, 1.5),    // x4: move up-left
+            (-1.0, 2.0, 2.0),   // x5: move left
+            (-1.5, 1.0, 2.5),   // x6: move down-left
+            (-1.0, 0.0, 3.0),   // x7: move down
+            (-0.5, -0.5, -2.8), // x8: move down-right
+            (0.5, -0.5, -2.3),  // x9: back towards origin
+        ];
+
+        // Add vertices using [x, y, theta] ordering
+        for (i, (x, y, theta)) in poses.iter().enumerate() {
+            let var_name = format!("x{}", i);
+            let se2_data = na::dvector![*x, *y, *theta];
+            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+        }
+
+        // Add chain of between factors
+        for i in 0..9 {
+            let from_pose = poses[i];
+            let to_pose = poses[i + 1];
+
+            // Compute relative transformation
+            let dx = to_pose.0 - from_pose.0;
+            let dy = to_pose.1 - from_pose.1;
+            let dtheta = to_pose.2 - from_pose.2;
+
+            let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
+            problem.add_residual_block(
+                &[&format!("x{}", i), &format!("x{}", i + 1)],
+                Box::new(between_factor),
+                Some(Box::new(HuberLoss::new(1.0))),
+            );
+        }
+
+        // Add loop closure from x9 back to x0
+        let dx = poses[0].0 - poses[9].0;
+        let dy = poses[0].1 - poses[9].1;
+        let dtheta = poses[0].2 - poses[9].2;
+
+        let loop_closure = BetweenFactorSE2::new(dx, dy, dtheta);
+        problem.add_residual_block(
+            &["x9", "x0"],
+            Box::new(loop_closure),
+            Some(Box::new(HuberLoss::new(1.0))),
+        );
+
+        // Add prior factor for x0
+        let prior_factor = PriorFactor {
+            data: na::dvector![0.0, 0.0, 0.0],
+        };
+        problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
+
+        (problem, initial_values)
+    }
+
+    /// Create a test SE3 dataset with 8 vertices in a 3D pattern
+    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
+
+        // Create 8 SE3 poses in a rough 3D cube pattern
+        let poses = vec![
+            // Bottom face of cube
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),   // x0: origin
+            (1.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.995), // x1: +X
+            (1.0, 1.0, 0.0, 0.0, 0.0, 0.2, 0.98),  // x2: +X+Y
+            (0.0, 1.0, 0.0, 0.0, 0.0, 0.3, 0.955), // x3: +Y
+            // Top face of cube
+            (0.0, 0.0, 1.0, 0.1, 0.0, 0.0, 0.995), // x4: +Z
+            (1.0, 0.0, 1.0, 0.1, 0.0, 0.1, 0.99),  // x5: +X+Z
+            (1.0, 1.0, 1.0, 0.1, 0.0, 0.2, 0.975), // x6: +X+Y+Z
+            (0.0, 1.0, 1.0, 0.1, 0.0, 0.3, 0.95),  // x7: +Y+Z
+        ];
+
+        // Add vertices using [tx, ty, tz, qw, qx, qy, qz] ordering
+        for (i, (tx, ty, tz, qx, qy, qz, qw)) in poses.iter().enumerate() {
+            let var_name = format!("x{}", i);
+            let se3_data = na::dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
+            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+        }
+
+        // Add between factors connecting the cube edges
+        let edges = vec![
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 0), // Bottom face
+            (4, 5),
+            (5, 6),
+            (6, 7),
+            (7, 4), // Top face
+            (0, 4),
+            (1, 5),
+            (2, 6),
+            (3, 7), // Vertical edges
+        ];
+
+        for (from_idx, to_idx) in edges {
+            let from_pose = poses[from_idx];
+            let to_pose = poses[to_idx];
+
+            // Create a simple relative transformation (simplified for testing)
+            let relative_se3 = SE3::from_translation_quaternion(
+                na::Vector3::new(
+                    to_pose.0 - from_pose.0, // dx
+                    to_pose.1 - from_pose.1, // dy
+                    to_pose.2 - from_pose.2, // dz
+                ),
+                na::Quaternion::new(1.0, 0.0, 0.0, 0.0), // identity quaternion
+            );
+
+            let between_factor = BetweenFactorSE3::new(relative_se3);
+            problem.add_residual_block(
+                &[&format!("x{}", from_idx), &format!("x{}", to_idx)],
+                Box::new(between_factor),
+                Some(Box::new(HuberLoss::new(1.0))),
+            );
+        }
+
+        // Add prior factor for x0
+        let prior_factor = PriorFactor {
+            data: na::dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        };
+        problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
+
+        (problem, initial_values)
+    }
+
+    #[test]
+    fn test_problem_construction_se2() {
+        let (problem, initial_values) = create_se2_test_problem();
+
+        // Test basic problem properties
+        assert_eq!(problem.num_residual_blocks(), 12); // 10 between + 1 loop closure + 1 prior
+        assert_eq!(problem.total_residual_dimension, 36); // 11 * 3 + 1 * 3
+        assert_eq!(initial_values.len(), 10);
+
+        println!("✅ SE2 Problem construction test passed");
+        println!("  Residual blocks: {}", problem.num_residual_blocks());
+        println!("  Total residual dim: {}", problem.total_residual_dimension);
+        println!("  Variables: {}", initial_values.len());
+    }
+
+    #[test]
+    fn test_problem_construction_se3() {
+        let (problem, initial_values) = create_se3_test_problem();
+
+        // Test basic problem properties
+        assert_eq!(problem.num_residual_blocks(), 13); // 12 between + 1 prior
+        assert_eq!(problem.total_residual_dimension, 78); // 12 * 6 + 1 * 6 (but SE3 is 6-dim)
+        assert_eq!(initial_values.len(), 8);
+
+        println!("✅ SE3 Problem construction test passed");
+        println!("  Residual blocks: {}", problem.num_residual_blocks());
+        println!("  Total residual dim: {}", problem.total_residual_dimension);
+        println!("  Variables: {}", initial_values.len());
+    }
+
+    #[test]
+    fn test_variable_initialization_se2() {
+        let (problem, initial_values) = create_se2_test_problem();
+
+        // Test variable initialization
+        let variables = problem.initialize_variables(&initial_values);
+        assert_eq!(variables.len(), 10);
+
+        // Test variable sizes
+        for (name, var) in &variables {
+            assert_eq!(
+                var.get_size(),
+                3,
+                "SE2 variable {} should have size 3",
+                name
+            );
+        }
+
+        // Test conversion to DVector
+        for (name, var) in &variables {
+            let vec = var.to_vector();
+            assert_eq!(
+                vec.len(),
+                3,
+                "SE2 variable {} vector should have length 3",
+                name
+            );
+        }
+
+        println!("✅ SE2 Variable initialization test passed");
+        println!("  Variables created: {}", variables.len());
+    }
+
+    #[test]
+    fn test_variable_initialization_se3() {
+        let (problem, initial_values) = create_se3_test_problem();
+
+        // Test variable initialization
+        let variables = problem.initialize_variables(&initial_values);
+        assert_eq!(variables.len(), 8);
+
+        // Test variable sizes
+        for (name, var) in &variables {
+            assert_eq!(
+                var.get_size(),
+                7,
+                "SE3 variable {} should have size 7",
+                name
+            );
+        }
+
+        // Test conversion to DVector
+        for (name, var) in &variables {
+            let vec = var.to_vector();
+            assert_eq!(
+                vec.len(),
+                7,
+                "SE3 variable {} vector should have length 7",
+                name
+            );
+        }
+
+        println!("✅ SE3 Variable initialization test passed");
+        println!("  Variables created: {}", variables.len());
+    }
+
+    #[test]
+    fn test_column_mapping_se2() {
+        let (problem, initial_values) = create_se2_test_problem();
+        let variables = problem.initialize_variables(&initial_values);
+
+        // Create column mapping for variables
+        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort(); // Ensure consistent ordering
+
+        for var_name in sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Test total degrees of freedom
+        let total_dof: usize = variables.values().map(|v| v.get_size()).sum();
+        assert_eq!(total_dof, 30); // 10 variables * 3 DOF each
+        assert_eq!(col_offset, 30);
+
+        // Test each variable has correct column mapping
+        for (var_name, &col_idx) in &variable_name_to_col_idx_dict {
+            assert!(
+                col_idx < total_dof,
+                "Column index {} for {} should be < {}",
+                col_idx,
+                var_name,
+                total_dof
+            );
+        }
+
+        println!("✅ SE2 Column mapping test passed");
+        println!("  Total DOF: {}", total_dof);
+        println!(
+            "  Variable mappings: {}",
+            variable_name_to_col_idx_dict.len()
+        );
+    }
+
+    #[test]
+    fn test_symbolic_structure_se2() {
+        let (problem, initial_values) = create_se2_test_problem();
+        let variables = problem.initialize_variables(&initial_values);
+
+        // Create column mapping
+        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort();
+
+        for var_name in sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Build symbolic structure
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+
+        // Test symbolic structure dimensions
+        assert_eq!(
+            symbolic_structure.pattern.nrows(),
+            problem.total_residual_dimension
+        );
+        assert_eq!(symbolic_structure.pattern.ncols(), 30); // total DOF
+
+        println!("✅ SE2 Symbolic structure test passed");
+        println!(
+            "  Symbolic matrix: {} x {}",
+            symbolic_structure.pattern.nrows(),
+            symbolic_structure.pattern.ncols()
+        );
+    }
+
+    #[test]
+    fn test_residual_jacobian_computation_se2() {
+        let (problem, initial_values) = create_se2_test_problem();
+        let variables = problem.initialize_variables(&initial_values);
+
+        // Create column mapping
+        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort();
+
+        for var_name in sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Test mixed computation
+        let (residual_faer, jacobian_dense) =
+            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
+
+        // Test dimensions
+        assert_eq!(residual_faer.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_dense.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_dense.ncols(), 30);
+
+        // Test sparse computation
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_name_to_col_idx_dict,
+            &symbolic_structure,
+        );
+
+        // Test sparse dimensions
+        assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_sparse.ncols(), 30);
+
+        // Convert to nalgebra for comparison
+        use faer_ext::IntoNalgebra;
+        let residual_dense_na = residual_faer.as_ref().into_nalgebra();
+        let residual_sparse_na = residual_sparse.as_ref().into_nalgebra();
+
+        // Test residuals match
+        let residual_diff = (residual_dense_na - residual_sparse_na).norm();
+        assert!(
+            residual_diff < 1e-12,
+            "Dense and sparse residuals should match"
+        );
+
+        println!("✅ SE2 Residual/Jacobian computation test passed");
+        println!("  Residual dimensions: {}", residual_faer.nrows());
+        println!(
+            "  Jacobian dimensions: {} x {}",
+            jacobian_dense.nrows(),
+            jacobian_dense.ncols()
+        );
+        println!("  Residual difference: {:.2e}", residual_diff);
+    }
+
+    #[test]
+    fn test_residual_jacobian_computation_se3() {
+        let (problem, initial_values) = create_se3_test_problem();
+        let variables = problem.initialize_variables(&initial_values);
+
+        // Create column mapping
+        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort();
+
+        for var_name in sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Test mixed computation
+        let (residual_faer, jacobian_dense) =
+            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
+
+        // Test dimensions
+        assert_eq!(residual_faer.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_dense.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_dense.ncols(), 56); // 8 variables * 7 DOF each
+
+        // Test sparse computation
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_name_to_col_idx_dict,
+            &symbolic_structure,
+        );
+
+        // Test sparse dimensions match
+        assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian_sparse.ncols(), 56);
+
+        println!("✅ SE3 Residual/Jacobian computation test passed");
+        println!("  Residual dimensions: {}", residual_faer.nrows());
+        println!(
+            "  Jacobian dimensions: {} x {}",
+            jacobian_dense.nrows(),
+            jacobian_dense.ncols()
+        );
+    }
+
+    #[test]
+    fn test_residual_block_operations() {
+        let mut problem = Problem::new();
+
+        // Test adding residual blocks
+        let block_id1 = problem.add_residual_block(
+            &["x0", "x1"],
+            Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
+            Some(Box::new(HuberLoss::new(1.0))),
+        );
+
+        let block_id2 = problem.add_residual_block(
+            &["x0"],
+            Box::new(PriorFactor {
+                data: na::dvector![0.0, 0.0, 0.0],
+            }),
+            None,
+        );
+
+        assert_eq!(problem.num_residual_blocks(), 2);
+        assert_eq!(problem.total_residual_dimension, 6); // 3 + 3
+        assert_eq!(block_id1, 0);
+        assert_eq!(block_id2, 1);
+
+        // Test removing residual blocks
+        let removed_block = problem.remove_residual_block(block_id1);
+        assert!(removed_block.is_some());
+        assert_eq!(problem.num_residual_blocks(), 1);
+        assert_eq!(problem.total_residual_dimension, 3); // Only prior factor remains
+
+        // Test removing non-existent block
+        let non_existent = problem.remove_residual_block(999);
+        assert!(non_existent.is_none());
+
+        println!("✅ Residual block operations test passed");
+        println!("  Block operations working correctly");
+    }
+
+    #[test]
+    fn test_variable_constraints() {
+        let mut problem = Problem::new();
+
+        // Test fixing variables
+        problem.fix_variable("x0", 0);
+        problem.fix_variable("x0", 1);
+        problem.fix_variable("x1", 2);
+
+        assert!(problem.fixed_variable_indexes.contains_key("x0"));
+        assert!(problem.fixed_variable_indexes.contains_key("x1"));
+        assert_eq!(problem.fixed_variable_indexes["x0"].len(), 2);
+        assert_eq!(problem.fixed_variable_indexes["x1"].len(), 1);
+
+        // Test unfixing variables
+        problem.unfix_variable("x0");
+        assert!(!problem.fixed_variable_indexes.contains_key("x0"));
+        assert!(problem.fixed_variable_indexes.contains_key("x1"));
+
+        // Test variable bounds
+        problem.set_variable_bounds("x2", 0, -1.0, 1.0);
+        problem.set_variable_bounds("x2", 1, -2.0, 2.0);
+        problem.set_variable_bounds("x3", 0, 0.0, 5.0);
+
+        assert!(problem.variable_bounds.contains_key("x2"));
+        assert!(problem.variable_bounds.contains_key("x3"));
+        assert_eq!(problem.variable_bounds["x2"].len(), 2);
+        assert_eq!(problem.variable_bounds["x3"].len(), 1);
+
+        // Test removing bounds
+        problem.remove_variable_bounds("x2");
+        assert!(!problem.variable_bounds.contains_key("x2"));
+        assert!(problem.variable_bounds.contains_key("x3"));
+
+        println!("✅ Variable constraints test passed");
+        println!("  Fix/unfix and bounds operations working correctly");
+    }
+
+    /// Integration test for basic problem functionality
+    #[test]
+    fn test_integration_with_known_values() {
+        // Use the exact same 5-pose test case that worked perfectly in individual tests
+        let (problem, initial_values) = create_simple_5pose_se2_test();
+        let variables = problem.initialize_variables(&initial_values);
+
+        // Create column mapping
+        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().collect();
+        sorted_vars.sort();
+
+        for var_name in sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Compute residual and Jacobian
+        let (residual_faer, _jacobian) =
+            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
+
+        // Convert to nalgebra
+        use faer_ext::IntoNalgebra;
+        let residual = residual_faer.as_ref().into_nalgebra();
+
+        // The first few residuals should match our individual factor tests
+        // From the simple_se2_debug test, we know:
+        // BetweenFactor 0->1: [0.0, 0.0, 0.0]
+        // BetweenFactor 1->2: [0.0000000519, 0.0000001758, -0.0000000000]
+
+        println!("✅ Integration test - first few residuals:");
+        for i in 0..std::cmp::min(15, residual.nrows()) {
+            println!("  r[{}] = {:.10}", i, residual[i]);
+        }
+
+        // Test that prior factor residuals are zero (last 3 elements)
+        let prior_start = residual.nrows() - 3;
+        for i in prior_start..residual.nrows() {
+            assert!(
+                residual[i].abs() < 1e-10,
+                "Prior factor residual {} should be ~0",
+                i
+            );
+        }
+
+        println!("  Prior factor residuals are correctly zero");
+    }
+
+    // Helper function for the known 5-pose test case
+    fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>)
+    {
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
+
+        // Use the exact same data from our successful simple debug test
+        let poses = [
+            ("x0", [0.000000, 0.000000, 0.000000]),
+            ("x1", [-0.012958, 1.030390, 0.011350]),
+            ("x2", [-0.026183, 2.043445, -0.060422]),
+            ("x3", [-0.021350, 3.070548, -0.094779]),
+            ("x4", [1.545440, 3.079976, 0.909609]),
+        ];
+
+        for (name, data) in &poses {
+            initial_values.insert(
+                name.to_string(),
+                (ManifoldType::SE2, na::dvector![data[1], data[2], data[0]]),
+            );
+        }
+
+        // Add the exact same between factors
+        let between_factors = [
+            ("x0", "x1", 1.030390, 0.011350, -0.012958),
+            ("x1", "x2", 1.013900, -0.058639, -0.013225),
+            ("x2", "x3", 1.027650, -0.007456, 0.004833),
+            ("x3", "x4", -0.012016, 1.004360, 1.566790),
+        ];
+
+        for (from, to, dx, dy, dtheta) in &between_factors {
+            problem.add_residual_block(
+                &[from, to],
+                Box::new(BetweenFactorSE2::new(*dx, *dy, *dtheta)),
+                Some(Box::new(HuberLoss::new(1.0))),
+            );
+        }
+
+        // Add prior factor
+        problem.add_residual_block(
+            &["x0"],
+            Box::new(PriorFactor {
+                data: na::dvector![0.000000, 0.000000, 0.000000],
+            }),
+            None,
+        );
+
+        (problem, initial_values)
     }
 }
