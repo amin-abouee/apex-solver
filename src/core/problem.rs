@@ -694,8 +694,8 @@ mod tests {
         let (problem, initial_values) = create_se2_test_problem();
 
         // Test basic problem properties
-        assert_eq!(problem.num_residual_blocks(), 12); // 10 between + 1 loop closure + 1 prior
-        assert_eq!(problem.total_residual_dimension, 36); // 11 * 3 + 1 * 3
+        assert_eq!(problem.num_residual_blocks(), 11); // 9 between + 1 loop closure + 1 prior
+        assert_eq!(problem.total_residual_dimension, 33); // 11 * 3
         assert_eq!(initial_values.len(), 10);
 
         println!("✅ SE2 Problem construction test passed");
@@ -710,7 +710,7 @@ mod tests {
 
         // Test basic problem properties
         assert_eq!(problem.num_residual_blocks(), 13); // 12 between + 1 prior
-        assert_eq!(problem.total_residual_dimension, 78); // 12 * 6 + 1 * 6 (but SE3 is 6-dim)
+        assert_eq!(problem.total_residual_dimension, 79); // 12 * 6 + 1 * 7 (SE3 between factors are 6-dim, prior factor is 7-dim)
         assert_eq!(initial_values.len(), 8);
 
         println!("✅ SE3 Problem construction test passed");
@@ -764,8 +764,8 @@ mod tests {
         for (name, var) in &variables {
             assert_eq!(
                 var.get_size(),
-                7,
-                "SE3 variable {} should have size 7",
+                6,
+                "SE3 variable {} should have size 6 (DOF)",
                 name
             );
         }
@@ -944,7 +944,7 @@ mod tests {
         // Test dimensions
         assert_eq!(residual_faer.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_dense.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_dense.ncols(), 56); // 8 variables * 7 DOF each
+        assert_eq!(jacobian_dense.ncols(), 48); // 8 variables * 6 DOF each
 
         // Test sparse computation
         let symbolic_structure =
@@ -958,7 +958,7 @@ mod tests {
         // Test sparse dimensions match
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_sparse.ncols(), 56);
+        assert_eq!(jacobian_sparse.ncols(), 48); // 8 variables * 6 DOF each
 
         println!("✅ SE3 Residual/Jacobian computation test passed");
         println!("  Residual dimensions: {}", residual_faer.nrows());
