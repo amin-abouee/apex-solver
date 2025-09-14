@@ -41,29 +41,6 @@ impl fmt::Display for SE3 {
     }
 }
 
-/// SE(3) tangent space element representing elements in the Lie algebra se(3).
-///
-/// Following manif conventions, internally represented as [rho(3), theta(3)] where:
-/// - rho: translational component [rho_x, rho_y, rho_z]
-/// - theta: rotational component [theta_x, theta_y, theta_z]
-#[derive(Clone, Debug, PartialEq)]
-pub struct SE3Tangent {
-    /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
-    data: Vector6<f64>,
-}
-
-impl fmt::Display for SE3Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rho = self.rho();
-        let theta = self.theta();
-        write!(
-            f,
-            "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
-            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
-        )
-    }
-}
-
 impl SE3 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 3;
@@ -202,10 +179,11 @@ impl From<nalgebra::DVector<f64>> for SE3 {
         // Input format: [tx, ty, tz, qw, qx, qy, qz]
         let translation = Vector3::new(data[0], data[1], data[2]); // tx, ty, tz
         let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]); // w, x, y, z
-        // Create UnitQuaternion without normalization to preserve exact values from G2O files
-        let unit_quat = UnitQuaternion::new_unchecked(quaternion);
-        let rotation = SO3::new(unit_quat);
-        SE3::from_translation_so3(translation, rotation)
+        // // Create UnitQuaternion without normalization to preserve exact values from G2O files
+        // let unit_quat = UnitQuaternion::new_unchecked(quaternion);
+        // let rotation = SO3::new(unit_quat);
+        // SE3::from_translation_so3(translation, rotation)
+        SE3::from_translation_quaternion(translation, quaternion)
     }
 }
 
@@ -427,6 +405,62 @@ impl LieGroup for SE3 {
     }
 }
 
+/// SE(3) tangent space element representing elements in the Lie algebra se(3).
+///
+/// Following manif conventions, internally represented as [rho(3), theta(3)] where:
+/// - rho: translational component [rho_x, rho_y, rho_z]
+/// - theta: rotational component [theta_x, theta_y, theta_z]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SE3Tangent {
+    /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
+    data: Vector6<f64>,
+}
+
+impl fmt::Display for SE3Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rho = self.rho();
+        let theta = self.theta();
+        write!(
+            f,
+            "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
+            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
+        )
+    }
+}
+
+impl From<nalgebra::DVector<f64>> for SE3Tangent {
+    fn from(data_vector: nalgebra::DVector<f64>) -> Self {
+        if data_vector.len() != 6 {
+            panic!(
+                "SE3Tangent::from expects 6-dimensional vector [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]"
+            );
+        }
+        SE3Tangent {
+            data: Vector6::new(
+                data_vector[0],
+                data_vector[1],
+                data_vector[2],
+                data_vector[3],
+                data_vector[4],
+                data_vector[5],
+            ),
+        }
+    }
+}
+
+impl From<SE3Tangent> for nalgebra::DVector<f64> {
+    fn from(se3_tangent: SE3Tangent) -> Self {
+        DVector::from_vec(vec![
+            se3_tangent.data[0],
+            se3_tangent.data[1],
+            se3_tangent.data[2],
+            se3_tangent.data[3],
+            se3_tangent.data[4],
+            se3_tangent.data[5],
+        ])
+    }
+}
+
 impl SE3Tangent {
     /// Create a new SE3Tangent from rho (translational) and theta (rotational) components.
     ///
@@ -465,28 +499,28 @@ impl SE3Tangent {
     }
 
     /// Create SE3Tangent from a 6-dimensional vector
-    pub fn from_vector(vector: DVector<f64>) -> Self {
-        if vector.len() != 6 {
-            panic!("SE3Tangent::from_vector expects 6-dimensional vector");
-        }
-        SE3Tangent {
-            data: Vector6::new(
-                vector[0], vector[1], vector[2], vector[3], vector[4], vector[5],
-            ),
-        }
-    }
+    // pub fn from_vector(vector: DVector<f64>) -> Self {
+    //     if vector.len() != 6 {
+    //         panic!("SE3Tangent::from_vector expects 6-dimensional vector");
+    //     }
+    //     SE3Tangent {
+    //         data: Vector6::new(
+    //             vector[0], vector[1], vector[2], vector[3], vector[4], vector[5],
+    //         ),
+    //     }
+    // }
 
     /// Convert SE3Tangent to a 6-dimensional vector
-    pub fn to_vector(&self) -> DVector<f64> {
-        DVector::from_vec(vec![
-            self.data[0],
-            self.data[1],
-            self.data[2],
-            self.data[3],
-            self.data[4],
-            self.data[5],
-        ])
-    }
+    // pub fn to_vector(&self) -> DVector<f64> {
+    //     DVector::from_vec(vec![
+    //         self.data[0],
+    //         self.data[1],
+    //         self.data[2],
+    //         self.data[3],
+    //         self.data[4],
+    //         self.data[5],
+    //     ])
+    // }
 
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians
     /// Q(ρ, θ) = (1/2)ρₓ + (θ - sin θ)/θ³ (θₓρₓ + ρₓθₓ + θₓρₓθₓ)
