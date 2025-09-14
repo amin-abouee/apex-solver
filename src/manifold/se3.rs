@@ -197,18 +197,30 @@ impl SE3 {
 impl From<nalgebra::DVector<f64>> for SE3 {
     fn from(data: nalgebra::DVector<f64>) -> Self {
         if data.len() != 7 {
-            panic!("SE3::from expects 7-dimensional vector [x, y, z, w, x, y, z]");
+            panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
         }
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let quaternion = Quaternion::new(data[6], data[3], data[4], data[5]);
-        let rotation = SO3::new(UnitQuaternion::from_quaternion(quaternion.normalize()));
+        // Input format: [tx, ty, tz, qw, qx, qy, qz]
+        let translation = Vector3::new(data[0], data[1], data[2]); // tx, ty, tz
+        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]); // w, x, y, z
+        // Create UnitQuaternion without normalization to preserve exact values from G2O files
+        let unit_quat = UnitQuaternion::new_unchecked(quaternion);
+        let rotation = SO3::new(unit_quat);
         SE3::from_translation_so3(translation, rotation)
     }
 }
 
 impl From<SE3> for nalgebra::DVector<f64> {
     fn from(se3: SE3) -> Self {
-        nalgebra::DVector::from_vec(se3.coeffs().to_vec())
+        let q = se3.rotation.quaternion();
+        nalgebra::DVector::from_vec(vec![
+            se3.translation.x, // tx first
+            se3.translation.y, // ty second
+            se3.translation.z, // tz third
+            q.w,               // qw fourth
+            q.i,               // qx fifth
+            q.j,               // qy sixth
+            q.k,               // qz seventh
+        ])
     }
 }
 

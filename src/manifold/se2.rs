@@ -45,6 +45,7 @@ impl From<nalgebra::DVector<f64>> for SE2 {
         if data.len() != 3 {
             panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
         }
+        // Input order is [x, y, theta]
         SE2::from_xy_angle(data[0], data[1], data[2])
     }
 }
@@ -52,9 +53,9 @@ impl From<nalgebra::DVector<f64>> for SE2 {
 impl From<SE2> for nalgebra::DVector<f64> {
     fn from(se2: SE2) -> Self {
         nalgebra::DVector::from_vec(vec![
-            se2.translation.x,
-            se2.translation.y,
-            se2.rotation.angle(),
+            se2.translation.x,    // x first
+            se2.translation.y,    // y second
+            se2.rotation.angle(), // theta third
         ])
     }
 }

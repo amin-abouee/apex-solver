@@ -53,6 +53,7 @@ pub enum ManifoldError {
     InvalidElement(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
 pub enum ManifoldType {
     RN,
     SE2,
