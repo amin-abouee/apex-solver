@@ -60,29 +60,6 @@ impl From<SE2> for nalgebra::DVector<f64> {
     }
 }
 
-/// SE(2) tangent space element representing elements in the Lie algebra se(2).
-///
-/// Following manif conventions, internally represented as [x, y, theta] where:
-/// - x, y: translational components
-/// - theta: rotational component
-#[derive(Clone, Debug, PartialEq)]
-pub struct SE2Tangent {
-    /// Internal data: [x, y, theta]
-    data: Vector3<f64>,
-}
-
-impl fmt::Display for SE2Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "se2(x: {:.4}, y: {:.4}, theta: {:.4})",
-            self.x(),
-            self.y(),
-            self.angle()
-        )
-    }
-}
-
 impl SE2 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 2;
@@ -389,6 +366,52 @@ impl LieGroup for SE2 {
     }
 }
 
+/// SE(2) tangent space element representing elements in the Lie algebra se(2).
+///
+/// Following manif conventions, internally represented as [x, y, theta] where:
+/// - x, y: translational components
+/// - theta: rotational component
+#[derive(Clone, Debug, PartialEq)]
+pub struct SE2Tangent {
+    /// Internal data: [x, y, theta]
+    data: Vector3<f64>,
+}
+
+impl fmt::Display for SE2Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "se2(x: {:.4}, y: {:.4}, theta: {:.4})",
+            self.x(),
+            self.y(),
+            self.angle()
+        )
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SE2Tangent {
+    fn from(data_vector: nalgebra::DVector<f64>) -> Self {
+        if data_vector.len() != 3 {
+            panic!("SE2Tangent::from expects 3-dimensional vector [x, y, theta]");
+        }
+        // Input order is [x, y, theta]
+        SE2Tangent {
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
+        }
+    }
+}
+
+impl From<SE2Tangent> for nalgebra::DVector<f64> {
+    fn from(se2_tangent: SE2Tangent) -> Self {
+        nalgebra::DVector::from_vec(vec![
+            se2_tangent.data[0], // x first
+            se2_tangent.data[1], // y second
+            se2_tangent.data[2], // theta third
+        ])
+    }
+}
+
 impl SE2Tangent {
     /// Create a new SE2Tangent from x, y, and theta components.
     pub fn new(x: f64, y: f64, theta: f64) -> Self {
@@ -417,20 +440,20 @@ impl SE2Tangent {
         Vector2::new(self.x(), self.y())
     }
 
-    /// Create SE2Tangent from a 3-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 3 {
-            panic!("SE2Tangent::from_vector expects 3-dimensional vector");
-        }
-        SE2Tangent {
-            data: Vector3::new(vector[0], vector[1], vector[2]),
-        }
-    }
+    // /// Create SE2Tangent from a 3-dimensional vector
+    // pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
+    //     if vector.len() != 3 {
+    //         panic!("SE2Tangent::from_vector expects 3-dimensional vector");
+    //     }
+    //     SE2Tangent {
+    //         data: Vector3::new(vector[0], vector[1], vector[2]),
+    //     }
+    // }
 
-    /// Convert SE2Tangent to a 3-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
-    }
+    // /// Convert SE2Tangent to a 3-dimensional vector
+    // pub fn to_vector(&self) -> nalgebra::DVector<f64> {
+    //     nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
+    // }
 }
 
 impl Tangent<SE2> for SE2Tangent {
