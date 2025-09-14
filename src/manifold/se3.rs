@@ -498,30 +498,6 @@ impl SE3Tangent {
         self.data.fixed_rows::<3>(3).into_owned()
     }
 
-    /// Create SE3Tangent from a 6-dimensional vector
-    // pub fn from_vector(vector: DVector<f64>) -> Self {
-    //     if vector.len() != 6 {
-    //         panic!("SE3Tangent::from_vector expects 6-dimensional vector");
-    //     }
-    //     SE3Tangent {
-    //         data: Vector6::new(
-    //             vector[0], vector[1], vector[2], vector[3], vector[4], vector[5],
-    //         ),
-    //     }
-    // }
-
-    /// Convert SE3Tangent to a 6-dimensional vector
-    // pub fn to_vector(&self) -> DVector<f64> {
-    //     DVector::from_vec(vec![
-    //         self.data[0],
-    //         self.data[1],
-    //         self.data[2],
-    //         self.data[3],
-    //         self.data[4],
-    //         self.data[5],
-    //     ])
-    // }
-
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians
     /// Q(ρ, θ) = (1/2)ρₓ + (θ - sin θ)/θ³ (θₓρₓ + ρₓθₓ + θₓρₓθₓ)
     ///           - (1 - θ²/2 - cos θ)/θ⁴ (θ²ₓρₓ + ρₓθ²ₓ - 3θₓρₓθₓ)
