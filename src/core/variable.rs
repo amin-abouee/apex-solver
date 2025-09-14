@@ -120,7 +120,7 @@ where
     /// let variable = Variable::new(se2_value);
     ///
     /// // Create a tangent vector: [dx, dy, dtheta]
-    /// let tangent = SE2Tangent::from_vector(na::DVector::from_vec(vec![0.1, 0.1, 0.1]));
+    /// let tangent = SE2Tangent::from(na::DVector::from(vec![0.1, 0.1, 0.1]));
     /// let new_value = variable.plus(&tangent);
     /// ```
     pub fn plus(&self, tangent: &M::TangentVector) -> M {
@@ -195,7 +195,7 @@ impl Variable<Rn> {
 mod tests {
     use super::*;
     use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
-    use nalgebra as na;
+    use nalgebra::{self as na, DVector};
     use std::f64::consts::PI;
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         let var2_updated = var2.plus(&diff_tangent);
         let final_diff = var1.minus(&Variable::new(var2_updated));
 
-        assert!(final_diff.to_vector().norm() < 1e-10);
+        assert!(DVector::from(final_diff).norm() < 1e-10);
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
         let final_diff = var1.minus(&Variable::new(var2_updated));
 
         // The final difference should be small (close to identity in tangent space)
-        assert!(final_diff.to_vector().norm() < 1e-10);
+        assert!(DVector::from(final_diff).norm() < 1e-10);
     }
 
     #[test]

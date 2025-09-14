@@ -133,7 +133,7 @@ impl Factor for BetweenFactorSE3 {
         let se3_k1_inv = se3_origin_k1.inverse(None);
         let temp = se3_origin_k0.compose(&self.relative_pose, None, None);
         let se3_diff = se3_k1_inv.compose(&temp, None, None);
-        let residual = se3_diff.log(None).to_vector();
+        let residual = se3_diff.log(None).into();
 
         // Use numerical differentiation for Jacobian computation
         let epsilon = 1e-8;
@@ -148,7 +148,7 @@ impl Factor for BetweenFactorSE3 {
                 let se3_k1_inv = se3_k1.inverse(None);
                 let temp = se3_k0.compose(&relative_pose_copy, None, None);
                 let diff = se3_k1_inv.compose(&temp, None, None);
-                diff.log(None).to_vector()
+                diff.log(None).into()
             };
 
         let base_residual = compute_residual(t_origin_k0, t_origin_k1);
