@@ -34,27 +34,6 @@ impl fmt::Display for SO3 {
     }
 }
 
-/// SO(3) tangent space element representing elements in the Lie algebra so(3).
-///
-/// Internally represented as axis-angle vectors in R³ where:
-/// - Direction: axis of rotation (unit vector)
-/// - Magnitude: angle of rotation (radians)
-#[derive(Clone, Debug, PartialEq)]
-pub struct SO3Tangent {
-    /// Internal data: axis-angle vector [θx, θy, θz]
-    data: Vector3<f64>,
-}
-
-impl fmt::Display for SO3Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "so3(axis-angle: [{:.4}, {:.4}, {:.4}])",
-            self.data.x, self.data.y, self.data.z
-        )
-    }
-}
-
 impl SO3 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 3;
@@ -398,6 +377,49 @@ impl LieGroup for SO3 {
     }
 }
 
+/// SO(3) tangent space element representing elements in the Lie algebra so(3).
+///
+/// Internally represented as axis-angle vectors in R³ where:
+/// - Direction: axis of rotation (unit vector)
+/// - Magnitude: angle of rotation (radians)
+#[derive(Clone, Debug, PartialEq)]
+pub struct SO3Tangent {
+    /// Internal data: axis-angle vector [θx, θy, θz]
+    data: Vector3<f64>,
+}
+
+impl fmt::Display for SO3Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "so3(axis-angle: [{:.4}, {:.4}, {:.4}])",
+            self.data.x, self.data.y, self.data.z
+        )
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SO3Tangent {
+    fn from(data_vector: nalgebra::DVector<f64>) -> Self {
+        if data_vector.len() != 3 {
+            panic!("SO3Tangent::from expects 3-dimensional vector [θx, θy, θz]");
+        }
+        SO3Tangent {
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
+        }
+    }
+}
+
+impl From<SO3Tangent> for nalgebra::DVector<f64> {
+    fn from(so3_tangent: SO3Tangent) -> Self {
+        nalgebra::DVector::from_vec(vec![
+            so3_tangent.data.x,
+            so3_tangent.data.y,
+            so3_tangent.data.z,
+        ])
+    }
+}
+
 impl SO3Tangent {
     /// Create a new SO3Tangent from axis-angle vector.
     ///
@@ -415,21 +437,6 @@ impl SO3Tangent {
     /// Get the axis-angle vector.
     pub fn axis_angle(&self) -> Vector3<f64> {
         self.data
-    }
-
-    /// Create SO3Tangent from a 3-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 3 {
-            panic!("SO3Tangent::from_vector expects 3-dimensional vector");
-        }
-        SO3Tangent {
-            data: Vector3::new(vector[0], vector[1], vector[2]),
-        }
-    }
-
-    /// Convert SO3Tangent to a 3-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
     }
 
     /// Get the angle of rotation.

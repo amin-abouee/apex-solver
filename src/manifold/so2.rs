@@ -44,21 +44,6 @@ impl From<SO2> for nalgebra::DVector<f64> {
     }
 }
 
-/// SO(2) tangent space element representing elements in the Lie algebra so(2).
-///
-/// Internally represented as a single scalar (angle in radians).
-#[derive(Clone, Debug, PartialEq)]
-pub struct SO2Tangent {
-    /// Internal data: angle (radians)
-    data: f64,
-}
-
-impl fmt::Display for SO2Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "so2(angle: {:.4})", self.data)
-    }
-}
-
 impl SO2 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 2;
@@ -256,6 +241,39 @@ impl LieGroup for SO2 {
     }
 }
 
+/// SO(2) tangent space element representing elements in the Lie algebra so(2).
+///
+/// Internally represented as a single scalar (angle in radians).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SO2Tangent {
+    /// Internal data: angle (radians)
+    data: f64,
+}
+
+impl fmt::Display for SO2Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "so2(angle: {:.4})", self.data)
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<nalgebra::DVector<f64>> for SO2Tangent {
+    fn from(data_vector: nalgebra::DVector<f64>) -> Self {
+        if data_vector.len() != 1 {
+            panic!("SO2Tangent::from expects 1-dimensional vector [angle]");
+        }
+        SO2Tangent {
+            data: data_vector[0],
+        }
+    }
+}
+
+impl From<SO2Tangent> for nalgebra::DVector<f64> {
+    fn from(so2_tangent: SO2Tangent) -> Self {
+        nalgebra::DVector::from_vec(vec![so2_tangent.data])
+    }
+}
+
 impl SO2Tangent {
     /// Create a new SO2Tangent from an angle.
     ///
@@ -268,19 +286,6 @@ impl SO2Tangent {
     /// Get the angle.
     pub fn angle(&self) -> f64 {
         self.data
-    }
-
-    /// Create SO2Tangent from a 1-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 1 {
-            panic!("SO2Tangent::from_vector expects 1-dimensional vector");
-        }
-        SO2Tangent { data: vector[0] }
-    }
-
-    /// Convert SO2Tangent to a 1-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_element(1, self.data)
     }
 }
 

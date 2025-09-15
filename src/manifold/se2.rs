@@ -381,7 +381,7 @@ impl fmt::Display for SE2Tangent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "se2(x: {:.4}, y: {:.4}, theta: {:.4})",
+            "SE2Tangent(x: {:.4}, y: {:.4}, theta: {:.4})",
             self.x(),
             self.y(),
             self.angle()
