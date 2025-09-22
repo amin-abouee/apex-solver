@@ -33,4 +33,4 @@ pub mod optimizer;
 pub use core::variable::Variable;
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-pub use optimizer::{AnySolver, OptimizerConfig, OptimizerType, SolverFactory};
+pub use optimizer::{OptimizerConfig, OptimizerType, solve_problem};
