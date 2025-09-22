@@ -7,7 +7,7 @@ mod integration_tests {
     const TOLERANCE: f64 = 1e-10;
 
     /// Helper function to create a realistic optimization problem
-    fn create_optimization_problem() -> (SparseColMat<usize, f64>, Mat<f64>, Mat<f64>) {
+    fn create_optimization_problem() -> (SparseColMat<usize, f64>, Mat<f64>) {
         // Create a 6x4 overdetermined system representing a typical optimization problem
         // This could represent 6 residuals with 4 parameters
         let triplets = vec![
@@ -45,32 +45,20 @@ mod integration_tests {
             _ => 0.0,
         });
 
-        // Create weights (could represent measurement uncertainties)
-        let weights = Mat::from_fn(6, 1, |i, _| match i {
-            0 => 2.0, // High confidence
-            1 => 1.5,
-            2 => 1.0, // Medium confidence
-            3 => 1.0,
-            4 => 0.5, // Low confidence
-            5 => 1.8, // High confidence
-            _ => 1.0,
-        });
-
-        (jacobian, residuals, weights)
+        (jacobian, residuals)
     }
 
     /// Test that QR and Cholesky solvers produce consistent covariance matrices
     #[test]
     fn test_solver_covariance_consistency() {
-        let (jacobian, residuals, weights) = create_optimization_problem();
+        let (jacobian, residuals) = create_optimization_problem();
 
         let mut qr_solver = SparseQRSolver::new();
         let mut cholesky_solver = SparseCholeskySolver::new();
 
         // Solve with both methods
-        let qr_result = qr_solver.solve_normal_equation(&residuals, &jacobian, &weights);
-        let cholesky_result =
-            cholesky_solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        let qr_result = qr_solver.solve_normal_equation(&residuals, &jacobian);
+        let cholesky_result = cholesky_solver.solve_normal_equation(&residuals, &jacobian);
 
         assert!(qr_result.is_some());
         assert!(cholesky_result.is_some());
@@ -108,7 +96,7 @@ mod integration_tests {
     /// Test covariance computation in iterative optimization scenario
     #[test]
     fn test_iterative_covariance_computation() {
-        let (jacobian, _residuals, weights) = create_optimization_problem();
+        let (jacobian, _residuals) = create_optimization_problem();
         let mut solver = SparseQRSolver::new();
 
         // Simulate multiple iterations of an optimization algorithm
@@ -128,7 +116,7 @@ mod integration_tests {
                 base_residual * (0.8_f64).powi(iteration)
             });
 
-            let result = solver.solve_normal_equation(&modified_residuals, &jacobian, &weights);
+            let result = solver.solve_normal_equation(&modified_residuals, &jacobian);
             assert!(result.is_some(), "Iteration {} should succeed", iteration);
 
             // Reset covariance computation for next iteration
@@ -163,18 +151,16 @@ mod integration_tests {
     /// Test covariance computation with different weight distributions
     #[test]
     fn test_covariance_with_weight_variations() {
-        let (jacobian, residuals, _) = create_optimization_problem();
+        let (jacobian, residuals) = create_optimization_problem();
 
         // Test with uniform weights
-        let uniform_weights = Mat::from_fn(6, 1, |_, _| 1.0);
         let mut solver1 = SparseQRSolver::new();
-        solver1.solve_normal_equation(&residuals, &jacobian, &uniform_weights);
+        solver1.solve_normal_equation(&residuals, &jacobian);
         let cov1 = solver1.compute_covariance_matrix().unwrap();
 
         // Test with varying weights
-        let varying_weights = Mat::from_fn(6, 1, |i, _| (i + 1) as f64 * 0.5);
         let mut solver2 = SparseQRSolver::new();
-        solver2.solve_normal_equation(&residuals, &jacobian, &varying_weights);
+        solver2.solve_normal_equation(&residuals, &jacobian);
         let cov2 = solver2.compute_covariance_matrix().unwrap();
 
         // Covariance matrices should be different due to different weights
@@ -216,12 +202,12 @@ mod integration_tests {
     /// Test that covariance computation handles augmented systems correctly
     #[test]
     fn test_covariance_with_augmented_system() {
-        let (jacobian, residuals, weights) = create_optimization_problem();
+        let (jacobian, residuals) = create_optimization_problem();
         let mut solver = SparseQRSolver::new();
 
         // Solve augmented system (Levenberg-Marquardt style)
         let lambda = 0.1;
-        let result = solver.solve_augmented_equation(&residuals, &jacobian, &weights, lambda);
+        let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
         assert!(result.is_some());
 
         // Compute covariance matrix
@@ -252,7 +238,7 @@ mod integration_tests {
 
         // Compare with normal equation solution
         let mut normal_solver = SparseQRSolver::new();
-        normal_solver.solve_normal_equation(&residuals, &jacobian, &weights);
+        normal_solver.solve_normal_equation(&residuals, &jacobian);
         let normal_cov = normal_solver.compute_covariance_matrix().unwrap();
 
         // Augmented system should generally have smaller variances (more confident)
