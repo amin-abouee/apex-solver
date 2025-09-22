@@ -3,14 +3,13 @@
 //! The Gauss-Newton algorithm is an iterative method for solving non-linear least squares problems.
 //! It approximates the Hessian using only first-order derivatives.
 
-use crate::core::{ApexError, Optimizable};
+use crate::core::ApexError;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::OptimizationStatus;
-use crate::optimizer::{ConvergenceInfo, OptimizerConfig, Solver, SolverResult};
-// Note: faer types will be used when implementing the full algorithm
-use std::time::Instant;
+use crate::optimizer::{OptimizerConfig, Solver, SolverResult};
 
 /// Gauss-Newton solver for nonlinear least squares optimization.
+#[allow(dead_code)]
 pub struct GaussNewton {
     config: OptimizerConfig,
     min_step_norm: f64,
@@ -37,6 +36,7 @@ impl GaussNewton {
     }
 
     /// Create the appropriate linear solver based on configuration
+    #[allow(dead_code)]
     fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
         match self.config.linear_solver_type {
             LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
@@ -45,6 +45,7 @@ impl GaussNewton {
     }
 
     /// Check convergence criteria
+    #[allow(dead_code)]
     fn check_convergence(
         &self,
         iteration: usize,
@@ -90,10 +91,7 @@ impl Default for GaussNewton {
     }
 }
 
-impl<P> Solver<P> for GaussNewton
-where
-    P: Clone,
-{
+impl Solver for GaussNewton {
     type Config = OptimizerConfig;
     type Error = ApexError;
 
@@ -101,100 +99,25 @@ where
         Self::with_config(config)
     }
 
-    fn solve<T>(&mut self, problem: &T, initial_params: P) -> Result<SolverResult<P>, Self::Error>
-    where
-        T: Optimizable<Parameters = P>,
-    {
-        let start_time = Instant::now();
-        let params = initial_params;
-        let mut iteration = 0;
-        let mut cost_evaluations = 0;
-        let jacobian_evaluations = 0;
-
-        // Create linear solver
-        let _linear_solver = self.create_linear_solver();
-
-        // Initial cost evaluation
-        let current_cost = problem.cost(&params)?;
-        cost_evaluations += 1;
-        let mut previous_cost = current_cost;
-
-        if self.config.verbose {
-            println!(
-                "Starting Gauss-Newton optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!("Initial cost: {:.6e}", current_cost);
-        }
-
-        loop {
-            let elapsed = start_time.elapsed();
-
-            // Increment iteration counter
-            iteration += 1;
-
-            // Check convergence criteria (but allow at least one iteration)
-            let cost_change = (previous_cost - current_cost).abs();
-            if iteration > 1
-                && let Some(status) = self.check_convergence(
-                    iteration,
-                    cost_change,
-                    0.0, // Will be updated with actual parameter update norm
-                    0.0, // Will be updated with actual gradient norm
-                    elapsed,
-                )
-            {
-                return Ok(SolverResult {
-                    parameters: params,
-                    status,
-                    final_cost: current_cost,
-                    iterations: iteration,
-                    elapsed_time: elapsed,
-                    convergence_info: ConvergenceInfo {
-                        final_gradient_norm: 0.0,
-                        final_parameter_update_norm: 0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
-                    },
-                });
-            }
-
-            // TODO: Implement the full Gauss-Newton algorithm
-            // The complete implementation would:
-            // 1. Evaluate residuals and Jacobian: (r, J) = problem.evaluate_with_jacobian(&params)
-            // 2. Create weight matrix (identity for unweighted least squares)
-            // 3. Solve normal equation: (J^T * J) * dx = -J^T * r using linear_solver
-            // 4. Update parameters: params = params + dx (with manifold operations if needed)
-            // 5. Evaluate new cost and check convergence
-            //
-            // This requires the Optimizable trait to provide concrete types for residuals and Jacobian
-            // that are compatible with the faer linear algebra library.
-            previous_cost = current_cost;
-
-            if self.config.verbose {
-                println!(
-                    "Iteration {}: cost = {:.6e}, cost_change = {:.6e}",
-                    iteration, current_cost, cost_change
-                );
-            }
-
-            // Simulate convergence for testing
-            if iteration >= 5 {
-                return Ok(SolverResult {
-                    parameters: params,
-                    status: OptimizationStatus::Converged,
-                    final_cost: current_cost,
-                    iterations: iteration,
-                    elapsed_time: elapsed,
-                    convergence_info: ConvergenceInfo {
-                        final_gradient_norm: 1e-10,
-                        final_parameter_update_norm: 1e-10,
-                        cost_evaluations,
-                        jacobian_evaluations,
-                    },
-                });
-            }
-        }
+    fn solve(
+        &mut self,
+        problem: &crate::core::problem::Problem,
+        initial_params: &std::collections::HashMap<
+            String,
+            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
+        Self::Error,
+    > {
+        // For now, use the simple solve_problem function from the module
+        // TODO: Implement actual Gauss-Newton algorithm
+        use crate::optimizer::solve_problem;
+        let config = OptimizerConfig {
+            optimizer_type: crate::optimizer::OptimizerType::GaussNewton,
+            ..Default::default()
+        };
+        solve_problem(problem, initial_params, config)
     }
 }
 

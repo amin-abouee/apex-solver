@@ -4,13 +4,13 @@
 //! direction with the steepest descent direction to find an optimal step within
 //! a trust region.
 
-use crate::core::{ApexError, Optimizable};
+use crate::core::ApexError;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::OptimizationStatus;
-use crate::optimizer::{ConvergenceInfo, OptimizerConfig, Solver, SolverResult};
-use std::time::Instant;
+use crate::optimizer::{OptimizerConfig, Solver, SolverResult};
 
 /// Dog Leg solver for nonlinear least squares optimization.
+#[allow(dead_code)]
 pub struct DogLeg {
     config: OptimizerConfig,
     trust_region_radius: f64,
@@ -59,6 +59,7 @@ impl DogLeg {
     }
 
     /// Create the appropriate linear solver based on configuration
+    #[allow(dead_code)]
     fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
         match self.config.linear_solver_type {
             LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
@@ -83,6 +84,7 @@ impl DogLeg {
     }
 
     /// Check convergence criteria
+    #[allow(dead_code)]
     fn check_convergence(
         &self,
         iteration: usize,
@@ -128,10 +130,7 @@ impl Default for DogLeg {
     }
 }
 
-impl<P> Solver<P> for DogLeg
-where
-    P: Clone,
-{
+impl Solver for DogLeg {
     type Config = OptimizerConfig;
     type Error = ApexError;
 
@@ -139,107 +138,25 @@ where
         Self::with_config(config)
     }
 
-    fn solve<T>(&mut self, problem: &T, initial_params: P) -> Result<SolverResult<P>, Self::Error>
-    where
-        T: Optimizable<Parameters = P>,
-    {
-        let start_time = Instant::now();
-        let params = initial_params;
-        let mut iteration = 0;
-        let mut cost_evaluations = 0;
-        let jacobian_evaluations = 0;
-
-        // Create linear solver
-        let _linear_solver = self.create_linear_solver();
-
-        // Initial cost evaluation
-        let current_cost = problem.cost(&params)?;
-        cost_evaluations += 1;
-        let mut previous_cost = current_cost;
-
-        if self.config.verbose {
-            println!(
-                "Starting Dog Leg optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!(
-                "Initial cost: {:.6e}, initial trust region: {:.6e}",
-                current_cost, self.trust_region_radius
-            );
-        }
-
-        loop {
-            let elapsed = start_time.elapsed();
-
-            // Increment iteration counter
-            iteration += 1;
-
-            // Check convergence criteria (but allow at least one iteration)
-            let cost_change = (previous_cost - current_cost).abs();
-            if iteration > 1
-                && let Some(status) = self.check_convergence(
-                    iteration,
-                    cost_change,
-                    0.0, // Will be updated with actual parameter update norm
-                    0.0, // Will be updated with actual gradient norm
-                    elapsed,
-                )
-            {
-                return Ok(SolverResult {
-                    parameters: params,
-                    status,
-                    final_cost: current_cost,
-                    iterations: iteration,
-                    elapsed_time: elapsed,
-                    convergence_info: ConvergenceInfo {
-                        final_gradient_norm: 0.0,
-                        final_parameter_update_norm: 0.0,
-                        cost_evaluations,
-                        jacobian_evaluations,
-                    },
-                });
-            }
-
-            // TODO: Implement the full Dog Leg algorithm
-            // The complete implementation would:
-            // 1. Evaluate residuals and Jacobian: (r, J) = problem.evaluate_with_jacobian(&params)
-            // 2. Compute Gauss-Newton step: solve (J^T * J) * h_gn = -J^T * r
-            // 3. Compute steepest descent step: h_sd = -α * J^T * r (where α minimizes ||r + α * J * J^T * r||²)
-            // 4. Compute Dog Leg step within trust region:
-            //    - If ||h_gn|| <= Δ: use h_gn
-            //    - Else if ||h_sd|| >= Δ: use (Δ/||h_sd||) * h_sd
-            //    - Else: find point on dog leg path: h_sd + β * (h_gn - h_sd) such that ||h|| = Δ
-            // 5. Compute step quality ratio ρ = (actual_reduction) / (predicted_reduction)
-            // 6. Update trust region radius based on ρ
-            // 7. If ρ > threshold, accept step: params = params + h
-            // 8. Evaluate new cost and check convergence
-
-            previous_cost = current_cost;
-
-            if self.config.verbose {
-                println!(
-                    "Iteration {}: cost = {:.6e}, cost_change = {:.6e}, trust_region = {:.6e}",
-                    iteration, current_cost, cost_change, self.trust_region_radius
-                );
-            }
-
-            // Simulate convergence for testing
-            if iteration >= 5 {
-                return Ok(SolverResult {
-                    parameters: params,
-                    status: OptimizationStatus::Converged,
-                    final_cost: current_cost,
-                    iterations: iteration,
-                    elapsed_time: elapsed,
-                    convergence_info: ConvergenceInfo {
-                        final_gradient_norm: 1e-10,
-                        final_parameter_update_norm: 1e-10,
-                        cost_evaluations,
-                        jacobian_evaluations,
-                    },
-                });
-            }
-        }
+    fn solve(
+        &mut self,
+        problem: &crate::core::problem::Problem,
+        initial_params: &std::collections::HashMap<
+            String,
+            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
+        Self::Error,
+    > {
+        // For now, use the simple solve_problem function from the module
+        // TODO: Implement actual Dog Leg algorithm
+        use crate::optimizer::solve_problem;
+        let config = OptimizerConfig {
+            optimizer_type: crate::optimizer::OptimizerType::DogLeg,
+            ..Default::default()
+        };
+        solve_problem(problem, initial_params, config)
     }
 }
 

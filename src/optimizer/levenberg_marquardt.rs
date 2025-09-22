@@ -267,48 +267,25 @@ impl LevenbergMarquardt {
         &self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
-        weights: &Mat<f64>,
     ) -> f64 {
-        let gradient = self.compute_gradient(residuals, jacobian, weights);
+        let gradient = self.compute_gradient(residuals, jacobian);
         gradient.norm_l2()
     }
 
-    /// Compute gradient vector: J^T * W * r
+    /// Compute gradient vector: J^T * r
     fn compute_gradient(
         &self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
-        weights: &Mat<f64>,
     ) -> Mat<f64> {
-        let m = jacobian.nrows();
-
-        // Create weighted residuals
-        let mut weighted_residuals = Mat::zeros(m, 1);
-        for i in 0..m {
-            weighted_residuals[(i, 0)] = weights[(i, 0)] * residuals[(i, 0)];
-        }
-
-        // Compute J^T * (W * r)
-        jacobian.transpose() * &weighted_residuals
+        // Compute J^T * r
+        jacobian.transpose() * residuals
     }
 
-    /// Compute Hessian approximation: J^T * W * J
-    fn compute_hessian(
-        &self,
-        jacobian: &SparseColMat<usize, f64>,
-        weights: &Mat<f64>,
-    ) -> SparseColMat<usize, f64> {
-        let m = jacobian.nrows();
-
-        // Create sparse diagonal weight matrix
-        let mut w_triplets = Vec::with_capacity(m);
-        for i in 0..m {
-            w_triplets.push(faer::sparse::Triplet::new(i, i, weights[(i, 0)]));
-        }
-        let weight_matrix = SparseColMat::try_new_from_triplets(m, m, &w_triplets).unwrap();
-
-        // Compute J^T * W * J
-        jacobian.transpose().to_col_major().unwrap() * (&weight_matrix * jacobian)
+    /// Compute Hessian approximation: J^T * J
+    fn compute_hessian(&self, jacobian: &SparseColMat<usize, f64>) -> SparseColMat<usize, f64> {
+        // Compute J^T * J
+        jacobian.transpose().to_col_major().unwrap() * jacobian
     }
 
     /// Create optimization summary
@@ -403,20 +380,15 @@ impl LevenbergMarquardt {
             let (residuals, jacobian) = problem.evaluate_with_jacobian(&params)?;
             jacobian_evaluations += 1;
 
-            // Create weight matrix (identity for now - can be extended for weighted least squares)
-            let weights = problem.weights();
-
-            // Compute gradient = J^T * W * r
-            let gradient_norm =
-                self.compute_gradient_norm(residuals.as_ref(), jacobian.as_ref(), &weights);
+            // Compute gradient = J^T * r
+            let gradient_norm = self.compute_gradient_norm(residuals.as_ref(), jacobian.as_ref());
             max_gradient_norm = max_gradient_norm.max(gradient_norm);
             final_gradient_norm = gradient_norm;
 
-            // Solve augmented system: (J^T * W * J + λI) * dx = -J^T * W * r
+            // Solve augmented system: (J^T * J + λI) * dx = -J^T * r
             if let Some(step) = linear_solver.solve_augmented_equation(
                 residuals.as_ref(),
                 jacobian.as_ref(),
-                &weights,
                 self.damping,
             ) {
                 let step_norm = step.norm_l2();
@@ -424,10 +396,9 @@ impl LevenbergMarquardt {
                 final_parameter_update_norm = step_norm;
 
                 // Compute predicted reduction
-                let hessian = self.compute_hessian(jacobian.as_ref(), &weights);
-                // Use negative gradient to match what linear solver uses: g = -J^T * W * r
-                let gradient =
-                    self.compute_gradient(residuals.as_ref(), jacobian.as_ref(), &weights);
+                let hessian = self.compute_hessian(jacobian.as_ref());
+                // Use negative gradient to match what linear solver uses: g = -J^T *  r
+                let gradient = self.compute_gradient(residuals.as_ref(), jacobian.as_ref());
                 let negative_gradient = &gradient * -1.0;
                 let predicted_reduction =
                     self.compute_predicted_reduction(&step, &negative_gradient, &hessian);
@@ -538,8 +509,8 @@ impl Default for LevenbergMarquardt {
     }
 }
 
-// Implement Solver trait specifically for Mat<f64> parameters
-impl crate::optimizer::Solver<Mat<f64>> for LevenbergMarquardt {
+// Implement Solver trait
+impl crate::optimizer::Solver for LevenbergMarquardt {
     type Config = OptimizerConfig;
     type Error = crate::core::ApexError;
 
@@ -547,15 +518,25 @@ impl crate::optimizer::Solver<Mat<f64>> for LevenbergMarquardt {
         Self::with_config(config)
     }
 
-    fn solve<T>(
+    fn solve(
         &mut self,
-        problem: &T,
-        initial_params: Mat<f64>,
-    ) -> Result<SolverResult<Mat<f64>>, Self::Error>
-    where
-        T: crate::core::Optimizable<Parameters = Mat<f64>>,
-    {
-        self.solve(problem, initial_params)
+        problem: &crate::core::problem::Problem,
+        initial_params: &std::collections::HashMap<
+            String,
+            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
+        Self::Error,
+    > {
+        // For now, use the simple solve_problem function from the module
+        // TODO: Implement actual Levenberg-Marquardt algorithm with Problem interface
+        use crate::optimizer::solve_problem;
+        let config = OptimizerConfig {
+            optimizer_type: crate::optimizer::OptimizerType::LevenbergMarquardt,
+            ..Default::default()
+        };
+        solve_problem(problem, initial_params, config)
     }
 }
 
