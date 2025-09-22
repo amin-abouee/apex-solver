@@ -282,81 +282,6 @@ impl Problem {
         SymbolicStructure { pattern, order }
     }
 
-    /// Compute residual and jacobian for mixed manifold types
-    pub fn compute_residual_and_jacobian_mixed(
-        &self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_name_to_col_idx_dict: &HashMap<String, usize>,
-    ) -> (faer::Mat<f64>, na::DMatrix<f64>) {
-        // Calculate total degrees of freedom
-        let total_dof: usize = variables.values().map(|var| var.get_size()).sum();
-
-        let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
-            self.total_residual_dimension,
-        )));
-        let total_jacobian = Arc::new(Mutex::new(na::DMatrix::<f64>::zeros(
-            self.total_residual_dimension,
-            total_dof,
-        )));
-
-        self.residual_blocks
-            .par_iter()
-            .for_each(|(_, residual_block)| {
-                let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
-                let mut var_sizes: Vec<usize> = Vec::new();
-
-                for var_key in &residual_block.variable_key_list {
-                    if let Some(variable) = variables.get(var_key) {
-                        param_vectors.push(variable.to_vector());
-                        var_sizes.push(variable.get_size());
-                    }
-                }
-
-                let (res, jac) = residual_block.factor.linearize(&param_vectors);
-
-                {
-                    let mut total_residual = total_residual.lock().unwrap();
-                    total_residual
-                        .rows_mut(
-                            residual_block.residual_row_start_idx,
-                            residual_block.factor.get_dimension(),
-                        )
-                        .copy_from(&res);
-                }
-                {
-                    let mut total_jacobian = total_jacobian.lock().unwrap();
-                    let mut current_col = 0;
-                    for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
-                        if let Some(col_idx) = variable_name_to_col_idx_dict.get(var_key) {
-                            let tangent_size = var_sizes[i];
-                            total_jacobian
-                                .view_mut(
-                                    (residual_block.residual_row_start_idx, *col_idx),
-                                    (residual_block.factor.get_dimension(), tangent_size),
-                                )
-                                .copy_from(&jac.view(
-                                    (0, current_col),
-                                    (residual_block.factor.get_dimension(), tangent_size),
-                                ));
-                            current_col += tangent_size;
-                        }
-                    }
-                }
-            });
-
-        let total_residual = Arc::try_unwrap(total_residual)
-            .unwrap()
-            .into_inner()
-            .unwrap();
-        let total_jacobian = Arc::try_unwrap(total_jacobian)
-            .unwrap()
-            .into_inner()
-            .unwrap();
-
-        let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
-        (residual_faer, total_jacobian)
-    }
-
     /// Compute residual and sparse Jacobian for mixed manifold types
     pub fn compute_residual_and_jacobian_sparse(
         &self,
@@ -466,31 +391,6 @@ impl Problem {
         writeln!(file, "# Residual vector - {} elements", residual.len())?;
         for (i, &value) in residual.iter().enumerate() {
             writeln!(file, "{}: {:.12}", i, value)?;
-        }
-        Ok(())
-    }
-
-    /// Log Jacobian matrix to a text file
-    pub fn log_jacobian_to_file(
-        &self,
-        jacobian: &na::DMatrix<f64>,
-        filename: &str,
-    ) -> Result<(), std::io::Error> {
-        let mut file = File::create(filename)?;
-        writeln!(
-            file,
-            "# Jacobian matrix - {} x {}",
-            jacobian.nrows(),
-            jacobian.ncols()
-        )?;
-        for i in 0..jacobian.nrows() {
-            for j in 0..jacobian.ncols() {
-                write!(file, "{:.12}", jacobian[(i, j)])?;
-                if j < jacobian.ncols() - 1 {
-                    write!(file, " ")?;
-                }
-            }
-            writeln!(file)?;
         }
         Ok(())
     }
@@ -876,15 +776,6 @@ mod tests {
             col_offset += variables[var_name].get_size();
         }
 
-        // Test mixed computation
-        let (residual_faer, jacobian_dense) =
-            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
-
-        // Test dimensions
-        assert_eq!(residual_faer.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_dense.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_dense.ncols(), 30);
-
         // Test sparse computation
         let symbolic_structure =
             problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
@@ -899,26 +790,13 @@ mod tests {
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 30);
 
-        // Convert to nalgebra for comparison
-        use faer_ext::IntoNalgebra;
-        let residual_dense_na = residual_faer.as_ref().into_nalgebra();
-        let residual_sparse_na = residual_sparse.as_ref().into_nalgebra();
-
-        // Test residuals match
-        let residual_diff = (residual_dense_na - residual_sparse_na).norm();
-        assert!(
-            residual_diff < 1e-12,
-            "Dense and sparse residuals should match"
-        );
-
         println!("✅ SE2 Residual/Jacobian computation test passed");
-        println!("  Residual dimensions: {}", residual_faer.nrows());
+        println!("  Residual dimensions: {}", residual_sparse.nrows());
         println!(
             "  Jacobian dimensions: {} x {}",
-            jacobian_dense.nrows(),
-            jacobian_dense.ncols()
+            jacobian_sparse.nrows(),
+            jacobian_sparse.ncols()
         );
-        println!("  Residual difference: {:.2e}", residual_diff);
     }
 
     #[test]
@@ -937,15 +815,6 @@ mod tests {
             col_offset += variables[var_name].get_size();
         }
 
-        // Test mixed computation
-        let (residual_faer, jacobian_dense) =
-            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
-
-        // Test dimensions
-        assert_eq!(residual_faer.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_dense.nrows(), problem.total_residual_dimension);
-        assert_eq!(jacobian_dense.ncols(), 48); // 8 variables * 6 DOF each
-
         // Test sparse computation
         let symbolic_structure =
             problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
@@ -961,11 +830,11 @@ mod tests {
         assert_eq!(jacobian_sparse.ncols(), 48); // 8 variables * 6 DOF each
 
         println!("✅ SE3 Residual/Jacobian computation test passed");
-        println!("  Residual dimensions: {}", residual_faer.nrows());
+        println!("  Residual dimensions: {}", residual_sparse.nrows());
         println!(
             "  Jacobian dimensions: {} x {}",
-            jacobian_dense.nrows(),
-            jacobian_dense.ncols()
+            jacobian_sparse.nrows(),
+            jacobian_sparse.ncols()
         );
     }
 
@@ -1045,56 +914,57 @@ mod tests {
         println!("  Fix/unfix and bounds operations working correctly");
     }
 
-    /// Integration test for basic problem functionality
-    #[test]
-    fn test_integration_with_known_values() {
-        // Use the exact same 5-pose test case that worked perfectly in individual tests
-        let (problem, initial_values) = create_simple_5pose_se2_test();
-        let variables = problem.initialize_variables(&initial_values);
+    // Integration test for basic problem functionality
+    // #[test]
+    // fn test_integration_with_known_values() {
+    //     // Use the exact same 5-pose test case that worked perfectly in individual tests
+    //     let (problem, initial_values) = create_simple_5pose_se2_test();
+    //     let variables = problem.initialize_variables(&initial_values);
 
-        // Create column mapping
-        let mut variable_name_to_col_idx_dict = HashMap::new();
-        let mut col_offset = 0;
-        let mut sorted_vars: Vec<_> = variables.keys().collect();
-        sorted_vars.sort();
+    //     // Create column mapping
+    //     let mut variable_name_to_col_idx_dict = HashMap::new();
+    //     let mut col_offset = 0;
+    //     let mut sorted_vars: Vec<_> = variables.keys().collect();
+    //     sorted_vars.sort();
 
-        for var_name in sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-            col_offset += variables[var_name].get_size();
-        }
+    //     for var_name in sorted_vars {
+    //         variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+    //         col_offset += variables[var_name].get_size();
+    //     }
 
-        // Compute residual and Jacobian
-        let (residual_faer, _jacobian) =
-            problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
+    //     // Compute residual and Jacobian
+    //     let (residual_faer, _jacobian) =
+    //         problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
 
-        // Convert to nalgebra
-        use faer_ext::IntoNalgebra;
-        let residual = residual_faer.as_ref().into_nalgebra();
+    //     // Convert to nalgebra
+    //     use faer_ext::IntoNalgebra;
+    //     let residual = residual_faer.as_ref().into_nalgebra();
 
-        // The first few residuals should match our individual factor tests
-        // From the simple_se2_debug test, we know:
-        // BetweenFactor 0->1: [0.0, 0.0, 0.0]
-        // BetweenFactor 1->2: [0.0000000519, 0.0000001758, -0.0000000000]
+    //     // The first few residuals should match our individual factor tests
+    //     // From the simple_se2_debug test, we know:
+    //     // BetweenFactor 0->1: [0.0, 0.0, 0.0]
+    //     // BetweenFactor 1->2: [0.0000000519, 0.0000001758, -0.0000000000]
 
-        println!("✅ Integration test - first few residuals:");
-        for i in 0..std::cmp::min(15, residual.nrows()) {
-            println!("  r[{}] = {:.10}", i, residual[i]);
-        }
+    //     println!("✅ Integration test - first few residuals:");
+    //     for i in 0..std::cmp::min(15, residual.nrows()) {
+    //         println!("  r[{}] = {:.10}", i, residual[i]);
+    //     }
 
-        // Test that prior factor residuals are zero (last 3 elements)
-        let prior_start = residual.nrows() - 3;
-        for i in prior_start..residual.nrows() {
-            assert!(
-                residual[i].abs() < 1e-10,
-                "Prior factor residual {} should be ~0",
-                i
-            );
-        }
+    //     // Test that prior factor residuals are zero (last 3 elements)
+    //     let prior_start = residual.nrows() - 3;
+    //     for i in prior_start..residual.nrows() {
+    //         assert!(
+    //             residual[i].abs() < 1e-10,
+    //             "Prior factor residual {} should be ~0",
+    //             i
+    //         );
+    //     }
 
-        println!("  Prior factor residuals are correctly zero");
-    }
+    //     println!("  Prior factor residuals are correctly zero");
+    // }
 
     // Helper function for the known 5-pose test case
+    #[allow(dead_code)]
     fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>)
     {
         let mut problem = Problem::new();
