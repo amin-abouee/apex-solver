@@ -9,97 +9,55 @@ pub trait Factor: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE2 {
-    pub dx: f64,
-    pub dy: f64,
-    pub dtheta: f64,
+    pub relative_pose: SE2,
 }
 
 impl BetweenFactorSE2 {
-    pub fn new(dx: f64, dy: f64, dtheta: f64) -> Self {
-        Self { dx, dy, dtheta }
-    }
-
-    pub fn from_se2(relative_pose: SE2) -> Self {
-        Self {
-            dx: relative_pose.translation().x,
-            dy: relative_pose.translation().y,
-            dtheta: relative_pose.angle(),
-        }
+    pub fn new(relative_pose: SE2) -> Self {
+        Self { relative_pose }
     }
 }
 
 impl Factor for BetweenFactorSE2 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        // Use standard SE2 formulation with [x, y, theta] parameter ordering
-        let t_origin_k0 = &params[0];
-        let t_origin_k1 = &params[1];
+        let se2_origin_k0 = SE2::from(params[0].clone());
+        let se2_origin_k1 = SE2::from(params[1].clone());
+        // let se2_origin_k0 = SE2::from_xy_angle(t_origin_k0[1], t_origin_k0[2], t_origin_k0[0]);
+        // let se2_origin_k1 = SE2::from_xy_angle(t_origin_k1[1], t_origin_k1[2], t_origin_k1[0]);
+        // let se2_k0_k1_measured = SE2::from_xy_angle(self.dx, self.dy, self.dtheta);
+        let se2_k0_k1_measured = &self.relative_pose;
 
-        // Create nalgebra Isometry2 objects from pose parameters
-        let se2_origin_k0 = na::Isometry2::new(
-            na::Vector2::new(t_origin_k0[0], t_origin_k0[1]), // x, y from indices 0, 1
-            t_origin_k0[2],                                   // theta from index 2
+        // Predicted measurement: T_k0_k1 = (T_w_k0)^-1 * T_w_k1
+        let mut j_predicted_wrt_k0 = na::Matrix3::zeros();
+        let mut j_predicted_wrt_k1 = na::Matrix3::zeros();
+        let se2_k0_k1_predicted = se2_origin_k0.between(
+            &se2_origin_k1,
+            Some(&mut j_predicted_wrt_k0),
+            Some(&mut j_predicted_wrt_k1),
         );
-        let se2_origin_k1 = na::Isometry2::new(
-            na::Vector2::new(t_origin_k1[0], t_origin_k1[1]), // x, y from indices 0, 1
-            t_origin_k1[2],                                   // theta from index 2
+
+        // Compute residual and Jacobians
+        // residual = log( (T_k0_k1_measured)^-1 * T_k0_k1_predicted )
+        let mut j_residual_wrt_predicted = na::Matrix3::zeros();
+        let residual = se2_k0_k1_predicted.right_minus(
+            se2_k0_k1_measured,
+            Some(&mut j_residual_wrt_predicted),
+            None,
         );
 
-        // Create measurement from dx, dy, dtheta relative transformation
-        let se2_k0_k1 = na::Isometry2::new(na::Vector2::new(self.dx, self.dy), self.dtheta);
+        // Chain rule for Jacobians
+        let jacobian_wrt_k0 = j_residual_wrt_predicted * j_predicted_wrt_k0;
+        let jacobian_wrt_k1 = j_residual_wrt_predicted * j_predicted_wrt_k1;
 
-        // Compute residual: se2_diff = se2_origin_k1.inverse() * se2_origin_k0 * se2_k0_k1
-        let se2_diff = se2_origin_k1.inverse() * se2_origin_k0 * se2_k0_k1;
-
-        // Extract residual as [dx, dy, dtheta]
-        let residual = na::dvector![
-            se2_diff.translation.x,
-            se2_diff.translation.y,
-            se2_diff.rotation.angle()
-        ];
-
-        // Use numerical differentiation for Jacobian computation
-        let epsilon = 1e-8;
         let mut jacobian = na::DMatrix::<f64>::zeros(3, 6);
+        jacobian
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&jacobian_wrt_k0);
+        jacobian
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&jacobian_wrt_k1);
 
-        // Numerical Jacobian for k0 (parameters 0, 1, 2)
-        for i in 0..3 {
-            let mut params_plus = params[0].clone();
-            params_plus[i] += epsilon;
-            let se2_k0_plus = na::Isometry2::new(
-                na::Vector2::new(params_plus[1], params_plus[2]),
-                params_plus[0],
-            );
-            let se2_diff_plus = se2_origin_k1.inverse() * se2_k0_plus * se2_k0_k1;
-            let residual_plus = na::dvector![
-                se2_diff_plus.translation.x,
-                se2_diff_plus.translation.y,
-                se2_diff_plus.rotation.angle()
-            ];
-
-            let grad = (residual_plus - &residual) / epsilon;
-            jacobian.column_mut(i).copy_from(&grad);
-        }
-
-        // Numerical Jacobian for k1 (parameters 3, 4, 5)
-        for i in 0..3 {
-            let mut params_plus = params[1].clone();
-            params_plus[i] += epsilon;
-            let se2_k1_plus = na::Isometry2::new(
-                na::Vector2::new(params_plus[1], params_plus[2]),
-                params_plus[0],
-            );
-            let se2_diff_plus = se2_k1_plus.inverse() * se2_origin_k0 * se2_k0_k1;
-            let residual_plus = na::dvector![
-                se2_diff_plus.translation.x,
-                se2_diff_plus.translation.y,
-                se2_diff_plus.rotation.angle()
-            ];
-
-            let grad = (residual_plus - &residual) / epsilon;
-            jacobian.column_mut(3 + i).copy_from(&grad);
-        }
-
-        (residual, jacobian)
+        (residual.into(), jacobian)
     }
 
     fn get_dimension(&self) -> usize {
@@ -120,59 +78,48 @@ impl BetweenFactorSE3 {
 
 impl Factor for BetweenFactorSE3 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        // Use standard SE3 formulation with [tx, ty, tz, qw, qx, qy, qz] parameter ordering
-        let t_origin_k0 = &params[0];
-        let t_origin_k1 = &params[1];
+        let se3_origin_k0 = SE3::from(params[0].clone());
+        let se3_origin_k1 = SE3::from(params[1].clone());
+        let se3_k0_k1_measured = &self.relative_pose;
 
-        // Convert parameters to SE3 objects using apex-solver conversion
-        let se3_origin_k0 = SE3::from(t_origin_k0.clone());
-        let se3_origin_k1 = SE3::from(t_origin_k1.clone());
+        // Step 1: se3_origin_k1.inverse()
+        let mut j_k1_inv_wrt_k1 = na::Matrix6::zeros();
+        let se3_k1_inv = se3_origin_k1.inverse(Some(&mut j_k1_inv_wrt_k1));
 
-        // Compute residual: se3_diff = se3_origin_k1.inverse() * se3_origin_k0 * se3_k0_k1
-        // For SE3, we use the direct multiplication approach
-        let se3_k1_inv = se3_origin_k1.inverse(None);
-        let temp = se3_origin_k0.compose(&self.relative_pose, None, None);
-        let se3_diff = se3_k1_inv.compose(&temp, None, None);
-        let residual = se3_diff.log(None).into();
+        // Step 2: se3_k1_inv * se3_origin_k0
+        let mut j_compose1_wrt_k1_inv = na::Matrix6::zeros();
+        let mut j_compose1_wrt_k0 = na::Matrix6::zeros();
+        let se3_temp = se3_k1_inv.compose(
+            &se3_origin_k0,
+            Some(&mut j_compose1_wrt_k1_inv),
+            Some(&mut j_compose1_wrt_k0),
+        );
 
-        // Use numerical differentiation for Jacobian computation
-        let epsilon = 1e-8;
-        let mut jacobian = na::DMatrix::<f64>::zeros(6, 14);
+        // Step 3: se3_temp * se3_k0_k1_measured
+        let mut j_compose2_wrt_temp = na::Matrix6::zeros();
+        let se3_diff = se3_temp.compose(se3_k0_k1_measured, Some(&mut j_compose2_wrt_temp), None);
 
-        // Helper function to compute residual
-        let relative_pose_copy = self.relative_pose.clone();
-        let compute_residual =
-            |params0: &na::DVector<f64>, params1: &na::DVector<f64>| -> na::DVector<f64> {
-                let se3_k0 = SE3::from(params0.clone());
-                let se3_k1 = SE3::from(params1.clone());
-                let se3_k1_inv = se3_k1.inverse(None);
-                let temp = se3_k0.compose(&relative_pose_copy, None, None);
-                let diff = se3_k1_inv.compose(&temp, None, None);
-                diff.log(None).into()
-            };
+        // Step 4: se3_diff.log()
+        let mut j_log_wrt_diff = na::Matrix6::zeros();
+        let residual = se3_diff.log(Some(&mut j_log_wrt_diff));
 
-        let base_residual = compute_residual(t_origin_k0, t_origin_k1);
+        // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
+        let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
+        let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
+        let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
 
-        // Numerical Jacobian for k0 (7 parameters)
-        for i in 0..7 {
-            let mut params_plus = t_origin_k0.clone();
-            params_plus[i] += epsilon;
-            let residual_plus = compute_residual(&params_plus, t_origin_k1);
-            let grad = (residual_plus - &base_residual) / epsilon;
-            jacobian.column_mut(i).copy_from(&grad);
-        }
+        let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
+        let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
-        // Numerical Jacobian for k1 (7 parameters)
-        for i in 0..7 {
-            let mut params_plus = t_origin_k1.clone();
-            params_plus[i] += epsilon;
-            let residual_plus = compute_residual(t_origin_k0, &params_plus);
-            let grad = (residual_plus - &base_residual) / epsilon;
-            jacobian.column_mut(7 + i).copy_from(&grad);
-        }
+        let mut jacobian = na::DMatrix::<f64>::zeros(6, 12);
+        jacobian
+            .fixed_view_mut::<6, 6>(0, 0)
+            .copy_from(&jacobian_wrt_k0);
+        jacobian
+            .fixed_view_mut::<6, 6>(0, 6)
+            .copy_from(&jacobian_wrt_k1);
 
-        // Return full 6x14 Jacobian (6 residual dims × 14 total parameters)
-        (residual, jacobian)
+        (residual.into(), jacobian)
     }
 
     fn get_dimension(&self) -> usize {
