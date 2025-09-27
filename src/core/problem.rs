@@ -914,55 +914,6 @@ mod tests {
         println!("  Fix/unfix and bounds operations working correctly");
     }
 
-    // Integration test for basic problem functionality
-    // #[test]
-    // fn test_integration_with_known_values() {
-    //     // Use the exact same 5-pose test case that worked perfectly in individual tests
-    //     let (problem, initial_values) = create_simple_5pose_se2_test();
-    //     let variables = problem.initialize_variables(&initial_values);
-
-    //     // Create column mapping
-    //     let mut variable_name_to_col_idx_dict = HashMap::new();
-    //     let mut col_offset = 0;
-    //     let mut sorted_vars: Vec<_> = variables.keys().collect();
-    //     sorted_vars.sort();
-
-    //     for var_name in sorted_vars {
-    //         variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-    //         col_offset += variables[var_name].get_size();
-    //     }
-
-    //     // Compute residual and Jacobian
-    //     let (residual_faer, _jacobian) =
-    //         problem.compute_residual_and_jacobian_mixed(&variables, &variable_name_to_col_idx_dict);
-
-    //     // Convert to nalgebra
-    //     use faer_ext::IntoNalgebra;
-    //     let residual = residual_faer.as_ref().into_nalgebra();
-
-    //     // The first few residuals should match our individual factor tests
-    //     // From the simple_se2_debug test, we know:
-    //     // BetweenFactor 0->1: [0.0, 0.0, 0.0]
-    //     // BetweenFactor 1->2: [0.0000000519, 0.0000001758, -0.0000000000]
-
-    //     println!("✅ Integration test - first few residuals:");
-    //     for i in 0..std::cmp::min(15, residual.nrows()) {
-    //         println!("  r[{}] = {:.10}", i, residual[i]);
-    //     }
-
-    //     // Test that prior factor residuals are zero (last 3 elements)
-    //     let prior_start = residual.nrows() - 3;
-    //     for i in prior_start..residual.nrows() {
-    //         assert!(
-    //             residual[i].abs() < 1e-10,
-    //             "Prior factor residual {} should be ~0",
-    //             i
-    //         );
-    //     }
-
-    //     println!("  Prior factor residuals are correctly zero");
-    // }
-
     // Helper function for the known 5-pose test case
     #[allow(dead_code)]
     fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>)
