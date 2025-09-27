@@ -360,12 +360,83 @@ impl G2oLoader {
     }
 
     /// Parse EDGE_SE3:QUAT line (placeholder implementation)
-    fn parse_edge_se3(_parts: &[&str], _line_num: usize) -> Result<EdgeSE3, ApexSolverIoError> {
-        // Simplified implementation - full edge parsing would be more complex
-        let from = 0;
-        let to = 1;
-        let translation = Vector3::zeros();
-        let rotation = UnitQuaternion::identity();
+    fn parse_edge_se3(parts: &[&str], line_num: usize) -> Result<EdgeSE3, ApexSolverIoError> {
+        // EDGE_SE3:QUAT from_id to_id tx ty tz qx qy qz qw [information matrix values]
+        if parts.len() < 10 {
+            return Err(ApexSolverIoError::MissingFields { line: line_num });
+        }
+
+        // Parse vertex IDs
+        let from = parts[1]
+            .parse::<usize>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[1].to_string(),
+            })?;
+
+        let to = parts[2]
+            .parse::<usize>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[2].to_string(),
+            })?;
+
+        // Parse translation (tx, ty, tz)
+        let tx = parts[3]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[3].to_string(),
+            })?;
+
+        let ty = parts[4]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[4].to_string(),
+            })?;
+
+        let tz = parts[5]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[5].to_string(),
+            })?;
+
+        let translation = Vector3::new(tx, ty, tz);
+
+        // Parse rotation quaternion (qx, qy, qz, qw)
+        let qx = parts[6]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[6].to_string(),
+            })?;
+
+        let qy = parts[7]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[7].to_string(),
+            })?;
+
+        let qz = parts[8]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[8].to_string(),
+            })?;
+
+        let qw = parts[9]
+            .parse::<f64>()
+            .map_err(|_| ApexSolverIoError::InvalidNumber {
+                line: line_num,
+                value: parts[9].to_string(),
+            })?;
+
+        let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
+
+        // For now, use identity information matrix (could parse full 6x6 matrix if needed)
         let information = Matrix6::identity();
 
         Ok(EdgeSE3::new(from, to, translation, rotation, information))
