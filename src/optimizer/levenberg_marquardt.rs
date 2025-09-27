@@ -119,6 +119,10 @@ pub struct LevenbergMarquardt {
     trust_region_radius: f64,
     min_step_quality: f64,
     good_step_quality: f64,
+    // Jacobi scaling support
+    jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    min_diagonal: f64,
+    max_diagonal: f64,
 }
 
 impl LevenbergMarquardt {
@@ -131,7 +135,7 @@ impl LevenbergMarquardt {
     pub fn with_config(config: OptimizerConfig) -> Self {
         Self {
             config,
-            damping: 1e-3,
+            damping: 1e-4,
             damping_min: 1e-12,
             damping_max: 1e12,
             damping_increase_factor: 10.0,
@@ -139,6 +143,9 @@ impl LevenbergMarquardt {
             trust_region_radius: 1e4,
             min_step_quality: 0.0,
             good_step_quality: 0.75,
+            jacobi_scaling: None,
+            min_diagonal: 1e-6,
+            max_diagonal: 1e32,
         }
     }
 
@@ -178,19 +185,19 @@ impl LevenbergMarquardt {
         }
     }
 
-    /// Update damping parameter based on step quality
+    /// Update damping parameter based on step quality using trust region approach
     fn update_damping(&mut self, rho: f64) -> bool {
-        if rho > self.good_step_quality {
-            // Good step, decrease damping
-            self.damping = (self.damping * self.damping_decrease_factor).max(self.damping_min);
+        if rho > 0.0 {
+            // Step accepted - decrease damping using tiny-solver's exact strategy
+            let tmp = 2.0 * rho - 1.0;
+            self.damping *= (1.0_f64 / 3.0).max(1.0 - tmp * tmp * tmp);
+            self.damping = self.damping.max(self.damping_min);
             true
-        } else if rho < self.min_step_quality {
-            // Poor step, increase damping
-            self.damping = (self.damping * self.damping_increase_factor).min(self.damping_max);
-            false
         } else {
-            // Acceptable step, keep damping unchanged
-            true
+            // Step rejected - increase damping using tiny-solver's exact strategy
+            self.damping *= 2.0;
+            self.damping = self.damping.min(self.damping_max);
+            false
         }
     }
 
@@ -210,17 +217,23 @@ impl LevenbergMarquardt {
     }
 
     /// Compute predicted cost reduction from linear model
+    /// Standard LM formula: -step^T * gradient - 0.5 * step^T * H * step
     fn compute_predicted_reduction(
         &self,
         step: &Mat<f64>,
         gradient: &Mat<f64>,
         hessian: &SparseColMat<usize, f64>,
     ) -> f64 {
-        // Predicted reduction = -step^T * gradient - 0.5 * step^T * H * step
-        // The negative signs account for the fact that we're minimizing
+        // Standard Levenberg-Marquardt predicted reduction formula
+        // predicted_reduction = -step^T * gradient - 0.5 * step^T * H * step
         let linear_term = step.transpose() * gradient;
-        let quadratic_term = step.transpose() * (hessian * step);
-        linear_term[(0, 0)] + 0.5 * quadratic_term[(0, 0)]
+        let hessian_step = hessian * step;
+        let quadratic_term = step.transpose() * &hessian_step;
+
+        let predicted_reduction = -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)];
+
+        // Positive predicted_reduction means we expect cost to decrease
+        predicted_reduction
     }
 
     /// Check convergence criteria
@@ -288,6 +301,101 @@ impl LevenbergMarquardt {
         jacobian.transpose().to_col_major().unwrap() * jacobian
     }
 
+    /// Create Jacobi scaling matrix from Jacobian
+    fn create_jacobi_scaling(
+        &self,
+        jacobian: &SparseColMat<usize, f64>,
+    ) -> SparseColMat<usize, f64> {
+        use faer::sparse::Triplet;
+
+        let cols = jacobian.ncols();
+        let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
+            .map(|c| {
+                // Compute column norm: sqrt(sum(J_col^2))
+                let col_norm_squared: f64 = jacobian
+                    .triplet_iter()
+                    .filter(|t| t.col == c)
+                    .map(|t| t.val * t.val)
+                    .sum();
+                let col_norm = col_norm_squared.sqrt();
+                // Scaling factor: 1.0 / (1.0 + col_norm)
+                let scaling = 1.0 / (1.0 + col_norm);
+                Triplet::new(c, c, scaling)
+            })
+            .collect();
+
+        SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
+            .expect("Failed to create Jacobi scaling matrix")
+    }
+
+    /// Apply Jacobi scaling to Jacobian: J_scaled = J * S
+    fn apply_jacobi_scaling(
+        &self,
+        jacobian: &SparseColMat<usize, f64>,
+        scaling: &SparseColMat<usize, f64>,
+    ) -> SparseColMat<usize, f64> {
+        jacobian * scaling
+    }
+
+    /// Apply inverse Jacobi scaling to step: dx_final = S * dx_scaled
+    fn apply_inverse_jacobi_scaling(
+        &self,
+        step: &Mat<f64>,
+        scaling: &SparseColMat<usize, f64>,
+    ) -> Mat<f64> {
+        scaling * step
+    }
+
+    /// Solve the regularized system with diagonal-aware damping
+    fn solve_regularized_system(
+        &self,
+        residuals: &Mat<f64>,
+        scaled_jacobian: &SparseColMat<usize, f64>,
+        hessian: &SparseColMat<usize, f64>,
+        linear_solver: &mut Box<dyn SparseLinearSolver>,
+    ) -> Option<Mat<f64>> {
+        // For now, create a temporary augmented system that mimics what we want
+        // We'll use the solve_augmented_equation with our custom damping
+
+        // Apply diagonal-aware regularization similar to tiny-solver-rs
+        let n_vars = scaled_jacobian.ncols();
+        let n_residuals = scaled_jacobian.nrows();
+
+        // Create damping matrix entries
+        let mut damping_triplets = Vec::new();
+        for i in 0..n_vars {
+            let diag_val = hessian[(i, i)];
+            let clamped_diag = diag_val.max(self.min_diagonal).min(self.max_diagonal);
+            let damping_value = (self.damping * clamped_diag).sqrt();
+            damping_triplets.push(faer::sparse::Triplet::new(
+                n_residuals + i,
+                i,
+                damping_value,
+            ));
+        }
+
+        // Create augmented Jacobian: [J; sqrt(damping) * D]
+        let mut all_triplets: Vec<_> = scaled_jacobian
+            .triplet_iter()
+            .map(|t| faer::sparse::Triplet::new(t.row, t.col, *t.val))
+            .collect();
+        all_triplets.extend(damping_triplets);
+
+        let augmented_jacobian =
+            SparseColMat::try_new_from_triplets(n_residuals + n_vars, n_vars, &all_triplets)
+                .ok()?;
+
+        // Create augmented residuals: [r; 0]
+        let mut augmented_residuals = Mat::zeros(n_residuals + n_vars, 1);
+        for i in 0..n_residuals {
+            augmented_residuals[(i, 0)] = residuals[(i, 0)];
+        }
+        // Zero entries for the damping part
+
+        // Solve using the standard interface
+        linear_solver.solve_normal_equation(&augmented_residuals, &augmented_jacobian)
+    }
+
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -329,37 +437,63 @@ impl LevenbergMarquardt {
         }
     }
 
-    pub fn solve<T, P>(
+    pub fn solve_problem(
         &mut self,
-        problem: &T,
-        initial_params: P,
-    ) -> Result<SolverResult<P>, crate::core::ApexError>
-    where
-        T: crate::core::Optimizable<Parameters = P>,
-        P: Clone + std::ops::Sub<Output = P>,
-        for<'a> &'a P: std::ops::Add<&'a Mat<f64>, Output = P>,
-    {
+        problem: &crate::core::problem::Problem,
+        initial_params: &std::collections::HashMap<
+            String,
+            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
+        crate::core::ApexError,
+    > {
         let start_time = Instant::now();
-        let mut params = initial_params;
         let mut iteration = 0;
         let mut cost_evaluations = 0;
         let mut jacobian_evaluations = 0;
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
-        let mut last_cost_reduction;
 
         // Create linear solver
         let mut linear_solver = self.create_linear_solver();
 
-        // Initial cost evaluation
-        let initial_cost = problem.cost(&params)?;
-        let mut current_cost = initial_cost;
+        // Initialize variables from initial values
+        let mut variables = problem.initialize_variables(initial_params);
+
+        // Create column mapping for variables
+        let mut variable_name_to_col_idx_dict = std::collections::HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
+        sorted_vars.sort(); // Ensure consistent ordering
+
+        for var_name in &sorted_vars {
+            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Build symbolic structure for sparse operations
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+
+        // Initial cost evaluation using sparse interface
+        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_name_to_col_idx_dict,
+            &symbolic_structure,
+        );
+        use faer_ext::IntoNalgebra;
+        let residual_na = residual.as_ref().into_nalgebra();
+        let mut current_cost = residual_na.norm_squared();
+        let initial_cost = current_cost;
         cost_evaluations += 1;
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
+        let mut last_cost_reduction = 0.0;
+        let mut last_accepted_cost_reduction = 0.0;
 
         if self.config.verbose {
             println!(
@@ -376,40 +510,213 @@ impl LevenbergMarquardt {
         let mut final_parameter_update_norm;
 
         loop {
-            // Evaluate residuals and Jacobian
-            let (residuals, jacobian) = problem.evaluate_with_jacobian(&params)?;
+            // Evaluate residuals and Jacobian using sparse interface
+            let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
+                &variables,
+                &variable_name_to_col_idx_dict,
+                &symbolic_structure,
+            );
             jacobian_evaluations += 1;
 
-            // Compute gradient = J^T * r
-            let gradient_norm = self.compute_gradient_norm(residuals.as_ref(), jacobian.as_ref());
+            // DEBUG: Log detailed iteration information
+            if self.config.verbose {
+                println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
+                println!("Current cost: {:.12e}", current_cost);
+                use faer_ext::IntoNalgebra;
+                let residual_na = residuals.as_ref().into_nalgebra();
+                println!(
+                    "Residuals shape: ({}, {})",
+                    residuals.nrows(),
+                    residuals.ncols()
+                );
+                println!("Residuals norm: {:.12e}", residual_na.norm());
+                println!(
+                    "Jacobian shape: ({}, {})",
+                    jacobian.nrows(),
+                    jacobian.ncols()
+                );
+
+                // Log first few residual values
+                let residual_vec: Vec<f64> = (0..residuals.nrows().min(10))
+                    .map(|row| residual_na[row])
+                    .collect();
+                println!("First 10 residuals: {:?}", residual_vec);
+            }
+
+            // Create or reuse Jacobi scaling on first iteration
+            if iteration == 0 {
+                let scaling = self.create_jacobi_scaling(&jacobian);
+
+                // DEBUG: Log Jacobi scaling values
+                if self.config.verbose {
+                    println!("Jacobi scaling computed for {} columns", scaling.ncols());
+                }
+
+                self.jacobi_scaling = Some(scaling);
+            }
+
+            // Apply Jacobi scaling to Jacobian
+            let scaled_jacobian =
+                self.apply_jacobi_scaling(&jacobian, self.jacobi_scaling.as_ref().unwrap());
+
+            // DEBUG: Log scaled Jacobian info
+            if self.config.verbose {
+                println!(
+                    "Scaled Jacobian shape: ({}, {})",
+                    scaled_jacobian.nrows(),
+                    scaled_jacobian.ncols()
+                );
+            }
+
+            // Compute gradient = J^T * r using scaled Jacobian
+            let residuals_owned = residuals.as_ref().to_owned();
+            let gradient_norm = self.compute_gradient_norm(&residuals_owned, &scaled_jacobian);
             max_gradient_norm = max_gradient_norm.max(gradient_norm);
             final_gradient_norm = gradient_norm;
 
-            // Solve augmented system: (J^T * J + λI) * dx = -J^T * r
-            if let Some(step) = linear_solver.solve_augmented_equation(
-                residuals.as_ref(),
-                jacobian.as_ref(),
+            // Compute Hessian approximation: J^T * J (using scaled Jacobian)
+            let hessian = self.compute_hessian(&scaled_jacobian);
+            let gradient = self.compute_gradient(&residuals_owned, &scaled_jacobian);
+
+            // DEBUG: Log gradient and Hessian info
+            if self.config.verbose {
+                println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
+
+                // Log Hessian info
+                println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
+
+                // Log first few gradient values
+                use faer_ext::IntoNalgebra;
+                let gradient_na = gradient.as_ref().into_nalgebra();
+                let gradient_vec: Vec<f64> = (0..gradient_na.nrows().min(10))
+                    .map(|row| gradient_na[row])
+                    .collect();
+                println!("First 10 gradient values: {:?}", gradient_vec);
+
+                println!("Damping parameter: {:.12e}", self.damping);
+            }
+
+            if self.config.verbose && iteration < 3 {
+                println!(
+                    "Debug iteration {}: gradient_norm = {:.6e}, damping = {:.6e}",
+                    iteration, gradient_norm, self.damping
+                );
+            }
+
+            // Use standard augmented equation solver with scaled Jacobian
+            // This will solve: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
+            if let Some(scaled_step) = linear_solver.solve_augmented_equation(
+                &residuals_owned,
+                &scaled_jacobian,
                 self.damping,
             ) {
+                // Apply inverse Jacobi scaling to get final step
+                let step = self.apply_inverse_jacobi_scaling(
+                    &scaled_step,
+                    self.jacobi_scaling.as_ref().unwrap(),
+                );
+
                 let step_norm = step.norm_l2();
                 max_parameter_update_norm = max_parameter_update_norm.max(step_norm);
                 final_parameter_update_norm = step_norm;
 
-                // Compute predicted reduction
-                let hessian = self.compute_hessian(jacobian.as_ref());
-                // Use negative gradient to match what linear solver uses: g = -J^T *  r
-                let gradient = self.compute_gradient(residuals.as_ref(), jacobian.as_ref());
-                let negative_gradient = &gradient * -1.0;
-                let predicted_reduction =
-                    self.compute_predicted_reduction(&step, &negative_gradient, &hessian);
+                // DEBUG: Log linear step details
+                if self.config.verbose {
+                    println!(
+                        "Linear step (scaled_step) norm: {:.12e}",
+                        scaled_step.norm_l2()
+                    );
+                    println!("Final step norm: {:.12e}", step_norm);
 
-                // Try the step
-                let new_params = &params + &step;
-                let new_cost = problem.cost(&new_params)?;
+                    // Log first few step values
+                    use faer_ext::IntoNalgebra;
+                    let step_na = step.as_ref().into_nalgebra();
+                    let step_vec: Vec<f64> = (0..step_na.nrows().min(10))
+                        .map(|row| step_na[row])
+                        .collect();
+                    println!("First 10 step values: {:?}", step_vec);
+                }
+
+                // Compute predicted reduction using scaled values
+                let predicted_reduction =
+                    self.compute_predicted_reduction(&scaled_step, &gradient, &hessian);
+
+                // DEBUG: Log predicted reduction calculation details
+                if self.config.verbose {
+                    println!("=== PREDICTED REDUCTION CALCULATION ===");
+                    use faer_ext::IntoNalgebra;
+                    let grad_na = gradient.as_ref().into_nalgebra();
+                    println!("Gradient norm: {:.12e}", grad_na.norm());
+                    println!("Predicted reduction: {:.12e}", predicted_reduction);
+                }
+
+                // Apply parameter updates using simple perturbation
+                let mut step_offset = 0;
+                for var_name in &sorted_vars {
+                    let var_size = variables[var_name].get_size();
+                    let var_step = step.subrows(step_offset, var_size);
+
+                    // Simple perturbation for SE3 variables
+                    match &mut variables.get_mut(var_name).unwrap() {
+                        crate::core::problem::VariableEnum::SE3(var) => {
+                            // Get current SE3 value
+                            let current_translation = var.value.translation();
+                            let current_rotation = var.value.rotation_so3();
+
+                            // Apply simple additive perturbation to translation (first 3 components)
+                            // and small rotation perturbation (last 3 components)
+                            use faer_ext::IntoNalgebra;
+                            let step_na = var_step.as_ref().into_nalgebra();
+                            let translation_step =
+                                nalgebra::Vector3::new(step_na[0], step_na[1], step_na[2]);
+                            let rotation_step =
+                                nalgebra::Vector3::new(step_na[3], step_na[4], step_na[5]);
+
+                            // Create SE3Tangent from the step vector (proper manifold operation)
+                            let step_dvector = nalgebra::DVector::from_vec(vec![
+                                step_na[0], step_na[1], step_na[2], step_na[3], step_na[4],
+                                step_na[5],
+                            ]);
+                            let se3_tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
+
+                            // Apply proper manifold plus operation: g ⊞ φ = g ∘ exp(φ^∧)
+                            let new_se3 = var.plus(&se3_tangent);
+                            var.set_value(new_se3);
+                        }
+                        _ => {
+                            // For other variable types, implement as needed
+                        }
+                    }
+                    step_offset += var_size;
+                }
+
+                if self.config.verbose && iteration < 3 {
+                    println!("  Applied parameter step with norm: {:.6e}", step_norm);
+                }
+
+                // Compute new cost using sparse interface
+                let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
+                    &variables,
+                    &variable_name_to_col_idx_dict,
+                    &symbolic_structure,
+                );
+                let new_residual_na = new_residual.as_ref().into_nalgebra();
+                let new_cost = new_residual_na.norm_squared();
                 cost_evaluations += 1;
 
                 // Compute step quality
                 let rho = self.compute_step_quality(current_cost, new_cost, predicted_reduction);
+
+                // DEBUG: Log detailed rho calculation
+                if self.config.verbose {
+                    println!("=== RHO CALCULATION DETAILS ===");
+                    println!("Old cost: {:.12e}", current_cost);
+                    println!("New cost: {:.12e}", new_cost);
+                    let actual_reduction = current_cost - new_cost;
+                    println!("Actual cost reduction: {:.12e}", actual_reduction);
+                    println!("Predicted cost reduction: {:.12e}", predicted_reduction);
+                    println!("Rho (actual/predicted): {:.12e}", rho);
+                }
 
                 // Update damping and decide whether to accept step
                 let accept_step = self.update_damping(rho);
@@ -418,8 +725,9 @@ impl LevenbergMarquardt {
                     // Accept the step
                     let cost_reduction = current_cost - new_cost;
                     last_cost_reduction = cost_reduction;
-                    params = new_params;
+                    last_accepted_cost_reduction = cost_reduction;
                     total_cost_reduction += cost_reduction;
+                    // Parameters already updated in variables
                     current_cost = new_cost;
                     successful_steps += 1;
 
@@ -434,9 +742,87 @@ impl LevenbergMarquardt {
                             rho
                         );
                     }
+
+                    // Check convergence only after successful steps
+                    let elapsed = start_time.elapsed();
+                    if let Some(status) = self.check_convergence(
+                        iteration,
+                        cost_reduction, // Use actual cost reduction from this step
+                        step_norm,      // Use actual step norm from this step
+                        gradient_norm,
+                        elapsed,
+                    ) {
+                        let summary = self.create_summary(
+                            initial_cost,
+                            current_cost,
+                            iteration + 1, // increment for final count
+                            successful_steps,
+                            unsuccessful_steps,
+                            max_gradient_norm,
+                            final_gradient_norm,
+                            max_parameter_update_norm,
+                            final_parameter_update_norm,
+                            total_cost_reduction,
+                            elapsed,
+                        );
+
+                        if self.config.verbose {
+                            println!("{}", summary);
+                        }
+
+                        return Ok(SolverResult {
+                            status,
+                            iterations: iteration + 1,
+                            final_cost: current_cost,
+                            parameters: variables.into_iter().collect(),
+                            elapsed_time: elapsed,
+                            convergence_info: ConvergenceInfo {
+                                final_gradient_norm,
+                                final_parameter_update_norm,
+                                cost_evaluations,
+                                jacobian_evaluations,
+                            },
+                        });
+                    }
                 } else {
-                    // Reject the step, increase damping
-                    last_cost_reduction = 0.0; // No cost reduction if step is rejected
+                    // Reject the step, revert parameter changes
+                    let mut step_offset = 0;
+                    for var_name in &sorted_vars {
+                        let var_size = variables[var_name].get_size();
+                        let var_step = step.subrows(step_offset, var_size);
+
+                        // Revert the perturbation using proper manifold operations
+                        match &mut variables.get_mut(var_name).unwrap() {
+                            crate::core::problem::VariableEnum::SE3(var) => {
+                                // Revert using negative step with proper manifold operation
+                                use faer_ext::IntoNalgebra;
+                                let step_na = var_step.as_ref().into_nalgebra();
+                                let negative_step_na = -step_na;
+
+                                // Create SE3Tangent from the negative step vector
+                                let negative_step_dvector = nalgebra::DVector::from_vec(vec![
+                                    negative_step_na[0],
+                                    negative_step_na[1],
+                                    negative_step_na[2],
+                                    negative_step_na[3],
+                                    negative_step_na[4],
+                                    negative_step_na[5],
+                                ]);
+                                let negative_se3_tangent =
+                                    crate::manifold::se3::SE3Tangent::from(negative_step_dvector);
+
+                                // Apply proper manifold plus operation with negative step
+                                let reverted_se3 = var.plus(&negative_se3_tangent);
+                                var.set_value(reverted_se3);
+                            }
+                            _ => {
+                                // For other variable types, implement as needed
+                            }
+                        }
+                        step_offset += var_size;
+                    }
+
+                    last_cost_reduction = 0.0;
                     unsuccessful_steps += 1;
 
                     if self.config.verbose {
@@ -457,15 +843,9 @@ impl LevenbergMarquardt {
                 ));
             }
 
+            // Check only max iterations - other convergence criteria checked after successful steps
             let elapsed = start_time.elapsed();
-            // Check convergence criteria
-            if let Some(status) = self.check_convergence(
-                iteration,
-                last_cost_reduction,
-                final_parameter_update_norm,
-                gradient_norm,
-                elapsed,
-            ) {
+            if iteration >= self.config.max_iterations {
                 let summary = self.create_summary(
                     initial_cost,
                     current_cost,
@@ -485,8 +865,8 @@ impl LevenbergMarquardt {
                 }
 
                 return Ok(SolverResult {
-                    parameters: params.clone(),
-                    status,
+                    parameters: variables,
+                    status: OptimizationStatus::MaxIterationsReached,
                     final_cost: current_cost,
                     iterations: iteration,
                     elapsed_time: elapsed,
@@ -510,35 +890,6 @@ impl Default for LevenbergMarquardt {
 }
 
 // Implement Solver trait
-impl crate::optimizer::Solver for LevenbergMarquardt {
-    type Config = OptimizerConfig;
-    type Error = crate::core::ApexError;
-
-    fn new(config: Self::Config) -> Self {
-        Self::with_config(config)
-    }
-
-    fn solve(
-        &mut self,
-        problem: &crate::core::problem::Problem,
-        initial_params: &std::collections::HashMap<
-            String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
-        Self::Error,
-    > {
-        // For now, use the simple solve_problem function from the module
-        // TODO: Implement actual Levenberg-Marquardt algorithm with Problem interface
-        use crate::optimizer::solve_problem;
-        let config = OptimizerConfig {
-            optimizer_type: crate::optimizer::OptimizerType::LevenbergMarquardt,
-            ..Default::default()
-        };
-        solve_problem(problem, initial_params, config)
-    }
-}
 
 #[cfg(test)]
 mod tests {

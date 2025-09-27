@@ -268,164 +268,31 @@ pub trait Solver {
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
 }
 
-/// Simple optimization function that takes a problem and initial variables,
-/// then optimizes them using the specified algorithm.
+/// Optimization function that uses the actual improved solvers.
 pub fn solve_problem(
     problem: &Problem,
     initial_params: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
     config: OptimizerConfig,
 ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::core::ApexError> {
-    // Initialize variables from initial values
-    let variables = problem.initialize_variables(initial_params);
-
-    // Create column mapping for variables
-    let mut variable_name_to_col_idx_dict = HashMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<_> = variables.keys().collect();
-    sorted_vars.sort(); // Ensure consistent ordering
-
-    for var_name in sorted_vars {
-        variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
-    }
-
-    // Build symbolic structure for sparse operations
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
-
-    // For now, implement a simple iterative optimization loop
-    let start_time = std::time::Instant::now();
-    let mut iteration = 0;
-
-    // Initial cost evaluation
-    let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
-        &variables,
-        &variable_name_to_col_idx_dict,
-        &symbolic_structure,
-    );
-
-    // Convert residual to nalgebra for cost computation
-    use faer_ext::IntoNalgebra;
-    let residual_na = residual.as_ref().into_nalgebra();
-    let mut current_cost = 0.5 * residual_na.norm_squared();
-
-    let initial_cost = current_cost;
-    let mut previous_cost = current_cost;
-
-    if config.verbose {
-        println!(
-            "Starting optimization with {} algorithm",
-            config.optimizer_type
-        );
-        println!("Initial cost: {:.6e}", current_cost);
-        println!("Variables: {}", variables.len());
-        println!(
-            "Total residual dimension: {}",
-            problem.total_residual_dimension
-        );
-    }
-
-    // Simple optimization loop (placeholder implementation)
-    while iteration < config.max_iterations {
-        iteration += 1;
-
-        // Compute residual and Jacobian
-        let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_name_to_col_idx_dict,
-            &symbolic_structure,
-        );
-
-        // Convert residual to nalgebra for cost computation
-        let residual_na = residual.as_ref().into_nalgebra();
-        current_cost = 0.5 * residual_na.norm_squared();
-
-        let cost_change = (previous_cost - current_cost).abs();
-
-        if config.verbose && iteration % 10 == 0 {
-            println!(
-                "Iteration {}: cost = {:.6e}, cost_change = {:.6e}",
-                iteration, current_cost, cost_change
-            );
+    // Use the actual solver implementations based on config via Solver trait
+    match config.optimizer_type {
+        OptimizerType::LevenbergMarquardt => {
+            let mut solver = LevenbergMarquardt::with_config(config);
+            solver.solve_problem(problem, initial_params)
         }
-
-        // Check convergence
-        let elapsed = start_time.elapsed();
-
-        // Check timeout
-        if let Some(timeout) = config.timeout
-            && elapsed >= timeout
-        {
-            return Ok(SolverResult {
-                parameters: variables,
-                status: OptimizationStatus::Timeout,
-                final_cost: current_cost,
-                iterations: iteration,
-                elapsed_time: elapsed,
-                convergence_info: ConvergenceInfo {
-                    final_gradient_norm: 0.0,
-                    final_parameter_update_norm: 0.0,
-                    cost_evaluations: iteration + 1,
-                    jacobian_evaluations: iteration + 1,
-                },
-            });
+        OptimizerType::GaussNewton => {
+            let mut solver = GaussNewton::new();
+            // TODO: Implement solve_problem for GaussNewton
+            Err(crate::core::ApexError::Solver(
+                "GaussNewton not implemented yet".to_string(),
+            ))
         }
-
-        // Check cost tolerance
-        if cost_change < config.cost_tolerance {
-            return Ok(SolverResult {
-                parameters: variables,
-                status: OptimizationStatus::CostToleranceReached,
-                final_cost: current_cost,
-                iterations: iteration,
-                elapsed_time: elapsed,
-                convergence_info: ConvergenceInfo {
-                    final_gradient_norm: 0.0,
-                    final_parameter_update_norm: 0.0,
-                    cost_evaluations: iteration + 1,
-                    jacobian_evaluations: iteration + 1,
-                },
-            });
-        }
-
-        previous_cost = current_cost;
-
-        // TODO: Implement actual optimization step based on config.optimizer_type
-        // For now, this is just a placeholder that will converge after some iterations
-        if iteration >= 50 {
-            break;
+        OptimizerType::DogLeg => {
+            let mut solver = DogLeg::new();
+            // TODO: Implement solve_problem for DogLeg
+            Err(crate::core::ApexError::Solver(
+                "DogLeg not implemented yet".to_string(),
+            ))
         }
     }
-
-    let elapsed = start_time.elapsed();
-
-    // Determine final status
-    let status = if iteration >= config.max_iterations {
-        OptimizationStatus::MaxIterationsReached
-    } else {
-        OptimizationStatus::Converged
-    };
-
-    if config.verbose {
-        println!("Optimization completed:");
-        println!("  Status: {}", status);
-        println!("  Final cost: {:.6e}", current_cost);
-        println!("  Cost reduction: {:.6e}", initial_cost - current_cost);
-        println!("  Iterations: {}", iteration);
-        println!("  Elapsed time: {:?}", elapsed);
-    }
-
-    Ok(SolverResult {
-        parameters: variables,
-        status,
-        final_cost: current_cost,
-        iterations: iteration,
-        elapsed_time: elapsed,
-        convergence_info: ConvergenceInfo {
-            final_gradient_norm: 0.0,
-            final_parameter_update_norm: 0.0,
-            cost_evaluations: iteration + 1,
-            jacobian_evaluations: iteration + 1,
-        },
-    })
 }
