@@ -174,11 +174,11 @@ impl SE3 {
 impl From<nalgebra::DVector<f64>> for SE3 {
     fn from(data: nalgebra::DVector<f64>) -> Self {
         if data.len() != 7 {
-            panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
+            panic!("SE3::from expects 7-dimensional vector [qx, qy, qz, qw, tx, ty, tz]");
         }
-        // Input format: [tx, ty, tz, qw, qx, qy, qz]
-        let translation = Vector3::new(data[0], data[1], data[2]); // tx, ty, tz
-        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]); // w, x, y, z
+        // Input format: [qx, qy, qz, qw, tx, ty, tz] to match tiny-solver
+        let quaternion = Quaternion::new(data[3], data[0], data[1], data[2]); // w, x, y, z
+        let translation = Vector3::new(data[4], data[5], data[6]); // tx, ty, tz
         // // Create UnitQuaternion without normalization to preserve exact values from G2O files
         // let unit_quat = UnitQuaternion::new_unchecked(quaternion);
         // let rotation = SO3::new(unit_quat);
@@ -191,13 +191,13 @@ impl From<SE3> for nalgebra::DVector<f64> {
     fn from(se3: SE3) -> Self {
         let q = se3.rotation.quaternion();
         nalgebra::DVector::from_vec(vec![
-            se3.translation.x, // tx first
-            se3.translation.y, // ty second
-            se3.translation.z, // tz third
+            q.i,               // qx first
+            q.j,               // qy second
+            q.k,               // qz third
             q.w,               // qw fourth
-            q.i,               // qx fifth
-            q.j,               // qy sixth
-            q.k,               // qz seventh
+            se3.translation.x, // tx fifth
+            se3.translation.y, // ty sixth
+            se3.translation.z, // tz seventh
         ])
     }
 }
