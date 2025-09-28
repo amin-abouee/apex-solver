@@ -13,51 +13,88 @@ pub struct BetweenFactorSE2 {
 }
 
 impl BetweenFactorSE2 {
-    pub fn new(relative_pose: SE2) -> Self {
+    pub fn new(dx: f64, dy: f64, dtheta: f64) -> Self {
+        let relative_pose = SE2::from_xy_angle(dx, dy, dtheta);
+        Self { relative_pose }
+    }
+
+    pub fn from_se2(relative_pose: SE2) -> Self {
         Self { relative_pose }
     }
 }
 
 impl Factor for BetweenFactorSE2 {
     fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        let se2_origin_k0 = SE2::from(params[0].clone());
-        let se2_origin_k1 = SE2::from(params[1].clone());
-        // let se2_origin_k0 = SE2::from_xy_angle(t_origin_k0[1], t_origin_k0[2], t_origin_k0[0]);
-        // let se2_origin_k1 = SE2::from_xy_angle(t_origin_k1[1], t_origin_k1[2], t_origin_k1[0]);
-        // let se2_k0_k1_measured = SE2::from_xy_angle(self.dx, self.dy, self.dtheta);
-        let se2_k0_k1_measured = &self.relative_pose;
+        // TEMPORARY: Use numerical jacobians that match tiny-solver exactly
+        // Input: params = [theta, x, y] for each pose (TINY-SOLVER FORMAT)
+        let t_origin_k0 = &params[0];
+        let t_origin_k1 = &params[1];
 
-        // Predicted measurement: T_k0_k1 = (T_w_k0)^-1 * T_w_k1
-        let mut j_predicted_wrt_k0 = na::Matrix3::zeros();
-        let mut j_predicted_wrt_k1 = na::Matrix3::zeros();
-        let se2_k0_k1_predicted = se2_origin_k0.between(
-            &se2_origin_k1,
-            Some(&mut j_predicted_wrt_k0),
-            Some(&mut j_predicted_wrt_k1),
+        // Create Isometry2 exactly like tiny-solver: params[0] = theta, params[1] = x, params[2] = y
+        let se2_origin_k0 = na::Isometry2::new(
+            na::Vector2::new(t_origin_k0[1], t_origin_k0[2]), // x, y
+            t_origin_k0[0],                                   // theta
+        );
+        let se2_origin_k1 = na::Isometry2::new(
+            na::Vector2::new(t_origin_k1[1], t_origin_k1[2]), // x, y
+            t_origin_k1[0],                                   // theta
+        );
+        let se2_k0_k1 = na::Isometry2::new(
+            na::Vector2::new(self.relative_pose.x(), self.relative_pose.y()),
+            self.relative_pose.angle(),
         );
 
-        // Compute residual and Jacobians
-        // residual = log( (T_k0_k1_measured)^-1 * T_k0_k1_predicted )
-        let mut j_residual_wrt_predicted = na::Matrix3::zeros();
-        let residual = se2_k0_k1_predicted.right_minus(
-            se2_k0_k1_measured,
-            Some(&mut j_residual_wrt_predicted),
-            None,
-        );
+        // Exact tiny-solver residual computation
+        let se2_diff = se2_origin_k1.inverse() * se2_origin_k0 * se2_k0_k1;
+        let residual = na::dvector![
+            se2_diff.translation.x,
+            se2_diff.translation.y,
+            se2_diff.rotation.angle()
+        ];
 
-        // Chain rule for Jacobians
-        let jacobian_wrt_k0 = j_residual_wrt_predicted * j_predicted_wrt_k0;
-        let jacobian_wrt_k1 = j_residual_wrt_predicted * j_predicted_wrt_k1;
+        // Compute numerical jacobian (matching tiny-solver's automatic differentiation)
+        let eps = 1e-8;
+        let mut jacobian = na::DMatrix::zeros(3, 6);
 
-        let mut jacobian = na::DMatrix::<f64>::zeros(3, 6);
-        jacobian
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&jacobian_wrt_k0);
-        jacobian
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&jacobian_wrt_k1);
+        // Tiny-solver compatible residual function
+        let compute_residual = |params: &[na::DVector<f64>]| -> na::DVector<f64> {
+            let k0 = &params[0];
+            let k1 = &params[1];
+            let iso_k0 = na::Isometry2::new(na::Vector2::new(k0[1], k0[2]), k0[0]);
+            let iso_k1 = na::Isometry2::new(na::Vector2::new(k1[1], k1[2]), k1[0]);
+            let iso_measured = na::Isometry2::new(
+                na::Vector2::new(self.relative_pose.x(), self.relative_pose.y()),
+                self.relative_pose.angle(),
+            );
+            let diff = iso_k1.inverse() * iso_k0 * iso_measured;
+            na::dvector![
+                diff.translation.x,
+                diff.translation.y,
+                diff.rotation.angle()
+            ]
+        };
 
-        (residual.into(), jacobian)
+        for param_idx in 0..2 {
+            for component in 0..3 {
+                let mut params_plus = [t_origin_k0.clone(), t_origin_k1.clone()];
+                let mut params_minus = [t_origin_k0.clone(), t_origin_k1.clone()];
+
+                params_plus[param_idx][component] += eps;
+                params_minus[param_idx][component] -= eps;
+
+                let residual_plus = compute_residual(&params_plus);
+                let residual_minus = compute_residual(&params_minus);
+
+                let numerical_derivative = (&residual_plus - &residual_minus) / (2.0 * eps);
+
+                let col_idx = param_idx * 3 + component;
+                for row in 0..3 {
+                    jacobian[(row, col_idx)] = numerical_derivative[row];
+                }
+            }
+        }
+
+        (residual, jacobian)
     }
 
     fn get_dimension(&self) -> usize {
