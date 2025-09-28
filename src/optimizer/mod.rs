@@ -281,14 +281,14 @@ pub fn solve_problem(
             solver.solve_problem(problem, initial_params)
         }
         OptimizerType::GaussNewton => {
-            let mut solver = GaussNewton::new();
+            let _solver = GaussNewton::new();
             // TODO: Implement solve_problem for GaussNewton
             Err(crate::core::ApexError::Solver(
                 "GaussNewton not implemented yet".to_string(),
             ))
         }
         OptimizerType::DogLeg => {
-            let mut solver = DogLeg::new();
+            let _solver = DogLeg::new();
             // TODO: Implement solve_problem for DogLeg
             Err(crate::core::ApexError::Solver(
                 "DogLeg not implemented yet".to_string(),
