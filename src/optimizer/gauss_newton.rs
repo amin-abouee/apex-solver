@@ -6,23 +6,36 @@
 use crate::core::ApexError;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::OptimizationStatus;
-use crate::optimizer::{OptimizerConfig, Solver, SolverResult};
+use crate::optimizer::{Solver, SolverResult};
+use std::time::Duration;
+
+/// Configuration for Gauss-Newton solver (placeholder - not fully implemented).
+#[derive(Clone, Default)]
+pub struct GaussNewtonConfig {
+    pub linear_solver_type: LinearSolverType,
+    pub max_iterations: usize,
+    pub cost_tolerance: f64,
+    pub parameter_tolerance: f64,
+    pub gradient_tolerance: f64,
+    pub timeout: Option<Duration>,
+    pub verbose: bool,
+}
 
 /// Gauss-Newton solver for nonlinear least squares optimization.
 #[allow(dead_code)]
 pub struct GaussNewton {
-    config: OptimizerConfig,
+    config: GaussNewtonConfig,
     min_step_norm: f64,
 }
 
 impl GaussNewton {
     /// Create a new Gauss-Newton solver with default configuration.
     pub fn new() -> Self {
-        Self::with_config(OptimizerConfig::default())
+        Self::with_config(GaussNewtonConfig::default())
     }
 
     /// Create a new Gauss-Newton solver with the given configuration.
-    pub fn with_config(config: OptimizerConfig) -> Self {
+    pub fn with_config(config: GaussNewtonConfig) -> Self {
         Self {
             config,
             min_step_norm: 1e-12,
@@ -92,17 +105,17 @@ impl Default for GaussNewton {
 }
 
 impl Solver for GaussNewton {
-    type Config = OptimizerConfig;
+    type Config = GaussNewtonConfig;
     type Error = ApexError;
 
     fn new(config: Self::Config) -> Self {
         Self::with_config(config)
     }
 
-    fn solve(
+    fn minimize(
         &mut self,
-        problem: &crate::core::problem::Problem,
-        initial_params: &std::collections::HashMap<
+        _problem: &crate::core::problem::Problem,
+        _initial_params: &std::collections::HashMap<
             String,
             (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
@@ -110,14 +123,10 @@ impl Solver for GaussNewton {
         SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
         Self::Error,
     > {
-        // For now, use the simple solve_problem function from the module
         // TODO: Implement actual Gauss-Newton algorithm
-        use crate::optimizer::solve_problem;
-        let config = OptimizerConfig {
-            optimizer_type: crate::optimizer::OptimizerType::GaussNewton,
-            ..Default::default()
-        };
-        solve_problem(problem, initial_params, config)
+        Err(ApexError::Solver(
+            "GaussNewton solver not fully implemented yet".to_string(),
+        ))
     }
 }
 

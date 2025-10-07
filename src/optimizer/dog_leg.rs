@@ -7,12 +7,25 @@
 use crate::core::ApexError;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::OptimizationStatus;
-use crate::optimizer::{OptimizerConfig, Solver, SolverResult};
+use crate::optimizer::{Solver, SolverResult};
+use std::time::Duration;
+
+/// Configuration for Dog Leg solver (placeholder - not fully implemented).
+#[derive(Clone, Default)]
+pub struct DogLegConfig {
+    pub linear_solver_type: LinearSolverType,
+    pub max_iterations: usize,
+    pub cost_tolerance: f64,
+    pub parameter_tolerance: f64,
+    pub gradient_tolerance: f64,
+    pub timeout: Option<Duration>,
+    pub verbose: bool,
+}
 
 /// Dog Leg solver for nonlinear least squares optimization.
 #[allow(dead_code)]
 pub struct DogLeg {
-    config: OptimizerConfig,
+    config: DogLegConfig,
     trust_region_radius: f64,
     trust_region_min: f64,
     trust_region_max: f64,
@@ -23,11 +36,11 @@ pub struct DogLeg {
 impl DogLeg {
     /// Create a new Dog Leg solver with default configuration.
     pub fn new() -> Self {
-        Self::with_config(OptimizerConfig::default())
+        Self::with_config(DogLegConfig::default())
     }
 
     /// Create a new Dog Leg solver with the given configuration.
-    pub fn with_config(config: OptimizerConfig) -> Self {
+    pub fn with_config(config: DogLegConfig) -> Self {
         Self {
             config,
             trust_region_radius: 1.0,
@@ -131,17 +144,17 @@ impl Default for DogLeg {
 }
 
 impl Solver for DogLeg {
-    type Config = OptimizerConfig;
+    type Config = DogLegConfig;
     type Error = ApexError;
 
     fn new(config: Self::Config) -> Self {
         Self::with_config(config)
     }
 
-    fn solve(
+    fn minimize(
         &mut self,
-        problem: &crate::core::problem::Problem,
-        initial_params: &std::collections::HashMap<
+        _problem: &crate::core::problem::Problem,
+        _initial_params: &std::collections::HashMap<
             String,
             (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
@@ -149,14 +162,10 @@ impl Solver for DogLeg {
         SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
         Self::Error,
     > {
-        // For now, use the simple solve_problem function from the module
         // TODO: Implement actual Dog Leg algorithm
-        use crate::optimizer::solve_problem;
-        let config = OptimizerConfig {
-            optimizer_type: crate::optimizer::OptimizerType::DogLeg,
-            ..Default::default()
-        };
-        solve_problem(problem, initial_params, config)
+        Err(ApexError::Solver(
+            "DogLeg solver not fully implemented yet".to_string(),
+        ))
     }
 }
 

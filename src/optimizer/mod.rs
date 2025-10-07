@@ -7,7 +7,6 @@
 //! - Dog Leg algorithm
 
 use crate::core::problem::{Problem, VariableEnum};
-use crate::linalg::LinearSolverType;
 use crate::manifold::ManifoldType;
 use nalgebra as na;
 use std::collections::HashMap;
@@ -263,15 +262,15 @@ pub trait Solver {
     /// Create a new solver with the given configuration
     fn new(config: Self::Config) -> Self;
 
-    /// Solve the optimization problem
-    fn solve(
+    /// Minimize the optimization problem
+    fn minimize(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
 }
 
-/// Optimization function that uses the actual improved solvers.
+// Legacy optimization function (commented out - use Solver trait instead)
 // pub fn solve_problem(
 //     problem: &Problem,
 //     initial_params: &HashMap<String, (ManifoldType, na::DVector<f64>)>,

@@ -12,10 +12,10 @@
 //! - Support for both sparse Cholesky and QR factorizations
 
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, OptimizationStatus, OptimizerConfig, SolverResult};
+use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
 use faer::{Mat, sparse::SparseColMat};
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]
@@ -108,48 +108,55 @@ impl fmt::Display for LevenbergMarquardtSummary {
     }
 }
 
-/// Levenberg-Marquardt solver for nonlinear least squares optimization.
+/// Configuration for Levenberg-Marquardt solver.
+#[derive(Clone)]
 pub struct LevenbergMarquardtConfig {
-    // Type of linear solver for the linear systems
-    linear_solver_type: LinearSolverType,
+    /// Type of linear solver for the linear systems
+    pub linear_solver_type: LinearSolverType,
     /// Maximum number of iterations
-    max_iterations: usize,
+    pub max_iterations: usize,
     /// Convergence tolerance for cost function
-    cost_tolerance: f64,
+    pub cost_tolerance: f64,
     /// Convergence tolerance for parameter updates
-    parameter_tolerance: f64,
+    pub parameter_tolerance: f64,
     /// Convergence tolerance for gradient norm
-    gradient_tolerance: f64,
+    pub gradient_tolerance: f64,
     /// Timeout duration
-    timeout: Option<Duration>,
+    pub timeout: Option<Duration>,
     /// Enable detailed logging
-    verbose: bool,
-    damping: f64,
-    damping_min: f64,
-    damping_max: f64,
-    damping_increase_factor: f64,
-    damping_decrease_factor: f64,
-    trust_region_radius: f64,
-    min_step_quality: f64,
-    good_step_quality: f64,
-    // Jacobi scaling support
-    jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    #[allow(dead_code)]
-    min_diagonal: f64,
-    #[allow(dead_code)]
-    max_diagonal: f64,
+    pub verbose: bool,
+    /// Initial damping parameter
+    pub damping: f64,
+    /// Minimum damping parameter
+    pub damping_min: f64,
+    /// Maximum damping parameter
+    pub damping_max: f64,
+    /// Damping increase factor (when step rejected)
+    pub damping_increase_factor: f64,
+    /// Damping decrease factor (when step accepted)
+    pub damping_decrease_factor: f64,
+    /// Trust region radius
+    pub trust_region_radius: f64,
+    /// Minimum step quality for acceptance
+    pub min_step_quality: f64,
+    /// Good step quality threshold
+    pub good_step_quality: f64,
+    /// Minimum diagonal value for regularization
+    pub min_diagonal: f64,
+    /// Maximum diagonal value for regularization
+    pub max_diagonal: f64,
 }
 
-impl LevenbergMarquardtConfig {
-    /// Create a new Levenberg-Marquardt solver with default configuration.
-    pub fn new() -> Self {
-        Self::with_config(OptimizerConfig::default())
-    }
-
-    /// Create a new Levenberg-Marquardt solver with the given configuration.
-    pub fn with_config(config: OptimizerConfig) -> Self {
+impl Default for LevenbergMarquardtConfig {
+    fn default() -> Self {
         Self {
-            config,
+            linear_solver_type: LinearSolverType::default(),
+            max_iterations: 100,
+            cost_tolerance: 1e-8,
+            parameter_tolerance: 1e-8,
+            gradient_tolerance: 1e-8,
+            timeout: None,
+            verbose: false,
             damping: 1e-4,
             damping_min: 1e-12,
             damping_max: 1e12,
@@ -158,10 +165,58 @@ impl LevenbergMarquardtConfig {
             trust_region_radius: 1e4,
             min_step_quality: 0.0,
             good_step_quality: 0.75,
-            jacobi_scaling: None,
             min_diagonal: 1e-6,
             max_diagonal: 1e32,
         }
+    }
+}
+
+impl LevenbergMarquardtConfig {
+    /// Create a new Levenberg-Marquardt configuration with default values.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the linear solver type
+    pub fn with_linear_solver_type(mut self, linear_solver_type: LinearSolverType) -> Self {
+        self.linear_solver_type = linear_solver_type;
+        self
+    }
+
+    /// Set the maximum number of iterations
+    pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
+        self.max_iterations = max_iterations;
+        self
+    }
+
+    /// Set the cost tolerance
+    pub fn with_cost_tolerance(mut self, cost_tolerance: f64) -> Self {
+        self.cost_tolerance = cost_tolerance;
+        self
+    }
+
+    /// Set the parameter tolerance
+    pub fn with_parameter_tolerance(mut self, parameter_tolerance: f64) -> Self {
+        self.parameter_tolerance = parameter_tolerance;
+        self
+    }
+
+    /// Set the gradient tolerance
+    pub fn with_gradient_tolerance(mut self, gradient_tolerance: f64) -> Self {
+        self.gradient_tolerance = gradient_tolerance;
+        self
+    }
+
+    /// Set the timeout duration
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Enable or disable verbose logging
+    pub fn with_verbose(mut self, verbose: bool) -> Self {
+        self.verbose = verbose;
+        self
     }
 
     /// Set the initial damping parameter.
@@ -191,6 +246,55 @@ impl LevenbergMarquardtConfig {
         self.good_step_quality = good_quality;
         self
     }
+}
+
+/// Levenberg-Marquardt solver for nonlinear least squares optimization.
+pub struct LevenbergMarquardt {
+    config: LevenbergMarquardtConfig,
+    jacobi_scaling: Option<SparseColMat<usize, f64>>,
+}
+
+impl LevenbergMarquardt {
+    /// Create a new Levenberg-Marquardt solver with default configuration.
+    pub fn new() -> Self {
+        Self::with_config(LevenbergMarquardtConfig::default())
+    }
+
+    /// Create a new Levenberg-Marquardt solver with the given configuration.
+    pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
+        Self {
+            config,
+            jacobi_scaling: None,
+        }
+    }
+
+    /// Set the initial damping parameter.
+    pub fn with_damping(mut self, damping: f64) -> Self {
+        self.config.damping = damping;
+        self
+    }
+
+    /// Set the damping parameter bounds.
+    pub fn with_damping_bounds(mut self, min: f64, max: f64) -> Self {
+        self.config.damping_min = min;
+        self.config.damping_max = max;
+        self
+    }
+
+    /// Set the damping adjustment factors.
+    pub fn with_damping_factors(mut self, increase: f64, decrease: f64) -> Self {
+        self.config.damping_increase_factor = increase;
+        self.config.damping_decrease_factor = decrease;
+        self
+    }
+
+    /// Set the trust region parameters.
+    pub fn with_trust_region(mut self, radius: f64, min_quality: f64, good_quality: f64) -> Self {
+        self.config.trust_region_radius = radius;
+        self.config.min_step_quality = min_quality;
+        self.config.good_step_quality = good_quality;
+        self
+    }
 
     /// Create the appropriate linear solver based on configuration
     fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
@@ -205,13 +309,13 @@ impl LevenbergMarquardtConfig {
         if rho > 0.0 {
             // Step accepted - decrease damping using tiny-solver's exact strategy
             let tmp = 2.0 * rho - 1.0;
-            self.damping *= (1.0_f64 / 3.0).max(1.0 - tmp * tmp * tmp);
-            self.damping = self.damping.max(self.damping_min);
+            self.config.damping *= (1.0_f64 / 3.0).max(1.0 - tmp * tmp * tmp);
+            self.config.damping = self.config.damping.max(self.config.damping_min);
             true
         } else {
             // Step rejected - increase damping using tiny-solver's exact strategy
-            self.damping *= 2.0;
-            self.damping = self.damping.min(self.damping_max);
+            self.config.damping *= 2.0;
+            self.config.damping = self.config.damping.min(self.config.damping_max);
             false
         }
     }
@@ -379,8 +483,10 @@ impl LevenbergMarquardtConfig {
         let mut damping_triplets = Vec::new();
         for i in 0..n_vars {
             let diag_val = hessian[(i, i)];
-            let clamped_diag = diag_val.max(self.min_diagonal).min(self.max_diagonal);
-            let damping_value = (self.damping * clamped_diag).sqrt();
+            let clamped_diag = diag_val
+                .max(self.config.min_diagonal)
+                .min(self.config.max_diagonal);
+            let damping_value = (self.config.damping * clamped_diag).sqrt();
             damping_triplets.push(faer::sparse::Triplet::new(
                 n_residuals + i,
                 i,
@@ -432,7 +538,7 @@ impl LevenbergMarquardtConfig {
             iterations,
             successful_steps,
             unsuccessful_steps,
-            final_damping: self.damping,
+            final_damping: self.config.damping,
             average_cost_reduction: if iterations > 0 {
                 total_cost_reduction / iterations as f64
             } else {
@@ -451,7 +557,7 @@ impl LevenbergMarquardtConfig {
         }
     }
 
-    pub fn solve_problem(
+    pub fn minimize(
         &mut self,
         problem: &crate::core::problem::Problem,
         initial_params: &std::collections::HashMap<
@@ -514,7 +620,7 @@ impl LevenbergMarquardtConfig {
             );
             println!(
                 "Initial cost: {:.6e}, initial damping: {:.6e}",
-                current_cost, self.damping
+                current_cost, self.config.damping
             );
         }
 
@@ -605,13 +711,13 @@ impl LevenbergMarquardtConfig {
                     .collect();
                 println!("First 10 gradient values: {:?}", gradient_vec);
 
-                println!("Damping parameter: {:.12e}", self.damping);
+                println!("Damping parameter: {:.12e}", self.config.damping);
             }
 
             if self.config.verbose && iteration < 3 {
                 println!(
                     "Debug iteration {}: gradient_norm = {:.6e}, damping = {:.6e}",
-                    iteration, gradient_norm, self.damping
+                    iteration, gradient_norm, self.config.damping
                 );
             }
 
@@ -620,7 +726,7 @@ impl LevenbergMarquardtConfig {
             if let Some(scaled_step) = linear_solver.solve_augmented_equation(
                 &residuals_owned,
                 &scaled_jacobian,
-                self.damping,
+                self.config.damping,
             ) {
                 // Apply inverse Jacobi scaling to get final step
                 let step = self.apply_inverse_jacobi_scaling(
@@ -743,7 +849,7 @@ impl LevenbergMarquardtConfig {
                             iteration + 1,
                             current_cost,
                             cost_reduction,
-                            self.damping,
+                            self.config.damping,
                             step_norm,
                             rho
                         );
@@ -779,15 +885,16 @@ impl LevenbergMarquardtConfig {
                         return Ok(SolverResult {
                             status,
                             iterations: iteration + 1,
+                            init_cost: initial_cost,
                             final_cost: current_cost,
                             parameters: variables.into_iter().collect(),
                             elapsed_time: elapsed,
-                            convergence_info: ConvergenceInfo {
+                            convergence_info: Some(ConvergenceInfo {
                                 final_gradient_norm,
                                 final_parameter_update_norm,
                                 cost_evaluations,
                                 jacobian_evaluations,
-                            },
+                            }),
                         });
                     }
                 } else {
@@ -835,7 +942,7 @@ impl LevenbergMarquardtConfig {
                             "Iteration {}: cost = {:.6e}, damping = {:.6e}, step_norm = {:.6e}, rho = {:.3} [REJECTED]",
                             iteration + 1,
                             current_cost,
-                            self.damping,
+                            self.config.damping,
                             step_norm,
                             rho
                         );
@@ -872,15 +979,16 @@ impl LevenbergMarquardtConfig {
                 return Ok(SolverResult {
                     parameters: variables,
                     status: OptimizationStatus::MaxIterationsReached,
+                    init_cost: initial_cost,
                     final_cost: current_cost,
                     iterations: iteration,
                     elapsed_time: elapsed,
-                    convergence_info: ConvergenceInfo {
+                    convergence_info: Some(ConvergenceInfo {
                         final_gradient_norm,
                         final_parameter_update_norm,
                         cost_evaluations,
                         jacobian_evaluations,
-                    },
+                    }),
                 });
             }
             iteration += 1;
@@ -895,6 +1003,30 @@ impl Default for LevenbergMarquardt {
 }
 
 // Implement Solver trait
+impl crate::optimizer::Solver for LevenbergMarquardt {
+    type Config = LevenbergMarquardtConfig;
+    type Error = crate::core::ApexError;
+
+    fn new(config: Self::Config) -> Self {
+        Self::with_config(config)
+    }
+
+    fn minimize(
+        &mut self,
+        problem: &crate::core::problem::Problem,
+        initial_params: &std::collections::HashMap<
+            String,
+            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        crate::optimizer::SolverResult<
+            std::collections::HashMap<String, crate::core::problem::VariableEnum>,
+        >,
+        Self::Error,
+    > {
+        self.minimize(problem, initial_params)
+    }
+}
 
 // #[cfg(test)]
 // mod tests {
