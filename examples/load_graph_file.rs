@@ -9,7 +9,6 @@ struct FileStatistics {
     edges: usize,
     se2_vertices: usize,
     se3_vertices: usize,
-    tum_vertices: usize,
     se2_edges: usize,
     se3_edges: usize,
 }
@@ -23,7 +22,6 @@ struct SummaryStatistics {
     total_edges: usize,
     total_se2_vertices: usize,
     total_se3_vertices: usize,
-    total_tum_vertices: usize,
     total_se2_edges: usize,
     total_se3_edges: usize,
     successful_loads: usize,
@@ -75,10 +73,7 @@ fn find_graph_files() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
 
 /// Check if the file extension represents a supported format
 fn is_supported_format(extension: &str) -> bool {
-    matches!(
-        extension.to_lowercase().as_str(),
-        "g2o" | "graph" | "txt" | "csv"
-    )
+    matches!(extension.to_lowercase().as_str(), "g2o" | "graph")
 }
 
 /// Get the format name from file extension
@@ -86,7 +81,6 @@ fn get_format_name(extension: &str) -> &'static str {
     match extension.to_lowercase().as_str() {
         "g2o" => "G2O",
         "graph" => "TORO",
-        "txt" | "csv" => "TUM",
         _ => "Unknown",
     }
 }
@@ -94,7 +88,7 @@ fn get_format_name(extension: &str) -> &'static str {
 /// Display message when no files are found
 fn display_no_files_message() {
     println!("No supported graph files found in the data directory.");
-    println!("Supported formats: .g2o (G2O), .graph (TORO), .txt/.csv (TUM)");
+    println!("Supported formats: .g2o (G2O), .graph (TORO)");
 }
 
 /// Display the list of found graph files
@@ -145,7 +139,6 @@ fn load_and_analyze_file(file_path: &Path) -> Result<FileStatistics, Box<dyn std
         edges: graph.edge_count(),
         se2_vertices: graph.vertices_se2.len(),
         se3_vertices: graph.vertices_se3.len(),
-        tum_vertices: graph.vertices_tum.len(),
         se2_edges: graph.edges_se2.len(),
         se3_edges: graph.edges_se3.len(),
     };
@@ -167,10 +160,6 @@ fn display_file_statistics(file_path: &Path, stats: &FileStatistics) {
     println!("Statistics:");
     println!("  - SE2 vertices: {}", stats.se2_vertices);
     println!("  - SE3 vertices: {}", stats.se3_vertices);
-
-    if stats.tum_vertices > 0 {
-        println!("  - TUM vertices: {}", stats.tum_vertices);
-    }
 
     println!("  - SE2 edges: {}", stats.se2_edges);
     println!("  - SE3 edges: {}", stats.se3_edges);
@@ -207,21 +196,6 @@ fn display_first_vertex_info(file_path: &Path) {
                 rotation.coords.y,
                 rotation.coords.z,
             );
-        } else if !graph.vertices_tum.is_empty() {
-            let vertex_0 = &graph.vertices_tum[0];
-            let translation = vertex_0.translation();
-            let rotation = vertex_0.rotation();
-            println!(
-                "  - First TUM vertex: timestamp={:.3}, translation=({:.3}, {:.3}, {:.3}), rotation=({:.3}, {:.3}, {:.3}, {:.3})",
-                vertex_0.timestamp,
-                translation.x,
-                translation.y,
-                translation.z,
-                rotation.coords.w,
-                rotation.coords.x,
-                rotation.coords.y,
-                rotation.coords.z,
-            );
         }
     }
 }
@@ -246,7 +220,6 @@ fn accumulate_statistics(summary: &mut SummaryStatistics, stats: &FileStatistics
     summary.total_edges += stats.edges;
     summary.total_se2_vertices += stats.se2_vertices;
     summary.total_se3_vertices += stats.se3_vertices;
-    summary.total_tum_vertices += stats.tum_vertices;
     summary.total_se2_edges += stats.se2_edges;
     summary.total_se3_edges += stats.se3_edges;
 }
@@ -260,10 +233,6 @@ fn display_summary(summary: &SummaryStatistics) {
     );
     println!("  Total SE2 vertices: {}", summary.total_se2_vertices);
     println!("  Total SE3 vertices: {}", summary.total_se3_vertices);
-
-    if summary.total_tum_vertices > 0 {
-        println!("  Total TUM vertices: {}", summary.total_tum_vertices);
-    }
 
     println!("  Total SE2 edges: {}", summary.total_se2_edges);
     println!("  Total SE3 edges: {}", summary.total_se3_edges);

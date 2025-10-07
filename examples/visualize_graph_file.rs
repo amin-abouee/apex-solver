@@ -1,4 +1,4 @@
-use apex_solver::io::{G2oGraph, load_graph};
+use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,
@@ -84,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Visualize SE3 poses as camera frustums
 fn visualize_se3_poses(
-    graph: &G2oGraph,
+    graph: &Graph,
     rec: &rerun::RecordingStream,
     scale: f32,
     _frustum_size: f32,
@@ -130,7 +130,7 @@ fn visualize_se3_poses(
 
 /// Visualize SE2 poses as 2D points
 fn visualize_se2_poses(
-    graph: &G2oGraph,
+    graph: &Graph,
     rec: &rerun::RecordingStream,
     scale: f32,
     _height: f32,

@@ -5,7 +5,8 @@ use apex_solver::core::factors::BetweenFactorSE2;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
-use apex_solver::optimizer::{OptimizerConfig, OptimizerType, solve_problem};
+use apex_solver::optimizer::LevenbergMarquardt;
+use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
 use nalgebra as na;
 
@@ -182,18 +183,16 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
     println!("  Parameter tolerance: 1e-6");
     println!("  Gradient tolerance: 1e-6");
 
-    let config = OptimizerConfig {
-        optimizer_type: OptimizerType::LevenbergMarquardt,
-        max_iterations: args.max_iterations,
-        cost_tolerance: 1e-6,
-        parameter_tolerance: 1e-6,
-        gradient_tolerance: 1e-6,
-        verbose: args.verbose,
-        ..Default::default()
-    };
+    let config = LevenbergMarquardtConfig::new()
+        .with_max_iterations(args.max_iterations)
+        .with_cost_tolerance(1e-6)
+        .with_parameter_tolerance(1e-6)
+        .with_gradient_tolerance(1e-6)
+        .with_verbose(args.verbose);
 
     let start_time = Instant::now();
-    let result = solve_problem(&problem, &initial_values, config)?;
+    let mut solver = LevenbergMarquardt::with_config(config);
+    let result = solver.minimize(&problem, &initial_values)?;
     let duration = start_time.elapsed();
 
     println!("\n=== APEX-SOLVER SE2 GN OPTIMIZATION RESULTS ===");

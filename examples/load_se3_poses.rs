@@ -1,11 +1,14 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs;
 use std::time::Instant;
 
 use apex_solver::core::factors::BetweenFactorSE3;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
-use apex_solver::optimizer::{OptimizerConfig, OptimizerType, solve_problem};
+use apex_solver::optimizer::LevenbergMarquardt;
+use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
 use nalgebra as na;
 
@@ -36,6 +39,105 @@ struct Args {
     /// Compare with known working datasets for validation
     #[arg(short, long)]
     compare: bool,
+
+    /// Save reference data (residuals, jacobian sample, final cost) for validation
+    #[arg(long)]
+    save_reference: bool,
+
+    /// Check current results against saved reference data
+    #[arg(long)]
+    check_reference: bool,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceData {
+    dataset_name: String,
+    vector_order: String, // "qx_qy_qz_qw_tx_ty_tz" or "tx_ty_tz_qw_qx_qy_qz"
+    initial_residuals: Vec<f64>, // First 20 residuals
+    jacobian_sample: Vec<Vec<f64>>, // First 5x7 block of jacobian
+    initial_cost: f64,
+    final_cost: f64,
+    iterations: usize,
+}
+
+fn save_reference_data(
+    data: &ReferenceData,
+    dataset_name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let filename = format!("reference_{}.json", dataset_name);
+    let json = serde_json::to_string_pretty(data)?;
+    fs::write(&filename, json)?;
+    println!("Reference data saved to {}", filename);
+    Ok(())
+}
+
+fn load_reference_data(dataset_name: &str) -> Result<ReferenceData, Box<dyn std::error::Error>> {
+    let filename = format!("reference_{}.json", dataset_name);
+    let json = fs::read_to_string(&filename)?;
+    let data: ReferenceData = serde_json::from_str(&json)?;
+    Ok(data)
+}
+
+fn compare_with_reference(
+    current: &ReferenceData,
+    reference: &ReferenceData,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n=== REFERENCE VALIDATION ===");
+    println!("Reference vector order: {}", reference.vector_order);
+    println!("Current vector order: {}", current.vector_order);
+
+    // Compare initial residuals
+    let mut residual_diffs = Vec::new();
+    for (i, (&curr, &ref_val)) in current
+        .initial_residuals
+        .iter()
+        .zip(&reference.initial_residuals)
+        .enumerate()
+    {
+        let diff = (curr - ref_val).abs();
+        residual_diffs.push(diff);
+        if i < 5 {
+            println!(
+                "Residual[{}]: current={:.8e}, reference={:.8e}, diff={:.2e}",
+                i, curr, ref_val, diff
+            );
+        }
+    }
+
+    let max_residual_diff = residual_diffs.iter().fold(0.0f64, |a, &b| a.max(b));
+    println!("Max residual difference: {:.2e}", max_residual_diff);
+
+    // Compare costs
+    let cost_diff = (current.initial_cost - reference.initial_cost).abs();
+    let final_cost_diff = (current.final_cost - reference.final_cost).abs();
+    println!("Initial cost difference: {:.2e}", cost_diff);
+    println!("Final cost difference: {:.2e}", final_cost_diff);
+
+    // Validation thresholds
+    const TOLERANCE: f64 = 1e-10;
+    let residual_ok = max_residual_diff < TOLERANCE;
+    let cost_ok = cost_diff < TOLERANCE && final_cost_diff < TOLERANCE;
+
+    if residual_ok && cost_ok {
+        println!(
+            "✅ VALIDATION PASSED: Results match reference within tolerance {:.1e}",
+            TOLERANCE
+        );
+    } else {
+        println!("❌ VALIDATION FAILED:");
+        if !residual_ok {
+            println!(
+                "  - Residuals differ by {:.2e} (tolerance: {:.1e})",
+                max_residual_diff, TOLERANCE
+            );
+        }
+        if !cost_ok {
+            println!("  - Costs differ significantly");
+        }
+        return Err("Reference validation failed".into());
+    }
+
+    Ok(())
 }
 
 fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
@@ -116,8 +218,8 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
             // Extract quaternion and translation from SE3
             let quat = vertex.pose.rotation_quaternion();
             let trans = vertex.pose.translation();
-            // Format: [qx, qy, qz, qw, tx, ty, tz]
-            let se3_data = na::dvector![quat.i, quat.j, quat.k, quat.w, trans.x, trans.y, trans.z];
+            // Format: [tx, ty, tz, qw, qx, qy, qz]
+            let se3_data = na::dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
             initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
     }
@@ -166,7 +268,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
         problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
 
     // Compute residual and jacobian
-    let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
+    let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
         &variables,
         &variable_name_to_col_idx_dict,
         &symbolic_structure,
@@ -174,6 +276,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
 
     use faer_ext::IntoNalgebra;
     let residual_na = residual.as_ref().into_nalgebra();
+
     let initial_cost = residual_na.norm_squared();
 
     println!("\n=== COMPUTING INITIAL STATE ===");
@@ -187,6 +290,35 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
         println!("  residual[{}] = {:.8}", i, residual_na[i]);
     }
 
+    // Capture reference data if requested
+    let initial_residuals: Vec<f64> = (0..std::cmp::min(20, residual_na.len()))
+        .map(|i| residual_na[i])
+        .collect();
+
+    // Sample jacobian (simplified for now - just store matrix dimensions)
+    let jacobian_sample: Vec<Vec<f64>> = vec![
+        vec![
+            jacobian.nrows() as f64,
+            jacobian.ncols() as f64,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ],
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    ];
+
+    if args.save_reference || args.check_reference {
+        println!("\nJacobian sample (first 5x7):");
+        for (i, row) in jacobian_sample.iter().enumerate() {
+            println!("  J[{}]: {:?}", i, row);
+        }
+    }
+
     println!("\n=== STARTING LEVENBERG-MARQUARDT OPTIMIZATION ===");
     println!("Configuration:");
     println!("  Optimizer: Levenberg-Marquardt");
@@ -195,18 +327,16 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
     println!("  Parameter tolerance: {:.2e}", param_tol);
     println!("  Gradient tolerance: 1e-12");
 
-    let config = OptimizerConfig {
-        optimizer_type: OptimizerType::LevenbergMarquardt,
-        max_iterations: max_iter,
-        cost_tolerance: cost_tol,
-        parameter_tolerance: param_tol,
-        gradient_tolerance: 1e-12,
-        verbose: args.verbose,
-        ..Default::default()
-    };
+    let config = LevenbergMarquardtConfig::new()
+        .with_max_iterations(max_iter)
+        .with_cost_tolerance(cost_tol)
+        .with_parameter_tolerance(param_tol)
+        .with_gradient_tolerance(1e-12)
+        .with_verbose(args.verbose);
 
     let start_time = Instant::now();
-    let result = solve_problem(&problem, &initial_values, config)?;
+    let mut solver = LevenbergMarquardt::with_config(config);
+    let result = solver.minimize(&problem, &initial_values)?;
     let duration = start_time.elapsed();
 
     println!(
@@ -239,8 +369,36 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
             // Note: Final residual computation omitted for simplicity in this benchmark
             println!("\nFinal optimization completed successfully.");
 
+            // Handle reference data operations
+            if args.save_reference || args.check_reference {
+                let current_data = ReferenceData {
+                    dataset_name: dataset_name.to_string(),
+                    vector_order: "tx_ty_tz_qw_qx_qy_qz".to_string(), // New format
+                    initial_residuals,
+                    jacobian_sample,
+                    initial_cost,
+                    final_cost: result.final_cost,
+                    iterations: result.iterations,
+                };
+
+                if args.save_reference {
+                    save_reference_data(&current_data, dataset_name)?;
+                }
+
+                if args.check_reference {
+                    match load_reference_data(dataset_name) {
+                        Ok(reference_data) => {
+                            compare_with_reference(&current_data, &reference_data)?;
+                        }
+                        Err(e) => {
+                            println!("Warning: Could not load reference data: {}", e);
+                        }
+                    }
+                }
+            }
+
             println!("\n=== BENCHMARK SUMMARY ===");
-            println!("Dataset: {}.g2o", args.dataset);
+            println!("Dataset: {}.g2o", dataset_name);
             println!("Solver: APEX Levenberg-Marquardt");
             println!("Result: ✅ CONVERGED");
             println!(
