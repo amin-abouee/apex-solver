@@ -33,4 +33,6 @@ pub mod optimizer;
 pub use core::variable::Variable;
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-pub use optimizer::{OptimizerConfig, OptimizerType, solve_problem};
+pub use optimizer::{
+    LevenbergMarquardt, OptimizerType, Solver, levenberg_marquardt::LevenbergMarquardtConfig,
+};
