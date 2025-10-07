@@ -43,7 +43,6 @@ impl fmt::Display for OptimizerType {
     }
 }
 
-/// Configuration parameters for optimization solvers.
 // #[derive(Clone)]
 // pub struct OptimizerConfig {
 //     /// Type of optimizer algorithm to use
@@ -151,7 +150,7 @@ impl fmt::Display for OptimizerType {
 //     }
 // }
 
-/// State information during iterative optimization.
+// State information during iterative optimization.
 // #[derive(Debug, Clone)]
 // pub struct IterativeState {
 //     /// Current iteration number
