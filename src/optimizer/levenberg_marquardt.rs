@@ -109,8 +109,21 @@ impl fmt::Display for LevenbergMarquardtSummary {
 }
 
 /// Levenberg-Marquardt solver for nonlinear least squares optimization.
-pub struct LevenbergMarquardt {
-    config: OptimizerConfig,
+pub struct LevenbergMarquardtConfig {
+    // Type of linear solver for the linear systems
+    linear_solver_type: LinearSolverType,
+    /// Maximum number of iterations
+    max_iterations: usize,
+    /// Convergence tolerance for cost function
+    cost_tolerance: f64,
+    /// Convergence tolerance for parameter updates
+    parameter_tolerance: f64,
+    /// Convergence tolerance for gradient norm
+    gradient_tolerance: f64,
+    /// Timeout duration
+    timeout: Option<Duration>,
+    /// Enable detailed logging
+    verbose: bool,
     damping: f64,
     damping_min: f64,
     damping_max: f64,
@@ -127,7 +140,7 @@ pub struct LevenbergMarquardt {
     max_diagonal: f64,
 }
 
-impl LevenbergMarquardt {
+impl LevenbergMarquardtConfig {
     /// Create a new Levenberg-Marquardt solver with default configuration.
     pub fn new() -> Self {
         Self::with_config(OptimizerConfig::default())

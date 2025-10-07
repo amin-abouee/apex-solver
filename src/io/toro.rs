@@ -6,7 +6,7 @@ use std::fs::File;
 pub struct ToroLoader;
 
 impl GraphLoader for ToroLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError> {
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
@@ -17,7 +17,7 @@ impl GraphLoader for ToroLoader {
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(_graph: &G2oGraph, _path: P) -> Result<(), ApexSolverIoError> {
+    fn write<P: AsRef<Path>>(_graph: &Graph, _path: P) -> Result<(), ApexSolverIoError> {
         // TODO: Implement TORO writing
         Err(ApexSolverIoError::UnsupportedFormat(
             "TORO writing not implemented yet".to_string(),
@@ -26,9 +26,9 @@ impl GraphLoader for ToroLoader {
 }
 
 impl ToroLoader {
-    fn parse_content(content: &str) -> Result<G2oGraph, ApexSolverIoError> {
+    fn parse_content(content: &str) -> Result<Graph, ApexSolverIoError> {
         let lines: Vec<&str> = content.lines().collect();
-        let mut graph = G2oGraph::new();
+        let mut graph = Graph::new();
 
         for (line_num, line) in lines.iter().enumerate() {
             Self::parse_line(line, line_num + 1, &mut graph)?;
@@ -37,11 +37,7 @@ impl ToroLoader {
         Ok(graph)
     }
 
-    fn parse_line(
-        line: &str,
-        line_num: usize,
-        graph: &mut G2oGraph,
-    ) -> Result<(), ApexSolverIoError> {
+    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), ApexSolverIoError> {
         let line = line.trim();
 
         // Skip empty lines and comments

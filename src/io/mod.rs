@@ -1,5 +1,6 @@
 use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 use thiserror::Error;
 
@@ -10,12 +11,10 @@ use crate::manifold::se3::SE3;
 // Module declarations
 pub mod g2o;
 pub mod toro;
-pub mod tum;
 
 // Re-exports
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
-pub use tum::TumLoader;
 
 /// Errors that can occur during graph file parsing
 #[derive(Error, Debug)]
@@ -45,18 +44,23 @@ pub enum ApexSolverIoError {
     UnsupportedFormat(String),
 }
 
-/// SE2 vertex with ID (x, y, theta)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct VertexSE2 {
     pub id: usize,
     pub pose: SE2,
 }
-
 impl VertexSE2 {
     pub fn new(id: usize, x: f64, y: f64, theta: f64) -> Self {
         Self {
             id,
             pose: SE2::from_xy_angle(x, y, theta),
+        }
+    }
+
+    pub fn from_vector(id: usize, vector: Vector3<f64>) -> Self {
+        Self {
+            id,
+            pose: SE2::from_xy_angle(vector[0], vector[1], vector[2]),
         }
     }
 
@@ -77,8 +81,14 @@ impl VertexSE2 {
     }
 }
 
+impl fmt::Display for VertexSE2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VertexSE2 [ id: {}, pose: {} ]", self.id, self.pose)
+    }
+}
+
 /// SE3 vertex with ID (x, y, z, qx, qy, qz, qw)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct VertexSE3 {
     pub id: usize,
     pub pose: SE3,
@@ -90,6 +100,14 @@ impl VertexSE3 {
             id,
             pose: SE3::new(translation, rotation),
         }
+    }
+
+    pub fn from_vector(id: usize, vector: [f64; 7]) -> Self {
+        let translation = Vector3::from([vector[0], vector[1], vector[2]]);
+        let rotation = UnitQuaternion::from_quaternion(Quaternion::from([
+            vector[3], vector[4], vector[5], vector[6],
+        ]));
+        Self::new(id, translation, rotation)
     }
 
     pub fn from_translation_quaternion(
@@ -128,43 +146,14 @@ impl VertexSE3 {
     }
 }
 
-/// TUM trajectory vertex with timestamp
-#[derive(Debug, Clone, PartialEq)]
-pub struct VertexTUM {
-    pub timestamp: f64,
-    pub pose: SE3,
-}
-
-impl VertexTUM {
-    pub fn new(timestamp: f64, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
-        Self {
-            timestamp,
-            pose: SE3::new(translation, rotation),
-        }
-    }
-
-    pub fn from_translation_quaternion(
-        timestamp: f64,
-        translation: Vector3<f64>,
-        quaternion: Quaternion<f64>,
-    ) -> Self {
-        Self {
-            timestamp,
-            pose: SE3::from_translation_quaternion(translation, quaternion),
-        }
-    }
-
-    pub fn translation(&self) -> Vector3<f64> {
-        self.pose.translation()
-    }
-
-    pub fn rotation(&self) -> UnitQuaternion<f64> {
-        self.pose.rotation_quaternion()
+impl fmt::Display for VertexSE3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "VertexSE3 [ id: {}, pose: {} ]", self.id, self.pose)
     }
 }
 
 /// 2D edge constraint between two SE2 vertices
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
@@ -190,8 +179,18 @@ impl EdgeSE2 {
     }
 }
 
+impl fmt::Display for EdgeSE2 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EdgeSE2 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            self.from, self.to, self.measurement, self.information
+        )
+    }
+}
+
 /// 3D edge constraint between two SE3 vertices
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
@@ -216,29 +215,37 @@ impl EdgeSE3 {
     }
 }
 
+impl fmt::Display for EdgeSE3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EdgeSE3 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            self.from, self.to, self.measurement, self.information
+        )
+    }
+}
+
 /// Main graph structure containing vertices and edges
-#[derive(Debug, Clone)]
-pub struct G2oGraph {
+#[derive(Clone)]
+pub struct Graph {
     pub vertices_se2: HashMap<usize, VertexSE2>,
     pub vertices_se3: HashMap<usize, VertexSE3>,
-    pub vertices_tum: Vec<VertexTUM>,
     pub edges_se2: Vec<EdgeSE2>,
     pub edges_se3: Vec<EdgeSE3>,
 }
 
-impl G2oGraph {
+impl Graph {
     pub fn new() -> Self {
         Self {
             vertices_se2: HashMap::new(),
             vertices_se3: HashMap::new(),
-            vertices_tum: Vec::new(),
             edges_se2: Vec::new(),
             edges_se3: Vec::new(),
         }
     }
 
     pub fn vertex_count(&self) -> usize {
-        self.vertices_se2.len() + self.vertices_se3.len() + self.vertices_tum.len()
+        self.vertices_se2.len() + self.vertices_se3.len()
     }
 
     pub fn edge_count(&self) -> usize {
@@ -246,23 +253,56 @@ impl G2oGraph {
     }
 }
 
-impl Default for G2oGraph {
+impl Default for Graph {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Display for Graph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Graph [[ vertices_se2: {} (count: {}), vertices_se3: {} (count: {}), edges_se2: {} (count: {}), edges_se3: {} (count: {}) ]]",
+            self.vertices_se2
+                .values()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.vertices_se2.len(),
+            self.vertices_se3
+                .values()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.vertices_se3.len(),
+            self.edges_se2
+                .iter()
+                .map(|e| format!("{}", e))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.edges_se2.len(),
+            self.edges_se3
+                .iter()
+                .map(|e| format!("{}", e))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.edges_se3.len()
+        )
     }
 }
 
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError>;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<Path>>(graph: &G2oGraph, path: P) -> Result<(), ApexSolverIoError>;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
 }
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError> {
+pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
@@ -272,7 +312,6 @@ pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError
     match extension.to_lowercase().as_str() {
         "g2o" => G2oLoader::load(path),
         "graph" => ToroLoader::load(path),
-        "txt" | "csv" => TumLoader::load(path),
         _ => Err(ApexSolverIoError::UnsupportedFormat(format!(
             "Unsupported extension: {extension}"
         ))),
@@ -364,18 +403,6 @@ mod tests {
 
         let graph = ToroLoader::load(temp_file.path()).unwrap();
         assert_eq!(graph.vertices_se2.len(), 2);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_tum_loader() -> Result<(), std::io::Error> {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "1.0 0.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
-        writeln!(temp_file, "2.0 1.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
-
-        let graph = TumLoader::load(temp_file.path()).unwrap();
-        assert_eq!(graph.vertices_tum.len(), 2);
 
         Ok(())
     }

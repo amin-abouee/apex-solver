@@ -8,7 +8,7 @@ use std::fs::File;
 pub struct G2oLoader;
 
 impl GraphLoader for G2oLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError> {
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
         let file = File::open(path)?;
         let mmap = unsafe { Mmap::map(&file)? };
         let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
@@ -19,7 +19,7 @@ impl GraphLoader for G2oLoader {
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(_graph: &G2oGraph, _path: P) -> Result<(), ApexSolverIoError> {
+    fn write<P: AsRef<Path>>(_graph: &Graph, _path: P) -> Result<(), ApexSolverIoError> {
         // TODO: Implement G2O writing
         Err(ApexSolverIoError::UnsupportedFormat(
             "G2O writing not implemented yet".to_string(),
@@ -29,21 +29,22 @@ impl GraphLoader for G2oLoader {
 
 impl G2oLoader {
     /// Parse G2O content with performance optimizations
-    fn parse_content(content: &str) -> Result<G2oGraph, ApexSolverIoError> {
+    fn parse_content(content: &str) -> Result<Graph, ApexSolverIoError> {
         let lines: Vec<&str> = content.lines().collect();
+        let minimum_lines_for_parallel = 1000;
 
         // Pre-allocate collections based on estimated size
-        let estimated_vertices = lines.len() / 2; // Rough estimate
-        let mut graph = G2oGraph {
+        let estimated_vertices = lines.len() / 4;
+        let estimated_edges = estimated_vertices * 3;
+        let mut graph = Graph {
             vertices_se2: HashMap::with_capacity(estimated_vertices),
             vertices_se3: HashMap::with_capacity(estimated_vertices),
-            vertices_tum: Vec::new(),
-            edges_se2: Vec::with_capacity(estimated_vertices / 4),
-            edges_se3: Vec::with_capacity(estimated_vertices / 4),
+            edges_se2: Vec::with_capacity(estimated_edges),
+            edges_se3: Vec::with_capacity(estimated_edges),
         };
 
         // For large files, use parallel processing
-        if lines.len() > 5000 {
+        if lines.len() > minimum_lines_for_parallel {
             Self::parse_parallel(&lines, &mut graph)?;
         } else {
             Self::parse_sequential(&lines, &mut graph)?;
@@ -53,7 +54,7 @@ impl G2oLoader {
     }
 
     /// Sequential parsing for smaller files
-    fn parse_sequential(lines: &[&str], graph: &mut G2oGraph) -> Result<(), ApexSolverIoError> {
+    fn parse_sequential(lines: &[&str], graph: &mut Graph) -> Result<(), ApexSolverIoError> {
         for (line_num, line) in lines.iter().enumerate() {
             Self::parse_line(line, line_num + 1, graph)?;
         }
@@ -61,7 +62,7 @@ impl G2oLoader {
     }
 
     /// Parallel parsing for larger files
-    fn parse_parallel(lines: &[&str], graph: &mut G2oGraph) -> Result<(), ApexSolverIoError> {
+    fn parse_parallel(lines: &[&str], graph: &mut Graph) -> Result<(), ApexSolverIoError> {
         // Collect parse results in parallel
         let results: Result<Vec<_>, ApexSolverIoError> = lines
             .par_iter()
@@ -99,11 +100,7 @@ impl G2oLoader {
     }
 
     /// Parse a single line (for sequential processing)
-    fn parse_line(
-        line: &str,
-        line_num: usize,
-        graph: &mut G2oGraph,
-    ) -> Result<(), ApexSolverIoError> {
+    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), ApexSolverIoError> {
         let line = line.trim();
 
         // Skip empty lines and comments
@@ -436,15 +433,59 @@ impl G2oLoader {
 
         let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
 
-        // For now, use identity information matrix (could parse full 6x6 matrix if needed)
-        let information = Matrix6::identity();
+        // Parse information matrix (upper triangular: i11, i12, i13, i14, i15, i16, i22, i23, i24, i25, i26, i33, i34, i35, i36, i44, i45, i46, i55, i56, i66)
+        let info_values: Result<Vec<f64>, _> =
+            parts[10..31].iter().map(|s| s.parse::<f64>()).collect();
+
+        let info_values = info_values.map_err(|_| ApexSolverIoError::Parse {
+            line: line_num,
+            message: "Invalid information matrix values".to_string(),
+        })?;
+
+        let information = Matrix6::new(
+            info_values[0],
+            info_values[1],
+            info_values[2],
+            info_values[3],
+            info_values[4],
+            info_values[5],
+            info_values[1],
+            info_values[6],
+            info_values[7],
+            info_values[8],
+            info_values[9],
+            info_values[10],
+            info_values[2],
+            info_values[7],
+            info_values[11],
+            info_values[12],
+            info_values[13],
+            info_values[14],
+            info_values[3],
+            info_values[8],
+            info_values[12],
+            info_values[15],
+            info_values[16],
+            info_values[17],
+            info_values[4],
+            info_values[9],
+            info_values[13],
+            info_values[16],
+            info_values[18],
+            info_values[19],
+            info_values[5],
+            info_values[10],
+            info_values[14],
+            info_values[17],
+            info_values[19],
+            info_values[20],
+        );
 
         Ok(EdgeSE3::new(from, to, translation, rotation, information))
     }
 }
 
 /// Enum for parsed items (used in parallel processing)
-#[derive(Debug)]
 enum ParsedItem {
     VertexSE2(VertexSE2),
     VertexSE3(VertexSE3),
