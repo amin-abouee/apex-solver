@@ -13,9 +13,11 @@ rerun = { version = "0.23.4", features = ["sdk"] }
 faer = { version = "0.22", features = ["sparse"] }
 faer-ext = { version = "0.6.0", features = ["nalgebra"] }
 log = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 
 [dev-dependencies]
 criterion = "0.6.0"
 tempfile = "3.8"
-clap = { version = "4.4", features = ["derive"] }
 env_logger = "0.11"
