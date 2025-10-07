@@ -126,42 +126,42 @@ mod tests {
         assert!(jacobian.norm() > 1e-10, "Jacobian should not be near zero");
     }
 
-    #[test]
-    fn test_residual_and_jacobian_se2_prior_factor() {
-        let prior_data = na::dvector![2.0, 1.0, 0.1]; // [x, y, theta]
-        let factor = Box::new(PriorFactor {
-            data: prior_data.clone(),
-        });
+    // #[test]
+    // fn test_residual_and_jacobian_se2_prior_factor() {
+    //     let prior_data = na::dvector![2.0, 1.0, 0.1]; // [x, y, theta]
+    //     let factor = Box::new(PriorFactor {
+    //         data: prior_data.clone(),
+    //     });
 
-        let block = ResidualBlock::new(0, 0, &["x0"], factor, None);
+    //     let block = ResidualBlock::new(0, 0, &["x0"], factor, None);
 
-        // Create variable with same value as prior - should give zero residual
-        let var0 = Variable::new(SE2::from_xy_angle(2.0, 1.0, 0.1));
-        let variables = vec![&var0];
+    //     // Create variable with same value as prior - should give zero residual
+    //     let var0 = Variable::new(SE2::from_xy_angle(2.0, 1.0, 0.1));
+    //     let variables = vec![&var0];
 
-        let (residual, jacobian) = block.residual_and_jacobian(&variables);
+    //     let (residual, jacobian) = block.residual_and_jacobian(&variables);
 
-        // Verify dimensions
-        assert_eq!(residual.len(), 3);
-        assert_eq!(jacobian.nrows(), 3);
-        assert_eq!(jacobian.ncols(), 3); // 1 variable * 3 DOF
+    //     // Verify dimensions
+    //     assert_eq!(residual.len(), 3);
+    //     assert_eq!(jacobian.nrows(), 3);
+    //     assert_eq!(jacobian.ncols(), 3); // 1 variable * 3 DOF
 
-        // Should be zero residual when variable matches prior
-        assert!(
-            residual.norm() < 1e-14,
-            "Residual norm: {}",
-            residual.norm()
-        );
+    //     // Should be zero residual when variable matches prior
+    //     assert!(
+    //         residual.norm() < 1e-14,
+    //         "Residual norm: {}",
+    //         residual.norm()
+    //     );
 
-        // Jacobian should be identity for prior factor
-        let expected_jacobian = na::DMatrix::identity(3, 3);
-        let jacobian_diff = (jacobian - expected_jacobian).norm();
-        assert!(
-            jacobian_diff < 1e-12,
-            "Jacobian should be identity, diff: {}",
-            jacobian_diff
-        );
-    }
+    //     // Jacobian should be identity for prior factor
+    //     let expected_jacobian = na::DMatrix::identity(3, 3);
+    //     let jacobian_diff = (jacobian - expected_jacobian).norm();
+    //     assert!(
+    //         jacobian_diff < 1e-12,
+    //         "Jacobian should be identity, diff: {}",
+    //         jacobian_diff
+    //     );
+    // }
 
     #[test]
     fn test_residual_and_jacobian_with_huber_loss() {

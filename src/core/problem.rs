@@ -76,19 +76,6 @@ impl Problem {
         }
     }
 
-    // pub fn get_variable_name_to_col_idx_dict(
-    //     &self,
-    //     variables: &HashMap<String, Variable<M>>,
-    // ) -> HashMap<String, usize> {
-    //     let mut count_col_idx = 0;
-    //     let mut variable_name_to_col_idx_dict = HashMap::new();
-    //     variables.iter().for_each(|(var_name, variable)| {
-    //         variable_name_to_col_idx_dict.insert(var_name.to_owned(), count_col_idx);
-    //         count_col_idx += variable.get_size();
-    //     });
-    //     variable_name_to_col_idx_dict
-    // }
-
     pub fn add_residual_block(
         &mut self,
         variable_key_size_list: &[&str],
@@ -162,10 +149,6 @@ impl Problem {
         self.variable_bounds.remove(var_to_unbound);
     }
 
-    /// Initialize variables from initial values with mixed manifold types
-    ///
-    /// This method handles a collection of different manifold types and creates
-    /// appropriate Variable instances for each based on the ManifoldType.
     pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
