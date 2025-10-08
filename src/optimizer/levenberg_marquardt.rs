@@ -15,6 +15,8 @@ use crate::core::problem::{Problem, VariableEnum};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
 use faer::{Mat, sparse::SparseColMat};
+use faer_ext::IntoNalgebra;
+use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -532,29 +534,30 @@ impl LevenbergMarquardt {
 
         // Initialize variables from initial values
         let mut variables = problem.initialize_variables(initial_params);
+        // println!("Initial variables: {:?}", variables);
 
         // Create column mapping for variables
-        let mut variable_name_to_col_idx_dict = std::collections::HashMap::new();
+        let mut variable_index_sparce_matrix = HashMap::new();
         let mut col_offset = 0;
-        let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-        sorted_vars.sort(); // Ensure consistent ordering
+        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
+        sorted_vars.sort();
 
         for var_name in &sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
             col_offset += variables[var_name].get_size();
         }
 
         // Build symbolic structure for sparse operations
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
 
         // Initial cost evaluation using sparse interface
         let (residual, _) = problem.compute_residual_and_jacobian_sparse(
             &variables,
-            &variable_name_to_col_idx_dict,
+            &variable_index_sparce_matrix,
             &symbolic_structure,
         );
-        use faer_ext::IntoNalgebra;
+
         let residual_na = residual.as_ref().into_nalgebra();
         let mut current_cost = residual_na.norm_squared();
         let initial_cost = current_cost;
@@ -583,7 +586,7 @@ impl LevenbergMarquardt {
             // Evaluate residuals and Jacobian using sparse interface
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
                 &variables,
-                &variable_name_to_col_idx_dict,
+                &variable_index_sparce_matrix,
                 &symbolic_structure,
             );
             jacobian_evaluations += 1;
@@ -592,7 +595,6 @@ impl LevenbergMarquardt {
             if self.config.verbose {
                 println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
                 println!("Current cost: {:.12e}", current_cost);
-                use faer_ext::IntoNalgebra;
                 let residual_na = residuals.as_ref().into_nalgebra();
                 println!(
                     "Residuals shape: ({}, {})",
@@ -763,7 +765,7 @@ impl LevenbergMarquardt {
                 // Compute new cost using sparse interface
                 let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
                     &variables,
-                    &variable_name_to_col_idx_dict,
+                    &variable_index_sparce_matrix,
                     &symbolic_structure,
                 );
                 let new_residual_na = new_residual.as_ref().into_nalgebra();

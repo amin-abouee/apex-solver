@@ -221,33 +221,94 @@ impl Problem {
     }
 
     /// Build symbolic structure for sparse Jacobian computation
+    ///
+    /// This method constructs the sparsity pattern of the Jacobian matrix before numerical
+    /// computation. It determines which entries in the Jacobian will be non-zero based on
+    /// the structure of the optimization problem (which residual blocks connect which variables).
+    ///
+    /// # Purpose
+    /// - Pre-allocates memory for sparse matrix operations
+    /// - Enables efficient sparse linear algebra (avoiding dense operations)
+    /// - Computed once at the beginning, used throughout optimization
+    ///
+    /// # Arguments
+    /// * `variables` - Map of variable names to their values and properties (SE2, SE3, etc.)
+    /// * `variable_index_sparce_matrix` - Map from variable name to starting column index in Jacobian
+    /// * `total_dof` - Total degrees of freedom (number of columns in Jacobian)
+    ///
+    /// # Returns
+    /// A `SymbolicStructure` containing:
+    /// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
+    /// - `order`: An ordering/permutation for efficient numerical computation
+    ///
+    /// # Algorithm
+    /// For each residual block:
+    /// 1. Identify which variables it depends on
+    /// 2. For each (residual_dimension × variable_dof) block, mark entries as non-zero
+    /// 3. Convert to optimized sparse matrix representation
+    ///
+    /// # Example Structure
+    /// For a simple problem with 3 SE2 poses (9 DOF total):
+    /// - Between(x0, x1): Creates 3×6 block at rows 0-2, cols 0-5
+    /// - Between(x1, x2): Creates 3×6 block at rows 3-5, cols 3-8
+    /// - Prior(x0): Creates 3×3 block at rows 6-8, cols 0-2
+    /// Result: 9×9 sparse Jacobian with 45 non-zero entries
     pub fn build_symbolic_structure(
         &self,
         variables: &HashMap<String, VariableEnum>,
-        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
+        total_dof: usize,
     ) -> SymbolicStructure {
-        let total_dof: usize = variables.values().map(|var| var.get_size()).sum();
+        // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
+        // Each Pair represents one entry in the sparse matrix
         let mut indices = Vec::<Pair<usize, usize>>::new();
 
+        // Iterate through all residual blocks (factors/constraints) in the problem
+        // Each residual block contributes a block of entries to the Jacobian
         self.residual_blocks.iter().for_each(|(_, residual_block)| {
+            // Create local indexing for this residual block's variables
+            // Maps each variable to its local starting index and size within this factor
+            // Example: For Between(x0, x1) with SE2: [(0, 3), (3, 3)]
+            //   - x0 starts at local index 0, has 3 DOF
+            //   - x1 starts at local index 3, has 3 DOF
             let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
             let mut count_variable_local_idx: usize = 0;
 
+            // Build the local index mapping for this residual block
             for var_key in &residual_block.variable_key_list {
                 if let Some(variable) = variables.get(var_key) {
+                    // Store (local_start_index, dof_size) for this variable
                     variable_local_idx_size_list
                         .push((count_variable_local_idx, variable.get_size()));
                     count_variable_local_idx += variable.get_size();
                 }
             }
 
+            // For each variable in this residual block, generate Jacobian entries
             for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
-                if let Some(variable_global_idx) = variable_name_to_col_idx_dict.get(var_key) {
+                if let Some(variable_global_idx) = variable_index_sparce_matrix.get(var_key) {
+                    // Get the DOF size for this variable
                     let (_, var_size) = variable_local_idx_size_list[i];
+
+                    // Generate all (row, col) pairs for the Jacobian block:
+                    // ∂(residual) / ∂(variable)
+                    //
+                    // For a residual block with dimension R and variable with DOF V:
+                    // Creates R × V entries in the Jacobian
+
+                    // Iterate over each residual dimension (rows)
                     for row_idx in 0..residual_block.factor.get_dimension() {
+                        // Iterate over each variable DOF (columns)
                         for col_idx in 0..var_size {
+                            // Compute global row index:
+                            // Start from this residual block's first row, add offset
                             let global_row_idx = residual_block.residual_row_start_idx + row_idx;
+
+                            // Compute global column index:
+                            // Start from this variable's first column, add offset
                             let global_col_idx = variable_global_idx + col_idx;
+
+                            // Record this (row, col) pair as a non-zero entry
                             indices.push(Pair::new(global_row_idx, global_col_idx));
                         }
                     }
@@ -255,13 +316,20 @@ impl Problem {
             }
         });
 
+        // Convert the list of (row, col) pairs into an optimized symbolic sparse matrix
+        // This performs:
+        // 1. Duplicate elimination (same entry might be referenced multiple times)
+        // 2. Sorting for column-wise storage format
+        // 3. Computing a fill-reducing ordering for numerical stability
+        // 4. Allocating the symbolic structure (no values yet, just pattern)
         let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
-            self.total_residual_dimension,
-            total_dof,
-            &indices,
+            self.total_residual_dimension, // Number of rows (total residual dimension)
+            total_dof,                     // Number of columns (total DOF)
+            &indices,                      // List of non-zero entry locations
         )
         .unwrap();
 
+        // Return the symbolic structure that will be filled with numerical values later
         SymbolicStructure { pattern, order }
     }
 
@@ -269,7 +337,7 @@ impl Problem {
     pub fn compute_residual_and_jacobian_sparse(
         &self,
         variables: &HashMap<String, VariableEnum>,
-        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
         let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
@@ -283,7 +351,7 @@ impl Problem {
                 self.compute_residual_and_jacobian_block(
                     residual_block,
                     variables,
-                    variable_name_to_col_idx_dict,
+                    variable_index_sparce_matrix,
                     &total_residual,
                 )
             })
@@ -310,7 +378,7 @@ impl Problem {
         &self,
         residual_block: &residual_block::ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
-        variable_name_to_col_idx_dict: &HashMap<String, usize>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
         total_residual: &Arc<Mutex<na::DVector<f64>>>,
     ) -> Vec<f64> {
         let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
@@ -344,7 +412,7 @@ impl Problem {
         // Extract Jacobian values in the correct order
         let mut local_jacobian_values = Vec::new();
         for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
-            if variable_name_to_col_idx_dict.contains_key(var_key) {
+            if variable_index_sparce_matrix.contains_key(var_key) {
                 let (variable_local_idx, var_size) = variable_local_idx_size_list[i];
                 let variable_jac = jac.view((0, variable_local_idx), (jac.shape().0, var_size));
 
@@ -674,13 +742,13 @@ mod tests {
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping for variables
-        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut variable_index_sparce_matrix = HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<_> = variables.keys().collect();
         sorted_vars.sort(); // Ensure consistent ordering
 
         for var_name in sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
             col_offset += variables[var_name].get_size();
         }
 
@@ -690,7 +758,7 @@ mod tests {
         assert_eq!(col_offset, 30);
 
         // Test each variable has correct column mapping
-        for (var_name, &col_idx) in &variable_name_to_col_idx_dict {
+        for (var_name, &col_idx) in &variable_index_sparce_matrix {
             assert!(
                 col_idx < total_dof,
                 "Column index {} for {} should be < {}",
@@ -704,7 +772,7 @@ mod tests {
         println!("  Total DOF: {}", total_dof);
         println!(
             "  Variable mappings: {}",
-            variable_name_to_col_idx_dict.len()
+            variable_index_sparce_matrix.len()
         );
     }
 
@@ -714,19 +782,19 @@ mod tests {
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
-        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut variable_index_sparce_matrix = HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<_> = variables.keys().collect();
         sorted_vars.sort();
 
         for var_name in sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
             col_offset += variables[var_name].get_size();
         }
 
         // Build symbolic structure
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
 
         // Test symbolic structure dimensions
         assert_eq!(
@@ -749,22 +817,22 @@ mod tests {
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
-        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut variable_index_sparce_matrix = HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<_> = variables.keys().collect();
         sorted_vars.sort();
 
         for var_name in sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
             col_offset += variables[var_name].get_size();
         }
 
         // Test sparse computation
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
         let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
             &variables,
-            &variable_name_to_col_idx_dict,
+            &variable_index_sparce_matrix,
             &symbolic_structure,
         );
 
@@ -788,22 +856,22 @@ mod tests {
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
-        let mut variable_name_to_col_idx_dict = HashMap::new();
+        let mut variable_index_sparce_matrix = HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<_> = variables.keys().collect();
         sorted_vars.sort();
 
         for var_name in sorted_vars {
-            variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
+            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
             col_offset += variables[var_name].get_size();
         }
 
         // Test sparse computation
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
         let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
             &variables,
-            &variable_name_to_col_idx_dict,
+            &variable_index_sparce_matrix,
             &symbolic_structure,
         );
 

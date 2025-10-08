@@ -131,7 +131,7 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
 
     // Build symbolic structure
     let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict);
+        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset);
 
     // Compute residual and jacobian
     let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
