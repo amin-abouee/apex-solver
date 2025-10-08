@@ -259,7 +259,7 @@ pub trait Solver {
     type Error;
 
     /// Create a new solver with the given configuration
-    fn new(config: Self::Config) -> Self;
+    fn new() -> Self;
 
     /// Minimize the optimization problem
     fn minimize(

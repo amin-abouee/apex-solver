@@ -108,8 +108,8 @@ impl Solver for GaussNewton {
     type Config = GaussNewtonConfig;
     type Error = ApexError;
 
-    fn new(config: Self::Config) -> Self {
-        Self::with_config(config)
+    fn new() -> Self {
+        Self::default()
     }
 
     fn minimize(

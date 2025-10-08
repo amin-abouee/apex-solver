@@ -11,6 +11,7 @@
 //! - Comprehensive optimization summaries
 //! - Support for both sparse Cholesky and QR factorizations
 
+use crate::core::problem::{Problem, VariableEnum};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
 use faer::{Mat, sparse::SparseColMat};
@@ -254,6 +255,12 @@ pub struct LevenbergMarquardt {
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
 }
 
+impl Default for LevenbergMarquardt {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LevenbergMarquardt {
     /// Create a new Levenberg-Marquardt solver with default configuration.
     pub fn new() -> Self {
@@ -463,59 +470,6 @@ impl LevenbergMarquardt {
         scaling * step
     }
 
-    /// Solve the regularized system with diagonal-aware damping
-    #[allow(dead_code)]
-    fn solve_regularized_system(
-        &self,
-        residuals: &Mat<f64>,
-        scaled_jacobian: &SparseColMat<usize, f64>,
-        hessian: &SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn SparseLinearSolver>,
-    ) -> Option<Mat<f64>> {
-        // For now, create a temporary augmented system that mimics what we want
-        // We'll use the solve_augmented_equation with our custom damping
-
-        // Apply diagonal-aware regularization similar to tiny-solver-rs
-        let n_vars = scaled_jacobian.ncols();
-        let n_residuals = scaled_jacobian.nrows();
-
-        // Create damping matrix entries
-        let mut damping_triplets = Vec::new();
-        for i in 0..n_vars {
-            let diag_val = hessian[(i, i)];
-            let clamped_diag = diag_val
-                .max(self.config.min_diagonal)
-                .min(self.config.max_diagonal);
-            let damping_value = (self.config.damping * clamped_diag).sqrt();
-            damping_triplets.push(faer::sparse::Triplet::new(
-                n_residuals + i,
-                i,
-                damping_value,
-            ));
-        }
-
-        // Create augmented Jacobian: [J; sqrt(damping) * D]
-        let mut all_triplets: Vec<_> = scaled_jacobian
-            .triplet_iter()
-            .map(|t| faer::sparse::Triplet::new(t.row, t.col, *t.val))
-            .collect();
-        all_triplets.extend(damping_triplets);
-
-        let augmented_jacobian =
-            SparseColMat::try_new_from_triplets(n_residuals + n_vars, n_vars, &all_triplets)
-                .ok()?;
-
-        // Create augmented residuals: [r; 0]
-        let mut augmented_residuals = Mat::zeros(n_residuals + n_vars, 1);
-        for i in 0..n_residuals {
-            augmented_residuals[(i, 0)] = residuals[(i, 0)];
-        }
-        // Zero entries for the damping part
-
-        // Solve using the standard interface
-        linear_solver.solve_normal_equation(&augmented_residuals, &augmented_jacobian)
-    }
-
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -559,15 +513,13 @@ impl LevenbergMarquardt {
 
     pub fn minimize(
         &mut self,
-        problem: &crate::core::problem::Problem,
+        problem: &Problem,
         initial_params: &std::collections::HashMap<
             String,
             (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<
-        SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,
-        crate::core::ApexError,
-    > {
+    ) -> Result<SolverResult<std::collections::HashMap<String, VariableEnum>>, crate::core::ApexError>
+    {
         let start_time = Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 0;
@@ -995,20 +947,13 @@ impl LevenbergMarquardt {
         }
     }
 }
-
-impl Default for LevenbergMarquardt {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // Implement Solver trait
 impl crate::optimizer::Solver for LevenbergMarquardt {
     type Config = LevenbergMarquardtConfig;
     type Error = crate::core::ApexError;
 
-    fn new(config: Self::Config) -> Self {
-        Self::with_config(config)
+    fn new() -> Self {
+        Self::default()
     }
 
     fn minimize(
