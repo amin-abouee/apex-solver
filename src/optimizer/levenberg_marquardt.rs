@@ -731,10 +731,6 @@ impl LevenbergMarquardt {
                     // Simple perturbation for SE3 variables
                     match &mut variables.get_mut(var_name).unwrap() {
                         crate::core::problem::VariableEnum::SE3(var) => {
-                            // Get current SE3 value
-                            let _current_translation = var.value.translation();
-                            let _current_rotation = var.value.rotation_so3();
-
                             // Apply simple additive perturbation to translation (first 3 components)
                             // and small rotation perturbation (last 3 components)
                             use faer_ext::IntoNalgebra;
@@ -748,8 +744,8 @@ impl LevenbergMarquardt {
                             let se3_tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
 
                             // Apply proper manifold plus operation: g ⊞ φ = g ∘ exp(φ^∧)
-                            let new_se3 = var.plus(&se3_tangent);
-                            var.set_value(new_se3);
+                            var.plus(&se3_tangent);
+                            // var.set_value(new_se3);
                         }
                         _ => {
                             // For other variable types, implement as needed
@@ -879,8 +875,8 @@ impl LevenbergMarquardt {
                                     crate::manifold::se3::SE3Tangent::from(negative_step_dvector);
 
                                 // Apply proper manifold plus operation with negative step
-                                let reverted_se3 = var.plus(&negative_se3_tangent);
-                                var.set_value(reverted_se3);
+                                var.plus(&negative_se3_tangent);
+                                // var.set_value(reverted_se3);
                             }
                             _ => {
                                 // For other variable types, implement as needed
