@@ -31,7 +31,7 @@
 //! let rotated = q.transform_vector(&v);
 //! ```
 
-use faer::{Col, Mat, col};
+use faer::{Col, ColMut, ColRef, Mat, col};
 use std::fmt;
 
 /// A unit quaternion representing a 3D rotation.
@@ -40,7 +40,7 @@ use std::fmt;
 /// Storage uses faer::Col<f64> as a 4-element column vector [w, x, y, z].
 ///
 /// All operations automatically maintain unit normalization.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Quaternion {
     /// Internal storage: 4-element column vector [w, x, y, z] (always normalized)
     pub(crate) data: Col<f64>,
@@ -58,10 +58,6 @@ impl fmt::Display for Quaternion {
         )
     }
 }
-
-// ============================================================================
-// Quaternion Implementation
-// ============================================================================
 
 impl Quaternion {
     /// Create a new unit quaternion from components w, x, y, z.
@@ -91,6 +87,16 @@ impl Quaternion {
     pub fn identity() -> Self {
         let data = col![1.0, 0.0, 0.0, 0.0];
         Self { data }
+    }
+
+    #[inline]
+    pub fn as_ref(&self) -> ColRef<f64> {
+        self.data.as_ref()
+    }
+
+    #[inline]
+    pub fn as_mut(&mut self) -> ColMut<f64> {
+        self.data.as_mut()
     }
 
     /// Create a unit quaternion from an axis and angle.
@@ -125,6 +131,34 @@ impl Quaternion {
         ];
 
         Self { data }
+    }
+
+    /// Create a unit quaternion from a scaled axis representation.
+    ///
+    /// The scaled axis encodes both the rotation axis and angle:
+    /// - Direction: rotation axis (will be normalized)
+    /// - Magnitude: rotation angle in radians
+    ///
+    /// # Arguments
+    /// * `axis_angle` - Scaled axis vector where ||axis_angle|| = angle
+    ///
+    /// # Formula
+    /// For axis_angle = θ * u (where u is unit axis):
+    /// q = cos(θ/2) + sin(θ/2) * u
+    pub fn from_scaled_axis(axis_angle: Col<f64>) -> Self {
+        let angle = axis_angle.norm_l2();
+
+        if angle < 1e-12 {
+            return Self::identity();
+        }
+
+        let axis = [
+            axis_angle[0] / angle,
+            axis_angle[1] / angle,
+            axis_angle[2] / angle,
+        ];
+
+        Self::from_axis_angle(&axis, angle)
     }
 
     /// Create a unit quaternion from Euler angles (roll, pitch, yaw).
@@ -252,7 +286,7 @@ impl Quaternion {
     /// Compute the norm of the quaternion (should always be ~1.0).
     #[inline]
     pub fn norm(&self) -> f64 {
-        self.norm_squared().sqrt()
+        self.data.norm_l2()
     }
 
     /// Compute the conjugate of the quaternion: w - xi - yj - zk.
@@ -501,12 +535,12 @@ impl Quaternion {
         Self { data }
     }
 
-    /// Re-normalize the quaternion to ensure it remains a unit quaternion.
+    /// Normalize the quaternion to ensure it remains a unit quaternion.
     ///
     /// This is useful after many operations to counteract floating-point drift.
     /// Most operations already maintain normalization, but this can be used
     /// explicitly when needed.
-    pub fn renormalize(&mut self) {
+    pub fn normalize(&mut self) {
         let norm_sq = self.norm_squared();
         if norm_sq < 1e-12 {
             *self = Self::identity();
@@ -906,7 +940,7 @@ mod tests {
         q.data[0] *= 1.1;
 
         // Renormalize
-        q.renormalize();
+        q.normalize();
 
         // Check it's normalized again
         let norm = (q.w() * q.w() + q.x() * q.x() + q.y() * q.y() + q.z() * q.z()).sqrt();

@@ -32,9 +32,10 @@
 //! Operations are differentiated with respect to perturbations on the local tangent space.
 //!
 
-use nalgebra::{Matrix3, Vector3};
+use faer::{Col, Mat};
 use std::fmt::Debug;
 use std::ops::{Mul, Neg};
+use thiserror::Error;
 
 pub mod quaternion;
 pub mod rn;
@@ -44,17 +45,17 @@ pub mod so2;
 pub mod so3;
 
 /// Errors that can occur during manifold operations.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum ManifoldError {
-    /// Invalid tangent vector dimension
+    #[error("Invalid tangent dimension: expected {expected}, got {actual}")]
     InvalidTangentDimension { expected: usize, actual: usize },
-    /// Numerical instability in computation
+    #[error("Numerical instability: {0}")]
     NumericalInstability(String),
-    /// Invalid manifold element
+    #[error("Invalid manifold element: {0}")]
     InvalidElement(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum ManifoldType {
     RN,
     SE2,
@@ -63,29 +64,8 @@ pub enum ManifoldType {
     SO3,
 }
 
-impl std::fmt::Display for ManifoldError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ManifoldError::InvalidTangentDimension { expected, actual } => {
-                write!(
-                    f,
-                    "Invalid tangent dimension: expected {expected}, got {actual}"
-                )
-            }
-            ManifoldError::NumericalInstability(msg) => {
-                write!(f, "Numerical instability: {msg}")
-            }
-            ManifoldError::InvalidElement(msg) => {
-                write!(f, "Invalid manifold element: {msg}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for ManifoldError {}
-
 /// Result type for manifold operations.
-pub type ManifoldResult<T> = Result<T, ManifoldError>;
+// pub type ManifoldResult<T> = Result<T, ManifoldError>;
 
 /// Core trait for Lie group operations.
 ///
@@ -177,10 +157,10 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// * `jacobian_vector` - Optional Jacobian ∂(g ⊙ v)/∂v
     fn act(
         &self,
-        vector: &Vector3<f64>,
+        vector: &Col<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut Matrix3<f64>>,
-    ) -> Vector3<f64>;
+        jacobian_vector: Option<&mut Mat<f64>>,
+    ) -> Col<f64>;
 
     // Adjoint operations
 

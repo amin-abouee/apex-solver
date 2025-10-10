@@ -11,11 +11,8 @@
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::manifold::so3::{SO3, SO3Tangent};
-use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{
-    DVector, Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion,
-    Vector3, Vector6,
-};
+use crate::manifold::{LieGroup, Tangent, quaternion::Quaternion};
+use faer::{Col, Mat, col};
 use std::fmt;
 
 /// SE(3) group element representing rigid body transformations in 3D.
@@ -26,7 +23,7 @@ pub struct SE3 {
     /// Rotation part as SO(3) element
     rotation: SO3,
     /// Translation part as Vector3
-    translation: Vector3<f64>,
+    translation: Col<f64>,
 }
 
 impl fmt::Display for SE3 {
@@ -36,7 +33,13 @@ impl fmt::Display for SE3 {
         write!(
             f,
             "SE3(translation: [{:.4}, {:.4}, {:.4}], rotation: [w: {:.4}, x: {:.4}, y: {:.4}, z: {:.4}])",
-            t.x, t.y, t.z, q.w, q.i, q.j, q.k
+            t[0],
+            t[1],
+            t[2],
+            q.w(),
+            q.x(),
+            q.y(),
+            q.z()
         )
     }
 }
@@ -57,15 +60,15 @@ impl SE3 {
     pub fn identity() -> Self {
         SE3 {
             rotation: SO3::identity(),
-            translation: Vector3::zeros(),
+            translation: Col::<f64>::zeros(3),
         }
     }
 
     /// Get the identity matrix for Jacobians.
     ///
     /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
-    pub fn jacobian_identity() -> Matrix6<f64> {
-        Matrix6::<f64>::identity()
+    pub fn jacobian_identity() -> Mat<f64> {
+        Mat::<f64>::identity(6, 6)
     }
 
     /// Create a new SE3 element from translation and rotation.
@@ -73,7 +76,7 @@ impl SE3 {
     /// # Arguments
     /// * `translation` - Translation vector [x, y, z]
     /// * `rotation` - Unit quaternion representing rotation
-    pub fn new(translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
+    pub fn new(translation: Col<f64>, rotation: Quaternion) -> Self {
         SE3 {
             rotation: SO3::new(rotation),
             translation,
@@ -81,31 +84,21 @@ impl SE3 {
     }
 
     /// Create SE3 from translation components and Euler angles.
-    pub fn from_translation_quaternion(
-        translation: Vector3<f64>,
-        quaternion: Quaternion<f64>,
-    ) -> Self {
-        let quaternion = UnitQuaternion::from_quaternion(quaternion.normalize());
-        Self::new(translation, quaternion)
+    pub fn from_translation_quaternion(translation: Col<f64>, quaternion: Quaternion) -> Self {
+        let mut normalized_quat = quaternion;
+        normalized_quat.normalize();
+        Self::new(translation, normalized_quat)
     }
 
     /// Create SE3 from translation components and Euler angles.
     pub fn from_translation_euler(x: f64, y: f64, z: f64, roll: f64, pitch: f64, yaw: f64) -> Self {
-        let translation = Vector3::new(x, y, z);
-        let rotation = UnitQuaternion::from_euler_angles(roll, pitch, yaw);
+        let translation = col![x, y, z];
+        let rotation = Quaternion::from_euler_angles(roll, pitch, yaw);
         Self::new(translation, rotation)
     }
 
-    /// Create SE3 directly from an Isometry3.
-    pub fn from_isometry(isometry: Isometry3<f64>) -> Self {
-        SE3 {
-            rotation: SO3::new(isometry.rotation),
-            translation: isometry.translation.vector,
-        }
-    }
-
     /// Create SE3 from SO3 and Vector3 components.
-    pub fn from_translation_so3(translation: Vector3<f64>, rotation: SO3) -> Self {
+    pub fn from_translation_so3(translation: Col<f64>, rotation: SO3) -> Self {
         SE3 {
             rotation,
             translation,
@@ -113,8 +106,8 @@ impl SE3 {
     }
 
     /// Get the translation part as a Vector3.
-    pub fn translation(&self) -> Vector3<f64> {
-        self.translation
+    pub fn translation(&self) -> Col<f64> {
+        self.translation.clone()
     }
 
     /// Get the rotation part as SO3.
@@ -123,49 +116,55 @@ impl SE3 {
     }
 
     /// Get the rotation part as a UnitQuaternion.
-    pub fn rotation_quaternion(&self) -> UnitQuaternion<f64> {
+    pub fn rotation_quaternion(&self) -> Quaternion {
         self.rotation.quaternion()
     }
 
-    /// Get as an Isometry3 (convenience method).
-    pub fn isometry(&self) -> Isometry3<f64> {
-        Isometry3::from_parts(
-            Translation3::from(self.translation),
-            self.rotation_quaternion(),
-        )
-    }
-
     /// Get the transformation matrix (4x4 homogeneous matrix).
-    pub fn matrix(&self) -> Matrix4<f64> {
-        self.isometry().to_homogeneous()
+    pub fn matrix(&self) -> Mat<f64> {
+        let mut matrix = Mat::<f64>::identity(4, 4);
+        let rot_matrix = self.rotation.rotation_matrix();
+
+        // Copy rotation part (top-left 3x3) using submatrix view
+        matrix
+            .as_mut()
+            .submatrix_mut(0, 0, 3, 3)
+            .copy_from(&rot_matrix);
+
+        // Copy translation part (top-right 3x1)
+        for i in 0..3 {
+            matrix[(i, 3)] = self.translation[i];
+        }
+
+        matrix
     }
 
     /// Get the x component of translation.
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.translation[0]
     }
 
     /// Get the y component of translation.
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.translation[1]
     }
 
     /// Get the z component of translation.
     pub fn z(&self) -> f64 {
-        self.translation.z
+        self.translation[2]
     }
 
     /// Get coefficients as array [tx, ty, tz, qw, qx, qy, qz].
     pub fn coeffs(&self) -> [f64; 7] {
         let q = self.rotation.quaternion();
         [
-            self.translation.x,
-            self.translation.y,
-            self.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
+            self.translation[0],
+            self.translation[1],
+            self.translation[2],
+            q.w(),
+            q.x(),
+            q.y(),
+            q.z(),
         ]
     }
 }
@@ -176,8 +175,8 @@ impl From<nalgebra::DVector<f64>> for SE3 {
         if data.len() != 7 {
             panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
         }
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]);
+        let translation = col![data[0], data[1], data[2]];
+        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]).unwrap();
         SE3::from_translation_quaternion(translation, quaternion)
     }
 }
@@ -186,13 +185,13 @@ impl From<SE3> for nalgebra::DVector<f64> {
     fn from(se3: SE3) -> Self {
         let q = se3.rotation.quaternion();
         nalgebra::DVector::from_vec(vec![
-            se3.translation.x, // tx first
-            se3.translation.y, // ty second
-            se3.translation.z, // tz third
-            q.w,               // qw fourth
-            q.i,               // qx fifth
-            q.j,               // qy sixth
-            q.k,               // qz seventh
+            se3.translation[0], // tx first
+            se3.translation[1], // ty second
+            se3.translation[2], // tz third
+            q.w(),              // qw fourth
+            q.x(),              // qx fifth
+            q.y(),              // qy sixth
+            q.z(),              // qz seventh
         ])
     }
 }
@@ -200,8 +199,8 @@ impl From<SE3> for nalgebra::DVector<f64> {
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE3 {
     type TangentVector = SE3Tangent;
-    type JacobianMatrix = Matrix6<f64>;
-    type LieAlgebra = Matrix4<f64>;
+    type JacobianMatrix = Mat<f64>;
+    type LieAlgebra = Mat<f64>;
 
     /// Get the inverse.
     ///
@@ -257,7 +256,7 @@ impl LieGroup for SE3 {
         // Eqs. 171
         let composed_rotation = self.rotation.compose(&other.rotation, None, None);
         let composed_translation =
-            self.rotation.act(&other.translation, None, None) + self.translation;
+            &self.rotation.act(&other.translation, None, None) + &self.translation;
 
         let result = SE3::from_translation_so3(composed_translation, composed_rotation);
 
@@ -268,7 +267,7 @@ impl LieGroup for SE3 {
 
         if let Some(jac_other) = jacobian_other {
             // Jacobian wrt second element: I (identity)
-            *jac_other = Matrix6::identity();
+            *jac_other = Mat::<f64>::identity(6, 6);
         }
 
         result
@@ -290,10 +289,20 @@ impl LieGroup for SE3 {
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         // Log of rotation (axis-angle representation)
         let theta = self.rotation.log(None);
-        let mut data = Vector6::zeros();
-        let translation_vector = theta.left_jacobian_inv() * self.translation;
-        data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
-        data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
+        let mut data = Col::<f64>::zeros(6);
+        let translation_vector = &theta.left_jacobian_inv() * &self.translation;
+
+        // Copy translation part
+        data[0] = translation_vector[0];
+        data[1] = translation_vector[1];
+        data[2] = translation_vector[2];
+
+        // Copy rotation part
+        let theta_coeffs = theta.coeffs();
+        data[3] = theta_coeffs[0];
+        data[4] = theta_coeffs[1];
+        data[5] = theta_coeffs[2];
+
         let result = SE3Tangent { data };
         if let Some(jac) = jacobian {
             *jac = result.right_jacobian_inv();
@@ -304,26 +313,37 @@ impl LieGroup for SE3 {
 
     fn act(
         &self,
-        vector: &Vector3<f64>,
+        vector: &Col<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut Matrix3<f64>>,
-    ) -> Vector3<f64> {
+        jacobian_vector: Option<&mut Mat<f64>>,
+    ) -> Col<f64> {
         // Apply SE(3) transformation: R * v + t
-        let result = self.rotation.act(vector, None, None) + self.translation;
+        let result = self.rotation.act(vector, None, None) + &self.translation;
 
         if let Some(jac_self) = jacobian_self {
+            let rot_matrix = self.rotation.rotation_matrix();
+
+            // Copy rotation matrix to top-left 3x3 block
             jac_self
-                .fixed_view_mut::<3, 3>(0, 0)
-                .copy_from(&self.rotation.rotation_matrix());
+                .as_mut()
+                .submatrix_mut(0, 0, 3, 3)
+                .copy_from(&rot_matrix);
+
+            // Copy -R * [v]_x to top-right 3x3 block
+            let top_right = -rot_matrix * SO3Tangent::new(vector.clone()).hat();
             jac_self
-                .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(-self.rotation.rotation_matrix() * SO3Tangent::new(*vector).hat()));
+                .as_mut()
+                .submatrix_mut(0, 3, 3, 3)
+                .copy_from(&top_right);
         }
 
         if let Some(jac_vector) = jacobian_vector {
             // Jacobian wrt vector
             let rotation_matrix = self.rotation.rotation_matrix();
-            jac_vector.copy_from(&rotation_matrix);
+            jac_vector
+                .as_mut()
+                .submatrix_mut(0, 0, 3, 3)
+                .copy_from(&rotation_matrix);
         }
 
         result
@@ -332,23 +352,26 @@ impl LieGroup for SE3 {
     fn adjoint(&self) -> Self::JacobianMatrix {
         // Adjoint matrix for SE(3)
         let rotation_matrix = self.rotation.rotation_matrix();
-        let translation = self.translation;
-        let mut adjoint_matrix = Matrix6::zeros();
+        let translation = self.translation.clone();
+        let mut adjoint_matrix = Mat::<f64>::zeros(6, 6);
 
         // Top-left block: R
         adjoint_matrix
-            .fixed_view_mut::<3, 3>(0, 0)
+            .as_mut()
+            .submatrix_mut(0, 0, 3, 3)
             .copy_from(&rotation_matrix);
 
         // Bottom-right block: R
         adjoint_matrix
-            .fixed_view_mut::<3, 3>(3, 3)
+            .as_mut()
+            .submatrix_mut(3, 3, 3, 3)
             .copy_from(&rotation_matrix);
 
         // Top-right block: [t]_× R (skew-symmetric of translation times rotation)
         let top_right = SO3Tangent::new(translation).hat() * rotation_matrix;
         adjoint_matrix
-            .fixed_view_mut::<3, 3>(0, 3)
+            .as_mut()
+            .submatrix_mut(0, 3, 3, 3)
             .copy_from(&top_right);
 
         adjoint_matrix
@@ -359,11 +382,11 @@ impl LieGroup for SE3 {
         let mut rng = rand::rng();
 
         // Random translation in [-1, 1]³
-        let translation = Vector3::new(
+        let translation = col![
             rng.random_range(-1.0..1.0),
             rng.random_range(-1.0..1.0),
             rng.random_range(-1.0..1.0),
-        );
+        ];
 
         // Random rotation
         let rotation = SO3::random();
@@ -408,7 +431,7 @@ impl LieGroup for SE3 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SE3Tangent {
     /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
-    data: Vector6<f64>,
+    data: Col<f64>,
 }
 
 impl fmt::Display for SE3Tangent {
@@ -418,7 +441,7 @@ impl fmt::Display for SE3Tangent {
         write!(
             f,
             "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
-            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
+            rho[0], rho[1], rho[2], theta[0], theta[1], theta[2]
         )
     }
 }
@@ -431,30 +454,30 @@ impl From<nalgebra::DVector<f64>> for SE3Tangent {
             );
         }
         SE3Tangent {
-            data: Vector6::new(
+            data: col![
                 data_vector[0],
                 data_vector[1],
                 data_vector[2],
                 data_vector[3],
                 data_vector[4],
                 data_vector[5],
-            ),
+            ],
         }
     }
 }
 
-impl From<SE3Tangent> for nalgebra::DVector<f64> {
-    fn from(se3_tangent: SE3Tangent) -> Self {
-        DVector::from_vec(vec![
-            se3_tangent.data[0],
-            se3_tangent.data[1],
-            se3_tangent.data[2],
-            se3_tangent.data[3],
-            se3_tangent.data[4],
-            se3_tangent.data[5],
-        ])
-    }
-}
+// impl From<SE3Tangent> for nalgebra::DVector<f64> {
+//     fn from(se3_tangent: SE3Tangent) -> Self {
+//         DVector::from_vec(vec![
+//             se3_tangent.data[0],
+//             se3_tangent.data[1],
+//             se3_tangent.data[2],
+//             se3_tangent.data[3],
+//             se3_tangent.data[4],
+//             se3_tangent.data[5],
+//         ])
+//     }
+// }
 
 impl SE3Tangent {
     /// Create a new SE3Tangent from rho (translational) and theta (rotational) components.
@@ -462,10 +485,14 @@ impl SE3Tangent {
     /// # Arguments
     /// * `rho` - Translational component [rho_x, rho_y, rho_z]
     /// * `theta` - Rotational component [theta_x, theta_y, theta_z]
-    pub fn new(rho: Vector3<f64>, theta: Vector3<f64>) -> Self {
-        let mut data = Vector6::zeros();
-        data.fixed_rows_mut::<3>(0).copy_from(&rho);
-        data.fixed_rows_mut::<3>(3).copy_from(&theta);
+    pub fn new(rho: Col<f64>, theta: Col<f64>) -> Self {
+        let mut data = Col::<f64>::zeros(6);
+        data[0] = rho[0];
+        data[1] = rho[1];
+        data[2] = rho[2];
+        data[3] = theta[0];
+        data[4] = theta[1];
+        data[5] = theta[2];
         SE3Tangent { data }
     }
 
@@ -479,28 +506,28 @@ impl SE3Tangent {
         theta_z: f64,
     ) -> Self {
         SE3Tangent {
-            data: Vector6::new(rho_x, rho_y, rho_z, theta_x, theta_y, theta_z),
+            data: col![rho_x, rho_y, rho_z, theta_x, theta_y, theta_z],
         }
     }
 
     /// Get the rho (translational) part.
-    pub fn rho(&self) -> Vector3<f64> {
-        self.data.fixed_rows::<3>(0).into_owned()
+    pub fn rho(&self) -> Col<f64> {
+        col![self.data[0], self.data[1], self.data[2]]
     }
 
     /// Get the theta (rotational) part.
-    pub fn theta(&self) -> Vector3<f64> {
-        self.data.fixed_rows::<3>(3).into_owned()
+    pub fn theta(&self) -> Col<f64> {
+        col![self.data[3], self.data[4], self.data[5]]
     }
 
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians
     /// Q(ρ, θ) = (1/2)ρₓ + (θ - sin θ)/θ³ (θₓρₓ + ρₓθₓ + θₓρₓθₓ)
     ///           - (1 - θ²/2 - cos θ)/θ⁴ (θ²ₓρₓ + ρₓθ²ₓ - 3θₓρₓθₓ)
     ///           - (1/2) * ( (1 - θ²/2 - cos θ)/θ⁴ - (3.0 * (θ - sin θ - θ³/6))/θ⁵ ) * (θₓρₓθ²ₓ + θ²ₓρₓθₓ)
-    pub fn q_block_jacobian_matrix(rho: Vector3<f64>, theta: Vector3<f64>) -> Matrix3<f64> {
+    pub fn q_block_jacobian_matrix(rho: Col<f64>, theta: Col<f64>) -> Mat<f64> {
+        let theta_squared = theta.squared_norm_l2();
         let rho_skew = SO3Tangent::new(rho).hat();
         let theta_skew = SO3Tangent::new(theta).hat();
-        let theta_squared = theta.norm_squared();
 
         let a = 0.5;
         let mut b = 1.0 / 6.0 + 1.0 / 120.0 * theta_squared;
@@ -522,18 +549,18 @@ impl SE3Tangent {
             d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
         }
 
-        let rho_skew_theta_skew = rho_skew * theta_skew;
-        let theta_skew_rho_skew = theta_skew * rho_skew;
-        let theta_skew_rho_skew_theta_skew = theta_skew * rho_skew * theta_skew;
-        let rho_skew_theta_skew_sq2 = rho_skew * theta_skew * theta_skew;
+        let rho_skew_theta_skew = &rho_skew * &theta_skew;
+        let theta_skew_rho_skew = &theta_skew * &rho_skew;
+        let theta_skew_rho_skew_theta_skew = &theta_skew * &rho_skew * &theta_skew;
+        let rho_skew_theta_skew_sq2 = &rho_skew * &theta_skew * &theta_skew;
 
         // Calculate matrix terms
-        let m1 = rho_skew;
-        let m2 = theta_skew_rho_skew + rho_skew_theta_skew + theta_skew_rho_skew_theta_skew;
-        let m3 = rho_skew_theta_skew_sq2
-            - rho_skew_theta_skew_sq2.transpose()
-            - 3.0 * theta_skew_rho_skew_theta_skew;
-        let m4 = theta_skew_rho_skew_theta_skew * theta_skew;
+        let m1 = &rho_skew;
+        let m2 = &theta_skew_rho_skew + &rho_skew_theta_skew + &theta_skew_rho_skew_theta_skew;
+        let m3 = &rho_skew_theta_skew_sq2
+            - &rho_skew_theta_skew_sq2.transpose().to_owned()
+            - 3.0 * &theta_skew_rho_skew_theta_skew;
+        let m4 = &theta_skew_rho_skew_theta_skew * &theta_skew;
 
         // Assemble the final matrix
         m1 * a + m2 * b - m3 * c - m4 * d
@@ -581,14 +608,25 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// The right Jacobian matrix (6x6)
     fn right_jacobian(&self) -> <SE3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix6::zeros();
+        let mut jac = Mat::<f64>::zeros(6, 6);
         let rho = self.rho();
         let theta = self.theta();
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&SE3Tangent::q_block_jacobian_matrix(-rho, -theta));
+        let theta_right_jac = SO3Tangent::new(-theta.clone()).right_jacobian();
+
+        // Top-left 3x3
+        jac.as_mut()
+            .submatrix_mut(0, 0, 3, 3)
+            .copy_from(&theta_right_jac);
+
+        // Bottom-right 3x3
+        jac.as_mut()
+            .submatrix_mut(3, 3, 3, 3)
+            .copy_from(&theta_right_jac);
+
+        // Top-right 3x3
+        let q_block = SE3Tangent::q_block_jacobian_matrix(-rho, -theta);
+        jac.as_mut().submatrix_mut(0, 3, 3, 3).copy_from(&q_block);
+
         jac
     }
 
@@ -602,15 +640,23 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// The left Jacobian matrix (6x6)
     fn left_jacobian(&self) -> <SE3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix6::zeros();
+        let mut jac = Mat::<f64>::zeros(6, 6);
         let theta_left_jac = SO3Tangent::new(self.theta()).left_jacobian();
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&SE3Tangent::q_block_jacobian_matrix(
-                self.rho(),
-                self.theta(),
-            ));
+
+        // Top-left 3x3
+        jac.as_mut()
+            .submatrix_mut(0, 0, 3, 3)
+            .copy_from(&theta_left_jac);
+
+        // Bottom-right 3x3
+        jac.as_mut()
+            .submatrix_mut(3, 3, 3, 3)
+            .copy_from(&theta_left_jac);
+
+        // Top-right 3x3
+        let q_block = SE3Tangent::q_block_jacobian_matrix(self.rho(), self.theta());
+        jac.as_mut().submatrix_mut(0, 3, 3, 3).copy_from(&q_block);
+
         jac
     }
 
@@ -622,18 +668,28 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// The inverse right Jacobian matrix (6x6)
     fn right_jacobian_inv(&self) -> <SE3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix6::zeros();
+        let mut jac = Mat::<f64>::zeros(6, 6);
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_inv_jac = SO3Tangent::new(-theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(-theta.clone()).left_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(-rho, -theta);
-        jac.fixed_view_mut::<3, 3>(0, 0)
+
+        // Top-left 3x3
+        jac.as_mut()
+            .submatrix_mut(0, 0, 3, 3)
             .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
+
+        // Bottom-right 3x3
+        jac.as_mut()
+            .submatrix_mut(3, 3, 3, 3)
             .copy_from(&theta_left_inv_jac);
-        // Bottom-right block: J_r^{-1}(theta)
-        let bottom_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&bottom_right);
+
+        // Top-right 3x3
+        let bottom_right = -1.0 * &theta_left_inv_jac * &q_block_jac * &theta_left_inv_jac;
+        jac.as_mut()
+            .submatrix_mut(0, 3, 3, 3)
+            .copy_from(&bottom_right);
+
         jac
     }
 
@@ -644,17 +700,28 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// The inverse left Jacobian matrix (6x6)
     fn left_jacobian_inv(&self) -> <SE3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix6::zeros();
+        let mut jac = Mat::<f64>::zeros(6, 6);
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(theta.clone()).left_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(rho, theta);
-        let top_right_block = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
-        jac.fixed_view_mut::<3, 3>(0, 0)
+        let top_right_block = -1.0 * &theta_left_inv_jac * &q_block_jac * &theta_left_inv_jac;
+
+        // Top-left 3x3
+        jac.as_mut()
+            .submatrix_mut(0, 0, 3, 3)
             .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
+
+        // Bottom-right 3x3
+        jac.as_mut()
+            .submatrix_mut(3, 3, 3, 3)
             .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right_block);
+
+        // Top-right 3x3
+        jac.as_mut()
+            .submatrix_mut(0, 3, 3, 3)
+            .copy_from(&top_right_block);
+
         jac
     }
 
@@ -671,11 +738,14 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// The 4x4 matrix representation in the SE(3) Lie algebra
     fn hat(&self) -> <SE3 as LieGroup>::LieAlgebra {
-        let mut lie_alg = Matrix4::zeros();
+        let mut lie_alg = Mat::<f64>::zeros(4, 4);
 
         // Top-left 3x3: skew-symmetric matrix of rotational part
         let theta_hat = SO3Tangent::new(self.theta()).hat();
-        lie_alg.view_mut((0, 0), (3, 3)).copy_from(&theta_hat);
+        lie_alg
+            .as_mut()
+            .submatrix_mut(0, 0, 3, 3)
+            .copy_from(&theta_hat);
 
         // Top-right 3x1: translational part
         let rho = self.rho();
@@ -695,7 +765,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// A 6-dimensional zero vector
     fn zero() -> <SE3 as LieGroup>::TangentVector {
-        SE3Tangent::new(Vector3::zeros(), Vector3::zeros())
+        SE3Tangent::new(Col::<f64>::zeros(3), Col::<f64>::zeros(3))
     }
 
     /// Random tangent vector (useful for testing).
@@ -728,7 +798,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// True if the norm is below the tolerance
     fn is_zero(&self, tolerance: f64) -> bool {
-        self.data.norm() < tolerance
+        self.data.norm_l2() < tolerance
     }
 
     /// Normalize the tangent vector to unit norm.
@@ -736,7 +806,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// Modifies this tangent vector to have unit norm. If the vector
     /// is near zero, it remains unchanged.
     fn normalize(&mut self) {
-        let theta_norm = self.theta().norm();
+        let theta_norm = self.theta().norm_l2();
         self.data[3] /= theta_norm;
         self.data[4] /= theta_norm;
         self.data[5] /= theta_norm;
@@ -750,11 +820,11 @@ impl Tangent<SE3> for SE3Tangent {
     /// # Returns
     /// A normalized copy of the tangent vector
     fn normalized(&self) -> <SE3 as LieGroup>::TangentVector {
-        let norm = self.theta().norm();
+        let norm = self.theta().norm_l2();
         if norm > f64::EPSILON {
             SE3Tangent::new(self.rho(), self.theta() / norm)
         } else {
-            SE3Tangent::new(self.rho(), Vector3::zeros())
+            SE3Tangent::new(self.rho(), Col::<f64>::zeros(3))
         }
     }
 
@@ -766,20 +836,27 @@ impl Tangent<SE3> for SE3Tangent {
     /// where Omega is the skew-symmetric matrix of the angular part
     /// and V is the skew-symmetric matrix of the linear part.
     fn small_adj(&self) -> <SE3 as LieGroup>::JacobianMatrix {
-        let mut small_adj = Matrix6::zeros();
+        let mut small_adj = Mat::<f64>::zeros(6, 6);
         let rho_skew = SO3Tangent::new(self.rho()).hat();
         let theta_skew = SO3Tangent::new(self.theta()).hat();
 
-        // Top-left and bottom-right blocks: theta_skew (skew-symmetric of angular part)
+        // Top-left block: theta_skew
         small_adj
-            .fixed_view_mut::<3, 3>(0, 0)
+            .as_mut()
+            .submatrix_mut(0, 0, 3, 3)
             .copy_from(&theta_skew);
+
+        // Bottom-right block: theta_skew
         small_adj
-            .fixed_view_mut::<3, 3>(3, 3)
+            .as_mut()
+            .submatrix_mut(3, 3, 3, 3)
             .copy_from(&theta_skew);
 
         // Top-right block: rho_skew (skew-symmetric of linear part)
-        small_adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&rho_skew);
+        small_adj
+            .as_mut()
+            .submatrix_mut(0, 3, 3, 3)
+            .copy_from(&rho_skew);
 
         // Bottom-left block: zeros (already set)
 
@@ -790,7 +867,7 @@ impl Tangent<SE3> for SE3Tangent {
     ///
     /// Computes the Lie bracket [this, other] = this.small_adj() * other.
     fn lie_bracket(&self, other: &Self) -> <SE3 as LieGroup>::TangentVector {
-        let bracket_result = self.small_adj() * other.data;
+        let bracket_result = &self.small_adj() * &other.data;
         SE3Tangent {
             data: bracket_result,
         }
@@ -802,7 +879,7 @@ impl Tangent<SE3> for SE3Tangent {
     /// * `other` - The other tangent vector to compare with
     /// * `tolerance` - The tolerance for the comparison
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
-        (self.data - other.data).norm() < tolerance
+        (&self.data - &other.data).norm_l2() < tolerance
     }
 
     /// Get the ith generator of the SE(3) Lie algebra.
@@ -815,7 +892,7 @@ impl Tangent<SE3> for SE3Tangent {
     fn generator(&self, i: usize) -> <SE3 as LieGroup>::LieAlgebra {
         assert!(i < 6, "SE(3) only has generators for indices 0-5");
 
-        let mut generator = Matrix4::zeros();
+        let mut generator = Mat::<f64>::zeros(4, 4);
 
         match i {
             0 => {
@@ -855,17 +932,15 @@ impl Tangent<SE3> for SE3Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::Quaternion;
-    use nalgebra::Vector3;
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 1e-9;
 
     #[test]
     fn test_se3_tangent_basic() {
-        let linear = Vector3::new(1.0, 2.0, 3.0);
-        let angular = Vector3::new(0.1, 0.2, 0.3);
-        let tangent = SE3Tangent::new(linear, angular);
+        let linear = col![1.0, 2.0, 3.0];
+        let angular = col![0.1, 0.2, 0.3];
+        let tangent = SE3Tangent::new(linear.clone(), angular.clone());
 
         assert_eq!(tangent.rho(), linear);
         assert_eq!(tangent.theta(), angular);
@@ -874,7 +949,8 @@ mod tests {
     #[test]
     fn test_se3_tangent_zero() {
         let zero = SE3Tangent::zero();
-        assert_eq!(zero.data, Vector6::zeros());
+        let zero_vec = Col::<f64>::zeros(6);
+        assert_eq!(zero.data, zero_vec);
 
         let tangent = SE3Tangent::from_components(0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
         assert!(tangent.is_zero(1e-10));
@@ -889,20 +965,21 @@ mod tests {
         let translation = identity.translation();
         let rotation = identity.rotation_quaternion();
 
-        assert!(translation.norm() < TOLERANCE);
+        assert!(translation.norm_l2() < TOLERANCE);
         assert!((rotation.angle()) < TOLERANCE);
     }
 
     #[test]
     fn test_se3_new() {
-        let translation = Vector3::new(1.0, 2.0, 3.0);
-        let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
+        let translation = col![1.0, 2.0, 3.0];
+        let rotation = Quaternion::from_euler_angles(0.1, 0.2, 0.3);
+        let rotation_angle = rotation.angle();
 
-        let se3 = SE3::new(translation, rotation);
+        let se3 = SE3::new(translation.clone(), rotation);
 
         assert!(se3.is_valid(TOLERANCE));
-        assert!((se3.translation() - translation).norm() < TOLERANCE);
-        assert!((se3.rotation_quaternion().angle() - rotation.angle()).abs() < TOLERANCE);
+        assert!((&se3.translation() - &translation).norm_l2() < TOLERANCE);
+        assert!((se3.rotation_quaternion().angle() - rotation_angle).abs() < TOLERANCE);
     }
 
     #[test]
@@ -920,7 +997,7 @@ mod tests {
         let composed = se3.compose(&se3_inv, None, None);
         let identity = SE3::identity();
 
-        let translation_diff = (composed.translation() - identity.translation()).norm();
+        let translation_diff = (&composed.translation() - &identity.translation()).norm_l2();
         let rotation_diff = composed.rotation_quaternion().angle();
 
         assert!(translation_diff < TOLERANCE);
@@ -939,7 +1016,8 @@ mod tests {
         let identity = SE3::identity();
         let composed_with_identity = se3_1.compose(&identity, None, None);
 
-        let translation_diff = (composed_with_identity.translation() - se3_1.translation()).norm();
+        let translation_diff =
+            (&composed_with_identity.translation() - &se3_1.translation()).norm_l2();
         let rotation_diff = (composed_with_identity.rotation_quaternion().angle()
             - se3_1.rotation_quaternion().angle())
         .abs();
@@ -966,7 +1044,7 @@ mod tests {
     #[test]
     fn test_se3_act() {
         let se3 = SE3::random();
-        let point = Vector3::new(1.0, 2.0, 3.0);
+        let point = col![1.0, 2.0, 3.0];
 
         let _transformed_point = se3.act(&point, None, None);
 
@@ -974,7 +1052,7 @@ mod tests {
         let identity = SE3::identity();
         let identity_transformed = identity.act(&point, None, None);
 
-        let diff = (identity_transformed - point).norm();
+        let diff = (&identity_transformed - &point).norm_l2();
         assert!(diff < TOLERANCE);
     }
 
@@ -993,14 +1071,14 @@ mod tests {
 
     #[test]
     fn test_se3_exp_log() {
-        let tangent_vec = Vector6::new(0.1, 0.2, 0.3, 0.01, 0.02, 0.03);
+        let tangent_vec = col![0.1, 0.2, 0.3, 0.01, 0.02, 0.03];
         let tangent = SE3Tangent { data: tangent_vec };
 
         // Test exp(log(g)) = g
         let se3 = tangent.exp(None);
         let recovered_tangent = se3.log(None);
 
-        let diff = (tangent.data - recovered_tangent.data).norm();
+        let diff = (&tangent.data - &recovered_tangent.data).norm_l2();
         assert!(diff < TOLERANCE);
     }
 
@@ -1010,7 +1088,7 @@ mod tests {
         let se3 = zero_tangent.exp(None);
         let identity = SE3::identity();
 
-        let translation_diff = (se3.translation() - identity.translation()).norm();
+        let translation_diff = (&se3.translation() - &identity.translation()).norm_l2();
         let rotation_diff = se3.rotation_quaternion().angle();
 
         assert!(translation_diff < TOLERANCE);
@@ -1022,14 +1100,14 @@ mod tests {
         let identity = SE3::identity();
         let tangent = identity.log(None);
 
-        assert!(tangent.data.norm() < TOLERANCE);
+        assert!(tangent.data.norm_l2() < TOLERANCE);
     }
 
     #[test]
     fn test_se3_normalize() {
-        let translation = Vector3::new(1.0, 2.0, 3.0);
-        let rotation =
-            UnitQuaternion::from_quaternion(Quaternion::new(0.5, 0.5, 0.5, 0.5).normalize()); // Normalized
+        let translation = col![1.0, 2.0, 3.0];
+        let mut rotation = Quaternion::new(0.5, 0.5, 0.5, 0.5).unwrap();
+        rotation.normalize();
 
         let mut se3 = SE3::new(translation, rotation);
         se3.normalize();
@@ -1058,7 +1136,7 @@ mod tests {
             .compose(&se3_3, None, None);
         let right_assoc = se3_1.compose(&se3_2.compose(&se3_3, None, None), None, None);
 
-        let translation_diff = (left_assoc.translation() - right_assoc.translation()).norm();
+        let translation_diff = (&left_assoc.translation() - &right_assoc.translation()).norm_l2();
         let rotation_diff = (left_assoc.rotation_quaternion().angle()
             - right_assoc.rotation_quaternion().angle())
         .abs();
@@ -1072,55 +1150,55 @@ mod tests {
         // Test specific known values similar to manif tests
 
         // Translation only
-        let translation_only = SE3::new(Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
+        let translation_only = SE3::new(col![1.0, 2.0, 3.0], Quaternion::identity());
 
-        let point = Vector3::new(0.0, 0.0, 0.0);
+        let point = col![0.0, 0.0, 0.0];
         let transformed = translation_only.act(&point, None, None);
-        let expected = Vector3::new(1.0, 2.0, 3.0);
+        let expected = col![1.0, 2.0, 3.0];
 
-        assert!((transformed - expected).norm() < TOLERANCE);
+        assert!((&transformed - &expected).norm_l2() < TOLERANCE);
 
         // Rotation only
         let rotation_only = SE3::new(
-            Vector3::zeros(),
-            UnitQuaternion::from_euler_angles(PI / 2.0, 0.0, 0.0),
+            Col::<f64>::zeros(3),
+            Quaternion::from_euler_angles(PI / 2.0, 0.0, 0.0),
         );
 
-        let point_y = Vector3::new(0.0, 1.0, 0.0);
+        let point_y = col![0.0, 1.0, 0.0];
         let rotated = rotation_only.act(&point_y, None, None);
-        let expected_rotated = Vector3::new(0.0, 0.0, 1.0);
+        let expected_rotated = col![0.0, 0.0, 1.0];
 
-        assert!((rotated - expected_rotated).norm() < TOLERANCE);
+        assert!((&rotated - &expected_rotated).norm_l2() < TOLERANCE);
     }
 
     #[test]
     fn test_se3_small_angle_approximations() {
         // Test behavior with very small angles, similar to manif library tests
-        let small_tangent = Vector6::new(1e-8, 2e-8, 3e-8, 1e-9, 2e-9, 3e-9);
+        let small_tangent = col![1e-8, 2e-8, 3e-8, 1e-9, 2e-9, 3e-9];
 
         let se3 = SE3::new(
-            Vector3::new(1e-8, 2e-8, 3e-8),
-            UnitQuaternion::from_euler_angles(1e-9, 2e-9, 3e-9),
+            col![1e-8, 2e-8, 3e-8],
+            Quaternion::from_euler_angles(1e-9, 2e-9, 3e-9),
         );
         let recovered = se3.log(None);
 
-        let diff = (small_tangent - recovered.data).norm();
+        let diff = (&small_tangent - &recovered.data).norm_l2();
         assert!(diff < TOLERANCE);
     }
 
     #[test]
     fn test_se3_tangent_norm() {
-        let tangent_vec = Vector6::new(3.0, 4.0, 0.0, 0.0, 0.0, 0.0);
+        let tangent_vec = col![3.0, 4.0, 0.0, 0.0, 0.0, 0.0];
         let tangent = SE3Tangent { data: tangent_vec };
 
-        let norm = tangent.data.norm();
+        let norm = tangent.data.norm_l2();
         assert!((norm - 5.0).abs() < TOLERANCE); // sqrt(3^2 + 4^2) = 5
     }
 
     #[test]
     fn test_se3_from_components() {
-        let translation = Vector3::new(1.0, 2.0, 3.0);
-        let quaternion = Quaternion::new(1.0, 0.0, 0.0, 0.0);
+        let translation = col![1.0, 2.0, 3.0];
+        let quaternion = Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap();
         let se3 = SE3::from_translation_quaternion(translation, quaternion);
         assert!(se3.is_valid(TOLERANCE));
         assert_eq!(se3.x(), 1.0);
@@ -1128,28 +1206,15 @@ mod tests {
         assert_eq!(se3.z(), 3.0);
 
         let quat = se3.rotation_quaternion();
-        assert!((quat.w - 1.0).abs() < TOLERANCE);
-        assert!(quat.i.abs() < TOLERANCE);
-        assert!(quat.j.abs() < TOLERANCE);
-        assert!(quat.k.abs() < TOLERANCE);
+        assert!((quat.w() - 1.0).abs() < TOLERANCE);
+        assert!(quat.x().abs() < TOLERANCE);
+        assert!(quat.y().abs() < TOLERANCE);
+        assert!(quat.z().abs() < TOLERANCE);
     }
 
-    #[test]
-    fn test_se3_from_isometry() {
-        let translation = nalgebra::Translation3::new(1.0, 2.0, 3.0);
-        let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
-        let isometry = Isometry3::from_parts(translation, rotation);
-
-        let se3 = SE3::from_isometry(isometry);
-        let recovered_isometry = se3.isometry();
-
-        let translation_diff =
-            (isometry.translation.vector - recovered_isometry.translation.vector).norm();
-        let rotation_diff = (isometry.rotation.angle() - recovered_isometry.rotation.angle()).abs();
-
-        assert!(translation_diff < TOLERANCE);
-        assert!(rotation_diff < TOLERANCE);
-    }
+    // Note: test_se3_from_isometry removed - Isometry3 is nalgebra-specific
+    // and not available in faer. SE3 can be constructed directly from
+    // translation and rotation components.
 
     #[test]
     fn test_se3_matrix() {
@@ -1174,13 +1239,13 @@ mod tests {
 
         // Create two SE3 elements
         let g1 = SE3::new(
-            Vector3::new(1.0, 0.0, 0.0),
-            UnitQuaternion::from_euler_angles(0.0, 0.0, PI / 4.0),
+            col![1.0, 0.0, 0.0],
+            Quaternion::from_euler_angles(0.0, 0.0, PI / 4.0),
         );
 
         let g2 = SE3::new(
-            Vector3::new(0.0, 1.0, 0.0),
-            UnitQuaternion::from_euler_angles(0.0, PI / 4.0, 0.0),
+            col![0.0, 1.0, 0.0],
+            Quaternion::from_euler_angles(0.0, PI / 4.0, 0.0),
         );
 
         // Test composition
@@ -1196,7 +1261,7 @@ mod tests {
             .compose(&g1_inv, None, None);
 
         let identity = SE3::identity();
-        let translation_diff = (result.translation() - identity.translation()).norm();
+        let translation_diff = (&result.translation() - &identity.translation()).norm_l2();
         let rotation_diff = result.rotation_quaternion().angle();
 
         assert!(translation_diff < TOLERANCE);
@@ -1205,17 +1270,14 @@ mod tests {
 
     #[test]
     fn test_se3_tangent_exp_jacobians() {
-        let tangent = SE3Tangent::new(Vector3::new(0.1, 0.0, 0.0), Vector3::new(0.0, 0.1, 0.0));
+        let tangent = SE3Tangent::new(col![0.1, 0.0, 0.0], col![0.0, 0.1, 0.0]);
 
         // Test exponential map
         let se3_element = tangent.exp(None);
         assert!(se3_element.is_valid(TOLERANCE));
 
         // Test basic exp functionality - that we can convert tangent to SE3
-        let another_tangent = SE3Tangent::new(
-            Vector3::new(0.01, 0.02, 0.03),
-            Vector3::new(0.001, 0.002, 0.003),
-        );
+        let another_tangent = SE3Tangent::new(col![0.01, 0.02, 0.03], col![0.001, 0.002, 0.003]);
         let another_se3 = another_tangent.exp(None);
         assert!(another_se3.is_valid(TOLERANCE));
 
@@ -1240,17 +1302,17 @@ mod tests {
     fn test_se3_tangent_utility_functions() {
         // Test zero
         let zero_vec = SE3Tangent::zero();
-        assert!(zero_vec.data.norm() < TOLERANCE);
+        assert!(zero_vec.data.norm_l2() < TOLERANCE);
 
         // Test random
         let random_vec = SE3Tangent::random();
-        assert!(random_vec.data.norm() > 0.0);
+        assert!(random_vec.data.norm_l2() > 0.0);
 
         // Test is_zero
-        let tangent = SE3Tangent::new(Vector3::zeros(), Vector3::zeros());
+        let tangent = SE3Tangent::new(Col::<f64>::zeros(3), Col::<f64>::zeros(3));
         assert!(tangent.is_zero(1e-10));
 
-        let non_zero_tangent = SE3Tangent::new(Vector3::new(1e-5, 0.0, 0.0), Vector3::zeros());
+        let non_zero_tangent = SE3Tangent::new(col![1e-5, 0.0, 0.0], Col::<f64>::zeros(3));
         assert!(!non_zero_tangent.is_zero(1e-10));
     }
 
@@ -1262,7 +1324,7 @@ mod tests {
         let tangent_log = se3.log(None);
         let tangent_vee = se3.vee();
 
-        assert!((tangent_log.data - tangent_vee.data).norm() < 1e-10);
+        assert!((&tangent_log.data - &tangent_vee.data).norm_l2() < 1e-10);
     }
 
     #[test]
@@ -1274,17 +1336,14 @@ mod tests {
         assert!(se3_1.is_approx(&se3_2, 1e-10));
 
         // Test with small perturbation
-        let small_tangent = SE3Tangent::new(
-            Vector3::new(1e-12, 1e-12, 1e-12),
-            Vector3::new(1e-12, 1e-12, 1e-12),
-        );
+        let small_tangent = SE3Tangent::new(col![1e-12, 1e-12, 1e-12], col![1e-12, 1e-12, 1e-12]);
         let se3_perturbed = se3_1.right_plus(&small_tangent, None, None);
         assert!(se3_1.is_approx(&se3_perturbed, 1e-10));
     }
 
     #[test]
     fn test_se3_tangent_small_adj() {
-        let tangent = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
+        let tangent = SE3Tangent::new(col![0.1, 0.2, 0.3], col![0.4, 0.5, 0.6]);
         let small_adj = tangent.small_adj();
 
         // Verify the structure of the small adjoint matrix for SE(3)
@@ -1294,31 +1353,33 @@ mod tests {
         let rho_skew = SO3Tangent::new(tangent.rho()).hat();
         let theta_skew = SO3Tangent::new(tangent.theta()).hat();
 
-        // Check top-left and bottom-right blocks (theta_skew)
-        let top_left = small_adj.fixed_view::<3, 3>(0, 0);
-        let bottom_right = small_adj.fixed_view::<3, 3>(3, 3);
-        assert!((top_left - theta_skew).norm() < 1e-10);
-        assert!((bottom_right - theta_skew).norm() < 1e-10);
+        // Check top-left block (theta_skew)
+        let top_left = small_adj.submatrix(0, 0, 3, 3);
+        assert!((&top_left - &theta_skew).norm_l2() < 1e-10);
+
+        // Check bottom-right block (theta_skew)
+        let bottom_right = small_adj.submatrix(3, 3, 3, 3);
+        assert!((&bottom_right - &theta_skew).norm_l2() < 1e-10);
 
         // Check top-right block (rho_skew)
-        let top_right = small_adj.fixed_view::<3, 3>(0, 3);
-        assert!((top_right - rho_skew).norm() < 1e-10);
+        let top_right = small_adj.submatrix(0, 3, 3, 3);
+        assert!((&top_right - &rho_skew).norm_l2() < 1e-10);
 
         // Check bottom-left block (zeros)
-        let bottom_left = small_adj.fixed_view::<3, 3>(3, 0);
-        assert!(bottom_left.norm() < 1e-10);
+        let bottom_left = small_adj.submatrix(3, 0, 3, 3);
+        assert!(bottom_left.norm_l2() < 1e-10);
     }
 
     #[test]
     fn test_se3_tangent_lie_bracket() {
-        let tangent_a = SE3Tangent::new(Vector3::new(0.1, 0.0, 0.0), Vector3::new(0.0, 0.2, 0.0));
-        let tangent_b = SE3Tangent::new(Vector3::new(0.0, 0.3, 0.0), Vector3::new(0.0, 0.0, 0.4));
+        let tangent_a = SE3Tangent::new(col![0.1, 0.0, 0.0], col![0.0, 0.2, 0.0]);
+        let tangent_b = SE3Tangent::new(col![0.0, 0.3, 0.0], col![0.0, 0.0, 0.4]);
 
         let bracket_ab = tangent_a.lie_bracket(&tangent_b);
         let bracket_ba = tangent_b.lie_bracket(&tangent_a);
 
         // Anti-symmetry test: [a,b] = -[b,a]
-        assert!((bracket_ab.data + bracket_ba.data).norm() < 1e-10);
+        assert!((&bracket_ab.data + &bracket_ba.data).norm_l2() < 1e-10);
 
         // [a,a] = 0
         let bracket_aa = tangent_a.lie_bracket(&tangent_a);
@@ -1326,18 +1387,15 @@ mod tests {
 
         // Verify bracket relationship with hat operator
         let bracket_hat = bracket_ab.hat();
-        let expected = tangent_a.hat() * tangent_b.hat() - tangent_b.hat() * tangent_a.hat();
-        assert!((bracket_hat - expected).norm() < 1e-10);
+        let expected = &tangent_a.hat() * &tangent_b.hat() - &tangent_b.hat() * &tangent_a.hat();
+        assert!((&bracket_hat - &expected).norm_l2() < 1e-10);
     }
 
     #[test]
     fn test_se3_tangent_is_approx() {
-        let tangent_1 = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
-        let tangent_2 = SE3Tangent::new(
-            Vector3::new(0.1 + 1e-12, 0.2, 0.3),
-            Vector3::new(0.4, 0.5, 0.6),
-        );
-        let tangent_3 = SE3Tangent::new(Vector3::new(0.7, 0.8, 0.9), Vector3::new(1.0, 1.1, 1.2));
+        let tangent_1 = SE3Tangent::new(col![0.1, 0.2, 0.3], col![0.4, 0.5, 0.6]);
+        let tangent_2 = SE3Tangent::new(col![0.1 + 1e-12, 0.2, 0.3], col![0.4, 0.5, 0.6]);
+        let tangent_3 = SE3Tangent::new(col![0.7, 0.8, 0.9], col![1.0, 1.1, 1.2]);
 
         assert!(tangent_1.is_approx(&tangent_1, 1e-10));
         assert!(tangent_1.is_approx(&tangent_2, 1e-10));
@@ -1346,7 +1404,7 @@ mod tests {
 
     #[test]
     fn test_se3_generators() {
-        let tangent = SE3Tangent::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 1.0, 1.0));
+        let tangent = SE3Tangent::new(col![1.0, 1.0, 1.0], col![1.0, 1.0, 1.0]);
 
         // Test all six generators
         for i in 0..6 {
@@ -1389,30 +1447,30 @@ mod tests {
     #[test]
     #[should_panic]
     fn test_se3_generator_invalid_index() {
-        let tangent = SE3Tangent::new(Vector3::new(1.0, 1.0, 1.0), Vector3::new(1.0, 1.0, 1.0));
+        let tangent = SE3Tangent::new(col![1.0, 1.0, 1.0], col![1.0, 1.0, 1.0]);
         let _generator = tangent.generator(6); // Should panic for SE(3)
     }
 
     #[test]
     fn test_se3_jacobi_identity() {
         // Test Jacobi identity: [x,[y,z]]+[y,[z,x]]+[z,[x,y]]=0
-        let x = SE3Tangent::new(Vector3::new(0.1, 0.0, 0.0), Vector3::new(0.0, 0.1, 0.0));
-        let y = SE3Tangent::new(Vector3::new(0.0, 0.2, 0.0), Vector3::new(0.0, 0.0, 0.2));
-        let z = SE3Tangent::new(Vector3::new(0.0, 0.0, 0.3), Vector3::new(0.3, 0.0, 0.0));
+        let x = SE3Tangent::new(col![0.1, 0.0, 0.0], col![0.0, 0.1, 0.0]);
+        let y = SE3Tangent::new(col![0.0, 0.2, 0.0], col![0.0, 0.0, 0.2]);
+        let z = SE3Tangent::new(col![0.0, 0.0, 0.3], col![0.3, 0.0, 0.0]);
 
         let term1 = x.lie_bracket(&y.lie_bracket(&z));
         let term2 = y.lie_bracket(&z.lie_bracket(&x));
         let term3 = z.lie_bracket(&x.lie_bracket(&y));
 
         let jacobi_sum = SE3Tangent {
-            data: term1.data + term2.data + term3.data,
+            data: &term1.data + &term2.data + &term3.data,
         };
         assert!(jacobi_sum.is_zero(1e-10));
     }
 
     #[test]
     fn test_se3_hat_matrix_structure() {
-        let tangent = SE3Tangent::new(Vector3::new(0.1, 0.2, 0.3), Vector3::new(0.4, 0.5, 0.6));
+        let tangent = SE3Tangent::new(col![0.1, 0.2, 0.3], col![0.4, 0.5, 0.6]);
         let hat_matrix = tangent.hat();
 
         // Verify hat matrix structure for SE(3)
@@ -1423,8 +1481,8 @@ mod tests {
 
         // Top-left should be skew-symmetric matrix of rotation part
         let theta_hat = SO3Tangent::new(tangent.theta()).hat();
-        let top_left = hat_matrix.fixed_view::<3, 3>(0, 0);
-        assert!((top_left - theta_hat).norm() < 1e-10);
+        let top_left = hat_matrix.submatrix(0, 0, 3, 3);
+        assert!((&top_left - &theta_hat).norm_l2() < 1e-10);
 
         // Bottom row should be zeros
         assert_eq!(hat_matrix[(3, 0)], 0.0);
