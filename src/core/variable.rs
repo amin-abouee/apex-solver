@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra as na;
+use faer::Col;
 
 /// Generic Variable struct that uses static dispatch with any manifold type.
 ///
@@ -162,21 +162,21 @@ use crate::manifold::rn::Rn;
 impl Variable<Rn> {
     /// Get the dynamic size for Rn manifold.
     pub fn dynamic_size(&self) -> usize {
-        self.value.data().len()
+        self.value.data().nrows()
     }
 
     /// Convert the Rn variable to a vector representation.
-    pub fn to_vector(&self) -> na::DVector<f64> {
+    pub fn to_vector(&self) -> Col<f64> {
         self.value.data().clone()
     }
 
     /// Create an Rn variable from a vector representation.
-    pub fn from_vector(values: na::DVector<f64>) -> Self {
+    pub fn from_vector(values: Col<f64>) -> Self {
         Self::new(Rn::new(values))
     }
 
     /// Update the Rn variable with bounds and fixed constraints.
-    pub fn update_variable(&mut self, mut tangent_delta: na::DVector<f64>) {
+    pub fn update_variable(&mut self, mut tangent_delta: Col<f64>) {
         // bound
         for (&idx, &(lower, upper)) in &self.bounds {
             tangent_delta[idx] = tangent_delta[idx].max(lower).min(upper);
@@ -195,12 +195,12 @@ impl Variable<Rn> {
 mod tests {
     use super::*;
     use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
-    use nalgebra::{self as na};
+    use faer::col;
     use std::f64::consts::PI;
 
     #[test]
     fn test_variable_creation_rn() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let vec_data = col![1.0, 2.0, 3.0, 4.0, 5.0];
         let rn_value = Rn::new(vec_data);
         let variable = Variable::new(rn_value);
 
@@ -222,9 +222,11 @@ mod tests {
 
     #[test]
     fn test_variable_creation_se3() {
+        use crate::manifold::quaternion::Quaternion;
+
         let se3 = SE3::from_translation_quaternion(
-            na::Vector3::new(1.0, 2.0, 3.0),
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            col![1.0, 2.0, 3.0],
+            Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap(),
         );
         let variable = Variable::new(se3);
 
@@ -255,10 +257,10 @@ mod tests {
 
     #[test]
     fn test_variable_set_value() {
-        let initial_vec = na::DVector::from_vec(vec![1.0, 2.0, 3.0]);
+        let initial_vec = col![1.0, 2.0, 3.0];
         let mut variable = Variable::new(Rn::new(initial_vec));
 
-        let new_vec = na::DVector::from_vec(vec![4.0, 5.0, 6.0, 7.0]);
+        let new_vec = col![4.0, 5.0, 6.0, 7.0];
         variable.set_value(Rn::new(new_vec));
         assert_eq!(variable.dynamic_size(), 4);
 
@@ -311,40 +313,39 @@ mod tests {
 
     #[test]
     fn test_variable_update_with_bounds() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let vec_data = col![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut variable = Variable::new(Rn::new(vec_data));
 
         variable.bounds.insert(0, (-1.0, 1.0));
         variable.bounds.insert(2, (0.0, 5.0));
 
-        let new_values = na::DVector::from_vec(vec![-5.0, 10.0, -3.0, 20.0, 30.0, 40.0]);
+        let new_values = col![-5.0, 10.0, -3.0, 20.0, 30.0, 40.0];
         variable.update_variable(new_values);
 
         let result_vec = variable.to_vector();
-        assert!(result_vec.len() == 6);
+        assert!(result_vec.nrows() == 6);
     }
 
     #[test]
     fn test_variable_update_with_fixed_indices() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let vec_data = col![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let mut variable = Variable::new(Rn::new(vec_data.clone()));
 
         variable.fixed_indices.insert(1);
         variable.fixed_indices.insert(4);
 
-        let delta_values =
-            na::DVector::from_vec(vec![9.0, 18.0, 27.0, 36.0, 45.0, 54.0, 63.0, 72.0]);
+        let delta_values = col![9.0, 18.0, 27.0, 36.0, 45.0, 54.0, 63.0, 72.0];
         variable.update_variable(delta_values);
 
         let result_vec = variable.to_vector();
         assert_eq!(result_vec[1], 2.0);
         assert_eq!(result_vec[4], 5.0);
-        assert!(result_vec.len() == 8);
+        assert!(result_vec.nrows() == 8);
     }
 
     #[test]
     fn test_variable_combined_bounds_and_fixed() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let vec_data = col![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0];
         let mut variable = Variable::new(Rn::new(vec_data.clone()));
 
         variable.bounds.insert(0, (-2.0, 2.0));
@@ -352,25 +353,27 @@ mod tests {
         variable.fixed_indices.insert(1);
         variable.fixed_indices.insert(5);
 
-        let delta_values = na::DVector::from_vec(vec![-5.0, 100.0, 30.0, 10.0, 50.0, 600.0, 70.0]);
+        let delta_values = col![-5.0, 100.0, 30.0, 10.0, 50.0, 600.0, 70.0];
         variable.update_variable(delta_values);
 
         let result = variable.to_vector();
         assert_eq!(result[1], 2.0);
         assert_eq!(result[5], 6.0);
-        assert!(result.len() == 7);
+        assert!(result.nrows() == 7);
     }
 
     #[test]
     fn test_variable_type_safety() {
+        use crate::manifold::quaternion::Quaternion;
+
         let se2_var = Variable::new(SE2::from_xy_angle(1.0, 2.0, 0.5));
         let se3_var = Variable::new(SE3::from_translation_quaternion(
-            na::Vector3::new(1.0, 2.0, 3.0),
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            col![1.0, 2.0, 3.0],
+            Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap(),
         ));
         let so2_var = Variable::new(SO2::from_angle(0.5));
         let so3_var = Variable::new(SO3::from_euler_angles(0.1, 0.2, 0.3));
-        let rn_var = Variable::new(Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0])));
+        let rn_var = Variable::new(Rn::new(col![1.0, 2.0, 3.0]));
 
         assert_eq!(se2_var.get_size(), SE2::DOF);
         assert_eq!(se3_var.get_size(), SE3::DOF);
@@ -381,13 +384,16 @@ mod tests {
 
     #[test]
     fn test_variable_vector_conversion_roundtrip() {
-        let original_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let original_data = col![1.0, 2.0, 3.0, 4.0, 5.0];
         let rn_var = Variable::new(Rn::new(original_data.clone()));
         let vec_repr = rn_var.to_vector();
-        assert_eq!(vec_repr, original_data);
+        assert_eq!(vec_repr.as_ref(), original_data.as_ref());
 
         let reconstructed_var = Variable::<Rn>::from_vector(vec_repr);
-        assert_eq!(reconstructed_var.to_vector(), original_data);
+        assert_eq!(
+            reconstructed_var.to_vector().as_ref(),
+            original_data.as_ref()
+        );
     }
 
     // #[test]
@@ -417,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_variable_constraints_interaction() {
-        let rn_data = na::DVector::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0]);
+        let rn_data = col![0.0, 0.0, 0.0, 0.0, 0.0];
         let mut rn_var = Variable::new(Rn::new(rn_data));
 
         rn_var.bounds.insert(0, (-1.0, 1.0));
@@ -425,7 +431,7 @@ mod tests {
         rn_var.fixed_indices.insert(1);
         rn_var.fixed_indices.insert(4);
 
-        let large_delta = na::DVector::from_vec(vec![5.0, 100.0, 15.0, 20.0, 200.0]);
+        let large_delta = col![5.0, 100.0, 15.0, 20.0, 200.0];
         rn_var.update_variable(large_delta);
 
         let result = rn_var.to_vector();
