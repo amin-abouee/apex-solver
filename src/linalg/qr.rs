@@ -179,6 +179,14 @@ impl SparseLinearSolver for SparseQRSolver {
             None
         }
     }
+
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
 }
 
 #[cfg(test)]

@@ -401,32 +401,6 @@ impl LevenbergMarquardt {
         None
     }
 
-    /// Compute gradient norm for convergence checking
-    fn compute_gradient_norm(
-        &self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> f64 {
-        let gradient = self.compute_gradient(residuals, jacobian);
-        gradient.norm_l2()
-    }
-
-    /// Compute gradient vector: J^T * r
-    fn compute_gradient(
-        &self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> Mat<f64> {
-        // Compute J^T * r
-        jacobian.transpose() * residuals
-    }
-
-    /// Compute Hessian approximation: J^T * J
-    fn compute_hessian(&self, jacobian: &SparseColMat<usize, f64>) -> SparseColMat<usize, f64> {
-        // Compute J^T * J
-        jacobian.transpose().to_col_major().unwrap() * jacobian
-    }
-
     /// Create Jacobi scaling matrix from Jacobian
     fn create_jacobi_scaling(
         &self,
@@ -640,48 +614,51 @@ impl LevenbergMarquardt {
                 );
             }
 
-            // Compute gradient = J^T * r using scaled Jacobian
-            let residuals_owned = residuals.as_ref().to_owned();
-            let gradient_norm = self.compute_gradient_norm(&residuals_owned, &scaled_jacobian);
-            max_gradient_norm = max_gradient_norm.max(gradient_norm);
-            final_gradient_norm = gradient_norm;
-
-            // Compute Hessian approximation: J^T * J (using scaled Jacobian)
-            let hessian = self.compute_hessian(&scaled_jacobian);
-            let gradient = self.compute_gradient(&residuals_owned, &scaled_jacobian);
-
-            // DEBUG: Log gradient and Hessian info
-            if self.config.verbose {
-                println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
-
-                // Log Hessian info
-                println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
-
-                // Log first few gradient values
-                use faer_ext::IntoNalgebra;
-                let gradient_na = gradient.as_ref().into_nalgebra();
-                let gradient_vec: Vec<f64> = (0..gradient_na.nrows().min(10))
-                    .map(|row| gradient_na[row])
-                    .collect();
-                println!("First 10 gradient values: {:?}", gradient_vec);
-
-                println!("Damping parameter: {:.12e}", self.config.damping);
-            }
-
-            if self.config.verbose && iteration < 3 {
-                println!(
-                    "Debug iteration {}: gradient_norm = {:.6e}, damping = {:.6e}",
-                    iteration, gradient_norm, self.config.damping
-                );
-            }
-
             // Use standard augmented equation solver with scaled Jacobian
             // This will solve: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
+            let residuals_owned = residuals.as_ref().to_owned();
             if let Some(scaled_step) = linear_solver.solve_augmented_equation(
                 &residuals_owned,
                 &scaled_jacobian,
                 self.config.damping,
             ) {
+                // Get cached gradient and Hessian from the solver (computed during solve)
+                // Note: solver stores gradient as J^T * (-r), so we need the actual J^T * r
+                let solver_gradient = linear_solver.get_gradient().unwrap();
+                let hessian = linear_solver.get_hessian().unwrap();
+
+                // Negate to get actual gradient: J^T * r (solver computes J^T * (-r))
+                let gradient = -solver_gradient;
+
+                // Compute gradient norm for convergence check
+                let gradient_norm = gradient.norm_l2();
+                max_gradient_norm = max_gradient_norm.max(gradient_norm);
+                final_gradient_norm = gradient_norm;
+
+                // DEBUG: Log gradient and Hessian info
+                if self.config.verbose {
+                    println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
+
+                    // Log Hessian info
+                    println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
+
+                    // Log first few gradient values
+                    use faer_ext::IntoNalgebra;
+                    let gradient_na = gradient.as_ref().into_nalgebra();
+                    let gradient_vec: Vec<f64> = (0..gradient_na.nrows().min(10))
+                        .map(|row| gradient_na[row])
+                        .collect();
+                    println!("First 10 gradient values: {:?}", gradient_vec);
+
+                    println!("Damping parameter: {:.12e}", self.config.damping);
+                }
+
+                if self.config.verbose && iteration < 3 {
+                    println!(
+                        "Debug iteration {}: gradient_norm = {:.6e}, damping = {:.6e}",
+                        iteration, gradient_norm, self.config.damping
+                    );
+                }
                 // Apply inverse Jacobi scaling to get final step
                 let step = self.apply_inverse_jacobi_scaling(
                     &scaled_step,

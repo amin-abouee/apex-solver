@@ -62,6 +62,12 @@ pub trait SparseLinearSolver {
         jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> Option<Mat<f64>>;
+
+    /// Get the cached Hessian matrix (J^T * J) from the last solve
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
+
+    /// Get the cached gradient vector (J^T * r) from the last solve
+    fn get_gradient(&self) -> Option<&Mat<f64>>;
 }
 
 pub use cholesky::SparseCholeskySolver;
