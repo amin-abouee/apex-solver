@@ -8,7 +8,7 @@ use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
-use nalgebra as na;
+use faer::col;
 
 #[derive(Parser)]
 #[command(name = "load_se2_poses")]
@@ -67,8 +67,8 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
             "  Edge {}->{}: dx={:.6}, dy={:.6}, dtheta={:.6}",
             edge.from,
             edge.to,
-            edge.measurement.translation().x,
-            edge.measurement.translation().y,
+            edge.measurement.translation()[0],
+            edge.measurement.translation()[1],
             edge.measurement.angle()
         );
     }
@@ -82,7 +82,7 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         if let Some(vertex) = graph.vertices_se2.get(&id) {
             let var_name = format!("x{}", id);
             // Format: [theta, x, y] - MATCHES TINY-SOLVER ORDER
-            let se2_data = na::dvector![vertex.theta(), vertex.x(), vertex.y()];
+            let se2_data = col![vertex.theta(), vertex.x(), vertex.y()];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
     }
@@ -92,8 +92,8 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
 
-        let dx = edge.measurement.translation().x;
-        let dy = edge.measurement.translation().y;
+        let dx = edge.measurement.translation()[0];
+        let dy = edge.measurement.translation()[1];
         let dtheta = edge.measurement.angle();
 
         let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);

@@ -10,7 +10,6 @@ use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
-use nalgebra as na;
 
 #[derive(Parser)]
 #[command(name = "load_se3_poses")]
@@ -191,7 +190,14 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
             let trans = vertex.pose.translation();
             println!(
                 "  x{}: quat=[{:.6},{:.6},{:.6},{:.6}] trans=[{:.6},{:.6},{:.6}]",
-                id, quat.i, quat.j, quat.k, quat.w, trans.x, trans.y, trans.z
+                id,
+                quat.x(),
+                quat.y(),
+                quat.z(),
+                quat.w(),
+                trans[0],
+                trans[1],
+                trans[2]
             );
         }
     }
@@ -203,7 +209,15 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
         let trans = edge.measurement.translation();
         println!(
             "  Edge {}->{}: quat=[{:.6},{:.6},{:.6},{:.6}] trans=[{:.6},{:.6},{:.6}]",
-            edge.from, edge.to, quat.i, quat.j, quat.k, quat.w, trans.x, trans.y, trans.z
+            edge.from,
+            edge.to,
+            quat.x(),
+            quat.y(),
+            quat.z(),
+            quat.w(),
+            trans[0],
+            trans[1],
+            trans[2]
         );
     }
 
@@ -219,7 +233,16 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
             let quat = vertex.pose.rotation_quaternion();
             let trans = vertex.pose.translation();
             // Format: [tx, ty, tz, qw, qx, qy, qz]
-            let se3_data = na::dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+            use faer::col;
+            let se3_data = col![
+                trans[0],
+                trans[1],
+                trans[2],
+                quat.w(),
+                quat.x(),
+                quat.y(),
+                quat.z()
+            ];
             initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
     }
