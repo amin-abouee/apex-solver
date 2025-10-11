@@ -14,8 +14,7 @@
 use crate::core::problem::{Problem, VariableEnum};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
-use faer::{Mat, sparse::SparseColMat};
-use faer_ext::IntoNalgebra;
+use faer::{Col, Mat, sparse::SparseColMat};
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -518,7 +517,7 @@ impl LevenbergMarquardt {
         problem: &Problem,
         initial_params: &std::collections::HashMap<
             String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+            (crate::manifold::ManifoldType, Col<f64>),
         >,
     ) -> Result<SolverResult<std::collections::HashMap<String, VariableEnum>>, crate::core::ApexError>
     {
@@ -557,9 +556,7 @@ impl LevenbergMarquardt {
             &variable_index_sparce_matrix,
             &symbolic_structure,
         );
-
-        let residual_na = residual.as_ref().into_nalgebra();
-        let mut current_cost = residual_na.norm_squared();
+        let mut current_cost = residual.squared_norm_l2();
         let initial_cost = current_cost;
         cost_evaluations += 1;
 
@@ -595,13 +592,13 @@ impl LevenbergMarquardt {
             if self.config.verbose {
                 println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
                 println!("Current cost: {:.12e}", current_cost);
-                let residual_na = residuals.as_ref().into_nalgebra();
+                // let residual_na = residuals.as_ref().into_nalgebra();
                 println!(
                     "Residuals shape: ({}, {})",
                     residuals.nrows(),
                     residuals.ncols()
                 );
-                println!("Residuals norm: {:.12e}", residual_na.norm());
+                println!("Residuals norm: {:.12e}", residuals.norm_l2());
                 println!(
                     "Jacobian shape: ({}, {})",
                     jacobian.nrows(),
@@ -610,7 +607,7 @@ impl LevenbergMarquardt {
 
                 // Log first few residual values
                 let residual_vec: Vec<f64> = (0..residuals.nrows().min(10))
-                    .map(|row| residual_na[row])
+                    .map(|row| residuals[(row, 0)])
                     .collect();
                 println!("First 10 residuals: {:?}", residual_vec);
             }
@@ -764,8 +761,7 @@ impl LevenbergMarquardt {
                     &variable_index_sparce_matrix,
                     &symbolic_structure,
                 );
-                let new_residual_na = new_residual.as_ref().into_nalgebra();
-                let new_cost = new_residual_na.norm_squared();
+                let new_cost = new_residual.squared_norm_l2();
                 cost_evaluations += 1;
 
                 // Compute step quality
@@ -959,7 +955,7 @@ impl crate::optimizer::Solver for LevenbergMarquardt {
         problem: &crate::core::problem::Problem,
         initial_params: &std::collections::HashMap<
             String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+            (crate::manifold::ManifoldType, Col<f64>),
         >,
     ) -> Result<
         crate::optimizer::SolverResult<
