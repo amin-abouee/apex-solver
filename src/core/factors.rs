@@ -1,9 +1,8 @@
-pub use nalgebra as na;
-
 use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
+use faer::{Col, Mat};
 
 pub trait Factor: Send + Sync {
-    fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>);
+    fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>);
     fn get_dimension(&self) -> usize;
 }
 
@@ -24,60 +23,40 @@ impl BetweenFactorSE2 {
 }
 
 impl Factor for BetweenFactorSE2 {
-    fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
-        // TEMPORARY: Use numerical jacobians that match tiny-solver exactly
+    fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>) {
+        // Use numerical jacobians with SE2 manifold operations
         // Input: params = [theta, x, y] for each pose (TINY-SOLVER FORMAT)
-        let t_origin_k0 = &params[0];
-        let t_origin_k1 = &params[1];
+        let se2_origin_k0 = SE2::from(params[0].clone());
+        let se2_origin_k1 = SE2::from(params[1].clone());
 
-        // Create Isometry2 exactly like tiny-solver: params[0] = theta, params[1] = x, params[2] = y
-        let se2_origin_k0 = na::Isometry2::new(
-            na::Vector2::new(t_origin_k0[1], t_origin_k0[2]), // x, y
-            t_origin_k0[0],                                   // theta
-        );
-        let se2_origin_k1 = na::Isometry2::new(
-            na::Vector2::new(t_origin_k1[1], t_origin_k1[2]), // x, y
-            t_origin_k1[0],                                   // theta
-        );
-        let se2_k0_k1 = na::Isometry2::new(
-            na::Vector2::new(self.relative_pose.x(), self.relative_pose.y()),
-            self.relative_pose.angle(),
-        );
+        // Compute residual: se2_k1_inv * se2_k0 * se2_k0_k1_measured
+        let se2_k1_inv = se2_origin_k1.inverse(None);
+        let se2_temp = se2_k1_inv.compose(&se2_origin_k0, None, None);
+        let se2_diff = se2_temp.compose(&self.relative_pose, None, None);
 
-        // Exact tiny-solver residual computation
-        let se2_diff = se2_origin_k1.inverse() * se2_origin_k0 * se2_k0_k1;
-        let residual = na::dvector![
-            se2_diff.translation.x,
-            se2_diff.translation.y,
-            se2_diff.rotation.angle()
-        ];
+        // Convert to tangent space (residual)
+        let tangent = se2_diff.log(None);
+        let residual: Col<f64> = tangent.into();
 
-        // Compute numerical jacobian (matching tiny-solver's automatic differentiation)
+        // Compute numerical jacobian
         let eps = 1e-8;
-        let mut jacobian = na::DMatrix::zeros(3, 6);
+        let mut jacobian = Mat::zeros(3, 6);
 
-        // Tiny-solver compatible residual function
-        let compute_residual = |params: &[na::DVector<f64>]| -> na::DVector<f64> {
-            let k0 = &params[0];
-            let k1 = &params[1];
-            let iso_k0 = na::Isometry2::new(na::Vector2::new(k0[1], k0[2]), k0[0]);
-            let iso_k1 = na::Isometry2::new(na::Vector2::new(k1[1], k1[2]), k1[0]);
-            let iso_measured = na::Isometry2::new(
-                na::Vector2::new(self.relative_pose.x(), self.relative_pose.y()),
-                self.relative_pose.angle(),
-            );
-            let diff = iso_k1.inverse() * iso_k0 * iso_measured;
-            na::dvector![
-                diff.translation.x,
-                diff.translation.y,
-                diff.rotation.angle()
-            ]
+        // Residual function for numerical differentiation
+        let compute_residual = |params: &[Col<f64>]| -> Col<f64> {
+            let k0 = SE2::from(params[0].clone());
+            let k1 = SE2::from(params[1].clone());
+            let k1_inv = k1.inverse(None);
+            let temp = k1_inv.compose(&k0, None, None);
+            let diff = temp.compose(&self.relative_pose, None, None);
+            let tang = diff.log(None);
+            tang.into()
         };
 
         for param_idx in 0..2 {
             for component in 0..3 {
-                let mut params_plus = [t_origin_k0.clone(), t_origin_k1.clone()];
-                let mut params_minus = [t_origin_k0.clone(), t_origin_k1.clone()];
+                let mut params_plus = [params[0].clone(), params[1].clone()];
+                let mut params_minus = [params[0].clone(), params[1].clone()];
 
                 params_plus[param_idx][component] += eps;
                 params_minus[param_idx][component] -= eps;
@@ -114,18 +93,18 @@ impl BetweenFactorSE3 {
 }
 
 impl Factor for BetweenFactorSE3 {
-    fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
+    fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>) {
         let se3_origin_k0 = SE3::from(params[0].clone());
         let se3_origin_k1 = SE3::from(params[1].clone());
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.inverse()
-        let mut j_k1_inv_wrt_k1 = na::Matrix6::zeros();
+        let mut j_k1_inv_wrt_k1 = Mat::<f64>::zeros(6, 6);
         let se3_k1_inv = se3_origin_k1.inverse(Some(&mut j_k1_inv_wrt_k1));
 
         // Step 2: se3_k1_inv * se3_origin_k0
-        let mut j_compose1_wrt_k1_inv = na::Matrix6::zeros();
-        let mut j_compose1_wrt_k0 = na::Matrix6::zeros();
+        let mut j_compose1_wrt_k1_inv = Mat::<f64>::zeros(6, 6);
+        let mut j_compose1_wrt_k0 = Mat::<f64>::zeros(6, 6);
         let se3_temp = se3_k1_inv.compose(
             &se3_origin_k0,
             Some(&mut j_compose1_wrt_k1_inv),
@@ -133,27 +112,29 @@ impl Factor for BetweenFactorSE3 {
         );
 
         // Step 3: se3_temp * se3_k0_k1_measured
-        let mut j_compose2_wrt_temp = na::Matrix6::zeros();
+        let mut j_compose2_wrt_temp = Mat::<f64>::zeros(6, 6);
         let se3_diff = se3_temp.compose(se3_k0_k1_measured, Some(&mut j_compose2_wrt_temp), None);
 
         // Step 4: se3_diff.log()
-        let mut j_log_wrt_diff = na::Matrix6::zeros();
+        let mut j_log_wrt_diff = Mat::<f64>::zeros(6, 6);
         let residual = se3_diff.log(Some(&mut j_log_wrt_diff));
 
         // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
-        let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
-        let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
-        let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
+        let j_temp_wrt_k1 = &j_compose1_wrt_k1_inv * &j_k1_inv_wrt_k1;
+        let j_diff_wrt_k0 = &j_compose2_wrt_temp * &j_compose1_wrt_k0;
+        let j_diff_wrt_k1 = &j_compose2_wrt_temp * &j_temp_wrt_k1;
 
-        let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
-        let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
+        let jacobian_wrt_k0 = &j_log_wrt_diff * &j_diff_wrt_k0;
+        let jacobian_wrt_k1 = &j_log_wrt_diff * &j_diff_wrt_k1;
 
-        let mut jacobian = na::DMatrix::<f64>::zeros(6, 12);
+        let mut jacobian = Mat::<f64>::zeros(6, 12);
         jacobian
-            .fixed_view_mut::<6, 6>(0, 0)
+            .as_mut()
+            .submatrix_mut(0, 0, 6, 6)
             .copy_from(&jacobian_wrt_k0);
         jacobian
-            .fixed_view_mut::<6, 6>(0, 6)
+            .as_mut()
+            .submatrix_mut(0, 6, 6, 6)
             .copy_from(&jacobian_wrt_k1);
 
         (residual.into(), jacobian)
@@ -166,16 +147,16 @@ impl Factor for BetweenFactorSE3 {
 
 #[derive(Debug, Clone)]
 pub struct PriorFactor {
-    pub data: na::DVector<f64>,
+    pub data: Col<f64>,
 }
 impl Factor for PriorFactor {
-    fn linearize(&self, params: &[na::DVector<f64>]) -> (na::DVector<f64>, na::DMatrix<f64>) {
+    fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>) {
         let residual = &params[0] - &self.data;
-        let jacobian = na::DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
+        let jacobian = Mat::<f64>::identity(residual.nrows(), residual.nrows());
         (residual, jacobian)
     }
 
     fn get_dimension(&self) -> usize {
-        self.data.len()
+        self.data.nrows()
     }
 }

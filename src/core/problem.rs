@@ -4,8 +4,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex};
 
 use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
-use faer_ext::IntoFaer;
-use nalgebra as na;
+use faer::{Col, Mat};
 use rayon::prelude::*;
 
 use crate::core::variable::Variable;
@@ -40,8 +39,8 @@ impl VariableEnum {
         }
     }
 
-    /// Convert to DVector for use with Factor trait
-    pub fn to_vector(&self) -> na::DVector<f64> {
+    /// Convert to Col for use with Factor trait
+    pub fn to_vector(&self) -> Col<f64> {
         match self {
             VariableEnum::Rn(var) => var.value.clone().into(),
             VariableEnum::SE2(var) => var.value.clone().into(),
@@ -151,7 +150,7 @@ impl Problem {
 
     pub fn initialize_variables(
         &self,
-        initial_values: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
+        initial_values: &HashMap<String, (ManifoldType, Col<f64>)>,
     ) -> HashMap<String, VariableEnum> {
         let variables: HashMap<String, VariableEnum> = initial_values
             .iter()
@@ -340,9 +339,7 @@ impl Problem {
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
-        let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
-            self.total_residual_dimension,
-        )));
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         let jacobian_values: Vec<f64> = self
             .residual_blocks
@@ -363,7 +360,8 @@ impl Problem {
             .into_inner()
             .unwrap();
 
-        let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
+        // Convert Col to Mat - reshape as column matrix
+        let residual_faer = Mat::from_fn(total_residual.nrows(), 1, |i, _| total_residual[i]);
         let jacobian_sparse = SparseColMat::new_from_argsort(
             symbolic_structure.pattern.clone(),
             &symbolic_structure.order,
@@ -379,9 +377,9 @@ impl Problem {
         residual_block: &residual_block::ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_residual: &Arc<Mutex<na::DVector<f64>>>,
+        total_residual: &Arc<Mutex<Col<f64>>>,
     ) -> Vec<f64> {
-        let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
+        let mut param_vectors: Vec<Col<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
         let mut count_variable_local_idx: usize = 0;
@@ -402,7 +400,8 @@ impl Problem {
         {
             let mut total_residual = total_residual.lock().unwrap();
             total_residual
-                .rows_mut(
+                .as_mut()
+                .subrows_mut(
                     residual_block.residual_row_start_idx,
                     residual_block.factor.get_dimension(),
                 )
@@ -414,9 +413,11 @@ impl Problem {
         for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
             if variable_index_sparce_matrix.contains_key(var_key) {
                 let (variable_local_idx, var_size) = variable_local_idx_size_list[i];
-                let variable_jac = jac.view((0, variable_local_idx), (jac.shape().0, var_size));
+                let variable_jac =
+                    jac.as_ref()
+                        .submatrix(0, variable_local_idx, jac.nrows(), var_size);
 
-                for row_idx in 0..jac.shape().0 {
+                for row_idx in 0..jac.nrows() {
                     for col_idx in 0..var_size {
                         local_jacobian_values.push(variable_jac[(row_idx, col_idx)]);
                     }
@@ -435,12 +436,12 @@ impl Problem {
     /// Log residual vector to a text file
     pub fn log_residual_to_file(
         &self,
-        residual: &na::DVector<f64>,
+        residual: &Col<f64>,
         filename: &str,
     ) -> Result<(), std::io::Error> {
         let mut file = File::create(filename)?;
-        writeln!(file, "# Residual vector - {} elements", residual.len())?;
-        for (i, &value) in residual.iter().enumerate() {
+        writeln!(file, "# Residual vector - {} elements", residual.nrows())?;
+        for (i, &value) in residual.as_ref().iter().enumerate() {
             writeln!(file, "{}: {:.12}", i, value)?;
         }
         Ok(())
@@ -481,9 +482,9 @@ impl Problem {
         for var_name in sorted_vars {
             let var_vector = variables[var_name].to_vector();
             write!(file, "{}: [", var_name)?;
-            for (i, &value) in var_vector.iter().enumerate() {
+            for (i, &value) in var_vector.as_ref().iter().enumerate() {
                 write!(file, "{:.12}", value)?;
-                if i < var_vector.len() - 1 {
+                if i < var_vector.nrows() - 1 {
                     write!(file, ", ")?;
                 }
             }
@@ -499,11 +500,11 @@ mod tests {
     use crate::core::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
     use crate::core::loss_functions::HuberLoss;
     use crate::manifold::se3::SE3;
-    use nalgebra as na;
+    use faer::col;
     use std::collections::HashMap;
 
     /// Create a test SE2 dataset with 10 vertices in a loop
-    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, Col<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -524,7 +525,7 @@ mod tests {
         // Add vertices using [x, y, theta] ordering
         for (i, (x, y, theta)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
-            let se2_data = na::dvector![*x, *y, *theta];
+            let se2_data = col![*x, *y, *theta];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
 
@@ -560,7 +561,7 @@ mod tests {
 
         // Add prior factor for x0
         let prior_factor = PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0],
+            data: col![0.0, 0.0, 0.0],
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
@@ -568,7 +569,7 @@ mod tests {
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, Col<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -589,7 +590,7 @@ mod tests {
         // Add vertices using [tx, ty, tz, qw, qx, qy, qz] ordering
         for (i, (tx, ty, tz, qx, qy, qz, qw)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
-            let se3_data = na::dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
+            let se3_data = col![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
             initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
 
@@ -614,13 +615,14 @@ mod tests {
             let to_pose = poses[to_idx];
 
             // Create a simple relative transformation (simplified for testing)
+            use crate::manifold::quaternion::Quaternion;
             let relative_se3 = SE3::from_translation_quaternion(
-                na::Vector3::new(
+                col![
                     to_pose.0 - from_pose.0, // dx
                     to_pose.1 - from_pose.1, // dy
-                    to_pose.2 - from_pose.2, // dz
-                ),
-                na::Quaternion::new(1.0, 0.0, 0.0, 0.0), // identity quaternion
+                    to_pose.2 - from_pose.2  // dz
+                ],
+                Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap(), // identity quaternion
             );
 
             let between_factor = BetweenFactorSE3::new(relative_se3);
@@ -633,7 +635,7 @@ mod tests {
 
         // Add prior factor for x0
         let prior_factor = PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            data: col![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
@@ -692,7 +694,7 @@ mod tests {
         for (name, var) in &variables {
             let vec = var.to_vector();
             assert_eq!(
-                vec.len(),
+                vec.nrows(),
                 3,
                 "SE2 variable {} vector should have length 3",
                 name
@@ -725,7 +727,7 @@ mod tests {
         for (name, var) in &variables {
             let vec = var.to_vector();
             assert_eq!(
-                vec.len(),
+                vec.nrows(),
                 7,
                 "SE3 variable {} vector should have length 7",
                 name
@@ -903,7 +905,7 @@ mod tests {
         let block_id2 = problem.add_residual_block(
             &["x0"],
             Box::new(PriorFactor {
-                data: na::dvector![0.0, 0.0, 0.0],
+                data: col![0.0, 0.0, 0.0],
             }),
             None,
         );
@@ -967,8 +969,7 @@ mod tests {
 
     // Helper function for the known 5-pose test case
     #[allow(dead_code)]
-    fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>)
-    {
+    fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, Col<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -984,7 +985,7 @@ mod tests {
         for (name, data) in &poses {
             initial_values.insert(
                 name.to_string(),
-                (ManifoldType::SE2, na::dvector![data[1], data[2], data[0]]),
+                (ManifoldType::SE2, col![data[1], data[2], data[0]]),
             );
         }
 
@@ -1008,7 +1009,7 @@ mod tests {
         problem.add_residual_block(
             &["x0"],
             Box::new(PriorFactor {
-                data: na::dvector![0.000000, 0.000000, 0.000000],
+                data: col![0.000000, 0.000000, 0.000000],
             }),
             None,
         );

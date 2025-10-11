@@ -1,4 +1,4 @@
-use nalgebra as na;
+use faer::{Col, Mat};
 /// https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/corrector.cc
 use std::ops::Mul;
 
@@ -34,7 +34,7 @@ impl Corrector {
             }
         }
     }
-    pub fn correct_jacobian(&self, residuals: &na::DVector<f64>, jacobian: &mut na::DMatrix<f64>) {
+    pub fn correct_jacobian(&self, residuals: &Col<f64>, jacobian: &mut Mat<f64>) {
         // The common case (rho[2] <= 0).
         if self.alpha_sq_norm == 0.0 {
             *jacobian = jacobian.clone().mul(self.sqrt_rho1);
@@ -45,7 +45,7 @@ impl Corrector {
         let r_rtj = residuals.clone() * residuals.transpose() * jacobian.clone();
         *jacobian = (jacobian.clone() - r_rtj.mul(self.alpha_sq_norm)).mul(self.sqrt_rho1);
     }
-    pub fn correct_residuals(&self, residuals: &mut na::DVector<f64>) {
+    pub fn correct_residuals(&self, residuals: &mut Col<f64>) {
         *residuals = residuals.clone().mul(self.residual_scaling);
     }
 }
