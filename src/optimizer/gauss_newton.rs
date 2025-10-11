@@ -117,7 +117,7 @@ impl Solver for GaussNewton {
         _problem: &crate::core::problem::Problem,
         _initial_params: &std::collections::HashMap<
             String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+            (crate::manifold::ManifoldType, faer::Col<f64>),
         >,
     ) -> Result<
         SolverResult<std::collections::HashMap<String, crate::core::problem::VariableEnum>>,

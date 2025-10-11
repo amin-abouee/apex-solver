@@ -8,7 +8,7 @@
 
 use crate::core::problem::{Problem, VariableEnum};
 use crate::manifold::ManifoldType;
-use nalgebra as na;
+use faer::Col;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
@@ -265,7 +265,7 @@ pub trait Solver {
     fn minimize(
         &mut self,
         problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
+        initial_params: &HashMap<String, (ManifoldType, Col<f64>)>,
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
 }
 
