@@ -279,7 +279,9 @@ impl LieGroup for SO3 {
 
         // Extract quaternion components
         let q = &self.quaternion;
-        let sin_angle_squared = q.norm_squared();
+        // For unit quaternion q = [w, x, y, z] = [cos(θ/2), sin(θ/2)*axis]
+        // sin²(θ/2) = x² + y² + z² (squared norm of imaginary part)
+        let sin_angle_squared = q.x() * q.x() + q.y() * q.y() + q.z() * q.z();
 
         let log_coeff = if sin_angle_squared > f64::EPSILON {
             let sin_angle = sin_angle_squared.sqrt();
@@ -422,6 +424,28 @@ impl From<SO3Tangent> for nalgebra::DVector<f64> {
             so3_tangent.data[1],
             so3_tangent.data[2],
         ])
+    }
+}
+
+// Conversion traits using faer Col
+impl From<Col<f64>> for SO3Tangent {
+    fn from(data: Col<f64>) -> Self {
+        if data.nrows() != 3 {
+            panic!("SO3Tangent::from expects 3-dimensional vector [θx, θy, θz]");
+        }
+        SO3Tangent { data }
+    }
+}
+
+impl From<SO3Tangent> for Col<f64> {
+    fn from(tangent: SO3Tangent) -> Self {
+        tangent.data
+    }
+}
+
+impl From<&SO3Tangent> for Col<f64> {
+    fn from(tangent: &SO3Tangent) -> Self {
+        tangent.data.clone()
     }
 }
 
