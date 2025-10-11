@@ -3,28 +3,29 @@
 //! This module implements the Special Orthogonal group SO(2), which represents
 //! rotations in 2D space.
 //!
-//! SO(2) elements are represented using nalgebra's UnitComplex internally.
+//! SO(2) elements are represented using a simple angle (θ) in radians.
 //! SO(2) tangent elements are represented as a single angle in radians.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{Matrix2, UnitComplex};
+use faer::{Col, Mat, col};
 use std::fmt;
 
 /// SO(2) group element representing rotations in 2D.
 ///
-/// Internally represented using nalgebra's UnitComplex<f64> for efficient rotations.
+/// Internally represented as a single angle θ in radians for efficiency.
+/// Rotation matrix is computed on-demand as [[cos θ, -sin θ], [sin θ, cos θ]].
 #[derive(Clone, Debug, PartialEq)]
 pub struct SO2 {
-    /// Internal representation as a unit complex number
-    complex: UnitComplex<f64>,
+    /// Internal representation as an angle in radians
+    angle: f64,
 }
 
 impl fmt::Display for SO2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SO2(angle: {:.4})", self.complex.angle())
+        write!(f, "SO2(angle: {:.4})", self.angle)
     }
 }
 
@@ -40,7 +41,29 @@ impl From<nalgebra::DVector<f64>> for SO2 {
 
 impl From<SO2> for nalgebra::DVector<f64> {
     fn from(so2: SO2) -> Self {
-        nalgebra::DVector::from_vec(vec![so2.complex.angle()])
+        nalgebra::DVector::from_vec(vec![so2.angle])
+    }
+}
+
+// Conversion traits using faer Col
+impl From<Col<f64>> for SO2 {
+    fn from(data: Col<f64>) -> Self {
+        if data.nrows() != 1 {
+            panic!("SO2::from expects 1-dimensional vector [angle]");
+        }
+        SO2::from_angle(data[0])
+    }
+}
+
+impl From<SO2> for Col<f64> {
+    fn from(so2: SO2) -> Self {
+        col![so2.angle]
+    }
+}
+
+impl From<&SO2> for Col<f64> {
+    fn from(so2: &SO2) -> Self {
+        col![so2.angle]
     }
 }
 
@@ -52,30 +75,28 @@ impl SO2 {
     pub const DOF: usize = 1;
 
     /// Representation size - size of the underlying data representation
-    pub const REP_SIZE: usize = 2;
+    pub const REP_SIZE: usize = 1;
 
     /// Get the identity element of the group.
     ///
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
-        SO2 {
-            complex: UnitComplex::identity(),
-        }
+        SO2 { angle: 0.0 }
     }
 
     /// Get the identity matrix for Jacobians.
     ///
     /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
-    pub fn jacobian_identity() -> nalgebra::Matrix1<f64> {
-        nalgebra::Matrix1::<f64>::identity()
+    pub fn jacobian_identity() -> Mat<f64> {
+        Mat::identity(1, 1)
     }
 
-    /// Create a new SO(2) element from a unit complex number.
+    /// Create a new SO(2) element from an angle.
     ///
     /// # Arguments
-    /// * `complex` - Unit complex number representing rotation
-    pub fn new(complex: UnitComplex<f64>) -> Self {
-        SO2 { complex }
+    /// * `angle` - Rotation angle in radians
+    pub fn new(angle: f64) -> Self {
+        SO2 { angle }
     }
 
     /// Create SO(2) from an angle.
@@ -83,29 +104,32 @@ impl SO2 {
     /// # Arguments
     /// * `angle` - Rotation angle in radians
     pub fn from_angle(angle: f64) -> Self {
-        SO2::new(UnitComplex::from_angle(angle))
-    }
-
-    /// Get the underlying unit complex number.
-    pub fn complex(&self) -> UnitComplex<f64> {
-        self.complex
+        SO2::new(angle)
     }
 
     /// Get the rotation angle in radians.
     pub fn angle(&self) -> f64 {
-        self.complex.angle()
+        self.angle
     }
 
     /// Get the rotation matrix (2x2).
-    pub fn rotation_matrix(&self) -> Matrix2<f64> {
-        self.complex.to_rotation_matrix().into_inner()
+    pub fn rotation_matrix(&self) -> Mat<f64> {
+        let cos_theta = self.angle.cos();
+        let sin_theta = self.angle.sin();
+
+        let mut matrix = Mat::<f64>::zeros(2, 2);
+        matrix[(0, 0)] = cos_theta;
+        matrix[(0, 1)] = -sin_theta;
+        matrix[(1, 0)] = sin_theta;
+        matrix[(1, 1)] = cos_theta;
+        matrix
     }
 }
 
 impl LieGroup for SO2 {
     type TangentVector = SO2Tangent;
-    type JacobianMatrix = nalgebra::Matrix1<f64>;
-    type LieAlgebra = Matrix2<f64>;
+    type JacobianMatrix = Mat<f64>;
+    type LieAlgebra = Mat<f64>;
 
     /// SO2 inverse.
     ///
@@ -122,9 +146,7 @@ impl LieGroup for SO2 {
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
-        SO2 {
-            complex: self.complex.inverse(),
-        }
+        SO2 { angle: -self.angle }
     }
 
     /// SO2 composition.
@@ -148,10 +170,10 @@ impl LieGroup for SO2 {
             *jac_self = other.inverse(None).adjoint();
         }
         if let Some(jac_other) = jacobian_other {
-            *jac_other = nalgebra::Matrix1::identity();
+            *jac_other = Mat::identity(1, 1);
         }
         SO2 {
-            complex: self.complex * other.complex,
+            angle: self.angle + other.angle,
         }
     }
 
@@ -168,11 +190,9 @@ impl LieGroup for SO2 {
     /// J_log_R = I
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         if let Some(jac) = jacobian {
-            *jac = nalgebra::Matrix1::identity();
+            *jac = Mat::identity(1, 1);
         }
-        SO2Tangent {
-            data: self.complex.angle(),
-        }
+        SO2Tangent { data: self.angle }
     }
 
     /// Rotation action on a 3-vector.
@@ -189,13 +209,26 @@ impl LieGroup for SO2 {
     /// This is a convenience function that treats the 3D vector as a 2D vector and ignores the z component.
     fn act(
         &self,
-        vector: &nalgebra::Vector3<f64>,
+        vector: &Col<f64>,
         _jacobian_self: Option<&mut Self::JacobianMatrix>,
-        _jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
-    ) -> nalgebra::Vector3<f64> {
-        let point2d = nalgebra::Vector2::new(vector.x, vector.y);
-        let rotated_point = self.complex * point2d;
-        nalgebra::Vector3::new(rotated_point.x, rotated_point.y, vector.z)
+        _jacobian_vector: Option<&mut Mat<f64>>,
+    ) -> Col<f64> {
+        if vector.nrows() != 3 {
+            panic!("act() requires 3-dimensional vector");
+        }
+
+        let cos_theta = self.angle.cos();
+        let sin_theta = self.angle.sin();
+
+        let x = vector[0];
+        let y = vector[1];
+        let z = vector[2];
+
+        col![
+            cos_theta * x - sin_theta * y,
+            sin_theta * x + cos_theta * y,
+            z
+        ]
     }
 
     /// Get the adjoint matrix of SO2 at this.
@@ -203,7 +236,7 @@ impl LieGroup for SO2 {
     /// # Notes
     /// See Eq. (123).
     fn adjoint(&self) -> Self::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Mat::identity(1, 1)
     }
 
     /// Generate a random element.
@@ -211,15 +244,20 @@ impl LieGroup for SO2 {
         SO2::from_angle(rand::random::<f64>() * 2.0 * std::f64::consts::PI)
     }
 
-    /// Normalize the underlying complex number.
+    /// Normalize the angle to [-π, π].
     fn normalize(&mut self) {
-        self.complex.renormalize();
+        // Normalize angle to [-π, π]
+        let pi = std::f64::consts::PI;
+        self.angle = ((self.angle + pi) % (2.0 * pi)) - pi;
+        if self.angle < -pi {
+            self.angle += 2.0 * pi;
+        }
     }
 
     /// Check if the element is valid.
-    fn is_valid(&self, tolerance: f64) -> bool {
-        let norm_diff = (self.complex.norm() - 1.0).abs();
-        norm_diff < tolerance
+    fn is_valid(&self, _tolerance: f64) -> bool {
+        // Any angle is valid for SO(2)
+        true
     }
 
     /// Vee operator: log(g)^∨.
@@ -274,6 +312,28 @@ impl From<SO2Tangent> for nalgebra::DVector<f64> {
     }
 }
 
+// Conversion traits using faer Col
+impl From<Col<f64>> for SO2Tangent {
+    fn from(data: Col<f64>) -> Self {
+        if data.nrows() != 1 {
+            panic!("SO2Tangent::from expects 1-dimensional vector [angle]");
+        }
+        SO2Tangent { data: data[0] }
+    }
+}
+
+impl From<SO2Tangent> for Col<f64> {
+    fn from(tangent: SO2Tangent) -> Self {
+        col![tangent.data]
+    }
+}
+
+impl From<&SO2Tangent> for Col<f64> {
+    fn from(tangent: &SO2Tangent) -> Self {
+        col![tangent.data]
+    }
+}
+
 impl SO2Tangent {
     /// Create a new SO2Tangent from an angle.
     ///
@@ -297,42 +357,42 @@ impl Tangent<SO2> for SO2Tangent {
     ///
     /// # Arguments
     /// * `tangent` - Tangent vector (angle)
-    /// * `jacobian` - Optional Jacobian matrix of the SE(3) element wrt this.
+    /// * `jacobian` - Optional Jacobian matrix of the SO(2) element wrt this.
     fn exp(&self, jacobian: Option<&mut <SO2 as LieGroup>::JacobianMatrix>) -> SO2 {
-        let angle = self.angle();
-        let complex = UnitComplex::new(angle);
-
         if let Some(jac) = jacobian {
-            *jac = nalgebra::Matrix1::identity();
+            *jac = Mat::identity(1, 1);
         }
 
-        SO2::new(complex)
+        SO2::new(self.data)
     }
 
     /// Right Jacobian for SO(2) is identity.
     fn right_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Mat::identity(1, 1)
     }
 
     /// Left Jacobian for SO(2) is identity.
     fn left_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Mat::identity(1, 1)
     }
 
     /// Inverse of right Jacobian for SO(2) is identity.
     fn right_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Mat::identity(1, 1)
     }
 
     /// Inverse of left Jacobian for SO(2) is identity.
     fn left_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Mat::identity(1, 1)
     }
 
     /// Hat operator: θ^∧ (scalar to skew-symmetric matrix).
     fn hat(&self) -> <SO2 as LieGroup>::LieAlgebra {
         let theta = self.data;
-        Matrix2::new(0.0, -theta, theta, 0.0)
+        let mut matrix = Mat::<f64>::zeros(2, 2);
+        matrix[(0, 1)] = -theta;
+        matrix[(1, 0)] = theta;
+        matrix
     }
 
     /// Zero tangent vector for SO2
@@ -371,7 +431,7 @@ impl Tangent<SO2> for SO2Tangent {
     ///
     /// For SO(2), the small adjoint is zero (since it's commutative).
     fn small_adj(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::zeros()
+        Mat::zeros(1, 1)
     }
 
     /// Lie bracket for SO(2).
@@ -402,7 +462,10 @@ impl Tangent<SO2> for SO2Tangent {
         // The generator for SO(2) is the skew-symmetric matrix:
         // E = | 0 -1 |
         //     | 1  0 |
-        Matrix2::new(0.0, -1.0, 1.0, 0.0)
+        let mut matrix = Mat::<f64>::zeros(2, 2);
+        matrix[(0, 1)] = -1.0;
+        matrix[(1, 0)] = 1.0;
+        matrix
     }
 }
 
@@ -510,9 +573,11 @@ mod tests {
         let generator = tangent.generator(0);
 
         // SO(2) generator should be the skew-symmetric matrix
-        let expected = Matrix2::new(0.0, -1.0, 1.0, 0.0);
+        let mut expected = Mat::<f64>::zeros(2, 2);
+        expected[(0, 1)] = -1.0;
+        expected[(1, 0)] = 1.0;
 
-        assert!((generator - expected).norm() < 1e-10);
+        assert!((&generator - &expected).norm_l2() < 1e-10);
     }
 
     #[test]
@@ -529,9 +594,9 @@ mod tests {
 
         // For SO(2): [a,b]^ = a^ * b^ - b^ * a^ should be zero (commutative)
         let bracket_hat = a.lie_bracket(&b).hat();
-        let expected = a.hat() * b.hat() - b.hat() * a.hat();
+        let expected = &a.hat() * &b.hat() - &b.hat() * &a.hat();
 
-        assert!((bracket_hat - expected).norm() < 1e-10);
-        assert!(expected.norm() < 1e-10); // Should be zero for SO(2)
+        assert!((&bracket_hat - &expected).norm_l2() < 1e-10);
+        assert!(expected.norm_l2() < 1e-10); // Should be zero for SO(2)
     }
 }
