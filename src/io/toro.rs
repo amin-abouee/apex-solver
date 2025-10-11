@@ -1,6 +1,8 @@
-use super::*;
+use crate::io::{ApexSolverIoError, EdgeSE2, Graph, GraphLoader, VertexSE2};
+use faer::mat;
 use memmap2::Mmap;
 use std::fs::File;
+use std::path::Path;
 
 /// TORO format loader
 pub struct ToroLoader;
@@ -183,7 +185,7 @@ impl ToroLoader {
                 value: parts[11].to_string(),
             })?;
 
-        let information = Matrix3::new(i11, i12, i13, i12, i22, i23, i13, i23, i33);
+        let information = mat![[i11, i12, i13], [i12, i22, i23], [i13, i23, i33]];
 
         Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }

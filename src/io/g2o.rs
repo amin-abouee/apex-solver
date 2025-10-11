@@ -1,8 +1,11 @@
-use super::*;
+use crate::io::{ApexSolverIoError, EdgeSE2, EdgeSE3, Graph, GraphLoader, VertexSE2, VertexSE3};
+use crate::manifold::quaternion::Quaternion;
+use faer::{col, mat};
 use memmap2::Mmap;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
+use std::path::Path;
 
 /// High-performance G2O file loader
 pub struct G2oLoader;
@@ -283,8 +286,8 @@ impl G2oLoader {
                 value: parts[8].to_string(),
             })?;
 
-        let translation = Vector3::new(x, y, z);
-        let quaternion = Quaternion::new(qw, qx, qy, qz);
+        let translation = col![x, y, z];
+        let quaternion = Quaternion::new(qw, qx, qy, qz).unwrap();
         Ok(VertexSE3::from_translation_quaternion(
             id,
             translation,
@@ -341,17 +344,11 @@ impl G2oLoader {
             message: "Invalid information matrix values".to_string(),
         })?;
 
-        let information = Matrix3::new(
-            info_values[0],
-            info_values[1],
-            info_values[2],
-            info_values[1],
-            info_values[3],
-            info_values[4],
-            info_values[2],
-            info_values[4],
-            info_values[5],
-        );
+        let information = mat![
+            [info_values[0], info_values[1], info_values[2]],
+            [info_values[1], info_values[3], info_values[4]],
+            [info_values[2], info_values[4], info_values[5]],
+        ];
 
         Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
@@ -400,7 +397,7 @@ impl G2oLoader {
                 value: parts[5].to_string(),
             })?;
 
-        let translation = Vector3::new(tx, ty, tz);
+        let translation = col![tx, ty, tz];
 
         // Parse rotation quaternion (qx, qy, qz, qw)
         let qx = parts[6]
@@ -431,7 +428,7 @@ impl G2oLoader {
                 value: parts[9].to_string(),
             })?;
 
-        let rotation = UnitQuaternion::from_quaternion(nalgebra::Quaternion::new(qw, qx, qy, qz));
+        let rotation = Quaternion::new(qw, qx, qy, qz).unwrap();
 
         // Parse information matrix (upper triangular: i11, i12, i13, i14, i15, i16, i22, i23, i24, i25, i26, i33, i34, i35, i36, i44, i45, i46, i55, i56, i66)
         let info_values: Result<Vec<f64>, _> =
@@ -442,44 +439,56 @@ impl G2oLoader {
             message: "Invalid information matrix values".to_string(),
         })?;
 
-        let information = Matrix6::new(
-            info_values[0],
-            info_values[1],
-            info_values[2],
-            info_values[3],
-            info_values[4],
-            info_values[5],
-            info_values[1],
-            info_values[6],
-            info_values[7],
-            info_values[8],
-            info_values[9],
-            info_values[10],
-            info_values[2],
-            info_values[7],
-            info_values[11],
-            info_values[12],
-            info_values[13],
-            info_values[14],
-            info_values[3],
-            info_values[8],
-            info_values[12],
-            info_values[15],
-            info_values[16],
-            info_values[17],
-            info_values[4],
-            info_values[9],
-            info_values[13],
-            info_values[16],
-            info_values[18],
-            info_values[19],
-            info_values[5],
-            info_values[10],
-            info_values[14],
-            info_values[17],
-            info_values[19],
-            info_values[20],
-        );
+        let information = mat![
+            [
+                info_values[0],
+                info_values[1],
+                info_values[2],
+                info_values[3],
+                info_values[4],
+                info_values[5]
+            ],
+            [
+                info_values[1],
+                info_values[6],
+                info_values[7],
+                info_values[8],
+                info_values[9],
+                info_values[10]
+            ],
+            [
+                info_values[2],
+                info_values[7],
+                info_values[11],
+                info_values[12],
+                info_values[13],
+                info_values[14]
+            ],
+            [
+                info_values[3],
+                info_values[8],
+                info_values[12],
+                info_values[15],
+                info_values[16],
+                info_values[17]
+            ],
+            [
+                info_values[4],
+                info_values[9],
+                info_values[13],
+                info_values[16],
+                info_values[18],
+                info_values[19]
+            ],
+            [
+                info_values[5],
+                info_values[10],
+                info_values[14],
+                info_values[17],
+                info_values[19],
+                info_values[20]
+            ],
+        ];
 
         Ok(EdgeSE3::new(from, to, translation, rotation, information))
     }
@@ -524,8 +533,8 @@ mod tests {
         let vertex = G2oLoader::parse_vertex_se3(&parts, 1).unwrap();
 
         assert_eq!(vertex.id(), 1);
-        assert_eq!(vertex.translation(), Vector3::new(1.0, 2.0, 3.0));
-        assert!(vertex.rotation().quaternion().w > 0.99); // Should be identity quaternion
+        assert_eq!(vertex.translation(), col![1.0, 2.0, 3.0]);
+        assert!(vertex.rotation().w() > 0.99); // Should be identity quaternion
     }
 
     #[test]
