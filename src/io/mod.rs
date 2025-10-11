@@ -1,4 +1,6 @@
-use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
+// use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
+use crate::manifold::quaternion::Quaternion;
+use faer::{Col, Mat, col};
 use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
@@ -57,7 +59,7 @@ impl VertexSE2 {
         }
     }
 
-    pub fn from_vector(id: usize, vector: Vector3<f64>) -> Self {
+    pub fn from_vector(id: usize, vector: Col<f64>) -> Self {
         Self {
             id,
             pose: SE2::from_xy_angle(vector[0], vector[1], vector[2]),
@@ -95,7 +97,7 @@ pub struct VertexSE3 {
 }
 
 impl VertexSE3 {
-    pub fn new(id: usize, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
+    pub fn new(id: usize, translation: Col<f64>, rotation: Quaternion) -> Self {
         Self {
             id,
             pose: SE3::new(translation, rotation),
@@ -103,17 +105,15 @@ impl VertexSE3 {
     }
 
     pub fn from_vector(id: usize, vector: [f64; 7]) -> Self {
-        let translation = Vector3::from([vector[0], vector[1], vector[2]]);
-        let rotation = UnitQuaternion::from_quaternion(Quaternion::from([
-            vector[3], vector[4], vector[5], vector[6],
-        ]));
+        let translation = col![vector[0], vector[1], vector[2]];
+        let rotation = Quaternion::new(vector[3], vector[4], vector[5], vector[6]).unwrap();
         Self::new(id, translation, rotation)
     }
 
     pub fn from_translation_quaternion(
         id: usize,
-        translation: Vector3<f64>,
-        quaternion: Quaternion<f64>,
+        translation: Col<f64>,
+        quaternion: Quaternion,
     ) -> Self {
         Self {
             id,
@@ -125,11 +125,11 @@ impl VertexSE3 {
         self.id
     }
 
-    pub fn translation(&self) -> Vector3<f64> {
+    pub fn translation(&self) -> Col<f64> {
         self.pose.translation()
     }
 
-    pub fn rotation(&self) -> UnitQuaternion<f64> {
+    pub fn rotation(&self) -> Quaternion {
         self.pose.rotation_quaternion()
     }
 
@@ -157,8 +157,8 @@ impl fmt::Display for VertexSE3 {
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE2,          // Relative transformation
-    pub information: Matrix3<f64>, // 3x3 information matrix
+    pub measurement: SE2,      // Relative transformation
+    pub information: Mat<f64>, // 3x3 information matrix
 }
 
 impl EdgeSE2 {
@@ -168,7 +168,7 @@ impl EdgeSE2 {
         dx: f64,
         dy: f64,
         dtheta: f64,
-        information: Matrix3<f64>,
+        information: Mat<f64>,
     ) -> Self {
         Self {
             from,
@@ -183,7 +183,7 @@ impl fmt::Display for EdgeSE2 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "EdgeSE2 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            "EdgeSE2 [ from: {}, to: {}, measurement: {}, information: {:?} ]",
             self.from, self.to, self.measurement, self.information
         )
     }
@@ -194,17 +194,17 @@ impl fmt::Display for EdgeSE2 {
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE3,          // Relative transformation
-    pub information: Matrix6<f64>, // 6x6 information matrix
+    pub measurement: SE3,      // Relative transformation
+    pub information: Mat<f64>, // 6x6 information matrix
 }
 
 impl EdgeSE3 {
     pub fn new(
         from: usize,
         to: usize,
-        translation: Vector3<f64>,
-        rotation: UnitQuaternion<f64>,
-        information: Matrix6<f64>,
+        translation: Col<f64>,
+        rotation: Quaternion,
+        information: Mat<f64>,
     ) -> Self {
         Self {
             from,
@@ -219,7 +219,7 @@ impl fmt::Display for EdgeSE3 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "EdgeSE3 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            "EdgeSE3 [ from: {}, to: {}, measurement: {}, information: {:?} ]",
             self.from, self.to, self.measurement, self.information
         )
     }
