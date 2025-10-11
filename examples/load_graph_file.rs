@@ -188,13 +188,13 @@ fn display_first_vertex_info(file_path: &Path) {
             println!(
                 "  - First SE3 vertex: id={}, translation=({:.3}, {:.3}, {:.3}), rotation=({:.3}, {:.3}, {:.3}, {:.3})",
                 vertex_0.id(),
-                translation.x,
-                translation.y,
-                translation.z,
-                rotation.coords.w,
-                rotation.coords.x,
-                rotation.coords.y,
-                rotation.coords.z,
+                translation[0],
+                translation[1],
+                translation[2],
+                rotation.w(),
+                rotation.x(),
+                rotation.y(),
+                rotation.z(),
             );
         }
     }

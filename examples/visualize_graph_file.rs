@@ -99,15 +99,17 @@ fn visualize_se3_poses(
         // Extract position
         let translation = pose.translation();
         let position = glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
+            translation[0] as f32,
+            translation[1] as f32,
+            translation[2] as f32,
         ) * scale;
 
         // Convert quaternion
         let rotation = pose.rotation();
         let nq = rotation.as_ref();
-        let quaternion = glam::Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
+        // Col storage order is [x, y, z, w] for quaternion
+        let quaternion =
+            glam::Quat::from_xyzw(nq[0] as f32, nq[1] as f32, nq[2] as f32, nq[3] as f32);
 
         // Create transform from position and rotation
         let transform = Transform3D::from_translation_rotation(position, quaternion);
