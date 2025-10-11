@@ -1,4 +1,4 @@
-use nalgebra as na;
+use faer::{Col, Mat};
 // use rayon::prelude::*;
 
 use crate::core::corrector::Corrector;
@@ -35,17 +35,14 @@ impl ResidualBlock {
         }
     }
 
-    pub fn residual_and_jacobian<M>(
-        &self,
-        variables: &Vec<&Variable<M>>,
-    ) -> (na::DVector<f64>, na::DMatrix<f64>)
+    pub fn residual_and_jacobian<M>(&self, variables: &Vec<&Variable<M>>) -> (Col<f64>, Mat<f64>)
     where
-        M: LieGroup + Clone + Into<na::DVector<f64>>,
+        M: LieGroup + Clone + Into<Col<f64>>,
         M::TangentVector: crate::manifold::Tangent<M>,
     {
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
         let (mut residual, mut jacobian) = self.factor.linearize(&param_vec);
-        let squared_norm = residual.norm_squared();
+        let squared_norm = residual.squared_norm_l2();
         if let Some(loss_func) = self.loss_func.as_ref() {
             let rho = loss_func.evaluate(squared_norm);
             let corrector = Corrector::new(squared_norm, &rho);
@@ -63,7 +60,7 @@ mod tests {
     use crate::core::loss_functions::HuberLoss;
     use crate::core::variable::Variable;
     use crate::manifold::{se2::SE2, se3::SE3};
-    use nalgebra as na;
+    use faer::col;
 
     #[test]
     fn test_residual_block_creation() {
@@ -81,7 +78,7 @@ mod tests {
     #[test]
     fn test_residual_block_without_loss() {
         let factor = Box::new(PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0],
+            data: col![0.0, 0.0, 0.0],
         });
 
         let block = ResidualBlock::new(1, 3, &["x0"], factor, None);
@@ -110,20 +107,23 @@ mod tests {
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
 
         // Verify dimensions
-        assert_eq!(residual.len(), 3);
+        assert_eq!(residual.nrows(), 3);
         assert_eq!(jacobian.nrows(), 3);
         assert_eq!(jacobian.ncols(), 6); // 2 variables * 3 DOF each
 
         // For identity start and [0.1, 1.0, 0.5] end with measurement [1.0, 0.5, 0.1]
         // This should give very small residuals (near zero)
         assert!(
-            residual.norm() < 1e-10,
+            residual.norm_l2() < 1e-10,
             "Residual norm: {}",
-            residual.norm()
+            residual.norm_l2()
         );
 
         // Verify Jacobian is not zero (it should have meaningful values)
-        assert!(jacobian.norm() > 1e-10, "Jacobian should not be near zero");
+        assert!(
+            jacobian.norm_l2() > 1e-10,
+            "Jacobian should not be near zero"
+        );
     }
 
     // #[test]
@@ -184,14 +184,14 @@ mod tests {
         let (residual_no_loss, jacobian_no_loss) = block_no_loss.residual_and_jacobian(&variables);
 
         // With loss function, residuals should be different (corrected)
-        let residual_diff = (residual_with_loss - residual_no_loss).norm();
+        let residual_diff = (&residual_with_loss - &residual_no_loss).norm_l2();
         assert!(
             residual_diff > 1e-10,
             "Loss function should modify residuals"
         );
 
         // Jacobian should also be different
-        let jacobian_diff = (jacobian_with_loss - jacobian_no_loss).norm();
+        let jacobian_diff = (&jacobian_with_loss - &jacobian_no_loss).norm_l2();
         assert!(
             jacobian_diff > 1e-10,
             "Loss function should modify Jacobian"
@@ -202,7 +202,9 @@ mod tests {
     fn test_residual_block_se3_between_factor() {
         // Test with SE3 - this requires SE3 between factor which we'll implement as needed
         // For now, test with prior factor on SE3
-        let se3_data = na::dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
+        use crate::manifold::quaternion::Quaternion;
+
+        let se3_data = col![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
         let factor = Box::new(PriorFactor {
             data: se3_data.clone(),
         });
@@ -211,15 +213,15 @@ mod tests {
 
         // Create SE3 variable
         let var0 = Variable::new(SE3::from_translation_quaternion(
-            na::vector![1.0, 0.5, 0.2],
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            col![1.0, 0.5, 0.2],
+            Quaternion::new(1.0, 0.0, 0.0, 0.0).unwrap(),
         ));
         let variables = vec![&var0];
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
 
         // Verify dimensions for SE3 - prior factor uses full manifold dimension
-        assert_eq!(residual.len(), 7); // SE3 manifold has 7 parameters [tx,ty,tz,qw,qx,qy,qz]
+        assert_eq!(residual.nrows(), 7); // SE3 manifold has 7 parameters [tx,ty,tz,qw,qx,qy,qz]
         assert_eq!(jacobian.nrows(), 7);
         // For PriorFactor, Jacobian dimensions depend on implementation
         // If it's identity-based, should be 7x7; if tangent-based, should be 7x6
@@ -234,7 +236,7 @@ mod tests {
             Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
             Box::new(BetweenFactorSE2::new(0.8, 0.2, -0.05)),
             Box::new(PriorFactor {
-                data: na::dvector![0.0, 0.0, 0.0],
+                data: col![0.0, 0.0, 0.0],
             }),
         ];
 
@@ -294,9 +296,12 @@ mod tests {
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
 
         // Should handle small values without numerical issues
-        assert!(residual.iter().all(|&x| x.is_finite()));
-        assert!(jacobian.iter().all(|&x| x.is_finite()));
-        assert!(residual.norm() < 1e-6);
+        assert!((0..residual.nrows()).all(|i| residual[i].is_finite()));
+        assert!(
+            (0..jacobian.nrows())
+                .all(|i| (0..jacobian.ncols()).all(|j| jacobian[(i, j)].is_finite()))
+        );
+        assert!(residual.norm_l2() < 1e-6);
     }
 
     #[test]
@@ -312,9 +317,12 @@ mod tests {
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
 
         // Should handle large values without overflow
-        assert!(residual.iter().all(|&x| x.is_finite()));
-        assert!(jacobian.iter().all(|&x| x.is_finite()));
-        assert!(residual.norm() < 1e-10); // Should still be near zero for matching measurement
+        assert!((0..residual.nrows()).all(|i| residual[i].is_finite()));
+        assert!(
+            (0..jacobian.nrows())
+                .all(|i| (0..jacobian.ncols()).all(|j| jacobian[(i, j)].is_finite()))
+        );
+        assert!(residual.norm_l2() < 1e-10); // Should still be near zero for matching measurement
     }
 
     #[test]
@@ -341,10 +349,10 @@ mod tests {
         let (res_without, jac_without) = block_without_loss.residual_and_jacobian(&variables);
 
         // Loss function should modify both residual and Jacobian
-        assert!((res_with.clone() - res_without.clone()).norm() > 1e-6);
-        assert!((jac_with.clone() - jac_without.clone()).norm() > 1e-6);
+        assert!((&res_with - &res_without).norm_l2() > 1e-6);
+        assert!((&jac_with - &jac_without).norm_l2() > 1e-6);
 
         // With Huber loss and significant error, residual magnitude should be reduced
-        assert!(res_with.norm() < res_without.norm());
+        assert!(res_with.norm_l2() < res_without.norm_l2());
     }
 }
