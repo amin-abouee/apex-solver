@@ -196,6 +196,48 @@ impl From<SE3> for nalgebra::DVector<f64> {
     }
 }
 
+// Conversion traits using faer Col
+impl From<Col<f64>> for SE3 {
+    fn from(data: Col<f64>) -> Self {
+        if data.nrows() != 7 {
+            panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
+        }
+        let translation = col![data[0], data[1], data[2]];
+        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]).unwrap();
+        SE3::from_translation_quaternion(translation, quaternion)
+    }
+}
+
+impl From<SE3> for Col<f64> {
+    fn from(se3: SE3) -> Self {
+        let q = se3.rotation.quaternion();
+        col![
+            se3.translation[0], // tx
+            se3.translation[1], // ty
+            se3.translation[2], // tz
+            q.w(),              // qw
+            q.x(),              // qx
+            q.y(),              // qy
+            q.z()               // qz
+        ]
+    }
+}
+
+impl From<&SE3> for Col<f64> {
+    fn from(se3: &SE3) -> Self {
+        let q = se3.rotation.quaternion();
+        col![
+            se3.translation[0], // tx
+            se3.translation[1], // ty
+            se3.translation[2], // tz
+            q.w(),              // qw
+            q.x(),              // qx
+            q.y(),              // qy
+            q.z()               // qz
+        ]
+    }
+}
+
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE3 {
     type TangentVector = SE3Tangent;
@@ -463,6 +505,30 @@ impl From<nalgebra::DVector<f64>> for SE3Tangent {
                 data_vector[5],
             ],
         }
+    }
+}
+
+// Conversion traits using faer Col
+impl From<Col<f64>> for SE3Tangent {
+    fn from(data: Col<f64>) -> Self {
+        if data.nrows() != 6 {
+            panic!(
+                "SE3Tangent::from expects 6-dimensional vector [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]"
+            );
+        }
+        SE3Tangent { data }
+    }
+}
+
+impl From<SE3Tangent> for Col<f64> {
+    fn from(tangent: SE3Tangent) -> Self {
+        tangent.data
+    }
+}
+
+impl From<&SE3Tangent> for Col<f64> {
+    fn from(tangent: &SE3Tangent) -> Self {
+        tangent.data.clone()
     }
 }
 
