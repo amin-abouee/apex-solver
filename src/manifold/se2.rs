@@ -70,6 +70,16 @@ impl From<Col<f64>> for SE2 {
     }
 }
 
+impl From<&Col<f64>> for SE2 {
+    fn from(data: &Col<f64>) -> Self {
+        if data.nrows() != 3 {
+            panic!("SE2::from expects 3-dimensional vector [theta, x, y]");
+        }
+        // Input order is [theta, x, y] to match tiny-solver
+        SE2::from_xy_angle(data[1], data[2], data[0])
+    }
+}
+
 impl From<SE2> for Col<f64> {
     fn from(se2: SE2) -> Self {
         col![

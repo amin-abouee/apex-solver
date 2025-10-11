@@ -42,11 +42,11 @@ impl VariableEnum {
     /// Convert to Col for use with Factor trait
     pub fn to_vector(&self) -> Col<f64> {
         match self {
-            VariableEnum::Rn(var) => var.value.clone().into(),
-            VariableEnum::SE2(var) => var.value.clone().into(),
-            VariableEnum::SE3(var) => var.value.clone().into(),
-            VariableEnum::SO2(var) => var.value.clone().into(),
-            VariableEnum::SO3(var) => var.value.clone().into(),
+            VariableEnum::Rn(var) => (&var.value).into(),
+            VariableEnum::SE2(var) => (&var.value).into(),
+            VariableEnum::SE3(var) => (&var.value).into(),
+            VariableEnum::SO2(var) => (&var.value).into(),
+            VariableEnum::SO3(var) => (&var.value).into(),
         }
     }
 }

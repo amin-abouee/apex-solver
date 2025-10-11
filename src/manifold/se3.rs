@@ -208,6 +208,17 @@ impl From<Col<f64>> for SE3 {
     }
 }
 
+impl From<&Col<f64>> for SE3 {
+    fn from(data: &Col<f64>) -> Self {
+        if data.nrows() != 7 {
+            panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
+        }
+        let translation = col![data[0], data[1], data[2]];
+        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]).unwrap();
+        SE3::from_translation_quaternion(translation, quaternion)
+    }
+}
+
 impl From<SE3> for Col<f64> {
     fn from(se3: SE3) -> Self {
         let q = se3.rotation.quaternion();

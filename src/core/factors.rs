@@ -26,8 +26,8 @@ impl Factor for BetweenFactorSE2 {
     fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>) {
         // Use numerical jacobians with SE2 manifold operations
         // Input: params = [theta, x, y] for each pose (TINY-SOLVER FORMAT)
-        let se2_origin_k0 = SE2::from(params[0].clone());
-        let se2_origin_k1 = SE2::from(params[1].clone());
+        let se2_origin_k0 = SE2::from(&params[0]);
+        let se2_origin_k1 = SE2::from(&params[1]);
 
         // Compute residual: se2_k1_inv * se2_k0 * se2_k0_k1_measured
         let se2_k1_inv = se2_origin_k1.inverse(None);
@@ -44,8 +44,8 @@ impl Factor for BetweenFactorSE2 {
 
         // Residual function for numerical differentiation
         let compute_residual = |params: &[Col<f64>]| -> Col<f64> {
-            let k0 = SE2::from(params[0].clone());
-            let k1 = SE2::from(params[1].clone());
+            let k0 = SE2::from(&params[0]);
+            let k1 = SE2::from(&params[1]);
             let k1_inv = k1.inverse(None);
             let temp = k1_inv.compose(&k0, None, None);
             let diff = temp.compose(&self.relative_pose, None, None);
@@ -94,8 +94,8 @@ impl BetweenFactorSE3 {
 
 impl Factor for BetweenFactorSE3 {
     fn linearize(&self, params: &[Col<f64>]) -> (Col<f64>, Mat<f64>) {
-        let se3_origin_k0 = SE3::from(params[0].clone());
-        let se3_origin_k1 = SE3::from(params[1].clone());
+        let se3_origin_k0 = SE3::from(&params[0]);
+        let se3_origin_k1 = SE3::from(&params[1]);
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.inverse()
