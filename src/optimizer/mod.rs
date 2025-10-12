@@ -269,6 +269,92 @@ pub trait Solver {
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
 }
 
+/// Apply parameter update step to all variables.
+///
+/// This is a common operation used by all optimizers (Levenberg-Marquardt, Gauss-Newton, Dog Leg).
+/// It applies a tangent space perturbation to each variable using the proper manifold plus operation.
+///
+/// # Arguments
+/// * `variables` - Mutable map of variables to update
+/// * `step` - Full step vector in tangent space (faer matrix view)
+/// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
+///
+/// # Returns
+/// * Step norm (L2 norm) for convergence checking
+///
+/// # Implementation Notes
+/// The step vector contains concatenated tangent vectors for all variables in the order
+/// specified by `variable_order`. Each variable's tangent space dimension determines
+/// how many elements it occupies in the step vector.
+///
+/// # Example
+/// ```ignore
+/// let step_norm = apply_parameter_step(
+///     &mut variables,
+///     step.as_ref(),
+///     &sorted_var_names,
+/// );
+/// ```
+pub fn apply_parameter_step(
+    variables: &mut HashMap<String, VariableEnum>,
+    step: faer::MatRef<f64>,
+    variable_order: &[String],
+) -> f64 {
+    let mut step_offset = 0;
+
+    for var_name in variable_order {
+        if let Some(var) = variables.get_mut(var_name) {
+            let var_size = var.get_size();
+            let var_step = step.subrows(step_offset, var_size);
+
+            // Delegate to VariableEnum's apply_tangent_step method
+            // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
+            var.apply_tangent_step(var_step);
+
+            step_offset += var_size;
+        }
+    }
+
+    // Compute and return step norm for convergence checking
+    step.norm_l2()
+}
+
+/// Apply negative parameter step to rollback variables.
+///
+/// This is used when an optimization step is rejected (e.g., in trust region methods).
+/// It applies the negative of a tangent space perturbation to revert the previous update.
+///
+/// # Arguments
+/// * `variables` - Mutable map of variables to revert
+/// * `step` - Full step vector in tangent space (faer matrix view) to negate
+/// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
+///
+/// # Example
+/// ```ignore
+/// // Revert the step if it's rejected
+/// apply_negative_parameter_step(
+///     &mut variables,
+///     step.as_ref(),
+///     &sorted_var_names,
+/// );
+/// ```
+pub fn apply_negative_parameter_step(
+    variables: &mut HashMap<String, VariableEnum>,
+    step: faer::MatRef<f64>,
+    variable_order: &[String],
+) {
+    use faer::Mat;
+
+    // Create a negated version of the step vector
+    let mut negative_step = Mat::zeros(step.nrows(), 1);
+    for i in 0..step.nrows() {
+        negative_step[(i, 0)] = -step[(i, 0)];
+    }
+
+    // Apply the negative step using the standard apply_parameter_step function
+    apply_parameter_step(variables, negative_step.as_ref(), variable_order);
+}
+
 // Legacy optimization function (commented out - use Solver trait instead)
 // pub fn solve_problem(
 //     problem: &Problem,
