@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
 use faer_ext::IntoFaer;
-use nalgebra as na;
+use nalgebra::DVector;
 use rayon::prelude::*;
 
 use crate::core::variable::Variable;
@@ -41,7 +41,7 @@ impl VariableEnum {
     }
 
     /// Convert to DVector for use with Factor trait
-    pub fn to_vector(&self) -> na::DVector<f64> {
+    pub fn to_vector(&self) -> DVector<f64> {
         match self {
             VariableEnum::Rn(var) => var.value.clone().into(),
             VariableEnum::SE2(var) => var.value.clone().into(),
@@ -151,7 +151,7 @@ impl Problem {
 
     pub fn initialize_variables(
         &self,
-        initial_values: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
+        initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
     ) -> HashMap<String, VariableEnum> {
         let variables: HashMap<String, VariableEnum> = initial_values
             .iter()
@@ -252,6 +252,7 @@ impl Problem {
     /// - Between(x0, x1): Creates 3×6 block at rows 0-2, cols 0-5
     /// - Between(x1, x2): Creates 3×6 block at rows 3-5, cols 3-8
     /// - Prior(x0): Creates 3×3 block at rows 6-8, cols 0-2
+    ///
     /// Result: 9×9 sparse Jacobian with 45 non-zero entries
     pub fn build_symbolic_structure(
         &self,
@@ -340,7 +341,7 @@ impl Problem {
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
-        let total_residual = Arc::new(Mutex::new(na::DVector::<f64>::zeros(
+        let total_residual = Arc::new(Mutex::new(DVector::<f64>::zeros(
             self.total_residual_dimension,
         )));
 
@@ -379,9 +380,9 @@ impl Problem {
         residual_block: &residual_block::ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_residual: &Arc<Mutex<na::DVector<f64>>>,
+        total_residual: &Arc<Mutex<DVector<f64>>>,
     ) -> Vec<f64> {
-        let mut param_vectors: Vec<na::DVector<f64>> = Vec::new();
+        let mut param_vectors: Vec<DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
         let mut count_variable_local_idx: usize = 0;
@@ -435,7 +436,7 @@ impl Problem {
     /// Log residual vector to a text file
     pub fn log_residual_to_file(
         &self,
-        residual: &na::DVector<f64>,
+        residual: &DVector<f64>,
         filename: &str,
     ) -> Result<(), std::io::Error> {
         let mut file = File::create(filename)?;
@@ -499,11 +500,11 @@ mod tests {
     use crate::core::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
     use crate::core::loss_functions::HuberLoss;
     use crate::manifold::se3::SE3;
-    use nalgebra as na;
+    use nalgebra::{Quaternion, Vector3, dvector};
     use std::collections::HashMap;
 
     /// Create a test SE2 dataset with 10 vertices in a loop
-    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -524,7 +525,7 @@ mod tests {
         // Add vertices using [x, y, theta] ordering
         for (i, (x, y, theta)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
-            let se2_data = na::dvector![*x, *y, *theta];
+            let se2_data = dvector![*x, *y, *theta];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
 
@@ -560,7 +561,7 @@ mod tests {
 
         // Add prior factor for x0
         let prior_factor = PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0],
+            data: dvector![0.0, 0.0, 0.0],
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
@@ -568,7 +569,7 @@ mod tests {
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>) {
+    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -589,7 +590,7 @@ mod tests {
         // Add vertices using [tx, ty, tz, qw, qx, qy, qz] ordering
         for (i, (tx, ty, tz, qx, qy, qz, qw)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
-            let se3_data = na::dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
+            let se3_data = dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
             initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
 
@@ -615,12 +616,12 @@ mod tests {
 
             // Create a simple relative transformation (simplified for testing)
             let relative_se3 = SE3::from_translation_quaternion(
-                na::Vector3::new(
+                Vector3::new(
                     to_pose.0 - from_pose.0, // dx
                     to_pose.1 - from_pose.1, // dy
                     to_pose.2 - from_pose.2, // dz
                 ),
-                na::Quaternion::new(1.0, 0.0, 0.0, 0.0), // identity quaternion
+                Quaternion::new(1.0, 0.0, 0.0, 0.0), // identity quaternion
             );
 
             let between_factor = BetweenFactorSE3::new(relative_se3);
@@ -633,7 +634,7 @@ mod tests {
 
         // Add prior factor for x0
         let prior_factor = PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            data: dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
@@ -903,7 +904,7 @@ mod tests {
         let block_id2 = problem.add_residual_block(
             &["x0"],
             Box::new(PriorFactor {
-                data: na::dvector![0.0, 0.0, 0.0],
+                data: dvector![0.0, 0.0, 0.0],
             }),
             None,
         );
@@ -967,8 +968,7 @@ mod tests {
 
     // Helper function for the known 5-pose test case
     #[allow(dead_code)]
-    fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, na::DVector<f64>)>)
-    {
+    fn create_simple_5pose_se2_test() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -984,7 +984,7 @@ mod tests {
         for (name, data) in &poses {
             initial_values.insert(
                 name.to_string(),
-                (ManifoldType::SE2, na::dvector![data[1], data[2], data[0]]),
+                (ManifoldType::SE2, dvector![data[1], data[2], data[0]]),
             );
         }
 
@@ -1008,7 +1008,7 @@ mod tests {
         problem.add_residual_block(
             &["x0"],
             Box::new(PriorFactor {
-                data: na::dvector![0.000000, 0.000000, 0.000000],
+                data: dvector![0.000000, 0.000000, 0.000000],
             }),
             None,
         );

@@ -8,7 +8,7 @@ use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
-use nalgebra as na;
+use nalgebra::dvector;
 
 #[derive(Parser)]
 #[command(name = "load_se2_poses")]
@@ -82,7 +82,7 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         if let Some(vertex) = graph.vertices_se2.get(&id) {
             let var_name = format!("x{}", id);
             // Format: [theta, x, y] - MATCHES TINY-SOLVER ORDER
-            let se2_data = na::dvector![vertex.theta(), vertex.x(), vertex.y()];
+            let se2_data = dvector![vertex.theta(), vertex.x(), vertex.y()];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
     }

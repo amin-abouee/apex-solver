@@ -10,7 +10,7 @@ use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
-use nalgebra as na;
+use nalgebra::dvector;
 
 #[derive(Parser)]
 #[command(name = "load_se3_poses")]
@@ -219,7 +219,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::
             let quat = vertex.pose.rotation_quaternion();
             let trans = vertex.pose.translation();
             // Format: [tx, ty, tz, qw, qx, qy, qz]
-            let se3_data = na::dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+            let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
             initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
     }

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra as na;
+use nalgebra::DVector;
 
 /// Generic Variable struct that uses static dispatch with any manifold type.
 ///
@@ -166,17 +166,17 @@ impl Variable<Rn> {
     }
 
     /// Convert the Rn variable to a vector representation.
-    pub fn to_vector(&self) -> na::DVector<f64> {
+    pub fn to_vector(&self) -> DVector<f64> {
         self.value.data().clone()
     }
 
     /// Create an Rn variable from a vector representation.
-    pub fn from_vector(values: na::DVector<f64>) -> Self {
+    pub fn from_vector(values: DVector<f64>) -> Self {
         Self::new(Rn::new(values))
     }
 
     /// Update the Rn variable with bounds and fixed constraints.
-    pub fn update_variable(&mut self, mut tangent_delta: na::DVector<f64>) {
+    pub fn update_variable(&mut self, mut tangent_delta: DVector<f64>) {
         // bound
         for (&idx, &(lower, upper)) in &self.bounds {
             tangent_delta[idx] = tangent_delta[idx].max(lower).min(upper);
@@ -195,12 +195,12 @@ impl Variable<Rn> {
 mod tests {
     use super::*;
     use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
-    use nalgebra::{self as na, DVector};
+    use nalgebra::{Quaternion, Vector3};
     use std::f64::consts::PI;
 
     #[test]
     fn test_variable_creation_rn() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let vec_data = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let rn_value = Rn::new(vec_data);
         let variable = Variable::new(rn_value);
 
@@ -223,8 +223,8 @@ mod tests {
     #[test]
     fn test_variable_creation_se3() {
         let se3 = SE3::from_translation_quaternion(
-            na::Vector3::new(1.0, 2.0, 3.0),
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            Vector3::new(1.0, 2.0, 3.0),
+            Quaternion::new(1.0, 0.0, 0.0, 0.0),
         );
         let variable = Variable::new(se3);
 
@@ -255,10 +255,10 @@ mod tests {
 
     #[test]
     fn test_variable_set_value() {
-        let initial_vec = na::DVector::from_vec(vec![1.0, 2.0, 3.0]);
+        let initial_vec = DVector::from_vec(vec![1.0, 2.0, 3.0]);
         let mut variable = Variable::new(Rn::new(initial_vec));
 
-        let new_vec = na::DVector::from_vec(vec![4.0, 5.0, 6.0, 7.0]);
+        let new_vec = DVector::from_vec(vec![4.0, 5.0, 6.0, 7.0]);
         variable.set_value(Rn::new(new_vec));
         assert_eq!(variable.dynamic_size(), 4);
 
@@ -288,8 +288,8 @@ mod tests {
     #[test]
     fn test_variable_rn_plus_minus_operations() {
         // Test Rn manifold plus/minus operations
-        let rn_1 = Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0]));
-        let rn_2 = Rn::new(na::DVector::from_vec(vec![4.0, 5.0, 6.0]));
+        let rn_1 = Rn::new(DVector::from_vec(vec![1.0, 2.0, 3.0]));
+        let rn_2 = Rn::new(DVector::from_vec(vec![4.0, 5.0, 6.0]));
         let var1 = Variable::new(rn_1);
         let var2 = Variable::new(rn_2);
 
@@ -297,15 +297,12 @@ mod tests {
         let diff_tangent = var1.minus(&var2);
         assert_eq!(
             diff_tangent.to_vector(),
-            na::DVector::from_vec(vec![-3.0, -3.0, -3.0])
+            DVector::from_vec(vec![-3.0, -3.0, -3.0])
         );
 
         // Test plus operation
         let var2_updated = var2.plus(&diff_tangent);
-        assert_eq!(
-            var2_updated.data(),
-            &na::DVector::from_vec(vec![1.0, 2.0, 3.0])
-        );
+        assert_eq!(var2_updated.data(), &DVector::from_vec(vec![1.0, 2.0, 3.0]));
 
         // Test roundtrip consistency
         let final_diff = var1.minus(&Variable::new(var2_updated));
@@ -314,13 +311,13 @@ mod tests {
 
     #[test]
     fn test_variable_update_with_bounds() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        let vec_data = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         let mut variable = Variable::new(Rn::new(vec_data));
 
         variable.bounds.insert(0, (-1.0, 1.0));
         variable.bounds.insert(2, (0.0, 5.0));
 
-        let new_values = na::DVector::from_vec(vec![-5.0, 10.0, -3.0, 20.0, 30.0, 40.0]);
+        let new_values = DVector::from_vec(vec![-5.0, 10.0, -3.0, 20.0, 30.0, 40.0]);
         variable.update_variable(new_values);
 
         let result_vec = variable.to_vector();
@@ -329,14 +326,13 @@ mod tests {
 
     #[test]
     fn test_variable_update_with_fixed_indices() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
+        let vec_data = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
         let mut variable = Variable::new(Rn::new(vec_data.clone()));
 
         variable.fixed_indices.insert(1);
         variable.fixed_indices.insert(4);
 
-        let delta_values =
-            na::DVector::from_vec(vec![9.0, 18.0, 27.0, 36.0, 45.0, 54.0, 63.0, 72.0]);
+        let delta_values = DVector::from_vec(vec![9.0, 18.0, 27.0, 36.0, 45.0, 54.0, 63.0, 72.0]);
         variable.update_variable(delta_values);
 
         let result_vec = variable.to_vector();
@@ -347,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_variable_combined_bounds_and_fixed() {
-        let vec_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
+        let vec_data = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]);
         let mut variable = Variable::new(Rn::new(vec_data.clone()));
 
         variable.bounds.insert(0, (-2.0, 2.0));
@@ -355,7 +351,7 @@ mod tests {
         variable.fixed_indices.insert(1);
         variable.fixed_indices.insert(5);
 
-        let delta_values = na::DVector::from_vec(vec![-5.0, 100.0, 30.0, 10.0, 50.0, 600.0, 70.0]);
+        let delta_values = DVector::from_vec(vec![-5.0, 100.0, 30.0, 10.0, 50.0, 600.0, 70.0]);
         variable.update_variable(delta_values);
 
         let result = variable.to_vector();
@@ -368,12 +364,12 @@ mod tests {
     fn test_variable_type_safety() {
         let se2_var = Variable::new(SE2::from_xy_angle(1.0, 2.0, 0.5));
         let se3_var = Variable::new(SE3::from_translation_quaternion(
-            na::Vector3::new(1.0, 2.0, 3.0),
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            Vector3::new(1.0, 2.0, 3.0),
+            Quaternion::new(1.0, 0.0, 0.0, 0.0),
         ));
         let so2_var = Variable::new(SO2::from_angle(0.5));
         let so3_var = Variable::new(SO3::from_euler_angles(0.1, 0.2, 0.3));
-        let rn_var = Variable::new(Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0])));
+        let rn_var = Variable::new(Rn::new(DVector::from_vec(vec![1.0, 2.0, 3.0])));
 
         assert_eq!(se2_var.get_size(), SE2::DOF);
         assert_eq!(se3_var.get_size(), SE3::DOF);
@@ -384,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_variable_vector_conversion_roundtrip() {
-        let original_data = na::DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+        let original_data = DVector::from_vec(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
         let rn_var = Variable::new(Rn::new(original_data.clone()));
         let vec_repr = rn_var.to_vector();
         assert_eq!(vec_repr, original_data);
@@ -396,13 +392,13 @@ mod tests {
     #[test]
     fn test_variable_manifold_operations_consistency() {
         // Test Rn manifold operations (has vector conversion methods)
-        let rn_initial = Rn::new(na::DVector::from_vec(vec![1.0, 2.0, 3.0]));
+        let rn_initial = Rn::new(DVector::from_vec(vec![1.0, 2.0, 3.0]));
         let mut rn_var = Variable::new(rn_initial);
-        let rn_new_values = na::DVector::from_vec(vec![2.0, 3.0, 4.0]);
+        let rn_new_values = DVector::from_vec(vec![2.0, 3.0, 4.0]);
         rn_var.update_variable(rn_new_values);
 
         let rn_result = rn_var.to_vector();
-        assert_eq!(rn_result, na::DVector::from_vec(vec![2.0, 3.0, 4.0]));
+        assert_eq!(rn_result, DVector::from_vec(vec![2.0, 3.0, 4.0]));
 
         // Test SE2 manifold plus/minus operations (core functionality)
         let se2_1 = SE2::from_xy_angle(2.0, 3.0, PI / 2.0);
@@ -420,7 +416,7 @@ mod tests {
 
     #[test]
     fn test_variable_constraints_interaction() {
-        let rn_data = na::DVector::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0]);
+        let rn_data = DVector::from_vec(vec![0.0, 0.0, 0.0, 0.0, 0.0]);
         let mut rn_var = Variable::new(Rn::new(rn_data));
 
         rn_var.bounds.insert(0, (-1.0, 1.0));
@@ -428,7 +424,7 @@ mod tests {
         rn_var.fixed_indices.insert(1);
         rn_var.fixed_indices.insert(4);
 
-        let large_delta = na::DVector::from_vec(vec![5.0, 100.0, 15.0, 20.0, 200.0]);
+        let large_delta = DVector::from_vec(vec![5.0, 100.0, 15.0, 20.0, 200.0]);
         rn_var.update_variable(large_delta);
 
         let result = rn_var.to_vector();

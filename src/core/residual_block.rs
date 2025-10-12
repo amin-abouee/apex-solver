@@ -1,4 +1,4 @@
-use nalgebra as na;
+use nalgebra::{DMatrix, DVector};
 // use rayon::prelude::*;
 
 use crate::core::corrector::Corrector;
@@ -38,9 +38,9 @@ impl ResidualBlock {
     pub fn residual_and_jacobian<M>(
         &self,
         variables: &Vec<&Variable<M>>,
-    ) -> (na::DVector<f64>, na::DMatrix<f64>)
+    ) -> (DVector<f64>, DMatrix<f64>)
     where
-        M: LieGroup + Clone + Into<na::DVector<f64>>,
+        M: LieGroup + Clone + Into<DVector<f64>>,
         M::TangentVector: crate::manifold::Tangent<M>,
     {
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
@@ -63,7 +63,7 @@ mod tests {
     use crate::core::loss_functions::HuberLoss;
     use crate::core::variable::Variable;
     use crate::manifold::{se2::SE2, se3::SE3};
-    use nalgebra as na;
+    use nalgebra::{dvector, vector};
 
     #[test]
     fn test_residual_block_creation() {
@@ -81,7 +81,7 @@ mod tests {
     #[test]
     fn test_residual_block_without_loss() {
         let factor = Box::new(PriorFactor {
-            data: na::dvector![0.0, 0.0, 0.0],
+            data: dvector![0.0, 0.0, 0.0],
         });
 
         let block = ResidualBlock::new(1, 3, &["x0"], factor, None);
@@ -202,7 +202,7 @@ mod tests {
     fn test_residual_block_se3_between_factor() {
         // Test with SE3 - this requires SE3 between factor which we'll implement as needed
         // For now, test with prior factor on SE3
-        let se3_data = na::dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
+        let se3_data = dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
         let factor = Box::new(PriorFactor {
             data: se3_data.clone(),
         });
@@ -211,8 +211,8 @@ mod tests {
 
         // Create SE3 variable
         let var0 = Variable::new(SE3::from_translation_quaternion(
-            na::vector![1.0, 0.5, 0.2],
-            na::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+            vector![1.0, 0.5, 0.2],
+            nalgebra::Quaternion::new(1.0, 0.0, 0.0, 0.0),
         ));
         let variables = vec![&var0];
 
@@ -234,7 +234,7 @@ mod tests {
             Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
             Box::new(BetweenFactorSE2::new(0.8, 0.2, -0.05)),
             Box::new(PriorFactor {
-                data: na::dvector![0.0, 0.0, 0.0],
+                data: dvector![0.0, 0.0, 0.0],
             }),
         ];
 

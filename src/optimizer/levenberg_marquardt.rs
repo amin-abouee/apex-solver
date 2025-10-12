@@ -713,7 +713,7 @@ impl LevenbergMarquardt {
 
                 // Compute predicted reduction using scaled values
                 let predicted_reduction =
-                    self.compute_predicted_reduction(&scaled_step, &gradient, &hessian);
+                    self.compute_predicted_reduction(&scaled_step, &gradient, hessian);
 
                 // DEBUG: Log predicted reduction calculation details
                 if self.config.verbose {
