@@ -19,7 +19,7 @@ struct Args {
     dataset: String,
 
     /// Maximum number of optimization iterations
-    #[arg(short, long, default_value = "50")]
+    #[arg(short, long, default_value = "150")]
     max_iterations: usize,
 
     /// Enable verbose output
@@ -81,8 +81,8 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se2.get(&id) {
             let var_name = format!("x{}", id);
-            // Format: [theta, x, y] - MATCHES TINY-SOLVER ORDER
-            let se2_data = dvector![vertex.theta(), vertex.x(), vertex.y()];
+            // Format: [x, y, theta] - MATCHES G2O FILE ORDER
+            let se2_data = dvector![vertex.x(), vertex.y(), vertex.theta()];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
     }
@@ -105,9 +105,23 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         );
     }
 
+    // Check if we have any vertices
+    if vertex_ids.is_empty() {
+        eprintln!("❌ No SE2 vertices found in dataset - this may be an SE3-only dataset");
+        eprintln!("   Skipping optimization for this dataset\n");
+        return Ok(());
+    }
+
+    // Fix the first pose to remove gauge freedom (all 3 DOF: x, y, theta)
+    let first_var_name = format!("x{}", vertex_ids[0]);
+    problem.fix_variable(&first_var_name, 0); // Fix x
+    problem.fix_variable(&first_var_name, 1); // Fix y
+    problem.fix_variable(&first_var_name, 2); // Fix theta
+
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
     println!("  Between factors: {}", graph.edges_se2.len());
+    println!("  Fixed first pose: {} (all 3 DOF)", first_var_name);
 
     // Initialize problem variables
     let variables = problem.initialize_variables(&initial_values);
@@ -185,9 +199,9 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(args.max_iterations)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-6)
-        .with_gradient_tolerance(1e-6)
+        .with_cost_tolerance(1e-4)
+        .with_parameter_tolerance(1e-4)
+        .with_gradient_tolerance(1e-10)
         .with_verbose(args.verbose);
 
     let start_time = Instant::now();
@@ -260,6 +274,12 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
             println!("Status: FAILED");
             println!("Error: {:?}", result.status);
             println!("Initial cost: {:.12e}", initial_cost);
+            println!("Final cost: {:.12e}", result.final_cost);
+            println!(
+                "Cost reduction: {:.12e} ({:.2}%)",
+                initial_cost - result.final_cost,
+                ((initial_cost - result.final_cost) / initial_cost) * 100.0
+            );
             println!("Iterations: {}", result.iterations);
             println!("Execution time: {:.1}ms", duration.as_millis());
 
@@ -281,7 +301,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine which datasets to test
     let datasets = if args.dataset == "all" {
-        vec!["M3500", "intel", "mit", "manhattanOlson3500", "rim", "ring"]
+        vec![
+            "city10000",
+            "M3500",
+            "M3500a",
+            "M3500b",
+            "M3500c",
+            "intel",
+            "mit",
+            "manhattanOlson3500",
+            "ring",
+            "ringCity",
+        ]
     } else {
         vec![args.dataset.as_str()]
     };
