@@ -43,19 +43,19 @@ impl fmt::Display for SE2 {
 impl From<nalgebra::DVector<f64>> for SE2 {
     fn from(data: nalgebra::DVector<f64>) -> Self {
         if data.len() != 3 {
-            panic!("SE2::from expects 3-dimensional vector [theta, x, y]");
+            panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
         }
-        // Input order is [theta, x, y] to match tiny-solver
-        SE2::from_xy_angle(data[1], data[2], data[0])
+        // Input order is [x, y, theta] to match G2O format
+        SE2::from_xy_angle(data[0], data[1], data[2])
     }
 }
 
 impl From<SE2> for nalgebra::DVector<f64> {
     fn from(se2: SE2) -> Self {
         nalgebra::DVector::from_vec(vec![
-            se2.rotation.angle(), // theta first
-            se2.translation.x,    // x second
-            se2.translation.y,    // y third
+            se2.translation.x,    // x first
+            se2.translation.y,    // y second
+            se2.rotation.angle(), // theta third
         ])
     }
 }
@@ -393,11 +393,12 @@ impl fmt::Display for SE2Tangent {
 impl From<nalgebra::DVector<f64>> for SE2Tangent {
     fn from(data_vector: nalgebra::DVector<f64>) -> Self {
         if data_vector.len() != 3 {
-            panic!("SE2Tangent::from expects 3-dimensional vector [theta, x, y]");
+            panic!("SE2Tangent::from expects 3-dimensional vector [x, y, theta]");
         }
-        // Input order is [theta, x, y] to match tiny-solver
+        // Input order is [x, y, theta] to match G2O format
+        // Internal storage is [x, y, theta]
         SE2Tangent {
-            data: Vector3::new(data_vector[1], data_vector[2], data_vector[0]),
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
         }
     }
 }
@@ -405,9 +406,9 @@ impl From<nalgebra::DVector<f64>> for SE2Tangent {
 impl From<SE2Tangent> for nalgebra::DVector<f64> {
     fn from(se2_tangent: SE2Tangent) -> Self {
         nalgebra::DVector::from_vec(vec![
-            se2_tangent.data[2], // theta first
-            se2_tangent.data[0], // x second
-            se2_tangent.data[1], // y third
+            se2_tangent.data[0], // x first
+            se2_tangent.data[1], // y second
+            se2_tangent.data[2], // theta third
         ])
     }
 }
