@@ -15,7 +15,6 @@ use crate::core::problem::{Problem, VariableEnum};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
 use faer::{Mat, sparse::SparseColMat};
-use faer_ext::IntoNalgebra;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -550,8 +549,8 @@ impl LevenbergMarquardt {
             &symbolic_structure,
         );
 
-        let residual_na = residual.as_ref().into_nalgebra();
-        let mut current_cost = residual_na.norm_squared();
+        let residual_norm = residual.norm_l2();
+        let mut current_cost = residual_norm * residual_norm;
         let initial_cost = current_cost;
         cost_evaluations += 1;
 
@@ -587,13 +586,12 @@ impl LevenbergMarquardt {
             if self.config.verbose {
                 println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
                 println!("Current cost: {:.12e}", current_cost);
-                let residual_na = residuals.as_ref().into_nalgebra();
                 println!(
                     "Residuals shape: ({}, {})",
                     residuals.nrows(),
                     residuals.ncols()
                 );
-                println!("Residuals norm: {:.12e}", residual_na.norm());
+                println!("Residuals norm: {:.12e}", residuals.norm_l2());
                 println!(
                     "Jacobian shape: ({}, {})",
                     jacobian.nrows(),
@@ -602,7 +600,7 @@ impl LevenbergMarquardt {
 
                 // Log first few residual values
                 let residual_vec: Vec<f64> = (0..residuals.nrows().min(10))
-                    .map(|row| residual_na[row])
+                    .map(|i| residuals[(i, 0)])
                     .collect();
                 println!("First 10 residuals: {:?}", residual_vec);
             }
@@ -664,10 +662,8 @@ impl LevenbergMarquardt {
                     println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
 
                     // Log first few gradient values
-                    use faer_ext::IntoNalgebra;
-                    let gradient_na = gradient.as_ref().into_nalgebra();
-                    let gradient_vec: Vec<f64> = (0..gradient_na.nrows().min(10))
-                        .map(|row| gradient_na[row])
+                    let gradient_vec: Vec<f64> = (0..gradient.nrows().min(10))
+                        .map(|i| gradient[(i, 0)])
                         .collect();
                     println!("First 10 gradient values: {:?}", gradient_vec);
 
@@ -703,11 +699,8 @@ impl LevenbergMarquardt {
                     println!("Final step norm: {:.12e}", step_norm);
 
                     // Log first few step values
-                    use faer_ext::IntoNalgebra;
-                    let step_na = step.as_ref().into_nalgebra();
-                    let step_vec: Vec<f64> = (0..step_na.nrows().min(10))
-                        .map(|row| step_na[row])
-                        .collect();
+                    let step_vec: Vec<f64> =
+                        (0..step.nrows().min(10)).map(|i| step[(i, 0)]).collect();
                     println!("First 10 step values: {:?}", step_vec);
                 }
 
@@ -718,47 +711,17 @@ impl LevenbergMarquardt {
                 // DEBUG: Log predicted reduction calculation details
                 if self.config.verbose {
                     println!("=== PREDICTED REDUCTION CALCULATION ===");
-                    use faer_ext::IntoNalgebra;
-                    let grad_na = gradient.as_ref().into_nalgebra();
-                    println!("Gradient norm: {:.12e}", grad_na.norm());
+                    println!("Gradient norm: {:.12e}", gradient.norm_l2());
                     println!("Predicted reduction: {:.12e}", predicted_reduction);
                 }
 
-                // Apply parameter updates using simple perturbation
-                let mut step_offset = 0;
-                for var_name in &sorted_vars {
-                    let var_size = variables[var_name].get_size();
-                    let var_step = step.subrows(step_offset, var_size);
-
-                    // Simple perturbation for SE3 variables
-                    match &mut variables.get_mut(var_name).unwrap() {
-                        crate::core::problem::VariableEnum::SE3(var) => {
-                            // Get current SE3 value
-                            let _current_translation = var.value.translation();
-                            let _current_rotation = var.value.rotation_so3();
-
-                            // Apply simple additive perturbation to translation (first 3 components)
-                            // and small rotation perturbation (last 3 components)
-                            use faer_ext::IntoNalgebra;
-                            let step_na = var_step.as_ref().into_nalgebra();
-
-                            // Create SE3Tangent from the step vector (proper manifold operation)
-                            let step_dvector = nalgebra::DVector::from_vec(vec![
-                                step_na[0], step_na[1], step_na[2], step_na[3], step_na[4],
-                                step_na[5],
-                            ]);
-                            let se3_tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
-
-                            // Apply proper manifold plus operation: g ⊞ φ = g ∘ exp(φ^∧)
-                            let new_se3 = var.plus(&se3_tangent);
-                            var.set_value(new_se3);
-                        }
-                        _ => {
-                            // For other variable types, implement as needed
-                        }
-                    }
-                    step_offset += var_size;
-                }
+                // Apply parameter updates using manifold operations
+                // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
+                let step_norm = crate::optimizer::apply_parameter_step(
+                    &mut variables,
+                    step.as_ref(),
+                    &sorted_vars,
+                );
 
                 if self.config.verbose && iteration < 3 {
                     println!("  Applied parameter step with norm: {:.6e}", step_norm);
@@ -770,8 +733,8 @@ impl LevenbergMarquardt {
                     &variable_index_sparce_matrix,
                     &symbolic_structure,
                 );
-                let new_residual_na = new_residual.as_ref().into_nalgebra();
-                let new_cost = new_residual_na.norm_squared();
+                let new_residual_norm = new_residual.norm_l2();
+                let new_cost = new_residual_norm * new_residual_norm;
                 cost_evaluations += 1;
 
                 // Compute step quality
@@ -854,42 +817,13 @@ impl LevenbergMarquardt {
                         });
                     }
                 } else {
-                    // Reject the step, revert parameter changes
-                    let mut step_offset = 0;
-                    for var_name in &sorted_vars {
-                        let var_size = variables[var_name].get_size();
-                        let var_step = step.subrows(step_offset, var_size);
-
-                        // Revert the perturbation using proper manifold operations
-                        match &mut variables.get_mut(var_name).unwrap() {
-                            crate::core::problem::VariableEnum::SE3(var) => {
-                                // Revert using negative step with proper manifold operation
-                                use faer_ext::IntoNalgebra;
-                                let step_na = var_step.as_ref().into_nalgebra();
-                                let negative_step_na = -step_na;
-
-                                // Create SE3Tangent from the negative step vector
-                                let negative_step_dvector = nalgebra::DVector::from_vec(vec![
-                                    negative_step_na[0],
-                                    negative_step_na[1],
-                                    negative_step_na[2],
-                                    negative_step_na[3],
-                                    negative_step_na[4],
-                                    negative_step_na[5],
-                                ]);
-                                let negative_se3_tangent =
-                                    crate::manifold::se3::SE3Tangent::from(negative_step_dvector);
-
-                                // Apply proper manifold plus operation with negative step
-                                let reverted_se3 = var.plus(&negative_se3_tangent);
-                                var.set_value(reverted_se3);
-                            }
-                            _ => {
-                                // For other variable types, implement as needed
-                            }
-                        }
-                        step_offset += var_size;
-                    }
+                    // Reject the step, revert parameter changes using negative step
+                    // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
+                    crate::optimizer::apply_negative_parameter_step(
+                        &mut variables,
+                        step.as_ref(),
+                        &sorted_vars,
+                    );
 
                     unsuccessful_steps += 1;
 

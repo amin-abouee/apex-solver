@@ -50,6 +50,70 @@ impl VariableEnum {
             VariableEnum::SO3(var) => var.value.clone().into(),
         }
     }
+
+    /// Apply a tangent space step to update this variable.
+    ///
+    /// This method applies a manifold plus operation: x_new = x ⊞ δx
+    /// where δx is a tangent vector. It supports all manifold types.
+    ///
+    /// # Arguments
+    /// * `step_slice` - View into the full step vector for this variable's DOF
+    ///
+    /// # Implementation Notes
+    /// Uses explicit clone instead of unsafe memory copy (`IntoNalgebra`) for small vectors.
+    /// This is safe and performant for typical manifold dimensions (1-6 DOF).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut var = VariableEnum::SE3(...);
+    /// let step = faer::Mat::from_fn(6, 1, |i, _| delta[i]);
+    /// var.apply_tangent_step(step.as_ref());
+    /// ```
+    pub fn apply_tangent_step(&mut self, step_slice: faer::MatRef<f64>) {
+        match self {
+            VariableEnum::SE3(var) => {
+                // SE3 has 6 DOF in tangent space
+                let step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::SE2(var) => {
+                // SE2 has 3 DOF in tangent space
+                let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = crate::manifold::se2::SE2Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::SO3(var) => {
+                // SO3 has 3 DOF in tangent space
+                let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = crate::manifold::so3::SO3Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::SO2(var) => {
+                // SO2 has 1 DOF in tangent space
+                let step_data = step_slice[(0, 0)];
+                let step_dvector = DVector::from_vec(vec![step_data]);
+                let tangent = crate::manifold::so2::SO2Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::Rn(var) => {
+                // Rn has dynamic size
+                let size = var.get_size();
+                let step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = crate::manifold::rn::RnTangent::new(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+        }
+    }
 }
 
 pub struct Problem {
