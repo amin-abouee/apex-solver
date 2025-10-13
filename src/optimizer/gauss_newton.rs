@@ -208,6 +208,32 @@ impl GaussNewtonConfig {
     }
 }
 
+/// State for optimization iteration
+#[allow(dead_code)]
+struct OptimizationState {
+    variables: HashMap<String, VariableEnum>,
+    variable_index_map: HashMap<String, usize>,
+    sorted_vars: Vec<String>,
+    symbolic_structure: crate::core::problem::SymbolicStructure,
+    current_cost: f64,
+    initial_cost: f64,
+}
+
+/// Result from step computation
+#[allow(dead_code)]
+struct StepResult {
+    step: Mat<f64>,
+    scaled_step: Mat<f64>,
+    gradient_norm: f64,
+}
+
+/// Result from cost evaluation
+#[allow(dead_code)]
+struct CostEvaluation {
+    new_cost: f64,
+    cost_reduction: f64,
+}
+
 /// Gauss-Newton solver for nonlinear least squares optimization.
 pub struct GaussNewton {
     config: GaussNewtonConfig,
@@ -326,6 +352,179 @@ impl GaussNewton {
         scaling * step
     }
 
+    /// Initialize optimization state from problem and initial parameters
+    fn initialize_optimization_state(
+        &self,
+        problem: &Problem,
+        initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) -> Result<OptimizationState, crate::core::ApexError> {
+        // Initialize variables from initial values
+        let variables = problem.initialize_variables(initial_params);
+
+        // Create column mapping for variables
+        let mut variable_index_map = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
+        sorted_vars.sort();
+
+        for var_name in &sorted_vars {
+            variable_index_map.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Build symbolic structure for sparse operations
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset);
+
+        // Initial cost evaluation using sparse interface
+        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_index_map,
+            &symbolic_structure,
+        );
+
+        let residual_norm = residual.norm_l2();
+        let current_cost = residual_norm * residual_norm;
+        let initial_cost = current_cost;
+
+        if self.config.verbose {
+            println!(
+                "Starting Gauss-Newton optimization with {} max iterations",
+                self.config.max_iterations
+            );
+            println!("Initial cost: {:.6e}", current_cost);
+        }
+
+        Ok(OptimizationState {
+            variables,
+            variable_index_map,
+            sorted_vars,
+            symbolic_structure,
+            current_cost,
+            initial_cost,
+        })
+    }
+
+    /// Process Jacobian by creating and applying Jacobi scaling if enabled
+    fn process_jacobian(
+        &mut self,
+        jacobian: &SparseColMat<usize, f64>,
+        iteration: usize,
+    ) -> SparseColMat<usize, f64> {
+        // Create Jacobi scaling on first iteration if enabled
+        if iteration == 0 && self.config.use_jacobi_scaling {
+            let scaling = self.create_jacobi_scaling(jacobian);
+
+            if self.config.verbose {
+                println!("Jacobi scaling computed for {} columns", scaling.ncols());
+            }
+
+            self.jacobi_scaling = Some(scaling);
+        }
+
+        // Apply Jacobi scaling to Jacobian if enabled
+        if self.config.use_jacobi_scaling {
+            self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
+        } else {
+            jacobian.clone()
+        }
+    }
+
+    /// Compute Gauss-Newton step by solving the normal equations
+    fn compute_gauss_newton_step(
+        &self,
+        residuals: &Mat<f64>,
+        scaled_jacobian: &SparseColMat<usize, f64>,
+        linear_solver: &mut Box<dyn SparseLinearSolver>,
+    ) -> Option<StepResult> {
+        // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
+        // Use min_diagonal for numerical stability (tiny regularization)
+        let residuals_owned = residuals.as_ref().to_owned();
+        let scaled_step = linear_solver.solve_augmented_equation(
+            &residuals_owned,
+            scaled_jacobian,
+            self.config.min_diagonal,
+        )?;
+
+        // Get gradient from the solver (J^T * r)
+        let solver_gradient = linear_solver.get_gradient()?;
+        let gradient = -solver_gradient; // Negate to get actual gradient
+
+        // Compute gradient norm for convergence check
+        let gradient_norm = gradient.norm_l2();
+
+        if self.config.verbose {
+            println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
+        }
+
+        // Apply inverse Jacobi scaling to get final step (if enabled)
+        let step = if self.config.use_jacobi_scaling {
+            self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
+        } else {
+            scaled_step.clone()
+        };
+
+        if self.config.verbose {
+            println!("Step norm: {:.12e}", step.norm_l2());
+        }
+
+        Some(StepResult {
+            step,
+            scaled_step,
+            gradient_norm,
+        })
+    }
+
+    /// Apply step to parameters and evaluate new cost
+    fn apply_step_and_evaluate_cost(
+        &self,
+        step_result: &StepResult,
+        state: &mut OptimizationState,
+        problem: &Problem,
+    ) -> CostEvaluation {
+        // Apply parameter updates using manifold operations
+        let _step_norm = crate::optimizer::apply_parameter_step(
+            &mut state.variables,
+            step_result.step.as_ref(),
+            &state.sorted_vars,
+        );
+
+        // Compute new cost using sparse interface
+        let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
+            &state.variables,
+            &state.variable_index_map,
+            &state.symbolic_structure,
+        );
+        let new_residual_norm = new_residual.norm_l2();
+        let new_cost = new_residual_norm * new_residual_norm;
+
+        // Compute cost reduction
+        let cost_reduction = state.current_cost - new_cost;
+
+        // Update current cost
+        state.current_cost = new_cost;
+
+        CostEvaluation {
+            new_cost,
+            cost_reduction,
+        }
+    }
+
+    /// Log iteration details if verbose mode is enabled
+    fn log_iteration(&self, iteration: usize, cost_eval: &CostEvaluation, step_norm: f64) {
+        if !self.config.verbose {
+            return;
+        }
+
+        println!(
+            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, step_norm = {:.6e}",
+            iteration + 1,
+            cost_eval.new_cost,
+            cost_eval.cost_reduction,
+            step_norm
+        );
+    }
+
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -369,71 +568,35 @@ impl GaussNewton {
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::core::ApexError> {
         let start_time = Instant::now();
         let mut iteration = 0;
-        let mut cost_evaluations = 0;
+        let mut cost_evaluations = 1; // Initial cost evaluation
         let mut jacobian_evaluations = 0;
+
+        // Initialize optimization state
+        let mut state = self.initialize_optimization_state(problem, initial_params)?;
 
         // Create linear solver
         let mut linear_solver = self.create_linear_solver();
-
-        // Initialize variables from initial values
-        let mut variables = problem.initialize_variables(initial_params);
-
-        // Create column mapping for variables
-        let mut variable_index_sparce_matrix = HashMap::new();
-        let mut col_offset = 0;
-        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
-        sorted_vars.sort();
-
-        for var_name in &sorted_vars {
-            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
-            col_offset += variables[var_name].get_size();
-        }
-
-        // Build symbolic structure for sparse operations
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
-
-        // Initial cost evaluation using sparse interface
-        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_sparce_matrix,
-            &symbolic_structure,
-        );
-
-        let residual_norm = residual.norm_l2();
-        let mut current_cost = residual_norm * residual_norm;
-        let initial_cost = current_cost;
-        cost_evaluations += 1;
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
-
-        if self.config.verbose {
-            println!(
-                "Starting Gauss-Newton optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!("Initial cost: {:.6e}", current_cost);
-        }
-
         let mut final_gradient_norm;
         let mut final_parameter_update_norm;
 
+        // Main optimization loop
         loop {
-            // Evaluate residuals and Jacobian using sparse interface
+            // Evaluate residuals and Jacobian
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_index_sparce_matrix,
-                &symbolic_structure,
+                &state.variables,
+                &state.variable_index_map,
+                &state.symbolic_structure,
             );
             jacobian_evaluations += 1;
 
-            // DEBUG: Log detailed iteration information
             if self.config.verbose {
                 println!("\n=== GAUSS-NEWTON ITERATION {} ===", iteration);
-                println!("Current cost: {:.12e}", current_cost);
+                println!("Current cost: {:.12e}", state.current_cost);
                 println!(
                     "Residuals shape: ({}, {})",
                     residuals.nrows(),
@@ -447,143 +610,77 @@ impl GaussNewton {
                 );
             }
 
-            // Create or reuse Jacobi scaling on first iteration (if enabled)
-            if iteration == 0 && self.config.use_jacobi_scaling {
-                let scaling = self.create_jacobi_scaling(&jacobian);
+            // Process Jacobian (apply scaling if enabled)
+            let scaled_jacobian = self.process_jacobian(&jacobian, iteration);
 
-                if self.config.verbose {
-                    println!("Jacobi scaling computed for {} columns", scaling.ncols());
+            // Compute Gauss-Newton step
+            let step_result = match self.compute_gauss_newton_step(
+                &residuals,
+                &scaled_jacobian,
+                &mut linear_solver,
+            ) {
+                Some(result) => result,
+                None => {
+                    return Err(crate::core::ApexError::Solver(
+                        "Linear solver failed to solve Gauss-Newton system".to_string(),
+                    ));
                 }
-
-                self.jacobi_scaling = Some(scaling);
-            }
-
-            // Apply Jacobi scaling to Jacobian (if enabled)
-            let scaled_jacobian = if self.config.use_jacobi_scaling {
-                self.apply_jacobi_scaling(&jacobian, self.jacobi_scaling.as_ref().unwrap())
-            } else {
-                jacobian.clone()
             };
 
-            // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
-            // Note: We use min_diagonal for numerical stability (tiny regularization)
-            let residuals_owned = residuals.as_ref().to_owned();
-            if let Some(scaled_step) = linear_solver.solve_augmented_equation(
-                &residuals_owned,
-                &scaled_jacobian,
-                self.config.min_diagonal, // Tiny regularization for numerical stability
+            // Update tracking variables
+            max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
+            final_gradient_norm = step_result.gradient_norm;
+            let step_norm = step_result.step.norm_l2();
+            max_parameter_update_norm = max_parameter_update_norm.max(step_norm);
+            final_parameter_update_norm = step_norm;
+
+            // Apply step and evaluate new cost
+            let cost_eval = self.apply_step_and_evaluate_cost(&step_result, &mut state, problem);
+            cost_evaluations += 1;
+            total_cost_reduction += cost_eval.cost_reduction;
+
+            // Log iteration
+            self.log_iteration(iteration, &cost_eval, step_norm);
+
+            // Check convergence
+            let elapsed = start_time.elapsed();
+            if let Some(status) = self.check_convergence(
+                iteration,
+                cost_eval.cost_reduction,
+                step_norm,
+                step_result.gradient_norm,
+                elapsed,
             ) {
-                // Get gradient from the solver (J^T * r)
-                let solver_gradient = linear_solver.get_gradient().unwrap();
-                let gradient = -solver_gradient; // Negate to get actual gradient
-
-                // Compute gradient norm for convergence check
-                let gradient_norm = gradient.norm_l2();
-                max_gradient_norm = max_gradient_norm.max(gradient_norm);
-                final_gradient_norm = gradient_norm;
-
-                if self.config.verbose {
-                    println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
-                }
-
-                // Apply inverse Jacobi scaling to get final step (if enabled)
-                let step = if self.config.use_jacobi_scaling {
-                    self.apply_inverse_jacobi_scaling(
-                        &scaled_step,
-                        self.jacobi_scaling.as_ref().unwrap(),
-                    )
-                } else {
-                    scaled_step.clone()
-                };
-
-                let step_norm = step.norm_l2();
-                max_parameter_update_norm = max_parameter_update_norm.max(step_norm);
-                final_parameter_update_norm = step_norm;
-
-                if self.config.verbose {
-                    println!("Step norm: {:.12e}", step_norm);
-                }
-
-                // Apply parameter updates using manifold operations
-                // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
-                let _applied_step_norm = crate::optimizer::apply_parameter_step(
-                    &mut variables,
-                    step.as_ref(),
-                    &sorted_vars,
-                );
-
-                // Compute new cost using sparse interface
-                let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
-                    &variables,
-                    &variable_index_sparce_matrix,
-                    &symbolic_structure,
-                );
-                let new_residual_norm = new_residual.norm_l2();
-                let new_cost = new_residual_norm * new_residual_norm;
-                cost_evaluations += 1;
-
-                // Compute cost reduction
-                let cost_reduction = current_cost - new_cost;
-                total_cost_reduction += cost_reduction;
-
-                if self.config.verbose {
-                    println!(
-                        "Iteration {}: cost = {:.6e}, reduction = {:.6e}, step_norm = {:.6e}",
-                        iteration + 1,
-                        new_cost,
-                        cost_reduction,
-                        step_norm
-                    );
-                }
-
-                // Update current cost
-                current_cost = new_cost;
-
-                // Check convergence
-                let elapsed = start_time.elapsed();
-                if let Some(status) = self.check_convergence(
-                    iteration,
-                    cost_reduction,
-                    step_norm,
-                    gradient_norm,
+                let summary = self.create_summary(
+                    state.initial_cost,
+                    state.current_cost,
+                    iteration + 1,
+                    max_gradient_norm,
+                    final_gradient_norm,
+                    max_parameter_update_norm,
+                    final_parameter_update_norm,
+                    total_cost_reduction,
                     elapsed,
-                ) {
-                    let summary = self.create_summary(
-                        initial_cost,
-                        current_cost,
-                        iteration + 1,
-                        max_gradient_norm,
-                        final_gradient_norm,
-                        max_parameter_update_norm,
-                        final_parameter_update_norm,
-                        total_cost_reduction,
-                        elapsed,
-                    );
+                );
 
-                    if self.config.verbose {
-                        println!("{}", summary);
-                    }
-
-                    return Ok(SolverResult {
-                        status,
-                        iterations: iteration + 1,
-                        init_cost: initial_cost,
-                        final_cost: current_cost,
-                        parameters: variables.into_iter().collect(),
-                        elapsed_time: elapsed,
-                        convergence_info: Some(ConvergenceInfo {
-                            final_gradient_norm,
-                            final_parameter_update_norm,
-                            cost_evaluations,
-                            jacobian_evaluations,
-                        }),
-                    });
+                if self.config.verbose {
+                    println!("{}", summary);
                 }
-            } else {
-                // Linear solver failed
-                return Err(crate::core::ApexError::Solver(
-                    "Linear solver failed to solve Gauss-Newton system".to_string(),
-                ));
+
+                return Ok(SolverResult {
+                    status,
+                    iterations: iteration + 1,
+                    init_cost: state.initial_cost,
+                    final_cost: state.current_cost,
+                    parameters: state.variables.into_iter().collect(),
+                    elapsed_time: elapsed,
+                    convergence_info: Some(ConvergenceInfo {
+                        final_gradient_norm,
+                        final_parameter_update_norm,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                    }),
+                });
             }
 
             iteration += 1;

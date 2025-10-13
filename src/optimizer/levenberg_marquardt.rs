@@ -268,6 +268,36 @@ impl LevenbergMarquardtConfig {
     }
 }
 
+/// State for optimization iteration
+#[allow(dead_code)]
+struct OptimizationState {
+    variables: HashMap<String, VariableEnum>,
+    variable_index_map: HashMap<String, usize>,
+    sorted_vars: Vec<String>,
+    symbolic_structure: crate::core::problem::SymbolicStructure,
+    current_cost: f64,
+    initial_cost: f64,
+}
+
+/// Result from step computation
+#[allow(dead_code)]
+struct StepResult {
+    step: Mat<f64>,
+    scaled_step: Mat<f64>,
+    gradient: Mat<f64>,
+    gradient_norm: f64,
+    predicted_reduction: f64,
+}
+
+/// Result from step evaluation
+#[allow(dead_code)]
+struct StepEvaluation {
+    accepted: bool,
+    new_cost: f64,
+    cost_reduction: f64,
+    rho: f64,
+}
+
 /// Levenberg-Marquardt solver for nonlinear least squares optimization.
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
@@ -463,6 +493,247 @@ impl LevenbergMarquardt {
         scaling * step
     }
 
+    /// Initialize optimization state from problem and initial parameters
+    fn initialize_optimization_state(
+        &self,
+        problem: &Problem,
+        initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) -> Result<OptimizationState, crate::core::ApexError> {
+        // Initialize variables from initial values
+        let variables = problem.initialize_variables(initial_params);
+
+        // Create column mapping for variables
+        let mut variable_index_map = HashMap::new();
+        let mut col_offset = 0;
+        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
+        sorted_vars.sort();
+
+        for var_name in &sorted_vars {
+            variable_index_map.insert(var_name.clone(), col_offset);
+            col_offset += variables[var_name].get_size();
+        }
+
+        // Build symbolic structure for sparse operations
+        let symbolic_structure =
+            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset);
+
+        // Initial cost evaluation using sparse interface
+        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_index_map,
+            &symbolic_structure,
+        );
+
+        let residual_norm = residual.norm_l2();
+        let current_cost = residual_norm * residual_norm;
+        let initial_cost = current_cost;
+
+        if self.config.verbose {
+            println!(
+                "Starting Levenberg-Marquardt optimization with {} max iterations",
+                self.config.max_iterations
+            );
+            println!(
+                "Initial cost: {:.6e}, initial damping: {:.6e}",
+                current_cost, self.config.damping
+            );
+        }
+
+        Ok(OptimizationState {
+            variables,
+            variable_index_map,
+            sorted_vars,
+            symbolic_structure,
+            current_cost,
+            initial_cost,
+        })
+    }
+
+    /// Process Jacobian by creating and applying Jacobi scaling if enabled
+    fn process_jacobian(
+        &mut self,
+        jacobian: &SparseColMat<usize, f64>,
+        iteration: usize,
+    ) -> SparseColMat<usize, f64> {
+        // Create Jacobi scaling on first iteration if enabled
+        if iteration == 0 && self.config.use_jacobi_scaling {
+            let scaling = self.create_jacobi_scaling(jacobian);
+
+            if self.config.verbose {
+                println!("Jacobi scaling computed for {} columns", scaling.ncols());
+            }
+
+            self.jacobi_scaling = Some(scaling);
+        }
+
+        // Apply Jacobi scaling to Jacobian if enabled
+        if self.config.use_jacobi_scaling {
+            self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
+        } else {
+            jacobian.clone()
+        }
+    }
+
+    /// Compute optimization step by solving the augmented system
+    fn compute_optimization_step(
+        &self,
+        residuals: &Mat<f64>,
+        scaled_jacobian: &SparseColMat<usize, f64>,
+        linear_solver: &mut Box<dyn SparseLinearSolver>,
+    ) -> Option<StepResult> {
+        // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
+        let residuals_owned = residuals.as_ref().to_owned();
+        let scaled_step = linear_solver.solve_augmented_equation(
+            &residuals_owned,
+            scaled_jacobian,
+            self.config.damping,
+        )?;
+
+        // Get cached gradient and Hessian from the solver
+        let solver_gradient = linear_solver.get_gradient()?;
+        let hessian = linear_solver.get_hessian()?;
+
+        // Negate to get actual gradient: J^T * r (solver computes J^T * (-r))
+        let gradient = -solver_gradient;
+        let gradient_norm = gradient.norm_l2();
+
+        if self.config.verbose {
+            println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
+            println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
+            println!("Damping parameter: {:.12e}", self.config.damping);
+        }
+
+        // Apply inverse Jacobi scaling to get final step (if enabled)
+        let step = if self.config.use_jacobi_scaling {
+            self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
+        } else {
+            scaled_step.clone()
+        };
+
+        if self.config.verbose {
+            println!(
+                "Linear step (scaled_step) norm: {:.12e}",
+                scaled_step.norm_l2()
+            );
+            println!("Final step norm: {:.12e}", step.norm_l2());
+        }
+
+        // Compute predicted reduction using scaled values
+        let predicted_reduction =
+            self.compute_predicted_reduction(&scaled_step, &gradient, hessian);
+
+        if self.config.verbose {
+            println!("Predicted reduction: {:.12e}", predicted_reduction);
+        }
+
+        Some(StepResult {
+            step,
+            scaled_step,
+            gradient,
+            gradient_norm,
+            predicted_reduction,
+        })
+    }
+
+    /// Evaluate and apply step, handling acceptance/rejection based on step quality
+    fn evaluate_and_apply_step(
+        &mut self,
+        step_result: &StepResult,
+        state: &mut OptimizationState,
+        problem: &Problem,
+    ) -> StepEvaluation {
+        // Apply parameter updates using manifold operations
+        let _step_norm = crate::optimizer::apply_parameter_step(
+            &mut state.variables,
+            step_result.step.as_ref(),
+            &state.sorted_vars,
+        );
+
+        // Compute new cost using sparse interface
+        let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
+            &state.variables,
+            &state.variable_index_map,
+            &state.symbolic_structure,
+        );
+        let new_residual_norm = new_residual.norm_l2();
+        let new_cost = new_residual_norm * new_residual_norm;
+
+        // Compute step quality
+        let rho = self.compute_step_quality(
+            state.current_cost,
+            new_cost,
+            step_result.predicted_reduction,
+        );
+
+        if self.config.verbose {
+            println!("=== RHO CALCULATION DETAILS ===");
+            println!("Old cost: {:.12e}", state.current_cost);
+            println!("New cost: {:.12e}", new_cost);
+            let actual_reduction = state.current_cost - new_cost;
+            println!("Actual cost reduction: {:.12e}", actual_reduction);
+            println!(
+                "Predicted cost reduction: {:.12e}",
+                step_result.predicted_reduction
+            );
+            println!("Rho (actual/predicted): {:.12e}", rho);
+        }
+
+        // Update damping and decide whether to accept step
+        let accepted = self.update_damping(rho);
+
+        let cost_reduction = if accepted {
+            // Accept the step - parameters already updated
+            let reduction = state.current_cost - new_cost;
+            state.current_cost = new_cost;
+            reduction
+        } else {
+            // Reject the step - revert parameter changes
+            crate::optimizer::apply_negative_parameter_step(
+                &mut state.variables,
+                step_result.step.as_ref(),
+                &state.sorted_vars,
+            );
+            0.0
+        };
+
+        StepEvaluation {
+            accepted,
+            new_cost,
+            cost_reduction,
+            rho,
+        }
+    }
+
+    /// Log iteration details if verbose mode is enabled
+    fn log_iteration(
+        &self,
+        iteration: usize,
+        step_eval: &StepEvaluation,
+        step_norm: f64,
+        current_cost: f64,
+    ) {
+        if !self.config.verbose {
+            return;
+        }
+
+        let status = if step_eval.accepted {
+            "[ACCEPTED]"
+        } else {
+            "[REJECTED]"
+        };
+
+        println!(
+            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, damping = {:.6e}, step_norm = {:.6e}, rho = {:.3} {}",
+            iteration + 1,
+            current_cost,
+            step_eval.cost_reduction,
+            self.config.damping,
+            step_norm,
+            step_eval.rho,
+            status
+        );
+    }
+
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -515,77 +786,37 @@ impl LevenbergMarquardt {
     {
         let start_time = Instant::now();
         let mut iteration = 0;
-        let mut cost_evaluations = 0;
+        let mut cost_evaluations = 1; // Initial cost evaluation
         let mut jacobian_evaluations = 0;
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
 
+        // Initialize optimization state
+        let mut state = self.initialize_optimization_state(problem, initial_params)?;
+
         // Create linear solver
         let mut linear_solver = self.create_linear_solver();
-
-        // Initialize variables from initial values
-        let mut variables = problem.initialize_variables(initial_params);
-        // println!("Initial variables: {:?}", variables);
-
-        // Create column mapping for variables
-        let mut variable_index_sparce_matrix = HashMap::new();
-        let mut col_offset = 0;
-        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
-        sorted_vars.sort();
-
-        for var_name in &sorted_vars {
-            variable_index_sparce_matrix.insert(var_name.clone(), col_offset);
-            col_offset += variables[var_name].get_size();
-        }
-
-        // Build symbolic structure for sparse operations
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
-
-        // Initial cost evaluation using sparse interface
-        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_sparce_matrix,
-            &symbolic_structure,
-        );
-
-        let residual_norm = residual.norm_l2();
-        let mut current_cost = residual_norm * residual_norm;
-        let initial_cost = current_cost;
-        cost_evaluations += 1;
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
-
-        if self.config.verbose {
-            println!(
-                "Starting Levenberg-Marquardt optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!(
-                "Initial cost: {:.6e}, initial damping: {:.6e}",
-                current_cost, self.config.damping
-            );
-        }
-
         let mut final_gradient_norm;
         let mut final_parameter_update_norm;
 
+        // Main optimization loop
         loop {
-            // Evaluate residuals and Jacobian using sparse interface
+            // Evaluate residuals and Jacobian
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_index_sparce_matrix,
-                &symbolic_structure,
+                &state.variables,
+                &state.variable_index_map,
+                &state.symbolic_structure,
             );
             jacobian_evaluations += 1;
 
-            // DEBUG: Log detailed iteration information
             if self.config.verbose {
                 println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
-                println!("Current cost: {:.12e}", current_cost);
+                println!("Current cost: {:.12e}", state.current_cost);
                 println!(
                     "Residuals shape: ({}, {})",
                     residuals.nrows(),
@@ -597,34 +828,11 @@ impl LevenbergMarquardt {
                     jacobian.nrows(),
                     jacobian.ncols()
                 );
-
-                // Log first few residual values
-                let residual_vec: Vec<f64> = (0..residuals.nrows().min(10))
-                    .map(|i| residuals[(i, 0)])
-                    .collect();
-                println!("First 10 residuals: {:?}", residual_vec);
             }
 
-            // Create or reuse Jacobi scaling on first iteration (if enabled)
-            if iteration == 0 && self.config.use_jacobi_scaling {
-                let scaling = self.create_jacobi_scaling(&jacobian);
+            // Process Jacobian (apply scaling if enabled)
+            let scaled_jacobian = self.process_jacobian(&jacobian, iteration);
 
-                // DEBUG: Log Jacobi scaling values
-                if self.config.verbose {
-                    println!("Jacobi scaling computed for {} columns", scaling.ncols());
-                }
-
-                self.jacobi_scaling = Some(scaling);
-            }
-
-            // Apply Jacobi scaling to Jacobian (if enabled)
-            let scaled_jacobian = if self.config.use_jacobi_scaling {
-                self.apply_jacobi_scaling(&jacobian, self.jacobi_scaling.as_ref().unwrap())
-            } else {
-                jacobian.clone()
-            };
-
-            // DEBUG: Log scaled Jacobian info
             if self.config.verbose {
                 println!(
                     "Scaled Jacobian shape: ({}, {})",
@@ -633,224 +841,93 @@ impl LevenbergMarquardt {
                 );
             }
 
-            // Use standard augmented equation solver with scaled Jacobian
-            // This will solve: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
-            let residuals_owned = residuals.as_ref().to_owned();
-            if let Some(scaled_step) = linear_solver.solve_augmented_equation(
-                &residuals_owned,
+            // Compute optimization step
+            let step_result = match self.compute_optimization_step(
+                &residuals,
                 &scaled_jacobian,
-                self.config.damping,
+                &mut linear_solver,
             ) {
-                // Get cached gradient and Hessian from the solver (computed during solve)
-                // Note: solver stores gradient as J^T * (-r), so we need the actual J^T * r
-                let solver_gradient = linear_solver.get_gradient().unwrap();
-                let hessian = linear_solver.get_hessian().unwrap();
-
-                // Negate to get actual gradient: J^T * r (solver computes J^T * (-r))
-                let gradient = -solver_gradient;
-
-                // Compute gradient norm for convergence check
-                let gradient_norm = gradient.norm_l2();
-                max_gradient_norm = max_gradient_norm.max(gradient_norm);
-                final_gradient_norm = gradient_norm;
-
-                // DEBUG: Log gradient and Hessian info
-                if self.config.verbose {
-                    println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
-
-                    // Log Hessian info
-                    println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
-
-                    // Log first few gradient values
-                    let gradient_vec: Vec<f64> = (0..gradient.nrows().min(10))
-                        .map(|i| gradient[(i, 0)])
-                        .collect();
-                    println!("First 10 gradient values: {:?}", gradient_vec);
-
-                    println!("Damping parameter: {:.12e}", self.config.damping);
+                Some(result) => result,
+                None => {
+                    return Err(crate::core::ApexError::Solver(
+                        "Linear solver failed to solve augmented system".to_string(),
+                    ));
                 }
+            };
 
-                if self.config.verbose && iteration < 3 {
-                    println!(
-                        "Debug iteration {}: gradient_norm = {:.6e}, damping = {:.6e}",
-                        iteration, gradient_norm, self.config.damping
-                    );
-                }
-                // Apply inverse Jacobi scaling to get final step (if enabled)
-                let step = if self.config.use_jacobi_scaling {
-                    self.apply_inverse_jacobi_scaling(
-                        &scaled_step,
-                        self.jacobi_scaling.as_ref().unwrap(),
-                    )
-                } else {
-                    scaled_step.clone()
-                };
+            // Update tracking variables
+            max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
+            final_gradient_norm = step_result.gradient_norm;
+            let step_norm = step_result.step.norm_l2();
+            max_parameter_update_norm = max_parameter_update_norm.max(step_norm);
+            final_parameter_update_norm = step_norm;
 
-                let step_norm = step.norm_l2();
-                max_parameter_update_norm = max_parameter_update_norm.max(step_norm);
-                final_parameter_update_norm = step_norm;
+            // Evaluate and apply step (handles accept/reject)
+            let step_eval = self.evaluate_and_apply_step(&step_result, &mut state, problem);
+            cost_evaluations += 1;
 
-                // DEBUG: Log linear step details
-                if self.config.verbose {
-                    println!(
-                        "Linear step (scaled_step) norm: {:.12e}",
-                        scaled_step.norm_l2()
-                    );
-                    println!("Final step norm: {:.12e}", step_norm);
-
-                    // Log first few step values
-                    let step_vec: Vec<f64> =
-                        (0..step.nrows().min(10)).map(|i| step[(i, 0)]).collect();
-                    println!("First 10 step values: {:?}", step_vec);
-                }
-
-                // Compute predicted reduction using scaled values
-                let predicted_reduction =
-                    self.compute_predicted_reduction(&scaled_step, &gradient, hessian);
-
-                // DEBUG: Log predicted reduction calculation details
-                if self.config.verbose {
-                    println!("=== PREDICTED REDUCTION CALCULATION ===");
-                    println!("Gradient norm: {:.12e}", gradient.norm_l2());
-                    println!("Predicted reduction: {:.12e}", predicted_reduction);
-                }
-
-                // Apply parameter updates using manifold operations
-                // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
-                let step_norm = crate::optimizer::apply_parameter_step(
-                    &mut variables,
-                    step.as_ref(),
-                    &sorted_vars,
-                );
-
-                if self.config.verbose && iteration < 3 {
-                    println!("  Applied parameter step with norm: {:.6e}", step_norm);
-                }
-
-                // Compute new cost using sparse interface
-                let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
-                    &variables,
-                    &variable_index_sparce_matrix,
-                    &symbolic_structure,
-                );
-                let new_residual_norm = new_residual.norm_l2();
-                let new_cost = new_residual_norm * new_residual_norm;
-                cost_evaluations += 1;
-
-                // Compute step quality
-                let rho = self.compute_step_quality(current_cost, new_cost, predicted_reduction);
-
-                // DEBUG: Log detailed rho calculation
-                if self.config.verbose {
-                    println!("=== RHO CALCULATION DETAILS ===");
-                    println!("Old cost: {:.12e}", current_cost);
-                    println!("New cost: {:.12e}", new_cost);
-                    let actual_reduction = current_cost - new_cost;
-                    println!("Actual cost reduction: {:.12e}", actual_reduction);
-                    println!("Predicted cost reduction: {:.12e}", predicted_reduction);
-                    println!("Rho (actual/predicted): {:.12e}", rho);
-                }
-
-                // Update damping and decide whether to accept step
-                let accept_step = self.update_damping(rho);
-
-                if accept_step {
-                    // Accept the step
-                    let cost_reduction = current_cost - new_cost;
-                    total_cost_reduction += cost_reduction;
-                    // Parameters already updated in variables
-                    current_cost = new_cost;
-                    successful_steps += 1;
-
-                    if self.config.verbose {
-                        println!(
-                            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, damping = {:.6e}, step_norm = {:.6e}, rho = {:.3} [ACCEPTED]",
-                            iteration + 1,
-                            current_cost,
-                            cost_reduction,
-                            self.config.damping,
-                            step_norm,
-                            rho
-                        );
-                    }
-
-                    // Check convergence only after successful steps
-                    let elapsed = start_time.elapsed();
-                    if let Some(status) = self.check_convergence(
-                        iteration,
-                        cost_reduction, // Use actual cost reduction from this step
-                        step_norm,      // Use actual step norm from this step
-                        gradient_norm,
-                        elapsed,
-                    ) {
-                        let summary = self.create_summary(
-                            initial_cost,
-                            current_cost,
-                            iteration + 1, // increment for final count
-                            successful_steps,
-                            unsuccessful_steps,
-                            max_gradient_norm,
-                            final_gradient_norm,
-                            max_parameter_update_norm,
-                            final_parameter_update_norm,
-                            total_cost_reduction,
-                            elapsed,
-                        );
-
-                        if self.config.verbose {
-                            println!("{}", summary);
-                        }
-
-                        return Ok(SolverResult {
-                            status,
-                            iterations: iteration + 1,
-                            init_cost: initial_cost,
-                            final_cost: current_cost,
-                            parameters: variables.into_iter().collect(),
-                            elapsed_time: elapsed,
-                            convergence_info: Some(ConvergenceInfo {
-                                final_gradient_norm,
-                                final_parameter_update_norm,
-                                cost_evaluations,
-                                jacobian_evaluations,
-                            }),
-                        });
-                    }
-                } else {
-                    // Reject the step, revert parameter changes using negative step
-                    // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
-                    crate::optimizer::apply_negative_parameter_step(
-                        &mut variables,
-                        step.as_ref(),
-                        &sorted_vars,
-                    );
-
-                    unsuccessful_steps += 1;
-
-                    if self.config.verbose {
-                        println!(
-                            "Iteration {}: cost = {:.6e}, damping = {:.6e}, step_norm = {:.6e}, rho = {:.3} [REJECTED]",
-                            iteration + 1,
-                            current_cost,
-                            self.config.damping,
-                            step_norm,
-                            rho
-                        );
-                    }
-                }
+            // Update counters based on acceptance
+            if step_eval.accepted {
+                successful_steps += 1;
+                total_cost_reduction += step_eval.cost_reduction;
             } else {
-                // Linear solver failed
-                return Err(crate::core::ApexError::Solver(
-                    "Linear solver failed to solve augmented system".to_string(),
-                ));
+                unsuccessful_steps += 1;
             }
 
-            // Check only max iterations - other convergence criteria checked after successful steps
+            // Log iteration
+            self.log_iteration(iteration, &step_eval, step_norm, state.current_cost);
+
+            // Check convergence (only after accepted steps)
+            if step_eval.accepted {
+                let elapsed = start_time.elapsed();
+                if let Some(status) = self.check_convergence(
+                    iteration,
+                    step_eval.cost_reduction,
+                    step_norm,
+                    step_result.gradient_norm,
+                    elapsed,
+                ) {
+                    let summary = self.create_summary(
+                        state.initial_cost,
+                        state.current_cost,
+                        iteration + 1,
+                        successful_steps,
+                        unsuccessful_steps,
+                        max_gradient_norm,
+                        final_gradient_norm,
+                        max_parameter_update_norm,
+                        final_parameter_update_norm,
+                        total_cost_reduction,
+                        elapsed,
+                    );
+
+                    if self.config.verbose {
+                        println!("{}", summary);
+                    }
+
+                    return Ok(SolverResult {
+                        status,
+                        iterations: iteration + 1,
+                        init_cost: state.initial_cost,
+                        final_cost: state.current_cost,
+                        parameters: state.variables.into_iter().collect(),
+                        elapsed_time: elapsed,
+                        convergence_info: Some(ConvergenceInfo {
+                            final_gradient_norm,
+                            final_parameter_update_norm,
+                            cost_evaluations,
+                            jacobian_evaluations,
+                        }),
+                    });
+                }
+            }
+
+            // Check max iterations
             let elapsed = start_time.elapsed();
             if iteration >= self.config.max_iterations {
                 let summary = self.create_summary(
-                    initial_cost,
-                    current_cost,
+                    state.initial_cost,
+                    state.current_cost,
                     iteration,
                     successful_steps,
                     unsuccessful_steps,
@@ -867,10 +944,10 @@ impl LevenbergMarquardt {
                 }
 
                 return Ok(SolverResult {
-                    parameters: variables,
+                    parameters: state.variables,
                     status: OptimizationStatus::MaxIterationsReached,
-                    init_cost: initial_cost,
-                    final_cost: current_cost,
+                    init_cost: state.initial_cost,
+                    final_cost: state.current_cost,
                     iterations: iteration,
                     elapsed_time: elapsed,
                     convergence_info: Some(ConvergenceInfo {
@@ -881,6 +958,7 @@ impl LevenbergMarquardt {
                     }),
                 });
             }
+
             iteration += 1;
         }
     }
