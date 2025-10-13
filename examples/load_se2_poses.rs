@@ -5,8 +5,9 @@ use apex_solver::core::factors::BetweenFactorSE2;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
-use apex_solver::optimizer::LevenbergMarquardt;
+use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+use apex_solver::optimizer::{GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
 
@@ -25,6 +26,10 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Optimizer type: "lm" (Levenberg-Marquardt) or "gn" (Gauss-Newton)
+    #[arg(short, long, default_value = "lm")]
+    optimizer: String,
 }
 
 #[derive(Clone)]
@@ -202,17 +207,48 @@ fn test_dataset(
     println!("\nInitial state:");
     println!("  Initial cost: {:.6e}", initial_cost);
 
-    println!("\n=== STARTING LEVENBERG-MARQUARDT OPTIMIZATION ===");
-    let config = LevenbergMarquardtConfig::new()
-        .with_max_iterations(args.max_iterations)
-        .with_cost_tolerance(1e-4)
-        .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-10)
-        .with_verbose(args.verbose);
+    // Determine optimizer type and run optimization
+    let optimizer_name = match args.optimizer.to_lowercase().as_str() {
+        "gn" => "GN",
+        "lm" => "LM",
+        _ => {
+            eprintln!(
+                "Invalid optimizer '{}'. Using LM (Levenberg-Marquardt) as default.",
+                args.optimizer
+            );
+            "LM"
+        }
+    };
+
+    println!(
+        "\n=== STARTING {} OPTIMIZATION ===",
+        if optimizer_name == "LM" {
+            "LEVENBERG-MARQUARDT"
+        } else {
+            "GAUSS-NEWTON"
+        }
+    );
 
     let start_time = Instant::now();
-    let mut solver = LevenbergMarquardt::with_config(config);
-    let result = solver.minimize(&problem, &initial_values)?;
+    let result = if optimizer_name == "GN" {
+        let config = GaussNewtonConfig::new()
+            .with_max_iterations(args.max_iterations)
+            .with_cost_tolerance(1e-4)
+            .with_parameter_tolerance(1e-4)
+            .with_gradient_tolerance(1e-10)
+            .with_verbose(args.verbose);
+        let mut solver = GaussNewton::with_config(config);
+        solver.minimize(&problem, &initial_values)?
+    } else {
+        let config = LevenbergMarquardtConfig::new()
+            .with_max_iterations(args.max_iterations)
+            .with_cost_tolerance(1e-4)
+            .with_parameter_tolerance(1e-4)
+            .with_gradient_tolerance(1e-10)
+            .with_verbose(args.verbose);
+        let mut solver = LevenbergMarquardt::with_config(config);
+        solver.minimize(&problem, &initial_values)?
+    };
     let duration = start_time.elapsed();
 
     println!("\n=== OPTIMIZATION RESULTS ===");
@@ -264,7 +300,7 @@ fn test_dataset(
 
     Ok(DatasetResult {
         dataset: dataset_name.to_string(),
-        optimizer: "LM".to_string(),
+        optimizer: optimizer_name.to_string(),
         vertices: num_vertices,
         edges: num_edges,
         initial_cost,
