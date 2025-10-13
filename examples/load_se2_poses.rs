@@ -25,52 +25,114 @@ struct Args {
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
-
-    /// Compare with tiny-solver performance expectations
-    #[arg(short, long)]
-    compare: bool,
 }
 
-fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== TESTING {} DATASET ===", dataset_name.to_uppercase());
+#[derive(Clone)]
+struct DatasetResult {
+    dataset: String,
+    optimizer: String,
+    vertices: usize,
+    edges: usize,
+    initial_cost: f64,
+    final_cost: f64,
+    improvement: f64,
+    iterations: usize,
+    time_ms: u128,
+    convergence_reason: String,
+    status: String,
+}
+
+fn format_summary_table(results: &[DatasetResult]) {
+    println!("\n{}", "=".repeat(160));
+    println!("=== FINAL SUMMARY TABLE ===\n");
+
+    // Header
+    println!(
+        "{:<16} | {:<10} | {:<8} | {:<6} | {:<12} | {:<12} | {:<11} | {:<5} | {:<9} | {:<20} | {:<12}",
+        "Dataset",
+        "Optimizer",
+        "Vertices",
+        "Edges",
+        "Init Cost",
+        "Final Cost",
+        "Improvement",
+        "Iters",
+        "Time(ms)",
+        "Convergence",
+        "Status"
+    );
+    println!("{}", "-".repeat(160));
+
+    // Rows
+    for result in results {
+        println!(
+            "{:<16} | {:<10} | {:<8} | {:<6} | {:<12.6e} | {:<12.6e} | {:>10.2}% | {:<5} | {:<9} | {:<20} | {:<12}",
+            result.dataset,
+            result.optimizer,
+            result.vertices,
+            result.edges,
+            result.initial_cost,
+            result.final_cost,
+            result.improvement,
+            result.iterations,
+            result.time_ms,
+            result.convergence_reason,
+            result.status
+        );
+    }
+
+    println!("{}", "-".repeat(160));
+
+    // Summary statistics
+    let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
+    let total_count = results.len();
+    println!(
+        "\nSummary: {}/{} datasets converged successfully",
+        converged_count, total_count
+    );
+
+    if converged_count > 0 {
+        let avg_time: f64 = results
+            .iter()
+            .filter(|r| r.status == "CONVERGED")
+            .map(|r| r.time_ms as f64)
+            .sum::<f64>()
+            / converged_count as f64;
+        let avg_iters: f64 = results
+            .iter()
+            .filter(|r| r.status == "CONVERGED")
+            .map(|r| r.iterations as f64)
+            .sum::<f64>()
+            / converged_count as f64;
+        println!("Average time for converged datasets: {:.1}ms", avg_time);
+        println!(
+            "Average iterations for converged datasets: {:.1}",
+            avg_iters
+        );
+    }
+}
+
+fn test_dataset(
+    dataset_name: &str,
+    args: &Args,
+) -> Result<DatasetResult, Box<dyn std::error::Error>> {
+    println!("\n=== TESTING {} DATASET ===", dataset_name.to_uppercase());
     println!("Loading {}.g2o dataset for SE2 optimization", dataset_name);
 
     // Load the G2O graph file
     let dataset_path = format!("data/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
+    let num_vertices = graph.vertices_se2.len();
+    let num_edges = graph.edges_se2.len();
+
     println!("Successfully loaded SE2 graph:");
-    println!("  SE2 vertices: {}", graph.vertices_se2.len());
-    println!("  SE2 edges: {}", graph.edges_se2.len());
+    println!("  SE2 vertices: {}", num_vertices);
+    println!("  SE2 edges: {}", num_edges);
 
-    // Display first few vertices
-    println!("\nFirst 10 SE2 vertices:");
-    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
-    vertex_ids.sort();
-
-    for &id in vertex_ids.iter().take(10) {
-        if let Some(vertex) = graph.vertices_se2.get(&id) {
-            println!(
-                "  x{}: theta={:.6}, x={:.6}, y={:.6}",
-                id,
-                vertex.theta(),
-                vertex.x(),
-                vertex.y()
-            );
-        }
-    }
-
-    // Display first few edges
-    println!("\nFirst 10 SE2 edges (relative transformations):");
-    for edge in graph.edges_se2.iter().take(10) {
-        println!(
-            "  Edge {}->{}: dx={:.6}, dy={:.6}, dtheta={:.6}",
-            edge.from,
-            edge.to,
-            edge.measurement.translation().x,
-            edge.measurement.translation().y,
-            edge.measurement.angle()
-        );
+    // Check if we have any vertices
+    if num_vertices == 0 {
+        return Err(format!("No SE2 vertices found in dataset {}", dataset_name).into());
     }
 
     // Create optimization problem
@@ -78,10 +140,12 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
     let mut initial_values = HashMap::new();
 
     // Add SE2 vertices as variables
+    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
+    vertex_ids.sort();
+
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se2.get(&id) {
             let var_name = format!("x{}", id);
-            // Format: [x, y, theta] - MATCHES G2O FILE ORDER
             let se2_data = dvector![vertex.x(), vertex.y(), vertex.theta()];
             initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
@@ -97,44 +161,23 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         let dtheta = edge.measurement.angle();
 
         let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
-
-        problem.add_residual_block(
-            &[&id0, &id1],
-            Box::new(between_factor),
-            None, // No loss function
-        );
-    }
-
-    // Check if we have any vertices
-    if vertex_ids.is_empty() {
-        eprintln!("❌ No SE2 vertices found in dataset - this may be an SE3-only dataset");
-        eprintln!("   Skipping optimization for this dataset\n");
-        return Ok(());
+        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 
     // Fix the first pose to remove gauge freedom (all 3 DOF: x, y, theta)
     let first_var_name = format!("x{}", vertex_ids[0]);
-    problem.fix_variable(&first_var_name, 0); // Fix x
-    problem.fix_variable(&first_var_name, 1); // Fix y
-    problem.fix_variable(&first_var_name, 2); // Fix theta
+    problem.fix_variable(&first_var_name, 0);
+    problem.fix_variable(&first_var_name, 1);
+    problem.fix_variable(&first_var_name, 2);
 
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
     println!("  Between factors: {}", graph.edges_se2.len());
     println!("  Fixed first pose: {} (all 3 DOF)", first_var_name);
 
-    // Initialize problem variables
+    // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);
-    println!("  Variable dimensions:");
-    for (name, var) in variables.iter().take(3) {
-        println!("    {}: {} dimensions", name, var.get_size());
-    }
-
-    // Compute initial cost for comparison
-    let variables = problem.initialize_variables(&initial_values);
-
-    // Create variable mapping
-    let mut variable_name_to_col_idx_dict = std::collections::HashMap::new();
+    let mut variable_name_to_col_idx_dict = HashMap::new();
     let mut col_offset = 0;
     let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
     sorted_vars.sort();
@@ -143,11 +186,9 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
         col_offset += variables[var_name].get_size();
     }
 
-    // Build symbolic structure
     let symbolic_structure =
         problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset);
 
-    // Compute residual and jacobian
     let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
         &variables,
         &variable_name_to_col_idx_dict,
@@ -158,45 +199,10 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
     let residual_na = residual.as_ref().into_nalgebra();
     let initial_cost = residual_na.norm_squared();
 
-    println!("\n=== COMPUTING INITIAL STATE ===");
-    println!("Initial residual vector:");
-    println!("  Length: {}", residual_na.len());
-    println!("  Norm²: {:.12e}", initial_cost);
-    println!("  Norm: {:.12e}", residual_na.norm());
-
-    println!("Initial residuals (first 10):");
-    for i in 0..std::cmp::min(10, residual_na.len()) {
-        println!("  residual[{}] = {:.8}", i, residual_na[i]);
-    }
-
-    // Display graph statistics
-    println!("\nGraph statistics:");
-    let total_poses = vertex_ids.len();
-    let total_constraints = graph.edges_se2.len();
-    let dof_before = total_poses * 3; // Each SE2 pose has 3 DOF
-    let dof_after = dof_before - 3; // Fix one pose (3 DOF removed)
-    let constraint_dim = total_constraints * 3; // Each between factor has 3 constraints
-
-    println!("  Total poses: {}", total_poses);
-    println!("  Total constraints: {}", total_constraints);
-    println!("  DOF before fixing: {}", dof_before);
-    println!("  DOF after fixing first pose: {}", dof_after);
-    println!("  Total constraint dimensions: {}", constraint_dim);
-
-    if constraint_dim >= dof_after {
-        println!("  System is over-constrained (good for optimization)");
-    } else {
-        println!("  System is under-constrained (may need more constraints)");
-    }
+    println!("\nInitial state:");
+    println!("  Initial cost: {:.6e}", initial_cost);
 
     println!("\n=== STARTING LEVENBERG-MARQUARDT OPTIMIZATION ===");
-    println!("Configuration:");
-    println!("  Optimizer: Levenberg-Marquardt");
-    println!("  Max iterations: {}", args.max_iterations);
-    println!("  Cost tolerance: 1e-6");
-    println!("  Parameter tolerance: 1e-6");
-    println!("  Gradient tolerance: 1e-6");
-
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(args.max_iterations)
         .with_cost_tolerance(1e-4)
@@ -209,95 +215,72 @@ fn test_dataset(dataset_name: &str, args: &Args) -> Result<(), Box<dyn std::erro
     let result = solver.minimize(&problem, &initial_values)?;
     let duration = start_time.elapsed();
 
-    println!("\n=== APEX-SOLVER SE2 GN OPTIMIZATION RESULTS ===");
+    println!("\n=== OPTIMIZATION RESULTS ===");
 
-    match result.status {
-        apex_solver::optimizer::OptimizationStatus::Converged
-        | apex_solver::optimizer::OptimizationStatus::CostToleranceReached
-        | apex_solver::optimizer::OptimizationStatus::ParameterToleranceReached
-        | apex_solver::optimizer::OptimizationStatus::GradientToleranceReached => {
-            println!("Status: SUCCESS");
-            println!("Initial cost: {:.12e}", initial_cost);
-            println!("Final cost: {:.12e}", result.final_cost);
-            println!(
-                "Cost reduction: {:.12e} ({:.2}%)",
-                initial_cost - result.final_cost,
-                ((initial_cost - result.final_cost) / initial_cost) * 100.0
-            );
-            println!("Iterations: {}", result.iterations);
-            println!("Execution time: {:.1}ms", duration.as_millis());
-            if result.iterations > 0 {
-                println!(
-                    "Time per iteration: ~{:.1}ms",
-                    duration.as_millis() as f64 / result.iterations as f64
-                );
-            }
-
-            println!("\nFinal optimization completed successfully.");
-
-            println!("\n=== BENCHMARK SUMMARY ===");
-            println!("Dataset: {}.g2o", dataset_name);
-            println!("Solver: APEX Levenberg-Marquardt with Analytical Jacobians");
-            println!("Result: ✅ CONVERGED");
-            println!(
-                "Performance: {:.1}ms total, {:.6e} final cost",
-                duration.as_millis(),
-                result.final_cost
-            );
-
-            // Tiny-solver performance comparison (if requested)
-            if args.compare {
-                println!("\n=== COMPARISON WITH TINY-SOLVER ===");
-                match dataset_name {
-                    "M3500" => {
-                        println!("Expected (tiny-solver): ~1.095e4 final cost, ~30s time");
-                        println!(
-                            "APEX Result: {:.3e} final cost, {:.1}s time",
-                            result.final_cost,
-                            duration.as_secs_f64()
-                        );
-                        if result.final_cost < 1.2e4 {
-                            println!("✅ Cost comparable to tiny-solver");
-                        } else {
-                            println!("⚠️ Cost higher than expected");
-                        }
-                    }
-                    _ => {
-                        println!("No tiny-solver reference available for {}", dataset_name);
-                    }
-                }
-            }
-
-            Ok(())
+    // Determine convergence status accurately
+    let (status, convergence_reason) = match &result.status {
+        apex_solver::optimizer::OptimizationStatus::Converged => {
+            ("CONVERGED", "Converged".to_string())
         }
-        _ => {
-            println!("Status: FAILED");
-            println!("Error: {:?}", result.status);
-            println!("Initial cost: {:.12e}", initial_cost);
-            println!("Final cost: {:.12e}", result.final_cost);
-            println!(
-                "Cost reduction: {:.12e} ({:.2}%)",
-                initial_cost - result.final_cost,
-                ((initial_cost - result.final_cost) / initial_cost) * 100.0
-            );
-            println!("Iterations: {}", result.iterations);
-            println!("Execution time: {:.1}ms", duration.as_millis());
-
-            println!("\n=== BENCHMARK SUMMARY ===");
-            println!("Dataset: {}.g2o", dataset_name);
-            println!("Solver: APEX Levenberg-Marquardt");
-            println!("Result: ❌ FAILED");
-            println!("Error: Optimization did not converge");
-
-            Err(format!("Dataset {} failed to converge", dataset_name).into())
+        apex_solver::optimizer::OptimizationStatus::CostToleranceReached => {
+            ("CONVERGED", "CostTolerance".to_string())
         }
-    }
+        apex_solver::optimizer::OptimizationStatus::ParameterToleranceReached => {
+            ("CONVERGED", "ParameterTolerance".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::GradientToleranceReached => {
+            ("CONVERGED", "GradientTolerance".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::MaxIterationsReached => {
+            ("NOT_CONVERGED", "MaxIterations".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::Timeout => {
+            ("NOT_CONVERGED", "Timeout".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::NumericalFailure => {
+            ("NOT_CONVERGED", "NumericalFailure".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::UserTerminated => {
+            ("NOT_CONVERGED", "UserTerminated".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::Failed(msg) => {
+            ("NOT_CONVERGED", format!("Failed:{}", msg))
+        }
+    };
+
+    let improvement = ((initial_cost - result.final_cost) / initial_cost) * 100.0;
+
+    println!("Status: {}", status);
+    println!("Convergence reason: {}", convergence_reason);
+    println!("Initial cost: {:.6e}", initial_cost);
+    println!("Final cost: {:.6e}", result.final_cost);
+    println!(
+        "Cost reduction: {:.6e} ({:.2}%)",
+        initial_cost - result.final_cost,
+        improvement
+    );
+    println!("Iterations: {}", result.iterations);
+    println!("Execution time: {:.1}ms", duration.as_millis());
+
+    Ok(DatasetResult {
+        dataset: dataset_name.to_string(),
+        optimizer: "LM".to_string(),
+        vertices: num_vertices,
+        edges: num_edges,
+        initial_cost,
+        final_cost: result.final_cost,
+        improvement,
+        iterations: result.iterations,
+        time_ms: duration.as_millis(),
+        convergence_reason: convergence_reason.to_string(),
+        status: status.to_string(),
+    })
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    println!("=== APEX-SOLVER SE2 ANALYTICAL JACOBIAN BENCHMARK ===");
+    println!("=== APEX-SOLVER SE2 POSE GRAPH OPTIMIZATION ===");
 
     // Determine which datasets to test
     let datasets = if args.dataset == "all" {
@@ -317,38 +300,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vec![args.dataset.as_str()]
     };
 
-    let mut successful_datasets = Vec::new();
-    let mut failed_datasets = Vec::new();
+    let mut results = Vec::new();
 
     for dataset in &datasets {
-        println!("\n{}", "=".repeat(60));
+        println!("\n{}", "=".repeat(80));
         match test_dataset(dataset, &args) {
-            Ok(()) => {
-                successful_datasets.push(*dataset);
-                println!("✅ {} completed successfully", dataset);
+            Ok(result) => {
+                println!("Dataset {} completed: {}", dataset, result.status);
+                results.push(result);
             }
             Err(e) => {
-                failed_datasets.push(*dataset);
-                println!("❌ {} failed: {}", dataset, e);
+                eprintln!("Dataset {} failed: {}", dataset, e);
             }
         }
     }
 
-    // Final summary
-    println!("\n{}", "=".repeat(60));
-    println!("=== FINAL SUMMARY ===");
-    println!("Total datasets tested: {}", datasets.len());
-    println!(
-        "Successful: {} {:?}",
-        successful_datasets.len(),
-        successful_datasets
-    );
-    println!("Failed: {} {:?}", failed_datasets.len(), failed_datasets);
+    // Display summary table
+    if results.len() > 1 {
+        format_summary_table(&results);
+    }
 
-    if successful_datasets.len() == datasets.len() {
-        println!("🎉 ALL DATASETS CONVERGED SUCCESSFULLY!");
+    let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
+    if converged_count == results.len() {
+        println!("\nAll datasets converged successfully!");
         Ok(())
+    } else if converged_count == 0 {
+        Err("No datasets converged".into())
     } else {
+        println!("\n{}/{} datasets converged", converged_count, results.len());
         Err("Some datasets failed to converge".into())
     }
 }
