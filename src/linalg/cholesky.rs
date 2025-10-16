@@ -6,7 +6,7 @@ use faer::{
     sparse::{SparseColMat, linalg::solvers},
 };
 
-use crate::linalg::SparseLinearSolver;
+use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
@@ -112,30 +112,40 @@ impl SparseLinearSolver for SparseCholeskySolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
-    ) -> Option<Mat<f64>> {
+    ) -> LinAlgResult<Mat<f64>> {
         // Form the normal equations: H = J^T * J
-        let hessian = jacobians
-            .as_ref()
-            .transpose()
+        let jt = jacobians.as_ref().transpose();
+        let hessian = jt
             .to_col_major()
-            .unwrap()
+            .map_err(|_| {
+                LinAlgError::MatrixConversion(
+                    "Failed to convert transposed Jacobian to column-major format".to_string(),
+                )
+            })?
             .mul(jacobians.as_ref());
 
         // g = J^T * -r
         let gradient = jacobians.as_ref().transpose().mul(-residuals);
 
-        let sym = solvers::SymbolicLlt::try_new(hessian.symbolic(), faer::Side::Lower).unwrap();
-        if let Ok(cholesky) =
-            solvers::Llt::try_new_with_symbolic(sym.clone(), hessian.as_ref(), faer::Side::Lower)
-        {
-            let dx = cholesky.solve(&gradient);
-            self.hessian = Some(hessian);
-            self.gradient = Some(gradient);
-            self.factorizer = Some(cholesky);
-            Some(dx)
-        } else {
-            None
-        }
+        // Create symbolic factorization
+        let sym =
+            solvers::SymbolicLlt::try_new(hessian.symbolic(), faer::Side::Lower).map_err(|_| {
+                LinAlgError::FactorizationFailed(
+                    "Symbolic Cholesky decomposition failed".to_string(),
+                )
+            })?;
+
+        // Perform numeric factorization
+        let cholesky =
+            solvers::Llt::try_new_with_symbolic(sym, hessian.as_ref(), faer::Side::Lower)
+                .map_err(|_| LinAlgError::SingularMatrix)?;
+
+        let dx = cholesky.solve(&gradient);
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        self.factorizer = Some(cholesky);
+
+        Ok(dx)
     }
 
     fn solve_augmented_equation(
@@ -143,15 +153,18 @@ impl SparseLinearSolver for SparseCholeskySolver {
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
-    ) -> Option<Mat<f64>> {
+    ) -> LinAlgResult<Mat<f64>> {
         let n = jacobians.ncols();
 
         // H = J^T * J
-        let hessian = jacobians
-            .as_ref()
-            .transpose()
+        let jt = jacobians.as_ref().transpose();
+        let hessian = jt
             .to_col_major()
-            .unwrap()
+            .map_err(|_| {
+                LinAlgError::MatrixConversion(
+                    "Failed to convert transposed Jacobian to column-major format".to_string(),
+                )
+            })?
             .mul(jacobians.as_ref());
 
         // g = J^T * -r
@@ -162,25 +175,35 @@ impl SparseLinearSolver for SparseCholeskySolver {
         for i in 0..n {
             lambda_i_triplets.push(faer::sparse::Triplet::new(i, i, lambda));
         }
-        let lambda_i =
-            faer::sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
+        let lambda_i = faer::sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets)
+            .map_err(|e| {
+                LinAlgError::SparseMatrixCreation(format!(
+                    "Failed to create lambda*I matrix: {:?}",
+                    e
+                ))
+            })?;
 
         let augmented_hessian = &hessian + lambda_i;
 
-        // Don't cache symbolic pattern for augmented system as sparsity may change
-        let sym =
-            solvers::SymbolicLlt::try_new(augmented_hessian.symbolic(), faer::Side::Lower).unwrap();
-        if let Ok(cholesky) =
+        // Create symbolic factorization for augmented system
+        let sym = solvers::SymbolicLlt::try_new(augmented_hessian.symbolic(), faer::Side::Lower)
+            .map_err(|_| {
+                LinAlgError::FactorizationFailed(
+                    "Symbolic Cholesky decomposition failed for augmented system".to_string(),
+                )
+            })?;
+
+        // Perform numeric factorization
+        let cholesky =
             solvers::Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), faer::Side::Lower)
-        {
-            let dx = cholesky.solve(&gradient);
-            self.hessian = Some(hessian);
-            self.gradient = Some(gradient);
-            self.factorizer = Some(cholesky);
-            Some(dx)
-        } else {
-            None
-        }
+                .map_err(|_| LinAlgError::SingularMatrix)?;
+
+        let dx = cholesky.solve(&gradient);
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        self.factorizer = Some(cholesky);
+
+        Ok(dx)
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
@@ -244,7 +267,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data();
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.nrows(), 3);
@@ -262,12 +285,12 @@ mod tests {
 
         // First solve
         let result1 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result1.is_some());
+        assert!(result1.is_ok());
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let result2 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result2.is_some());
+        assert!(result2.is_ok());
 
         // Results should be identical
         let sol1 = result1.unwrap();
@@ -285,7 +308,7 @@ mod tests {
         let lambda = 0.1;
 
         let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.nrows(), 3);
@@ -304,8 +327,8 @@ mod tests {
         let result1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1);
         let result2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2);
 
-        assert!(result1.is_some());
-        assert!(result2.is_some());
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
 
         // Solutions should be different due to different regularization
         let sol1 = result1.unwrap();
@@ -339,7 +362,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         let result = solver.solve_normal_equation(&residuals, &singular_jacobian);
-        assert!(result.is_none(), "Singular matrix should return None");
+        assert!(result.is_err(), "Singular matrix should return Err");
     }
 
     /// Test with empty matrix (edge case)
@@ -351,7 +374,7 @@ mod tests {
         let empty_residuals = Mat::zeros(0, 1);
 
         let result = solver.solve_normal_equation(&empty_residuals, &empty_jacobian);
-        if let Some(solution) = result {
+        if let Ok(solution) = result {
             assert_eq!(solution.nrows(), 0);
         }
     }
@@ -372,7 +395,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| -((i + 1) as f64)); // [-1, -2]
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         // Expected solution should be [1, 2] since J^T * J = I and J^T * (-r) = [1, 2]
@@ -398,7 +421,7 @@ mod tests {
 
         // First solve to set up factorizer and hessian
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // Now compute covariance matrix
         let cov_matrix = solver.compute_covariance_matrix();
@@ -435,7 +458,7 @@ mod tests {
 
         // First solve to set up factorizer and hessian
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -481,7 +504,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
@@ -503,7 +526,7 @@ mod tests {
 
         // First solve
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // First covariance computation
         solver.compute_covariance_matrix();
@@ -537,7 +560,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // Verify that we have a factorizer and hessian
         assert!(solver.factorizer.is_some());
@@ -564,7 +587,7 @@ mod tests {
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]

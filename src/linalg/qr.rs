@@ -6,7 +6,7 @@ use faer::{
     sparse::{SparseColMat, linalg::solvers},
 };
 
-use crate::linalg::SparseLinearSolver;
+use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
@@ -115,28 +115,36 @@ impl SparseLinearSolver for SparseQRSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
-    ) -> Option<Mat<f64>> {
+    ) -> LinAlgResult<Mat<f64>> {
         // Form the normal equations explicitly: H = J^T * J
-        let hessian = jacobians
-            .as_ref()
-            .transpose()
+        let jt = jacobians.as_ref().transpose();
+        let hessian = jt
             .to_col_major()
-            .unwrap()
+            .map_err(|_| {
+                LinAlgError::MatrixConversion(
+                    "Failed to convert transposed Jacobian to column-major format".to_string(),
+                )
+            })?
             .mul(jacobians.as_ref());
 
         // g = J^T * W * -r
         let gradient = jacobians.as_ref().transpose().mul(-residuals);
 
-        let sym = solvers::SymbolicQr::try_new(hessian.symbolic()).unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym.clone(), hessian.as_ref()) {
-            let dx = qr.solve(&gradient);
-            self.hessian = Some(hessian);
-            self.gradient = Some(gradient);
-            self.factorizer = Some(qr);
-            Some(dx)
-        } else {
-            None
-        }
+        // Create symbolic factorization
+        let sym = solvers::SymbolicQr::try_new(hessian.symbolic()).map_err(|_| {
+            LinAlgError::FactorizationFailed("Symbolic QR decomposition failed".to_string())
+        })?;
+
+        // Perform numeric factorization
+        let qr = solvers::Qr::try_new_with_symbolic(sym, hessian.as_ref())
+            .map_err(|_| LinAlgError::SingularMatrix)?;
+
+        let dx = qr.solve(&gradient);
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        self.factorizer = Some(qr);
+
+        Ok(dx)
     }
 
     fn solve_augmented_equation(
@@ -144,15 +152,18 @@ impl SparseLinearSolver for SparseQRSolver {
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
-    ) -> Option<Mat<f64>> {
+    ) -> LinAlgResult<Mat<f64>> {
         let n = jacobians.ncols();
 
         // H = J^T * J
-        let hessian = jacobians
-            .as_ref()
-            .transpose()
+        let jt = jacobians.as_ref().transpose();
+        let hessian = jt
             .to_col_major()
-            .unwrap()
+            .map_err(|_| {
+                LinAlgError::MatrixConversion(
+                    "Failed to convert transposed Jacobian to column-major format".to_string(),
+                )
+            })?
             .mul(jacobians.as_ref());
 
         // g = J^T * -r
@@ -163,21 +174,33 @@ impl SparseLinearSolver for SparseQRSolver {
         for i in 0..n {
             lambda_i_triplets.push(faer::sparse::Triplet::new(i, i, lambda));
         }
-        let lambda_i = SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).unwrap();
+        let lambda_i =
+            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
+                LinAlgError::SparseMatrixCreation(format!(
+                    "Failed to create lambda*I matrix: {:?}",
+                    e
+                ))
+            })?;
 
         let augmented_hessian = hessian.as_ref() + lambda_i;
 
-        // Don't cache symbolic pattern for augmented system as sparsity may change
-        let sym = solvers::SymbolicQr::try_new(augmented_hessian.symbolic()).unwrap();
-        if let Ok(qr) = solvers::Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()) {
-            let dx = qr.solve(&gradient);
-            self.hessian = Some(hessian);
-            self.gradient = Some(gradient);
-            self.factorizer = Some(qr);
-            Some(dx)
-        } else {
-            None
-        }
+        // Create symbolic factorization for augmented system
+        let sym = solvers::SymbolicQr::try_new(augmented_hessian.symbolic()).map_err(|_| {
+            LinAlgError::FactorizationFailed(
+                "Symbolic QR decomposition failed for augmented system".to_string(),
+            )
+        })?;
+
+        // Perform numeric factorization
+        let qr = solvers::Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
+            .map_err(|_| LinAlgError::SingularMatrix)?;
+
+        let dx = qr.solve(&gradient);
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        self.factorizer = Some(qr);
+
+        Ok(dx)
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
@@ -238,7 +261,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data();
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.nrows(), 3); // Number of variables
@@ -256,12 +279,12 @@ mod tests {
 
         // First solve
         let result1 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result1.is_some());
+        assert!(result1.is_ok());
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let result2 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result2.is_some());
+        assert!(result2.is_ok());
 
         // Results should be identical
         let sol1 = result1.unwrap();
@@ -279,7 +302,7 @@ mod tests {
         let lambda = 0.1;
 
         let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.nrows(), 3); // Number of variables
@@ -298,8 +321,8 @@ mod tests {
         let result1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1);
         let result2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2);
 
-        assert!(result1.is_some());
-        assert!(result2.is_some());
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
 
         // Solutions should be different due to different regularization
         let sol1 = result1.unwrap();
@@ -339,7 +362,7 @@ mod tests {
 
         // QR should still provide a least squares solution
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
     }
 
     /// Test augmented system structure and dimensions
@@ -359,7 +382,7 @@ mod tests {
         let lambda = 0.5;
 
         let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         assert_eq!(solution.nrows(), 2); // Should return only the variable part
@@ -381,7 +404,7 @@ mod tests {
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let solution = result.unwrap();
         // Expected solution should be [1, 2, 3]
@@ -415,8 +438,8 @@ mod tests {
         let normal_result = solver.solve_normal_equation(&residuals, &jacobian);
         let augmented_result = solver.solve_augmented_equation(&residuals, &jacobian, 0.0);
 
-        assert!(normal_result.is_some());
-        assert!(augmented_result.is_some());
+        assert!(normal_result.is_ok());
+        assert!(augmented_result.is_ok());
 
         let normal_sol = normal_result.unwrap();
         let augmented_sol = augmented_result.unwrap();
@@ -438,7 +461,7 @@ mod tests {
 
         // First solve to set up factorizer and hessian
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // Now compute covariance matrix
         let cov_matrix = solver.compute_covariance_matrix();
@@ -475,7 +498,7 @@ mod tests {
 
         // First solve to set up factorizer and hessian
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -521,7 +544,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
@@ -543,7 +566,7 @@ mod tests {
 
         // First solve
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_some());
+        assert!(result.is_ok());
 
         // First covariance computation
         solver.compute_covariance_matrix();
@@ -580,7 +603,7 @@ mod tests {
 
         // QR can handle rank-deficient systems, but covariance may be problematic
         let result = solver.solve_normal_equation(&residuals, &jacobian);
-        if result.is_some() {
+        if result.is_ok() {
             // If solve succeeded, covariance computation might still fail due to singularity
             let cov_matrix = solver.compute_covariance_matrix();
             // We don't assert failure here since QR might handle this case
