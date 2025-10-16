@@ -51,6 +51,12 @@ pub enum ManifoldError {
     NumericalInstability(String),
     /// Invalid manifold element
     InvalidElement(String),
+    /// Dimension validation failed during conversion
+    DimensionMismatch { expected: usize, actual: usize },
+    /// NaN or Inf detected in manifold element
+    InvalidNumber,
+    /// Normalization failed for manifold element
+    NormalizationFailed(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +82,15 @@ impl std::fmt::Display for ManifoldError {
             }
             ManifoldError::InvalidElement(msg) => {
                 write!(f, "Invalid manifold element: {msg}")
+            }
+            ManifoldError::DimensionMismatch { expected, actual } => {
+                write!(f, "Dimension mismatch: expected {expected}, got {actual}")
+            }
+            ManifoldError::InvalidNumber => {
+                write!(f, "Invalid number: NaN or Inf detected")
+            }
+            ManifoldError::NormalizationFailed(msg) => {
+                write!(f, "Normalization failed: {msg}")
             }
         }
     }

@@ -83,6 +83,32 @@ impl From<std::num::ParseIntError> for ApexError {
     }
 }
 
+// Convert module-specific errors to ApexError
+
+impl From<crate::linalg::LinAlgError> for ApexError {
+    fn from(err: crate::linalg::LinAlgError) -> Self {
+        ApexError::LinearAlgebra(err.to_string())
+    }
+}
+
+impl From<crate::optimizer::OptimizerError> for ApexError {
+    fn from(err: crate::optimizer::OptimizerError) -> Self {
+        ApexError::Solver(err.to_string())
+    }
+}
+
+impl From<crate::manifold::ManifoldError> for ApexError {
+    fn from(err: crate::manifold::ManifoldError) -> Self {
+        ApexError::Manifold(err.to_string())
+    }
+}
+
+impl From<crate::io::ApexSolverIoError> for ApexError {
+    fn from(err: crate::io::ApexSolverIoError) -> Self {
+        ApexError::Io(err.to_string())
+    }
+}
+
 /// Convenience macro for creating linear algebra errors
 #[macro_export]
 macro_rules! linalg_error {
