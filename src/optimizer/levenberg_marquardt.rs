@@ -583,11 +583,9 @@ impl LevenbergMarquardt {
     ) -> Option<StepResult> {
         // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
         let residuals_owned = residuals.as_ref().to_owned();
-        let scaled_step = linear_solver.solve_augmented_equation(
-            &residuals_owned,
-            scaled_jacobian,
-            self.config.damping,
-        )?;
+        let scaled_step = linear_solver
+            .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.damping)
+            .ok()?;
 
         // Get cached gradient and Hessian from the solver
         let solver_gradient = linear_solver.get_gradient()?;

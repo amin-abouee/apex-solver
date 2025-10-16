@@ -7,11 +7,13 @@
 //! - Dog Leg algorithm
 
 use crate::core::problem::{Problem, VariableEnum};
+use crate::linalg::LinAlgError;
 use crate::manifold::ManifoldType;
 use nalgebra::DVector;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::Duration;
+use thiserror::Error;
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -42,6 +44,57 @@ impl fmt::Display for OptimizerType {
         }
     }
 }
+
+/// Optimizer-specific error types for apex-solver
+#[derive(Debug, Clone, Error)]
+pub enum OptimizerError {
+    /// Linear system solve failed during optimization
+    #[error("Linear system solve failed: {0}")]
+    LinearSolveFailed(String),
+
+    /// Maximum iterations reached without achieving convergence
+    #[error("Maximum iterations ({max_iters}) reached without convergence")]
+    MaxIterationsReached { max_iters: usize },
+
+    /// Trust region radius became too small
+    #[error("Trust region radius became too small: {radius:.6e} < {min_radius:.6e}")]
+    TrustRegionFailure { radius: f64, min_radius: f64 },
+
+    /// Damping parameter became too large (LM-specific)
+    #[error("Damping parameter became too large: {damping:.6e} > {max_damping:.6e}")]
+    DampingFailure { damping: f64, max_damping: f64 },
+
+    /// Cost increased unexpectedly when it should decrease
+    #[error("Cost increased unexpectedly: {old_cost:.6e} -> {new_cost:.6e}")]
+    CostIncrease { old_cost: f64, new_cost: f64 },
+
+    /// Jacobian computation failed
+    #[error("Jacobian computation failed: {0}")]
+    JacobianFailed(String),
+
+    /// Invalid optimization parameters provided
+    #[error("Invalid optimization parameters: {0}")]
+    InvalidParameters(String),
+
+    /// Numerical instability detected (NaN, Inf in cost, gradient, or parameters)
+    #[error("Numerical instability detected: {0}")]
+    NumericalInstability(String),
+
+    /// Linear algebra operation failed
+    #[error("Linear algebra error: {0}")]
+    LinAlg(#[from] LinAlgError),
+
+    /// Problem has no variables to optimize
+    #[error("Problem has no variables to optimize")]
+    EmptyProblem,
+
+    /// Problem has no residual blocks
+    #[error("Problem has no residual blocks")]
+    NoResidualBlocks,
+}
+
+/// Result type for optimizer operations
+pub type OptimizerResult<T> = Result<T, OptimizerError>;
 
 // #[derive(Clone)]
 // pub struct OptimizerConfig {

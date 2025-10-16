@@ -440,11 +440,9 @@ impl GaussNewton {
         // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
         // Use min_diagonal for numerical stability (tiny regularization)
         let residuals_owned = residuals.as_ref().to_owned();
-        let scaled_step = linear_solver.solve_augmented_equation(
-            &residuals_owned,
-            scaled_jacobian,
-            self.config.min_diagonal,
-        )?;
+        let scaled_step = linear_solver
+            .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.min_diagonal)
+            .ok()?;
 
         // Get gradient from the solver (J^T * r)
         let solver_gradient = linear_solver.get_gradient()?;
