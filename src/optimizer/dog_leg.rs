@@ -161,7 +161,7 @@ impl Default for DogLegConfig {
             gradient_tolerance: 1e-8,
             timeout: None,
             verbose: false,
-            trust_region_radius: 1.0,
+            trust_region_radius: 10.0,
             trust_region_min: 1e-12,
             trust_region_max: 1e12,
             trust_region_increase_factor: 2.0,
@@ -465,7 +465,7 @@ impl DogLeg {
     }
 
     /// Update trust region radius based on step quality
-    fn update_trust_region(&mut self, rho: f64, step_norm: f64) -> bool {
+    fn update_trust_region(&mut self, rho: f64, _step_norm: f64) -> bool {
         if rho > self.config.good_step_quality {
             // Good step, increase trust region
             self.config.trust_region_radius = (self.config.trust_region_radius
@@ -473,8 +473,9 @@ impl DogLeg {
                 .min(self.config.trust_region_max);
             true
         } else if rho < self.config.poor_step_quality {
-            // Poor step, decrease trust region
-            self.config.trust_region_radius = (step_norm
+            // Poor step, decrease trust region BUT maintain minimum
+            // KEY FIX: Use current radius, not step_norm, to prevent collapse
+            self.config.trust_region_radius = (self.config.trust_region_radius
                 * self.config.trust_region_decrease_factor)
                 .max(self.config.trust_region_min);
             false
@@ -677,11 +678,22 @@ impl DogLeg {
         linear_solver: &mut Box<dyn SparseLinearSolver>,
     ) -> Option<StepResult> {
         // Solve for Gauss-Newton step: (J^T*J + λI) * h_gn = -J^T*r
-        // Use tiny damping for numerical stability (effectively Gauss-Newton)
+        // Try with increasing damping if solver fails
         let residuals_owned = residuals.as_ref().to_owned();
-        let scaled_gn_step = linear_solver
-            .solve_augmented_equation(&residuals_owned, scaled_jacobian, 1e-12)
-            .ok()?;
+
+        let damping_values = [1e-12, 1e-9, 1e-6, 1e-3];
+        let mut scaled_gn_step = None;
+
+        for &damping in &damping_values {
+            if let Ok(step) =
+                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, damping)
+            {
+                scaled_gn_step = Some(step);
+                break;
+            }
+        }
+
+        let scaled_gn_step = scaled_gn_step?;
 
         // Get gradient and Hessian (cached by solve_augmented_equation)
         let solver_gradient = linear_solver.get_gradient()?;
@@ -770,8 +782,9 @@ impl DogLeg {
         }
 
         // Update trust region and decide acceptance
-        let accepted = rho > self.config.min_step_quality;
-        let trust_region_updated = self.update_trust_region(rho, step_norm);
+        // Filter out numerical noise with small threshold
+        let accepted = rho > 1e-4;
+        let _trust_region_updated = self.update_trust_region(rho, step_norm);
 
         let cost_reduction = if accepted {
             let reduction = state.current_cost - new_cost;
@@ -789,9 +802,8 @@ impl DogLeg {
 
         if self.config.verbose {
             println!(
-                "Step {}, Trust region updated: {}, New radius: {:.6e}",
+                "Step {}, New radius: {:.6e}",
                 if accepted { "ACCEPTED" } else { "REJECTED" },
-                trust_region_updated,
                 self.config.trust_region_radius
             );
         }
