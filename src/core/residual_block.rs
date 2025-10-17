@@ -68,7 +68,7 @@ mod tests {
     #[test]
     fn test_residual_block_creation() {
         let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-        let loss = Some(Box::new(HuberLoss::new(1.0)) as Box<dyn Loss + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
@@ -167,7 +167,7 @@ mod tests {
     fn test_residual_and_jacobian_with_huber_loss() {
         // Create a between factor that will have non-zero residual
         let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
-        let loss = Some(Box::new(HuberLoss::new(1.0)) as Box<dyn Loss + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
@@ -248,7 +248,7 @@ mod tests {
                     if i == 2 { &["x0"] } else { &["x0", "x1"] },
                     factor,
                     if i == 1 {
-                        Some(Box::new(HuberLoss::new(0.5)))
+                        Some(Box::new(HuberLoss::new(0.5).unwrap()))
                     } else {
                         None
                     },
@@ -328,7 +328,7 @@ mod tests {
             0,
             &["x0", "x1"],
             factor1,
-            Some(Box::new(HuberLoss::new(0.1))),
+            Some(Box::new(HuberLoss::new(0.1).unwrap())),
         );
         let block_without_loss = ResidualBlock::new(0, 0, &["x0", "x1"], factor2, None);
 
