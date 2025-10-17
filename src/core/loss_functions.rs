@@ -11,14 +11,16 @@ pub struct HuberLoss {
 }
 
 impl HuberLoss {
-    pub fn new(scale: f64) -> Self {
+    pub fn new(scale: f64) -> crate::core::ApexResult<Self> {
         if scale <= 0.0 {
-            panic!("scale needs to be larger than zero");
+            return Err(crate::core::ApexError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
-        HuberLoss {
+        Ok(HuberLoss {
             scale,
             scale2: scale * scale,
-        }
+        })
     }
 }
 
@@ -43,12 +45,17 @@ pub struct CauchyLoss {
 }
 
 impl CauchyLoss {
-    pub fn new(scale: f64) -> Self {
+    pub fn new(scale: f64) -> crate::core::ApexResult<Self> {
+        if scale <= 0.0 {
+            return Err(crate::core::ApexError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
+        }
         let scale2 = scale * scale;
-        CauchyLoss {
+        Ok(CauchyLoss {
             scale2,
             c: 1.0 / scale2,
-        }
+        })
     }
 }
 
