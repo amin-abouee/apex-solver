@@ -715,35 +715,133 @@ impl crate::optimizer::Solver for GaussNewton {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_gauss_newton_creation() {
-        let solver = GaussNewton::new();
-        assert_eq!(solver.config.max_iterations, 100);
-        assert_eq!(solver.config.cost_tolerance, 1e-8);
+    /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
+    /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
+    #[derive(Debug, Clone)]
+    struct RosenbrockFactor1;
+
+    impl crate::core::factors::Factor for RosenbrockFactor1 {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            let x1 = params[0][0];
+            let x2 = params[1][0];
+
+            // Residual: r1 = 10(x2 - x1²)
+            let residual = nalgebra::dvector![10.0 * (x2 - x1 * x1)];
+
+            // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
+            let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
+            jacobian[(0, 0)] = -20.0 * x1;
+            jacobian[(0, 1)] = 10.0;
+
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    /// Custom Rosenbrock Factor 2: r2 = 1 - x1
+    /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
+    #[derive(Debug, Clone)]
+    struct RosenbrockFactor2;
+
+    impl crate::core::factors::Factor for RosenbrockFactor2 {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            let x1 = params[0][0];
+
+            // Residual: r2 = 1 - x1
+            let residual = nalgebra::dvector![1.0 - x1];
+
+            // Jacobian: ∂r2/∂x1 = -1
+            let jacobian = nalgebra::DMatrix::from_element(1, 1, -1.0);
+
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
     }
 
     #[test]
-    fn test_config_builder() {
+    fn test_rosenbrock_optimization() {
+        // Rosenbrock function test:
+        // Minimize: r1² + r2² where
+        //   r1 = 10(x2 - x1²)
+        //   r2 = 1 - x1
+        // Starting point: [-1.2, 1.0]
+        // Expected minimum: [1.0, 1.0]
+
+        use crate::core::problem::Problem;
+        use crate::manifold::ManifoldType;
+        use nalgebra::dvector;
+        use std::collections::HashMap;
+
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
+
+        // Add variables using Rn manifold (Euclidean space)
+        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
+        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
+
+        // Add custom factors (demonstrates extensibility!)
+        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+
+        // Configure Gauss-Newton optimizer
         let config = GaussNewtonConfig::new()
-            .with_max_iterations(50)
-            .with_cost_tolerance(1e-6)
-            .with_verbose(true)
-            .with_jacobi_scaling(true);
+            .with_max_iterations(100)
+            .with_cost_tolerance(1e-8)
+            .with_parameter_tolerance(1e-8)
+            .with_gradient_tolerance(1e-10);
 
-        assert_eq!(config.max_iterations, 50);
-        assert_eq!(config.cost_tolerance, 1e-6);
-        assert!(config.verbose);
-        assert!(config.use_jacobi_scaling);
-    }
+        let mut solver = GaussNewton::with_config(config);
+        let result = solver.minimize(&problem, &initial_values).unwrap();
 
-    #[test]
-    fn test_solver_with_config() {
-        let config = GaussNewtonConfig::new()
-            .with_max_iterations(25)
-            .with_parameter_tolerance(1e-10);
+        // Extract final values
+        let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
+        let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
 
-        let solver = GaussNewton::with_config(config.clone());
-        assert_eq!(solver.config.max_iterations, 25);
-        assert_eq!(solver.config.parameter_tolerance, 1e-10);
+        println!("Rosenbrock optimization result (Gauss-Newton):");
+        println!("  Status: {:?}", result.status);
+        println!("  Initial cost: {:.6e}", result.init_cost);
+        println!("  Final cost: {:.6e}", result.final_cost);
+        println!("  Iterations: {}", result.iterations);
+        println!("  x1: {:.6} (expected 1.0)", x1_final);
+        println!("  x2: {:.6} (expected 1.0)", x2_final);
+
+        // Verify convergence to [1.0, 1.0]
+        assert!(
+            matches!(
+                result.status,
+                crate::optimizer::OptimizationStatus::Converged
+                    | crate::optimizer::OptimizationStatus::CostToleranceReached
+                    | crate::optimizer::OptimizationStatus::ParameterToleranceReached
+                    | crate::optimizer::OptimizationStatus::GradientToleranceReached
+            ),
+            "Optimization should converge"
+        );
+        assert!(
+            (x1_final - 1.0).abs() < 1e-4,
+            "x1 should converge to 1.0, got {}",
+            x1_final
+        );
+        assert!(
+            (x2_final - 1.0).abs() < 1e-4,
+            "x2 should converge to 1.0, got {}",
+            x2_final
+        );
+        assert!(
+            result.final_cost < 1e-6,
+            "Final cost should be near zero, got {}",
+            result.final_cost
+        );
     }
 }

@@ -986,100 +986,131 @@ impl crate::optimizer::Solver for LevenbergMarquardt {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use crate::core::Optimizable;
-//     use faer::mat;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::factors::Factor;
+    use crate::core::problem::Problem;
+    use crate::manifold::ManifoldType;
+    use nalgebra::{DMatrix, DVector, dvector};
+    use std::collections::HashMap;
 
-//     #[test]
-//     fn test_levenberg_marquardt_creation() {
-//         let solver = LevenbergMarquardt::new();
-//         assert!(solver.damping > 0.0);
-//     }
+    /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
+    /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
+    #[derive(Debug, Clone)]
+    struct RosenbrockFactor1;
 
-//     #[test]
-//     fn test_damping_configuration() {
-//         let solver = LevenbergMarquardt::new()
-//             .with_damping(1e-6)
-//             .with_damping_bounds(1e-15, 1e15);
+    impl Factor for RosenbrockFactor1 {
+        fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+            let x1 = params[0][0];
+            let x2 = params[1][0];
 
-//         assert_eq!(solver.damping, 1e-6);
-//         assert_eq!(solver.damping_min, 1e-15);
-//         assert_eq!(solver.damping_max, 1e15);
-//     }
+            // Residual: r1 = 10(x2 - x1²)
+            let residual = dvector![10.0 * (x2 - x1 * x1)];
 
-//     // Rosenbrock function for testing
-//     struct RosenbrockProblem {
-//         a: f64,
-//         b: f64,
-//     }
+            // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
+            let mut jacobian = DMatrix::zeros(1, 2);
+            jacobian[(0, 0)] = -20.0 * x1;
+            jacobian[(0, 1)] = 10.0;
 
-//     struct MatWrapper(pub Mat<f64>);
-//     impl AsRef<Mat<f64>> for MatWrapper {
-//         fn as_ref(&self) -> &Mat<f64> {
-//             &self.0
-//         }
-//     }
+            (residual, jacobian)
+        }
 
-//     struct SparseMatWrapper(pub SparseColMat<usize, f64>);
-//     impl AsRef<SparseColMat<usize, f64>> for SparseMatWrapper {
-//         fn as_ref(&self) -> &SparseColMat<usize, f64> {
-//             &self.0
-//         }
-//     }
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
 
-//     impl Optimizable for RosenbrockProblem {
-//         type Parameters = Mat<f64>;
-//         type Residuals = MatWrapper;
-//         type Jacobian = SparseMatWrapper;
+    /// Custom Rosenbrock Factor 2: r2 = 1 - x1
+    /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
+    #[derive(Debug, Clone)]
+    struct RosenbrockFactor2;
 
-//         fn evaluate_with_jacobian(
-//             &self,
-//             params: &Self::Parameters,
-//         ) -> Result<(Self::Residuals, Self::Jacobian), crate::core::ApexError> {
-//             let x = params[(0, 0)];
-//             let y = params[(1, 0)];
+    impl Factor for RosenbrockFactor2 {
+        fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+            let x1 = params[0][0];
 
-//             let r1 = self.a - x;
-//             let r2 = self.b.sqrt() * (y - x * x);
-//             let residuals = mat![[r1], [r2]];
+            // Residual: r2 = 1 - x1
+            let residual = dvector![1.0 - x1];
 
-//             let triplets = vec![
-//                 faer::sparse::Triplet::new(0, 0, -1.0),
-//                 faer::sparse::Triplet::new(1, 0, -2.0 * self.b.sqrt() * x),
-//                 faer::sparse::Triplet::new(1, 1, self.b.sqrt()),
-//             ];
-//             let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)
-//                 .map_err(|e| crate::core::ApexError::Computation(e.to_string()))?;
+            // Jacobian: ∂r2/∂x1 = -1
+            let jacobian = DMatrix::from_element(1, 1, -1.0);
 
-//             Ok((MatWrapper(residuals), SparseMatWrapper(jacobian)))
-//         }
+            (residual, jacobian)
+        }
 
-//         fn cost(&self, params: &Self::Parameters) -> Result<f64, crate::core::ApexError> {
-//             let (residuals, _) = self.evaluate_with_jacobian(params)?;
-//             let r = residuals.as_ref();
-//             Ok(0.5 * r.norm_l2() * r.norm_l2())
-//         }
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
 
-//         fn weights(&self) -> Mat<f64> {
-//             mat![[1.0], [1.0]]
-//         }
+    #[test]
+    fn test_rosenbrock_optimization() {
+        // Rosenbrock function test:
+        // Minimize: r1² + r2² where
+        //   r1 = 10(x2 - x1²)
+        //   r2 = 1 - x1
+        // Starting point: [-1.2, 1.0]
+        // Expected minimum: [1.0, 1.0]
 
-//         fn evaluate(
-//             &self,
-//             parameters: &Self::Parameters,
-//         ) -> Result<Self::Residuals, crate::core::ApexError> {
-//             let (residuals, _) = self.evaluate_with_jacobian(parameters)?;
-//             Ok(residuals)
-//         }
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
 
-//         fn parameter_count(&self) -> usize {
-//             2
-//         }
+        // Add variables using Rn manifold (Euclidean space)
+        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
+        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
 
-//         fn residual_count(&self) -> usize {
-//             2
-//         }
-//     }
-// }
+        // Add custom factors (demonstrates extensibility!)
+        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+
+        // Configure Levenberg-Marquardt optimizer
+        let config = LevenbergMarquardtConfig::new()
+            .with_max_iterations(100)
+            .with_cost_tolerance(1e-8)
+            .with_parameter_tolerance(1e-8)
+            .with_gradient_tolerance(1e-10);
+
+        let mut solver = LevenbergMarquardt::with_config(config);
+        let result = solver.minimize(&problem, &initial_values).unwrap();
+
+        // Extract final values
+        let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
+        let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
+
+        println!("Rosenbrock optimization result:");
+        println!("  Status: {:?}", result.status);
+        println!("  Initial cost: {:.6e}", result.init_cost);
+        println!("  Final cost: {:.6e}", result.final_cost);
+        println!("  Iterations: {}", result.iterations);
+        println!("  x1: {:.6} (expected 1.0)", x1_final);
+        println!("  x2: {:.6} (expected 1.0)", x2_final);
+
+        // Verify convergence to [1.0, 1.0]
+        assert!(
+            matches!(
+                result.status,
+                OptimizationStatus::Converged
+                    | OptimizationStatus::CostToleranceReached
+                    | OptimizationStatus::ParameterToleranceReached
+                    | OptimizationStatus::GradientToleranceReached
+            ),
+            "Optimization should converge"
+        );
+        assert!(
+            (x1_final - 1.0).abs() < 1e-4,
+            "x1 should converge to 1.0, got {}",
+            x1_final
+        );
+        assert!(
+            (x2_final - 1.0).abs() < 1e-4,
+            "x2 should converge to 1.0, got {}",
+            x2_final
+        );
+        assert!(
+            result.final_cost < 1e-6,
+            "Final cost should be near zero, got {}",
+            result.final_cost
+        );
+    }
+}
