@@ -96,113 +96,6 @@ pub enum OptimizerError {
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
 
-// #[derive(Clone)]
-// pub struct OptimizerConfig {
-//     /// Type of optimizer algorithm to use
-//     pub optimizer_type: OptimizerType,
-//     /// Type of linear solver for the linear systems
-//     pub linear_solver_type: LinearSolverType,
-//     /// Maximum number of iterations
-//     pub max_iterations: usize,
-//     /// Convergence tolerance for cost function
-//     pub cost_tolerance: f64,
-//     /// Convergence tolerance for parameter updates
-//     pub parameter_tolerance: f64,
-//     /// Convergence tolerance for gradient norm
-//     pub gradient_tolerance: f64,
-//     /// Timeout duration
-//     pub timeout: Option<Duration>,
-//     /// Enable detailed logging
-//     pub verbose: bool,
-// }
-
-// impl Default for OptimizerConfig {
-//     fn default() -> Self {
-//         Self {
-//             optimizer_type: OptimizerType::default(),
-//             linear_solver_type: LinearSolverType::default(),
-//             max_iterations: 100,
-//             cost_tolerance: 1e-8,
-//             parameter_tolerance: 1e-8,
-//             gradient_tolerance: 1e-8,
-//             timeout: None,
-//             verbose: false,
-//         }
-//     }
-// }
-
-// impl OptimizerConfig {
-//     /// Create a new solver configuration with default values
-//     pub fn new() -> Self {
-//         Self::default()
-//     }
-
-//     /// Set the optimizer algorithm type
-//     pub fn with_optimizer_type(mut self, optimizer_type: OptimizerType) -> Self {
-//         self.optimizer_type = optimizer_type;
-//         self
-//     }
-
-//     /// Set the linear solver type
-//     pub fn with_linear_solver_type(mut self, linear_solver_type: LinearSolverType) -> Self {
-//         self.linear_solver_type = linear_solver_type;
-//         self
-//     }
-
-//     /// Set the maximum number of iterations
-//     pub fn with_max_iterations(mut self, max_iterations: usize) -> Self {
-//         self.max_iterations = max_iterations;
-//         self
-//     }
-
-//     /// Set the cost tolerance
-//     pub fn with_cost_tolerance(mut self, cost_tolerance: f64) -> Self {
-//         self.cost_tolerance = cost_tolerance;
-//         self
-//     }
-
-//     /// Set the parameter tolerance
-//     pub fn with_parameter_tolerance(mut self, parameter_tolerance: f64) -> Self {
-//         self.parameter_tolerance = parameter_tolerance;
-//         self
-//     }
-
-//     /// Set the gradient tolerance
-//     pub fn with_gradient_tolerance(mut self, gradient_tolerance: f64) -> Self {
-//         self.gradient_tolerance = gradient_tolerance;
-//         self
-//     }
-
-//     /// Set the timeout duration
-//     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-//         self.timeout = Some(timeout);
-//         self
-//     }
-
-//     /// Enable or disable verbose logging
-//     pub fn with_verbose(mut self, verbose: bool) -> Self {
-//         self.verbose = verbose;
-//         self
-//     }
-// }
-
-// impl fmt::Display for OptimizerConfig {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(
-//             f,
-//             "OptimizerConfig {{ optimizer_type: {:?}, linear_solver_type: {:?}, max_iterations: {}, cost_tolerance: {}, parameter_tolerance: {}, gradient_tolerance: {}, timeout: {:?}, verbose: {} }}",
-//             self.optimizer_type,
-//             self.linear_solver_type,
-//             self.max_iterations,
-//             self.cost_tolerance,
-//             self.parameter_tolerance,
-//             self.gradient_tolerance,
-//             self.timeout,
-//             self.verbose
-//         )
-//     }
-// }
-
 // State information during iterative optimization.
 // #[derive(Debug, Clone)]
 // pub struct IterativeState {
@@ -340,14 +233,6 @@ pub trait Solver {
 /// specified by `variable_order`. Each variable's tangent space dimension determines
 /// how many elements it occupies in the step vector.
 ///
-/// # Example
-/// ```ignore
-/// let step_norm = apply_parameter_step(
-///     &mut variables,
-///     step.as_ref(),
-///     &sorted_var_names,
-/// );
-/// ```
 pub fn apply_parameter_step(
     variables: &mut HashMap<String, VariableEnum>,
     step: faer::MatRef<f64>,
@@ -382,15 +267,6 @@ pub fn apply_parameter_step(
 /// * `step` - Full step vector in tangent space (faer matrix view) to negate
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
-/// # Example
-/// ```ignore
-/// // Revert the step if it's rejected
-/// apply_negative_parameter_step(
-///     &mut variables,
-///     step.as_ref(),
-///     &sorted_var_names,
-/// );
-/// ```
 pub fn apply_negative_parameter_step(
     variables: &mut HashMap<String, VariableEnum>,
     step: faer::MatRef<f64>,
@@ -407,32 +283,3 @@ pub fn apply_negative_parameter_step(
     // Apply the negative step using the standard apply_parameter_step function
     apply_parameter_step(variables, negative_step.as_ref(), variable_order);
 }
-
-// Legacy optimization function (commented out - use Solver trait instead)
-// pub fn solve_problem(
-//     problem: &Problem,
-//     initial_params: &HashMap<String, (ManifoldType, na::DVector<f64>)>,
-//     config: OptimizerConfig,
-// ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::core::ApexError> {
-//     // Use the actual solver implementations based on config via Solver trait
-//     match config.optimizer_type {
-//         OptimizerType::LevenbergMarquardt => {
-//             let mut solver = LevenbergMarquardt::with_config(config);
-//             solver.solve_problem(problem, initial_params)
-//         }
-//         OptimizerType::GaussNewton => {
-//             let _solver = GaussNewton::new();
-//             // TODO: Implement solve_problem for GaussNewton
-//             Err(crate::core::ApexError::Solver(
-//                 "GaussNewton not implemented yet".to_string(),
-//             ))
-//         }
-//         OptimizerType::DogLeg => {
-//             let _solver = DogLeg::new();
-//             // TODO: Implement solve_problem for DogLeg
-//             Err(crate::core::ApexError::Solver(
-//                 "DogLeg not implemented yet".to_string(),
-//             ))
-//         }
-//     }
-// }
