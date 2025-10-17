@@ -63,12 +63,6 @@ impl VariableEnum {
     /// Uses explicit clone instead of unsafe memory copy (`IntoNalgebra`) for small vectors.
     /// This is safe and performant for typical manifold dimensions (1-6 DOF).
     ///
-    /// # Example
-    /// ```ignore
-    /// let mut var = VariableEnum::SE3(...);
-    /// let step = faer::Mat::from_fn(6, 1, |i, _| delta[i]);
-    /// var.apply_tangent_step(step.as_ref());
-    /// ```
     pub fn apply_tangent_step(&mut self, step_slice: faer::MatRef<f64>) {
         match self {
             VariableEnum::SE3(var) => {
@@ -735,10 +729,10 @@ mod tests {
         assert_eq!(problem.total_residual_dimension, 33); // 11 * 3
         assert_eq!(initial_values.len(), 10);
 
-        println!("✅ SE2 Problem construction test passed");
-        println!("  Residual blocks: {}", problem.num_residual_blocks());
-        println!("  Total residual dim: {}", problem.total_residual_dimension);
-        println!("  Variables: {}", initial_values.len());
+        println!("SE2 Problem construction test passed");
+        println!("Residual blocks: {}", problem.num_residual_blocks());
+        println!("Total residual dim: {}", problem.total_residual_dimension);
+        println!("Variables: {}", initial_values.len());
     }
 
     #[test]
@@ -750,10 +744,10 @@ mod tests {
         assert_eq!(problem.total_residual_dimension, 79); // 12 * 6 + 1 * 7 (SE3 between factors are 6-dim, prior factor is 7-dim)
         assert_eq!(initial_values.len(), 8);
 
-        println!("✅ SE3 Problem construction test passed");
-        println!("  Residual blocks: {}", problem.num_residual_blocks());
-        println!("  Total residual dim: {}", problem.total_residual_dimension);
-        println!("  Variables: {}", initial_values.len());
+        println!("SE3 Problem construction test passed");
+        println!("Residual blocks: {}", problem.num_residual_blocks());
+        println!("Total residual dim: {}", problem.total_residual_dimension);
+        println!("Variables: {}", initial_values.len());
     }
 
     #[test]
@@ -785,8 +779,8 @@ mod tests {
             );
         }
 
-        println!("✅ SE2 Variable initialization test passed");
-        println!("  Variables created: {}", variables.len());
+        println!("SE2 Variable initialization test passed");
+        println!("Variables created: {}", variables.len());
     }
 
     #[test]
@@ -818,8 +812,8 @@ mod tests {
             );
         }
 
-        println!("✅ SE3 Variable initialization test passed");
-        println!("  Variables created: {}", variables.len());
+        println!("SE3 Variable initialization test passed");
+        println!("Variables created: {}", variables.len());
     }
 
     #[test]
@@ -854,12 +848,9 @@ mod tests {
             );
         }
 
-        println!("✅ SE2 Column mapping test passed");
-        println!("  Total DOF: {}", total_dof);
-        println!(
-            "  Variable mappings: {}",
-            variable_index_sparce_matrix.len()
-        );
+        println!("SE2 Column mapping test passed");
+        println!("Total DOF: {}", total_dof);
+        println!("Variable mappings: {}", variable_index_sparce_matrix.len());
     }
 
     #[test]
@@ -890,9 +881,9 @@ mod tests {
         );
         assert_eq!(symbolic_structure.pattern.ncols(), 30); // total DOF
 
-        println!("✅ SE2 Symbolic structure test passed");
+        println!("SE2 Symbolic structure test passed");
         println!(
-            "  Symbolic matrix: {} x {}",
+            "Symbolic matrix: {} x {}",
             symbolic_structure.pattern.nrows(),
             symbolic_structure.pattern.ncols()
         );
@@ -931,10 +922,10 @@ mod tests {
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 30);
 
-        println!("✅ SE2 Residual/Jacobian computation test passed");
-        println!("  Residual dimensions: {}", residual_sparse.nrows());
+        println!("SE2 Residual/Jacobian computation test passed");
+        println!("Residual dimensions: {}", residual_sparse.nrows());
         println!(
-            "  Jacobian dimensions: {} x {}",
+            "Jacobian dimensions: {} x {}",
             jacobian_sparse.nrows(),
             jacobian_sparse.ncols()
         );
@@ -973,10 +964,10 @@ mod tests {
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 48); // 8 variables * 6 DOF each
 
-        println!("✅ SE3 Residual/Jacobian computation test passed");
-        println!("  Residual dimensions: {}", residual_sparse.nrows());
+        println!("SE3 Residual/Jacobian computation test passed");
+        println!("Residual dimensions: {}", residual_sparse.nrows());
         println!(
-            "  Jacobian dimensions: {} x {}",
+            "Jacobian dimensions: {} x {}",
             jacobian_sparse.nrows(),
             jacobian_sparse.ncols()
         );
@@ -1016,8 +1007,8 @@ mod tests {
         let non_existent = problem.remove_residual_block(999);
         assert!(non_existent.is_none());
 
-        println!("✅ Residual block operations test passed");
-        println!("  Block operations working correctly");
+        println!("Residual block operations test passed");
+        println!("Block operations working correctly");
     }
 
     #[test]
@@ -1054,8 +1045,8 @@ mod tests {
         assert!(!problem.variable_bounds.contains_key("x2"));
         assert!(problem.variable_bounds.contains_key("x3"));
 
-        println!("✅ Variable constraints test passed");
-        println!("  Fix/unfix and bounds operations working correctly");
+        println!("Variable constraints test passed");
+        println!("Fix/unfix and bounds operations working correctly");
     }
 
     // Helper function for the known 5-pose test case
