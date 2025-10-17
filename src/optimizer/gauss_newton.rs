@@ -374,14 +374,14 @@ impl GaussNewton {
 
         // Build symbolic structure for sparse operations
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset);
+            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
 
         // Initial cost evaluation using sparse interface
         let (residual, _) = problem.compute_residual_and_jacobian_sparse(
             &variables,
             &variable_index_map,
             &symbolic_structure,
-        );
+        )?;
 
         let residual_norm = residual.norm_l2();
         let current_cost = residual_norm * residual_norm;
@@ -479,7 +479,7 @@ impl GaussNewton {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &Problem,
-    ) -> CostEvaluation {
+    ) -> crate::core::ApexResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = crate::optimizer::apply_parameter_step(
             &mut state.variables,
@@ -492,7 +492,7 @@ impl GaussNewton {
             &state.variables,
             &state.variable_index_map,
             &state.symbolic_structure,
-        );
+        )?;
         let new_residual_norm = new_residual.norm_l2();
         let new_cost = new_residual_norm * new_residual_norm;
 
@@ -502,10 +502,10 @@ impl GaussNewton {
         // Update current cost
         state.current_cost = new_cost;
 
-        CostEvaluation {
+        Ok(CostEvaluation {
             new_cost,
             cost_reduction,
-        }
+        })
     }
 
     /// Log iteration details if verbose mode is enabled
@@ -589,7 +589,7 @@ impl GaussNewton {
                 &state.variables,
                 &state.variable_index_map,
                 &state.symbolic_structure,
-            );
+            )?;
             jacobian_evaluations += 1;
 
             if self.config.verbose {
@@ -633,7 +633,7 @@ impl GaussNewton {
             final_parameter_update_norm = step_norm;
 
             // Apply step and evaluate new cost
-            let cost_eval = self.apply_step_and_evaluate_cost(&step_result, &mut state, problem);
+            let cost_eval = self.apply_step_and_evaluate_cost(&step_result, &mut state, problem)?;
             cost_evaluations += 1;
             total_cost_reduction += cost_eval.cost_reduction;
 

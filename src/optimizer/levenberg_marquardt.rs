@@ -515,14 +515,14 @@ impl LevenbergMarquardt {
 
         // Build symbolic structure for sparse operations
         let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset);
+            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
 
         // Initial cost evaluation using sparse interface
         let (residual, _) = problem.compute_residual_and_jacobian_sparse(
             &variables,
             &variable_index_map,
             &symbolic_structure,
-        );
+        )?;
 
         let residual_norm = residual.norm_l2();
         let current_cost = residual_norm * residual_norm;
@@ -639,7 +639,7 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &Problem,
-    ) -> StepEvaluation {
+    ) -> crate::core::ApexResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = crate::optimizer::apply_parameter_step(
             &mut state.variables,
@@ -652,7 +652,7 @@ impl LevenbergMarquardt {
             &state.variables,
             &state.variable_index_map,
             &state.symbolic_structure,
-        );
+        )?;
         let new_residual_norm = new_residual.norm_l2();
         let new_cost = new_residual_norm * new_residual_norm;
 
@@ -694,12 +694,12 @@ impl LevenbergMarquardt {
             0.0
         };
 
-        StepEvaluation {
+        Ok(StepEvaluation {
             accepted,
             new_cost,
             cost_reduction,
             rho,
-        }
+        })
     }
 
     /// Log iteration details if verbose mode is enabled
@@ -809,7 +809,7 @@ impl LevenbergMarquardt {
                 &state.variables,
                 &state.variable_index_map,
                 &state.symbolic_structure,
-            );
+            )?;
             jacobian_evaluations += 1;
 
             if self.config.verbose {
@@ -861,7 +861,7 @@ impl LevenbergMarquardt {
             final_parameter_update_norm = step_norm;
 
             // Evaluate and apply step (handles accept/reject)
-            let step_eval = self.evaluate_and_apply_step(&step_result, &mut state, problem);
+            let step_eval = self.evaluate_and_apply_step(&step_result, &mut state, problem)?;
             cost_evaluations += 1;
 
             // Update counters based on acceptance
