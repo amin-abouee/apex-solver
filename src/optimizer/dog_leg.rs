@@ -452,7 +452,7 @@ impl DogLeg {
             };
 
             // Clamp beta to [0, 1]
-            let beta = beta.max(0.0).min(1.0);
+            let beta = beta.clamp(0.0, 1.0);
 
             // Compute dog leg step
             let mut dog_leg = Mat::zeros(h_sd.nrows(), 1);
