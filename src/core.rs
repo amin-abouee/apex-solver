@@ -33,6 +33,10 @@ pub enum ApexError {
     Memory(String),
     /// Convergence failures
     Convergence(String),
+    /// Matrix operation errors
+    MatrixOperation(String),
+    /// Thread synchronization errors
+    ThreadError(String),
 }
 
 impl fmt::Display for ApexError {
@@ -46,6 +50,8 @@ impl fmt::Display for ApexError {
             ApexError::InvalidInput(msg) => write!(f, "Invalid input: {msg}"),
             ApexError::Memory(msg) => write!(f, "Memory error: {msg}"),
             ApexError::Convergence(msg) => write!(f, "Convergence error: {msg}"),
+            ApexError::MatrixOperation(msg) => write!(f, "Matrix operation error: {msg}"),
+            ApexError::ThreadError(msg) => write!(f, "Thread synchronization error: {msg}"),
         }
     }
 }
@@ -61,6 +67,8 @@ impl std::error::Error for ApexError {
             ApexError::InvalidInput(_) => "Invalid input provided",
             ApexError::Memory(_) => "Memory operation failed",
             ApexError::Convergence(_) => "Algorithm did not converge",
+            ApexError::MatrixOperation(_) => "Matrix operation failed",
+            ApexError::ThreadError(_) => "Thread synchronization failed",
         }
     }
 }
