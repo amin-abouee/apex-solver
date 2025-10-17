@@ -323,7 +323,7 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         total_dof: usize,
-    ) -> SymbolicStructure {
+    ) -> crate::core::ApexResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
         let mut indices = Vec::<Pair<usize, usize>>::new();
@@ -392,10 +392,14 @@ impl Problem {
             total_dof,                     // Number of columns (total DOF)
             &indices,                      // List of non-zero entry locations
         )
-        .unwrap();
+        .map_err(|_| {
+            crate::core::ApexError::MatrixOperation(
+                "Failed to build symbolic sparse matrix structure".to_string(),
+            )
+        })?;
 
         // Return the symbolic structure that will be filled with numerical values later
-        SymbolicStructure { pattern, order }
+        Ok(SymbolicStructure { pattern, order })
     }
 
     /// Compute residual and sparse Jacobian for mixed manifold types
@@ -404,12 +408,12 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> (faer::Mat<f64>, SparseColMat<usize, f64>) {
+    ) -> crate::core::ApexResult<(faer::Mat<f64>, SparseColMat<usize, f64>)> {
         let total_residual = Arc::new(Mutex::new(DVector::<f64>::zeros(
             self.total_residual_dimension,
         )));
 
-        let jacobian_values: Vec<f64> = self
+        let jacobian_values: Result<Vec<Vec<f64>>, crate::core::ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -420,13 +424,22 @@ impl Problem {
                     &total_residual,
                 )
             })
-            .flatten()
             .collect();
 
+        let jacobian_values: Vec<f64> = jacobian_values?.into_iter().flatten().collect();
+
         let total_residual = Arc::try_unwrap(total_residual)
-            .unwrap()
+            .map_err(|_| {
+                crate::core::ApexError::ThreadError(
+                    "Failed to unwrap Arc for total residual".to_string(),
+                )
+            })?
             .into_inner()
-            .unwrap();
+            .map_err(|_| {
+                crate::core::ApexError::ThreadError(
+                    "Failed to extract mutex inner value for total residual".to_string(),
+                )
+            })?;
 
         let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
         let jacobian_sparse = SparseColMat::new_from_argsort(
@@ -434,9 +447,13 @@ impl Problem {
             &symbolic_structure.order,
             jacobian_values.as_slice(),
         )
-        .unwrap();
+        .map_err(|_| {
+            crate::core::ApexError::MatrixOperation(
+                "Failed to create sparse Jacobian from argsort".to_string(),
+            )
+        })?;
 
-        (residual_faer, jacobian_sparse)
+        Ok((residual_faer, jacobian_sparse))
     }
 
     fn compute_residual_and_jacobian_block(
@@ -445,7 +462,7 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         total_residual: &Arc<Mutex<DVector<f64>>>,
-    ) -> Vec<f64> {
+    ) -> crate::core::ApexResult<Vec<f64>> {
         let mut param_vectors: Vec<DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
@@ -465,7 +482,11 @@ impl Problem {
 
         // Update total residual
         {
-            let mut total_residual = total_residual.lock().unwrap();
+            let mut total_residual = total_residual.lock().map_err(|_| {
+                crate::core::ApexError::ThreadError(
+                    "Failed to acquire lock on total residual".to_string(),
+                )
+            })?;
             total_residual
                 .rows_mut(
                     residual_block.residual_row_start_idx,
@@ -487,14 +508,14 @@ impl Problem {
                     }
                 }
             } else {
-                panic!(
+                return Err(crate::core::ApexError::InvalidInput(format!(
                     "Missing key {} in variable-to-column-index mapping",
                     var_key
-                );
+                )));
             }
         }
 
-        local_jacobian_values
+        Ok(local_jacobian_values)
     }
 
     /// Log residual vector to a text file
@@ -607,7 +628,7 @@ mod tests {
             problem.add_residual_block(
                 &[&format!("x{}", i), &format!("x{}", i + 1)],
                 Box::new(between_factor),
-                Some(Box::new(HuberLoss::new(1.0))),
+                Some(Box::new(HuberLoss::new(1.0).unwrap())),
             );
         }
 
@@ -620,7 +641,7 @@ mod tests {
         problem.add_residual_block(
             &["x9", "x0"],
             Box::new(loop_closure),
-            Some(Box::new(HuberLoss::new(1.0))),
+            Some(Box::new(HuberLoss::new(1.0).unwrap())),
         );
 
         // Add prior factor for x0
@@ -692,7 +713,7 @@ mod tests {
             problem.add_residual_block(
                 &[&format!("x{}", from_idx), &format!("x{}", to_idx)],
                 Box::new(between_factor),
-                Some(Box::new(HuberLoss::new(1.0))),
+                Some(Box::new(HuberLoss::new(1.0).unwrap())),
             );
         }
 
@@ -858,8 +879,9 @@ mod tests {
         }
 
         // Build symbolic structure
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
+        let symbolic_structure = problem
+            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
+            .unwrap();
 
         // Test symbolic structure dimensions
         assert_eq!(
@@ -893,13 +915,16 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
-        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_sparce_matrix,
-            &symbolic_structure,
-        );
+        let symbolic_structure = problem
+            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
+            .unwrap();
+        let (residual_sparse, jacobian_sparse) = problem
+            .compute_residual_and_jacobian_sparse(
+                &variables,
+                &variable_index_sparce_matrix,
+                &symbolic_structure,
+            )
+            .unwrap();
 
         // Test sparse dimensions
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
@@ -932,13 +957,16 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset);
-        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_sparce_matrix,
-            &symbolic_structure,
-        );
+        let symbolic_structure = problem
+            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
+            .unwrap();
+        let (residual_sparse, jacobian_sparse) = problem
+            .compute_residual_and_jacobian_sparse(
+                &variables,
+                &variable_index_sparce_matrix,
+                &symbolic_structure,
+            )
+            .unwrap();
 
         // Test sparse dimensions match
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
@@ -962,7 +990,7 @@ mod tests {
         let block_id1 = problem.add_residual_block(
             &["x0", "x1"],
             Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
-            Some(Box::new(HuberLoss::new(1.0))),
+            Some(Box::new(HuberLoss::new(1.0).unwrap())),
         );
 
         let block_id2 = problem.add_residual_block(
@@ -1064,7 +1092,7 @@ mod tests {
             problem.add_residual_block(
                 &[from, to],
                 Box::new(BetweenFactorSE2::new(*dx, *dy, *dtheta)),
-                Some(Box::new(HuberLoss::new(1.0))),
+                Some(Box::new(HuberLoss::new(1.0).unwrap())),
             );
         }
 
