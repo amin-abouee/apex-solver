@@ -556,7 +556,7 @@ impl LevenbergMarquardt {
         iteration: usize,
     ) -> SparseColMat<usize, f64> {
         // Create Jacobi scaling on first iteration if enabled
-        if iteration == 0 && self.config.use_jacobi_scaling {
+        if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
 
             if self.config.verbose {
@@ -566,12 +566,7 @@ impl LevenbergMarquardt {
             self.jacobi_scaling = Some(scaling);
         }
 
-        // Apply Jacobi scaling to Jacobian if enabled
-        if self.config.use_jacobi_scaling {
-            self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
-        } else {
-            jacobian.clone()
-        }
+        self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
     }
 
     /// Compute optimization step by solving the augmented system
@@ -829,7 +824,11 @@ impl LevenbergMarquardt {
             }
 
             // Process Jacobian (apply scaling if enabled)
-            let scaled_jacobian = self.process_jacobian(&jacobian, iteration);
+            let scaled_jacobian = if self.config.use_jacobi_scaling {
+                self.process_jacobian(&jacobian, iteration)
+            } else {
+                jacobian
+            };
 
             if self.config.verbose {
                 println!(
