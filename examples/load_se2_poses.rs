@@ -191,14 +191,17 @@ fn test_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset);
+    let symbolic_structure = problem
+        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
+        .expect("Failed to build symbolic structure");
 
-    let (residual, _jacobian) = problem.compute_residual_and_jacobian_sparse(
-        &variables,
-        &variable_name_to_col_idx_dict,
-        &symbolic_structure,
-    );
+    let (residual, _jacobian) = problem
+        .compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_name_to_col_idx_dict,
+            &symbolic_structure,
+        )
+        .expect("Failed to compute residual and jacobian");
 
     use faer_ext::IntoNalgebra;
     let residual_na = residual.as_ref().into_nalgebra();
