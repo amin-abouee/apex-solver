@@ -1,8 +1,10 @@
 pub mod cholesky;
 pub mod qr;
 
+use crate::core::problem::VariableEnum;
 use faer::Mat;
 use faer::sparse::SparseColMat;
+use std::collections::HashMap;
 use std::fmt;
 use thiserror::Error;
 
@@ -120,7 +122,79 @@ pub trait SparseLinearSolver {
 
     /// Get the cached gradient vector (J^T * r) from the last solve
     fn get_gradient(&self) -> Option<&Mat<f64>>;
+
+    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian
+    ///
+    /// Returns a reference to the covariance matrix if successful, None otherwise.
+    /// The covariance matrix represents parameter uncertainty in the tangent space.
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>>;
+
+    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian
+    ///
+    /// Returns None if covariance has not been computed yet.
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>>;
 }
 
 pub use cholesky::SparseCholeskySolver;
 pub use qr::SparseQRSolver;
+
+/// Extract per-variable covariance blocks from the full covariance matrix.
+///
+/// Given the full covariance matrix H^{-1} (inverse of information matrix),
+/// this function extracts the diagonal blocks corresponding to each individual variable.
+///
+/// # Arguments
+/// * `full_covariance` - Full covariance matrix of size n×n (from H^{-1})
+/// * `variables` - Map of variable names to their Variable objects
+/// * `variable_index_map` - Map from variable names to their starting column index in the full matrix
+///
+/// # Returns
+/// HashMap mapping variable names to their covariance matrices in tangent space.
+/// For SE3 variables, this would be 6×6 matrices; for SE2, 3×3; etc.
+///
+/// # Example
+/// ```ignore
+/// // After optimization, get full covariance from linear solver
+/// let full_cov = linear_solver.compute_covariance_matrix();
+///
+/// // Extract per-variable covariances
+/// let var_covariances = extract_variable_covariances(
+///     full_cov.unwrap(),
+///     &variables,
+///     &variable_index_map
+/// );
+///
+/// // Access individual variable uncertainty
+/// if let Some(pose_cov) = var_covariances.get("x0") {
+///     println!("Pose x0 covariance: {}", pose_cov);
+/// }
+/// ```
+pub fn extract_variable_covariances(
+    full_covariance: &Mat<f64>,
+    variables: &HashMap<String, VariableEnum>,
+    variable_index_map: &HashMap<String, usize>,
+) -> HashMap<String, Mat<f64>> {
+    let mut result = HashMap::new();
+
+    for (var_name, var) in variables {
+        // Get the starting column/row index for this variable
+        if let Some(&start_idx) = variable_index_map.get(var_name) {
+            // Get the tangent space dimension for this variable
+            let dim = var.get_size();
+
+            // Extract the block diagonal covariance for this variable
+            // This is the block [start_idx:start_idx+dim, start_idx:start_idx+dim]
+            let mut var_cov = Mat::zeros(dim, dim);
+
+            for i in 0..dim {
+                for j in 0..dim {
+                    var_cov[(i, j)] = full_covariance[(start_idx + i, start_idx + j)];
+                }
+            }
+
+            result.insert(var_name.clone(), var_cov);
+        }
+    }
+
+    result
+}

@@ -62,24 +62,6 @@ impl SparseQRSolver {
         self.gradient.as_ref()
     }
 
-    pub fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        // Only compute if we have a factorizer and hessian, but no covariance matrix yet
-        if self.factorizer.is_some()
-            && self.hessian.is_some()
-            && self.covariance_matrix.is_none()
-            && let (Some(factorizer), Some(hessian)) = (&self.factorizer, &self.hessian)
-        {
-            let n = hessian.ncols();
-            // Create identity matrix
-            let identity = Mat::identity(n, n);
-
-            // Solve H * X = I to get X = H^(-1) = covariance matrix
-            let cov_matrix = factorizer.solve(&identity);
-            self.covariance_matrix = Some(cov_matrix);
-        }
-        self.covariance_matrix.as_ref()
-    }
-
     pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
         // // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
@@ -241,6 +223,28 @@ impl SparseLinearSolver for SparseQRSolver {
 
     fn get_gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
+    }
+
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        // Only compute if we have a factorizer and hessian, but no covariance matrix yet
+        if self.factorizer.is_some()
+            && self.hessian.is_some()
+            && self.covariance_matrix.is_none()
+            && let (Some(factorizer), Some(hessian)) = (&self.factorizer, &self.hessian)
+        {
+            let n = hessian.ncols();
+            // Create identity matrix
+            let identity = Mat::identity(n, n);
+
+            // Solve H * X = I to get X = H^(-1) = covariance matrix
+            let cov_matrix = factorizer.solve(&identity);
+            self.covariance_matrix = Some(cov_matrix);
+        }
+        self.covariance_matrix.as_ref()
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
     }
 }
 
