@@ -559,7 +559,7 @@ impl GaussNewton {
         }
     }
 
-    pub fn minimize(
+    pub fn optimize(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
@@ -668,7 +668,7 @@ impl GaussNewton {
                 return Ok(SolverResult {
                     status,
                     iterations: iteration + 1,
-                    init_cost: state.initial_cost,
+                    initial_cost: state.initial_cost,
                     final_cost: state.current_cost,
                     parameters: state.variables.into_iter().collect(),
                     elapsed_time: elapsed,
@@ -694,7 +694,7 @@ impl crate::optimizer::Solver for GaussNewton {
         Self::default()
     }
 
-    fn minimize(
+    fn optimize(
         &mut self,
         problem: &crate::core::problem::Problem,
         initial_params: &std::collections::HashMap<
@@ -707,7 +707,7 @@ impl crate::optimizer::Solver for GaussNewton {
         >,
         Self::Error,
     > {
-        self.minimize(problem, initial_params)
+        self.optimize(problem, initial_params)
     }
 }
 
@@ -803,7 +803,7 @@ mod tests {
             .with_gradient_tolerance(1e-10);
 
         let mut solver = GaussNewton::with_config(config);
-        let result = solver.minimize(&problem, &initial_values).unwrap();
+        let result = solver.optimize(&problem, &initial_values).unwrap();
 
         // Extract final values
         let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
@@ -811,7 +811,7 @@ mod tests {
 
         println!("Rosenbrock optimization result (Gauss-Newton):");
         println!("  Status: {:?}", result.status);
-        println!("  Initial cost: {:.6e}", result.init_cost);
+        println!("  Initial cost: {:.6e}", result.initial_cost);
         println!("  Final cost: {:.6e}", result.final_cost);
         println!("  Iterations: {}", result.iterations);
         println!("  x1: {:.6} (expected 1.0)", x1_final);

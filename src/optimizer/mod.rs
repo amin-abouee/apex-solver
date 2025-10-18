@@ -186,7 +186,7 @@ pub struct SolverResult<T> {
     /// Final optimization status
     pub status: OptimizationStatus,
     /// Initial cost value
-    pub init_cost: f64,
+    pub initial_cost: f64,
     /// Final cost value
     pub final_cost: f64,
     /// Number of iterations performed
@@ -207,8 +207,8 @@ pub trait Solver {
     /// Create a new solver with the given configuration
     fn new() -> Self;
 
-    /// Minimize the optimization problem
-    fn minimize(
+    /// Optimize the problem to minimize the cost function
+    fn optimize(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
