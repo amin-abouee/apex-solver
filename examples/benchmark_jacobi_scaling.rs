@@ -100,7 +100,7 @@ fn main() {
     let mut solver_with = LevenbergMarquardt::with_config(config_with_scaling).with_damping(1e-3);
 
     let start_with = Instant::now();
-    let result_with = match solver_with.minimize(&problem, &initial_values) {
+    let result_with = match solver_with.optimize(&problem, &initial_values) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Optimization failed: {}", e);
@@ -110,7 +110,7 @@ fn main() {
     let elapsed_with = start_with.elapsed();
 
     println!("Status: {:?}", result_with.status);
-    println!("Initial cost: {:.6e}", result_with.init_cost);
+    println!("Initial cost: {:.6e}", result_with.initial_cost);
     println!("Final cost: {:.6e}", result_with.final_cost);
     println!("Iterations: {}", result_with.iterations);
     println!("Time: {:.3}s", elapsed_with.as_secs_f64());
@@ -138,7 +138,7 @@ fn main() {
         LevenbergMarquardt::with_config(config_without_scaling).with_damping(1e-3);
 
     let start_without = Instant::now();
-    let result_without = match solver_without.minimize(&problem, &initial_values) {
+    let result_without = match solver_without.optimize(&problem, &initial_values) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("Optimization failed: {}", e);
@@ -148,7 +148,7 @@ fn main() {
     let elapsed_without = start_without.elapsed();
 
     println!("Status: {:?}", result_without.status);
-    println!("Initial cost: {:.6e}", result_without.init_cost);
+    println!("Initial cost: {:.6e}", result_without.initial_cost);
     println!("Final cost: {:.6e}", result_without.final_cost);
     println!("Iterations: {}", result_without.iterations);
     println!("Time: {:.3}s", elapsed_without.as_secs_f64());

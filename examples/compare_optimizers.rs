@@ -107,7 +107,7 @@ fn run_optimizer_se3(
                 .with_parameter_tolerance(parameter_tolerance)
                 .with_verbose(verbose);
             let mut solver = LevenbergMarquardt::with_config(config);
-            solver.minimize(problem, initial_values)?
+            solver.optimize(problem, initial_values)?
         }
         "GN" => {
             let config = GaussNewtonConfig::new()
@@ -116,7 +116,7 @@ fn run_optimizer_se3(
                 .with_parameter_tolerance(parameter_tolerance)
                 .with_verbose(verbose);
             let mut solver = GaussNewton::with_config(config);
-            solver.minimize(problem, initial_values)?
+            solver.optimize(problem, initial_values)?
         }
         "DL" => {
             let config = DogLegConfig::new()
@@ -125,7 +125,7 @@ fn run_optimizer_se3(
                 .with_parameter_tolerance(parameter_tolerance)
                 .with_verbose(verbose);
             let mut solver = DogLeg::with_config(config);
-            solver.minimize(problem, initial_values)?
+            solver.optimize(problem, initial_values)?
         }
         _ => unreachable!(),
     };

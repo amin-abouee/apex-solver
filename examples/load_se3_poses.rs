@@ -275,7 +275,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = GaussNewton::with_config(config);
-            solver.minimize(&problem, &initial_values)?
+            solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
             let config = DogLegConfig::new()
@@ -285,7 +285,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = DogLeg::with_config(config);
-            solver.minimize(&problem, &initial_values)?
+            solver.optimize(&problem, &initial_values)?
         }
         _ => {
             let config = LevenbergMarquardtConfig::new()
@@ -295,7 +295,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = LevenbergMarquardt::with_config(config);
-            solver.minimize(&problem, &initial_values)?
+            solver.optimize(&problem, &initial_values)?
         }
     };
     let duration = start_time.elapsed();

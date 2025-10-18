@@ -127,7 +127,7 @@ fn main() {
 
     // Run optimization - THIS IS THE HOT PATH TO PROFILE
     let start = std::time::Instant::now();
-    let result = optimizer.minimize(&problem, &initial_values);
+    let result = optimizer.optimize(&problem, &initial_values);
     let elapsed = start.elapsed();
 
     // Print results
@@ -135,7 +135,7 @@ fn main() {
     match result {
         Ok(solver_result) => {
             println!("Status: {:?}", solver_result.status);
-            println!("Initial cost: {:.6e}", solver_result.init_cost);
+            println!("Initial cost: {:.6e}", solver_result.initial_cost);
             println!("Final cost: {:.6e}", solver_result.final_cost);
             println!("Iterations: {}", solver_result.iterations);
             println!("Time: {:.3}s", elapsed.as_secs_f64());
