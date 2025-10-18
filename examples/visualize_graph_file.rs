@@ -1,10 +1,12 @@
-use apex_solver::io::{Graph, load_graph};
+use apex_solver::io::{
+    Graph, load_graph, rerun_conversions::IntoRerunPosition2D,
+    rerun_conversions::IntoRerunTransform,
+};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,
     archetypes::{Pinhole, Points2D},
     components::Color,
-    external::glam,
 };
 use std::path::PathBuf;
 
@@ -13,7 +15,7 @@ use std::path::PathBuf;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the graph file to visualize
-    #[arg(default_value = "data/parking-garage.g2o")]
+    #[arg(short = 'f', long, default_value = "data/parking-garage.g2o")]
     file_path: PathBuf,
 
     /// Scale factor for visualization
@@ -95,22 +97,12 @@ fn visualize_se3_poses(
         graph.vertices_se3.len()
     );
 
-    for (id, pose) in &graph.vertices_se3 {
-        // Extract position
-        let translation = pose.translation();
-        let position = glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
-        ) * scale;
-
-        // Convert quaternion
-        let rotation = pose.rotation();
-        let nq = rotation.as_ref();
-        let quaternion = glam::Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
+    for (id, vertex) in &graph.vertices_se3 {
+        // Use conversion trait for clean code
+        let (position, rotation) = vertex.into_rerun_transform(scale);
 
         // Create transform from position and rotation
-        let transform = Transform3D::from_translation_rotation(position, quaternion);
+        let transform = Transform3D::from_translation_rotation(position, rotation);
 
         // Create entity path for this pose
         let entity_path = format!("se3_poses/{id}");
@@ -141,17 +133,15 @@ fn visualize_se2_poses(
         graph.vertices_se2.len()
     );
 
-    // Collect all positions for the points
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
+    // Collect all positions using conversion trait
+    let positions: Vec<[f32; 2]> = graph
+        .vertices_se2
+        .values()
+        .map(|vertex| vertex.into_rerun_position_2d(scale))
+        .collect();
 
-    for pose in graph.vertices_se2.values() {
-        // Extract position (only X and Y for 2D)
-        let position = [(pose.x() as f32) * scale, (pose.y() as f32) * scale];
-
-        positions.push(position);
-        colors.push(Color::from_rgb(255, 170, 0));
-    }
+    // Create colors for all points
+    let colors = vec![Color::from_rgb(255, 170, 0); positions.len()];
 
     // Log all points as a batch
     if !positions.is_empty() {
