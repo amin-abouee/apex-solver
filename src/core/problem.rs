@@ -3,8 +3,8 @@ use std::fs::File;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use faer::Col;
 use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
-use faer_ext::IntoFaer;
 use nalgebra::DVector;
 use rayon::prelude::*;
 
@@ -447,9 +447,7 @@ impl Problem {
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> crate::core::ApexResult<(faer::Mat<f64>, SparseColMat<usize, f64>)> {
-        let total_residual = Arc::new(Mutex::new(DVector::<f64>::zeros(
-            self.total_residual_dimension,
-        )));
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         let jacobian_values: Result<Vec<Vec<f64>>, crate::core::ApexError> = self
             .residual_blocks
@@ -479,7 +477,8 @@ impl Problem {
                 )
             })?;
 
-        let residual_faer = total_residual.view_range(.., ..).into_faer().to_owned();
+        // Convert faer Col to Mat (column vector as n×1 matrix)
+        let residual_faer = total_residual.as_ref().as_mat().to_owned();
         let jacobian_sparse = SparseColMat::new_from_argsort(
             symbolic_structure.pattern.clone(),
             &symbolic_structure.order,
@@ -499,7 +498,7 @@ impl Problem {
         residual_block: &residual_block::ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_residual: &Arc<Mutex<DVector<f64>>>,
+        total_residual: &Arc<Mutex<Col<f64>>>,
     ) -> crate::core::ApexResult<Vec<f64>> {
         let mut param_vectors: Vec<DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
@@ -525,12 +524,14 @@ impl Problem {
                     "Failed to acquire lock on total residual".to_string(),
                 )
             })?;
-            total_residual
-                .rows_mut(
-                    residual_block.residual_row_start_idx,
-                    residual_block.factor.get_dimension(),
-                )
-                .copy_from(&res);
+
+            // Copy residual values from nalgebra DVector to faer Col
+            let start_idx = residual_block.residual_row_start_idx;
+            let dim = residual_block.factor.get_dimension();
+            let mut total_residual_mut = total_residual.as_mut();
+            for i in 0..dim {
+                total_residual_mut[start_idx + i] = res[i];
+            }
         }
 
         // Extract Jacobian values in the correct order
