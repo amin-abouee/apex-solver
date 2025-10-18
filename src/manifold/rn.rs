@@ -454,6 +454,18 @@ impl LieGroup for Rn {
         // For abelian groups, left minus is the same as right minus
         self.right_minus(other, jacobian_self, jacobian_other)
     }
+
+    /// Get the dimension of the tangent space for this Rⁿ element.
+    ///
+    /// # Returns
+    /// The actual runtime dimension of this Rⁿ element.
+    ///
+    /// # Notes
+    /// Overrides the default implementation to return the dynamic size
+    /// based on the actual data vector length, since Rⁿ has variable dimension.
+    fn tangent_dim(&self) -> usize {
+        self.data.len()
+    }
 }
 
 impl RnTangent {

@@ -88,26 +88,7 @@ where
     /// # Returns
     /// The tangent space dimension (degrees of freedom)
     pub fn get_size(&self) -> usize {
-        // For most manifolds, use the compile-time constant
-        if M::TangentVector::DIM > 0 {
-            M::TangentVector::DIM
-        } else {
-            // For dynamically sized manifolds like Rn, we need a different approach
-            // This is a bit of a hack, but works for our current needs
-            match std::any::type_name::<M>() {
-                name if name.contains("Rn") => {
-                    // For Rn manifold, get the dynamic size
-                    if let Some(rn_var) = (self as &dyn std::any::Any)
-                        .downcast_ref::<Variable<crate::manifold::rn::Rn>>()
-                    {
-                        rn_var.dynamic_size()
-                    } else {
-                        0
-                    }
-                }
-                _ => M::TangentVector::DIM,
-            }
-        }
+        self.value.tangent_dim()
     }
 
     /// Plus operation: apply tangent space perturbation to the manifold value.
@@ -197,11 +178,6 @@ where
 use crate::manifold::rn::Rn;
 
 impl Variable<Rn> {
-    /// Get the dynamic size for Rn manifold.
-    pub fn dynamic_size(&self) -> usize {
-        self.value.data().len()
-    }
-
     /// Convert the Rn variable to a vector representation.
     pub fn to_vector(&self) -> DVector<f64> {
         self.value.data().clone()
@@ -241,8 +217,8 @@ mod tests {
         let rn_value = Rn::new(vec_data);
         let variable = Variable::new(rn_value);
 
-        // Use dynamic_size for Rn manifold
-        assert_eq!(variable.dynamic_size(), 5);
+        // Use get_size for Rn manifold (returns dynamic size)
+        assert_eq!(variable.get_size(), 5);
         assert!(variable.fixed_indices.is_empty());
         assert!(variable.bounds.is_empty());
     }
@@ -297,7 +273,7 @@ mod tests {
 
         let new_vec = DVector::from_vec(vec![4.0, 5.0, 6.0, 7.0]);
         variable.set_value(Rn::new(new_vec));
-        assert_eq!(variable.dynamic_size(), 4);
+        assert_eq!(variable.get_size(), 4);
 
         let se2_initial = SE2::from_xy_angle(0.0, 0.0, 0.0);
         let mut se2_variable = Variable::new(se2_initial);
@@ -412,7 +388,7 @@ mod tests {
         assert_eq!(se3_var.get_size(), SE3::DOF);
         assert_eq!(so2_var.get_size(), SO2::DOF);
         assert_eq!(so3_var.get_size(), SO3::DOF);
-        assert_eq!(rn_var.dynamic_size(), 3);
+        assert_eq!(rn_var.get_size(), 3);
     }
 
     #[test]

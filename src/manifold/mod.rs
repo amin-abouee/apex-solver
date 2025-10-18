@@ -397,6 +397,22 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 
         result
     }
+
+    /// Get the dimension of the tangent space for this manifold element.
+    ///
+    /// For most manifolds, this returns the compile-time constant from the TangentVector type.
+    /// For dynamically-sized manifolds like Rⁿ, this method should be overridden to return
+    /// the actual runtime dimension.
+    ///
+    /// # Returns
+    /// The dimension of the tangent space (degrees of freedom)
+    ///
+    /// # Default Implementation
+    /// Returns `Self::TangentVector::DIM` which works for fixed-size manifolds
+    /// (SE2=3, SE3=6, SO2=1, SO3=3).
+    fn tangent_dim(&self) -> usize {
+        Self::TangentVector::DIM
+    }
 }
 
 /// Trait for Lie algebra operations.
