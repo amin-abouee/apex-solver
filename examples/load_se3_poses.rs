@@ -234,9 +234,8 @@ fn test_se3_dataset(
         )
         .expect("Failed to compute residual and jacobian");
 
-    use faer_ext::IntoNalgebra;
-    let residual_na = residual.as_ref().into_nalgebra();
-    let initial_cost = residual_na.norm_squared();
+    // Compute initial cost using faer's norm
+    let initial_cost = residual.as_ref().squared_norm_l2();
 
     println!("\nInitial state:");
     println!("  Initial cost: {:.6e}", initial_cost);
