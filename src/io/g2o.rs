@@ -19,11 +19,105 @@ impl GraphLoader for G2oLoader {
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(_graph: &Graph, _path: P) -> Result<(), ApexSolverIoError> {
-        // TODO: Implement G2O writing
-        Err(ApexSolverIoError::UnsupportedFormat(
-            "G2O writing not implemented yet".to_string(),
-        ))
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError> {
+        use std::io::Write;
+
+        let mut file = File::create(path)?;
+
+        // Write header comment
+        writeln!(file, "# G2O file written by Apex Solver")?;
+        writeln!(
+            file,
+            "# Timestamp: {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        )?;
+        writeln!(
+            file,
+            "# SE2 vertices: {}, SE3 vertices: {}, SE2 edges: {}, SE3 edges: {}",
+            graph.vertices_se2.len(),
+            graph.vertices_se3.len(),
+            graph.edges_se2.len(),
+            graph.edges_se3.len()
+        )?;
+        writeln!(file)?;
+
+        // Write SE2 vertices (sorted by ID)
+        let mut se2_ids: Vec<_> = graph.vertices_se2.keys().collect();
+        se2_ids.sort();
+
+        for id in se2_ids {
+            let vertex = &graph.vertices_se2[id];
+            writeln!(
+                file,
+                "VERTEX_SE2 {} {:.17e} {:.17e} {:.17e}",
+                vertex.id,
+                vertex.x(),
+                vertex.y(),
+                vertex.theta()
+            )?;
+        }
+
+        // Write SE3 vertices (sorted by ID)
+        let mut se3_ids: Vec<_> = graph.vertices_se3.keys().collect();
+        se3_ids.sort();
+
+        for id in se3_ids {
+            let vertex = &graph.vertices_se3[id];
+            let trans = vertex.translation();
+            let quat = vertex.rotation();
+            writeln!(
+                file,
+                "VERTEX_SE3:QUAT {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+                vertex.id, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
+            )?;
+        }
+
+        // Write SE2 edges
+        for edge in &graph.edges_se2 {
+            let meas = &edge.measurement;
+            let info = &edge.information;
+
+            // G2O SE2 information matrix order: i11, i12, i22, i33, i13, i23
+            writeln!(
+                file,
+                "EDGE_SE2 {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+                edge.from,
+                edge.to,
+                meas.x(),
+                meas.y(),
+                meas.angle(),
+                info[(0, 0)],
+                info[(0, 1)],
+                info[(1, 1)],
+                info[(2, 2)],
+                info[(0, 2)],
+                info[(1, 2)]
+            )?;
+        }
+
+        // Write SE3 edges
+        for edge in &graph.edges_se3 {
+            let trans = edge.measurement.translation();
+            let quat = edge.measurement.rotation_quaternion();
+            let info = &edge.information;
+
+            // Write EDGE_SE3:QUAT with full 6x6 upper triangular information matrix (21 values)
+            write!(
+                file,
+                "EDGE_SE3:QUAT {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+                edge.from, edge.to, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
+            )?;
+
+            // Write upper triangular information matrix (21 values)
+            for i in 0..6 {
+                for j in i..6 {
+                    write!(file, " {:.17e}", info[(i, j)])?;
+                }
+            }
+            writeln!(file)?;
+        }
+
+        Ok(())
     }
 }
 

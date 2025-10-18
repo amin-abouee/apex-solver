@@ -10,6 +10,7 @@ use crate::manifold::se3::SE3;
 
 // Module declarations
 pub mod g2o;
+pub mod rerun_conversions;
 pub mod toro;
 
 // Re-exports
@@ -253,6 +254,61 @@ impl Graph {
 
     pub fn edge_count(&self) -> usize {
         self.edges_se2.len() + self.edges_se3.len()
+    }
+
+    /// Create a new graph from optimized variables, keeping the original edges
+    ///
+    /// This is useful for saving optimization results: vertices are updated with
+    /// optimized poses, while edges (constraints) remain the same.
+    ///
+    /// # Arguments
+    /// * `variables` - HashMap of optimized variable values from solver
+    /// * `original_edges` - Reference to original graph to copy edges from
+    ///
+    /// # Returns
+    /// A new Graph with optimized vertices and original edges
+    pub fn from_optimized_variables(
+        variables: &HashMap<String, crate::core::problem::VariableEnum>,
+        original_edges: &Self,
+    ) -> Self {
+        use crate::core::problem::VariableEnum;
+
+        let mut graph = Graph::new();
+
+        // Copy edges from original (they don't change during optimization)
+        graph.edges_se2 = original_edges.edges_se2.clone();
+        graph.edges_se3 = original_edges.edges_se3.clone();
+
+        // Convert optimized variables back to vertices
+        for (var_name, var) in variables {
+            // Extract vertex ID from variable name (format: "x{id}")
+            if let Some(id_str) = var_name.strip_prefix('x') {
+                if let Ok(id) = id_str.parse::<usize>() {
+                    match var {
+                        VariableEnum::SE2(v) => {
+                            let vertex = VertexSE2 {
+                                id,
+                                pose: v.value.clone(),
+                            };
+                            graph.vertices_se2.insert(id, vertex);
+                        }
+                        VariableEnum::SE3(v) => {
+                            let vertex = VertexSE3 {
+                                id,
+                                pose: v.value.clone(),
+                            };
+                            graph.vertices_se3.insert(id, vertex);
+                        }
+                        _ => {
+                            // Skip other manifold types (SO2, SO3, Rn)
+                            // These are not commonly used in SLAM graphs
+                        }
+                    }
+                }
+            }
+        }
+
+        graph
     }
 }
 

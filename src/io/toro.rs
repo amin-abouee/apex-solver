@@ -17,11 +17,59 @@ impl GraphLoader for ToroLoader {
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(_graph: &Graph, _path: P) -> Result<(), ApexSolverIoError> {
-        // TODO: Implement TORO writing
-        Err(ApexSolverIoError::UnsupportedFormat(
-            "TORO writing not implemented yet".to_string(),
-        ))
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError> {
+        use std::io::Write;
+
+        // TORO only supports SE2
+        if !graph.vertices_se3.is_empty() || !graph.edges_se3.is_empty() {
+            return Err(ApexSolverIoError::UnsupportedFormat(
+                "TORO format only supports SE2 (2D) graphs. Use G2O format for SE3 data."
+                    .to_string(),
+            ));
+        }
+
+        let mut file = File::create(path)?;
+
+        // Write SE2 vertices (sorted by ID)
+        let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().collect();
+        vertex_ids.sort();
+
+        for id in vertex_ids {
+            let vertex = &graph.vertices_se2[id];
+            writeln!(
+                file,
+                "VERTEX2 {} {:.17e} {:.17e} {:.17e}",
+                vertex.id,
+                vertex.x(),
+                vertex.y(),
+                vertex.theta()
+            )?;
+        }
+
+        // Write SE2 edges
+        // TORO format: EDGE2 <id1> <id2> <dx> <dy> <dtheta> <i11> <i12> <i22> <i33> <i13> <i23>
+        for edge in &graph.edges_se2 {
+            let meas = &edge.measurement;
+            let info = &edge.information;
+
+            writeln!(
+                file,
+                "EDGE2 {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
+                edge.from,
+                edge.to,
+                meas.x(),
+                meas.y(),
+                meas.angle(),
+                info[(0, 0)], // i11
+                info[(0, 1)], // i12
+                info[(1, 1)], // i22
+                info[(2, 2)], // i33
+                info[(0, 2)], // i13
+                info[(1, 2)]  // i23
+            )?;
+        }
+
+        Ok(())
     }
 }
 
