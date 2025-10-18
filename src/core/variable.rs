@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::manifold::{LieGroup, Tangent};
+use faer::Mat;
 use nalgebra::DVector;
 
 /// Generic Variable struct that uses static dispatch with any manifold type.
@@ -33,6 +34,15 @@ pub struct Variable<M: LieGroup> {
     pub fixed_indices: HashSet<usize>,
     /// Bounds constraints on the tangent space representation
     pub bounds: HashMap<usize, (f64, f64)>,
+    /// Covariance matrix in the tangent space (uncertainty estimation)
+    ///
+    /// This is `None` if covariance has not been computed.
+    /// When present, it's a square matrix of size `tangent_dim x tangent_dim`
+    /// representing the uncertainty in the optimized variable's tangent space.
+    ///
+    /// For example, for SE3 this would be a 6×6 matrix representing uncertainty
+    /// in [translation_x, translation_y, translation_z, rotation_x, rotation_y, rotation_z].
+    pub covariance: Option<Mat<f64>>,
 }
 
 impl<M> Variable<M>
@@ -58,6 +68,7 @@ where
             value,
             fixed_indices: HashSet::new(),
             bounds: HashMap::new(),
+            covariance: None,
         }
     }
 
@@ -153,6 +164,32 @@ where
     /// ```
     pub fn minus(&self, other: &Self) -> M::TangentVector {
         self.value.minus(&other.value, None, None)
+    }
+
+    /// Get the covariance matrix for this variable (if computed).
+    ///
+    /// Returns `None` if covariance has not been computed.
+    ///
+    /// # Returns
+    /// Reference to the covariance matrix in tangent space
+    pub fn get_covariance(&self) -> Option<&Mat<f64>> {
+        self.covariance.as_ref()
+    }
+
+    /// Set the covariance matrix for this variable.
+    ///
+    /// The covariance matrix should be square with dimension equal to
+    /// the tangent space dimension of this variable.
+    ///
+    /// # Arguments
+    /// * `cov` - Covariance matrix in tangent space
+    pub fn set_covariance(&mut self, cov: Mat<f64>) {
+        self.covariance = Some(cov);
+    }
+
+    /// Clear the covariance matrix.
+    pub fn clear_covariance(&mut self) {
+        self.covariance = None;
     }
 }
 

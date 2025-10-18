@@ -108,6 +108,50 @@ impl VariableEnum {
             }
         }
     }
+
+    /// Get the covariance matrix for this variable (if computed).
+    ///
+    /// Returns `None` if covariance has not been computed.
+    ///
+    /// # Returns
+    /// Reference to the covariance matrix in tangent space
+    pub fn get_covariance(&self) -> Option<&faer::Mat<f64>> {
+        match self {
+            VariableEnum::Rn(var) => var.get_covariance(),
+            VariableEnum::SE2(var) => var.get_covariance(),
+            VariableEnum::SE3(var) => var.get_covariance(),
+            VariableEnum::SO2(var) => var.get_covariance(),
+            VariableEnum::SO3(var) => var.get_covariance(),
+        }
+    }
+
+    /// Set the covariance matrix for this variable.
+    ///
+    /// The covariance matrix should be square with dimension equal to
+    /// the tangent space dimension of this variable.
+    ///
+    /// # Arguments
+    /// * `cov` - Covariance matrix in tangent space
+    pub fn set_covariance(&mut self, cov: faer::Mat<f64>) {
+        match self {
+            VariableEnum::Rn(var) => var.set_covariance(cov),
+            VariableEnum::SE2(var) => var.set_covariance(cov),
+            VariableEnum::SE3(var) => var.set_covariance(cov),
+            VariableEnum::SO2(var) => var.set_covariance(cov),
+            VariableEnum::SO3(var) => var.set_covariance(cov),
+        }
+    }
+
+    /// Clear the covariance matrix for this variable.
+    pub fn clear_covariance(&mut self) {
+        match self {
+            VariableEnum::Rn(var) => var.clear_covariance(),
+            VariableEnum::SE2(var) => var.clear_covariance(),
+            VariableEnum::SE3(var) => var.clear_covariance(),
+            VariableEnum::SO2(var) => var.clear_covariance(),
+            VariableEnum::SO3(var) => var.clear_covariance(),
+        }
+    }
 }
 
 pub struct Problem {
@@ -570,6 +614,52 @@ impl Problem {
             writeln!(file, "]")?;
         }
         Ok(())
+    }
+
+    /// Compute per-variable covariances and set them in Variable objects
+    ///
+    /// This method computes the full covariance matrix by inverting the Hessian
+    /// from the linear solver, then extracts per-variable covariance blocks and
+    /// stores them in the corresponding Variable objects.
+    ///
+    /// # Arguments
+    /// * `linear_solver` - Mutable reference to the linear solver containing the cached Hessian
+    /// * `variables` - Mutable map of variables where covariances will be stored
+    /// * `variable_index_map` - Map from variable names to their starting column indices
+    ///
+    /// # Returns
+    /// `Some(HashMap)` containing per-variable covariance matrices if successful, `None` otherwise
+    ///
+    /// # Example
+    /// ```ignore
+    /// let covariances = problem.compute_and_set_covariances(
+    ///     &mut linear_solver,
+    ///     &mut variables,
+    ///     &variable_index_map
+    /// );
+    /// ```
+    pub fn compute_and_set_covariances(
+        &self,
+        linear_solver: &mut Box<dyn crate::linalg::SparseLinearSolver>,
+        variables: &mut HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+    ) -> Option<HashMap<String, faer::Mat<f64>>> {
+        // Compute the full covariance matrix (H^{-1}) using the linear solver
+        linear_solver.compute_covariance_matrix()?;
+        let full_cov = linear_solver.get_covariance_matrix()?.clone();
+
+        // Extract per-variable covariance blocks from the full matrix
+        let per_var_covariances =
+            crate::linalg::extract_variable_covariances(&full_cov, variables, variable_index_map);
+
+        // Set covariances in Variable objects for easy access
+        for (var_name, cov) in &per_var_covariances {
+            if let Some(var) = variables.get_mut(var_name) {
+                var.set_covariance(cov.clone());
+            }
+        }
+
+        Some(per_var_covariances)
     }
 }
 
