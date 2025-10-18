@@ -285,6 +285,19 @@ impl G2oLoader {
 
         let translation = Vector3::new(x, y, z);
         let quaternion = Quaternion::new(qw, qx, qy, qz);
+
+        // Validate quaternion normalization
+        let quat_norm = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt();
+        if (quat_norm - 1.0).abs() > 0.01 {
+            return Err(ApexSolverIoError::InvalidQuaternion {
+                line: line_num,
+                norm: quat_norm,
+            });
+        }
+
+        // Always normalize for numerical safety
+        let quaternion = quaternion.normalize();
+
         Ok(VertexSE3::from_translation_quaternion(
             id,
             translation,

@@ -40,6 +40,9 @@ pub enum ApexSolverIoError {
     #[error("Duplicate vertex ID: {id}")]
     DuplicateVertex { id: usize },
 
+    #[error("Invalid quaternion at line {line}: norm = {norm:.6}, expected ~1.0")]
+    InvalidQuaternion { line: usize, norm: f64 },
+
     #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
 }
