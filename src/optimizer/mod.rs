@@ -195,6 +195,14 @@ pub struct SolverResult<T> {
     pub elapsed_time: Duration,
     /// Convergence statistics
     pub convergence_info: Option<ConvergenceInfo>,
+    /// Per-variable covariance matrices (uncertainty estimation)
+    ///
+    /// This is `None` if covariance computation was not enabled in the solver configuration.
+    /// When present, it contains a mapping from variable names to their covariance matrices
+    /// in tangent space. For example, for SE3 variables this would be 6×6 matrices.
+    ///
+    /// Enable covariance computation by setting `compute_covariances: true` in the optimizer config.
+    pub covariances: Option<std::collections::HashMap<String, faer::Mat<f64>>>,
 }
 
 /// Core trait for optimization solvers.

@@ -123,6 +123,14 @@ pub struct GaussNewtonConfig {
     ///
     /// Default: 1e-10 (very small, practically identical to pure Gauss-Newton)
     pub min_diagonal: f64,
+    /// Compute per-variable covariance matrices (uncertainty estimation)
+    ///
+    /// When enabled, computes covariance by inverting the Hessian matrix after
+    /// convergence. The full covariance matrix is extracted into per-variable
+    /// blocks stored in both Variable structs and SolverResult.
+    ///
+    /// Default: false (to avoid performance overhead)
+    pub compute_covariances: bool,
 }
 
 impl Default for GaussNewtonConfig {
@@ -137,6 +145,7 @@ impl Default for GaussNewtonConfig {
             verbose: false,
             use_jacobi_scaling: false,
             min_diagonal: 1e-10,
+            compute_covariances: false,
         }
     }
 }
@@ -204,6 +213,15 @@ impl GaussNewtonConfig {
     /// maintaining the fast convergence of pure Gauss-Newton.
     pub fn with_min_diagonal(mut self, min_diagonal: f64) -> Self {
         self.min_diagonal = min_diagonal;
+        self
+    }
+
+    /// Enable or disable covariance computation (uncertainty estimation).
+    ///
+    /// When enabled, computes the full covariance matrix by inverting the Hessian
+    /// after convergence, then extracts per-variable covariance blocks.
+    pub fn with_compute_covariances(mut self, compute_covariances: bool) -> Self {
+        self.compute_covariances = compute_covariances;
         self
     }
 }
@@ -665,6 +683,17 @@ impl GaussNewton {
                     println!("{}", summary);
                 }
 
+                // Compute covariances if enabled
+                let covariances = if self.config.compute_covariances {
+                    problem.compute_and_set_covariances(
+                        &mut linear_solver,
+                        &mut state.variables,
+                        &state.variable_index_map,
+                    )
+                } else {
+                    None
+                };
+
                 return Ok(SolverResult {
                     status,
                     iterations: iteration + 1,
@@ -678,6 +707,7 @@ impl GaussNewton {
                         cost_evaluations,
                         jacobian_evaluations,
                     }),
+                    covariances,
                 });
             }
 

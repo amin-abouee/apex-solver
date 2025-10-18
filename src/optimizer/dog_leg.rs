@@ -149,6 +149,14 @@ pub struct DogLegConfig {
     pub poor_step_quality: f64,
     /// Use Jacobi column scaling (preconditioning)
     pub use_jacobi_scaling: bool,
+    /// Compute per-variable covariance matrices (uncertainty estimation)
+    ///
+    /// When enabled, computes covariance by inverting the Hessian matrix after
+    /// convergence. The full covariance matrix is extracted into per-variable
+    /// blocks stored in both Variable structs and SolverResult.
+    ///
+    /// Default: false (to avoid performance overhead)
+    pub compute_covariances: bool,
 }
 
 impl Default for DogLegConfig {
@@ -170,6 +178,7 @@ impl Default for DogLegConfig {
             good_step_quality: 0.75,
             poor_step_quality: 0.25,
             use_jacobi_scaling: false,
+            compute_covariances: false,
         }
     }
 }
@@ -258,6 +267,15 @@ impl DogLegConfig {
     /// Enable or disable Jacobi column scaling (preconditioning)
     pub fn with_jacobi_scaling(mut self, use_jacobi_scaling: bool) -> Self {
         self.use_jacobi_scaling = use_jacobi_scaling;
+        self
+    }
+
+    /// Enable or disable covariance computation (uncertainty estimation).
+    ///
+    /// When enabled, computes the full covariance matrix by inverting the Hessian
+    /// after convergence, then extracts per-variable covariance blocks.
+    pub fn with_compute_covariances(mut self, compute_covariances: bool) -> Self {
+        self.compute_covariances = compute_covariances;
         self
     }
 }
@@ -1001,6 +1019,17 @@ impl DogLeg {
                         println!("{}", summary);
                     }
 
+                    // Compute covariances if enabled
+                    let covariances = if self.config.compute_covariances {
+                        problem.compute_and_set_covariances(
+                            &mut linear_solver,
+                            &mut state.variables,
+                            &state.variable_index_map,
+                        )
+                    } else {
+                        None
+                    };
+
                     return Ok(SolverResult {
                         status,
                         iterations: iteration + 1,
@@ -1014,6 +1043,7 @@ impl DogLeg {
                             cost_evaluations,
                             jacobian_evaluations,
                         }),
+                        covariances,
                     });
                 }
             }
@@ -1039,6 +1069,17 @@ impl DogLeg {
                     println!("{}", summary);
                 }
 
+                // Compute covariances if enabled
+                let covariances = if self.config.compute_covariances {
+                    problem.compute_and_set_covariances(
+                        &mut linear_solver,
+                        &mut state.variables,
+                        &state.variable_index_map,
+                    )
+                } else {
+                    None
+                };
+
                 return Ok(SolverResult {
                     parameters: state.variables,
                     status: OptimizationStatus::MaxIterationsReached,
@@ -1052,6 +1093,7 @@ impl DogLeg {
                         cost_evaluations,
                         jacobian_evaluations,
                     }),
+                    covariances,
                 });
             }
 
