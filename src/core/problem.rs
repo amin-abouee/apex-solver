@@ -597,8 +597,7 @@ mod tests {
             (-1.0, 2.0, 2.0),   // x5: move left
             (-1.5, 1.0, 2.5),   // x6: move down-left
             (-1.0, 0.0, 3.0),   // x7: move down
-            (-0.5, -0.5, -2.8), // x8: move down-right
-            (0.5, -0.5, -2.3),  // x9: back towards origin
+            (-0.5, -0.5, -2.8), // x8: move down-right (0.5, -0.5, -2.3),  // x9: back towards origin
         ];
 
         // Add vertices using [x, y, theta] ordering
