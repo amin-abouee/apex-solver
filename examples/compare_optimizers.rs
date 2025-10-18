@@ -205,9 +205,8 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         )
         .expect("Failed to compute residual");
 
-    use faer_ext::IntoNalgebra;
-    let residual_na = residual.as_ref().into_nalgebra();
-    let init_cost = residual_na.norm_squared();
+    // Compute initial cost using faer's norm
+    let init_cost = residual.as_ref().squared_norm_l2();
 
     println!("Initial cost: {:.6e}", init_cost);
 
@@ -323,9 +322,8 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         )
         .expect("Failed to compute residual");
 
-    use faer_ext::IntoNalgebra;
-    let residual_na = residual.as_ref().into_nalgebra();
-    let init_cost = residual_na.norm_squared();
+    // Compute initial cost using faer's norm
+    let init_cost = residual.as_ref().squared_norm_l2();
 
     println!("Initial cost: {:.6e}", init_cost);
 
