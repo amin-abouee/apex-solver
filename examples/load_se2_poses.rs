@@ -31,6 +31,10 @@ struct Args {
     /// Optimizer type: "lm" (Levenberg-Marquardt), "gn" (Gauss-Newton), "dl" (Dog Leg), or "all"
     #[arg(short, long, default_value = "lm")]
     optimizer: String,
+
+    /// Optional path to save optimized graph (e.g., output/optimized.g2o)
+    #[arg(long)]
+    save_output: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone)]
@@ -316,6 +320,34 @@ fn test_dataset(
     );
     println!("Iterations: {}", result.iterations);
     println!("Execution time: {:.1}ms", duration.as_millis());
+
+    // Save optimized graph if requested
+    if let Some(output_base) = &args.save_output {
+        println!("\nSaving optimized graph...");
+
+        // Determine output path - if it's a directory, auto-generate filename
+        let output_path = if output_base.is_dir() || output_base.to_string_lossy().ends_with('/') {
+            output_base.join(format!("{}_optimized.g2o", dataset_name))
+        } else {
+            output_base.clone()
+        };
+
+        // Create output directory if it doesn't exist
+        if let Some(parent) = output_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Reconstruct graph from optimized variables
+        use apex_solver::io::Graph;
+        let optimized_graph = Graph::from_optimized_variables(&result.parameters, &graph);
+
+        // Write to file (default: G2O format)
+        use apex_solver::io::GraphLoader;
+        G2oLoader::write(&optimized_graph, &output_path)?;
+
+        println!("✓ Saved optimized graph to: {}", output_path.display());
+        println!("  Status: {} ({})", status, convergence_reason);
+    }
 
     Ok(DatasetResult {
         dataset: dataset_name.to_string(),
