@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2.0.12"
-nalgebra = "0.33"
+nalgebra = { version = "0.33", features = ["convert-glam028"] }
 memmap2 = "0.9"
 rayon = "1.8"
 rand = "0.9.1"

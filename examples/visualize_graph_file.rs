@@ -1,7 +1,4 @@
-use apex_solver::io::{
-    Graph, load_graph, rerun_conversions::IntoRerunPosition2D,
-    rerun_conversions::IntoRerunTransform,
-};
+use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,
@@ -98,8 +95,8 @@ fn visualize_se3_poses(
     );
 
     for (id, vertex) in &graph.vertices_se3 {
-        // Use conversion trait for clean code
-        let (position, rotation) = vertex.into_rerun_transform(scale);
+        // Use conversion method for clean code
+        let (position, rotation) = vertex.to_rerun_transform(scale);
 
         // Create transform from position and rotation
         let transform = Transform3D::from_translation_rotation(position, rotation);
@@ -133,11 +130,11 @@ fn visualize_se2_poses(
         graph.vertices_se2.len()
     );
 
-    // Collect all positions using conversion trait
+    // Collect all positions using conversion method
     let positions: Vec<[f32; 2]> = graph
         .vertices_se2
         .values()
-        .map(|vertex| vertex.into_rerun_position_2d(scale))
+        .map(|vertex| vertex.to_rerun_position_2d(scale))
         .collect();
 
     // Create colors for all points

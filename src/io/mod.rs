@@ -10,7 +10,6 @@ use crate::manifold::se3::SE3;
 
 // Module declarations
 pub mod g2o;
-pub mod rerun_conversions;
 pub mod toro;
 
 // Re-exports
@@ -91,6 +90,35 @@ impl fmt::Display for VertexSE2 {
     }
 }
 
+impl VertexSE2 {
+    /// Convert to Rerun 2D position with scaling
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to position
+    ///
+    /// # Returns
+    /// 2D position array [x, y] compatible with Rerun Points2D
+    pub fn to_rerun_position_2d(&self, scale: f32) -> [f32; 2] {
+        [(self.x() as f32) * scale, (self.y() as f32) * scale]
+    }
+
+    /// Convert to Rerun 3D position with scaling and specified height
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to X and Y
+    /// * `height` - Z coordinate for the 2D point in 3D space
+    ///
+    /// # Returns
+    /// 3D position compatible with Rerun Transform3D or Points3D
+    pub fn to_rerun_position_3d(&self, scale: f32, height: f32) -> rerun::external::glam::Vec3 {
+        rerun::external::glam::Vec3::new(
+            (self.x() as f32) * scale,
+            (self.y() as f32) * scale,
+            height,
+        )
+    }
+}
+
 /// SE3 vertex with ID (x, y, z, qx, qy, qz, qw)
 #[derive(Clone, PartialEq)]
 pub struct VertexSE3 {
@@ -153,6 +181,40 @@ impl VertexSE3 {
 impl fmt::Display for VertexSE3 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "VertexSE3 [ id: {}, pose: {} ]", self.id, self.pose)
+    }
+}
+
+impl VertexSE3 {
+    /// Convert to Rerun 3D transform components (position and rotation) with scaling
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to position
+    ///
+    /// # Returns
+    /// Tuple of (position, rotation) compatible with Rerun Transform3D
+    pub fn to_rerun_transform(
+        &self,
+        scale: f32,
+    ) -> (rerun::external::glam::Vec3, rerun::external::glam::Quat) {
+        use nalgebra::Vector3;
+
+        // Extract translation and convert to glam Vec3
+        let trans = self.translation();
+        let position: rerun::external::glam::Vec3 =
+            Vector3::new(trans.x as f32, trans.y as f32, trans.z as f32).into();
+        let position = position * scale;
+
+        // Extract rotation quaternion and convert to glam Quat
+        let rot = self.rotation();
+        let nq = rot.as_ref();
+        let rotation = rerun::external::glam::Quat::from_xyzw(
+            nq.i as f32,
+            nq.j as f32,
+            nq.k as f32,
+            nq.w as f32,
+        );
+
+        (position, rotation)
     }
 }
 
@@ -464,5 +526,38 @@ mod tests {
         assert_eq!(graph.vertices_se2.len(), 2);
 
         Ok(())
+    }
+
+    #[test]
+    fn test_se3_to_rerun() {
+        let vertex = VertexSE3::new(0, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
+
+        let (pos, rot) = vertex.to_rerun_transform(0.1);
+
+        assert!((pos.x - 0.1).abs() < 1e-6);
+        assert!((pos.y - 0.2).abs() < 1e-6);
+        assert!((pos.z - 0.3).abs() < 1e-6);
+        assert!((rot.w - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_se2_to_rerun_2d() {
+        let vertex = VertexSE2::new(0, 10.0, 20.0, 0.5);
+
+        let pos = vertex.to_rerun_position_2d(0.1);
+
+        assert!((pos[0] - 1.0).abs() < 1e-6);
+        assert!((pos[1] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_se2_to_rerun_3d() {
+        let vertex = VertexSE2::new(0, 10.0, 20.0, 0.5);
+
+        let pos = vertex.to_rerun_position_3d(0.1, 5.0);
+
+        assert!((pos.x - 1.0).abs() < 1e-6);
+        assert!((pos.y - 2.0).abs() < 1e-6);
+        assert!((pos.z - 5.0).abs() < 1e-6);
     }
 }
