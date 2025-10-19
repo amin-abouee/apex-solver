@@ -344,27 +344,27 @@ impl Graph {
         // Convert optimized variables back to vertices
         for (var_name, var) in variables {
             // Extract vertex ID from variable name (format: "x{id}")
-            if let Some(id_str) = var_name.strip_prefix('x') {
-                if let Ok(id) = id_str.parse::<usize>() {
-                    match var {
-                        VariableEnum::SE2(v) => {
-                            let vertex = VertexSE2 {
-                                id,
-                                pose: v.value.clone(),
-                            };
-                            graph.vertices_se2.insert(id, vertex);
-                        }
-                        VariableEnum::SE3(v) => {
-                            let vertex = VertexSE3 {
-                                id,
-                                pose: v.value.clone(),
-                            };
-                            graph.vertices_se3.insert(id, vertex);
-                        }
-                        _ => {
-                            // Skip other manifold types (SO2, SO3, Rn)
-                            // These are not commonly used in SLAM graphs
-                        }
+            if let Some(id_str) = var_name.strip_prefix('x')
+                && let Ok(id) = id_str.parse::<usize>()
+            {
+                match var {
+                    VariableEnum::SE2(v) => {
+                        let vertex = VertexSE2 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se2.insert(id, vertex);
+                    }
+                    VariableEnum::SE3(v) => {
+                        let vertex = VertexSE3 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se3.insert(id, vertex);
+                    }
+                    _ => {
+                        // Skip other manifold types (SO2, SO3, Rn)
+                        // These are not commonly used in SLAM graphs
                     }
                 }
             }
