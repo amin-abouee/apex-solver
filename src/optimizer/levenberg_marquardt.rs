@@ -163,6 +163,19 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
+    /// Enable real-time Rerun visualization (graphical debugging)
+    ///
+    /// When enabled, logs optimization progress to Rerun viewer including:
+    /// - Time series plots (cost, gradient norm, damping, step quality)
+    /// - Sparse Hessian heat map visualization
+    /// - Gradient vector visualization
+    /// - Manifold state updates (for SE2/SE3 problems)
+    ///
+    /// This is automatically disabled in release builds (zero overhead).
+    /// Use `verbose` for terminal output; this is for graphical visualization.
+    ///
+    /// Default: false
+    pub enable_visualization: bool,
 }
 
 impl Default for LevenbergMarquardtConfig {
@@ -187,6 +200,7 @@ impl Default for LevenbergMarquardtConfig {
             max_diagonal: 1e32,
             use_jacobi_scaling: false,
             compute_covariances: false,
+            enable_visualization: false,
         }
     }
 }
@@ -284,6 +298,24 @@ impl LevenbergMarquardtConfig {
         self.compute_covariances = compute_covariances;
         self
     }
+
+    /// Enable real-time visualization (graphical debugging).
+    ///
+    /// When enabled, optimization progress is logged to a Rerun viewer with:
+    /// - Time series plots of cost, gradient norm, damping, step quality
+    /// - Sparse Hessian matrix visualization as heat map
+    /// - Gradient vector visualization
+    /// - Real-time manifold state updates (for SE2/SE3 problems)
+    ///
+    /// Note: Has zero overhead when disabled. Use `verbose` for terminal logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `enable` - Whether to enable visualization
+    pub fn with_visualization(mut self, enable: bool) -> Self {
+        self.enable_visualization = enable;
+        self
+    }
 }
 
 /// State for optimization iteration
@@ -320,6 +352,8 @@ struct StepEvaluation {
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    #[allow(dead_code)]
+    visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
 }
 
 impl Default for LevenbergMarquardt {
@@ -336,9 +370,23 @@ impl LevenbergMarquardt {
 
     /// Create a new Levenberg-Marquardt solver with the given configuration.
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
+        // Create visualizer if enabled (zero overhead when disabled)
+        let visualizer = if config.enable_visualization {
+            match crate::optimizer::visualization::OptimizationVisualizer::new(true) {
+                Ok(vis) => Some(vis),
+                Err(e) => {
+                    eprintln!("[WARNING] Failed to create visualizer: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             jacobi_scaling: None,
+            visualizer,
         }
     }
 
@@ -715,36 +763,6 @@ impl LevenbergMarquardt {
         })
     }
 
-    /// Log iteration details if verbose mode is enabled
-    fn log_iteration(
-        &self,
-        iteration: usize,
-        step_eval: &StepEvaluation,
-        step_norm: f64,
-        current_cost: f64,
-    ) {
-        if !self.config.verbose {
-            return;
-        }
-
-        let status = if step_eval.accepted {
-            "[ACCEPTED]"
-        } else {
-            "[REJECTED]"
-        };
-
-        println!(
-            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, damping = {:.6e}, step_norm = {:.6e}, rho = {:.3} {}",
-            iteration + 1,
-            current_cost,
-            step_eval.cost_reduction,
-            self.config.damping,
-            step_norm,
-            step_eval.rho,
-            status
-        );
-    }
-
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -889,8 +907,30 @@ impl LevenbergMarquardt {
                 unsuccessful_steps += 1;
             }
 
-            // Log iteration
-            self.log_iteration(iteration, &step_eval, step_norm, state.current_cost);
+            // Rerun visualization
+            if let Some(ref vis) = self.visualizer {
+                if let Err(e) = vis.log_scalars(
+                    iteration,
+                    state.current_cost,
+                    step_result.gradient_norm,
+                    self.config.damping,
+                    step_norm,
+                    Some(step_eval.rho),
+                ) {
+                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                }
+
+                // Log expensive visualizations (Hessian, gradient, manifolds)
+                if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
+                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                }
+                if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
+                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                }
+                if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
+                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                }
+            }
 
             // Check convergence (only after accepted steps)
             if step_eval.accepted {
@@ -918,6 +958,11 @@ impl LevenbergMarquardt {
 
                     if self.config.verbose {
                         println!("{}", summary);
+                    }
+
+                    // Log convergence to Rerun
+                    if let Some(ref vis) = self.visualizer {
+                        let _ = vis.log_convergence(&format!("Converged: {}", status));
                     }
 
                     // Compute covariances if enabled

@@ -157,6 +157,14 @@ pub struct DogLegConfig {
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
+
+    /// Enable real-time visualization (graphical debugging).
+    ///
+    /// When enabled, optimization progress is logged to a Rerun viewer.
+    /// Note: Has zero overhead when disabled.
+    ///
+    /// Default: false
+    pub enable_visualization: bool,
 }
 
 impl Default for DogLegConfig {
@@ -179,6 +187,7 @@ impl Default for DogLegConfig {
             poor_step_quality: 0.25,
             use_jacobi_scaling: false,
             compute_covariances: false,
+            enable_visualization: false,
         }
     }
 }
@@ -278,6 +287,16 @@ impl DogLegConfig {
         self.compute_covariances = compute_covariances;
         self
     }
+
+    /// Enable real-time visualization.
+    ///
+    /// # Arguments
+    ///
+    /// * `enable` - Whether to enable visualization
+    pub fn with_visualization(mut self, enable: bool) -> Self {
+        self.enable_visualization = enable;
+        self
+    }
 }
 
 /// State for optimization iteration
@@ -336,6 +355,8 @@ struct StepEvaluation {
 pub struct DogLeg {
     config: DogLegConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    #[allow(dead_code)]
+    visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
 }
 
 impl Default for DogLeg {
@@ -352,9 +373,20 @@ impl DogLeg {
 
     /// Create a new Dog Leg solver with the given configuration.
     pub fn with_config(config: DogLegConfig) -> Self {
+        // Create visualizer if enabled (zero overhead when disabled)
+        let visualizer = if config.enable_visualization {
+            match crate::optimizer::visualization::OptimizationVisualizer::new(true) {
+                Ok(vis) => Some(vis),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
         Self {
             config,
             jacobi_scaling: None,
+            visualizer,
         }
     }
 
