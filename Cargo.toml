@@ -5,11 +5,11 @@ edition = "2024"
 
 [dependencies]
 thiserror = "2.0.12"
-nalgebra = { version = "0.33", features = ["convert-glam028"] }
+nalgebra = { version = "0.33", features = ["convert-glam029"] }
 memmap2 = "0.9"
 rayon = "1.8"
 rand = "0.9.1"
-rerun = { version = "0.23.4", features = ["sdk"] }
+rerun = { version = "0.26.0", features = ["sdk"] }
 faer = { version = "0.22", features = ["sparse"] }
 log = "0.4"
 clap = { version = "4.4", features = ["derive"] }
