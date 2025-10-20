@@ -295,10 +295,7 @@ impl GaussNewton {
     pub fn with_config(config: GaussNewtonConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
         let visualizer = if config.enable_visualization {
-            match crate::optimizer::visualization::OptimizationVisualizer::new(true) {
-                Ok(vis) => Some(vis),
-                Err(_) => None,
-            }
+            crate::optimizer::visualization::OptimizationVisualizer::new(true).ok()
         } else {
             None
         };
