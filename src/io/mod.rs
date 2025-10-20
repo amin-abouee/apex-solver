@@ -196,13 +196,11 @@ impl VertexSE3 {
         &self,
         scale: f32,
     ) -> (rerun::external::glam::Vec3, rerun::external::glam::Quat) {
-        use nalgebra::Vector3;
-
         // Extract translation and convert to glam Vec3
         let trans = self.translation();
-        let position: rerun::external::glam::Vec3 =
-            Vector3::new(trans.x as f32, trans.y as f32, trans.z as f32).into();
-        let position = position * scale;
+        let position =
+            rerun::external::glam::Vec3::new(trans.x as f32, trans.y as f32, trans.z as f32)
+                * scale;
 
         // Extract rotation quaternion and convert to glam Quat
         let rot = self.rotation();
