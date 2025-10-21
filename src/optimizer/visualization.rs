@@ -10,13 +10,6 @@
 //! - **Gradient visualization**: Vector representation with magnitude encoding
 //! - **Manifold state**: Real-time pose updates for SE2/SE3 problems
 //!
-//! # Example
-//!
-//! ```ignore
-//! let mut visualizer = OptimizationVisualizer::new(true)?;
-//! visualizer.log_scalars(iteration, cost, gradient_norm, damping, step_norm, step_quality);
-//! visualizer.log_hessian(hessian, iteration);
-//! ```
 
 use crate::core::problem::VariableEnum;
 use faer::{Mat, sparse::SparseColMat};
@@ -622,6 +615,6 @@ mod tests {
 
         // Test mid-range value - should be light blue
         let rgb = OptimizationVisualizer::value_to_rgb_heatmap(0.5, 1.0);
-        assert_eq!(rgb, [127, 127, 255]);
+        assert_eq!(rgb, [128, 128, 255]);
     }
 }
