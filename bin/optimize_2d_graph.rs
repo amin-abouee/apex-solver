@@ -35,6 +35,10 @@ struct Args {
     /// Optional path to save optimized graph (e.g., output/optimized.g2o)
     #[arg(long)]
     save_output: Option<std::path::PathBuf>,
+
+    /// Enable real-time Rerun visualization
+    #[arg(long)]
+    with_visualizer: bool,
 }
 
 #[derive(Clone)]
@@ -246,7 +250,8 @@ fn test_dataset(
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_verbose(args.verbose)
+                .with_visualization(args.with_visualizer);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -256,7 +261,8 @@ fn test_dataset(
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_verbose(args.verbose)
+                .with_visualization(args.with_visualizer);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -266,7 +272,8 @@ fn test_dataset(
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_verbose(args.verbose)
+                .with_visualization(args.with_visualizer);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -364,7 +371,7 @@ fn test_dataset(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    let mut args = Args::parse();
 
     println!("=== APEX-SOLVER 2D POSE GRAPH OPTIMIZATION ===");
 
@@ -385,6 +392,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         vec![args.dataset.as_str()]
     };
+
+    // Check if visualization is requested with multiple datasets
+    if args.with_visualizer && datasets.len() > 1 {
+        eprintln!(
+            "\n[WARNING] Visualization is not supported when running multiple datasets (--dataset all)."
+        );
+        eprintln!(
+            "[WARNING] Disabling visualization. To use visualization, specify a single dataset."
+        );
+        eprintln!("[WARNING] Example: --dataset M3500 --with-visualizer\n");
+        args.with_visualizer = false;
+    }
 
     let mut results = Vec::new();
 
