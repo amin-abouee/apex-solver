@@ -26,3 +26,4 @@ Cargo.lock
 .cursor/
 .vscode/
 profiles/
+scripts/
