@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::core::factors::BetweenFactorSE2;
+use apex_solver::core::factors::BetweenFactorSE3;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -13,20 +13,28 @@ use clap::Parser;
 use nalgebra::dvector;
 
 #[derive(Parser)]
-#[command(name = "load_se2_poses")]
-#[command(about = "Load and optimize SE2 poses from G2O dataset")]
+#[command(name = "optimize_3d_graph")]
+#[command(about = "Optimize 3D pose graphs from G2O datasets")]
 struct Args {
-    /// G2O dataset file to load (without .g2o extension). Use "all" to test all SE2 datasets
-    #[arg(short, long, default_value = "M3500")]
+    /// G2O dataset file to load (without .g2o extension). Use "all" to test all SE3 datasets
+    #[arg(short, long, default_value = "sphere2500")]
     dataset: String,
 
-    /// Maximum number of optimization iterations
-    #[arg(short, long, default_value = "150")]
+    /// Maximum number of optimization iterations (optimized for SE3 datasets)
+    #[arg(short, long, default_value = "100")]
     max_iterations: usize,
 
     /// Enable verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Cost tolerance for convergence (optimized for SE3 datasets)
+    #[arg(long, default_value = "1e-4")]
+    cost_tolerance: f64,
+
+    /// Parameter tolerance for convergence (optimized for SE3 datasets)
+    #[arg(long, default_value = "1e-4")]
+    parameter_tolerance: f64,
 
     /// Optimizer type: "lm" (Levenberg-Marquardt), "gn" (Gauss-Newton), "dl" (Dog Leg), or "all"
     #[arg(short, long, default_value = "lm")]
@@ -122,68 +130,86 @@ fn format_summary_table(results: &[DatasetResult]) {
     }
 }
 
-fn test_dataset(
+fn test_se3_dataset(
     dataset_name: &str,
     args: &Args,
 ) -> Result<DatasetResult, Box<dyn std::error::Error>> {
-    println!("\n=== TESTING {} DATASET ===", dataset_name.to_uppercase());
-    println!("Loading {}.g2o dataset for SE2 optimization", dataset_name);
+    println!(
+        "\n=== TESTING {} SE3 DATASET ===",
+        dataset_name.to_uppercase()
+    );
+    println!("Loading {}.g2o dataset for SE3 optimization", dataset_name);
+
+    // Apply dataset-specific optimizations
+    let (cost_tol, param_tol, max_iter) = match dataset_name {
+        "grid3D" => {
+            println!("Note: grid3D requires very relaxed tolerances due to high complexity");
+            (1e-1, 1e-1, 30)
+        }
+        "rim" => (1e-3, 1e-3, args.max_iterations),
+        "torus3D" => (1e-5, 1e-5, args.max_iterations),
+        _ => (
+            args.cost_tolerance,
+            args.parameter_tolerance,
+            args.max_iterations,
+        ),
+    };
+
+    if cost_tol != args.cost_tolerance
+        || param_tol != args.parameter_tolerance
+        || max_iter != args.max_iterations
+    {
+        println!(
+            "Using optimized parameters: cost_tol={:.1e}, param_tol={:.1e}, max_iter={}",
+            cost_tol, param_tol, max_iter
+        );
+    }
 
     // Load the G2O graph file
     let dataset_path = format!("data/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
-    let num_vertices = graph.vertices_se2.len();
-    let num_edges = graph.edges_se2.len();
+    let num_vertices = graph.vertices_se3.len();
+    let num_edges = graph.edges_se3.len();
 
-    println!("Successfully loaded SE2 graph:");
-    println!("  SE2 vertices: {}", num_vertices);
-    println!("  SE2 edges: {}", num_edges);
+    println!("Successfully loaded SE3 graph:");
+    println!("  SE3 vertices: {}", num_vertices);
+    println!("  SE3 edges: {}", num_edges);
 
-    // Check if we have any vertices
     if num_vertices == 0 {
-        return Err(format!("No SE2 vertices found in dataset {}", dataset_name).into());
+        return Err(format!("No SE3 vertices found in dataset {}", dataset_name).into());
     }
 
     // Create optimization problem
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
-    // Add SE2 vertices as variables
-    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
+    // Add SE3 vertices as variables
+    let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
-        if let Some(vertex) = graph.vertices_se2.get(&id) {
+        if let Some(vertex) = graph.vertices_se3.get(&id) {
             let var_name = format!("x{}", id);
-            let se2_data = dvector![vertex.x(), vertex.y(), vertex.theta()];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+            let quat = vertex.pose.rotation_quaternion();
+            let trans = vertex.pose.translation();
+            let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
     }
 
-    // Add SE2 between factors
-    for edge in &graph.edges_se2 {
+    // Add SE3 between factors
+    for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
-
-        let dx = edge.measurement.translation().x;
-        let dy = edge.measurement.translation().y;
-        let dtheta = edge.measurement.angle();
-
-        let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
+        let relative_pose = edge.measurement.clone();
+        let between_factor = BetweenFactorSE3::new(relative_pose);
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 
-    // Fix the first pose to remove gauge freedom (all 3 DOF: x, y, theta)
-    let first_var_name = format!("x{}", vertex_ids[0]);
-    problem.fix_variable(&first_var_name, 0);
-    problem.fix_variable(&first_var_name, 1);
-    problem.fix_variable(&first_var_name, 2);
-
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
-    println!("  Between factors: {}", graph.edges_se2.len());
-    println!("  Fixed first pose: {} (all 3 DOF)", first_var_name);
+    println!("  Between factors: {}", graph.edges_se3.len());
 
     // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);
@@ -237,35 +263,39 @@ fn test_dataset(
             _ => "LEVENBERG-MARQUARDT",
         }
     );
+    println!("Configuration:");
+    println!("  Max iterations: {}", max_iter);
+    println!("  Cost tolerance: {:.2e}", cost_tol);
+    println!("  Parameter tolerance: {:.2e}", param_tol);
 
     let start_time = Instant::now();
     let result = match optimizer_name {
         "GN" => {
             let config = GaussNewtonConfig::new()
-                .with_max_iterations(args.max_iterations)
-                .with_cost_tolerance(1e-4)
-                .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
+                .with_max_iterations(max_iter)
+                .with_cost_tolerance(cost_tol)
+                .with_parameter_tolerance(param_tol)
+                .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
             let config = DogLegConfig::new()
-                .with_max_iterations(args.max_iterations)
-                .with_cost_tolerance(1e-4)
-                .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
+                .with_max_iterations(max_iter)
+                .with_cost_tolerance(cost_tol)
+                .with_parameter_tolerance(param_tol)
+                .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
             let config = LevenbergMarquardtConfig::new()
-                .with_max_iterations(args.max_iterations)
-                .with_cost_tolerance(1e-4)
-                .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
+                .with_max_iterations(max_iter)
+                .with_cost_tolerance(cost_tol)
+                .with_parameter_tolerance(param_tol)
+                .with_gradient_tolerance(1e-12)
                 .with_verbose(args.verbose);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(&problem, &initial_values)?
@@ -366,22 +396,20 @@ fn test_dataset(
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    println!("=== APEX-SOLVER SE2 POSE GRAPH OPTIMIZATION ===");
+    println!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
 
-    // Determine which datasets to test
+    // Define available SE3 datasets
+    let se3_datasets = vec![
+        "rim",
+        "sphere2500",
+        "parking-garage",
+        "torus3D",
+        "grid3D",
+        "cubicle",
+    ];
+
     let datasets = if args.dataset == "all" {
-        vec![
-            "city10000",
-            "M3500",
-            "M3500a",
-            "M3500b",
-            "M3500c",
-            "intel",
-            "mit",
-            "manhattanOlson3500",
-            "ring",
-            "ringCity",
-        ]
+        se3_datasets
     } else {
         vec![args.dataset.as_str()]
     };
@@ -390,7 +418,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for dataset in &datasets {
         println!("\n{}", "=".repeat(80));
-        match test_dataset(dataset, &args) {
+        match test_se3_dataset(dataset, &args) {
             Ok(result) => {
                 println!("Dataset {} completed: {}", dataset, result.status);
                 results.push(result);
