@@ -152,23 +152,6 @@ pub use qr::SparseQRSolver;
 /// HashMap mapping variable names to their covariance matrices in tangent space.
 /// For SE3 variables, this would be 6×6 matrices; for SE2, 3×3; etc.
 ///
-/// # Example
-/// ```ignore
-/// // After optimization, get full covariance from linear solver
-/// let full_cov = linear_solver.compute_covariance_matrix();
-///
-/// // Extract per-variable covariances
-/// let var_covariances = extract_variable_covariances(
-///     full_cov.unwrap(),
-///     &variables,
-///     &variable_index_map
-/// );
-///
-/// // Access individual variable uncertainty
-/// if let Some(pose_cov) = var_covariances.get("x0") {
-///     println!("Pose x0 covariance: {}", pose_cov);
-/// }
-/// ```
 pub fn extract_variable_covariances(
     full_covariance: &Mat<f64>,
     variables: &HashMap<String, VariableEnum>,

@@ -631,14 +631,6 @@ impl Problem {
     /// # Returns
     /// `Some(HashMap)` containing per-variable covariance matrices if successful, `None` otherwise
     ///
-    /// # Example
-    /// ```ignore
-    /// let covariances = problem.compute_and_set_covariances(
-    ///     &mut linear_solver,
-    ///     &mut variables,
-    ///     &variable_index_map
-    /// );
-    /// ```
     pub fn compute_and_set_covariances(
         &self,
         linear_solver: &mut Box<dyn crate::linalg::SparseLinearSolver>,

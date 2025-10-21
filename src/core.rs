@@ -117,39 +117,6 @@ impl From<crate::io::ApexSolverIoError> for ApexError {
     }
 }
 
-/// Convenience macro for creating linear algebra errors
-#[macro_export]
-macro_rules! linalg_error {
-    ($msg:expr) => {
-        $crate::core::ApexError::LinearAlgebra($msg.to_string())
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::core::ApexError::LinearAlgebra(format!($fmt, $($arg)*))
-    };
-}
-
-/// Convenience macro for creating solver errors
-#[macro_export]
-macro_rules! solver_error {
-    ($msg:expr) => {
-        $crate::core::ApexError::Solver($msg.to_string())
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::core::ApexError::Solver(format!($fmt, $($arg)*))
-    };
-}
-
-/// Convenience macro for creating computation errors
-#[macro_export]
-macro_rules! computation_error {
-    ($msg:expr) => {
-        $crate::core::ApexError::Computation($msg.to_string())
-    };
-    ($fmt:expr, $($arg:tt)*) => {
-        $crate::core::ApexError::Computation(format!($fmt, $($arg)*))
-    };
-}
-
 /// Trait for problems that can be optimized
 pub trait Optimizable {
     /// Parameter type (e.g., Vec<f64>, nalgebra::DVector<f64>)
@@ -225,32 +192,5 @@ mod tests {
     fn test_apex_result_err() {
         let result: ApexResult<i32> = Err(ApexError::Computation("Test error".to_string()));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_linalg_error_macro() {
-        let error = linalg_error!("Test {}", "message");
-        match error {
-            ApexError::LinearAlgebra(msg) => assert_eq!(msg, "Test message"),
-            _ => panic!("Expected LinearAlgebra error"),
-        }
-    }
-
-    #[test]
-    fn test_solver_error_macro() {
-        let error = solver_error!("Convergence failed after {} iterations", 100);
-        match error {
-            ApexError::Solver(msg) => assert_eq!(msg, "Convergence failed after 100 iterations"),
-            _ => panic!("Expected Solver error"),
-        }
-    }
-
-    #[test]
-    fn test_computation_error_macro() {
-        let error = computation_error!("Division by zero");
-        match error {
-            ApexError::Computation(msg) => assert_eq!(msg, "Division by zero"),
-            _ => panic!("Expected Computation error"),
-        }
     }
 }
