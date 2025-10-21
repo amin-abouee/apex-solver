@@ -27,3 +27,5 @@ Cargo.lock
 .vscode/
 profiles/
 scripts/
+output/
+doc/*.md
