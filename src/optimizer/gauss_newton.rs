@@ -246,7 +246,6 @@ impl GaussNewtonConfig {
 }
 
 /// State for optimization iteration
-#[allow(dead_code)]
 struct OptimizationState {
     variables: HashMap<String, VariableEnum>,
     variable_index_map: HashMap<String, usize>,
@@ -257,15 +256,12 @@ struct OptimizationState {
 }
 
 /// Result from step computation
-#[allow(dead_code)]
 struct StepResult {
     step: Mat<f64>,
-    scaled_step: Mat<f64>,
     gradient_norm: f64,
 }
 
 /// Result from cost evaluation
-#[allow(dead_code)]
 struct CostEvaluation {
     new_cost: f64,
     cost_reduction: f64,
@@ -275,7 +271,6 @@ struct CostEvaluation {
 pub struct GaussNewton {
     config: GaussNewtonConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    #[allow(dead_code)]
     visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
 }
 
@@ -515,7 +510,6 @@ impl GaussNewton {
 
         Some(StepResult {
             step,
-            scaled_step,
             gradient_norm,
         })
     }
@@ -686,6 +680,31 @@ impl GaussNewton {
 
             // Log iteration
             self.log_iteration(iteration, &cost_eval, step_norm);
+
+            // Rerun visualization
+            if let Some(ref vis) = self.visualizer {
+                if let Err(e) = vis.log_scalars(
+                    iteration,
+                    state.current_cost,
+                    step_result.gradient_norm,
+                    0.0, // Gauss-Newton doesn't use damping/trust region
+                    step_norm,
+                    None, // No step quality rho in Gauss-Newton
+                ) {
+                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                }
+
+                // Log expensive visualizations (Hessian, gradient, manifolds)
+                if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
+                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                }
+                if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
+                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                }
+                if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
+                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                }
+            }
 
             // Check convergence
             let elapsed = start_time.elapsed();

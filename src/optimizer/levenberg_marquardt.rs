@@ -319,7 +319,6 @@ impl LevenbergMarquardtConfig {
 }
 
 /// State for optimization iteration
-#[allow(dead_code)]
 struct OptimizationState {
     variables: HashMap<String, VariableEnum>,
     variable_index_map: HashMap<String, usize>,
@@ -330,20 +329,15 @@ struct OptimizationState {
 }
 
 /// Result from step computation
-#[allow(dead_code)]
 struct StepResult {
     step: Mat<f64>,
-    scaled_step: Mat<f64>,
-    gradient: Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
 }
 
 /// Result from step evaluation
-#[allow(dead_code)]
 struct StepEvaluation {
     accepted: bool,
-    new_cost: f64,
     cost_reduction: f64,
     rho: f64,
 }
@@ -352,7 +346,6 @@ struct StepEvaluation {
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    #[allow(dead_code)]
     visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
 }
 
@@ -687,8 +680,6 @@ impl LevenbergMarquardt {
 
         Some(StepResult {
             step,
-            scaled_step,
-            gradient,
             gradient_norm,
             predicted_reduction,
         })
@@ -757,7 +748,6 @@ impl LevenbergMarquardt {
 
         Ok(StepEvaluation {
             accepted,
-            new_cost,
             cost_reduction,
             rho,
         })

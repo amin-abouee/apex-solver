@@ -300,7 +300,6 @@ impl DogLegConfig {
 }
 
 /// State for optimization iteration
-#[allow(dead_code)]
 struct OptimizationState {
     variables: HashMap<String, VariableEnum>,
     variable_index_map: HashMap<String, usize>,
@@ -311,11 +310,8 @@ struct OptimizationState {
 }
 
 /// Result from step computation
-#[allow(dead_code)]
 struct StepResult {
     step: Mat<f64>,
-    scaled_step: Mat<f64>,
-    gradient: Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
     step_type: StepType,
@@ -343,10 +339,8 @@ impl fmt::Display for StepType {
 }
 
 /// Result from step evaluation
-#[allow(dead_code)]
 struct StepEvaluation {
     accepted: bool,
-    new_cost: f64,
     cost_reduction: f64,
     rho: f64,
 }
@@ -355,7 +349,6 @@ struct StepEvaluation {
 pub struct DogLeg {
     config: DogLegConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    #[allow(dead_code)]
     visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
 }
 
@@ -778,8 +771,6 @@ impl DogLeg {
 
         Some(StepResult {
             step,
-            scaled_step,
-            gradient,
             gradient_norm,
             predicted_reduction,
             step_type,
@@ -857,7 +848,6 @@ impl DogLeg {
 
         Ok(StepEvaluation {
             accepted,
-            new_cost,
             cost_reduction,
             rho,
         })
@@ -1019,6 +1009,31 @@ impl DogLeg {
                 step_result.step_type,
                 state.current_cost,
             );
+
+            // Rerun visualization
+            if let Some(ref vis) = self.visualizer {
+                if let Err(e) = vis.log_scalars(
+                    iteration,
+                    state.current_cost,
+                    step_result.gradient_norm,
+                    self.config.trust_region_radius,
+                    step_norm,
+                    Some(step_eval.rho),
+                ) {
+                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                }
+
+                // Log expensive visualizations (Hessian, gradient, manifolds)
+                if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
+                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                }
+                if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
+                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                }
+                if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
+                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                }
+            }
 
             // Check convergence (only after accepted steps)
             if step_eval.accepted {
