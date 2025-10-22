@@ -394,8 +394,8 @@ mod tests {
     #[test]
     fn test_variable_rn_plus_minus_operations() {
         // Test Rn manifold plus/minus operations
-        let rn_1 = Rn::new(DVector::from_vec(vec![1.0, 2.0, 3.0]));
-        let rn_2 = Rn::new(DVector::from_vec(vec![4.0, 5.0, 6.0]));
+        let rn_1 = Rn::new(nalgebra::DVector::from_vec(vec![1.0, 2.0, 3.0]));
+        let rn_2 = Rn::new(nalgebra::DVector::from_vec(vec![4.0, 5.0, 6.0]));
         let var1 = Variable::new(rn_1);
         let var2 = Variable::new(rn_2);
 
