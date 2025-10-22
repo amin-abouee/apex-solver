@@ -1,7 +1,5 @@
-use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
-use std::collections::HashMap;
-use std::fmt;
-use std::path::Path;
+use nalgebra;
+use std::{collections, fmt, path};
 use thiserror::Error;
 
 // Import manifold types
@@ -60,7 +58,7 @@ impl VertexSE2 {
         }
     }
 
-    pub fn from_vector(id: usize, vector: Vector3<f64>) -> Self {
+    pub fn from_vector(id: usize, vector: nalgebra::Vector3<f64>) -> Self {
         Self {
             id,
             pose: SE2::from_xy_angle(vector[0], vector[1], vector[2]),
@@ -127,7 +125,11 @@ pub struct VertexSE3 {
 }
 
 impl VertexSE3 {
-    pub fn new(id: usize, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
+    pub fn new(
+        id: usize,
+        translation: nalgebra::Vector3<f64>,
+        rotation: nalgebra::UnitQuaternion<f64>,
+    ) -> Self {
         Self {
             id,
             pose: SE3::new(translation, rotation),
@@ -135,8 +137,8 @@ impl VertexSE3 {
     }
 
     pub fn from_vector(id: usize, vector: [f64; 7]) -> Self {
-        let translation = Vector3::from([vector[0], vector[1], vector[2]]);
-        let rotation = UnitQuaternion::from_quaternion(Quaternion::from([
+        let translation = nalgebra::Vector3::from([vector[0], vector[1], vector[2]]);
+        let rotation = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::from([
             vector[3], vector[4], vector[5], vector[6],
         ]));
         Self::new(id, translation, rotation)
@@ -144,8 +146,8 @@ impl VertexSE3 {
 
     pub fn from_translation_quaternion(
         id: usize,
-        translation: Vector3<f64>,
-        quaternion: Quaternion<f64>,
+        translation: nalgebra::Vector3<f64>,
+        quaternion: nalgebra::Quaternion<f64>,
     ) -> Self {
         Self {
             id,
@@ -157,11 +159,11 @@ impl VertexSE3 {
         self.id
     }
 
-    pub fn translation(&self) -> Vector3<f64> {
+    pub fn translation(&self) -> nalgebra::Vector3<f64> {
         self.pose.translation()
     }
 
-    pub fn rotation(&self) -> UnitQuaternion<f64> {
+    pub fn rotation(&self) -> nalgebra::UnitQuaternion<f64> {
         self.pose.rotation_quaternion()
     }
 
@@ -221,8 +223,8 @@ impl VertexSE3 {
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE2,          // Relative transformation
-    pub information: Matrix3<f64>, // 3x3 information matrix
+    pub measurement: SE2,                    // Relative transformation
+    pub information: nalgebra::Matrix3<f64>, // 3x3 information matrix
 }
 
 impl EdgeSE2 {
@@ -232,7 +234,7 @@ impl EdgeSE2 {
         dx: f64,
         dy: f64,
         dtheta: f64,
-        information: Matrix3<f64>,
+        information: nalgebra::Matrix3<f64>,
     ) -> Self {
         Self {
             from,
@@ -258,17 +260,17 @@ impl fmt::Display for EdgeSE2 {
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE3,          // Relative transformation
-    pub information: Matrix6<f64>, // 6x6 information matrix
+    pub measurement: SE3,                    // Relative transformation
+    pub information: nalgebra::Matrix6<f64>, // 6x6 information matrix
 }
 
 impl EdgeSE3 {
     pub fn new(
         from: usize,
         to: usize,
-        translation: Vector3<f64>,
-        rotation: UnitQuaternion<f64>,
-        information: Matrix6<f64>,
+        translation: nalgebra::Vector3<f64>,
+        rotation: nalgebra::UnitQuaternion<f64>,
+        information: nalgebra::Matrix6<f64>,
     ) -> Self {
         Self {
             from,
@@ -292,8 +294,8 @@ impl fmt::Display for EdgeSE3 {
 /// Main graph structure containing vertices and edges
 #[derive(Clone)]
 pub struct Graph {
-    pub vertices_se2: HashMap<usize, VertexSE2>,
-    pub vertices_se3: HashMap<usize, VertexSE3>,
+    pub vertices_se2: collections::HashMap<usize, VertexSE2>,
+    pub vertices_se3: collections::HashMap<usize, VertexSE3>,
     pub edges_se2: Vec<EdgeSE2>,
     pub edges_se3: Vec<EdgeSE3>,
 }
@@ -301,8 +303,8 @@ pub struct Graph {
 impl Graph {
     pub fn new() -> Self {
         Self {
-            vertices_se2: HashMap::new(),
-            vertices_se3: HashMap::new(),
+            vertices_se2: collections::HashMap::new(),
+            vertices_se3: collections::HashMap::new(),
             edges_se2: Vec::new(),
             edges_se3: Vec::new(),
         }
@@ -322,13 +324,13 @@ impl Graph {
     /// optimized poses, while edges (constraints) remain the same.
     ///
     /// # Arguments
-    /// * `variables` - HashMap of optimized variable values from solver
+    /// * `variables` - collections::HashMap of optimized variable values from solver
     /// * `original_edges` - Reference to original graph to copy edges from
     ///
     /// # Returns
     /// A new Graph with optimized vertices and original edges
     pub fn from_optimized_variables(
-        variables: &HashMap<String, crate::core::problem::VariableEnum>,
+        variables: &collections::HashMap<String, crate::core::problem::VariableEnum>,
         original_edges: &Self,
     ) -> Self {
         use crate::core::problem::VariableEnum;
@@ -414,14 +416,14 @@ impl fmt::Display for Graph {
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
+    fn load<P: AsRef<path::Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
+    fn write<P: AsRef<path::Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
 }
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
+pub fn load_graph<P: AsRef<path::Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
@@ -528,7 +530,11 @@ mod tests {
 
     #[test]
     fn test_se3_to_rerun() {
-        let vertex = VertexSE3::new(0, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
+        let vertex = VertexSE3::new(
+            0,
+            nalgebra::Vector3::new(1.0, 2.0, 3.0),
+            nalgebra::UnitQuaternion::identity(),
+        );
 
         let (pos, rot) = vertex.to_rerun_transform(0.1);
 
