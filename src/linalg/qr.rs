@@ -1,10 +1,7 @@
 use std::ops::Mul;
 
-use faer::{
-    Mat,
-    linalg::solvers::Solve,
-    sparse::{SparseColMat, linalg::solvers},
-};
+use faer;
+use faer::{linalg::solvers::Solve, sparse, sparse::linalg::solvers};
 
 use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
 
@@ -23,23 +20,23 @@ pub struct SparseQRSolver {
     /// The Hessian matrix, computed as `(J^T * W * J)`.
     ///
     /// This is `None` if the Hessian could not be computed.
-    hessian: Option<SparseColMat<usize, f64>>,
+    hessian: Option<sparse::SparseColMat<usize, f64>>,
 
     /// The gradient vector, computed as `J^T * W * r`.
     ///
     /// This is `None` if the gradient could not be computed.
-    gradient: Option<Mat<f64>>,
+    gradient: Option<faer::Mat<f64>>,
 
     /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
     ///
     /// This is `None` if the Hessian is singular or ill-conditioned.
-    covariance_matrix: Option<Mat<f64>>,
+    covariance_matrix: Option<faer::Mat<f64>>,
     /// Asymptotic standard errors of the parameters.
     ///
     /// This is `None` if the covariance matrix could not be computed.
     /// Each error is the square root of the corresponding diagonal element
     /// of the covariance matrix.
-    standard_errors: Option<Mat<f64>>,
+    standard_errors: Option<faer::Mat<f64>>,
 }
 
 impl SparseQRSolver {
@@ -54,15 +51,15 @@ impl SparseQRSolver {
         }
     }
 
-    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+    pub fn hessian(&self) -> Option<&sparse::SparseColMat<usize, f64>> {
         self.hessian.as_ref()
     }
 
-    pub fn gradient(&self) -> Option<&Mat<f64>> {
+    pub fn gradient(&self) -> Option<&faer::Mat<f64>> {
         self.gradient.as_ref()
     }
 
-    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
+    pub fn compute_standard_errors(&mut self) -> Option<&faer::Mat<f64>> {
         // // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
             self.compute_covariance_matrix();
@@ -71,7 +68,7 @@ impl SparseQRSolver {
         let n = self.hessian.as_ref().unwrap().ncols();
         // Compute standard errors as sqrt of diagonal elements
         if let Some(cov) = &self.covariance_matrix {
-            let mut std_errors = Mat::zeros(n, 1);
+            let mut std_errors = faer::Mat::zeros(n, 1);
             for i in 0..n {
                 let diag_val = cov[(i, i)];
                 if diag_val >= 0.0 {
@@ -102,9 +99,9 @@ impl Default for SparseQRSolver {
 impl SparseLinearSolver for SparseQRSolver {
     fn solve_normal_equation(
         &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>> {
+        residuals: &faer::Mat<f64>,
+        jacobians: &sparse::SparseColMat<usize, f64>,
+    ) -> LinAlgResult<faer::Mat<f64>> {
         // Form the normal equations explicitly: H = J^T * J
         let jt = jacobians.as_ref().transpose();
         let hessian = jt
@@ -151,10 +148,10 @@ impl SparseLinearSolver for SparseQRSolver {
 
     fn solve_augmented_equation(
         &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
+        residuals: &faer::Mat<f64>,
+        jacobians: &sparse::SparseColMat<usize, f64>,
         lambda: f64,
-    ) -> LinAlgResult<Mat<f64>> {
+    ) -> LinAlgResult<faer::Mat<f64>> {
         let n = jacobians.ncols();
 
         // H = J^T * J
@@ -176,8 +173,8 @@ impl SparseLinearSolver for SparseQRSolver {
         for i in 0..n {
             lambda_i_triplets.push(faer::sparse::Triplet::new(i, i, lambda));
         }
-        let lambda_i =
-            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
+        let lambda_i = sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets)
+            .map_err(|e| {
                 LinAlgError::SparseMatrixCreation(format!(
                     "Failed to create lambda*I matrix: {:?}",
                     e
@@ -217,15 +214,15 @@ impl SparseLinearSolver for SparseQRSolver {
         Ok(dx)
     }
 
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+    fn get_hessian(&self) -> Option<&sparse::SparseColMat<usize, f64>> {
         self.hessian.as_ref()
     }
 
-    fn get_gradient(&self) -> Option<&Mat<f64>> {
+    fn get_gradient(&self) -> Option<&faer::Mat<f64>> {
         self.gradient.as_ref()
     }
 
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+    fn compute_covariance_matrix(&mut self) -> Option<&faer::Mat<f64>> {
         // Only compute if we have a factorizer and hessian, but no covariance matrix yet
         if self.factorizer.is_some()
             && self.hessian.is_some()
@@ -234,7 +231,7 @@ impl SparseLinearSolver for SparseQRSolver {
         {
             let n = hessian.ncols();
             // Create identity matrix
-            let identity = Mat::identity(n, n);
+            let identity = faer::Mat::identity(n, n);
 
             // Solve H * X = I to get X = H^(-1) = covariance matrix
             let cov_matrix = factorizer.solve(&identity);
@@ -243,7 +240,7 @@ impl SparseLinearSolver for SparseQRSolver {
         self.covariance_matrix.as_ref()
     }
 
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+    fn get_covariance_matrix(&self) -> Option<&faer::Mat<f64>> {
         self.covariance_matrix.as_ref()
     }
 }
