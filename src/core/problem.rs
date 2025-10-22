@@ -1,3 +1,87 @@
+//! Optimization problem definition and sparse Jacobian computation.
+//!
+//! The `Problem` struct is the central component that defines a factor graph optimization problem.
+//! It manages residual blocks (constraints), variables, and the construction of sparse Jacobian
+//! matrices for efficient nonlinear least squares optimization.
+//!
+//! # Factor Graph Representation
+//!
+//! The optimization problem is represented as a bipartite factor graph:
+//!
+//! ```text
+//! Variables:  x0 --- x1 --- x2 --- x3
+//!              |      |      |      |
+//! Factors:    f0     f1     f2     f3 (constraints/measurements)
+//! ```
+//!
+//! Each factor connects one or more variables and contributes a residual (error) term to the
+//! overall cost function:
+//!
+//! ```text
+//! minimize Σ_i ρ(||r_i(x)||²)
+//! ```
+//!
+//! where `r_i(x)` is the residual for factor i, and ρ is an optional robust loss function.
+//!
+//! # Key Responsibilities
+//!
+//! 1. **Residual Block Management**: Add/remove factors and track their structure
+//! 2. **Variable Management**: Initialize variables with manifold types and constraints
+//! 3. **Sparsity Pattern**: Build symbolic structure for efficient sparse linear algebra
+//! 4. **Linearization**: Compute residuals and Jacobians in parallel
+//! 5. **Covariance**: Extract per-variable uncertainty estimates after optimization
+//!
+//! # Sparse Jacobian Structure
+//!
+//! The Jacobian matrix `J = ∂r/∂x` is sparse because each factor only depends on a small
+//! subset of variables. For example, a between factor connecting x0 and x1 contributes
+//! a 3×6 block (SE2) or 6×12 block (SE3) to the Jacobian, leaving the rest as zeros.
+//!
+//! The Problem pre-computes the sparsity pattern once, then efficiently fills in the
+//! numerical values during each iteration.
+//!
+//! # Mixed Manifold Support
+//!
+//! The Problem supports mixed manifold types in a single optimization problem via
+//! [`VariableEnum`]. This allows:
+//! - SE2 and SE3 poses in the same graph
+//! - SO3 rotations with R³ landmarks
+//! - Any combination of supported manifolds
+//!
+//! # Example: Building a Problem
+//!
+//! ```
+//! use apex_solver::core::problem::Problem;
+//! use apex_solver::core::factors::{BetweenFactorSE2, PriorFactor};
+//! use apex_solver::core::loss_functions::HuberLoss;
+//! use apex_solver::manifold::ManifoldType;
+//! use nalgebra::{DVector, dvector};
+//! use std::collections::HashMap;
+//!
+//! let mut problem = Problem::new();
+//!
+//! // Add prior factor to anchor the first pose
+//! let prior = Box::new(PriorFactor {
+//!     data: dvector![0.0, 0.0, 0.0],
+//! });
+//! problem.add_residual_block(&["x0"], prior, None);
+//!
+//! // Add between factor with robust loss
+//! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+//! let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()));
+//! problem.add_residual_block(&["x0", "x1"], between, loss);
+//!
+//! // Initialize variables
+//! let mut initial_values = HashMap::new();
+//! initial_values.insert("x0".to_string(), (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]));
+//! initial_values.insert("x1".to_string(), (ManifoldType::SE2, dvector![0.9, 0.1, 0.12]));
+//!
+//! let variables = problem.initialize_variables(&initial_values);
+//!
+//! println!("Problem has {} residual blocks", problem.num_residual_blocks());
+//! println!("Total residual dimension: {}", problem.total_residual_dimension);
+//! ```
+
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::Write;
@@ -12,7 +96,16 @@ use crate::core::variable::Variable;
 use crate::core::{factors, loss_functions, residual_block};
 use crate::manifold::{ManifoldType, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
 
-/// Symbolic structure for sparse matrix operations
+/// Symbolic structure for sparse matrix operations.
+///
+/// Contains the sparsity pattern (which entries are non-zero) and an ordering
+/// for efficient numerical computation. This is computed once at the beginning
+/// and reused throughout optimization.
+///
+/// # Fields
+///
+/// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
+/// - `order`: A fill-reducing ordering/permutation for numerical stability
 pub struct SymbolicStructure {
     pub pattern: SymbolicSparseColMat<usize>,
     pub order: Argsort<usize>,
@@ -154,11 +247,69 @@ impl VariableEnum {
     }
 }
 
+/// The optimization problem definition for factor graph optimization.
+///
+/// Manages residual blocks (factors/constraints), variables, and the sparse Jacobian structure.
+/// Supports mixed manifold types (SE2, SE3, SO2, SO3, Rn) in a single problem and provides
+/// efficient parallel residual/Jacobian computation.
+///
+/// # Architecture
+///
+/// The Problem acts as a container and coordinator:
+/// - Stores all residual blocks (factors with optional loss functions)
+/// - Tracks the global structure (which variables connect to which factors)
+/// - Builds and maintains the sparse Jacobian pattern
+/// - Provides parallel residual/Jacobian evaluation using rayon
+/// - Manages variable constraints (fixed indices, bounds)
+///
+/// # Workflow
+///
+/// 1. **Construction**: Create a new Problem with `Problem::new()`
+/// 2. **Add Factors**: Use `add_residual_block()` to add constraints
+/// 3. **Initialize Variables**: Use `initialize_variables()` with initial values
+/// 4. **Build Sparsity**: Use `build_symbolic_structure()` once before optimization
+/// 5. **Linearize**: Call `compute_residual_and_jacobian_sparse()` each iteration
+/// 6. **Extract Covariance**: Use `compute_and_set_covariances()` after convergence
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::core::problem::Problem;
+/// use apex_solver::core::factors::BetweenFactorSE2;
+/// use apex_solver::manifold::ManifoldType;
+/// use nalgebra::dvector;
+/// use std::collections::HashMap;
+///
+/// let mut problem = Problem::new();
+///
+/// // Add a between factor
+/// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+/// problem.add_residual_block(&["x0", "x1"], factor, None);
+///
+/// // Initialize variables
+/// let mut initial = HashMap::new();
+/// initial.insert("x0".to_string(), (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]));
+/// initial.insert("x1".to_string(), (ManifoldType::SE2, dvector![1.0, 0.0, 0.1]));
+///
+/// let variables = problem.initialize_variables(&initial);
+/// assert_eq!(variables.len(), 2);
+/// ```
 pub struct Problem {
+    /// Total dimension of the stacked residual vector (sum of all residual block dimensions)
     pub total_residual_dimension: usize,
+
+    /// Counter for assigning unique IDs to residual blocks
     residual_id_count: usize,
+
+    /// Map from residual block ID to ResidualBlock instance
     residual_blocks: HashMap<usize, residual_block::ResidualBlock>,
+
+    /// Variables with fixed indices (e.g., fix first pose's x,y coordinates)
+    /// Maps variable name -> set of indices to fix
     pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
+
+    /// Variable bounds (box constraints on individual DOF)
+    /// Maps variable name -> (index -> (lower_bound, upper_bound))
     pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
 }
 impl Default for Problem {
@@ -168,6 +319,21 @@ impl Default for Problem {
 }
 
 impl Problem {
+    /// Create a new empty optimization problem.
+    ///
+    /// # Returns
+    ///
+    /// A new `Problem` with no residual blocks or variables
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::problem::Problem;
+    ///
+    /// let problem = Problem::new();
+    /// assert_eq!(problem.num_residual_blocks(), 0);
+    /// assert_eq!(problem.total_residual_dimension, 0);
+    /// ```
     pub fn new() -> Self {
         Self {
             total_residual_dimension: 0,
@@ -178,6 +344,44 @@ impl Problem {
         }
     }
 
+    /// Add a residual block (factor with optional loss function) to the problem.
+    ///
+    /// This is the primary method for building the factor graph. Each call adds one constraint
+    /// connecting one or more variables.
+    ///
+    /// # Arguments
+    ///
+    /// * `variable_key_size_list` - Names of the variables this factor connects (order matters)
+    /// * `factor` - The factor implementation that computes residuals and Jacobians
+    /// * `loss_func` - Optional robust loss function for outlier rejection
+    ///
+    /// # Returns
+    ///
+    /// The unique ID assigned to this residual block
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::problem::Problem;
+    /// use apex_solver::core::factors::{BetweenFactorSE2, PriorFactor};
+    /// use apex_solver::core::loss_functions::HuberLoss;
+    /// use nalgebra::dvector;
+    ///
+    /// let mut problem = Problem::new();
+    ///
+    /// // Add prior factor (unary constraint)
+    /// let prior = Box::new(PriorFactor { data: dvector![0.0, 0.0, 0.0] });
+    /// let id1 = problem.add_residual_block(&["x0"], prior, None);
+    ///
+    /// // Add between factor with robust loss (binary constraint)
+    /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()));
+    /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
+    ///
+    /// assert_eq!(id1, 0);
+    /// assert_eq!(id2, 1);
+    /// assert_eq!(problem.num_residual_blocks(), 2);
+    /// ```
     pub fn add_residual_block(
         &mut self,
         variable_key_size_list: &[&str],
@@ -251,6 +455,46 @@ impl Problem {
         self.variable_bounds.remove(var_to_unbound);
     }
 
+    /// Initialize variables from initial values with manifold types.
+    ///
+    /// Converts raw initial values into typed `Variable<M>` instances wrapped in `VariableEnum`.
+    /// This method also applies any fixed indices or bounds that were set via `fix_variable()`
+    /// or `set_variable_bounds()`.
+    ///
+    /// # Arguments
+    ///
+    /// * `initial_values` - Map from variable name to (manifold type, initial value vector)
+    ///
+    /// # Returns
+    ///
+    /// Map from variable name to `VariableEnum` (typed variables ready for optimization)
+    ///
+    /// # Manifold Formats
+    ///
+    /// - **SE2**: `[x, y, theta]` (3 elements)
+    /// - **SE3**: `[tx, ty, tz, qw, qx, qy, qz]` (7 elements)
+    /// - **SO2**: `[theta]` (1 element)
+    /// - **SO3**: `[qw, qx, qy, qz]` (4 elements)
+    /// - **Rn**: `[x1, x2, ..., xn]` (n elements)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::problem::Problem;
+    /// use apex_solver::manifold::ManifoldType;
+    /// use nalgebra::dvector;
+    /// use std::collections::HashMap;
+    ///
+    /// let problem = Problem::new();
+    ///
+    /// let mut initial = HashMap::new();
+    /// initial.insert("pose0".to_string(), (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]));
+    /// initial.insert("pose1".to_string(), (ManifoldType::SE2, dvector![1.0, 0.0, 0.1]));
+    /// initial.insert("landmark".to_string(), (ManifoldType::RN, dvector![5.0, 3.0]));
+    ///
+    /// let variables = problem.initialize_variables(&initial);
+    /// assert_eq!(variables.len(), 3);
+    /// ```
     pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
@@ -440,7 +684,46 @@ impl Problem {
         Ok(SymbolicStructure { pattern, order })
     }
 
-    /// Compute residual and sparse Jacobian for mixed manifold types
+    /// Compute residual vector and sparse Jacobian matrix for the current variable values.
+    ///
+    /// This is the core linearization method called during each optimization iteration. It:
+    /// 1. Evaluates all residual blocks in parallel using rayon
+    /// 2. Assembles the full residual vector
+    /// 3. Constructs the sparse Jacobian matrix using the precomputed symbolic structure
+    ///
+    /// # Arguments
+    ///
+    /// * `variables` - Current variable values (from `initialize_variables()` or updated)
+    /// * `variable_index_sparce_matrix` - Map from variable name to starting column in Jacobian
+    /// * `symbolic_structure` - Precomputed sparsity pattern (from `build_symbolic_structure()`)
+    ///
+    /// # Returns
+    ///
+    /// Tuple `(residual, jacobian)` where:
+    /// - `residual`: N×1 column matrix (total residual dimension)
+    /// - `jacobian`: N×M sparse matrix (N = residual dim, M = total DOF)
+    ///
+    /// # Performance
+    ///
+    /// This method is highly optimized:
+    /// - **Parallel evaluation**: Each residual block is evaluated independently using rayon
+    /// - **Sparse storage**: Only non-zero Jacobian entries are stored and computed
+    /// - **Memory efficient**: Preallocated sparse structure avoids dynamic allocations
+    ///
+    /// Typically accounts for 40-60% of total optimization time (including sparse matrix ops).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Inside optimizer loop:
+    /// let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
+    ///     &variables,
+    ///     &variable_index_map,
+    ///     &symbolic_structure,
+    /// )?;
+    ///
+    /// // Use for linear system: J^T J dx = -J^T r
+    /// ```
     pub fn compute_residual_and_jacobian_sparse(
         &self,
         variables: &HashMap<String, VariableEnum>,
