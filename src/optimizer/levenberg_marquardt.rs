@@ -11,9 +11,11 @@
 //! - Comprehensive optimization summaries
 //! - Support for both sparse Cholesky and QR factorizations
 
-use crate::core::problem::{Problem, VariableEnum};
+use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
+use crate::optimizer::{
+    ConvergenceInfo, OptimizationStatus, SolverResult, visualization::OptimizationVisualizer,
+};
 use faer::{Mat, sparse::SparseColMat};
 use std::collections::HashMap;
 use std::fmt;
@@ -52,7 +54,7 @@ pub struct LevenbergMarquardtSummary {
 
 impl fmt::Display for LevenbergMarquardtSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Levenberg-Marquardt Optimization Summary ===")?;
+        writeln!(f, "Levenberg-Marquardt Optimization Summary")?;
         writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
         writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
         writeln!(
@@ -137,6 +139,8 @@ pub struct LevenbergMarquardtConfig {
     pub damping_increase_factor: f64,
     /// Damping decrease factor (when step accepted)
     pub damping_decrease_factor: f64,
+    /// Damping nu parameter
+    pub damping_nu: f64,
     /// Trust region radius
     pub trust_region_radius: f64,
     /// Minimum step quality for acceptance
@@ -153,7 +157,7 @@ pub struct LevenbergMarquardtConfig {
     /// This can improve convergence for problems with mixed parameter scales
     /// (e.g., positions in meters + angles in radians) but adds ~5-10% overhead.
     ///
-    /// Default: true (for backward compatibility and robustness)
+    /// Default: false (to avoid performance overhead and faster convergence)
     pub use_jacobi_scaling: bool,
     /// Compute per-variable covariance matrices (uncertainty estimation)
     ///
@@ -193,6 +197,7 @@ impl Default for LevenbergMarquardtConfig {
             damping_max: 1e12,
             damping_increase_factor: 10.0,
             damping_decrease_factor: 0.3,
+            damping_nu: 2.0,
             trust_region_radius: 1e4,
             min_step_quality: 0.0,
             good_step_quality: 0.75,
@@ -323,7 +328,7 @@ struct OptimizationState {
     variables: HashMap<String, VariableEnum>,
     variable_index_map: HashMap<String, usize>,
     sorted_vars: Vec<String>,
-    symbolic_structure: crate::core::problem::SymbolicStructure,
+    symbolic_structure: SymbolicStructure,
     current_cost: f64,
     initial_cost: f64,
 }
@@ -346,7 +351,7 @@ struct StepEvaluation {
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
+    visualizer: Option<OptimizationVisualizer>,
 }
 
 impl Default for LevenbergMarquardt {
@@ -365,7 +370,7 @@ impl LevenbergMarquardt {
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
         let visualizer = if config.enable_visualization {
-            match crate::optimizer::visualization::OptimizationVisualizer::new(true) {
+            match OptimizationVisualizer::new(true) {
                 Ok(vis) => Some(vis),
                 Err(e) => {
                     eprintln!("[WARNING] Failed to create visualizer: {}", e);
@@ -383,34 +388,6 @@ impl LevenbergMarquardt {
         }
     }
 
-    /// Set the initial damping parameter.
-    pub fn with_damping(mut self, damping: f64) -> Self {
-        self.config.damping = damping;
-        self
-    }
-
-    /// Set the damping parameter bounds.
-    pub fn with_damping_bounds(mut self, min: f64, max: f64) -> Self {
-        self.config.damping_min = min;
-        self.config.damping_max = max;
-        self
-    }
-
-    /// Set the damping adjustment factors.
-    pub fn with_damping_factors(mut self, increase: f64, decrease: f64) -> Self {
-        self.config.damping_increase_factor = increase;
-        self.config.damping_decrease_factor = decrease;
-        self
-    }
-
-    /// Set the trust region parameters.
-    pub fn with_trust_region(mut self, radius: f64, min_quality: f64, good_quality: f64) -> Self {
-        self.config.trust_region_radius = radius;
-        self.config.min_step_quality = min_quality;
-        self.config.good_step_quality = good_quality;
-        self
-    }
-
     /// Create the appropriate linear solver based on configuration
     fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
         match self.config.linear_solver_type {
@@ -420,16 +397,20 @@ impl LevenbergMarquardt {
     }
 
     /// Update damping parameter based on step quality using trust region approach
+    /// Reference: Introduction to Optimization and Data Fitting
+    /// Algorithm 6.18
     fn update_damping(&mut self, rho: f64) -> bool {
         if rho > 0.0 {
-            // Step accepted - decrease damping using tiny-solver's exact strategy
-            let tmp = 2.0 * rho - 1.0;
-            self.config.damping *= (1.0_f64 / 3.0).max(1.0 - tmp * tmp * tmp);
+            // Step accepted - decrease damping
+            let coff = 2.0 * rho - 1.0;
+            self.config.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
             self.config.damping = self.config.damping.max(self.config.damping_min);
+            self.config.damping_nu = 2.0;
             true
         } else {
-            // Step rejected - increase damping using tiny-solver's exact strategy
-            self.config.damping *= 2.0;
+            // Step rejected - increase damping
+            self.config.damping *= self.config.damping_nu;
+            self.config.damping_nu *= 2.0;
             self.config.damping = self.config.damping.min(self.config.damping_max);
             false
         }
@@ -451,21 +432,13 @@ impl LevenbergMarquardt {
     }
 
     /// Compute predicted cost reduction from linear model
-    /// Standard LM formula: -step^T * gradient - 0.5 * step^T * H * step
-    fn compute_predicted_reduction(
-        &self,
-        step: &Mat<f64>,
-        gradient: &Mat<f64>,
-        hessian: &SparseColMat<usize, f64>,
-    ) -> f64 {
+    /// Standard LM formula: 0.5 * step^T * (damping * step - gradient)
+    fn compute_predicted_reduction(&self, step: &Mat<f64>, gradient: &Mat<f64>) -> f64 {
         // Standard Levenberg-Marquardt predicted reduction formula
         // predicted_reduction = -step^T * gradient - 0.5 * step^T * H * step
-        let linear_term = step.transpose() * gradient;
-        let hessian_step = hessian * step;
-        let quadratic_term = step.transpose() * &hessian_step;
-
-        // Positive predicted_reduction means we expect cost to decrease
-        -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)]
+        //                     = 0.5 * step^T * (damping * step - gradient)
+        let diff = self.config.damping * step - gradient;
+        (0.5 * step.transpose() * &diff)[(0, 0)]
     }
 
     /// Check convergence criteria
@@ -490,11 +463,13 @@ impl LevenbergMarquardt {
         }
 
         // Check cost tolerance
+        // TODO: Implement cost tolerance check
         if iteration > 0 && cost_change.abs() < self.config.cost_tolerance {
             return Some(OptimizationStatus::CostToleranceReached);
         }
 
         // Check parameter tolerance
+        // TODO: Implement parameter tolerance check
         if iteration > 0 && parameter_update_norm < self.config.parameter_tolerance {
             return Some(OptimizationStatus::ParameterToleranceReached);
         }
@@ -535,13 +510,13 @@ impl LevenbergMarquardt {
     }
 
     /// Apply Jacobi scaling to Jacobian: J_scaled = J * S
-    fn apply_jacobi_scaling(
-        &self,
-        jacobian: &SparseColMat<usize, f64>,
-        scaling: &SparseColMat<usize, f64>,
-    ) -> SparseColMat<usize, f64> {
-        jacobian * scaling
-    }
+    // fn apply_jacobi_scaling(
+    //     &self,
+    //     jacobian: &SparseColMat<usize, f64>,
+    //     scaling: &SparseColMat<usize, f64>,
+    // ) -> SparseColMat<usize, f64> {
+    //     jacobian * scaling
+    // }
 
     /// Apply inverse Jacobi scaling to step: dx_final = S * dx_scaled
     fn apply_inverse_jacobi_scaling(
@@ -625,7 +600,8 @@ impl LevenbergMarquardt {
             self.jacobi_scaling = Some(scaling);
         }
 
-        self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
+        // self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
+        jacobian * self.jacobi_scaling.as_ref().unwrap()
     }
 
     /// Compute optimization step by solving the augmented system
@@ -642,11 +618,8 @@ impl LevenbergMarquardt {
             .ok()?;
 
         // Get cached gradient and Hessian from the solver
-        let solver_gradient = linear_solver.get_gradient()?;
+        let gradient = linear_solver.get_gradient()?;
         let hessian = linear_solver.get_hessian()?;
-
-        // Negate to get actual gradient: J^T * r (solver computes J^T * (-r))
-        let gradient = -solver_gradient;
         let gradient_norm = gradient.norm_l2();
 
         if self.config.verbose {
@@ -671,8 +644,7 @@ impl LevenbergMarquardt {
         }
 
         // Compute predicted reduction using scaled values
-        let predicted_reduction =
-            self.compute_predicted_reduction(&scaled_step, &gradient, hessian);
+        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, &gradient);
 
         if self.config.verbose {
             println!("Predicted reduction: {:.12e}", predicted_reduction);

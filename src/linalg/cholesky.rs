@@ -169,8 +169,8 @@ impl SparseLinearSolver for SparseCholeskySolver {
             })?
             .mul(jacobians.as_ref());
 
-        // g = J^T * -r
-        let gradient = jacobians.as_ref().transpose().mul(-residuals);
+        // g = J^T * r
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
 
         // H_aug = H + lambda * I
         let mut lambda_i_triplets = Vec::with_capacity(n);
@@ -213,7 +213,7 @@ impl SparseLinearSolver for SparseCholeskySolver {
             solvers::Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), faer::Side::Lower)
                 .map_err(|_| LinAlgError::SingularMatrix)?;
 
-        let dx = cholesky.solve(&gradient);
+        let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
         self.factorizer = Some(cholesky);
