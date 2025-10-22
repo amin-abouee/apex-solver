@@ -93,7 +93,7 @@
 
 use std::collections;
 
-use crate::manifold::{LieGroup, Tangent};
+use crate::manifold;
 use faer;
 use nalgebra;
 
@@ -120,7 +120,7 @@ use nalgebra;
 /// let rn_var = Variable::new(rn_value);
 /// ```
 #[derive(Clone, Debug)]
-pub struct Variable<M: LieGroup> {
+pub struct Variable<M: manifold::LieGroup> {
     /// The manifold value
     pub value: M,
     /// Indices that should remain fixed during optimization
@@ -140,8 +140,8 @@ pub struct Variable<M: LieGroup> {
 
 impl<M> Variable<M>
 where
-    M: LieGroup + Clone + 'static,
-    M::TangentVector: Tangent<M>,
+    M: manifold::LieGroup + Clone + 'static,
+    M::TangentVector: manifold::Tangent<M>,
 {
     /// Create a new Variable from a manifold value.
     ///

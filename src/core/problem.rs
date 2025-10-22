@@ -82,19 +82,16 @@
 //! println!("Total residual dimension: {}", problem.total_residual_dimension);
 //! ```
 
-use std::collections::{HashMap, HashSet};
-use std::fs::File;
-use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::{collections, fs, io::Write, sync};
 
-use faer::Col;
-use faer::sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat};
-use nalgebra::DVector;
+use faer;
+use faer::sparse;
+use nalgebra;
 use rayon::prelude::*;
 
-use crate::core::variable::Variable;
-use crate::core::{factors, loss_functions, residual_block};
-use crate::manifold::{ManifoldType, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+use crate::core::{factors, loss_functions, residual_block, variable};
+use crate::manifold;
+use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
 
 /// Symbolic structure for sparse matrix operations.
 ///
@@ -107,18 +104,18 @@ use crate::manifold::{ManifoldType, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::S
 /// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
 /// - `order`: A fill-reducing ordering/permutation for numerical stability
 pub struct SymbolicStructure {
-    pub pattern: SymbolicSparseColMat<usize>,
-    pub order: Argsort<usize>,
+    pub pattern: sparse::SymbolicSparseColMat<usize>,
+    pub order: sparse::Argsort<usize>,
 }
 
 /// Enum to handle mixed manifold variable types
 #[derive(Clone, Debug)]
 pub enum VariableEnum {
-    Rn(Variable<Rn>),
-    SE2(Variable<SE2>),
-    SE3(Variable<SE3>),
-    SO2(Variable<SO2>),
-    SO3(Variable<SO3>),
+    Rn(variable::Variable<Rn>),
+    SE2(variable::Variable<SE2>),
+    SE3(variable::Variable<SE3>),
+    SO2(variable::Variable<SO2>),
+    SO3(variable::Variable<SO3>),
 }
 
 impl VariableEnum {
@@ -134,7 +131,7 @@ impl VariableEnum {
     }
 
     /// Convert to DVector for use with Factor trait
-    pub fn to_vector(&self) -> DVector<f64> {
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
         match self {
             VariableEnum::Rn(var) => var.value.clone().into(),
             VariableEnum::SE2(var) => var.value.clone().into(),
@@ -161,7 +158,7 @@ impl VariableEnum {
             VariableEnum::SE3(var) => {
                 // SE3 has 6 DOF in tangent space
                 let step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
-                let step_dvector = DVector::from_vec(step_data);
+                let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
@@ -169,7 +166,7 @@ impl VariableEnum {
             VariableEnum::SE2(var) => {
                 // SE2 has 3 DOF in tangent space
                 let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
-                let step_dvector = DVector::from_vec(step_data);
+                let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = crate::manifold::se2::SE2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
@@ -177,7 +174,7 @@ impl VariableEnum {
             VariableEnum::SO3(var) => {
                 // SO3 has 3 DOF in tangent space
                 let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
-                let step_dvector = DVector::from_vec(step_data);
+                let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = crate::manifold::so3::SO3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
@@ -185,7 +182,7 @@ impl VariableEnum {
             VariableEnum::SO2(var) => {
                 // SO2 has 1 DOF in tangent space
                 let step_data = step_slice[(0, 0)];
-                let step_dvector = DVector::from_vec(vec![step_data]);
+                let step_dvector = nalgebra::DVector::from_vec(vec![step_data]);
                 let tangent = crate::manifold::so2::SO2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
@@ -194,7 +191,7 @@ impl VariableEnum {
                 // Rn has dynamic size
                 let size = var.get_size();
                 let step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
-                let step_dvector = DVector::from_vec(step_data);
+                let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = crate::manifold::rn::RnTangent::new(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
@@ -302,15 +299,15 @@ pub struct Problem {
     residual_id_count: usize,
 
     /// Map from residual block ID to ResidualBlock instance
-    residual_blocks: HashMap<usize, residual_block::ResidualBlock>,
+    residual_blocks: collections::HashMap<usize, residual_block::ResidualBlock>,
 
     /// Variables with fixed indices (e.g., fix first pose's x,y coordinates)
     /// Maps variable name -> set of indices to fix
-    pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
+    pub fixed_variable_indexes: collections::HashMap<String, collections::HashSet<usize>>,
 
     /// Variable bounds (box constraints on individual DOF)
     /// Maps variable name -> (index -> (lower_bound, upper_bound))
-    pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
+    pub variable_bounds: collections::HashMap<String, collections::HashMap<usize, (f64, f64)>>,
 }
 impl Default for Problem {
     fn default() -> Self {
@@ -338,9 +335,9 @@ impl Problem {
         Self {
             total_residual_dimension: 0,
             residual_id_count: 0,
-            residual_blocks: HashMap::new(),
-            fixed_variable_indexes: HashMap::new(),
-            variable_bounds: HashMap::new(),
+            residual_blocks: collections::HashMap::new(),
+            fixed_variable_indexes: collections::HashMap::new(),
+            variable_bounds: collections::HashMap::new(),
         }
     }
 
@@ -424,7 +421,7 @@ impl Problem {
             var_mut.insert(idx);
         } else {
             self.fixed_variable_indexes
-                .insert(var_to_fix.to_owned(), HashSet::from([idx]));
+                .insert(var_to_fix.to_owned(), collections::HashSet::from([idx]));
         }
     }
 
@@ -446,7 +443,7 @@ impl Problem {
         } else {
             self.variable_bounds.insert(
                 var_to_bound.to_owned(),
-                HashMap::from([(idx, (lower_bound, upper_bound))]),
+                collections::HashMap::from([(idx, (lower_bound, upper_bound))]),
             );
         }
     }
@@ -497,14 +494,17 @@ impl Problem {
     /// ```
     pub fn initialize_variables(
         &self,
-        initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> HashMap<String, VariableEnum> {
-        let variables: HashMap<String, VariableEnum> = initial_values
+        initial_values: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> collections::HashMap<String, VariableEnum> {
+        let variables: collections::HashMap<String, VariableEnum> = initial_values
             .iter()
             .map(|(k, v)| {
                 let variable_enum = match v.0 {
-                    ManifoldType::SO2 => {
-                        let mut var = Variable::new(SO2::from(v.1.clone()));
+                    manifold::ManifoldType::SO2 => {
+                        let mut var = variable::Variable::new(SO2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -513,8 +513,8 @@ impl Problem {
                         }
                         VariableEnum::SO2(var)
                     }
-                    ManifoldType::SO3 => {
-                        let mut var = Variable::new(SO3::from(v.1.clone()));
+                    manifold::ManifoldType::SO3 => {
+                        let mut var = variable::Variable::new(SO3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -523,8 +523,8 @@ impl Problem {
                         }
                         VariableEnum::SO3(var)
                     }
-                    ManifoldType::SE2 => {
-                        let mut var = Variable::new(SE2::from(v.1.clone()));
+                    manifold::ManifoldType::SE2 => {
+                        let mut var = variable::Variable::new(SE2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -533,8 +533,8 @@ impl Problem {
                         }
                         VariableEnum::SE2(var)
                     }
-                    ManifoldType::SE3 => {
-                        let mut var = Variable::new(SE3::from(v.1.clone()));
+                    manifold::ManifoldType::SE3 => {
+                        let mut var = variable::Variable::new(SE3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -543,8 +543,8 @@ impl Problem {
                         }
                         VariableEnum::SE3(var)
                     }
-                    ManifoldType::RN => {
-                        let mut var = Variable::new(Rn::from(v.1.clone()));
+                    manifold::ManifoldType::RN => {
+                        let mut var = variable::Variable::new(Rn::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -602,13 +602,13 @@ impl Problem {
     /// Result: 9×9 sparse Jacobian with 45 non-zero entries
     pub fn build_symbolic_structure(
         &self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &HashMap<String, usize>,
+        variables: &collections::HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         total_dof: usize,
     ) -> crate::core::ApexResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
-        let mut indices = Vec::<Pair<usize, usize>>::new();
+        let mut indices = Vec::<sparse::Pair<usize, usize>>::new();
 
         // Iterate through all residual blocks (factors/constraints) in the problem
         // Each residual block contributes a block of entries to the Jacobian
@@ -656,7 +656,7 @@ impl Problem {
                             let global_col_idx = variable_global_idx + col_idx;
 
                             // Record this (row, col) pair as a non-zero entry
-                            indices.push(Pair::new(global_row_idx, global_col_idx));
+                            indices.push(sparse::Pair::new(global_row_idx, global_col_idx));
                         }
                     }
                 }
@@ -669,7 +669,7 @@ impl Problem {
         // 2. Sorting for column-wise storage format
         // 3. Computing a fill-reducing ordering for numerical stability
         // 4. Allocating the symbolic structure (no values yet, just pattern)
-        let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
+        let (pattern, order) = sparse::SymbolicSparseColMat::try_new_from_indices(
             self.total_residual_dimension, // Number of rows (total residual dimension)
             total_dof,                     // Number of columns (total DOF)
             &indices,                      // List of non-zero entry locations
@@ -726,11 +726,13 @@ impl Problem {
     /// ```
     pub fn compute_residual_and_jacobian_sparse(
         &self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &HashMap<String, usize>,
+        variables: &collections::HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> crate::core::ApexResult<(faer::Mat<f64>, SparseColMat<usize, f64>)> {
-        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
+    ) -> crate::core::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
+        let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
+            self.total_residual_dimension,
+        )));
 
         let jacobian_values: Result<Vec<Vec<f64>>, crate::core::ApexError> = self
             .residual_blocks
@@ -747,7 +749,7 @@ impl Problem {
 
         let jacobian_values: Vec<f64> = jacobian_values?.into_iter().flatten().collect();
 
-        let total_residual = Arc::try_unwrap(total_residual)
+        let total_residual = sync::Arc::try_unwrap(total_residual)
             .map_err(|_| {
                 crate::core::ApexError::ThreadError(
                     "Failed to unwrap Arc for total residual".to_string(),
@@ -762,7 +764,7 @@ impl Problem {
 
         // Convert faer Col to Mat (column vector as n×1 matrix)
         let residual_faer = total_residual.as_ref().as_mat().to_owned();
-        let jacobian_sparse = SparseColMat::new_from_argsort(
+        let jacobian_sparse = sparse::SparseColMat::new_from_argsort(
             symbolic_structure.pattern.clone(),
             &symbolic_structure.order,
             jacobian_values.as_slice(),
@@ -779,11 +781,11 @@ impl Problem {
     fn compute_residual_and_jacobian_block(
         &self,
         residual_block: &residual_block::ResidualBlock,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_residual: &Arc<Mutex<Col<f64>>>,
+        variables: &collections::HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
+        total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
     ) -> crate::core::ApexResult<Vec<f64>> {
-        let mut param_vectors: Vec<DVector<f64>> = Vec::new();
+        let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
         let mut count_variable_local_idx: usize = 0;
@@ -843,10 +845,10 @@ impl Problem {
     /// Log residual vector to a text file
     pub fn log_residual_to_file(
         &self,
-        residual: &DVector<f64>,
+        residual: &nalgebra::DVector<f64>,
         filename: &str,
     ) -> Result<(), std::io::Error> {
-        let mut file = File::create(filename)?;
+        let mut file = fs::File::create(filename)?;
         writeln!(file, "# Residual vector - {} elements", residual.len())?;
         for (i, &value) in residual.iter().enumerate() {
             writeln!(file, "{}: {:.12}", i, value)?;
@@ -857,10 +859,10 @@ impl Problem {
     /// Log sparse Jacobian matrix to a text file
     pub fn log_sparse_jacobian_to_file(
         &self,
-        jacobian: &SparseColMat<usize, f64>,
+        jacobian: &sparse::SparseColMat<usize, f64>,
         filename: &str,
     ) -> Result<(), std::io::Error> {
-        let mut file = File::create(filename)?;
+        let mut file = fs::File::create(filename)?;
         writeln!(
             file,
             "# Sparse Jacobian matrix - {} x {} ({} non-zeros)",
@@ -876,10 +878,10 @@ impl Problem {
     /// Log variables to a text file
     pub fn log_variables_to_file(
         &self,
-        variables: &HashMap<String, VariableEnum>,
+        variables: &collections::HashMap<String, VariableEnum>,
         filename: &str,
     ) -> Result<(), std::io::Error> {
-        let mut file = File::create(filename)?;
+        let mut file = fs::File::create(filename)?;
         writeln!(file, "# Variables - {} total", variables.len())?;
         writeln!(file, "# Format: variable_name: [values...]")?;
 
@@ -917,9 +919,9 @@ impl Problem {
     pub fn compute_and_set_covariances(
         &self,
         linear_solver: &mut Box<dyn crate::linalg::SparseLinearSolver>,
-        variables: &mut HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
-    ) -> Option<HashMap<String, faer::Mat<f64>>> {
+        variables: &mut collections::HashMap<String, VariableEnum>,
+        variable_index_map: &collections::HashMap<String, usize>,
+    ) -> Option<collections::HashMap<String, faer::Mat<f64>>> {
         // Compute the full covariance matrix (H^{-1}) using the linear solver
         linear_solver.compute_covariance_matrix()?;
         let full_cov = linear_solver.get_covariance_matrix()?.clone();
@@ -944,12 +946,15 @@ mod tests {
     use super::*;
     use crate::core::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
     use crate::core::loss_functions::HuberLoss;
-    use crate::manifold::se3::SE3;
+    use crate::manifold::{ManifoldType, se3::SE3};
     use nalgebra::{Quaternion, Vector3, dvector};
     use std::collections::HashMap;
 
     /// Create a test SE2 dataset with 10 vertices in a loop
-    fn create_se2_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+    fn create_se2_test_problem() -> (
+        Problem,
+        HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -971,7 +976,7 @@ mod tests {
         for (i, (x, y, theta)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
             let se2_data = dvector![*x, *y, *theta];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+            initial_values.insert(var_name, (manifold::ManifoldType::SE2, se2_data));
         }
 
         // Add chain of between factors
@@ -1014,7 +1019,10 @@ mod tests {
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+    fn create_se3_test_problem() -> (
+        Problem,
+        HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -1036,7 +1044,7 @@ mod tests {
         for (i, (tx, ty, tz, qx, qy, qz, qw)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
             let se3_data = dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+            initial_values.insert(var_name, (manifold::ManifoldType::SE3, se3_data));
         }
 
         // Add between factors connecting the cube edges

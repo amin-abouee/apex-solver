@@ -65,7 +65,7 @@
 use nalgebra;
 
 use crate::core::{corrector, factors, loss_functions, variable};
-use crate::manifold::LieGroup;
+use crate::manifold;
 
 /// A residual block that wraps a factor with an optional robust loss function.
 ///
@@ -222,8 +222,8 @@ impl ResidualBlock {
         variables: &Vec<&variable::Variable<M>>,
     ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>)
     where
-        M: LieGroup + Clone + Into<nalgebra::DVector<f64>>,
-        M::TangentVector: crate::manifold::Tangent<M>,
+        M: manifold::LieGroup + Clone + Into<nalgebra::DVector<f64>>,
+        M::TangentVector: manifold::Tangent<M>,
     {
         // Extract variable values as DVector for the factor
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
