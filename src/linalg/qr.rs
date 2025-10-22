@@ -168,8 +168,8 @@ impl SparseLinearSolver for SparseQRSolver {
             })?
             .mul(jacobians.as_ref());
 
-        // g = J^T * -r
-        let gradient = jacobians.as_ref().transpose().mul(-residuals);
+        // g = J^T * r
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
 
         // H_aug = H + lambda * I
         let mut lambda_i_triplets = Vec::with_capacity(n);
@@ -209,7 +209,7 @@ impl SparseLinearSolver for SparseQRSolver {
         let qr = solvers::Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
             .map_err(|_| LinAlgError::SingularMatrix)?;
 
-        let dx = qr.solve(&gradient);
+        let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
         self.factorizer = Some(qr);
