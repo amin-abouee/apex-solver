@@ -1,3 +1,96 @@
+//! Variables for optimization on manifolds.
+//!
+//! This module provides the `Variable` struct, which represents optimization variables that
+//! live on manifolds (Lie groups like SE2, SE3, SO2, SO3, or Euclidean spaces Rn). Variables
+//! support manifold operations (plus/minus in tangent space), constraints (fixed indices,
+//! bounds), and covariance estimation.
+//!
+//! # Key Concepts
+//!
+//! ## Manifolds vs. Vector Spaces
+//!
+//! Unlike standard optimization that operates in Euclidean space (Rⁿ), many robotics problems
+//! involve variables on manifolds:
+//! - **Poses**: SE(2) or SE(3) - rigid body transformations
+//! - **Rotations**: SO(2) or SO(3) - rotation matrices/quaternions
+//! - **Landmarks**: R³ - 3D points in Euclidean space
+//!
+//! Manifolds require special handling:
+//! - Updates happen in the tangent space (local linearization)
+//! - Plus operation (⊞): manifold × tangent → manifold
+//! - Minus operation (⊟): manifold × manifold → tangent
+//!
+//! ## Tangent Space Updates
+//!
+//! During optimization, updates are computed as tangent vectors and applied via the plus
+//! operation:
+//!
+//! ```text
+//! x_new = x_old ⊞ δx
+//! ```
+//!
+//! where `δx` is a tangent vector (e.g., 6D for SE(3), 3D for SE(2)).
+//!
+//! ## Constraints
+//!
+//! Variables support two types of constraints:
+//! - **Fixed indices**: Specific DOF held constant during optimization
+//! - **Bounds**: Box constraints (min/max) on tangent space components
+//!
+//! ## Covariance
+//!
+//! After optimization, the `Variable` can store a covariance matrix representing uncertainty
+//! in the tangent space. For SE(3), this is a 6×6 matrix; for SE(2), a 3×3 matrix.
+//!
+//! # Example: SE(2) Variable
+//!
+//! ```
+//! use apex_solver::core::variable::Variable;
+//! use apex_solver::manifold::se2::{SE2, SE2Tangent};
+//! use nalgebra::DVector;
+//!
+//! // Create a 2D pose variable
+//! let initial_pose = SE2::from_xy_angle(1.0, 2.0, 0.5);
+//! let mut var = Variable::new(initial_pose);
+//!
+//! // Apply a tangent space update: [dx, dy, dtheta]
+//! let delta = SE2Tangent::from(DVector::from_vec(vec![0.1, 0.2, 0.05]));
+//! let updated_pose = var.plus(&delta);
+//! var.set_value(updated_pose);
+//!
+//! println!("Updated pose at ({}, {}, {})",
+//!     var.value.translation().x,
+//!     var.value.translation().y,
+//!     var.value.rotation().angle()
+//! );
+//! ```
+//!
+//! # Example: Variable with Constraints
+//!
+//! ```
+//! use apex_solver::core::variable::Variable;
+//! use apex_solver::manifold::rn::Rn;
+//! use nalgebra::DVector;
+//!
+//! // Create a 3D point variable
+//! let mut landmark = Variable::new(Rn::new(DVector::from_vec(vec![0.0, 0.0, 0.0])));
+//!
+//! // Fix the z-coordinate (index 2)
+//! landmark.fixed_indices.insert(2);
+//!
+//! // Constrain x to [-10, 10]
+//! landmark.bounds.insert(0, (-10.0, 10.0));
+//!
+//! // Apply update (will respect constraints)
+//! let update = DVector::from_vec(vec![15.0, 5.0, 100.0]); // Large update
+//! landmark.update_variable(update);
+//!
+//! let result = landmark.to_vector();
+//! assert_eq!(result[0], 10.0);   // Clamped to upper bound
+//! assert_eq!(result[1], 5.0);    // Unconstrained
+//! assert_eq!(result[2], 0.0);    // Fixed at original value
+//! ```
+
 use std::collections::{HashMap, HashSet};
 
 use crate::manifold::{LieGroup, Tangent};

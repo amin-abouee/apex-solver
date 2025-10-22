@@ -12,11 +12,16 @@
 //! - Support for both sparse Cholesky and QR factorizations
 
 use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
+use crate::core::{ApexError, ApexResult};
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+use crate::manifold::ManifoldType;
+use crate::optimizer;
 use crate::optimizer::{
-    ConvergenceInfo, OptimizationStatus, SolverResult, visualization::OptimizationVisualizer,
+    ConvergenceInfo, OptimizationStatus, Solver, SolverResult,
+    visualization::OptimizationVisualizer,
 };
 use faer::{Mat, sparse::SparseColMat};
+use nalgebra::DVector;
 use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -513,8 +518,8 @@ impl LevenbergMarquardt {
     fn initialize_optimization_state(
         &self,
         problem: &Problem,
-        initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) -> Result<OptimizationState, crate::core::ApexError> {
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<OptimizationState, ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -643,9 +648,9 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &Problem,
-    ) -> crate::core::ApexResult<StepEvaluation> {
+    ) -> ApexResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
-        let _step_norm = crate::optimizer::apply_parameter_step(
+        let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
@@ -668,7 +673,7 @@ impl LevenbergMarquardt {
         );
 
         if self.config.verbose {
-            println!("=== RHO CALCULATION DETAILS ===");
+            println!("RHO CALCULATION DETAILS");
             println!("Old cost: {:.12e}", state.current_cost);
             println!("New cost: {:.12e}", new_cost);
             let actual_reduction = state.current_cost - new_cost;
@@ -690,7 +695,7 @@ impl LevenbergMarquardt {
             reduction
         } else {
             // Reject the step - revert parameter changes
-            crate::optimizer::apply_negative_parameter_step(
+            optimizer::apply_negative_parameter_step(
                 &mut state.variables,
                 step_result.step.as_ref(),
                 &state.sorted_vars,
@@ -749,12 +754,8 @@ impl LevenbergMarquardt {
     pub fn optimize(
         &mut self,
         problem: &Problem,
-        initial_params: &std::collections::HashMap<
-            String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<SolverResult<std::collections::HashMap<String, VariableEnum>>, crate::core::ApexError>
-    {
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, ApexError> {
         let start_time = Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1; // Initial cost evaluation
@@ -786,7 +787,7 @@ impl LevenbergMarquardt {
             jacobian_evaluations += 1;
 
             if self.config.verbose {
-                println!("\n=== APEX-SOLVER DEBUG ITERATION {} ===", iteration);
+                println!("APEX-SOLVER DEBUG ITERATION {}", iteration);
                 println!("Current cost: {:.12e}", state.current_cost);
                 println!(
                     "Residuals shape: ({}, {})",
@@ -824,7 +825,7 @@ impl LevenbergMarquardt {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(crate::core::ApexError::Solver(
+                    return Err(ApexError::Solver(
                         "Linear solver failed to solve augmented system".to_string(),
                     ));
                 }
@@ -990,9 +991,9 @@ impl LevenbergMarquardt {
     }
 }
 // Implement Solver trait
-impl crate::optimizer::Solver for LevenbergMarquardt {
+impl Solver for LevenbergMarquardt {
     type Config = LevenbergMarquardtConfig;
-    type Error = crate::core::ApexError;
+    type Error = ApexError;
 
     fn new() -> Self {
         Self::default()
@@ -1000,17 +1001,9 @@ impl crate::optimizer::Solver for LevenbergMarquardt {
 
     fn optimize(
         &mut self,
-        problem: &crate::core::problem::Problem,
-        initial_params: &std::collections::HashMap<
-            String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        crate::optimizer::SolverResult<
-            std::collections::HashMap<String, crate::core::problem::VariableEnum>,
-        >,
-        Self::Error,
-    > {
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error> {
         self.optimize(problem, initial_params)
     }
 }
