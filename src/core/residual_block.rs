@@ -1,5 +1,68 @@
+//! Residual blocks that connect factors with robust loss functions.
+//!
+//! A `ResidualBlock` is the fundamental building block of the optimization problem. It wraps
+//! a [`Factor`] (which computes residuals and Jacobians) with an optional [`Loss`] function
+//! (which provides robustness to outliers). Each residual block corresponds to one measurement
+//! or constraint in the factor graph.
+//!
+//! # Role in Optimization
+//!
+//! The `ResidualBlock` coordinates three key components:
+//!
+//! 1. **Factor**: Computes the raw residual `r(x)` and Jacobian `J = ∂r/∂x`
+//! 2. **Loss function** (optional): Evaluates `ρ(||r||²)` for robust cost
+//! 3. **Corrector**: Applies loss function via residual/Jacobian adjustment
+//!
+//! During each optimization iteration, the residual block:
+//! - Evaluates the factor at current variable values
+//! - Computes the squared residual norm
+//! - If a loss function is present, creates a `Corrector` and applies corrections
+//! - Returns the (possibly corrected) residual and Jacobian
+//!
+//! # Structure in the Problem
+//!
+//! The [`Problem`](crate::core::problem::Problem) maintains a collection of residual blocks.
+//! Each block is assigned:
+//! - A unique ID for identification
+//! - A starting row index in the global Jacobian matrix
+//! - A list of connected variable keys
+//! - The factor implementation
+//! - An optional loss function
+//!
+//! # Example
+//!
+//! ```
+//! use apex_solver::core::residual_block::ResidualBlock;
+//! use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+//! use apex_solver::core::loss_functions::{Loss, HuberLoss};
+//! use apex_solver::core::variable::Variable;
+//! use apex_solver::manifold::se2::SE2;
+//!
+//! // Create a between factor (measurement between two poses)
+//! let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+//!
+//! // Add robust loss function for outlier rejection
+//! let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+//!
+//! // Create residual block
+//! let block = ResidualBlock::new(
+//!     0,                      // Block ID
+//!     0,                      // Starting row in Jacobian
+//!     &["x0", "x1"],          // Connected variables
+//!     factor,
+//!     loss,
+//! );
+//!
+//! // Later, during optimization:
+//! let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+//! let var1 = Variable::new(SE2::from_xy_angle(1.1, 0.05, 0.12));
+//! let variables = vec![&var0, &var1];
+//!
+//! let (residual, jacobian) = block.residual_and_jacobian(&variables);
+//! // residual and jacobian are now ready for the linear solver
+//! ```
+
 use nalgebra::{DMatrix, DVector};
-// use rayon::prelude::*;
 
 use crate::core::corrector::Corrector;
 use crate::core::factors::Factor;
@@ -7,15 +70,85 @@ use crate::core::loss_functions::Loss;
 use crate::core::variable::Variable;
 use crate::manifold::LieGroup;
 
+/// A residual block that wraps a factor with an optional robust loss function.
+///
+/// Each residual block represents one measurement or constraint in the optimization problem.
+/// It connects one or more variables through a factor, and optionally applies a robust loss
+/// function for outlier rejection.
+///
+/// # Fields
+///
+/// - `residual_block_id`: Unique identifier for this block
+/// - `residual_row_start_idx`: Starting row index in the global residual/Jacobian matrix
+/// - `variable_key_list`: Names of the variables connected by this block
+/// - `factor`: The factor that computes residuals and Jacobians
+/// - `loss_func`: Optional robust loss function (e.g., Huber, Cauchy)
+///
+/// # Thread Safety
+///
+/// Residual blocks are designed for parallel evaluation. Both the `factor` and `loss_func`
+/// must be `Send` to enable parallel processing across multiple residual blocks.
 pub struct ResidualBlock {
+    /// Unique identifier for this residual block
     pub residual_block_id: usize,
+
+    /// Starting row index in the global residual vector and Jacobian matrix
+    ///
+    /// This allows the optimizer to place this block's residual and Jacobian contributions
+    /// at the correct location in the full problem matrices.
     pub residual_row_start_idx: usize,
+
+    /// List of variable names (keys) that this block connects
+    ///
+    /// For example, a between factor connecting poses "x0" and "x1" would have
+    /// `variable_key_list = ["x0", "x1"]`.
     pub variable_key_list: Vec<String>,
+
+    /// The factor that computes residuals and Jacobians
+    ///
+    /// Must implement the `Factor` trait and be thread-safe (`Send`).
     pub factor: Box<dyn Factor + Send>,
+
+    /// Optional robust loss function for outlier rejection
+    ///
+    /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
+    /// is applied to downweight outliers.
     pub loss_func: Option<Box<dyn Loss + Send>>,
 }
 
 impl ResidualBlock {
+    /// Create a new residual block.
+    ///
+    /// # Arguments
+    ///
+    /// * `residual_block_id` - Unique identifier for this block
+    /// * `residual_row_start_idx` - Starting row in the global residual vector
+    /// * `variable_key_size_list` - Names of the connected variables (as string slices)
+    /// * `factor` - Factor implementation (boxed trait object)
+    /// * `loss_func` - Optional robust loss function (boxed trait object)
+    ///
+    /// # Returns
+    ///
+    /// A new `ResidualBlock` instance ready for use in optimization
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::residual_block::ResidualBlock;
+    /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+    ///
+    /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+    ///
+    /// let block = ResidualBlock::new(
+    ///     0,                  // First block
+    ///     0,                  // Starts at row 0
+    ///     &["x0", "x1"],      // Connects two variables
+    ///     factor,
+    ///     loss,
+    /// );
+    /// ```
     pub fn new(
         residual_block_id: usize,
         residual_row_start_idx: usize,
@@ -35,6 +168,58 @@ impl ResidualBlock {
         }
     }
 
+    /// Compute residual and Jacobian for this block at the given variable values.
+    ///
+    /// This is the core method called during each optimization iteration. It:
+    /// 1. Extracts values from the provided variables
+    /// 2. Calls the factor's `linearize` method
+    /// 3. If a loss function is present, applies the corrector algorithm
+    /// 4. Returns the (possibly corrected) residual and Jacobian
+    ///
+    /// # Arguments
+    ///
+    /// * `variables` - References to the variables connected by this block, in order
+    ///
+    /// # Returns
+    ///
+    /// Tuple `(residual, jacobian)` where:
+    /// - `residual`: N-dimensional error vector (possibly downweighted by loss function)
+    /// - `jacobian`: N × M matrix of derivatives (possibly corrected by loss function)
+    ///
+    /// # Type Parameters
+    ///
+    /// * `M` - The manifold type (e.g., SE2, SE3, SO3) that implements `LieGroup`
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::residual_block::ResidualBlock;
+    /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::core::variable::Variable;
+    /// use apex_solver::manifold::se2::SE2;
+    ///
+    /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
+    ///
+    /// let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+    /// let var1 = Variable::new(SE2::from_xy_angle(1.0, 0.0, 0.1));
+    /// let variables = vec![&var0, &var1];
+    ///
+    /// let (residual, jacobian) = block.residual_and_jacobian(&variables);
+    /// // Use residual and jacobian in optimization linear system
+    /// ```
+    ///
+    /// # Implementation Details
+    ///
+    /// When a loss function is present:
+    /// - Computes `s = ||r||²` (squared residual norm)
+    /// - Creates a `Corrector` using the loss function evaluation at `s`
+    /// - Applies corrections to both residual and Jacobian
+    /// - This effectively converts the robust problem into weighted least squares
+    ///
+    /// Without a loss function:
+    /// - Returns raw residual and Jacobian from the factor
+    /// - Equivalent to standard (non-robust) least squares
     pub fn residual_and_jacobian<M>(
         &self,
         variables: &Vec<&Variable<M>>,
@@ -43,15 +228,23 @@ impl ResidualBlock {
         M: LieGroup + Clone + Into<DVector<f64>>,
         M::TangentVector: crate::manifold::Tangent<M>,
     {
+        // Extract variable values as DVector for the factor
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
+
+        // Compute raw residual and Jacobian from the factor
         let (mut residual, mut jacobian) = self.factor.linearize(&param_vec);
-        let squared_norm = residual.norm_squared();
+
+        // Apply robust loss function if present
         if let Some(loss_func) = self.loss_func.as_ref() {
-            let rho = loss_func.evaluate(squared_norm);
-            let corrector = Corrector::new(squared_norm, &rho);
+            // Compute squared norm: s = ||r||²
+            let squared_norm = residual.norm_squared();
+
+            // Create corrector and apply to residual and Jacobian
+            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
             corrector.correct_jacobian(&residual, &mut jacobian);
             corrector.correct_residuals(&mut residual);
         }
+
         (residual, jacobian)
     }
 }
@@ -126,43 +319,6 @@ mod tests {
         assert!(jacobian.norm() > 1e-10, "Jacobian should not be near zero");
     }
 
-    // #[test]
-    // fn test_residual_and_jacobian_se2_prior_factor() {
-    //     let prior_data = na::dvector![2.0, 1.0, 0.1]; // [x, y, theta]
-    //     let factor = Box::new(PriorFactor {
-    //         data: prior_data.clone(),
-    //     });
-
-    //     let block = ResidualBlock::new(0, 0, &["x0"], factor, None);
-
-    //     // Create variable with same value as prior - should give zero residual
-    //     let var0 = Variable::new(SE2::from_xy_angle(2.0, 1.0, 0.1));
-    //     let variables = vec![&var0];
-
-    //     let (residual, jacobian) = block.residual_and_jacobian(&variables);
-
-    //     // Verify dimensions
-    //     assert_eq!(residual.len(), 3);
-    //     assert_eq!(jacobian.nrows(), 3);
-    //     assert_eq!(jacobian.ncols(), 3); // 1 variable * 3 DOF
-
-    //     // Should be zero residual when variable matches prior
-    //     assert!(
-    //         residual.norm() < 1e-14,
-    //         "Residual norm: {}",
-    //         residual.norm()
-    //     );
-
-    //     // Jacobian should be identity for prior factor
-    //     let expected_jacobian = na::DMatrix::identity(3, 3);
-    //     let jacobian_diff = (jacobian - expected_jacobian).norm();
-    //     assert!(
-    //         jacobian_diff < 1e-12,
-    //         "Jacobian should be identity, diff: {}",
-    //         jacobian_diff
-    //     );
-    // }
-
     #[test]
     fn test_residual_and_jacobian_with_huber_loss() {
         // Create a between factor that will have non-zero residual
@@ -200,8 +356,7 @@ mod tests {
 
     #[test]
     fn test_residual_block_se3_between_factor() {
-        // Test with SE3 - this requires SE3 between factor which we'll implement as needed
-        // For now, test with prior factor on SE3
+        // Test with SE3 - use prior factor on SE3
         let se3_data = dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
         let factor = Box::new(PriorFactor {
             data: se3_data.clone(),
