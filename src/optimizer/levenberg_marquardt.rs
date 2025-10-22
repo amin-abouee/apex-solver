@@ -509,24 +509,6 @@ impl LevenbergMarquardt {
             .expect("Failed to create Jacobi scaling matrix")
     }
 
-    /// Apply Jacobi scaling to Jacobian: J_scaled = J * S
-    // fn apply_jacobi_scaling(
-    //     &self,
-    //     jacobian: &SparseColMat<usize, f64>,
-    //     scaling: &SparseColMat<usize, f64>,
-    // ) -> SparseColMat<usize, f64> {
-    //     jacobian * scaling
-    // }
-
-    /// Apply inverse Jacobi scaling to step: dx_final = S * dx_scaled
-    fn apply_inverse_jacobi_scaling(
-        &self,
-        step: &Mat<f64>,
-        scaling: &SparseColMat<usize, f64>,
-    ) -> Mat<f64> {
-        scaling * step
-    }
-
     /// Initialize optimization state from problem and initial parameters
     fn initialize_optimization_state(
         &self,
@@ -630,21 +612,19 @@ impl LevenbergMarquardt {
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
-            self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
+            // self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
+            &scaled_step * self.jacobi_scaling.as_ref().unwrap()
         } else {
-            scaled_step.clone()
+            scaled_step
         };
 
         if self.config.verbose {
-            println!(
-                "Linear step (scaled_step) norm: {:.12e}",
-                scaled_step.norm_l2()
-            );
+            println!("Linear step (step) norm: {:.12e}", step.norm_l2());
             println!("Final step norm: {:.12e}", step.norm_l2());
         }
 
         // Compute predicted reduction using scaled values
-        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, &gradient);
+        let predicted_reduction = self.compute_predicted_reduction(&step, &gradient);
 
         if self.config.verbose {
             println!("Predicted reduction: {:.12e}", predicted_reduction);
