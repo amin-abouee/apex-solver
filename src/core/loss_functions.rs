@@ -45,8 +45,6 @@
 //! // rho_prime < 1.0, downweighting the outlier
 //! ```
 
-use core;
-
 /// Trait for robust loss functions used in nonlinear least squares optimization.
 ///
 /// A loss function transforms the squared residual `s = ||r||²` into a robust cost `ρ(s)`
@@ -184,7 +182,7 @@ impl Loss for HuberLoss {
             // Outlier region: s > δ²
             // Linear cost: ρ(s) = 2δ√s - δ²
             let r = s.sqrt(); // r = √s = ||r||
-            let rho1 = (self.scale / r).max(core::f64::MIN); // ρ'(s) = δ / √s
+            let rho1 = (self.scale / r).max(f64::MIN); // ρ'(s) = δ / √s
             [
                 2.0 * self.scale * r - self.scale2, // ρ(s)
                 rho1,                               // ρ'(s)
@@ -308,7 +306,7 @@ impl Loss for CauchyLoss {
         // Note: sum and inv are always positive, assuming s ≥ 0
         [
             self.scale2 * sum.log2(), // ρ(s) = (δ²/2) * log(1 + s/δ²)
-            inv.max(core::f64::MIN),  // ρ'(s) = 1 / (1 + s/δ²)
+            inv.max(f64::MIN),        // ρ'(s) = 1 / (1 + s/δ²)
             -self.c * (inv * inv),    // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
         ]
     }
