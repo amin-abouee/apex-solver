@@ -58,7 +58,7 @@
 //! println!("Jacobian shape: {} x {}", jacobian.nrows(), jacobian.ncols());
 //! ```
 
-use nalgebra::{DMatrix, DVector, Matrix3, Matrix6};
+use nalgebra;
 
 use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
 
@@ -131,7 +131,10 @@ pub trait Factor: Send + Sync {
     /// For a between factor connecting two SE2 poses (3 DOF each):
     /// - Input: `params = [pose1 (3×1), pose2 (3×1)]`
     /// - Output: `(residual (3×1), jacobian (3×6))`
-    fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>);
+    fn linearize(
+        &self,
+        params: &[nalgebra::DVector<f64>],
+    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>);
 
     /// Get the dimension of the residual vector.
     ///
@@ -273,7 +276,10 @@ impl Factor for BetweenFactorSE2 {
     /// 2. Composition: `T_i⁻¹ ⊕ T_j`
     /// 3. Composition: `(T_i⁻¹ ⊕ T_j) ⊕ T_ij`
     /// 4. Logarithm: `log(...)`
-    fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+    fn linearize(
+        &self,
+        params: &[nalgebra::DVector<f64>],
+    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
         // Use analytical jacobians for SE2 between factor (same pattern as SE3)
         // Input: params = [x, y, theta] for each pose (G2O FORMAT)
         let se2_origin_k0 = SE2::from(params[0].clone());
@@ -281,12 +287,12 @@ impl Factor for BetweenFactorSE2 {
         let se2_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se2_origin_k1.inverse()
-        let mut j_k1_inv_wrt_k1 = Matrix3::zeros();
+        let mut j_k1_inv_wrt_k1 = nalgebra::Matrix3::zeros();
         let se2_k1_inv = se2_origin_k1.inverse(Some(&mut j_k1_inv_wrt_k1));
 
         // Step 2: se2_k1_inv * se2_origin_k0
-        let mut j_compose1_wrt_k1_inv = Matrix3::zeros();
-        let mut j_compose1_wrt_k0 = Matrix3::zeros();
+        let mut j_compose1_wrt_k1_inv = nalgebra::Matrix3::zeros();
+        let mut j_compose1_wrt_k0 = nalgebra::Matrix3::zeros();
         let se2_temp = se2_k1_inv.compose(
             &se2_origin_k0,
             Some(&mut j_compose1_wrt_k1_inv),
@@ -294,11 +300,11 @@ impl Factor for BetweenFactorSE2 {
         );
 
         // Step 3: se2_temp * se2_k0_k1_measured
-        let mut j_compose2_wrt_temp = Matrix3::zeros();
+        let mut j_compose2_wrt_temp = nalgebra::Matrix3::zeros();
         let se2_diff = se2_temp.compose(se2_k0_k1_measured, Some(&mut j_compose2_wrt_temp), None);
 
         // Step 4: se2_diff.log()
-        let mut j_log_wrt_diff = Matrix3::zeros();
+        let mut j_log_wrt_diff = nalgebra::Matrix3::zeros();
         let residual = se2_diff.log(Some(&mut j_log_wrt_diff));
 
         // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
@@ -310,7 +316,7 @@ impl Factor for BetweenFactorSE2 {
         let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
         // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
-        let mut jacobian = DMatrix::<f64>::zeros(3, 6);
+        let mut jacobian = nalgebra::DMatrix::<f64>::zeros(3, 6);
         jacobian
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&jacobian_wrt_k0);
@@ -449,18 +455,21 @@ impl Factor for BetweenFactorSE3 {
     /// 2. Composition: `T_i⁻¹ ⊕ T_j`
     /// 3. Composition: `(T_i⁻¹ ⊕ T_j) ⊕ T_ij`
     /// 4. Logarithm: `log(...)`
-    fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+    fn linearize(
+        &self,
+        params: &[nalgebra::DVector<f64>],
+    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
         let se3_origin_k0 = SE3::from(params[0].clone());
         let se3_origin_k1 = SE3::from(params[1].clone());
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.inverse()
-        let mut j_k1_inv_wrt_k1 = Matrix6::zeros();
+        let mut j_k1_inv_wrt_k1 = nalgebra::Matrix6::zeros();
         let se3_k1_inv = se3_origin_k1.inverse(Some(&mut j_k1_inv_wrt_k1));
 
         // Step 2: se3_k1_inv * se3_origin_k0
-        let mut j_compose1_wrt_k1_inv = Matrix6::zeros();
-        let mut j_compose1_wrt_k0 = Matrix6::zeros();
+        let mut j_compose1_wrt_k1_inv = nalgebra::Matrix6::zeros();
+        let mut j_compose1_wrt_k0 = nalgebra::Matrix6::zeros();
         let se3_temp = se3_k1_inv.compose(
             &se3_origin_k0,
             Some(&mut j_compose1_wrt_k1_inv),
@@ -468,11 +477,11 @@ impl Factor for BetweenFactorSE3 {
         );
 
         // Step 3: se3_temp * se3_k0_k1_measured
-        let mut j_compose2_wrt_temp = Matrix6::zeros();
+        let mut j_compose2_wrt_temp = nalgebra::Matrix6::zeros();
         let se3_diff = se3_temp.compose(se3_k0_k1_measured, Some(&mut j_compose2_wrt_temp), None);
 
         // Step 4: se3_diff.log()
-        let mut j_log_wrt_diff = Matrix6::zeros();
+        let mut j_log_wrt_diff = nalgebra::Matrix6::zeros();
         let residual = se3_diff.log(Some(&mut j_log_wrt_diff));
 
         // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
@@ -484,7 +493,7 @@ impl Factor for BetweenFactorSE3 {
         let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
         // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
-        let mut jacobian = DMatrix::<f64>::zeros(6, 12);
+        let mut jacobian = nalgebra::DMatrix::<f64>::zeros(6, 12);
         jacobian
             .fixed_view_mut::<6, 6>(0, 0)
             .copy_from(&jacobian_wrt_k0);
@@ -549,7 +558,7 @@ impl Factor for BetweenFactorSE3 {
 #[derive(Debug, Clone)]
 pub struct PriorFactor {
     /// The prior value (measurement or known value)
-    pub data: DVector<f64>,
+    pub data: nalgebra::DVector<f64>,
 }
 
 impl Factor for PriorFactor {
@@ -585,9 +594,12 @@ impl Factor for PriorFactor {
     /// assert_eq!(jacobian[(0, 0)], 1.0);
     /// assert_eq!(jacobian[(1, 1)], 1.0);
     /// ```
-    fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+    fn linearize(
+        &self,
+        params: &[nalgebra::DVector<f64>],
+    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
         let residual = &params[0] - &self.data;
-        let jacobian = DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
+        let jacobian = nalgebra::DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
         (residual, jacobian)
     }
 
