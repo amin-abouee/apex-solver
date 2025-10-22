@@ -1,7 +1,7 @@
 use crate::io;
-use memmap2::Mmap;
+use memmap2;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections;
 use std::{fs, path};
 
 /// High-performance G2O file loader
@@ -10,7 +10,7 @@ pub struct G2oLoader;
 impl io::GraphLoader for G2oLoader {
     fn load<P: AsRef<path::Path>>(path: P) -> Result<io::Graph, io::ApexSolverIoError> {
         let file = fs::File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
         let content = std::str::from_utf8(&mmap).map_err(|e| io::ApexSolverIoError::Parse {
             line: 0,
             message: format!("Invalid UTF-8: {e}"),
@@ -134,8 +134,8 @@ impl G2oLoader {
         let estimated_vertices = lines.len() / 4;
         let estimated_edges = estimated_vertices * 3;
         let mut graph = io::Graph {
-            vertices_se2: HashMap::with_capacity(estimated_vertices),
-            vertices_se3: HashMap::with_capacity(estimated_vertices),
+            vertices_se2: collections::HashMap::with_capacity(estimated_vertices),
+            vertices_se3: collections::HashMap::with_capacity(estimated_vertices),
             edges_se2: Vec::with_capacity(estimated_edges),
             edges_se3: Vec::with_capacity(estimated_edges),
         };

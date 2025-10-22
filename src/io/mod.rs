@@ -1,6 +1,6 @@
 use nalgebra;
 use std::{collections, fmt, path};
-use thiserror::Error;
+use thiserror;
 
 // Import manifold types
 use crate::manifold::se2::SE2;
@@ -15,7 +15,7 @@ pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
 
 /// Errors that can occur during graph file parsing
-#[derive(Error, Debug)]
+#[derive(thiserror::Error, Debug)]
 pub enum ApexSolverIoError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
