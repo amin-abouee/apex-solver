@@ -11,10 +11,9 @@
 //! - **Manifold state**: Real-time pose updates for SE2/SE3 problems
 //!
 
-use crate::core::problem::VariableEnum;
-use faer::{Mat, sparse::SparseColMat};
-use rerun::{RecordingStream, RecordingStreamBuilder};
-use std::collections::HashMap;
+use crate::core::problem;
+use faer::sparse;
+use std::collections;
 
 /// Optimization visualizer for real-time debugging with Rerun.
 ///
@@ -22,7 +21,7 @@ use std::collections::HashMap;
 /// various aspects of the optimization process.
 #[derive(Debug)]
 pub struct OptimizationVisualizer {
-    rec: Option<RecordingStream>,
+    rec: Option<rerun::RecordingStream>,
     enabled: bool,
 }
 
@@ -54,10 +53,10 @@ impl OptimizationVisualizer {
             let rec = if let Some(path) = save_path {
                 // Save to file
                 println!("✓ Saving visualization to: {}", path);
-                RecordingStreamBuilder::new("apex-solver-optimization").save(path)?
+                rerun::RecordingStreamBuilder::new("apex-solver-optimization").save(path)?
             } else {
                 // Try to spawn Rerun viewer
-                match RecordingStreamBuilder::new("apex-solver-optimization").spawn() {
+                match rerun::RecordingStreamBuilder::new("apex-solver-optimization").spawn() {
                     Ok(rec) => {
                         println!("✓ Rerun viewer launched successfully");
                         rec
@@ -68,7 +67,7 @@ impl OptimizationVisualizer {
                         eprintln!("  View it later with: rerun optimization.rrd\n");
 
                         // Fall back to saving to file
-                        RecordingStreamBuilder::new("apex-solver-optimization")
+                        rerun::RecordingStreamBuilder::new("apex-solver-optimization")
                             .save("optimization.rrd")?
                     }
                 }
@@ -185,7 +184,7 @@ impl OptimizationVisualizer {
     /// * `iteration` - Current iteration number
     pub fn log_hessian(
         &self,
-        hessian: Option<&SparseColMat<usize, f64>>,
+        hessian: Option<&sparse::SparseColMat<usize, f64>>,
         iteration: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_enabled() {
@@ -222,7 +221,7 @@ impl OptimizationVisualizer {
     /// * `iteration` - Current iteration number
     pub fn log_gradient(
         &self,
-        gradient: Option<&Mat<f64>>,
+        gradient: Option<&faer::Mat<f64>>,
         iteration: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_enabled() {
@@ -261,7 +260,7 @@ impl OptimizationVisualizer {
     /// * `iteration` - Current iteration number
     pub fn log_manifolds(
         &self,
-        variables: &HashMap<String, VariableEnum>,
+        variables: &collections::HashMap<String, problem::VariableEnum>,
         iteration: usize,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_enabled() {
@@ -274,7 +273,7 @@ impl OptimizationVisualizer {
         // Visualize SE3 poses (only poses, no edges)
         for (var_name, var) in variables {
             match var {
-                VariableEnum::SE3(v) => {
+                problem::VariableEnum::SE3(v) => {
                     let trans = v.value.translation();
                     let rot = v.value.rotation_quaternion();
 
@@ -307,7 +306,7 @@ impl OptimizationVisualizer {
                         &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(0.5, 1.0),
                     )?;
                 }
-                VariableEnum::SE2(v) => {
+                problem::VariableEnum::SE2(v) => {
                     // Visualize SE2 as 2D points or 3D poses at z=0
                     let x = v.value.x();
                     let y = v.value.y();
@@ -416,7 +415,7 @@ impl OptimizationVisualizer {
     ///
     /// Uses block averaging to downsample large matrices while preserving structure.
     fn sparse_hessian_to_image(
-        hessian: &SparseColMat<usize, f64>,
+        hessian: &sparse::SparseColMat<usize, f64>,
     ) -> Result<rerun::datatypes::TensorData, Box<dyn std::error::Error>> {
         // Fixed target size for visualization
         let target_size = 100;
@@ -500,7 +499,7 @@ impl OptimizationVisualizer {
     /// This function efficiently iterates only over non-zero elements using
     /// the sparse CSC (Compressed Sparse Column) format, avoiding O(m*n) complexity.
     fn downsample_sparse_matrix(
-        sparse: &SparseColMat<usize, f64>,
+        sparse: &sparse::SparseColMat<usize, f64>,
         target_rows: usize,
         target_cols: usize,
     ) -> Vec<f64> {
