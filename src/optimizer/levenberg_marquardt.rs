@@ -584,8 +584,6 @@ impl LevenbergMarquardt {
 
             self.jacobi_scaling = Some(scaling);
         }
-
-        // self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
         jacobian * self.jacobi_scaling.as_ref().unwrap()
     }
 
