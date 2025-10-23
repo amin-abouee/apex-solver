@@ -544,9 +544,7 @@ impl LevenbergMarquardt {
 
         // Initial cost evaluation (residual only, no Jacobian needed)
         let residual = problem.compute_residual_sparse(&variables)?;
-
-        let residual_norm = residual.norm_l2();
-        let current_cost = residual_norm * residual_norm;
+        let current_cost = optimizer::compute_cost(&residual);
         let initial_cost = current_cost;
 
         if self.config.verbose {
@@ -657,8 +655,7 @@ impl LevenbergMarquardt {
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_residual_norm = new_residual.norm_l2();
-        let new_cost = new_residual_norm * new_residual_norm;
+        let new_cost = optimizer::compute_cost(&new_residual);
 
         // Compute step quality
         let rho = self.compute_step_quality(
