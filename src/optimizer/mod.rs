@@ -296,3 +296,8 @@ pub fn apply_negative_parameter_step(
     // Apply the negative step using the standard apply_parameter_step function
     apply_parameter_step(variables, negative_step.as_ref(), variable_order);
 }
+
+pub fn compute_cost(residual: &faer::Mat<f64>) -> f64 {
+    let cost = residual.norm_l2();
+    0.5 * cost * cost
+}
