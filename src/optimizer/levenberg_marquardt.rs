@@ -325,7 +325,7 @@ impl LevenbergMarquardtConfig {
 }
 
 /// State for optimization iteration
-struct OptimizationState {
+struct LinearizerResult {
     variables: collections::HashMap<String, problem::VariableEnum>,
     variable_index_map: collections::HashMap<String, usize>,
     sorted_vars: Vec<String>,
@@ -420,6 +420,9 @@ impl LevenbergMarquardt {
     }
 
     /// Compute step quality ratio (actual vs predicted reduction)
+    /// Reference: Introduction to Optimization and Data Fitting
+    /// Reference: Damping parameter in marquardt's method
+    /// Formula 2.2
     fn compute_step_quality(
         &self,
         current_cost: f64,
@@ -520,7 +523,7 @@ impl LevenbergMarquardt {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, error::ApexError> {
+    ) -> Result<LinearizerResult, error::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -539,12 +542,8 @@ impl LevenbergMarquardt {
         let symbolic_structure =
             problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
 
-        // Initial cost evaluation using sparse interface
-        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_map,
-            &symbolic_structure,
-        )?;
+        // Initial cost evaluation (residual only, no Jacobian needed)
+        let residual = problem.compute_residual_sparse(&variables)?;
 
         let residual_norm = residual.norm_l2();
         let current_cost = residual_norm * residual_norm;
@@ -561,7 +560,7 @@ impl LevenbergMarquardt {
             );
         }
 
-        Ok(OptimizationState {
+        Ok(LinearizerResult {
             variables,
             variable_index_map,
             sorted_vars,
@@ -625,7 +624,6 @@ impl LevenbergMarquardt {
         };
 
         if self.config.verbose {
-            println!("Linear step (step) norm: {:.12e}", step.norm_l2());
             println!("Final step norm: {:.12e}", step.norm_l2());
         }
 
@@ -647,7 +645,7 @@ impl LevenbergMarquardt {
     fn evaluate_and_apply_step(
         &mut self,
         step_result: &StepResult,
-        state: &mut OptimizationState,
+        state: &mut LinearizerResult,
         problem: &problem::Problem,
     ) -> error::ApexResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
@@ -657,12 +655,8 @@ impl LevenbergMarquardt {
             &state.sorted_vars,
         );
 
-        // Compute new cost using sparse interface
-        let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &state.variables,
-            &state.variable_index_map,
-            &state.symbolic_structure,
-        )?;
+        // Compute new cost (residual only, no Jacobian needed for step evaluation)
+        let new_residual = problem.compute_residual_sparse(&state.variables)?;
         let new_residual_norm = new_residual.norm_l2();
         let new_cost = new_residual_norm * new_residual_norm;
 
@@ -674,7 +668,7 @@ impl LevenbergMarquardt {
         );
 
         if self.config.verbose {
-            println!("RHO CALCULATION DETAILS");
+            println!("RHO (Gain Factor) CALCULATION DETAILS");
             println!("Old cost: {:.12e}", state.current_cost);
             println!("New cost: {:.12e}", new_cost);
             let actual_reduction = state.current_cost - new_cost;
@@ -1035,17 +1029,24 @@ mod tests {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
             let x1 = params[0][0];
             let x2 = params[1][0];
 
             // Residual: r1 = 10(x2 - x1²)
             let residual = dvector![10.0 * (x2 - x1 * x1)];
 
-            // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-            let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
-            jacobian[(0, 0)] = -20.0 * x1;
-            jacobian[(0, 1)] = 10.0;
+            let jacobian = if compute_jacobian {
+                // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
+                let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
+                jacobian[(0, 0)] = -20.0 * x1;
+                jacobian[(0, 1)] = 10.0;
+
+                Some(jacobian)
+            } else {
+                None
+            };
 
             (residual, jacobian)
         }
@@ -1064,14 +1065,19 @@ mod tests {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
             let x1 = params[0][0];
 
             // Residual: r2 = 1 - x1
             let residual = dvector![1.0 - x1];
 
-            // Jacobian: ∂r2/∂x1 = -1
-            let jacobian = nalgebra::DMatrix::from_element(1, 1, -1.0);
+            let jacobian = if compute_jacobian {
+                // Jacobian: ∂r2/∂x1 = -1
+                Some(nalgebra::DMatrix::from_element(1, 1, -1.0))
+            } else {
+                None
+            };
 
             (residual, jacobian)
         }

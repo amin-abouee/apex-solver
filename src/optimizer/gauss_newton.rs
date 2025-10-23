@@ -419,12 +419,8 @@ impl GaussNewton {
         let symbolic_structure =
             problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
 
-        // Initial cost evaluation using sparse interface
-        let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_index_map,
-            &symbolic_structure,
-        )?;
+        // Initial cost evaluation (residual only, no Jacobian needed)
+        let residual = problem.compute_residual_sparse(&variables)?;
 
         let residual_norm = residual.norm_l2();
         let current_cost = residual_norm * residual_norm;
@@ -527,12 +523,8 @@ impl GaussNewton {
             &state.sorted_vars,
         );
 
-        // Compute new cost using sparse interface
-        let (new_residual, _) = problem.compute_residual_and_jacobian_sparse(
-            &state.variables,
-            &state.variable_index_map,
-            &state.symbolic_structure,
-        )?;
+        // Compute new cost (residual only, no Jacobian needed for step evaluation)
+        let new_residual = problem.compute_residual_sparse(&state.variables)?;
         let new_residual_norm = new_residual.norm_l2();
         let new_cost = new_residual_norm * new_residual_norm;
 
@@ -810,7 +802,8 @@ mod tests {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
             let x1 = params[0][0];
             let x2 = params[1][0];
 
@@ -818,9 +811,14 @@ mod tests {
             let residual = nalgebra::dvector![10.0 * (x2 - x1 * x1)];
 
             // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-            let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
-            jacobian[(0, 0)] = -20.0 * x1;
-            jacobian[(0, 1)] = 10.0;
+            let jacobian = if compute_jacobian {
+                let mut jac = nalgebra::DMatrix::zeros(1, 2);
+                jac[(0, 0)] = -20.0 * x1;
+                jac[(0, 1)] = 10.0;
+                Some(jac)
+            } else {
+                None
+            };
 
             (residual, jacobian)
         }
@@ -839,14 +837,19 @@ mod tests {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
             let x1 = params[0][0];
 
             // Residual: r2 = 1 - x1
             let residual = nalgebra::dvector![1.0 - x1];
 
             // Jacobian: ∂r2/∂x1 = -1
-            let jacobian = nalgebra::DMatrix::from_element(1, 1, -1.0);
+            let jacobian = if compute_jacobian {
+                Some(nalgebra::DMatrix::from_element(1, 1, -1.0))
+            } else {
+                None
+            };
 
             (residual, jacobian)
         }
