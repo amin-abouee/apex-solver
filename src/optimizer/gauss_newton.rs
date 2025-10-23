@@ -794,9 +794,10 @@ impl optimizer::Solver for GaussNewton {
 
 #[cfg(test)]
 mod tests {
-    use crate::core::{factors, problem};
-    use crate::manifold;
-    use crate::optimizer;
+    use crate::{
+        core::{factors, problem},
+        manifold, optimizer,
+    };
     use nalgebra::dvector;
     use std::collections;
 

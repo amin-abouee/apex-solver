@@ -11,7 +11,7 @@
 //! - **Manifold state**: Real-time pose updates for SE2/SE3 problems
 //!
 
-use crate::core::problem;
+use crate::{core::problem, io};
 use faer::sparse;
 use std::collections;
 
@@ -362,7 +362,7 @@ impl OptimizationVisualizer {
     /// * `scale` - Scale factor for visualization
     pub fn log_initial_graph(
         &self,
-        graph: &crate::io::Graph,
+        graph: &io::Graph,
         scale: f32,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if !self.is_enabled() {

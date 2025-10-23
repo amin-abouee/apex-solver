@@ -1177,7 +1177,8 @@ impl optimizer::Solver for DogLeg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors;
+    use crate::{core::factors, manifold};
+    use nalgebra;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
@@ -1243,16 +1244,18 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        use crate::core::problem::Problem;
-        use crate::manifold::ManifoldType;
-        use nalgebra::dvector;
-
-        let mut problem = Problem::new();
+        let mut problem = problem::Problem::new();
         let mut initial_values = collections::HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
+        initial_values.insert(
+            "x1".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
+        );
+        initial_values.insert(
+            "x2".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
+        );
 
         // Add custom factors (demonstrates extensibility!)
         problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);

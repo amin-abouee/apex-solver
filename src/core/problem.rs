@@ -89,9 +89,12 @@ use faer::sparse;
 use nalgebra;
 use rayon::prelude::*;
 
-use crate::core::{factors, loss_functions, residual_block, variable};
-use crate::manifold;
-use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+use crate::{
+    core,
+    core::{factors, loss_functions, residual_block, variable},
+    linalg, manifold,
+    manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3},
+};
 
 /// Symbolic structure for sparse matrix operations.
 ///
@@ -159,7 +162,7 @@ impl VariableEnum {
                 // SE3 has 6 DOF in tangent space
                 let step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = crate::manifold::se3::SE3Tangent::from(step_dvector);
+                let tangent = manifold::se3::SE3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -167,7 +170,7 @@ impl VariableEnum {
                 // SE2 has 3 DOF in tangent space
                 let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = crate::manifold::se2::SE2Tangent::from(step_dvector);
+                let tangent = manifold::se2::SE2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -175,7 +178,7 @@ impl VariableEnum {
                 // SO3 has 3 DOF in tangent space
                 let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = crate::manifold::so3::SO3Tangent::from(step_dvector);
+                let tangent = manifold::so3::SO3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -183,7 +186,7 @@ impl VariableEnum {
                 // SO2 has 1 DOF in tangent space
                 let step_data = step_slice[(0, 0)];
                 let step_dvector = nalgebra::DVector::from_vec(vec![step_data]);
-                let tangent = crate::manifold::so2::SO2Tangent::from(step_dvector);
+                let tangent = manifold::so2::SO2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -192,7 +195,7 @@ impl VariableEnum {
                 let size = var.get_size();
                 let step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = crate::manifold::rn::RnTangent::new(step_dvector);
+                let tangent = manifold::rn::RnTangent::new(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -605,7 +608,7 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         total_dof: usize,
-    ) -> crate::core::ApexResult<SymbolicStructure> {
+    ) -> core::ApexResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
         let mut indices = Vec::<sparse::Pair<usize, usize>>::new();
@@ -675,7 +678,7 @@ impl Problem {
             &indices,                      // List of non-zero entry locations
         )
         .map_err(|_| {
-            crate::core::ApexError::MatrixOperation(
+            core::ApexError::MatrixOperation(
                 "Failed to build symbolic sparse matrix structure".to_string(),
             )
         })?;
@@ -729,12 +732,12 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> crate::core::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
+    ) -> core::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
         let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
             self.total_residual_dimension,
         )));
 
-        let jacobian_values: Result<Vec<Vec<f64>>, crate::core::ApexError> = self
+        let jacobian_values: Result<Vec<Vec<f64>>, core::ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -751,13 +754,11 @@ impl Problem {
 
         let total_residual = sync::Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                crate::core::ApexError::ThreadError(
-                    "Failed to unwrap Arc for total residual".to_string(),
-                )
+                core::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
             })?
             .into_inner()
             .map_err(|_| {
-                crate::core::ApexError::ThreadError(
+                core::ApexError::ThreadError(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
             })?;
@@ -770,7 +771,7 @@ impl Problem {
             jacobian_values.as_slice(),
         )
         .map_err(|_| {
-            crate::core::ApexError::MatrixOperation(
+            core::ApexError::MatrixOperation(
                 "Failed to create sparse Jacobian from argsort".to_string(),
             )
         })?;
@@ -784,7 +785,7 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
-    ) -> crate::core::ApexResult<Vec<f64>> {
+    ) -> core::ApexResult<Vec<f64>> {
         let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
@@ -805,9 +806,7 @@ impl Problem {
         // Update total residual
         {
             let mut total_residual = total_residual.lock().map_err(|_| {
-                crate::core::ApexError::ThreadError(
-                    "Failed to acquire lock on total residual".to_string(),
-                )
+                core::ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
             })?;
 
             // Copy residual values from nalgebra DVector to faer Col
@@ -832,7 +831,7 @@ impl Problem {
                     }
                 }
             } else {
-                return Err(crate::core::ApexError::InvalidInput(format!(
+                return Err(core::ApexError::InvalidInput(format!(
                     "Missing key {} in variable-to-column-index mapping",
                     var_key
                 )));
@@ -918,7 +917,7 @@ impl Problem {
     ///
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn crate::linalg::SparseLinearSolver>,
+        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
         variables: &mut collections::HashMap<String, VariableEnum>,
         variable_index_map: &collections::HashMap<String, usize>,
     ) -> Option<collections::HashMap<String, faer::Mat<f64>>> {
@@ -928,7 +927,7 @@ impl Problem {
 
         // Extract per-variable covariance blocks from the full matrix
         let per_var_covariances =
-            crate::linalg::extract_variable_covariances(&full_cov, variables, variable_index_map);
+            linalg::extract_variable_covariances(&full_cov, variables, variable_index_map);
 
         // Set covariances in Variable objects for easy access
         for (var_name, cov) in &per_var_covariances {

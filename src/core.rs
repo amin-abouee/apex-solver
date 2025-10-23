@@ -3,6 +3,7 @@
 //! This module provides fundamental types used throughout the library,
 //! including error handling and result types.
 
+use crate::{io, linalg, manifold, optimizer};
 use std::fmt;
 pub mod corrector;
 pub mod factors;
@@ -93,26 +94,26 @@ impl From<std::num::ParseIntError> for ApexError {
 
 // Convert module-specific errors to ApexError
 
-impl From<crate::linalg::LinAlgError> for ApexError {
-    fn from(err: crate::linalg::LinAlgError) -> Self {
+impl From<linalg::LinAlgError> for ApexError {
+    fn from(err: linalg::LinAlgError) -> Self {
         ApexError::LinearAlgebra(err.to_string())
     }
 }
 
-impl From<crate::optimizer::OptimizerError> for ApexError {
-    fn from(err: crate::optimizer::OptimizerError) -> Self {
+impl From<optimizer::OptimizerError> for ApexError {
+    fn from(err: optimizer::OptimizerError) -> Self {
         ApexError::Solver(err.to_string())
     }
 }
 
-impl From<crate::manifold::ManifoldError> for ApexError {
-    fn from(err: crate::manifold::ManifoldError) -> Self {
+impl From<manifold::ManifoldError> for ApexError {
+    fn from(err: manifold::ManifoldError) -> Self {
         ApexError::Manifold(err.to_string())
     }
 }
 
-impl From<crate::io::ApexSolverIoError> for ApexError {
-    fn from(err: crate::io::ApexSolverIoError) -> Self {
+impl From<io::ApexSolverIoError> for ApexError {
+    fn from(err: io::ApexSolverIoError) -> Self {
         ApexError::Io(err.to_string())
     }
 }

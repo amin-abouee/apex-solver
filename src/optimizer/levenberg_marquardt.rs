@@ -1024,20 +1024,18 @@ impl optimizer::Solver for LevenbergMarquardt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors::Factor;
-    use crate::core::problem::Problem;
-    use crate::manifold;
-    use nalgebra::{DMatrix, dvector};
+    use crate::{core::factors, manifold};
+    use nalgebra::dvector;
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
     struct RosenbrockFactor1;
 
-    impl Factor for RosenbrockFactor1 {
+    impl factors::Factor for RosenbrockFactor1 {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, DMatrix<f64>) {
+        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
             let x1 = params[0][0];
             let x2 = params[1][0];
 
@@ -1045,7 +1043,7 @@ mod tests {
             let residual = dvector![10.0 * (x2 - x1 * x1)];
 
             // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-            let mut jacobian = DMatrix::zeros(1, 2);
+            let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
             jacobian[(0, 0)] = -20.0 * x1;
             jacobian[(0, 1)] = 10.0;
 
@@ -1062,18 +1060,18 @@ mod tests {
     #[derive(Debug, Clone)]
     struct RosenbrockFactor2;
 
-    impl Factor for RosenbrockFactor2 {
+    impl factors::Factor for RosenbrockFactor2 {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
-        ) -> (nalgebra::DVector<f64>, DMatrix<f64>) {
+        ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
             let x1 = params[0][0];
 
             // Residual: r2 = 1 - x1
             let residual = dvector![1.0 - x1];
 
             // Jacobian: ∂r2/∂x1 = -1
-            let jacobian = DMatrix::from_element(1, 1, -1.0);
+            let jacobian = nalgebra::DMatrix::from_element(1, 1, -1.0);
 
             (residual, jacobian)
         }
@@ -1092,7 +1090,7 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        let mut problem = Problem::new();
+        let mut problem = problem::Problem::new();
         let mut initial_values = collections::HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)

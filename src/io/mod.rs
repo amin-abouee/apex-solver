@@ -3,8 +3,10 @@ use std::{collections, fmt, path};
 use thiserror;
 
 // Import manifold types
-use crate::manifold::se2::SE2;
-use crate::manifold::se3::SE3;
+use crate::{
+    core::problem,
+    manifold::{se2::SE2, se3::SE3},
+};
 
 // Module declarations
 pub mod g2o;
@@ -330,10 +332,10 @@ impl Graph {
     /// # Returns
     /// A new Graph with optimized vertices and original edges
     pub fn from_optimized_variables(
-        variables: &collections::HashMap<String, crate::core::problem::VariableEnum>,
+        variables: &collections::HashMap<String, problem::VariableEnum>,
         original_edges: &Self,
     ) -> Self {
-        use crate::core::problem::VariableEnum;
+        use problem::VariableEnum;
 
         let mut graph = Graph::new();
 
