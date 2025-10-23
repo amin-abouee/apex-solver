@@ -454,7 +454,7 @@ impl GaussNewton {
         // Use min_diagonal for numerical stability (tiny regularization)
         let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
-            .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.min_diagonal)
+            .solve_normal_equation(&residuals_owned, scaled_jacobian)
             .ok()?;
 
         // Get gradient from the solver (J^T * r)
