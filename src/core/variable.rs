@@ -61,7 +61,7 @@
 //! println!("Updated pose at ({}, {}, {})",
 //!     var.value.translation().x,
 //!     var.value.translation().y,
-//!     var.value.rotation().angle()
+//!     var.value.angle()
 //! );
 //! ```
 //!

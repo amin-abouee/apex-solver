@@ -418,15 +418,11 @@ impl BetweenFactorSE3 {
     /// ```
     /// use apex_solver::core::factors::BetweenFactorSE3;
     /// use apex_solver::manifold::se3::SE3;
-    /// use nalgebra::{Vector3, Quaternion};
     ///
-    /// // Create relative pose: move 2m in x, rotate 90° around z
-    /// let relative = SE3::from_translation_quaternion(
-    ///     Vector3::new(2.0, 0.0, 0.0),
-    ///     Quaternion::from_axis_angle(
-    ///         &nalgebra::Unit::new_normalize(Vector3::z()),
-    ///         std::f64::consts::FRAC_PI_2
-    ///     )
+    /// // Create relative pose: move 2m in x, rotate 90° around z-axis
+    /// let relative = SE3::from_translation_euler(
+    ///     2.0, 0.0, 0.0,                      // translation (x, y, z)
+    ///     0.0, 0.0, std::f64::consts::FRAC_PI_2  // rotation (roll, pitch, yaw)
     /// );
     ///
     /// let factor = BetweenFactorSE3::new(relative);

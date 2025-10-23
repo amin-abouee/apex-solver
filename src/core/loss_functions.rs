@@ -45,7 +45,7 @@
 //! // rho_prime < 1.0, downweighting the outlier
 //! ```
 
-use crate::core;
+use crate::error;
 
 /// Trait for robust loss functions used in nonlinear least squares optimization.
 ///
@@ -156,9 +156,9 @@ impl HuberLoss {
     ///
     /// let huber = HuberLoss::new(1.345).unwrap();
     /// ```
-    pub fn new(scale: f64) -> core::ApexResult<Self> {
+    pub fn new(scale: f64) -> error::ApexResult<Self> {
         if scale <= 0.0 {
-            return Err(core::ApexError::InvalidInput(
+            return Err(error::ApexError::InvalidInput(
                 "scale needs to be larger than zero".to_string(),
             ));
         }
@@ -277,9 +277,9 @@ impl CauchyLoss {
     ///
     /// let cauchy = CauchyLoss::new(2.3849).unwrap();
     /// ```
-    pub fn new(scale: f64) -> core::ApexResult<Self> {
+    pub fn new(scale: f64) -> error::ApexResult<Self> {
         if scale <= 0.0 {
-            return Err(core::ApexError::InvalidInput(
+            return Err(error::ApexError::InvalidInput(
                 "scale needs to be larger than zero".to_string(),
             ));
         }

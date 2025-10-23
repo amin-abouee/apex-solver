@@ -24,6 +24,7 @@
 //! - **Sparse QR**: More robust for rank-deficient or ill-conditioned systems
 
 pub mod core;
+pub mod error;
 pub mod io;
 pub mod linalg;
 pub mod manifold;
@@ -31,6 +32,7 @@ pub mod optimizer;
 
 // Re-export core types
 pub use core::variable::Variable;
+pub use error::{ApexError, ApexResult};
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 pub use optimizer::{

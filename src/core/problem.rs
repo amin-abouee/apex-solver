@@ -68,7 +68,8 @@
 //!
 //! // Add between factor with robust loss
 //! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-//! let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()));
+//! let loss: Option<Box<dyn apex_solver::core::loss_functions::Loss + Send>> =
+//!     Some(Box::new(HuberLoss::new(1.0).unwrap()));
 //! problem.add_residual_block(&["x0", "x1"], between, loss);
 //!
 //! // Initialize variables
@@ -90,9 +91,8 @@ use nalgebra;
 use rayon::prelude::*;
 
 use crate::{
-    core,
     core::{factors, loss_functions, residual_block, variable},
-    linalg, manifold,
+    error, linalg, manifold,
     manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3},
 };
 
@@ -375,7 +375,8 @@ impl Problem {
     ///
     /// // Add between factor with robust loss (binary constraint)
     /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-    /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()));
+    /// let loss: Option<Box<dyn apex_solver::core::loss_functions::Loss + Send>> =
+    ///     Some(Box::new(HuberLoss::new(1.0).unwrap()));
     /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
     ///
     /// assert_eq!(id1, 0);
@@ -608,7 +609,7 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         total_dof: usize,
-    ) -> core::ApexResult<SymbolicStructure> {
+    ) -> error::ApexResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
         let mut indices = Vec::<sparse::Pair<usize, usize>>::new();
@@ -678,7 +679,7 @@ impl Problem {
             &indices,                      // List of non-zero entry locations
         )
         .map_err(|_| {
-            core::ApexError::MatrixOperation(
+            error::ApexError::MatrixOperation(
                 "Failed to build symbolic sparse matrix structure".to_string(),
             )
         })?;
@@ -717,7 +718,6 @@ impl Problem {
     ///
     /// # Example
     ///
-    /// ```ignore
     /// // Inside optimizer loop:
     /// let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
     ///     &variables,
@@ -732,12 +732,12 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> core::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
+    ) -> error::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
         let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
             self.total_residual_dimension,
         )));
 
-        let jacobian_values: Result<Vec<Vec<f64>>, core::ApexError> = self
+        let jacobian_values: Result<Vec<Vec<f64>>, error::ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -754,11 +754,11 @@ impl Problem {
 
         let total_residual = sync::Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                core::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+                error::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
             })?
             .into_inner()
             .map_err(|_| {
-                core::ApexError::ThreadError(
+                error::ApexError::ThreadError(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
             })?;
@@ -771,7 +771,7 @@ impl Problem {
             jacobian_values.as_slice(),
         )
         .map_err(|_| {
-            core::ApexError::MatrixOperation(
+            error::ApexError::MatrixOperation(
                 "Failed to create sparse Jacobian from argsort".to_string(),
             )
         })?;
@@ -785,7 +785,7 @@ impl Problem {
         variables: &collections::HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &collections::HashMap<String, usize>,
         total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
-    ) -> core::ApexResult<Vec<f64>> {
+    ) -> error::ApexResult<Vec<f64>> {
         let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
@@ -806,7 +806,9 @@ impl Problem {
         // Update total residual
         {
             let mut total_residual = total_residual.lock().map_err(|_| {
-                core::ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
+                error::ApexError::ThreadError(
+                    "Failed to acquire lock on total residual".to_string(),
+                )
             })?;
 
             // Copy residual values from nalgebra DVector to faer Col
@@ -831,7 +833,7 @@ impl Problem {
                     }
                 }
             } else {
-                return Err(core::ApexError::InvalidInput(format!(
+                return Err(error::ApexError::InvalidInput(format!(
                     "Missing key {} in variable-to-column-index mapping",
                     var_key
                 )));
