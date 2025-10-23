@@ -688,6 +688,77 @@ impl Problem {
         Ok(SymbolicStructure { pattern, order })
     }
 
+    /// Compute only the residual vector for the current variable values.
+    ///
+    /// This is an optimized version that skips Jacobian computation when only the cost
+    /// function value is needed (e.g., during initialization or step evaluation).
+    ///
+    /// # Arguments
+    ///
+    /// * `variables` - Current variable values (from `initialize_variables()` or updated)
+    ///
+    /// # Returns
+    ///
+    /// Residual vector as N×1 column matrix (N = total residual dimension)
+    ///
+    /// # Performance
+    ///
+    /// Approximately **2x faster** than `compute_residual_and_jacobian_sparse()` since it:
+    /// - Skips Jacobian computation for each residual block
+    /// - Avoids Jacobian matrix assembly and storage
+    /// - Only parallelizes residual evaluation
+    ///
+    /// # When to Use
+    ///
+    /// - **Initial cost computation**: When setting up optimization state
+    /// - **Step evaluation**: When computing new cost after applying parameter updates
+    /// - **Cost-only queries**: When you don't need gradients
+    ///
+    /// Use `compute_residual_and_jacobian_sparse()` when you need both residual and Jacobian
+    /// (e.g., in the main optimization iteration loop for linearization).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Initial cost evaluation (no Jacobian needed)
+    /// let residual = problem.compute_residual_sparse(&variables)?;
+    /// let initial_cost = residual.norm_l2() * residual.norm_l2();
+    /// ```
+    pub fn compute_residual_sparse(
+        &self,
+        variables: &collections::HashMap<String, VariableEnum>,
+    ) -> error::ApexResult<faer::Mat<f64>> {
+        let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
+            self.total_residual_dimension,
+        )));
+
+        // Compute residuals in parallel (no Jacobian needed)
+        let result: Result<Vec<()>, error::ApexError> = self
+            .residual_blocks
+            .par_iter()
+            .map(|(_, residual_block)| {
+                self.compute_residual_block(residual_block, variables, &total_residual)
+            })
+            .collect();
+
+        result?;
+
+        let total_residual = sync::Arc::try_unwrap(total_residual)
+            .map_err(|_| {
+                error::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+            })?
+            .into_inner()
+            .map_err(|_| {
+                error::ApexError::ThreadError(
+                    "Failed to extract mutex inner value for total residual".to_string(),
+                )
+            })?;
+
+        // Convert faer Col to Mat (column vector as n×1 matrix)
+        let residual_faer = total_residual.as_ref().as_mat().to_owned();
+        Ok(residual_faer)
+    }
+
     /// Compute residual vector and sparse Jacobian matrix for the current variable values.
     ///
     /// This is the core linearization method called during each optimization iteration. It:
@@ -716,8 +787,14 @@ impl Problem {
     ///
     /// Typically accounts for 40-60% of total optimization time (including sparse matrix ops).
     ///
+    /// # When to Use
+    ///
+    /// Use this method in the main optimization loop when you need both residual and Jacobian
+    /// for linearization. For cost-only evaluation, use `compute_residual_sparse()` instead.
+    ///
     /// # Example
     ///
+    /// ```rust,ignore
     /// // Inside optimizer loop:
     /// let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
     ///     &variables,
@@ -779,6 +856,44 @@ impl Problem {
         Ok((residual_faer, jacobian_sparse))
     }
 
+    /// Compute only the residual for a single residual block (no Jacobian).
+    ///
+    /// Helper method for `compute_residual_sparse()`.
+    fn compute_residual_block(
+        &self,
+        residual_block: &residual_block::ResidualBlock,
+        variables: &collections::HashMap<String, VariableEnum>,
+        total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
+    ) -> error::ApexResult<()> {
+        let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
+
+        for var_key in &residual_block.variable_key_list {
+            if let Some(variable) = variables.get(var_key) {
+                param_vectors.push(variable.to_vector());
+            }
+        }
+
+        // Compute only residual (linearize still computes Jacobian internally,
+        // but we don't extract/store it)
+        let (res, _) = residual_block.factor.linearize(&param_vectors, false);
+        let mut total_residual = total_residual.lock().map_err(|_| {
+            error::ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
+        })?;
+
+        // Copy residual values from nalgebra DVector to faer Col
+        let start_idx = residual_block.residual_row_start_idx;
+        let dim = residual_block.factor.get_dimension();
+        let mut total_residual_mut = total_residual.as_mut();
+        for i in 0..dim {
+            total_residual_mut[start_idx + i] = res[i];
+        }
+
+        Ok(())
+    }
+
+    /// Compute residual and Jacobian for a single residual block.
+    ///
+    /// Helper method for `compute_residual_and_jacobian_sparse()`.
     fn compute_residual_and_jacobian_block(
         &self,
         residual_block: &residual_block::ResidualBlock,
@@ -801,7 +916,8 @@ impl Problem {
             }
         }
 
-        let (res, jac) = residual_block.factor.linearize(&param_vectors);
+        let (res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
+        let jac = jac_opt.expect("Jacobian should be computed when compute_jacobian=true");
 
         // Update total residual
         {

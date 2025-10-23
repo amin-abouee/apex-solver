@@ -50,17 +50,18 @@
 //!
 //! // Linearize: compute residual and Jacobian
 //! let params = vec![pose1, pose2];
-//! let (residual, jacobian) = between_factor.linearize(&params);
+//! let (residual, jacobian) = between_factor.linearize(&params, true);
 //!
 //! // residual: 3x1 vector showing how far pose2 deviates from expected
 //! // jacobian: 3x6 matrix showing derivatives w.r.t. both poses
 //! println!("Residual: {:?}", residual);
-//! println!("Jacobian shape: {} x {}", jacobian.nrows(), jacobian.ncols());
+//! if let Some(jac) = jacobian {
+//!     println!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());
+//! }
 //! ```
 
-use nalgebra;
-
 use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
+use nalgebra;
 
 /// Trait for factor (constraint) implementations in factor graph optimization.
 ///
@@ -92,7 +93,7 @@ use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
 /// }
 ///
 /// impl Factor for RangeFactor {
-///     fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+///     fn linearize(&self, params: &[DVector<f64>], compute_jacobian: bool) -> (DVector<f64>, Option<DMatrix<f64>>) {
 ///         // params[0] is a 2D point [x, y]
 ///         let x = params[0][0];
 ///         let y = params[0][1];
@@ -102,10 +103,14 @@ use crate::manifold::{LieGroup, se2::SE2, se3::SE3};
 ///         let residual = DVector::from_vec(vec![self.measurement - predicted_distance]);
 ///
 ///         // Jacobian: ∂(residual)/∂[x, y]
-///         let jacobian = DMatrix::from_row_slice(1, 2, &[
-///             -x / predicted_distance,
-///             -y / predicted_distance,
-///         ]);
+///         let jacobian = if compute_jacobian {
+///             Some(DMatrix::from_row_slice(1, 2, &[
+///                 -x / predicted_distance,
+///                 -y / predicted_distance,
+///             ]))
+///         } else {
+///             None
+///         };
 ///
 ///         (residual, jacobian)
 ///     }
@@ -134,7 +139,8 @@ pub trait Factor: Send + Sync {
     fn linearize(
         &self,
         params: &[nalgebra::DVector<f64>],
-    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>);
+        compute_jacobian: bool,
+    ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>);
 
     /// Get the dimension of the residual vector.
     ///
@@ -198,7 +204,7 @@ pub trait Factor: Send + Sync {
 /// let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.12]);  // Slightly off
 ///
 /// // Compute residual (should be small if poses are consistent)
-/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j]);
+/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
 /// println!("Residual: {:?}", residual);  // Shows deviation from measurement
 /// ```
 #[derive(Debug, Clone)]
@@ -279,7 +285,8 @@ impl Factor for BetweenFactorSE2 {
     fn linearize(
         &self,
         params: &[nalgebra::DVector<f64>],
-    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+        compute_jacobian: bool,
+    ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
         // Use analytical jacobians for SE2 between factor (same pattern as SE3)
         // Input: params = [x, y, theta] for each pose (G2O FORMAT)
         let se2_origin_k0 = SE2::from(params[0].clone());
@@ -307,22 +314,28 @@ impl Factor for BetweenFactorSE2 {
         let mut j_log_wrt_diff = nalgebra::Matrix3::zeros();
         let residual = se2_diff.log(Some(&mut j_log_wrt_diff));
 
-        // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
-        let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
-        let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
-        let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
+        let jacobian = if compute_jacobian {
+            // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
+            let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
+            let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
+            let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
 
-        let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
-        let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
+            let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
+            let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
-        // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
-        let mut jacobian = nalgebra::DMatrix::<f64>::zeros(3, 6);
-        jacobian
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&jacobian_wrt_k0);
-        jacobian
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&jacobian_wrt_k1);
+            // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
+            let mut jacobian = nalgebra::DMatrix::<f64>::zeros(3, 6);
+            jacobian
+                .fixed_view_mut::<3, 3>(0, 0)
+                .copy_from(&jacobian_wrt_k0);
+            jacobian
+                .fixed_view_mut::<3, 3>(0, 3)
+                .copy_from(&jacobian_wrt_k1);
+
+            Some(jacobian)
+        } else {
+            None
+        };
 
         (residual.into(), jacobian)
     }
@@ -392,9 +405,11 @@ impl Factor for BetweenFactorSE2 {
 /// let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0]);
 ///
 /// // Compute residual
-/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j]);
+/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
 /// println!("Residual dimension: {}", residual.len());  // 6
-/// println!("Jacobian shape: {} x {}", jacobian.nrows(), jacobian.ncols());  // 6x12
+/// if let Some(jac) = jacobian {
+///     println!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());  // 6x12
+/// }
 /// ```
 #[derive(Debug, Clone)]
 pub struct BetweenFactorSE3 {
@@ -454,7 +469,8 @@ impl Factor for BetweenFactorSE3 {
     fn linearize(
         &self,
         params: &[nalgebra::DVector<f64>],
-    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+        compute_jacobian: bool,
+    ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
         let se3_origin_k0 = SE3::from(params[0].clone());
         let se3_origin_k1 = SE3::from(params[1].clone());
         let se3_k0_k1_measured = &self.relative_pose;
@@ -480,23 +496,28 @@ impl Factor for BetweenFactorSE3 {
         let mut j_log_wrt_diff = nalgebra::Matrix6::zeros();
         let residual = se3_diff.log(Some(&mut j_log_wrt_diff));
 
-        // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
-        let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
-        let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
-        let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
+        let jacobian = if compute_jacobian {
+            // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
+            let j_temp_wrt_k1 = j_compose1_wrt_k1_inv * j_k1_inv_wrt_k1;
+            let j_diff_wrt_k0 = j_compose2_wrt_temp * j_compose1_wrt_k0;
+            let j_diff_wrt_k1 = j_compose2_wrt_temp * j_temp_wrt_k1;
 
-        let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
-        let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
+            let jacobian_wrt_k0 = j_log_wrt_diff * j_diff_wrt_k0;
+            let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
-        // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
-        let mut jacobian = nalgebra::DMatrix::<f64>::zeros(6, 12);
-        jacobian
-            .fixed_view_mut::<6, 6>(0, 0)
-            .copy_from(&jacobian_wrt_k0);
-        jacobian
-            .fixed_view_mut::<6, 6>(0, 6)
-            .copy_from(&jacobian_wrt_k1);
+            // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
+            let mut jacobian = nalgebra::DMatrix::<f64>::zeros(6, 12);
+            jacobian
+                .fixed_view_mut::<6, 6>(0, 0)
+                .copy_from(&jacobian_wrt_k0);
+            jacobian
+                .fixed_view_mut::<6, 6>(0, 6)
+                .copy_from(&jacobian_wrt_k1);
 
+            Some(jacobian)
+        } else {
+            None
+        };
         (residual.into(), jacobian)
     }
 
@@ -542,7 +563,7 @@ impl Factor for BetweenFactorSE3 {
 /// let current_pose = DVector::from_vec(vec![0.1, 0.05, 0.02]);
 ///
 /// // Compute residual (shows deviation from prior)
-/// let (residual, jacobian) = prior.linearize(&[current_pose]);
+/// let (residual, jacobian) = prior.linearize(&[current_pose], true);
 /// println!("Deviation from origin: {:?}", residual);
 /// ```
 ///
@@ -579,23 +600,33 @@ impl Factor for PriorFactor {
     ///     data: DVector::from_vec(vec![1.0, 2.0]),
     /// };
     ///
-    /// let current = DVector::from_vec(vec![1.5, 2.3]);
-    /// let (residual, jacobian) = prior.linearize(&[current]);
-    ///
-    /// // Residual shows difference
-    /// assert!((residual[0] - 0.5).abs() < 1e-10);
-    /// assert!((residual[1] - 0.3).abs() < 1e-10);
-    ///
-    /// // Jacobian is identity
-    /// assert_eq!(jacobian[(0, 0)], 1.0);
-    /// assert_eq!(jacobian[(1, 1)], 1.0);
+/// let current = DVector::from_vec(vec![1.5, 2.3]);
+/// let (residual, jacobian) = prior.linearize(&[current], true);
+///
+/// // Residual shows difference
+/// assert!((residual[0] - 0.5).abs() < 1e-10);
+/// assert!((residual[1] - 0.3).abs() < 1e-10);
+///
+/// // Jacobian is identity
+/// if let Some(jac) = jacobian {
+///     assert_eq!(jac[(0, 0)], 1.0);
+///     assert_eq!(jac[(1, 1)], 1.0);
+/// }
     /// ```
     fn linearize(
         &self,
         params: &[nalgebra::DVector<f64>],
-    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>) {
+        compute_jacobian: bool,
+    ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
         let residual = &params[0] - &self.data;
-        let jacobian = nalgebra::DMatrix::<f64>::identity(residual.nrows(), residual.nrows());
+        let jacobian = if compute_jacobian {
+            Some(nalgebra::DMatrix::<f64>::identity(
+                residual.nrows(),
+                residual.nrows(),
+            ))
+        } else {
+            None
+        };
         (residual, jacobian)
     }
 
