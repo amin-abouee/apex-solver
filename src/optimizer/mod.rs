@@ -9,6 +9,7 @@
 use crate::core::problem;
 use crate::linalg;
 use crate::manifold;
+use faer;
 use nalgebra;
 use std::collections;
 use std::fmt;

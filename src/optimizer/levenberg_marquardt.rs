@@ -590,7 +590,7 @@ impl LevenbergMarquardt {
     }
 
     /// Compute optimization step by solving the augmented system
-    fn compute_optimization_step(
+    fn compute_levenberg_marquardt_step(
         &self,
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &sparse::SparseColMat<usize, f64>,
@@ -615,7 +615,6 @@ impl LevenbergMarquardt {
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
-            // self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
             &scaled_step * self.jacobi_scaling.as_ref().unwrap()
         } else {
             scaled_step
@@ -816,7 +815,7 @@ impl LevenbergMarquardt {
             }
 
             // Compute optimization step
-            let step_result = match self.compute_optimization_step(
+            let step_result = match self.compute_levenberg_marquardt_step(
                 &residuals,
                 &scaled_jacobian,
                 &mut linear_solver,
