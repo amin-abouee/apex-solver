@@ -11,7 +11,7 @@
 //! - Comprehensive optimization summaries
 //! - Support for both sparse Cholesky and QR factorizations
 
-use crate::{core, core::problem, linalg, manifold, optimizer};
+use crate::{core::problem, error, linalg, manifold, optimizer};
 use faer::sparse;
 use std::{collections, fmt, time};
 
@@ -643,7 +643,7 @@ impl DogLeg {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, core::ApexError> {
+    ) -> Result<OptimizationState, error::ApexError> {
         let variables = problem.initialize_variables(initial_params);
 
         let mut variable_index_map = collections::HashMap::new();
@@ -782,7 +782,7 @@ impl DogLeg {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &problem::Problem,
-    ) -> core::ApexResult<StepEvaluation> {
+    ) -> error::ApexResult<StepEvaluation> {
         // Apply parameter updates
         let step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
@@ -935,7 +935,7 @@ impl DogLeg {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        core::ApexError,
+        error::ApexError,
     > {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -982,7 +982,7 @@ impl DogLeg {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(core::ApexError::Solver(
+                    return Err(error::ApexError::Solver(
                         "Linear solver failed to solve system".to_string(),
                     ));
                 }
@@ -1153,7 +1153,7 @@ impl DogLeg {
 
 impl optimizer::Solver for DogLeg {
     type Config = DogLegConfig;
-    type Error = core::ApexError;
+    type Error = error::ApexError;
 
     fn new() -> Self {
         Self::default()

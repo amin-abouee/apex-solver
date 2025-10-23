@@ -11,8 +11,8 @@
 //! - Comprehensive optimization summaries
 //! - Support for both sparse Cholesky and QR factorizations
 
-use crate::core;
 use crate::core::problem;
+use crate::error;
 use crate::linalg;
 use crate::manifold;
 use crate::optimizer;
@@ -520,7 +520,7 @@ impl LevenbergMarquardt {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, core::ApexError> {
+    ) -> Result<OptimizationState, error::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -649,7 +649,7 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &problem::Problem,
-    ) -> core::ApexResult<StepEvaluation> {
+    ) -> error::ApexResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
@@ -761,7 +761,7 @@ impl LevenbergMarquardt {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        core::ApexError,
+        error::ApexError,
     > {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -832,7 +832,7 @@ impl LevenbergMarquardt {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(core::ApexError::Solver(
+                    return Err(error::ApexError::Solver(
                         "Linear solver failed to solve augmented system".to_string(),
                     ));
                 }
@@ -1000,7 +1000,7 @@ impl LevenbergMarquardt {
 // Implement Solver trait
 impl optimizer::Solver for LevenbergMarquardt {
     type Config = LevenbergMarquardtConfig;
-    type Error = core::ApexError;
+    type Error = error::ApexError;
 
     fn new() -> Self {
         Self::default()

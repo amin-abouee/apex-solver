@@ -10,7 +10,7 @@
 //! - Support for both sparse Cholesky and QR factorizations
 //! - Optional Jacobi scaling for improved convergence
 
-use crate::{core, core::problem, linalg, manifold, optimizer};
+use crate::{core::problem, error, linalg, manifold, optimizer};
 use faer::sparse;
 use std::{collections, fmt, time};
 
@@ -400,7 +400,7 @@ impl GaussNewton {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, core::ApexError> {
+    ) -> Result<OptimizationState, error::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -519,7 +519,7 @@ impl GaussNewton {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &problem::Problem,
-    ) -> core::ApexResult<CostEvaluation> {
+    ) -> error::ApexResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
@@ -608,7 +608,7 @@ impl GaussNewton {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        core::ApexError,
+        error::ApexError,
     > {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -665,7 +665,7 @@ impl GaussNewton {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(core::ApexError::Solver(
+                    return Err(error::ApexError::Solver(
                         "Linear solver failed to solve Gauss-Newton system".to_string(),
                     ));
                 }
@@ -771,7 +771,7 @@ impl GaussNewton {
 
 impl optimizer::Solver for GaussNewton {
     type Config = GaussNewtonConfig;
-    type Error = core::ApexError;
+    type Error = error::ApexError;
 
     fn new() -> Self {
         Self::default()
