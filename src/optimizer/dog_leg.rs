@@ -376,26 +376,6 @@ impl DogLeg {
         }
     }
 
-    /// Set the initial trust region radius
-    pub fn with_trust_region_radius(mut self, radius: f64) -> Self {
-        self.config.trust_region_radius = radius;
-        self
-    }
-
-    /// Set the trust region radius bounds
-    pub fn with_trust_region_bounds(mut self, min: f64, max: f64) -> Self {
-        self.config.trust_region_min = min;
-        self.config.trust_region_max = max;
-        self
-    }
-
-    /// Set the trust region adjustment factors
-    pub fn with_trust_region_factors(mut self, increase: f64, decrease: f64) -> Self {
-        self.config.trust_region_increase_factor = increase;
-        self.config.trust_region_decrease_factor = decrease;
-        self
-    }
-
     /// Create the appropriate linear solver based on configuration
     fn create_linear_solver(&self) -> Box<dyn linalg::SparseLinearSolver> {
         match self.config.linear_solver_type {
