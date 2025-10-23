@@ -32,7 +32,7 @@
 //! Operations are differentiated with respect to perturbations on the local tangent space.
 //!
 
-use nalgebra::{Matrix3, Vector3};
+use nalgebra;
 use std::fmt::Debug;
 use std::ops::{Mul, Neg};
 
@@ -191,10 +191,10 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// * `jacobian_vector` - Optional Jacobian ∂(g ⊙ v)/∂v
     fn act(
         &self,
-        vector: &Vector3<f64>,
+        vector: &nalgebra::Vector3<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut Matrix3<f64>>,
-    ) -> Vector3<f64>;
+        jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
+    ) -> nalgebra::Vector3<f64>;
 
     // Adjoint operations
 

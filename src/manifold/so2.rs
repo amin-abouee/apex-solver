@@ -3,23 +3,23 @@
 //! This module implements the Special Orthogonal group SO(2), which represents
 //! rotations in 2D space.
 //!
-//! SO(2) elements are represented using nalgebra's UnitComplex internally.
+//! SO(2) elements are represented using nalgebra's nalgebra::UnitComplex internally.
 //! SO(2) tangent elements are represented as a single angle in radians.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{Matrix2, UnitComplex};
+use nalgebra;
 use std::fmt;
 
 /// SO(2) group element representing rotations in 2D.
 ///
-/// Internally represented using nalgebra's UnitComplex<f64> for efficient rotations.
+/// Internally represented using nalgebra's nalgebra::UnitComplex<f64> for efficient rotations.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SO2 {
     /// Internal representation as a unit complex number
-    complex: UnitComplex<f64>,
+    complex: nalgebra::UnitComplex<f64>,
 }
 
 impl fmt::Display for SO2 {
@@ -59,7 +59,7 @@ impl SO2 {
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
         SO2 {
-            complex: UnitComplex::identity(),
+            complex: nalgebra::UnitComplex::identity(),
         }
     }
 
@@ -74,7 +74,7 @@ impl SO2 {
     ///
     /// # Arguments
     /// * `complex` - Unit complex number representing rotation
-    pub fn new(complex: UnitComplex<f64>) -> Self {
+    pub fn new(complex: nalgebra::UnitComplex<f64>) -> Self {
         SO2 { complex }
     }
 
@@ -83,11 +83,11 @@ impl SO2 {
     /// # Arguments
     /// * `angle` - Rotation angle in radians
     pub fn from_angle(angle: f64) -> Self {
-        SO2::new(UnitComplex::from_angle(angle))
+        SO2::new(nalgebra::UnitComplex::from_angle(angle))
     }
 
     /// Get the underlying unit complex number.
-    pub fn complex(&self) -> UnitComplex<f64> {
+    pub fn complex(&self) -> nalgebra::UnitComplex<f64> {
         self.complex
     }
 
@@ -97,7 +97,7 @@ impl SO2 {
     }
 
     /// Get the rotation matrix (2x2).
-    pub fn rotation_matrix(&self) -> Matrix2<f64> {
+    pub fn rotation_matrix(&self) -> nalgebra::Matrix2<f64> {
         self.complex.to_rotation_matrix().into_inner()
     }
 }
@@ -105,7 +105,7 @@ impl SO2 {
 impl LieGroup for SO2 {
     type TangentVector = SO2Tangent;
     type JacobianMatrix = nalgebra::Matrix1<f64>;
-    type LieAlgebra = Matrix2<f64>;
+    type LieAlgebra = nalgebra::Matrix2<f64>;
 
     /// SO2 inverse.
     ///
@@ -300,7 +300,7 @@ impl Tangent<SO2> for SO2Tangent {
     /// * `jacobian` - Optional Jacobian matrix of the SE(3) element wrt this.
     fn exp(&self, jacobian: Option<&mut <SO2 as LieGroup>::JacobianMatrix>) -> SO2 {
         let angle = self.angle();
-        let complex = UnitComplex::new(angle);
+        let complex = nalgebra::UnitComplex::new(angle);
 
         if let Some(jac) = jacobian {
             *jac = nalgebra::Matrix1::identity();
@@ -332,7 +332,7 @@ impl Tangent<SO2> for SO2Tangent {
     /// Hat operator: θ^∧ (scalar to skew-symmetric matrix).
     fn hat(&self) -> <SO2 as LieGroup>::LieAlgebra {
         let theta = self.data;
-        Matrix2::new(0.0, -theta, theta, 0.0)
+        nalgebra::Matrix2::new(0.0, -theta, theta, 0.0)
     }
 
     /// Zero tangent vector for SO2
@@ -402,7 +402,7 @@ impl Tangent<SO2> for SO2Tangent {
         // The generator for SO(2) is the skew-symmetric matrix:
         // E = | 0 -1 |
         //     | 1  0 |
-        Matrix2::new(0.0, -1.0, 1.0, 0.0)
+        nalgebra::Matrix2::new(0.0, -1.0, 1.0, 0.0)
     }
 }
 
@@ -510,7 +510,7 @@ mod tests {
         let generator = tangent.generator(0);
 
         // SO(2) generator should be the skew-symmetric matrix
-        let expected = Matrix2::new(0.0, -1.0, 1.0, 0.0);
+        let expected = nalgebra::Matrix2::new(0.0, -1.0, 1.0, 0.0);
 
         assert!((generator - expected).norm() < 1e-10);
     }

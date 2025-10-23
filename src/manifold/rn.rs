@@ -3,24 +3,25 @@
 //! This module implements the n-dimensional Euclidean space Rⁿ with vector addition
 //! as the group operation.
 //!
-//! Rⁿ elements are represented using nalgebra's DVector<f64> for dynamic sizing.
-//! Rⁿ tangent elements are also represented as DVector<f64> since the tangent space
+//! Rⁿ elements are represented using nalgebra's nalgebra::DVector<f64> for dynamic sizing.
+//! Rⁿ tangent elements are also represented as nalgebra::DVector<f64> since the tangent space
 //! is isomorphic to the manifold itself.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
+use crate::manifold;
+use crate::manifold::Tangent;
+use nalgebra;
 use std::fmt;
 
 /// Rⁿ group element representing n-dimensional Euclidean vectors.
 ///
-/// Internally represented using nalgebra's DVector<f64> for dynamic sizing.
+/// Internally represented using nalgebra's nalgebra::DVector<f64> for dynamic sizing.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Rn {
     /// Internal representation as a dynamic vector
-    data: DVector<f64>,
+    data: nalgebra::DVector<f64>,
 }
 
 impl fmt::Display for Rn {
@@ -37,13 +38,13 @@ impl fmt::Display for Rn {
 }
 
 // Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for Rn {
-    fn from(data: DVector<f64>) -> Self {
+impl From<nalgebra::DVector<f64>> for Rn {
+    fn from(data: nalgebra::DVector<f64>) -> Self {
         Rn::new(data)
     }
 }
 
-impl From<Rn> for DVector<f64> {
+impl From<Rn> for nalgebra::DVector<f64> {
     fn from(rn: Rn) -> Self {
         rn.data
     }
@@ -52,11 +53,11 @@ impl From<Rn> for DVector<f64> {
 /// Rⁿ tangent space element representing elements in the Lie algebra rⁿ.
 ///
 /// For Euclidean space, the tangent space is isomorphic to the manifold itself,
-/// so this is also represented as a DVector<f64>.
+/// so this is also represented as a nalgebra::DVector<f64>.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RnTangent {
     /// Internal data: n-dimensional vector
-    data: DVector<f64>,
+    data: nalgebra::DVector<f64>,
 }
 
 impl fmt::Display for RnTangent {
@@ -90,22 +91,22 @@ impl Rn {
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     /// Note: Default to 3D identity for compatibility, but this should be created with specific dimension
     pub fn identity() -> Self {
-        Rn::new(DVector::zeros(3))
+        Rn::new(nalgebra::DVector::zeros(3))
     }
 
     /// Get the identity matrix for Jacobians.
     ///
     /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
     /// Note: Default to 3x3 identity, but this should be created with specific dimension
-    pub fn jacobian_identity() -> DMatrix<f64> {
-        DMatrix::identity(3, 3)
+    pub fn jacobian_identity() -> nalgebra::DMatrix<f64> {
+        nalgebra::DMatrix::identity(3, 3)
     }
 
     /// Create a new Rⁿ element from a vector.
     ///
     /// # Arguments
     /// * `data` - Vector data
-    pub fn new(data: DVector<f64>) -> Self {
+    pub fn new(data: nalgebra::DVector<f64>) -> Self {
         Rn { data }
     }
 
@@ -114,16 +115,16 @@ impl Rn {
     /// # Arguments
     /// * `slice` - Data slice
     pub fn from_slice(slice: &[f64]) -> Self {
-        Rn::new(DVector::from_row_slice(slice))
+        Rn::new(nalgebra::DVector::from_row_slice(slice))
     }
 
     /// Create Rⁿ from individual components (up to 6D for convenience).
     pub fn from_vec(components: Vec<f64>) -> Self {
-        Rn::new(DVector::from_vec(components))
+        Rn::new(nalgebra::DVector::from_vec(components))
     }
 
     /// Get the underlying vector.
-    pub fn data(&self) -> &DVector<f64> {
+    pub fn data(&self) -> &nalgebra::DVector<f64> {
         &self.data
     }
 
@@ -152,16 +153,16 @@ impl Rn {
         self.data.norm_squared()
     }
 
-    /// Convert Rn to a DVector
-    pub fn to_vector(&self) -> DVector<f64> {
+    /// Convert Rn to a nalgebra::DVector
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
         self.data.clone()
     }
 }
 
-impl LieGroup for Rn {
+impl manifold::LieGroup for Rn {
     type TangentVector = RnTangent;
-    type JacobianMatrix = DMatrix<f64>;
-    type LieAlgebra = DMatrix<f64>;
+    type JacobianMatrix = nalgebra::DMatrix<f64>;
+    type LieAlgebra = nalgebra::DMatrix<f64>;
 
     /// Rⁿ inverse (negation for additive group).
     ///
@@ -174,7 +175,7 @@ impl LieGroup for Rn {
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         let dim = self.data.len();
         if let Some(jac) = jacobian {
-            *jac = -DMatrix::identity(dim, dim);
+            *jac = -nalgebra::DMatrix::identity(dim, dim);
         }
         Rn::new(-&self.data)
     }
@@ -203,10 +204,10 @@ impl LieGroup for Rn {
 
         let dim = self.data.len();
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(dim, dim);
+            *jac_self = nalgebra::DMatrix::identity(dim, dim);
         }
         if let Some(jac_other) = jacobian_other {
-            *jac_other = DMatrix::identity(dim, dim);
+            *jac_other = nalgebra::DMatrix::identity(dim, dim);
         }
 
         Rn::new(&self.data + &other.data)
@@ -223,7 +224,7 @@ impl LieGroup for Rn {
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         let dim = self.data.len();
         if let Some(jac) = jacobian {
-            *jac = DMatrix::identity(dim, dim);
+            *jac = nalgebra::DMatrix::identity(dim, dim);
         }
         RnTangent::new(self.data.clone())
     }
@@ -250,10 +251,10 @@ impl LieGroup for Rn {
     /// This only works if this Rⁿ element is 3-dimensional.
     fn act(
         &self,
-        vector: &Vector3<f64>,
+        vector: &nalgebra::Vector3<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut Matrix3<f64>>,
-    ) -> Vector3<f64> {
+        jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
+    ) -> nalgebra::Vector3<f64> {
         if self.data.len() != 3 {
             panic!(
                 "act() requires 3-dimensional Rⁿ element, got dimension {}",
@@ -262,13 +263,13 @@ impl LieGroup for Rn {
         }
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(3, 3);
+            *jac_self = nalgebra::DMatrix::identity(3, 3);
         }
         if let Some(jac_vector) = jacobian_vector {
-            *jac_vector = Matrix3::identity();
+            *jac_vector = nalgebra::Matrix3::identity();
         }
 
-        Vector3::new(
+        nalgebra::Vector3::new(
             self.data[0] + vector.x,
             self.data[1] + vector.y,
             self.data[2] + vector.z,
@@ -281,13 +282,13 @@ impl LieGroup for Rn {
     /// For Euclidean space (abelian group), adjoint is identity.
     fn adjoint(&self) -> Self::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::identity(dim, dim)
+        nalgebra::DMatrix::identity(dim, dim)
     }
 
     /// Generate a random element.
     fn random() -> Self {
         // Default to 3D random vector
-        let data = DVector::from_fn(3, |_, _| rand::random::<f64>() * 10.0 - 5.0);
+        let data = nalgebra::DVector::from_fn(3, |_, _| rand::random::<f64>() * 10.0 - 5.0);
         Rn::new(data)
     }
 
@@ -350,11 +351,11 @@ impl LieGroup for Rn {
         let dim = self.data.len();
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(dim, dim);
+            *jac_self = nalgebra::DMatrix::identity(dim, dim);
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = DMatrix::identity(dim, dim);
+            *jac_tangent = nalgebra::DMatrix::identity(dim, dim);
         }
 
         Rn::new(&self.data + &tangent.data)
@@ -387,11 +388,11 @@ impl LieGroup for Rn {
         let dim = self.data.len();
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(dim, dim);
+            *jac_self = nalgebra::DMatrix::identity(dim, dim);
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = -DMatrix::identity(dim, dim);
+            *jac_other = -nalgebra::DMatrix::identity(dim, dim);
         }
 
         RnTangent::new(&self.data - &other.data)
@@ -423,11 +424,11 @@ impl LieGroup for Rn {
         let dim = self.data.len();
 
         if let Some(jac_tangent) = jacobian_tangent {
-            *jac_tangent = DMatrix::identity(dim, dim);
+            *jac_tangent = nalgebra::DMatrix::identity(dim, dim);
         }
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = DMatrix::identity(dim, dim);
+            *jac_self = nalgebra::DMatrix::identity(dim, dim);
         }
 
         // For abelian groups, left plus is the same as right plus
@@ -473,7 +474,7 @@ impl RnTangent {
     ///
     /// # Arguments
     /// * `data` - Vector data
-    pub fn new(data: DVector<f64>) -> Self {
+    pub fn new(data: nalgebra::DVector<f64>) -> Self {
         RnTangent { data }
     }
 
@@ -482,16 +483,16 @@ impl RnTangent {
     /// # Arguments
     /// * `slice` - Data slice
     pub fn from_slice(slice: &[f64]) -> Self {
-        RnTangent::new(DVector::from_row_slice(slice))
+        RnTangent::new(nalgebra::DVector::from_row_slice(slice))
     }
 
     /// Create RnTangent from individual components.
     pub fn from_vec(components: Vec<f64>) -> Self {
-        RnTangent::new(DVector::from_vec(components))
+        RnTangent::new(nalgebra::DVector::from_vec(components))
     }
 
     /// Get the underlying vector.
-    pub fn data(&self) -> &DVector<f64> {
+    pub fn data(&self) -> &nalgebra::DVector<f64> {
         &self.data
     }
 
@@ -520,18 +521,18 @@ impl RnTangent {
         self.data.norm_squared()
     }
 
-    /// Convert RnTangent to a DVector
-    pub fn to_vector(&self) -> DVector<f64> {
+    /// Convert RnTangent to a nalgebra::DVector
+    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
         self.data.clone()
     }
 
-    /// Create RnTangent from a DVector
-    pub fn from_vector(data: DVector<f64>) -> Self {
+    /// Create RnTangent from a nalgebra::DVector
+    pub fn from_vector(data: nalgebra::DVector<f64>) -> Self {
         RnTangent::new(data)
     }
 }
 
-impl Tangent<Rn> for RnTangent {
+impl manifold::Tangent<Rn> for RnTangent {
     /// Dimension of the tangent space
     /// Note: For Rⁿ this is dynamic and determined at runtime
     const DIM: usize = 0;
@@ -544,59 +545,59 @@ impl Tangent<Rn> for RnTangent {
     /// # Notes
     /// For Euclidean space: exp(v) = v
     /// Jacobian: dexp(v)/dv = I
-    fn exp(&self, jacobian: Option<&mut <Rn as LieGroup>::JacobianMatrix>) -> Rn {
+    fn exp(&self, jacobian: Option<&mut <Rn as manifold::LieGroup>::JacobianMatrix>) -> Rn {
         let dim = self.data.len();
         if let Some(jac) = jacobian {
-            *jac = DMatrix::identity(dim, dim);
+            *jac = nalgebra::DMatrix::identity(dim, dim);
         }
         Rn::new(self.data.clone())
     }
 
     /// Right Jacobian for Euclidean space (identity).
-    fn right_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
+    fn right_jacobian(&self) -> <Rn as manifold::LieGroup>::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::identity(dim, dim)
+        nalgebra::DMatrix::identity(dim, dim)
     }
 
     /// Left Jacobian for Euclidean space (identity).
-    fn left_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
+    fn left_jacobian(&self) -> <Rn as manifold::LieGroup>::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::identity(dim, dim)
+        nalgebra::DMatrix::identity(dim, dim)
     }
 
     /// Inverse of right Jacobian for Euclidean space (identity).
-    fn right_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
+    fn right_jacobian_inv(&self) -> <Rn as manifold::LieGroup>::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::identity(dim, dim)
+        nalgebra::DMatrix::identity(dim, dim)
     }
 
     /// Inverse of left Jacobian for Euclidean space (identity).
-    fn left_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
+    fn left_jacobian_inv(&self) -> <Rn as manifold::LieGroup>::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::identity(dim, dim)
+        nalgebra::DMatrix::identity(dim, dim)
     }
 
     /// Hat operator: v^∧ (vector to matrix).
     ///
     /// For Euclidean space, this could be interpreted as a diagonal matrix
     /// or simply return the vector as a column matrix.
-    fn hat(&self) -> <Rn as LieGroup>::LieAlgebra {
-        DMatrix::from_diagonal(&self.data)
+    fn hat(&self) -> <Rn as manifold::LieGroup>::LieAlgebra {
+        nalgebra::DMatrix::from_diagonal(&self.data)
     }
 
     /// Small adjugate operator for Euclidean space.
     ///
     /// For abelian groups, this is zero matrix.
-    fn small_adj(&self) -> <Rn as LieGroup>::JacobianMatrix {
+    fn small_adj(&self) -> <Rn as manifold::LieGroup>::JacobianMatrix {
         let dim = self.data.len();
-        DMatrix::zeros(dim, dim)
+        nalgebra::DMatrix::zeros(dim, dim)
     }
 
     /// Lie bracket for Euclidean space.
     ///
     /// For abelian groups: [v, w] = 0
-    fn lie_bracket(&self, _other: &Self) -> <Rn as LieGroup>::TangentVector {
-        RnTangent::new(DVector::zeros(self.data.len()))
+    fn lie_bracket(&self, _other: &Self) -> <Rn as manifold::LieGroup>::TangentVector {
+        RnTangent::new(nalgebra::DVector::zeros(self.data.len()))
     }
 
     /// Check if the tangent vector is approximately equal to another tangent vector.
@@ -614,26 +615,26 @@ impl Tangent<Rn> for RnTangent {
     /// Get the i-th generator of the Lie algebra.
     ///
     /// For Euclidean space, generators are standard basis vectors.
-    fn generator(&self, i: usize) -> <Rn as LieGroup>::LieAlgebra {
+    fn generator(&self, i: usize) -> <Rn as manifold::LieGroup>::LieAlgebra {
         let dim = self.data.len();
         if i >= dim {
             panic!("Generator index {} out of bounds for dimension {}", i, dim);
         }
-        let mut generator_matrix = DMatrix::zeros(dim, dim);
+        let mut generator_matrix = nalgebra::DMatrix::zeros(dim, dim);
         generator_matrix[(i, i)] = 1.0;
         generator_matrix
     }
 
     /// Zero tangent vector.
-    fn zero() -> <Rn as LieGroup>::TangentVector {
+    fn zero() -> <Rn as manifold::LieGroup>::TangentVector {
         // Default to 3D zero vector for compatibility
-        RnTangent::new(DVector::zeros(3))
+        RnTangent::new(nalgebra::DVector::zeros(3))
     }
 
     /// Random tangent vector.
-    fn random() -> <Rn as LieGroup>::TangentVector {
+    fn random() -> <Rn as manifold::LieGroup>::TangentVector {
         // Default to 3D random vector
-        let data = DVector::from_fn(3, |_, _| rand::random::<f64>() * 10.0 - 5.0);
+        let data = nalgebra::DVector::from_fn(3, |_, _| rand::random::<f64>() * 10.0 - 5.0);
         RnTangent::new(data)
     }
 
@@ -651,7 +652,7 @@ impl Tangent<Rn> for RnTangent {
     }
 
     /// Return a unit tangent vector in the same direction.
-    fn normalized(&self) -> <Rn as LieGroup>::TangentVector {
+    fn normalized(&self) -> <Rn as manifold::LieGroup>::TangentVector {
         let mut result = self.clone();
         result.normalize();
         result
@@ -659,7 +660,7 @@ impl Tangent<Rn> for RnTangent {
 }
 
 // Implement Interpolatable trait for Rn
-impl crate::manifold::Interpolatable for Rn {
+impl manifold::Interpolatable for Rn {
     /// Linear interpolation in Euclidean space.
     ///
     /// For parameter t ∈ [0,1]: interp(v₁, v₂, 0) = v₁, interp(v₁, v₂, 1) = v₂.
@@ -688,40 +689,40 @@ impl crate::manifold::Interpolatable for Rn {
 impl Rn {
     /// Create Rn with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
-        Rn::new(DVector::zeros(dim))
+        Rn::new(nalgebra::DVector::zeros(dim))
     }
 
     /// Create Rn with specific dimension filled with ones.
     pub fn ones(dim: usize) -> Self {
-        Rn::new(DVector::from_element(dim, 1.0))
+        Rn::new(nalgebra::DVector::from_element(dim, 1.0))
     }
 
     /// Create Rn with specific dimension and random values.
     pub fn random_with_dim(dim: usize) -> Self {
-        let data = DVector::from_fn(dim, |_, _| rand::random::<f64>() * 10.0 - 5.0);
+        let data = nalgebra::DVector::from_fn(dim, |_, _| rand::random::<f64>() * 10.0 - 5.0);
         Rn::new(data)
     }
 
     /// Create identity matrix for Jacobians with specific dimension.
-    pub fn jacobian_identity_with_dim(dim: usize) -> DMatrix<f64> {
-        DMatrix::identity(dim, dim)
+    pub fn jacobian_identity_with_dim(dim: usize) -> nalgebra::DMatrix<f64> {
+        nalgebra::DMatrix::identity(dim, dim)
     }
 }
 
 impl RnTangent {
     /// Create RnTangent with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
-        RnTangent::new(DVector::zeros(dim))
+        RnTangent::new(nalgebra::DVector::zeros(dim))
     }
 
     /// Create RnTangent with specific dimension filled with ones.
     pub fn ones(dim: usize) -> Self {
-        RnTangent::new(DVector::from_element(dim, 1.0))
+        RnTangent::new(nalgebra::DVector::from_element(dim, 1.0))
     }
 
     /// Create RnTangent with specific dimension and random values.
     pub fn random_with_dim(dim: usize) -> Self {
-        let data = DVector::from_fn(dim, |_, _| rand::random::<f64>() * 2.0 - 1.0);
+        let data = nalgebra::DVector::from_fn(dim, |_, _| rand::random::<f64>() * 2.0 - 1.0);
         RnTangent::new(data)
     }
 }
@@ -821,7 +822,7 @@ mod tests {
     fn test_rn_action() {
         // Test action on 3D vector (translation)
         let translation = Rn::from_vec(vec![1.0, 2.0, 3.0]);
-        let point = Vector3::new(4.0, 5.0, 6.0);
+        let point = nalgebra::Vector3::new(4.0, 5.0, 6.0);
         let transformed = translation.act(&point, None, None);
 
         assert_eq!(transformed.x, 5.0);
@@ -841,8 +842,8 @@ mod tests {
         assert!((result.component(2) - 3.3).abs() < 1e-10);
 
         // Test right plus with Jacobians
-        let mut jac_self = DMatrix::zeros(3, 3);
-        let mut jac_tangent = DMatrix::zeros(3, 3);
+        let mut jac_self = nalgebra::DMatrix::zeros(3, 3);
+        let mut jac_tangent = nalgebra::DMatrix::zeros(3, 3);
         let result_jac = v.right_plus(&delta, Some(&mut jac_self), Some(&mut jac_tangent));
 
         // Verify result is the same
@@ -851,7 +852,7 @@ mod tests {
         assert!((result_jac.component(2) - result.component(2)).abs() < 1e-10);
 
         // Verify Jacobians are identity matrices
-        let identity = DMatrix::identity(3, 3);
+        let identity = nalgebra::DMatrix::identity(3, 3);
         assert!((jac_self - &identity).norm() < 1e-10);
         assert!((jac_tangent - &identity).norm() < 1e-10);
     }
@@ -868,8 +869,8 @@ mod tests {
         assert!((result.component(2) - 6.0).abs() < 1e-10);
 
         // Test right minus with Jacobians
-        let mut jac_self = DMatrix::zeros(3, 3);
-        let mut jac_other = DMatrix::zeros(3, 3);
+        let mut jac_self = nalgebra::DMatrix::zeros(3, 3);
+        let mut jac_other = nalgebra::DMatrix::zeros(3, 3);
         let result_jac = v1.right_minus(&v2, Some(&mut jac_self), Some(&mut jac_other));
 
         // Verify result is the same
@@ -878,7 +879,7 @@ mod tests {
         assert!((result_jac.component(2) - result.component(2)).abs() < 1e-10);
 
         // Verify Jacobians
-        let identity = DMatrix::identity(3, 3);
+        let identity = nalgebra::DMatrix::identity(3, 3);
         let neg_identity = -&identity;
         assert!((jac_self - &identity).norm() < 1e-10);
         assert!((jac_other - &neg_identity).norm() < 1e-10);
@@ -896,8 +897,8 @@ mod tests {
         assert!((result.component(2) - 3.3).abs() < 1e-10);
 
         // Test left plus with Jacobians
-        let mut jac_tangent = DMatrix::zeros(3, 3);
-        let mut jac_self = DMatrix::zeros(3, 3);
+        let mut jac_tangent = nalgebra::DMatrix::zeros(3, 3);
+        let mut jac_self = nalgebra::DMatrix::zeros(3, 3);
         let result_jac = v.left_plus(&delta, Some(&mut jac_tangent), Some(&mut jac_self));
 
         // Verify result is the same
@@ -906,7 +907,7 @@ mod tests {
         assert!((result_jac.component(2) - result.component(2)).abs() < 1e-10);
 
         // Verify Jacobians are identity matrices
-        let identity = DMatrix::identity(3, 3);
+        let identity = nalgebra::DMatrix::identity(3, 3);
         assert!((jac_tangent - &identity).norm() < 1e-10);
         assert!((jac_self - &identity).norm() < 1e-10);
     }
@@ -923,8 +924,8 @@ mod tests {
         assert!((result.component(2) - 6.0).abs() < 1e-10);
 
         // Test left minus with Jacobians
-        let mut jac_self = DMatrix::zeros(3, 3);
-        let mut jac_other = DMatrix::zeros(3, 3);
+        let mut jac_self = nalgebra::DMatrix::zeros(3, 3);
+        let mut jac_other = nalgebra::DMatrix::zeros(3, 3);
         let result_jac = v1.left_minus(&v2, Some(&mut jac_self), Some(&mut jac_other));
 
         // Verify result is the same
@@ -933,7 +934,7 @@ mod tests {
         assert!((result_jac.component(2) - result.component(2)).abs() < 1e-10);
 
         // Verify Jacobians
-        let identity = DMatrix::identity(3, 3);
+        let identity = nalgebra::DMatrix::identity(3, 3);
         let neg_identity = -&identity;
         assert!((jac_self - &identity).norm() < 1e-10);
         assert!((jac_other - &neg_identity).norm() < 1e-10);
@@ -1004,20 +1005,20 @@ mod tests {
         // Test that Jacobians have correct dimensions for different vector sizes
         let v1d = Rn::from_vec(vec![1.0]);
         let delta1d = RnTangent::from_vec(vec![0.1]);
-        let mut jac1d = DMatrix::zeros(1, 1);
+        let mut jac1d = nalgebra::DMatrix::zeros(1, 1);
         v1d.right_plus(&delta1d, Some(&mut jac1d), None);
         assert_eq!(jac1d.nrows(), 1);
         assert_eq!(jac1d.ncols(), 1);
 
         let v4d = Rn::from_vec(vec![1.0, 2.0, 3.0, 4.0]);
         let delta4d = RnTangent::from_vec(vec![0.1, 0.2, 0.3, 0.4]);
-        let mut jac4d = DMatrix::zeros(4, 4);
+        let mut jac4d = nalgebra::DMatrix::zeros(4, 4);
         v4d.right_plus(&delta4d, Some(&mut jac4d), None);
         assert_eq!(jac4d.nrows(), 4);
         assert_eq!(jac4d.ncols(), 4);
 
         // Verify they are identity matrices
-        assert!((jac1d - DMatrix::identity(1, 1)).norm() < 1e-10);
-        assert!((jac4d - DMatrix::identity(4, 4)).norm() < 1e-10);
+        assert!((jac1d - nalgebra::DMatrix::identity(1, 1)).norm() < 1e-10);
+        assert!((jac4d - nalgebra::DMatrix::identity(4, 4)).norm() < 1e-10);
     }
 }
