@@ -113,8 +113,8 @@ impl SparseLinearSolver for SparseQRSolver {
             })?
             .mul(jacobians.as_ref());
 
-        // g = J^T * W * -r
-        let gradient = jacobians.as_ref().transpose().mul(-residuals);
+        // g = J^T * r (stored as positive, will negate when solving)
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
 
         // Check if we can reuse the cached symbolic factorization
         // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
@@ -138,7 +138,8 @@ impl SparseLinearSolver for SparseQRSolver {
         let qr = solvers::Qr::try_new_with_symbolic(sym, hessian.as_ref())
             .map_err(|_| LinAlgError::SingularMatrix)?;
 
-        let dx = qr.solve(&gradient);
+        // Solve H * dx = -g (negate gradient to get descent direction)
+        let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
         self.factorizer = Some(qr);

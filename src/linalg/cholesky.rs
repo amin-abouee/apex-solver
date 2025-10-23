@@ -108,11 +108,9 @@ impl SparseLinearSolver for SparseCholeskySolver {
             })?
             .mul(jacobians.as_ref());
 
-        // g = J^T * -r
-        let gradient = jacobians.as_ref().transpose().mul(-residuals);
+        // g = J^T * r
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
 
-        // Check if we can reuse the cached symbolic factorization
-        // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
             // Note: SymbolicLlt is reference-counted, so clone() is cheap (O(1))
@@ -137,7 +135,7 @@ impl SparseLinearSolver for SparseCholeskySolver {
             solvers::Llt::try_new_with_symbolic(sym, hessian.as_ref(), faer::Side::Lower)
                 .map_err(|_| LinAlgError::SingularMatrix)?;
 
-        let dx = cholesky.solve(&gradient);
+        let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
         self.factorizer = Some(cholesky);
@@ -182,11 +180,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
 
         let augmented_hessian = &hessian + lambda_i;
 
-        // Check if we can reuse the cached symbolic factorization
-        // For augmented systems, the sparsity pattern remains the same
-        // (adding diagonal lambda*I doesn't change the pattern)
-        // Note: SymbolicLlt is reference-counted, so clone() is cheap (O(1))
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
+            // Reuse cached symbolic factorization
+            // Note: SymbolicLlt is reference-counted, so clone() is cheap (O(1))
+            // We assume the sparsity pattern is constant across iterations
+            // which is typical in iterative optimization
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
@@ -394,6 +392,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         let result = solver.solve_normal_equation(&residuals, &singular_jacobian);
+        // Without regularization, singular matrices should fail
         assert!(result.is_err(), "Singular matrix should return Err");
     }
 
