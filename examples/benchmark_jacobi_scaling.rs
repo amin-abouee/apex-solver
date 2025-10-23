@@ -95,9 +95,10 @@ fn main() {
         .with_cost_tolerance(cost_tol)
         .with_parameter_tolerance(param_tol)
         .with_jacobi_scaling(true) // Enable scaling
-        .with_verbose(false);
+        .with_verbose(false)
+        .with_damping(1e-3);
 
-    let mut solver_with = LevenbergMarquardt::with_config(config_with_scaling).with_damping(1e-3);
+    let mut solver_with = LevenbergMarquardt::with_config(config_with_scaling);
 
     let start_with = Instant::now();
     let result_with = match solver_with.optimize(&problem, &initial_values) {
@@ -132,10 +133,10 @@ fn main() {
         .with_cost_tolerance(cost_tol)
         .with_parameter_tolerance(param_tol)
         .with_jacobi_scaling(false) // Disable scaling
-        .with_verbose(false);
+        .with_verbose(false)
+        .with_damping(1e-3);
 
-    let mut solver_without =
-        LevenbergMarquardt::with_config(config_without_scaling).with_damping(1e-3);
+    let mut solver_without = LevenbergMarquardt::with_config(config_without_scaling);
 
     let start_without = Instant::now();
     let result_without = match solver_without.optimize(&problem, &initial_values) {

@@ -115,9 +115,10 @@ fn main() {
         .with_max_iterations(max_iters)
         .with_cost_tolerance(cost_tol)
         .with_parameter_tolerance(param_tol)
-        .with_verbose(false); // Disable verbose to reduce I/O overhead during profiling
+        .with_verbose(false)
+        .with_damping(1e-3);
 
-    let mut optimizer = LevenbergMarquardt::with_config(config).with_damping(1e-3);
+    let mut optimizer = LevenbergMarquardt::with_config(config);
 
     println!("\n=== Starting Optimization (Profiling Mode) ===");
     println!("Max iterations: {}", max_iters);
