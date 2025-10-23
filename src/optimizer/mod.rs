@@ -6,14 +6,14 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem::{Problem, VariableEnum};
-use crate::linalg::LinAlgError;
-use crate::manifold::ManifoldType;
-use nalgebra::DVector;
-use std::collections::HashMap;
+use crate::core::problem;
+use crate::linalg;
+use crate::manifold;
+use nalgebra;
+use std::collections;
 use std::fmt;
-use std::time::Duration;
-use thiserror::Error;
+use std::time;
+use thiserror;
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -48,7 +48,7 @@ impl fmt::Display for OptimizerType {
 }
 
 /// Optimizer-specific error types for apex-solver
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum OptimizerError {
     /// Linear system solve failed during optimization
     #[error("Linear system solve failed: {0}")]
@@ -84,7 +84,7 @@ pub enum OptimizerError {
 
     /// Linear algebra operation failed
     #[error("Linear algebra error: {0}")]
-    LinAlg(#[from] LinAlgError),
+    LinAlg(#[from] linalg::LinAlgError),
 
     /// Problem has no variables to optimize
     #[error("Problem has no variables to optimize")]
@@ -194,7 +194,7 @@ pub struct SolverResult<T> {
     /// Number of iterations performed
     pub iterations: usize,
     /// Total time elapsed
-    pub elapsed_time: Duration,
+    pub elapsed_time: time::Duration,
     /// Convergence statistics
     pub convergence_info: Option<ConvergenceInfo>,
     /// Per-variable covariance matrices (uncertainty estimation)
@@ -220,9 +220,12 @@ pub trait Solver {
     /// Optimize the problem to minimize the cost function
     fn optimize(
         &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
+        problem: &problem::Problem,
+        initial_params: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<SolverResult<collections::HashMap<String, problem::VariableEnum>>, Self::Error>;
 }
 
 /// Apply parameter update step to all variables.
@@ -244,7 +247,7 @@ pub trait Solver {
 /// how many elements it occupies in the step vector.
 ///
 pub fn apply_parameter_step(
-    variables: &mut HashMap<String, VariableEnum>,
+    variables: &mut collections::HashMap<String, problem::VariableEnum>,
     step: faer::MatRef<f64>,
     variable_order: &[String],
 ) -> f64 {
@@ -278,7 +281,7 @@ pub fn apply_parameter_step(
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
 pub fn apply_negative_parameter_step(
-    variables: &mut HashMap<String, VariableEnum>,
+    variables: &mut collections::HashMap<String, problem::VariableEnum>,
     step: faer::MatRef<f64>,
     variable_order: &[String],
 ) {

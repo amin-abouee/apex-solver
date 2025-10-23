@@ -10,13 +10,9 @@
 //! - Support for both sparse Cholesky and QR factorizations
 //! - Optional Jacobi scaling for improved convergence
 
-use crate::core::problem::{Problem, VariableEnum};
-use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-use crate::optimizer::{ConvergenceInfo, OptimizationStatus, SolverResult};
-use faer::{Mat, sparse::SparseColMat};
-use std::collections::HashMap;
-use std::fmt;
-use std::time::{Duration, Instant};
+use crate::{core, core::problem, linalg, manifold, optimizer};
+use faer::sparse;
+use std::{collections, fmt, time};
 
 /// Summary statistics for the Gauss-Newton optimization process.
 #[derive(Debug, Clone)]
@@ -38,9 +34,9 @@ pub struct GaussNewtonSummary {
     /// Final parameter update norm
     pub final_parameter_update_norm: f64,
     /// Total time elapsed
-    pub total_time: Duration,
+    pub total_time: time::Duration,
     /// Average time per iteration
-    pub average_time_per_iteration: Duration,
+    pub average_time_per_iteration: time::Duration,
 }
 
 impl fmt::Display for GaussNewtonSummary {
@@ -94,7 +90,7 @@ impl fmt::Display for GaussNewtonSummary {
 #[derive(Clone)]
 pub struct GaussNewtonConfig {
     /// Type of linear solver for the linear systems
-    pub linear_solver_type: LinearSolverType,
+    pub linear_solver_type: linalg::LinearSolverType,
     /// Maximum number of iterations
     pub max_iterations: usize,
     /// Convergence tolerance for cost function
@@ -104,7 +100,7 @@ pub struct GaussNewtonConfig {
     /// Convergence tolerance for gradient norm
     pub gradient_tolerance: f64,
     /// Timeout duration
-    pub timeout: Option<Duration>,
+    pub timeout: Option<time::Duration>,
     /// Enable detailed logging
     pub verbose: bool,
     /// Use Jacobi column scaling (preconditioning)
@@ -127,7 +123,7 @@ pub struct GaussNewtonConfig {
     ///
     /// When enabled, computes covariance by inverting the Hessian matrix after
     /// convergence. The full covariance matrix is extracted into per-variable
-    /// blocks stored in both Variable structs and SolverResult.
+    /// blocks stored in both Variable structs and optimier::SolverResult.
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
@@ -144,7 +140,7 @@ pub struct GaussNewtonConfig {
 impl Default for GaussNewtonConfig {
     fn default() -> Self {
         Self {
-            linear_solver_type: LinearSolverType::default(),
+            linear_solver_type: linalg::LinearSolverType::default(),
             max_iterations: 100,
             cost_tolerance: 1e-8,
             parameter_tolerance: 1e-8,
@@ -166,7 +162,7 @@ impl GaussNewtonConfig {
     }
 
     /// Set the linear solver type
-    pub fn with_linear_solver_type(mut self, linear_solver_type: LinearSolverType) -> Self {
+    pub fn with_linear_solver_type(mut self, linear_solver_type: linalg::LinearSolverType) -> Self {
         self.linear_solver_type = linear_solver_type;
         self
     }
@@ -196,7 +192,7 @@ impl GaussNewtonConfig {
     }
 
     /// Set the timeout duration
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+    pub fn with_timeout(mut self, timeout: time::Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
@@ -247,17 +243,17 @@ impl GaussNewtonConfig {
 
 /// State for optimization iteration
 struct OptimizationState {
-    variables: HashMap<String, VariableEnum>,
-    variable_index_map: HashMap<String, usize>,
+    variables: collections::HashMap<String, problem::VariableEnum>,
+    variable_index_map: collections::HashMap<String, usize>,
     sorted_vars: Vec<String>,
-    symbolic_structure: crate::core::problem::SymbolicStructure,
+    symbolic_structure: problem::SymbolicStructure,
     current_cost: f64,
     initial_cost: f64,
 }
 
 /// Result from step computation
 struct StepResult {
-    step: Mat<f64>,
+    step: faer::Mat<f64>,
     gradient_norm: f64,
 }
 
@@ -270,8 +266,8 @@ struct CostEvaluation {
 /// Gauss-Newton solver for nonlinear least squares optimization.
 pub struct GaussNewton {
     config: GaussNewtonConfig,
-    jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    visualizer: Option<crate::optimizer::visualization::OptimizationVisualizer>,
+    jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
+    visualizer: Option<optimizer::visualization::OptimizationVisualizer>,
 }
 
 impl Default for GaussNewton {
@@ -290,7 +286,7 @@ impl GaussNewton {
     pub fn with_config(config: GaussNewtonConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
         let visualizer = if config.enable_visualization {
-            crate::optimizer::visualization::OptimizationVisualizer::new(true).ok()
+            optimizer::visualization::OptimizationVisualizer::new(true).ok()
         } else {
             None
         };
@@ -303,10 +299,12 @@ impl GaussNewton {
     }
 
     /// Create the appropriate linear solver based on configuration
-    fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
+    fn create_linear_solver(&self) -> Box<dyn linalg::SparseLinearSolver> {
         match self.config.linear_solver_type {
-            LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
-            LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
+            linalg::LinearSolverType::SparseCholesky => {
+                Box::new(linalg::SparseCholeskySolver::new())
+            }
+            linalg::LinearSolverType::SparseQR => Box::new(linalg::SparseQRSolver::new()),
         }
     }
 
@@ -317,33 +315,33 @@ impl GaussNewton {
         cost_change: f64,
         parameter_update_norm: f64,
         gradient_norm: f64,
-        elapsed: Duration,
-    ) -> Option<OptimizationStatus> {
+        elapsed: time::Duration,
+    ) -> Option<optimizer::OptimizationStatus> {
         // Check timeout
         if let Some(timeout) = self.config.timeout
             && elapsed >= timeout
         {
-            return Some(OptimizationStatus::Timeout);
+            return Some(optimizer::OptimizationStatus::Timeout);
         }
 
         // Check maximum iterations
         if iteration >= self.config.max_iterations {
-            return Some(OptimizationStatus::MaxIterationsReached);
+            return Some(optimizer::OptimizationStatus::MaxIterationsReached);
         }
 
         // Check cost tolerance
         if iteration > 0 && cost_change.abs() < self.config.cost_tolerance {
-            return Some(OptimizationStatus::CostToleranceReached);
+            return Some(optimizer::OptimizationStatus::CostToleranceReached);
         }
 
         // Check parameter tolerance
         if iteration > 0 && parameter_update_norm < self.config.parameter_tolerance {
-            return Some(OptimizationStatus::ParameterToleranceReached);
+            return Some(optimizer::OptimizationStatus::ParameterToleranceReached);
         }
 
         // Check gradient tolerance
         if gradient_norm < self.config.gradient_tolerance {
-            return Some(OptimizationStatus::GradientToleranceReached);
+            return Some(optimizer::OptimizationStatus::GradientToleranceReached);
         }
 
         None
@@ -352,8 +350,8 @@ impl GaussNewton {
     /// Create Jacobi scaling matrix from Jacobian
     fn create_jacobi_scaling(
         &self,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> SparseColMat<usize, f64> {
+        jacobian: &sparse::SparseColMat<usize, f64>,
+    ) -> sparse::SparseColMat<usize, f64> {
         use faer::sparse::Triplet;
 
         let cols = jacobian.ncols();
@@ -372,39 +370,42 @@ impl GaussNewton {
             })
             .collect();
 
-        SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
+        sparse::SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
             .expect("Failed to create Jacobi scaling matrix")
     }
 
     /// Apply Jacobi scaling to Jacobian: J_scaled = J * S
     fn apply_jacobi_scaling(
         &self,
-        jacobian: &SparseColMat<usize, f64>,
-        scaling: &SparseColMat<usize, f64>,
-    ) -> SparseColMat<usize, f64> {
+        jacobian: &sparse::SparseColMat<usize, f64>,
+        scaling: &sparse::SparseColMat<usize, f64>,
+    ) -> sparse::SparseColMat<usize, f64> {
         jacobian * scaling
     }
 
     /// Apply inverse Jacobi scaling to step: dx_final = S * dx_scaled
     fn apply_inverse_jacobi_scaling(
         &self,
-        step: &Mat<f64>,
-        scaling: &SparseColMat<usize, f64>,
-    ) -> Mat<f64> {
+        step: &faer::Mat<f64>,
+        scaling: &sparse::SparseColMat<usize, f64>,
+    ) -> faer::Mat<f64> {
         scaling * step
     }
 
     /// Initialize optimization state from problem and initial parameters
     fn initialize_optimization_state(
         &self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) -> Result<OptimizationState, crate::core::ApexError> {
+        problem: &problem::Problem,
+        initial_params: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<OptimizationState, core::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
         // Create column mapping for variables
-        let mut variable_index_map = HashMap::new();
+        let mut variable_index_map = collections::HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
         sorted_vars.sort();
@@ -450,9 +451,9 @@ impl GaussNewton {
     /// Process Jacobian by creating and applying Jacobi scaling if enabled
     fn process_jacobian(
         &mut self,
-        jacobian: &SparseColMat<usize, f64>,
+        jacobian: &sparse::SparseColMat<usize, f64>,
         iteration: usize,
-    ) -> SparseColMat<usize, f64> {
+    ) -> sparse::SparseColMat<usize, f64> {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 && self.config.use_jacobi_scaling {
             let scaling = self.create_jacobi_scaling(jacobian);
@@ -475,9 +476,9 @@ impl GaussNewton {
     /// Compute Gauss-Newton step by solving the normal equations
     fn compute_gauss_newton_step(
         &self,
-        residuals: &Mat<f64>,
-        scaled_jacobian: &SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn SparseLinearSolver>,
+        residuals: &faer::Mat<f64>,
+        scaled_jacobian: &sparse::SparseColMat<usize, f64>,
+        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
     ) -> Option<StepResult> {
         // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
         // Use min_diagonal for numerical stability (tiny regularization)
@@ -487,9 +488,7 @@ impl GaussNewton {
             .ok()?;
 
         // Get gradient from the solver (J^T * r)
-        let solver_gradient = linear_solver.get_gradient()?;
-        let gradient = -solver_gradient; // Negate to get actual gradient
-
+        let gradient = linear_solver.get_gradient()?;
         // Compute gradient norm for convergence check
         let gradient_norm = gradient.norm_l2();
 
@@ -519,10 +518,10 @@ impl GaussNewton {
         &self,
         step_result: &StepResult,
         state: &mut OptimizationState,
-        problem: &Problem,
-    ) -> crate::core::ApexResult<CostEvaluation> {
+        problem: &problem::Problem,
+    ) -> core::ApexResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
-        let _step_norm = crate::optimizer::apply_parameter_step(
+        let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
@@ -576,7 +575,7 @@ impl GaussNewton {
         max_parameter_update_norm: f64,
         final_parameter_update_norm: f64,
         total_cost_reduction: f64,
-        total_time: Duration,
+        total_time: time::Duration,
     ) -> GaussNewtonSummary {
         GaussNewtonSummary {
             initial_cost,
@@ -595,17 +594,23 @@ impl GaussNewton {
             average_time_per_iteration: if iterations > 0 {
                 total_time / iterations as u32
             } else {
-                Duration::from_secs(0)
+                time::Duration::from_secs(0)
             },
         }
     }
 
     pub fn optimize(
         &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (crate::manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::core::ApexError> {
-        let start_time = Instant::now();
+        problem: &problem::Problem,
+        initial_params: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
+        core::ApexError,
+    > {
+        let start_time = time::Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1; // Initial cost evaluation
         let mut jacobian_evaluations = 0;
@@ -660,7 +665,7 @@ impl GaussNewton {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(crate::core::ApexError::Solver(
+                    return Err(core::ApexError::Solver(
                         "Linear solver failed to solve Gauss-Newton system".to_string(),
                     ));
                 }
@@ -742,14 +747,14 @@ impl GaussNewton {
                     None
                 };
 
-                return Ok(SolverResult {
+                return Ok(optimizer::SolverResult {
                     status,
                     iterations: iteration + 1,
                     initial_cost: state.initial_cost,
                     final_cost: state.current_cost,
                     parameters: state.variables.into_iter().collect(),
                     elapsed_time: elapsed,
-                    convergence_info: Some(ConvergenceInfo {
+                    convergence_info: Some(optimizer::ConvergenceInfo {
                         final_gradient_norm,
                         final_parameter_update_norm,
                         cost_evaluations,
@@ -764,9 +769,9 @@ impl GaussNewton {
     }
 }
 
-impl crate::optimizer::Solver for GaussNewton {
+impl optimizer::Solver for GaussNewton {
     type Config = GaussNewtonConfig;
-    type Error = crate::core::ApexError;
+    type Error = core::ApexError;
 
     fn new() -> Self {
         Self::default()
@@ -774,15 +779,13 @@ impl crate::optimizer::Solver for GaussNewton {
 
     fn optimize(
         &mut self,
-        problem: &crate::core::problem::Problem,
+        problem: &problem::Problem,
         initial_params: &std::collections::HashMap<
             String,
-            (crate::manifold::ManifoldType, nalgebra::DVector<f64>),
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
     ) -> Result<
-        crate::optimizer::SolverResult<
-            std::collections::HashMap<String, crate::core::problem::VariableEnum>,
-        >,
+        optimizer::SolverResult<std::collections::HashMap<String, problem::VariableEnum>>,
         Self::Error,
     > {
         self.optimize(problem, initial_params)
@@ -791,14 +794,18 @@ impl crate::optimizer::Solver for GaussNewton {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::core::{factors, problem};
+    use crate::manifold;
+    use crate::optimizer;
+    use nalgebra::dvector;
+    use std::collections;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
     struct RosenbrockFactor1;
 
-    impl crate::core::factors::Factor for RosenbrockFactor1 {
+    impl factors::Factor for RosenbrockFactor1 {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
@@ -827,7 +834,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct RosenbrockFactor2;
 
-    impl crate::core::factors::Factor for RosenbrockFactor2 {
+    impl factors::Factor for RosenbrockFactor2 {
         fn linearize(
             &self,
             params: &[nalgebra::DVector<f64>],
@@ -857,30 +864,31 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        use crate::core::problem::Problem;
-        use crate::manifold::ManifoldType;
-        use nalgebra::dvector;
-        use std::collections::HashMap;
-
-        let mut problem = Problem::new();
-        let mut initial_values = HashMap::new();
+        let mut problem = problem::Problem::new();
+        let mut initial_values = collections::HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
+        initial_values.insert(
+            "x1".to_string(),
+            (manifold::ManifoldType::RN, dvector![-1.2]),
+        );
+        initial_values.insert(
+            "x2".to_string(),
+            (manifold::ManifoldType::RN, dvector![1.0]),
+        );
 
         // Add custom factors (demonstrates extensibility!)
         problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
         problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
 
         // Configure Gauss-Newton optimizer
-        let config = GaussNewtonConfig::new()
+        let config = optimizer::gauss_newton::GaussNewtonConfig::new()
             .with_max_iterations(100)
             .with_cost_tolerance(1e-8)
             .with_parameter_tolerance(1e-8)
             .with_gradient_tolerance(1e-10);
 
-        let mut solver = GaussNewton::with_config(config);
+        let mut solver = optimizer::GaussNewton::with_config(config);
         let result = solver.optimize(&problem, &initial_values).unwrap();
 
         // Extract final values
@@ -899,10 +907,10 @@ mod tests {
         assert!(
             matches!(
                 result.status,
-                crate::optimizer::OptimizationStatus::Converged
-                    | crate::optimizer::OptimizationStatus::CostToleranceReached
-                    | crate::optimizer::OptimizationStatus::ParameterToleranceReached
-                    | crate::optimizer::OptimizationStatus::GradientToleranceReached
+                optimizer::OptimizationStatus::Converged
+                    | optimizer::OptimizationStatus::CostToleranceReached
+                    | optimizer::OptimizationStatus::ParameterToleranceReached
+                    | optimizer::OptimizationStatus::GradientToleranceReached
             ),
             "Optimization should converge"
         );
