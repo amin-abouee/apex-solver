@@ -242,7 +242,7 @@ impl GaussNewtonConfig {
 }
 
 /// State for optimization iteration
-struct OptimizationState {
+struct LinearizerResult {
     variables: collections::HashMap<String, problem::VariableEnum>,
     variable_index_map: collections::HashMap<String, usize>,
     sorted_vars: Vec<String>,
@@ -374,24 +374,6 @@ impl GaussNewton {
             .expect("Failed to create Jacobi scaling matrix")
     }
 
-    /// Apply Jacobi scaling to Jacobian: J_scaled = J * S
-    fn apply_jacobi_scaling(
-        &self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
-        scaling: &sparse::SparseColMat<usize, f64>,
-    ) -> sparse::SparseColMat<usize, f64> {
-        jacobian * scaling
-    }
-
-    /// Apply inverse Jacobi scaling to step: dx_final = S * dx_scaled
-    fn apply_inverse_jacobi_scaling(
-        &self,
-        step: &faer::Mat<f64>,
-        scaling: &sparse::SparseColMat<usize, f64>,
-    ) -> faer::Mat<f64> {
-        scaling * step
-    }
-
     /// Initialize optimization state from problem and initial parameters
     fn initialize_optimization_state(
         &self,
@@ -400,7 +382,7 @@ impl GaussNewton {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, error::ApexError> {
+    ) -> Result<LinearizerResult, error::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -421,9 +403,7 @@ impl GaussNewton {
 
         // Initial cost evaluation (residual only, no Jacobian needed)
         let residual = problem.compute_residual_sparse(&variables)?;
-
-        let residual_norm = residual.norm_l2();
-        let current_cost = residual_norm * residual_norm;
+        let current_cost = optimizer::compute_cost(&residual);
         let initial_cost = current_cost;
 
         if self.config.verbose {
@@ -434,7 +414,7 @@ impl GaussNewton {
             println!("Initial cost: {:.6e}", current_cost);
         }
 
-        Ok(OptimizationState {
+        Ok(LinearizerResult {
             variables,
             variable_index_map,
             sorted_vars,
@@ -451,7 +431,7 @@ impl GaussNewton {
         iteration: usize,
     ) -> sparse::SparseColMat<usize, f64> {
         // Create Jacobi scaling on first iteration if enabled
-        if iteration == 0 && self.config.use_jacobi_scaling {
+        if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
 
             if self.config.verbose {
@@ -460,13 +440,7 @@ impl GaussNewton {
 
             self.jacobi_scaling = Some(scaling);
         }
-
-        // Apply Jacobi scaling to Jacobian if enabled
-        if self.config.use_jacobi_scaling {
-            self.apply_jacobi_scaling(jacobian, self.jacobi_scaling.as_ref().unwrap())
-        } else {
-            jacobian.clone()
-        }
+        jacobian * self.jacobi_scaling.as_ref().unwrap()
     }
 
     /// Compute Gauss-Newton step by solving the normal equations
@@ -494,9 +468,9 @@ impl GaussNewton {
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
-            self.apply_inverse_jacobi_scaling(&scaled_step, self.jacobi_scaling.as_ref().unwrap())
+            &scaled_step * self.jacobi_scaling.as_ref().unwrap()
         } else {
-            scaled_step.clone()
+            scaled_step
         };
 
         if self.config.verbose {
@@ -513,7 +487,7 @@ impl GaussNewton {
     fn apply_step_and_evaluate_cost(
         &self,
         step_result: &StepResult,
-        state: &mut OptimizationState,
+        state: &mut LinearizerResult,
         problem: &problem::Problem,
     ) -> error::ApexResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
@@ -525,8 +499,7 @@ impl GaussNewton {
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_residual_norm = new_residual.norm_l2();
-        let new_cost = new_residual_norm * new_residual_norm;
+        let new_cost = optimizer::compute_cost(&new_residual);
 
         // Compute cost reduction
         let cost_reduction = state.current_cost - new_cost;
@@ -647,7 +620,19 @@ impl GaussNewton {
             }
 
             // Process Jacobian (apply scaling if enabled)
-            let scaled_jacobian = self.process_jacobian(&jacobian, iteration);
+            let scaled_jacobian = if self.config.use_jacobi_scaling {
+                self.process_jacobian(&jacobian, iteration)
+            } else {
+                jacobian
+            };
+
+            if self.config.verbose {
+                println!(
+                    "Scaled Jacobian shape: ({}, {})",
+                    scaled_jacobian.nrows(),
+                    scaled_jacobian.ncols()
+                );
+            }
 
             // Compute Gauss-Newton step
             let step_result = match self.compute_gauss_newton_step(
@@ -676,7 +661,9 @@ impl GaussNewton {
             total_cost_reduction += cost_eval.cost_reduction;
 
             // Log iteration
-            self.log_iteration(iteration, &cost_eval, step_norm);
+            if self.config.verbose {
+                self.log_iteration(iteration, &cost_eval, step_norm);
+            };
 
             // Rerun visualization
             if let Some(ref vis) = self.visualizer {
