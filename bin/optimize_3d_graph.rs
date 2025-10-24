@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::core::factors::BetweenFactorSE3;
+use apex_solver::core::factors::{BetweenFactorSE3, PriorFactor};
+use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -202,6 +203,47 @@ fn test_se3_dataset(
         }
     }
 
+    // Add prior factor ONLY for Gauss-Newton optimizer
+    // LM and Dog Leg have built-in regularization (λI damping) that handles gauge freedom naturally
+    // GN needs an explicit prior factor to make the Hessian full-rank
+    let optimizer_type = args.optimizer.to_lowercase();
+    let needs_prior = optimizer_type == "gn" || optimizer_type == "gauss-newton";
+
+    if needs_prior {
+        if let Some(&first_id) = vertex_ids.first() {
+            if let Some(first_vertex) = graph.vertices_se3.get(&first_id) {
+                let var_name = format!("x{}", first_id);
+                let quat = first_vertex.pose.rotation_quaternion();
+                let trans = first_vertex.pose.translation();
+                let prior_value =
+                    dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+
+                let prior_factor = PriorFactor {
+                    data: prior_value.clone(),
+                };
+                // Use HuberLoss with scale=1.0 (same as tiny-solver-rs)
+                // This allows the first vertex to move slightly if graph structure demands it
+                let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+                problem.add_residual_block(
+                    &[&var_name],
+                    Box::new(prior_factor),
+                    Some(Box::new(huber_loss)),
+                );
+
+                println!(
+                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for GN",
+                    first_id
+                );
+                println!("  Prior value: {:?}", prior_value.as_slice());
+            }
+        }
+    } else {
+        println!(
+            "Skipping prior factor for {} optimizer (has built-in regularization)",
+            optimizer_type.to_uppercase()
+        );
+    }
+
     // Add SE3 between factors
     for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
@@ -213,6 +255,10 @@ fn test_se3_dataset(
 
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
+    println!(
+        "  Prior factors: 1 (vertex {})",
+        vertex_ids.first().unwrap_or(&0)
+    );
     println!("  Between factors: {}", graph.edges_se3.len());
 
     // Compute initial cost
@@ -356,6 +402,20 @@ fn test_se3_dataset(
     );
     println!("Iterations: {}", result.iterations);
     println!("Execution time: {:.1}ms", duration.as_millis());
+
+    // Print first vertex (x0) to verify if it moved during optimization
+    if let Some(&first_id) = vertex_ids.first() {
+        let var_name = format!("x{}", first_id);
+        if let Some(final_var) = result.parameters.get(&var_name) {
+            let final_vector = final_var.to_vector();
+            println!("\nFirst vertex (x0) after optimization:");
+            println!("  Final value: {:?}", final_vector.as_slice());
+            if let Some((_, initial_vec)) = initial_values.get(&var_name) {
+                let diff: f64 = (final_vector - initial_vec).norm();
+                println!("  Change from initial: {:.6e}", diff);
+            }
+        }
+    }
 
     // Save optimized graph if requested
     if let Some(output_base) = &args.save_output {
