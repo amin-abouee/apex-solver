@@ -141,28 +141,45 @@ impl Corrector {
         // Compute scaling factors
         let sqrt_rho1 = rho_1.sqrt(); // √(ρ'(s))
 
-        // Alpha factor: α = ρ''(s) / ρ'(s)
-        // This is the correction term for the Jacobian
-        let alpha_sq_norm = if rho_1 != 0.0 { rho_2 / rho_1 } else { 0.0 };
+        // Handle special cases (common case: rho[2] <= 0)
+        // This occurs when the loss function has no curvature correction needed
+        if sq_norm == 0.0 || rho_2 <= 0.0 {
+            return Self {
+                sqrt_rho1,
+                residual_scaling: sqrt_rho1,
+                alpha_sq_norm: 0.0,
+            };
+        }
+
+        // Compute alpha by solving the quadratic equation:
+        // 0.5·α² - α - (ρ''/ρ')·s = 0
+        //
+        // This gives: α = 1 - √(1 + 2·s·ρ''/ρ')
+        //
+        // Reference: Ceres Solver corrector.cc
+        // https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/corrector.cc
+        let d = 1.0 + 2.0 * sq_norm * rho_2 / rho_1;
+        let alpha = 1.0 - d.sqrt();
 
         Self {
             sqrt_rho1,
-            residual_scaling: sqrt_rho1,
-            alpha_sq_norm,
+            residual_scaling: sqrt_rho1 / (1.0 - alpha),
+            alpha_sq_norm: alpha / sq_norm,
         }
     }
 
     /// Apply correction to the Jacobian matrix.
     ///
-    /// Transforms the Jacobian `J` into `J̃` according to the corrector algorithm:
+    /// Transforms the Jacobian `J` into `J̃` according to the Ceres Solver corrector algorithm:
     ///
     /// ```text
-    /// J̃ = √(ρ'(s)) · J + α · (J^T r) · r^T / ||r||
+    /// J̃ = √(ρ'(s)) · (J - α²·r·r^T·J)
     /// ```
     ///
     /// where:
-    /// - `√(ρ'(s))` scales the entire Jacobian by the loss function weight
-    /// - The second term is a rank-1 correction that ensures correct gradient
+    /// - `√(ρ'(s))` scales the Jacobian by the loss function weight
+    /// - `α` is computed by solving the quadratic equation: 0.5·α² - α - (ρ''/ρ')·s = 0
+    /// - The subtractive term `α²·r·r^T·J` is a rank-1 curvature correction
     ///
     /// # Arguments
     ///
@@ -201,28 +218,26 @@ impl Corrector {
         residual: &nalgebra::DVector<f64>,
         jacobian: &mut nalgebra::DMatrix<f64>,
     ) {
-        // Step 1: Scale entire Jacobian by √(ρ'(s))
-        *jacobian *= self.sqrt_rho1;
-
-        // Step 2: Add rank-1 correction term: α · (J^T r) · r^T / ||r||
-        //
-        // For each row i of the Jacobian (corresponding to residual r_i):
-        //   J̃[i, :] += α · r_i · (J^T r) / ||r||
-        //
-        // This ensures the gradient ∇(ρ(||r||²)) is correctly computed
-
-        if self.alpha_sq_norm != 0.0 {
-            // Compute J^T r (gradient of residual w.r.t. parameters)
-            let j_t_r = jacobian.transpose() * residual; // Vector of size num_parameters
-
-            // Add correction: α · (J^T r) · r^T / ||r||
-            // Outer product: r * (J^T r)^T scaled by α
-            for i in 0..jacobian.nrows() {
-                for j in 0..jacobian.ncols() {
-                    jacobian[(i, j)] += self.alpha_sq_norm * residual[i] * j_t_r[j];
-                }
-            }
+        // Common case (rho[2] <= 0): only apply first-order correction
+        // This is the most common scenario for well-behaved loss functions
+        if self.alpha_sq_norm == 0.0 {
+            *jacobian *= self.sqrt_rho1;
+            return;
         }
+
+        // Full correction with curvature term:
+        // J̃ = √ρ₁ · (J - α²·r·r^T·J)
+        //
+        // This is the correct Ceres Solver algorithm:
+        // 1. Compute r·r^T·J (outer product of residual with Jacobian)
+        // 2. Subtract α²·r·r^T·J from J
+        // 3. Scale result by √ρ₁
+        //
+        // Reference: Ceres Solver corrector.cc
+        // https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/corrector.cc
+
+        let r_rtj = residual * residual.transpose() * jacobian.clone();
+        *jacobian = (jacobian.clone() - r_rtj * self.alpha_sq_norm) * self.sqrt_rho1;
     }
 
     /// Apply correction to the residual vector.

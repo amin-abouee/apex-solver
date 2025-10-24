@@ -91,7 +91,7 @@ use nalgebra;
 use rayon::prelude::*;
 
 use crate::{
-    core::{factors, loss_functions, residual_block, variable},
+    core::{corrector, factors, loss_functions, residual_block, variable},
     error, linalg, manifold,
     manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3},
 };
@@ -928,7 +928,15 @@ impl Problem {
 
         // Compute only residual (linearize still computes Jacobian internally,
         // but we don't extract/store it)
-        let (res, _) = residual_block.factor.linearize(&param_vectors, false);
+        let (mut res, _) = residual_block.factor.linearize(&param_vectors, false);
+
+        // Apply loss function if present (critical for robust optimization)
+        if let Some(loss_func) = &residual_block.loss_func {
+            let squared_norm = res.dot(&res);
+            let corrector = corrector::Corrector::new(loss_func.as_ref(), squared_norm);
+            corrector.correct_residuals(&mut res);
+        }
+
         let mut total_residual = total_residual.lock().map_err(|_| {
             error::ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
         })?;
@@ -969,8 +977,16 @@ impl Problem {
             }
         }
 
-        let (res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
-        let jac = jac_opt.expect("Jacobian should be computed when compute_jacobian=true");
+        let (mut res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
+        let mut jac = jac_opt.expect("Jacobian should be computed when compute_jacobian=true");
+
+        // Apply loss function if present (critical for robust optimization)
+        if let Some(loss_func) = &residual_block.loss_func {
+            let squared_norm = res.dot(&res);
+            let corrector = corrector::Corrector::new(loss_func.as_ref(), squared_norm);
+            corrector.correct_jacobian(&res, &mut jac);
+            corrector.correct_residuals(&mut res);
+        }
 
         // Update total residual
         {
