@@ -245,6 +245,59 @@ impl VariableEnum {
             VariableEnum::SO3(var) => var.clear_covariance(),
         }
     }
+
+    /// Get the bounds for this variable.
+    ///
+    /// Returns a reference to the bounds map where keys are indices and values are (lower, upper) pairs.
+    pub fn get_bounds(&self) -> &collections::HashMap<usize, (f64, f64)> {
+        match self {
+            VariableEnum::Rn(var) => &var.bounds,
+            VariableEnum::SE2(var) => &var.bounds,
+            VariableEnum::SE3(var) => &var.bounds,
+            VariableEnum::SO2(var) => &var.bounds,
+            VariableEnum::SO3(var) => &var.bounds,
+        }
+    }
+
+    /// Get the fixed indices for this variable.
+    ///
+    /// Returns a reference to the set of indices that should remain fixed during optimization.
+    pub fn get_fixed_indices(&self) -> &collections::HashSet<usize> {
+        match self {
+            VariableEnum::Rn(var) => &var.fixed_indices,
+            VariableEnum::SE2(var) => &var.fixed_indices,
+            VariableEnum::SE3(var) => &var.fixed_indices,
+            VariableEnum::SO2(var) => &var.fixed_indices,
+            VariableEnum::SO3(var) => &var.fixed_indices,
+        }
+    }
+
+    /// Set the value of this variable from a vector representation.
+    ///
+    /// This is used to update the variable after applying constraints (bounds and fixed indices).
+    pub fn set_from_vector(&mut self, vec: &nalgebra::DVector<f64>) {
+        match self {
+            VariableEnum::Rn(var) => {
+                var.set_value(Rn::new(vec.clone()));
+            }
+            VariableEnum::SE2(var) => {
+                let new_se2: SE2 = vec.clone().into();
+                var.set_value(new_se2);
+            }
+            VariableEnum::SE3(var) => {
+                let new_se3: SE3 = vec.clone().into();
+                var.set_value(new_se3);
+            }
+            VariableEnum::SO2(var) => {
+                let new_so2: SO2 = vec.clone().into();
+                var.set_value(new_so2);
+            }
+            VariableEnum::SO3(var) => {
+                let new_so3: SO3 = vec.clone().into();
+                var.set_value(new_so3);
+            }
+        }
+    }
 }
 
 /// The optimization problem definition for factor graph optimization.
