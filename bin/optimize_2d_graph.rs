@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::core::factors::BetweenFactorSE2;
+use apex_solver::core::factors::{BetweenFactorSE2, PriorFactor};
+use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -39,6 +40,14 @@ struct Args {
     /// Enable real-time Rerun visualization
     #[arg(long)]
     with_visualizer: bool,
+
+    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2"
+    #[arg(long, default_value = "huber")]
+    loss_function: String,
+
+    /// Scale parameter for the loss function (default: 1.345 for Huber)
+    #[arg(long)]
+    loss_scale: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -126,6 +135,60 @@ fn format_summary_table(results: &[DatasetResult]) {
     }
 }
 
+/// Create a loss function based on the user's choice
+fn create_loss_function(
+    loss_name: &str,
+    scale: Option<f64>,
+) -> Result<Option<Box<dyn Loss + Send>>, Box<dyn std::error::Error>> {
+    let loss_lower = loss_name.to_lowercase();
+
+    // Determine default scale if not provided
+    let default_scale = match loss_lower.as_str() {
+        "l2" | "l1" => {
+            return Ok(match loss_lower.as_str() {
+                "l2" => Some(Box::new(L2Loss)),
+                "l1" => Some(Box::new(L1Loss)),
+                _ => None,
+            });
+        }
+        "huber" => 1.345,
+        "cauchy" => 2.3849,
+        "fair" => 1.3999,
+        "welsch" => 2.9846,
+        "tukey" => 4.6851,
+        "geman" | "gemanmcclure" => 1.0,
+        "andrews" => 1.339,
+        "ramsay" => 0.3,
+        "trimmed" | "trimmedmean" => 2.0,
+        "lp" => 1.5,
+        "barron0" | "barron1" | "barron-2" => 1.0,
+        _ => {
+            return Err(format!("Unknown loss function: {}. Valid options: l2, l1, huber, cauchy, fair, welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, barron-2", loss_name).into());
+        }
+    };
+
+    let scale_param = scale.unwrap_or(default_scale);
+
+    let loss: Box<dyn Loss + Send> = match loss_lower.as_str() {
+        "huber" => Box::new(HuberLoss::new(scale_param)?),
+        "cauchy" => Box::new(CauchyLoss::new(scale_param)?),
+        "fair" => Box::new(FairLoss::new(scale_param)?),
+        "welsch" => Box::new(WelschLoss::new(scale_param)?),
+        "tukey" => Box::new(TukeyBiweightLoss::new(scale_param)?),
+        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(scale_param)?),
+        "andrews" => Box::new(AndrewsWaveLoss::new(scale_param)?),
+        "ramsay" => Box::new(RamsayEaLoss::new(scale_param)?),
+        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(scale_param)?),
+        "lp" => Box::new(LpNormLoss::new(scale_param)?),
+        "barron0" => Box::new(BarronGeneralLoss::new(0.0, scale_param)?),
+        "barron1" => Box::new(BarronGeneralLoss::new(1.0, scale_param)?),
+        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, scale_param)?),
+        _ => unreachable!(),
+    };
+
+    Ok(Some(loss))
+}
+
 fn test_dataset(
     dataset_name: &str,
     args: &Args,
@@ -165,6 +228,80 @@ fn test_dataset(
         }
     }
 
+    // Add prior factor ONLY for Gauss-Newton optimizer
+    // LM and Dog Leg have built-in regularization (λI damping) that handles gauge freedom naturally
+    // GN needs an explicit prior factor to make the Hessian full-rank
+    let optimizer_type = args.optimizer.to_lowercase();
+    let needs_prior = optimizer_type == "gn" || optimizer_type == "gauss-newton";
+
+    if needs_prior {
+        if let Some(&first_id) = vertex_ids.first() {
+            if let Some(first_vertex) = graph.vertices_se2.get(&first_id) {
+                let var_name = format!("x{}", first_id);
+                let trans = first_vertex.pose.translation();
+                let angle = first_vertex.pose.rotation_angle();
+                let prior_value = dvector![trans.x, trans.y, angle];
+
+                let prior_factor = PriorFactor {
+                    data: prior_value.clone(),
+                };
+                // Use HuberLoss with scale=1.0 (same as 3D version)
+                // This allows the first vertex to move slightly if graph structure demands it
+                let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+                problem.add_residual_block(
+                    &[&var_name],
+                    Box::new(prior_factor),
+                    Some(Box::new(huber_loss)),
+                );
+
+                println!(
+                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for GN",
+                    first_id
+                );
+                println!("  Prior value: {:?}", prior_value.as_slice());
+            }
+        }
+    } else {
+        // For LM and DL, fix the first pose to remove gauge freedom
+        let first_var_name = format!("x{}", vertex_ids[0]);
+        problem.fix_variable(&first_var_name, 0);
+        problem.fix_variable(&first_var_name, 1);
+        problem.fix_variable(&first_var_name, 2);
+        println!(
+            "Fixed first pose {} (all 3 DOF) for {} optimizer",
+            first_var_name,
+            optimizer_type.to_uppercase()
+        );
+    }
+
+    // Create loss function for between factors
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
+    let loss_name = args.loss_function.to_uppercase();
+    let loss_scale = if loss_fn.is_some() {
+        // Try to extract scale from the loss function name or use the provided scale
+        args.loss_scale
+            .unwrap_or_else(|| match args.loss_function.to_lowercase().as_str() {
+                "huber" => 1.345,
+                "cauchy" => 2.3849,
+                "fair" => 1.3999,
+                "welsch" => 2.9846,
+                "tukey" => 4.6851,
+                "geman" | "gemanmcclure" => 1.0,
+                "andrews" => 1.339,
+                "ramsay" => 0.3,
+                "trimmed" | "trimmedmean" => 2.0,
+                "lp" => 1.5,
+                _ => 1.0,
+            })
+    } else {
+        1.0
+    };
+
+    println!(
+        "Using loss function: {} (scale: {:.4})",
+        loss_name, loss_scale
+    );
+
     // Add SE2 between factors
     for edge in &graph.edges_se2 {
         let id0 = format!("x{}", edge.from);
@@ -175,19 +312,20 @@ fn test_dataset(
         let dtheta = edge.measurement.angle();
 
         let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
-    }
 
-    // Fix the first pose to remove gauge freedom (all 3 DOF: x, y, theta)
-    let first_var_name = format!("x{}", vertex_ids[0]);
-    problem.fix_variable(&first_var_name, 0);
-    problem.fix_variable(&first_var_name, 1);
-    problem.fix_variable(&first_var_name, 2);
+        // Clone the loss function for each edge
+        let edge_loss = if loss_fn.is_some() {
+            Some(create_loss_function(&args.loss_function, args.loss_scale)?.unwrap())
+        } else {
+            None
+        };
+
+        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
+    }
 
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
     println!("  Between factors: {}", graph.edges_se2.len());
-    println!("  Fixed first pose: {} (all 3 DOF)", first_var_name);
 
     // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);

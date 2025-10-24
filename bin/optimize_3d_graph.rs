@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use apex_solver::core::factors::{BetweenFactorSE3, PriorFactor};
-use apex_solver::core::loss_functions::HuberLoss;
+use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -48,6 +48,14 @@ struct Args {
     /// Enable real-time Rerun visualization
     #[arg(long)]
     with_visualizer: bool,
+
+    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2"
+    #[arg(long, default_value = "huber")]
+    loss_function: String,
+
+    /// Scale parameter for the loss function (default: 1.345 for Huber)
+    #[arg(long)]
+    loss_scale: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -133,6 +141,60 @@ fn format_summary_table(results: &[DatasetResult]) {
             avg_iters
         );
     }
+}
+
+/// Create a loss function based on the user's choice
+fn create_loss_function(
+    loss_name: &str,
+    scale: Option<f64>,
+) -> Result<Option<Box<dyn Loss + Send>>, Box<dyn std::error::Error>> {
+    let loss_lower = loss_name.to_lowercase();
+
+    // Determine default scale if not provided
+    let default_scale = match loss_lower.as_str() {
+        "l2" | "l1" => {
+            return Ok(match loss_lower.as_str() {
+                "l2" => Some(Box::new(L2Loss)),
+                "l1" => Some(Box::new(L1Loss)),
+                _ => None,
+            });
+        }
+        "huber" => 1.345,
+        "cauchy" => 2.3849,
+        "fair" => 1.3999,
+        "welsch" => 2.9846,
+        "tukey" => 4.6851,
+        "geman" | "gemanmcclure" => 1.0,
+        "andrews" => 1.339,
+        "ramsay" => 0.3,
+        "trimmed" | "trimmedmean" => 2.0,
+        "lp" => 1.5,
+        "barron0" | "barron1" | "barron-2" => 1.0,
+        _ => {
+            return Err(format!("Unknown loss function: {}. Valid options: l2, l1, huber, cauchy, fair, welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, barron-2", loss_name).into());
+        }
+    };
+
+    let scale_param = scale.unwrap_or(default_scale);
+
+    let loss: Box<dyn Loss + Send> = match loss_lower.as_str() {
+        "huber" => Box::new(HuberLoss::new(scale_param)?),
+        "cauchy" => Box::new(CauchyLoss::new(scale_param)?),
+        "fair" => Box::new(FairLoss::new(scale_param)?),
+        "welsch" => Box::new(WelschLoss::new(scale_param)?),
+        "tukey" => Box::new(TukeyBiweightLoss::new(scale_param)?),
+        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(scale_param)?),
+        "andrews" => Box::new(AndrewsWaveLoss::new(scale_param)?),
+        "ramsay" => Box::new(RamsayEaLoss::new(scale_param)?),
+        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(scale_param)?),
+        "lp" => Box::new(LpNormLoss::new(scale_param)?),
+        "barron0" => Box::new(BarronGeneralLoss::new(0.0, scale_param)?),
+        "barron1" => Box::new(BarronGeneralLoss::new(1.0, scale_param)?),
+        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, scale_param)?),
+        _ => unreachable!(),
+    };
+
+    Ok(Some(loss))
 }
 
 fn test_se3_dataset(
@@ -244,19 +306,55 @@ fn test_se3_dataset(
         );
     }
 
+    // Create loss function for between factors
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
+    let loss_name = args.loss_function.to_uppercase();
+    let loss_scale = if loss_fn.is_some() {
+        args.loss_scale
+            .unwrap_or_else(|| match args.loss_function.to_lowercase().as_str() {
+                "huber" => 1.345,
+                "cauchy" => 2.3849,
+                "fair" => 1.3999,
+                "welsch" => 2.9846,
+                "tukey" => 4.6851,
+                "geman" | "gemanmcclure" => 1.0,
+                "andrews" => 1.339,
+                "ramsay" => 0.3,
+                "trimmed" | "trimmedmean" => 2.0,
+                "lp" => 1.5,
+                _ => 1.0,
+            })
+    } else {
+        1.0
+    };
+
+    println!(
+        "Using loss function: {} (scale: {:.4})",
+        loss_name, loss_scale
+    );
+
     // Add SE3 between factors
     for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactorSE3::new(relative_pose);
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
+
+        // Clone the loss function for each edge
+        let edge_loss = if loss_fn.is_some() {
+            Some(create_loss_function(&args.loss_function, args.loss_scale)?.unwrap())
+        } else {
+            None
+        };
+
+        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
     }
 
     println!("\nProblem setup completed:");
     println!("  Variables: {}", initial_values.len());
     println!(
-        "  Prior factors: 1 (vertex {})",
+        "  Prior factors: {} (vertex {})",
+        if needs_prior { "1" } else { "0" },
         vertex_ids.first().unwrap_or(&0)
     );
     println!("  Between factors: {}", graph.edges_se3.len());
