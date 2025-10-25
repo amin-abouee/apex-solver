@@ -159,6 +159,14 @@ pub enum OptimizationStatus {
     UserTerminated,
     /// Timeout reached
     Timeout,
+    /// Trust region radius fell below minimum threshold
+    TrustRegionRadiusTooSmall,
+    /// Objective function fell below user-specified cutoff
+    MinCostThresholdReached,
+    /// Jacobian matrix is singular or ill-conditioned
+    IllConditionedJacobian,
+    /// NaN or Inf detected in cost or parameters
+    InvalidNumericalValues,
     /// Other failure
     Failed(String),
 }
@@ -176,6 +184,18 @@ impl fmt::Display for OptimizationStatus {
             OptimizationStatus::NumericalFailure => write!(f, "Numerical failure"),
             OptimizationStatus::UserTerminated => write!(f, "User terminated"),
             OptimizationStatus::Timeout => write!(f, "Timeout"),
+            OptimizationStatus::TrustRegionRadiusTooSmall => {
+                write!(f, "Trust region radius too small")
+            }
+            OptimizationStatus::MinCostThresholdReached => {
+                write!(f, "Minimum cost threshold reached")
+            }
+            OptimizationStatus::IllConditionedJacobian => {
+                write!(f, "Ill-conditioned Jacobian matrix")
+            }
+            OptimizationStatus::InvalidNumericalValues => {
+                write!(f, "Invalid numerical values (NaN/Inf) detected")
+            }
             OptimizationStatus::Failed(msg) => write!(f, "Failed: {msg}"),
         }
     }
