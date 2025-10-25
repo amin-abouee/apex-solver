@@ -446,6 +446,12 @@ fn test_dataset(
         apex_solver::optimizer::OptimizationStatus::GradientToleranceReached => {
             ("CONVERGED", "GradientTolerance".to_string())
         }
+        apex_solver::optimizer::OptimizationStatus::TrustRegionRadiusTooSmall => {
+            ("CONVERGED", "TrustRegionRadiusTooSmall".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::MinCostThresholdReached => {
+            ("CONVERGED", "MinCostThresholdReached".to_string())
+        }
         apex_solver::optimizer::OptimizationStatus::MaxIterationsReached => {
             ("NOT_CONVERGED", "MaxIterations".to_string())
         }
@@ -454,6 +460,12 @@ fn test_dataset(
         }
         apex_solver::optimizer::OptimizationStatus::NumericalFailure => {
             ("NOT_CONVERGED", "NumericalFailure".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::IllConditionedJacobian => {
+            ("NOT_CONVERGED", "IllConditionedJacobian".to_string())
+        }
+        apex_solver::optimizer::OptimizationStatus::InvalidNumericalValues => {
+            ("NOT_CONVERGED", "InvalidNumericalValues".to_string())
         }
         apex_solver::optimizer::OptimizationStatus::UserTerminated => {
             ("NOT_CONVERGED", "UserTerminated".to_string())
