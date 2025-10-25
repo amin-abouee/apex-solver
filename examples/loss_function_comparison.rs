@@ -255,17 +255,17 @@ fn benchmark_dataset_se3(
         ),
     ];
 
-    // let optimizers = vec!["LM", "GN", "DL"];
-    let optimizers = vec!["LM"];
+    let optimizers = vec!["LM", "GN", "DL"];
     let mut results = Vec::new();
 
     // Test each (optimizer, loss_function) combination
     for optimizer_name in &optimizers {
         println!("\n--- Testing Optimizer: {} ---", optimizer_name);
 
-        for (loss_name, scale, _loss_fn) in &loss_configs {
+        for &(loss_name, scale, _) in &loss_configs {
             println!("  Testing {} (scale={:.4})...", loss_name, scale);
 
+            let scale_value = scale;
             // Build problem with this loss function
             let mut problem = Problem::new();
 
@@ -276,28 +276,32 @@ fn benchmark_dataset_se3(
 
                 // Clone the loss function for this edge
                 let loss_clone: Option<Box<dyn Loss + Send>> = match loss_name {
-                    &"L2" => Some(Box::new(L2Loss)),
-                    &"L1" => Some(Box::new(L1Loss)),
-                    &"Huber" => Some(Box::new(HuberLoss::new(*scale).unwrap())),
-                    &"Cauchy" => Some(Box::new(CauchyLoss::new(*scale).unwrap())),
-                    &"Fair" => Some(Box::new(FairLoss::new(*scale).unwrap())),
-                    &"Welsch" => Some(Box::new(WelschLoss::new(*scale).unwrap())),
-                    &"Tukey" => Some(Box::new(TukeyBiweightLoss::new(*scale).unwrap())),
-                    &"GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(*scale).unwrap())),
-                    &"Andrews" => Some(Box::new(AndrewsWaveLoss::new(*scale).unwrap())),
-                    &"Ramsay" => Some(Box::new(RamsayEaLoss::new(*scale).unwrap())),
-                    &"TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(*scale).unwrap())),
-                    &"Lp(1.5)" => Some(Box::new(LpNormLoss::new(*scale).unwrap())),
-                    &"Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, *scale).unwrap())),
-                    &"Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, *scale).unwrap())),
-                    &"Barron(α=-2)" => {
-                        Some(Box::new(BarronGeneralLoss::new(-2.0, *scale).unwrap()))
+                    "L2" => Some(Box::new(L2Loss)),
+                    "L1" => Some(Box::new(L1Loss)),
+                    "Huber" => Some(Box::new(HuberLoss::new(scale_value).unwrap())),
+                    "Cauchy" => Some(Box::new(CauchyLoss::new(scale_value).unwrap())),
+                    "Fair" => Some(Box::new(FairLoss::new(scale_value).unwrap())),
+                    "Welsch" => Some(Box::new(WelschLoss::new(scale_value).unwrap())),
+                    "Tukey" => Some(Box::new(TukeyBiweightLoss::new(scale_value).unwrap())),
+                    "GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(scale_value).unwrap())),
+                    "Andrews" => Some(Box::new(AndrewsWaveLoss::new(scale_value).unwrap())),
+                    "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value).unwrap())),
+                    "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value).unwrap())),
+                    "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value).unwrap())),
+                    "Barron(α=0)" => {
+                        Some(Box::new(BarronGeneralLoss::new(0.0, scale_value).unwrap()))
                     }
-                    &"TDistribution(ν=5)" => {
-                        Some(Box::new(TDistributionLoss::new(*scale).unwrap()))
+                    "Barron(α=1)" => {
+                        Some(Box::new(BarronGeneralLoss::new(1.0, scale_value).unwrap()))
                     }
-                    &"AdaptiveBarron" => {
-                        Some(Box::new(AdaptiveBarronLoss::new(0.0, *scale).unwrap()))
+                    "Barron(α=-2)" => {
+                        Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value).unwrap()))
+                    }
+                    "TDistribution(ν=5)" => {
+                        Some(Box::new(TDistributionLoss::new(scale_value).unwrap()))
+                    }
+                    "AdaptiveBarron" => {
+                        Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value).unwrap()))
                     }
                     _ => None,
                 };
@@ -364,7 +368,7 @@ fn benchmark_dataset_se3(
                         manifold: "SE3".to_string(),
                         optimizer: optimizer_name.to_string(),
                         loss_function: loss_name.to_string(),
-                        scale_param: *scale,
+                        scale_param: scale_value,
                         vertices: num_vertices,
                         edges: num_edges,
                         initial_cost,
@@ -462,9 +466,10 @@ fn benchmark_dataset_se2(
     for optimizer_name in &optimizers {
         println!("\n--- Testing Optimizer: {} ---", optimizer_name);
 
-        for (loss_name, scale, _) in &loss_configs {
+        for &(loss_name, scale, _) in &loss_configs {
             println!("  Testing {} (scale={:.4})...", loss_name, scale);
 
+            let scale_value = scale;
             let mut problem = Problem::new();
 
             for edge in &graph.edges_se2 {
@@ -475,28 +480,32 @@ fn benchmark_dataset_se2(
                 let factor = BetweenFactorSE2::new(trans.x, trans.y, angle);
 
                 let loss_clone: Option<Box<dyn Loss + Send>> = match loss_name {
-                    &"L2" => Some(Box::new(L2Loss)),
-                    &"L1" => Some(Box::new(L1Loss)),
-                    &"Huber" => Some(Box::new(HuberLoss::new(*scale).unwrap())),
-                    &"Cauchy" => Some(Box::new(CauchyLoss::new(*scale).unwrap())),
-                    &"Fair" => Some(Box::new(FairLoss::new(*scale).unwrap())),
-                    &"Welsch" => Some(Box::new(WelschLoss::new(*scale).unwrap())),
-                    &"Tukey" => Some(Box::new(TukeyBiweightLoss::new(*scale).unwrap())),
-                    &"GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(*scale).unwrap())),
-                    &"Andrews" => Some(Box::new(AndrewsWaveLoss::new(*scale).unwrap())),
-                    &"Ramsay" => Some(Box::new(RamsayEaLoss::new(*scale).unwrap())),
-                    &"TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(*scale).unwrap())),
-                    &"Lp(1.5)" => Some(Box::new(LpNormLoss::new(*scale).unwrap())),
-                    &"Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, *scale).unwrap())),
-                    &"Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, *scale).unwrap())),
-                    &"Barron(α=-2)" => {
-                        Some(Box::new(BarronGeneralLoss::new(-2.0, *scale).unwrap()))
+                    "L2" => Some(Box::new(L2Loss)),
+                    "L1" => Some(Box::new(L1Loss)),
+                    "Huber" => Some(Box::new(HuberLoss::new(scale_value).unwrap())),
+                    "Cauchy" => Some(Box::new(CauchyLoss::new(scale_value).unwrap())),
+                    "Fair" => Some(Box::new(FairLoss::new(scale_value).unwrap())),
+                    "Welsch" => Some(Box::new(WelschLoss::new(scale_value).unwrap())),
+                    "Tukey" => Some(Box::new(TukeyBiweightLoss::new(scale_value).unwrap())),
+                    "GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(scale_value).unwrap())),
+                    "Andrews" => Some(Box::new(AndrewsWaveLoss::new(scale_value).unwrap())),
+                    "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value).unwrap())),
+                    "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value).unwrap())),
+                    "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value).unwrap())),
+                    "Barron(α=0)" => {
+                        Some(Box::new(BarronGeneralLoss::new(0.0, scale_value).unwrap()))
                     }
-                    &"TDistribution(ν=5)" => {
-                        Some(Box::new(TDistributionLoss::new(*scale).unwrap()))
+                    "Barron(α=1)" => {
+                        Some(Box::new(BarronGeneralLoss::new(1.0, scale_value).unwrap()))
                     }
-                    &"AdaptiveBarron" => {
-                        Some(Box::new(AdaptiveBarronLoss::new(0.0, *scale).unwrap()))
+                    "Barron(α=-2)" => {
+                        Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value).unwrap()))
+                    }
+                    "TDistribution(ν=5)" => {
+                        Some(Box::new(TDistributionLoss::new(scale_value).unwrap()))
+                    }
+                    "AdaptiveBarron" => {
+                        Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value).unwrap()))
                     }
                     _ => None,
                 };
@@ -562,7 +571,7 @@ fn benchmark_dataset_se2(
                         manifold: "SE2".to_string(),
                         optimizer: optimizer_name.to_string(),
                         loss_function: loss_name.to_string(),
-                        scale_param: *scale,
+                        scale_param: scale_value,
                         vertices: num_vertices,
                         edges: num_edges,
                         initial_cost,
