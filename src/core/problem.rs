@@ -160,7 +160,15 @@ impl VariableEnum {
         match self {
             VariableEnum::SE3(var) => {
                 // SE3 has 6 DOF in tangent space
-                let step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 6 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = manifold::se3::SE3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
@@ -168,7 +176,15 @@ impl VariableEnum {
             }
             VariableEnum::SE2(var) => {
                 // SE2 has 3 DOF in tangent space
-                let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 3 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = manifold::se2::SE2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
@@ -176,7 +192,15 @@ impl VariableEnum {
             }
             VariableEnum::SO3(var) => {
                 // SO3 has 3 DOF in tangent space
-                let step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 3 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = manifold::so3::SO3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
@@ -184,7 +208,13 @@ impl VariableEnum {
             }
             VariableEnum::SO2(var) => {
                 // SO2 has 1 DOF in tangent space
-                let step_data = step_slice[(0, 0)];
+                let mut step_data = step_slice[(0, 0)];
+
+                // Enforce fixed indices: zero out step if index 0 is fixed
+                if var.fixed_indices.contains(&0) {
+                    step_data = 0.0;
+                }
+
                 let step_dvector = nalgebra::DVector::from_vec(vec![step_data]);
                 let tangent = manifold::so2::SO2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
@@ -193,7 +223,15 @@ impl VariableEnum {
             VariableEnum::Rn(var) => {
                 // Rn has dynamic size
                 let size = var.get_size();
-                let step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < size {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
                 let step_dvector = nalgebra::DVector::from_vec(step_data);
                 let tangent = manifold::rn::RnTangent::new(step_dvector);
                 let new_value = var.plus(&tangent);
