@@ -230,7 +230,8 @@ impl ResidualBlock {
 
         // Compute raw residual and Jacobian from the factor
         let (mut residual, jacobian_opt) = self.factor.linearize(&param_vec, true);
-        let mut jacobian = jacobian_opt.expect("Jacobian should be computed when compute_jacobian=true");
+        let mut jacobian =
+            jacobian_opt.expect("Jacobian should be computed when compute_jacobian=true");
 
         // Apply robust loss function if present
         if let Some(loss_func) = self.loss_func.as_ref() {

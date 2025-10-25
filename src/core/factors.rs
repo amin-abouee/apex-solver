@@ -600,18 +600,18 @@ impl Factor for PriorFactor {
     ///     data: DVector::from_vec(vec![1.0, 2.0]),
     /// };
     ///
-/// let current = DVector::from_vec(vec![1.5, 2.3]);
-/// let (residual, jacobian) = prior.linearize(&[current], true);
-///
-/// // Residual shows difference
-/// assert!((residual[0] - 0.5).abs() < 1e-10);
-/// assert!((residual[1] - 0.3).abs() < 1e-10);
-///
-/// // Jacobian is identity
-/// if let Some(jac) = jacobian {
-///     assert_eq!(jac[(0, 0)], 1.0);
-///     assert_eq!(jac[(1, 1)], 1.0);
-/// }
+    /// let current = DVector::from_vec(vec![1.5, 2.3]);
+    /// let (residual, jacobian) = prior.linearize(&[current], true);
+    ///
+    /// // Residual shows difference
+    /// assert!((residual[0] - 0.5).abs() < 1e-10);
+    /// assert!((residual[1] - 0.3).abs() < 1e-10);
+    ///
+    /// // Jacobian is identity
+    /// if let Some(jac) = jacobian {
+    ///     assert_eq!(jac[(0, 0)], 1.0);
+    ///     assert_eq!(jac[(1, 1)], 1.0);
+    /// }
     /// ```
     fn linearize(
         &self,
