@@ -28,4 +28,5 @@ Cargo.lock
 profiles/
 scripts/
 output/
+*.csv
 doc/*.md
