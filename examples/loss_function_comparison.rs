@@ -243,6 +243,16 @@ fn benchmark_dataset_se3(
             1.0,
             Box::new(BarronGeneralLoss::new(-2.0, 1.0)?),
         ),
+        (
+            "TDistribution(ν=5)",
+            5.0,
+            Box::new(TDistributionLoss::new(5.0)?),
+        ),
+        (
+            "AdaptiveBarron",
+            1.0,
+            Box::new(AdaptiveBarronLoss::new(0.0, 1.0)?),
+        ),
     ];
 
     // let optimizers = vec!["LM", "GN", "DL"];
@@ -282,6 +292,12 @@ fn benchmark_dataset_se3(
                     &"Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, *scale).unwrap())),
                     &"Barron(α=-2)" => {
                         Some(Box::new(BarronGeneralLoss::new(-2.0, *scale).unwrap()))
+                    }
+                    &"TDistribution(ν=5)" => {
+                        Some(Box::new(TDistributionLoss::new(*scale).unwrap()))
+                    }
+                    &"AdaptiveBarron" => {
+                        Some(Box::new(AdaptiveBarronLoss::new(0.0, *scale).unwrap()))
                     }
                     _ => None,
                 };
@@ -428,6 +444,16 @@ fn benchmark_dataset_se2(
             1.0,
             Box::new(BarronGeneralLoss::new(-2.0, 1.0)?),
         ),
+        (
+            "TDistribution(ν=5)",
+            5.0,
+            Box::new(TDistributionLoss::new(5.0)?),
+        ),
+        (
+            "AdaptiveBarron",
+            1.0,
+            Box::new(AdaptiveBarronLoss::new(0.0, 1.0)?),
+        ),
     ];
 
     let optimizers = vec!["LM", "GN", "DL"];
@@ -465,6 +491,12 @@ fn benchmark_dataset_se2(
                     &"Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, *scale).unwrap())),
                     &"Barron(α=-2)" => {
                         Some(Box::new(BarronGeneralLoss::new(-2.0, *scale).unwrap()))
+                    }
+                    &"TDistribution(ν=5)" => {
+                        Some(Box::new(TDistributionLoss::new(*scale).unwrap()))
+                    }
+                    &"AdaptiveBarron" => {
+                        Some(Box::new(AdaptiveBarronLoss::new(0.0, *scale).unwrap()))
                     }
                     _ => None,
                 };

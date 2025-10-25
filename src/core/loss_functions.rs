@@ -1273,6 +1273,205 @@ impl Loss for BarronGeneralLoss {
     }
 }
 
+/// Student's t-distribution loss function (robust M-estimator).
+///
+/// The t-distribution loss is derived from the negative log-likelihood of Student's
+/// t-distribution. It provides heavy tails for robustness against outliers, with the
+/// degrees of freedom parameter ν controlling the tail heaviness.
+///
+/// # Mathematical Definition
+///
+/// ```text
+/// ρ(s) = (ν + 1)/2 · log(1 + s/ν)
+/// ρ'(s) = (ν + 1)/(2(ν + s))
+/// ρ''(s) = -(ν + 1)/(2(ν + s)²)
+/// ```
+///
+/// where `ν` is the degrees of freedom and `s = ||r||²` is the squared residual norm.
+///
+/// # Properties
+///
+/// - **Heavy tails**: Provides robustness through heavier tails than Gaussian
+/// - **Parameter control**: Small ν → heavy tails (more robust), large ν → Gaussian (less robust)
+/// - **Well-founded**: Based on maximum likelihood estimation with t-distribution
+/// - **Smooth**: Continuous derivatives for all s > 0
+///
+/// # Degrees of Freedom Selection
+///
+/// - **ν = 3-4**: Very robust, heavy outlier suppression
+/// - **ν = 5**: Recommended default, good balance
+/// - **ν = 10**: Moderate robustness
+/// - **ν → ∞**: Converges to Gaussian (L2 loss)
+///
+/// # Use Cases
+///
+/// - Robust regression with unknown outlier distribution
+/// - SLAM and pose graph optimization with loop closure outliers
+/// - Bundle adjustment with incorrect feature matches
+/// - Any optimization problem with heavy-tailed noise
+///
+/// # References
+///
+/// - Student's t-distribution is widely used in robust statistics
+/// - Applied in robust SLAM (e.g., Chebrolu et al. 2021, Agarwal et al.)
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::core::loss_functions::{Loss, TDistributionLoss};
+///
+/// let t_loss = TDistributionLoss::new(5.0).unwrap();
+///
+/// let [rho, rho_prime, _] = t_loss.evaluate(4.0);
+/// // Robust to outliers with heavy tails
+/// ```
+#[derive(Debug, Clone)]
+pub struct TDistributionLoss {
+    nu: f64,             // Degrees of freedom
+    half_nu_plus_1: f64, // (ν + 1)/2 (cached)
+}
+
+impl TDistributionLoss {
+    /// Create a new Student's t-distribution loss function.
+    ///
+    /// # Arguments
+    ///
+    /// * `nu` - Degrees of freedom (must be positive)
+    ///
+    /// # Recommended Values
+    ///
+    /// - ν = 5.0: Default, good balance between robustness and efficiency
+    /// - ν = 3.0-4.0: More robust to outliers
+    /// - ν = 10.0: Less aggressive, closer to Gaussian
+    pub fn new(nu: f64) -> error::ApexResult<Self> {
+        if nu <= 0.0 {
+            return Err(error::ApexError::InvalidInput(
+                "degrees of freedom must be positive".to_string(),
+            ));
+        }
+        Ok(TDistributionLoss {
+            nu,
+            half_nu_plus_1: (nu + 1.0) / 2.0,
+        })
+    }
+}
+
+impl Loss for TDistributionLoss {
+    fn evaluate(&self, s: f64) -> [f64; 3] {
+        // ρ(s) = (ν + 1)/2 · log(1 + s/ν)
+        let inner = 1.0 + s / self.nu;
+        let rho = self.half_nu_plus_1 * inner.ln();
+
+        // ρ'(s) = (ν + 1)/(2(ν + s))
+        let denom = self.nu + s;
+        let rho_prime = self.half_nu_plus_1 / denom;
+
+        // ρ''(s) = -(ν + 1)/(2(ν + s)²)
+        let rho_double_prime = -self.half_nu_plus_1 / (denom * denom);
+
+        [rho, rho_prime, rho_double_prime]
+    }
+}
+
+/// Adaptive Barron loss function (simplified version).
+///
+/// This is a convenience wrapper around `BarronGeneralLoss` with recommended default
+/// parameters for adaptive robust optimization. Based on Chebrolu et al. (2021) RAL paper
+/// "Adaptive Robust Kernels for Non-Linear Least Squares Problems".
+///
+/// # Mathematical Definition
+///
+/// For α ≠ 0:
+/// ```text
+/// ρ(s) = |α - 2|/α · ((s/c² + 1)^(α/2) - 1)
+/// ```
+///
+/// For α = 0 (Cauchy-like):
+/// ```text
+/// ρ(s) = log(s/(2c²) + 1)
+/// ```
+///
+/// where `α` is the shape parameter and `c` is the scale parameter.
+///
+/// # Properties
+///
+/// - **Adaptive**: Can approximate many M-estimators (Huber, Cauchy, Geman-McClure, etc.)
+/// - **Shape parameter α**: Controls the robustness level
+/// - **Scale parameter c**: Controls the transition point
+/// - **Unified framework**: Single loss function family
+///
+/// # Parameter Selection
+///
+/// **Default (α = 0.0, c = 1.0):**
+/// - Cauchy-like behavior
+/// - Good general-purpose robust loss
+/// - Suitable for moderate to heavy outliers
+///
+/// **Other values:**
+/// - α = 2.0: L2 loss (no robustness)
+/// - α = 1.0: Pseudo-Huber/Charbonnier-like
+/// - α = -2.0: Geman-McClure-like (very robust)
+///
+/// # Note on Adaptivity
+///
+/// This simplified version uses fixed parameters. The full adaptive version from
+/// Chebrolu et al. requires iterative estimation of α based on residual distribution,
+/// which would require integration into the optimizer's main loop.
+///
+/// # References
+///
+/// Chebrolu, N., Läbe, T., Vysotska, O., Behley, J., & Stachniss, C. (2021).
+/// Adaptive robust kernels for non-linear least squares problems.
+/// IEEE Robotics and Automation Letters, 6(2), 2240-2247.
+///
+/// Barron, J. T. (2019). A general and adaptive robust loss function.
+/// IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR).
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::core::loss_functions::{Loss, AdaptiveBarronLoss};
+///
+/// // Default Cauchy-like behavior
+/// let adaptive = AdaptiveBarronLoss::new(0.0, 1.0).unwrap();
+///
+/// let [rho, rho_prime, _] = adaptive.evaluate(4.0);
+/// // Adaptive robust behavior
+/// ```
+#[derive(Debug, Clone)]
+pub struct AdaptiveBarronLoss {
+    inner: BarronGeneralLoss,
+}
+
+impl AdaptiveBarronLoss {
+    /// Create a new adaptive Barron loss function.
+    ///
+    /// # Arguments
+    ///
+    /// * `alpha` - Shape parameter (default: 0.0 for Cauchy-like)
+    /// * `scale` - Scale parameter c (must be positive)
+    ///
+    /// # Recommended Defaults
+    ///
+    /// - α = 0.0, c = 1.0: General-purpose robust loss
+    pub fn new(alpha: f64, scale: f64) -> error::ApexResult<Self> {
+        Ok(AdaptiveBarronLoss {
+            inner: BarronGeneralLoss::new(alpha, scale)?,
+        })
+    }
+
+    /// Create with default parameters (α = 0.0, c = 1.0).
+    pub fn default() -> error::ApexResult<Self> {
+        Self::new(0.0, 1.0)
+    }
+}
+
+impl Loss for AdaptiveBarronLoss {
+    fn evaluate(&self, s: f64) -> [f64; 3] {
+        self.inner.evaluate(s)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1583,5 +1782,93 @@ mod tests {
 
         // Cauchy should strongly suppress outliers
         assert!(w_cauchy < 0.1);
+    }
+
+    #[test]
+    fn test_t_distribution_loss() {
+        let loss = TDistributionLoss::new(5.0).unwrap();
+
+        // Test at s = 0 (should be well-defined)
+        let [rho, rho_prime, _] = loss.evaluate(0.0);
+        assert_eq!(rho, 0.0);
+        assert!((rho_prime - 0.6).abs() < 0.01); // (ν+1)/(2ν) = 6/10 = 0.6
+
+        // Test heavy tail behavior (downweighting)
+        let [_, rho_prime_small, _] = loss.evaluate(1.0);
+        let [_, rho_prime_large, _] = loss.evaluate(100.0);
+        assert!(rho_prime_large < rho_prime_small);
+
+        // Test that large outliers are strongly downweighted
+        assert!(rho_prime_large < 0.1);
+
+        // Verify derivatives numerically
+        let s = 4.0;
+        let [_, rho_prime, rho_double_prime] = loss.evaluate(s);
+        let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
+        assert!((rho_prime - rho_prime_num).abs() < 1e-4);
+        assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_t_distribution_loss_different_nu() {
+        // Test that smaller ν is more robust
+        let t3 = TDistributionLoss::new(3.0).unwrap();
+        let t10 = TDistributionLoss::new(10.0).unwrap();
+
+        let s_outlier = 100.0;
+        let [_, w_t3, _] = t3.evaluate(s_outlier);
+        let [_, w_t10, _] = t10.evaluate(s_outlier);
+
+        // Smaller ν should downweight more aggressively
+        assert!(w_t3 < w_t10);
+    }
+
+    #[test]
+    fn test_adaptive_barron_loss() {
+        // Test default (Cauchy-like with α = 0)
+        let adaptive = AdaptiveBarronLoss::new(0.0, 1.0).unwrap();
+
+        // Test at s = 0
+        let [rho, _, _] = adaptive.evaluate(0.0);
+        assert!(rho.abs() < EPSILON);
+
+        // Test robustness
+        let [_, rho_prime_small, _] = adaptive.evaluate(1.0);
+        let [_, rho_prime_large, _] = adaptive.evaluate(100.0);
+        assert!(rho_prime_large < rho_prime_small);
+
+        // AdaptiveBarron wraps BarronGeneral which is already tested,
+        // so we just verify the wrapper works correctly
+        let barron = BarronGeneralLoss::new(0.0, 1.0).unwrap();
+        let [rho_a, rho_prime_a, rho_double_prime_a] = adaptive.evaluate(4.0);
+        let [rho_b, rho_prime_b, rho_double_prime_b] = barron.evaluate(4.0);
+
+        // Should match the underlying BarronGeneral exactly
+        assert!((rho_a - rho_b).abs() < EPSILON);
+        assert!((rho_prime_a - rho_prime_b).abs() < EPSILON);
+        assert!((rho_double_prime_a - rho_double_prime_b).abs() < EPSILON);
+    }
+
+    #[test]
+    fn test_adaptive_barron_default() {
+        // Test default constructor
+        let adaptive = AdaptiveBarronLoss::default().unwrap();
+
+        // Should behave like Cauchy
+        let [_, rho_prime, _] = adaptive.evaluate(4.0);
+        assert!(rho_prime > 0.0 && rho_prime < 1.0);
+    }
+
+    #[test]
+    fn test_new_loss_constructor_validation() {
+        // T-distribution: reject non-positive degrees of freedom
+        assert!(TDistributionLoss::new(0.0).is_err());
+        assert!(TDistributionLoss::new(-1.0).is_err());
+        assert!(TDistributionLoss::new(5.0).is_ok());
+
+        // Adaptive Barron: reject non-positive scale
+        assert!(AdaptiveBarronLoss::new(0.0, 0.0).is_err());
+        assert!(AdaptiveBarronLoss::new(1.0, -1.0).is_err());
+        assert!(AdaptiveBarronLoss::new(0.0, 1.0).is_ok());
     }
 }
