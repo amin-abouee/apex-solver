@@ -1459,16 +1459,17 @@ impl AdaptiveBarronLoss {
             inner: BarronGeneralLoss::new(alpha, scale)?,
         })
     }
-
-    /// Create with default parameters (α = 0.0, c = 1.0).
-    pub fn default() -> error::ApexResult<Self> {
-        Self::new(0.0, 1.0)
-    }
 }
 
 impl Loss for AdaptiveBarronLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         self.inner.evaluate(s)
+    }
+}
+
+impl Default for AdaptiveBarronLoss {
+    fn default() -> Self {
+        Self::new(0.0, 1.0).unwrap()
     }
 }
 
@@ -1852,7 +1853,7 @@ mod tests {
     #[test]
     fn test_adaptive_barron_default() {
         // Test default constructor
-        let adaptive = AdaptiveBarronLoss::default().unwrap();
+        let adaptive = AdaptiveBarronLoss::default();
 
         // Should behave like Cauchy
         let [_, rho_prime, _] = adaptive.evaluate(4.0);
