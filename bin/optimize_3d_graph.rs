@@ -282,35 +282,33 @@ fn test_se3_dataset(
         || optimizer_type == "dogleg"
         || optimizer_type == "dog-leg";
 
-    if needs_prior {
-        if let Some(&first_id) = vertex_ids.first() {
-            if let Some(first_vertex) = graph.vertices_se3.get(&first_id) {
-                let var_name = format!("x{}", first_id);
-                let quat = first_vertex.pose.rotation_quaternion();
-                let trans = first_vertex.pose.translation();
-                let prior_value =
-                    dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+    if needs_prior
+        && let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
+    {
+        let var_name = format!("x{}", first_id);
+        let quat = first_vertex.pose.rotation_quaternion();
+        let trans = first_vertex.pose.translation();
+        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
 
-                let prior_factor = PriorFactor {
-                    data: prior_value.clone(),
-                };
-                // Use HuberLoss with scale=1.0 (same as tiny-solver-rs)
-                // This allows the first vertex to move slightly if graph structure demands it
-                let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
-                problem.add_residual_block(
-                    &[&var_name],
-                    Box::new(prior_factor),
-                    Some(Box::new(huber_loss)),
-                );
+        let prior_factor = PriorFactor {
+            data: prior_value.clone(),
+        };
+        // Use HuberLoss with scale=1.0 (same as tiny-solver-rs)
+        // This allows the first vertex to move slightly if graph structure demands it
+        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        problem.add_residual_block(
+            &[&var_name],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
 
-                println!(
-                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
-                    first_id,
-                    optimizer_type.to_uppercase()
-                );
-                println!("  Prior value: {:?}", prior_value.as_slice());
-            }
-        }
+        println!(
+            "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
+            first_id,
+            optimizer_type.to_uppercase()
+        );
+        println!("  Prior value: {:?}", prior_value.as_slice());
     } else {
         println!(
             "Skipping prior factor for {} optimizer (has built-in regularization)",

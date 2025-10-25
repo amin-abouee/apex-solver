@@ -245,34 +245,33 @@ fn test_dataset(
         || optimizer_type == "dogleg"
         || optimizer_type == "dog-leg";
 
-    if needs_prior {
-        if let Some(&first_id) = vertex_ids.first() {
-            if let Some(first_vertex) = graph.vertices_se2.get(&first_id) {
-                let var_name = format!("x{}", first_id);
-                let trans = first_vertex.pose.translation();
-                let angle = first_vertex.pose.rotation_angle();
-                let prior_value = dvector![trans.x, trans.y, angle];
+    if needs_prior
+        && let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
+    {
+        let var_name = format!("x{}", first_id);
+        let trans = first_vertex.pose.translation();
+        let angle = first_vertex.pose.rotation_angle();
+        let prior_value = dvector![trans.x, trans.y, angle];
 
-                let prior_factor = PriorFactor {
-                    data: prior_value.clone(),
-                };
-                // Use HuberLoss with scale=1.0 (same as 3D version)
-                // This allows the first vertex to move slightly if graph structure demands it
-                let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
-                problem.add_residual_block(
-                    &[&var_name],
-                    Box::new(prior_factor),
-                    Some(Box::new(huber_loss)),
-                );
+        let prior_factor = PriorFactor {
+            data: prior_value.clone(),
+        };
+        // Use HuberLoss with scale=1.0 (same as 3D version)
+        // This allows the first vertex to move slightly if graph structure demands it
+        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        problem.add_residual_block(
+            &[&var_name],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
 
-                println!(
-                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
-                    first_id,
-                    optimizer_type.to_uppercase()
-                );
-                println!("  Prior value: {:?}", prior_value.as_slice());
-            }
-        }
+        println!(
+            "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
+            first_id,
+            optimizer_type.to_uppercase()
+        );
+        println!("  Prior value: {:?}", prior_value.as_slice());
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         // For LM only, fix the first pose to remove gauge freedom
         // LM's damping (λI) handles the rank deficiency well with fixed variables
