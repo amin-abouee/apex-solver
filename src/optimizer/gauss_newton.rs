@@ -593,10 +593,10 @@ impl GaussNewton {
 
         // CRITERION 8: Timeout
         // Check wall-clock time limit
-        if let Some(timeout) = self.config.timeout {
-            if elapsed >= timeout {
-                return Some(optimizer::OptimizationStatus::Timeout);
-            }
+        if let Some(timeout) = self.config.timeout
+            && elapsed >= timeout
+        {
+            return Some(optimizer::OptimizationStatus::Timeout);
         }
 
         // CRITERION 7: Maximum Iterations
@@ -642,10 +642,10 @@ impl GaussNewton {
 
         // CRITERION 4: Objective Function Cutoff (optional early stopping)
         // Useful for "good enough" solutions
-        if let Some(min_cost) = self.config.min_cost_threshold {
-            if new_cost < min_cost {
-                return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
-            }
+        if let Some(min_cost) = self.config.min_cost_threshold
+            && new_cost < min_cost
+        {
+            return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
         }
 
         // CRITERION 5: Singular/Ill-Conditioned Jacobian

@@ -1098,10 +1098,10 @@ impl DogLeg {
 
         // CRITERION 9: Timeout
         // Check wall-clock time limit
-        if let Some(timeout) = self.config.timeout {
-            if elapsed >= timeout {
-                return Some(optimizer::OptimizationStatus::Timeout);
-            }
+        if let Some(timeout) = self.config.timeout
+            && elapsed >= timeout
+        {
+            return Some(optimizer::OptimizationStatus::Timeout);
         }
 
         // CRITERION 8: Maximum Iterations
@@ -1152,10 +1152,10 @@ impl DogLeg {
 
         // CRITERION 4: Objective Function Cutoff (optional early stopping)
         // Useful for "good enough" solutions
-        if let Some(min_cost) = self.config.min_cost_threshold {
-            if new_cost < min_cost {
-                return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
-            }
+        if let Some(min_cost) = self.config.min_cost_threshold
+            && new_cost < min_cost
+        {
+            return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
         }
 
         // CRITERION 5: Trust Region Radius
@@ -1721,11 +1721,7 @@ impl DogLeg {
             let parameter_norm = Self::compute_parameter_norm(&state.variables);
 
             // Compute costs for convergence check
-            let new_cost = if step_eval.accepted {
-                state.current_cost
-            } else {
-                state.current_cost
-            };
+            let new_cost = state.current_cost;
 
             let cost_before_step = if step_eval.accepted {
                 state.current_cost + step_eval.cost_reduction
