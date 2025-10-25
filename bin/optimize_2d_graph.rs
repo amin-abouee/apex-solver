@@ -41,8 +41,8 @@ struct Args {
     #[arg(long)]
     with_visualizer: bool,
 
-    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2"
-    #[arg(long, default_value = "huber")]
+    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2", "t-distribution", "adaptive-barron"
+    #[arg(long, default_value = "l2")]
     loss_function: String,
 
     /// Scale parameter for the loss function (default: 1.345 for Huber)
@@ -162,8 +162,10 @@ fn create_loss_function(
         "trimmed" | "trimmedmean" => 2.0,
         "lp" => 1.5,
         "barron0" | "barron1" | "barron-2" => 1.0,
+        "t-distribution" | "tdistribution" => 5.0,
+        "adaptive-barron" | "adaptivebarron" => 1.0,
         _ => {
-            return Err(format!("Unknown loss function: {}. Valid options: l2, l1, huber, cauchy, fair, welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, barron-2", loss_name).into());
+            return Err(format!("Unknown loss function: {}. Valid options: l2, l1, huber, cauchy, fair, welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, barron-2, t-distribution, adaptive-barron", loss_name).into());
         }
     };
 
@@ -183,6 +185,10 @@ fn create_loss_function(
         "barron0" => Box::new(BarronGeneralLoss::new(0.0, scale_param)?),
         "barron1" => Box::new(BarronGeneralLoss::new(1.0, scale_param)?),
         "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, scale_param)?),
+        "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(scale_param)?),
+        "adaptive-barron" | "adaptivebarron" => {
+            Box::new(AdaptiveBarronLoss::new(0.0, scale_param)?)
+        }
         _ => unreachable!(),
     };
 
@@ -228,11 +234,16 @@ fn test_dataset(
         }
     }
 
-    // Add prior factor ONLY for Gauss-Newton optimizer
-    // LM and Dog Leg have built-in regularization (λI damping) that handles gauge freedom naturally
-    // GN needs an explicit prior factor to make the Hessian full-rank
+    // Add prior factor for GN and Dog Leg optimizers
+    // - GN: Needs explicit prior to make Hessian full-rank (no built-in damping)
+    // - Dog Leg: Requires valid GN step computation, which needs regularization
+    // - LM: Has built-in λI damping, can use fix_variable() instead
     let optimizer_type = args.optimizer.to_lowercase();
-    let needs_prior = optimizer_type == "gn" || optimizer_type == "gauss-newton";
+    let needs_prior = optimizer_type == "gn"
+        || optimizer_type == "gauss-newton"
+        || optimizer_type == "dl"
+        || optimizer_type == "dogleg"
+        || optimizer_type == "dog-leg";
 
     if needs_prior {
         if let Some(&first_id) = vertex_ids.first() {
@@ -255,14 +266,16 @@ fn test_dataset(
                 );
 
                 println!(
-                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for GN",
-                    first_id
+                    "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
+                    first_id,
+                    optimizer_type.to_uppercase()
                 );
                 println!("  Prior value: {:?}", prior_value.as_slice());
             }
         }
-    } else {
-        // For LM and DL, fix the first pose to remove gauge freedom
+    } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
+        // For LM only, fix the first pose to remove gauge freedom
+        // LM's damping (λI) handles the rank deficiency well with fixed variables
         let first_var_name = format!("x{}", vertex_ids[0]);
         problem.fix_variable(&first_var_name, 0);
         problem.fix_variable(&first_var_name, 1);
