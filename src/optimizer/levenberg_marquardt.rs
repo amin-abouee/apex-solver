@@ -1,15 +1,152 @@
 //! Levenberg-Marquardt algorithm implementation.
 //!
-//! The Levenberg-Marquardt algorithm is a popular optimization method for
-//! nonlinear least squares problems. It interpolates between the Gauss-Newton
-//! algorithm and gradient descent by adding a damping parameter.
+//! The Levenberg-Marquardt (LM) method is a robust and widely-used algorithm for solving
+//! nonlinear least squares problems of the form:
 //!
-//! This implementation includes:
-//! - Adaptive damping parameter adjustment
-//! - Trust region strategy
-//! - Robust numerical factorization
-//! - Comprehensive optimization summaries
-//! - Support for both sparse Cholesky and QR factorizations
+//! ```text
+//! min f(x) = ½||r(x)||² = ½Σᵢ rᵢ(x)²
+//! ```
+//!
+//! where `r: ℝⁿ → ℝᵐ` is the residual vector function.
+//!
+//! # Algorithm Overview
+//!
+//! The Levenberg-Marquardt method solves the damped normal equations at each iteration:
+//!
+//! ```text
+//! (J^T·J + λI)·h = -J^T·r
+//! ```
+//!
+//! where:
+//! - `J` is the Jacobian matrix (m × n)
+//! - `r` is the residual vector (m × 1)
+//! - `h` is the step vector (n × 1)
+//! - `λ` is the adaptive damping parameter (scalar)
+//! - `I` is the identity matrix (or diagonal scaling matrix)
+//!
+//! ## Damping Parameter Strategy
+//!
+//! The damping parameter λ adapts based on step quality:
+//!
+//! - **λ → 0** (small damping): Behaves like Gauss-Newton with fast quadratic convergence
+//! - **λ → ∞** (large damping): Behaves like gradient descent with guaranteed descent direction
+//!
+//! This interpolation between Newton and gradient descent provides excellent robustness
+//! while maintaining fast convergence near the solution.
+//!
+//! ## Step Acceptance and Damping Update
+//!
+//! The algorithm evaluates each proposed step using the gain ratio:
+//!
+//! ```text
+//! ρ = (actual reduction) / (predicted reduction)
+//!   = [f(xₖ) - f(xₖ + h)] / [f(xₖ) - L(h)]
+//! ```
+//!
+//! where `L(h) = f(xₖ) + h^T·g + ½h^T·H·h` is the local quadratic model.
+//!
+//! **Step acceptance:**
+//! - If `ρ > 0`: Accept step (cost decreased), decrease λ to trust the model more
+//! - If `ρ ≤ 0`: Reject step (cost increased), increase λ to be more conservative
+//!
+//! **Damping update** (Nielsen's formula):
+//! ```text
+//! λₖ₊₁ = λₖ · max(1/3, 1 - (2ρ - 1)³)
+//! ```
+//!
+//! This provides smooth, data-driven adaptation of the damping parameter.
+//!
+//! ## Convergence Properties
+//!
+//! - **Global convergence**: Guaranteed to find a stationary point from any starting guess
+//! - **Local quadratic convergence**: Near the solution, behaves like Gauss-Newton
+//! - **Robust to poor initialization**: Adaptive damping prevents divergence
+//! - **Handles ill-conditioning**: Large λ stabilizes nearly singular Hessian
+//!
+//! ## When to Use
+//!
+//! Levenberg-Marquardt is the best general-purpose choice when:
+//! - Initial parameter guess may be far from the optimum
+//! - Problem conditioning is unknown
+//! - Robustness is prioritized over raw speed
+//! - You want reliable convergence across diverse problem types
+//!
+//! For problems with specific structure, consider:
+//! - [`GaussNewton`](crate::optimizer::GaussNewton) if well-conditioned with good initialization
+//! - [`DogLeg`](crate::optimizer::DogLeg) for explicit trust region control
+//!
+//! # Implementation Features
+//!
+//! - **Sparse matrix support**: Efficient handling of large-scale problems via `faer` sparse library
+//! - **Adaptive damping**: Nielsen's formula for smooth parameter adaptation
+//! - **Robust linear solvers**: Cholesky (fast) or QR (stable) factorization
+//! - **Jacobi scaling**: Optional diagonal preconditioning for mixed-scale problems
+//! - **Covariance computation**: Optional uncertainty quantification after convergence
+//! - **Manifold operations**: Native support for optimization on Lie groups (SE2, SE3, SO2, SO3)
+//! - **Comprehensive diagnostics**: Detailed summaries of convergence and performance
+//!
+//! # Mathematical Background
+//!
+//! The augmented Hessian `J^T·J + λI` combines two beneficial properties:
+//!
+//! 1. **Positive definiteness**: Always solvable even when `J^T·J` is singular
+//! 2. **Regularization**: Prevents taking steps in poorly-determined directions
+//!
+//! The trust region interpretation: λ controls an implicit spherical trust region where
+//! larger λ restricts step size, ensuring the linear model remains valid.
+//!
+//! # Examples
+//!
+//! ## Basic usage
+//!
+//! ```no_run
+//! use apex_solver::optimizer::LevenbergMarquardt;
+//! use apex_solver::core::problem::Problem;
+//! use std::collections::HashMap;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut problem = Problem::new();
+//! // ... add residual blocks (factors) to problem ...
+//!
+//! let initial_values = HashMap::new();
+//! // ... initialize parameters ...
+//!
+//! let mut solver = LevenbergMarquardt::new();
+//! let result = solver.optimize(&problem, &initial_values)?;
+//!
+//! println!("Status: {:?}", result.status);
+//! println!("Final cost: {:.6e}", result.final_cost);
+//! println!("Iterations: {}", result.iterations);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Advanced configuration
+//!
+//! ```no_run
+//! use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardtConfig, LevenbergMarquardt};
+//! use apex_solver::linalg::LinearSolverType;
+//!
+//! # fn main() {
+//! let config = LevenbergMarquardtConfig::new()
+//!     .with_max_iterations(100)
+//!     .with_cost_tolerance(1e-6)
+//!     .with_damping(1e-3)  // Initial damping
+//!     .with_damping_bounds(1e-12, 1e12)  // Min/max damping
+//!     .with_jacobi_scaling(true)  // Improve conditioning
+//!     .with_verbose(true);
+//!
+//! let mut solver = LevenbergMarquardt::with_config(config);
+//! # }
+//! ```
+//!
+//! # References
+//!
+//! - Levenberg, K. (1944). "A Method for the Solution of Certain Non-Linear Problems in Least Squares". *Quarterly of Applied Mathematics*.
+//! - Marquardt, D. W. (1963). "An Algorithm for Least-Squares Estimation of Nonlinear Parameters". *Journal of the Society for Industrial and Applied Mathematics*.
+//! - Madsen, K., Nielsen, H. B., & Tingleff, O. (2004). *Methods for Non-Linear Least Squares Problems* (2nd ed.). Chapter 3.
+//! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 10.
+//! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
 use crate::core::problem;
 use crate::error;
@@ -113,7 +250,49 @@ impl fmt::Display for LevenbergMarquardtSummary {
     }
 }
 
-/// Configuration for Levenberg-Marquardt solver.
+/// Configuration parameters for the Levenberg-Marquardt optimizer.
+///
+/// Controls the adaptive damping strategy, convergence criteria, and numerical stability
+/// enhancements for the Levenberg-Marquardt algorithm.
+///
+/// # Builder Pattern
+///
+/// All configuration options can be set using the builder pattern:
+///
+/// ```
+/// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+///
+/// let config = LevenbergMarquardtConfig::new()
+///     .with_max_iterations(100)
+///     .with_damping(1e-3)
+///     .with_damping_bounds(1e-12, 1e12)
+///     .with_jacobi_scaling(true)
+///     .with_verbose(true);
+/// ```
+///
+/// # Damping Parameter Behavior
+///
+/// The damping parameter λ controls the trade-off between Gauss-Newton and gradient descent:
+///
+/// - **Initial damping** (`damping`): Starting value (default: 1e-4)
+/// - **Damping bounds** (`damping_min`, `damping_max`): Valid range (default: 1e-12 to 1e12)
+/// - **Adaptation**: Automatically adjusted based on step quality using Nielsen's formula
+///
+/// # Convergence Criteria
+///
+/// The optimizer terminates when ANY of the following conditions is met:
+///
+/// - **Cost tolerance**: `|cost_k - cost_{k-1}| < cost_tolerance`
+/// - **Parameter tolerance**: `||step|| < parameter_tolerance`
+/// - **Gradient tolerance**: `||J^T·r|| < gradient_tolerance`
+/// - **Maximum iterations**: `iteration >= max_iterations`
+/// - **Timeout**: `elapsed_time >= timeout`
+///
+/// # See Also
+///
+/// - [`LevenbergMarquardt`] - The solver that uses this configuration
+/// - [`GaussNewtonConfig`](crate::optimizer::GaussNewtonConfig) - Undamped variant
+/// - [`DogLegConfig`](crate::optimizer::DogLegConfig) - Trust region alternative
 #[derive(Clone)]
 pub struct LevenbergMarquardtConfig {
     /// Type of linear solver for the linear systems
@@ -349,6 +528,53 @@ struct StepEvaluation {
 }
 
 /// Levenberg-Marquardt solver for nonlinear least squares optimization.
+///
+/// Implements the damped Gauss-Newton method with adaptive damping parameter λ that
+/// interpolates between Gauss-Newton and gradient descent based on step quality.
+///
+/// # Algorithm
+///
+/// At each iteration k:
+/// 1. Compute residual `r(xₖ)` and Jacobian `J(xₖ)`
+/// 2. Solve augmented system: `(J^T·J + λI)·h = -J^T·r`
+/// 3. Evaluate step quality: `ρ = (actual reduction) / (predicted reduction)`
+/// 4. If `ρ > 0`: Accept step and update `xₖ₊₁ = xₖ ⊕ h`, decrease λ
+/// 5. If `ρ ≤ 0`: Reject step (keep `xₖ₊₁ = xₖ`), increase λ
+/// 6. Check convergence criteria
+///
+/// The damping parameter λ is updated using Nielsen's smooth formula:
+/// `λₖ₊₁ = λₖ · max(1/3, 1 - (2ρ - 1)³)` for accepted steps,
+/// or `λₖ₊₁ = λₖ · ν` (with increasing ν) for rejected steps.
+///
+/// # Examples
+///
+/// ```no_run
+/// use apex_solver::optimizer::LevenbergMarquardt;
+/// use apex_solver::core::problem::Problem;
+/// use std::collections::HashMap;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut problem = Problem::new();
+/// // ... add factors to problem ...
+///
+/// let initial_values = HashMap::new();
+/// // ... initialize parameters ...
+///
+/// let mut solver = LevenbergMarquardt::new();
+/// let result = solver.optimize(&problem, &initial_values)?;
+///
+/// println!("Status: {:?}", result.status);
+/// println!("Final cost: {}", result.final_cost);
+/// println!("Iterations: {}", result.iterations);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # See Also
+///
+/// - [`LevenbergMarquardtConfig`] - Configuration options
+/// - [`GaussNewton`](crate::optimizer::GaussNewton) - Undamped variant (faster but less robust)
+/// - [`DogLeg`](crate::optimizer::DogLeg) - Alternative trust region method
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,

@@ -1,14 +1,124 @@
-//! Gauss-Newton optimization algorithm implementation
+//! Gauss-Newton optimization algorithm implementation.
 //!
-//! The Gauss-Newton algorithm is an iterative method for solving non-linear least squares problems.
-//! It approximates the Hessian using only first-order derivatives (J^T·J) and takes pure Newton steps.
+//! The Gauss-Newton method is a fundamental iterative algorithm for solving nonlinear least squares problems
+//! of the form:
 //!
-//! This implementation includes:
-//! - Direct Newton step computation without damping
-//! - Robust numerical factorization (Cholesky or QR)
-//! - Comprehensive optimization summaries
-//! - Support for both sparse Cholesky and QR factorizations
-//! - Optional Jacobi scaling for improved convergence
+//! ```text
+//! min f(x) = ½||r(x)||² = ½Σᵢ rᵢ(x)²
+//! ```
+//!
+//! where `r: ℝⁿ → ℝᵐ` is the residual vector function.
+//!
+//! # Algorithm Overview
+//!
+//! The Gauss-Newton method solves the normal equations at each iteration:
+//!
+//! ```text
+//! J^T·J·h = -J^T·r
+//! ```
+//!
+//! where:
+//! - `J` is the Jacobian matrix (m × n) of partial derivatives ∂rᵢ/∂xⱼ
+//! - `r` is the residual vector (m × 1)
+//! - `h` is the step vector (n × 1)
+//!
+//! The approximated Hessian `H ≈ J^T·J` replaces the true Hessian `∇²f = J^T·J + Σᵢ rᵢ·∇²rᵢ`,
+//! which works well when residuals are small or nearly linear.
+//!
+//! ## Convergence Properties
+//!
+//! - **Quadratic convergence** near the solution when the Gauss-Newton approximation is valid
+//! - **May diverge** if the initial guess is far from the optimum or the problem is ill-conditioned
+//! - **No step size control** - always takes the full Newton step without damping
+//!
+//! ## When to Use
+//!
+//! Gauss-Newton is most effective when:
+//! - The problem is well-conditioned with `J^T·J` having good numerical properties
+//! - The initial parameter guess is close to the solution
+//! - Fast convergence is prioritized over robustness
+//! - Residuals at the solution are expected to be small
+//!
+//! For ill-conditioned problems or poor initial guesses, consider:
+//! - [`LevenbergMarquardt`](crate::optimizer::LevenbergMarquardt) for adaptive damping
+//! - [`DogLeg`](crate::optimizer::DogLeg) for trust region control
+//!
+//! # Implementation Features
+//!
+//! - **Sparse matrix support**: Efficient handling of large-scale problems via `faer` sparse library
+//! - **Robust linear solvers**: Choice between Cholesky (fast) and QR (stable) factorizations
+//! - **Jacobi scaling**: Optional diagonal preconditioning to improve conditioning
+//! - **Manifold operations**: Support for optimization on Lie groups (SE2, SE3, SO2, SO3)
+//! - **Comprehensive diagnostics**: Detailed convergence and performance summaries
+//!
+//! # Mathematical Background
+//!
+//! At each iteration k, the algorithm:
+//!
+//! 1. **Linearizes** the problem around current estimate xₖ: `r(xₖ + h) ≈ r(xₖ) + J(xₖ)·h`
+//! 2. **Solves** the normal equations for step h: `J^T·J·h = -J^T·r`
+//! 3. **Updates** parameters: `xₖ₊₁ = xₖ ⊕ h` (using manifold plus operation)
+//! 4. **Checks** convergence criteria (cost, gradient, parameter change)
+//!
+//! The method terminates when cost change, gradient norm, or parameter update fall below
+//! specified tolerances, or when maximum iterations are reached.
+//!
+//! # Examples
+//!
+//! ## Basic usage
+//!
+//! ```no_run
+//! use apex_solver::optimizer::GaussNewton;
+//! use apex_solver::core::problem::Problem;
+//! use std::collections::HashMap;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create optimization problem
+//! let mut problem = Problem::new();
+//! // ... add residual blocks (factors) to problem ...
+//!
+//! // Set up initial parameter values
+//! let initial_values = HashMap::new();
+//! // ... initialize parameters ...
+//!
+//! // Create solver with default configuration
+//! let mut solver = GaussNewton::new();
+//!
+//! // Run optimization
+//! let result = solver.optimize(&problem, &initial_values)?;
+//!
+//! println!("Converged: {:?}", result.status);
+//! println!("Final cost: {:.6e}", result.final_cost);
+//! println!("Iterations: {}", result.iterations);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Advanced configuration
+//!
+//! ```no_run
+//! use apex_solver::optimizer::gauss_newton::{GaussNewtonConfig, GaussNewton};
+//! use apex_solver::linalg::LinearSolverType;
+//!
+//! # fn main() {
+//! let config = GaussNewtonConfig::new()
+//!     .with_max_iterations(100)
+//!     .with_cost_tolerance(1e-8)
+//!     .with_parameter_tolerance(1e-8)
+//!     .with_gradient_tolerance(1e-10)
+//!     .with_linear_solver_type(LinearSolverType::SparseQR)  // More stable
+//!     .with_jacobi_scaling(true)  // Improve conditioning
+//!     .with_verbose(true);
+//!
+//! let mut solver = GaussNewton::with_config(config);
+//! # }
+//! ```
+//!
+//! # References
+//!
+//! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 10.
+//! - Madsen, K., Nielsen, H. B., & Tingleff, O. (2004). *Methods for Non-Linear Least Squares Problems* (2nd ed.).
+//! - Björck, Å. (1996). *Numerical Methods for Least Squares Problems*. SIAM.
 
 use crate::{core::problem, error, linalg, manifold, optimizer};
 use faer::sparse;
@@ -86,7 +196,41 @@ impl fmt::Display for GaussNewtonSummary {
     }
 }
 
-/// Configuration for Gauss-Newton solver.
+/// Configuration parameters for the Gauss-Newton optimizer.
+///
+/// Controls the behavior of the Gauss-Newton algorithm including convergence criteria,
+/// linear solver selection, and numerical stability enhancements.
+///
+/// # Builder Pattern
+///
+/// All configuration options can be set using the builder pattern:
+///
+/// ```
+/// use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
+/// use apex_solver::linalg::LinearSolverType;
+///
+/// let config = GaussNewtonConfig::new()
+///     .with_max_iterations(50)
+///     .with_cost_tolerance(1e-6)
+///     .with_linear_solver_type(LinearSolverType::SparseQR)
+///     .with_verbose(true);
+/// ```
+///
+/// # Convergence Criteria
+///
+/// The optimizer terminates when ANY of the following conditions is met:
+///
+/// - **Cost tolerance**: `|cost_k - cost_{k-1}| < cost_tolerance`
+/// - **Parameter tolerance**: `||step|| < parameter_tolerance`
+/// - **Gradient tolerance**: `||J^T·r|| < gradient_tolerance`
+/// - **Maximum iterations**: `iteration >= max_iterations`
+/// - **Timeout**: `elapsed_time >= timeout`
+///
+/// # See Also
+///
+/// - [`GaussNewton`] - The solver that uses this configuration
+/// - [`LevenbergMarquardtConfig`](crate::optimizer::LevenbergMarquardtConfig) - For adaptive damping
+/// - [`DogLegConfig`](crate::optimizer::DogLegConfig) - For trust region methods
 #[derive(Clone)]
 pub struct GaussNewtonConfig {
     /// Type of linear solver for the linear systems
@@ -264,6 +408,48 @@ struct CostEvaluation {
 }
 
 /// Gauss-Newton solver for nonlinear least squares optimization.
+///
+/// Implements the classical Gauss-Newton algorithm which solves `J^T·J·h = -J^T·r` at each
+/// iteration to find the step `h`. This provides fast quadratic convergence near the solution
+/// but may diverge for poor initial guesses or ill-conditioned problems.
+///
+/// # Algorithm
+///
+/// At each iteration k:
+/// 1. Compute residual `r(xₖ)` and Jacobian `J(xₖ)`
+/// 2. Form normal equations: `(J^T·J)·h = -J^T·r`
+/// 3. Solve for step `h` using Cholesky or QR factorization
+/// 4. Update parameters: `xₖ₊₁ = xₖ ⊕ h` (manifold plus operation)
+/// 5. Check convergence criteria
+///
+/// # Examples
+///
+/// ```no_run
+/// use apex_solver::optimizer::GaussNewton;
+/// use apex_solver::core::problem::Problem;
+/// use std::collections::HashMap;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut problem = Problem::new();
+/// // ... add factors to problem ...
+///
+/// let initial_values = HashMap::new();
+/// // ... initialize parameters ...
+///
+/// let mut solver = GaussNewton::new();
+/// let result = solver.optimize(&problem, &initial_values)?;
+///
+/// println!("Status: {:?}", result.status);
+/// println!("Final cost: {}", result.final_cost);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # See Also
+///
+/// - [`GaussNewtonConfig`] - Configuration options
+/// - [`LevenbergMarquardt`](crate::optimizer::LevenbergMarquardt) - For adaptive damping
+/// - [`DogLeg`](crate::optimizer::DogLeg) - For trust region control
 pub struct GaussNewton {
     config: GaussNewtonConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,

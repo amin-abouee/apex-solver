@@ -1,15 +1,202 @@
-//! Dog Leg optimization algorithm implementation.
+//! Dog Leg trust region optimization algorithm implementation.
 //!
-//! The Dog Leg algorithm is a trust region method that combines the Gauss-Newton
-//! direction with the steepest descent direction to find an optimal step within
-//! a trust region.
+//! The Dog Leg method is a robust trust region algorithm for solving nonlinear least squares problems:
 //!
-//! This implementation includes:
-//! - Trust region management with adaptive radius adjustment
-//! - Dog leg step computation (interpolation between steepest descent and Gauss-Newton)
-//! - Robust numerical factorization
-//! - Comprehensive optimization summaries
-//! - Support for both sparse Cholesky and QR factorizations
+//! ```text
+//! min f(x) = ½||r(x)||² = ½Σᵢ rᵢ(x)²
+//! ```
+//!
+//! where `r: ℝⁿ → ℝᵐ` is the residual vector function.
+//!
+//! # Algorithm Overview
+//!
+//! Powell's Dog Leg method constructs a piecewise linear path within a spherical trust region
+//! of radius Δ, connecting three key points:
+//!
+//! 1. **Origin** (current position)
+//! 2. **Cauchy Point** p_c = -α·g (optimal steepest descent step)
+//! 3. **Gauss-Newton Point** h_gn (full Newton step solving J^T·J·h = -J^T·r)
+//!
+//! The "dog leg" path travels from the origin to the Cauchy point, then from the Cauchy point
+//! toward the Gauss-Newton point, stopping at the trust region boundary.
+//!
+//! ## Step Selection Strategy
+//!
+//! Given trust region radius Δ, the algorithm selects a step h based on three cases:
+//!
+//! **Case 1: GN step inside trust region** (`||h_gn|| ≤ Δ`)
+//! ```text
+//! h = h_gn  (full Gauss-Newton step)
+//! ```
+//!
+//! **Case 2: Even Cauchy point outside trust region** (`||p_c|| ≥ Δ`)
+//! ```text
+//! h = (Δ / ||g||) · (-g)  (scaled steepest descent to boundary)
+//! ```
+//!
+//! **Case 3: Dog leg interpolation** (`||p_c|| < Δ < ||h_gn||`)
+//! ```text
+//! h(β) = p_c + β·(h_gn - p_c),  where β ∈ [0,1] satisfies ||h(β)|| = Δ
+//! ```
+//!
+//! ## Cauchy Point Computation
+//!
+//! The Cauchy point is the optimal step along the steepest descent direction -g:
+//!
+//! ```text
+//! α = (g^T·g) / (g^T·H·g)  where H = J^T·J
+//! p_c = -α·g
+//! ```
+//!
+//! This minimizes the quadratic model along the gradient direction.
+//!
+//! ## Trust Region Management
+//!
+//! The trust region radius Δ adapts based on the gain ratio:
+//!
+//! ```text
+//! ρ = (actual reduction) / (predicted reduction)
+//! ```
+//!
+//! **Good step** (`ρ > 0.75`): Increase radius `Δ ← max(Δ, 3·||h||)`
+//! **Poor step** (`ρ < 0.25`): Decrease radius `Δ ← Δ/2`
+//! **Moderate step**: Keep radius unchanged
+//!
+//! # Advanced Features (Ceres Solver Enhancements)
+//!
+//! This implementation includes several improvements from Google's Ceres Solver:
+//!
+//! ## 1. Adaptive μ Regularization
+//!
+//! Instead of solving `J^T·J·h = -J^T·r` directly, we solve:
+//!
+//! ```text
+//! (J^T·J + μI)·h = -J^T·r
+//! ```
+//!
+//! where μ adapts to handle ill-conditioned Hessians:
+//! - **Increases** (×10) when linear solve fails
+//! - **Decreases** (÷5) when steps are accepted
+//! - **Bounded** between `min_mu` (1e-8) and `max_mu` (1.0)
+//!
+//! Default `initial_mu = 1e-4` provides good numerical stability.
+//!
+//! ## 2. Numerically Robust Beta Computation
+//!
+//! When computing β for dog leg interpolation, solves: `||p_c + β·v||² = Δ²`
+//!
+//! Uses two formulas to avoid catastrophic cancellation:
+//! ```text
+//! If b ≤ 0:  β = (-b + √(b²-ac)) / a    (standard formula)
+//! If b > 0:  β = -c / (b + √(b²-ac))    (alternative, avoids cancellation)
+//! ```
+//!
+//! ## 3. Step Reuse Mechanism
+//!
+//! When a step is rejected, caches the Gauss-Newton step, Cauchy point, and gradient.
+//! On the next iteration (with smaller Δ), reuses these cached values instead of
+//! recomputing them. This avoids expensive linear solves when trust region shrinks.
+//!
+//! **Safety limits:**
+//! - Maximum 5 consecutive reuses before forcing fresh computation
+//! - Cache invalidated when steps are accepted (parameters have moved)
+//!
+//! ## 4. Jacobi Scaling (Diagonal Preconditioning)
+//!
+//! Optionally applies column scaling to J before forming J^T·J:
+//! ```text
+//! S_ii = 1 / (1 + ||J_i||)  where J_i is column i
+//! ```
+//!
+//! This creates an **elliptical trust region** instead of spherical, improving
+//! convergence for problems with mixed parameter scales.
+//!
+//! # Mathematical Background
+//!
+//! ## Why Dog Leg Works
+//!
+//! The dog leg path is a cheap approximation to the optimal trust region step
+//! (which would require solving a constrained optimization problem). It:
+//!
+//! 1. Exploits the fact that optimal steps often lie near the 2D subspace
+//!    spanned by the gradient and Gauss-Newton directions
+//! 2. Provides global convergence guarantees (always finds descent direction)
+//! 3. Achieves local quadratic convergence (like Gauss-Newton near solution)
+//! 4. Requires only one linear solve per iteration (same as Gauss-Newton)
+//!
+//! ## Convergence Properties
+//!
+//! - **Global convergence**: Guaranteed descent at each iteration
+//! - **Local quadratic convergence**: Reduces to Gauss-Newton near solution
+//! - **Robustness**: Handles ill-conditioning via trust region + μ regularization
+//! - **Efficiency**: Comparable cost to Gauss-Newton with better reliability
+//!
+//! # When to Use
+//!
+//! Dog Leg is an excellent choice when:
+//! - You want explicit control over step size (via trust region radius)
+//! - The problem may be ill-conditioned
+//! - You need guaranteed descent at each iteration
+//! - Initial guess may be poor but you want reliable convergence
+//!
+//! Compared to alternatives:
+//! - **vs Gauss-Newton**: More robust but similar computational cost
+//! - **vs Levenberg-Marquardt**: Explicit trust region vs implicit damping
+//! - Both Dog Leg and LM are excellent general-purpose choices
+//!
+//! # Examples
+//!
+//! ## Basic usage
+//!
+//! ```no_run
+//! use apex_solver::optimizer::DogLeg;
+//! use apex_solver::core::problem::Problem;
+//! use std::collections::HashMap;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut problem = Problem::new();
+//! // ... add residual blocks (factors) to problem ...
+//!
+//! let initial_values = HashMap::new();
+//! // ... initialize parameters ...
+//!
+//! let mut solver = DogLeg::new();
+//! let result = solver.optimize(&problem, &initial_values)?;
+//!
+//! println!("Status: {:?}", result.status);
+//! println!("Final cost: {:.6e}", result.final_cost);
+//! println!("Iterations: {}", result.iterations);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Advanced configuration with Ceres enhancements
+//!
+//! ```no_run
+//! use apex_solver::optimizer::dog_leg::{DogLegConfig, DogLeg};
+//! use apex_solver::linalg::LinearSolverType;
+//!
+//! # fn main() {
+//! let config = DogLegConfig::new()
+//!     .with_max_iterations(100)
+//!     .with_trust_region_radius(1e4)  // Large initial radius
+//!     .with_trust_region_bounds(1e-3, 1e6)  // Min/max radius
+//!     .with_mu_params(1e-4, 1e-8, 1.0, 10.0)  // Conservative regularization
+//!     .with_jacobi_scaling(true)  // Enable elliptical trust regions
+//!     .with_step_reuse(true)  // Enable Ceres-style caching
+//!     .with_verbose(true);
+//!
+//! let mut solver = DogLeg::with_config(config);
+//! # }
+//! ```
+//!
+//! # References
+//!
+//! - Powell, M. J. D. (1970). "A Hybrid Method for Nonlinear Equations". *Numerical Methods for Nonlinear Algebraic Equations*. Gordon and Breach.
+//! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 4 (Trust Region Methods).
+//! - Madsen, K., Nielsen, H. B., & Tingleff, O. (2004). *Methods for Non-Linear Least Squares Problems* (2nd ed.). Chapter 6.
+//! - Conn, A. R., Gould, N. I. M., & Toint, P. L. (2000). *Trust-Region Methods*. SIAM.
+//! - Ceres Solver: http://ceres-solver.org/ - Google's C++ nonlinear least squares library
 
 use crate::{core::problem, error, linalg, manifold, optimizer};
 use faer::sparse;
@@ -110,7 +297,58 @@ impl fmt::Display for DogLegSummary {
     }
 }
 
-/// Configuration for Dog Leg solver.
+/// Configuration parameters for the Dog Leg trust region optimizer.
+///
+/// Controls trust region management, convergence criteria, adaptive regularization,
+/// and Ceres Solver enhancements for the Dog Leg algorithm.
+///
+/// # Builder Pattern
+///
+/// All configuration options can be set using the builder pattern:
+///
+/// ```
+/// use apex_solver::optimizer::dog_leg::DogLegConfig;
+///
+/// let config = DogLegConfig::new()
+///     .with_max_iterations(100)
+///     .with_trust_region_radius(1e4)
+///     .with_mu_params(1e-4, 1e-8, 1.0, 10.0)
+///     .with_jacobi_scaling(true)
+///     .with_step_reuse(true)
+///     .with_verbose(true);
+/// ```
+///
+/// # Trust Region Behavior
+///
+/// The trust region radius Δ controls the maximum allowed step size:
+///
+/// - **Initial radius** (`trust_region_radius`): Starting value (default: 1e4)
+/// - **Bounds** (`trust_region_min`, `trust_region_max`): Valid range (default: 1e-3 to 1e6)
+/// - **Adaptation**: Increases for good steps, decreases for poor steps
+///
+/// # Adaptive μ Regularization (Ceres Enhancement)
+///
+/// Controls the regularization parameter in `(J^T·J + μI)·h = -J^T·r`:
+///
+/// - `initial_mu`: Starting value (default: 1e-4 for numerical stability)
+/// - `min_mu`, `max_mu`: Bounds (default: 1e-8 to 1.0)
+/// - `mu_increase_factor`: Multiplier when solve fails (default: 10.0)
+///
+/// # Convergence Criteria
+///
+/// The optimizer terminates when ANY of the following conditions is met:
+///
+/// - **Cost tolerance**: `|cost_k - cost_{k-1}| < cost_tolerance`
+/// - **Parameter tolerance**: `||step|| < parameter_tolerance`
+/// - **Gradient tolerance**: `||J^T·r|| < gradient_tolerance`
+/// - **Maximum iterations**: `iteration >= max_iterations`
+/// - **Timeout**: `elapsed_time >= timeout`
+///
+/// # See Also
+///
+/// - [`DogLeg`] - The solver that uses this configuration
+/// - [`LevenbergMarquardtConfig`](crate::optimizer::LevenbergMarquardtConfig) - Alternative damping approach
+/// - [`GaussNewtonConfig`](crate::optimizer::GaussNewtonConfig) - Undamped variant
 #[derive(Clone)]
 pub struct DogLegConfig {
     /// Type of linear solver for the linear systems
@@ -392,7 +630,71 @@ struct StepEvaluation {
     rho: f64,
 }
 
-/// Dog Leg solver for nonlinear least squares optimization.
+/// Dog Leg trust region solver for nonlinear least squares optimization.
+///
+/// Implements Powell's Dog Leg algorithm with Ceres Solver enhancements including
+/// adaptive μ regularization, numerically robust beta computation, and step reuse caching.
+///
+/// # Algorithm
+///
+/// At each iteration k:
+/// 1. Compute residual `r(xₖ)` and Jacobian `J(xₖ)`
+/// 2. Solve for Gauss-Newton step: `(J^T·J + μI)·h_gn = -J^T·r`
+/// 3. Compute steepest descent direction: `-g` where `g = J^T·r`
+/// 4. Compute Cauchy point: `p_c = -α·g` (optimal along steepest descent)
+/// 5. Construct dog leg step based on trust region radius Δ:
+///    - If `||h_gn|| ≤ Δ`: Take full GN step
+///    - Else if `||p_c|| ≥ Δ`: Take scaled SD to boundary
+///    - Else: Interpolate `h = p_c + β·(h_gn - p_c)` where `||h|| = Δ`
+/// 6. Evaluate gain ratio: `ρ = (actual reduction) / (predicted reduction)`
+/// 7. Update trust region radius based on ρ
+/// 8. Accept/reject step and update parameters
+///
+/// # Ceres Solver Enhancements
+///
+/// This implementation includes four major improvements from Google's Ceres Solver:
+///
+/// **1. Adaptive μ Regularization:** Dynamically adjusts regularization parameter
+/// to handle ill-conditioned Hessians (increases on failure, decreases on success).
+///
+/// **2. Numerically Robust Beta:** Uses two formulas for computing dog leg
+/// interpolation parameter β to avoid catastrophic cancellation.
+///
+/// **3. Step Reuse Mechanism:** Caches GN step, Cauchy point, and gradient when
+/// steps are rejected. Limited to 5 consecutive reuses to prevent staleness.
+///
+/// **4. Jacobi Scaling:** Optional diagonal preconditioning creates elliptical
+/// trust regions for better handling of mixed-scale problems.
+///
+/// # Examples
+///
+/// ```no_run
+/// use apex_solver::optimizer::DogLeg;
+/// use apex_solver::core::problem::Problem;
+/// use std::collections::HashMap;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut problem = Problem::new();
+/// // ... add factors to problem ...
+///
+/// let initial_values = HashMap::new();
+/// // ... initialize parameters ...
+///
+/// let mut solver = DogLeg::new();
+/// let result = solver.optimize(&problem, &initial_values)?;
+///
+/// println!("Status: {:?}", result.status);
+/// println!("Final cost: {}", result.final_cost);
+/// println!("Iterations: {}", result.iterations);
+/// # Ok(())
+/// # }
+/// ```
+///
+/// # See Also
+///
+/// - [`DogLegConfig`] - Configuration options
+/// - [`LevenbergMarquardt`](crate::optimizer::LevenbergMarquardt) - Alternative adaptive damping
+/// - [`GaussNewton`](crate::optimizer::GaussNewton) - Undamped variant
 pub struct DogLeg {
     config: DogLegConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
@@ -825,53 +1127,52 @@ impl DogLeg {
         if self.reuse_step_on_rejection
             && self.config.enable_step_reuse
             && self.cache_reuse_count < MAX_CACHE_REUSE
-        {
-            if let (Some(cached_gn), Some(cached_cauchy), Some(cached_grad), Some(_cached_a)) = (
+            && let (Some(cached_gn), Some(cached_cauchy), Some(cached_grad), Some(_cached_a)) = (
                 &self.cached_gn_step,
                 &self.cached_cauchy_point,
                 &self.cached_gradient,
                 &self.cached_alpha,
-            ) {
-                // Increment reuse counter
-                self.cache_reuse_count += 1;
+            )
+        {
+            // Increment reuse counter
+            self.cache_reuse_count += 1;
 
-                if self.config.verbose {
-                    println!(
-                        "  Reusing cached GN step and Cauchy point (step was rejected, reuse #{}/{})",
-                        self.cache_reuse_count, MAX_CACHE_REUSE
-                    );
-                }
-
-                let gradient_norm = cached_grad.norm_l2();
-                let mut steepest_descent = faer::Mat::zeros(cached_grad.nrows(), 1);
-                for i in 0..cached_grad.nrows() {
-                    steepest_descent[(i, 0)] = -cached_grad[(i, 0)];
-                }
-
-                let (scaled_step, step_type) = self.compute_dog_leg_step(
-                    &steepest_descent,
-                    cached_cauchy,
-                    cached_gn,
-                    self.config.trust_region_radius,
+            if self.config.verbose {
+                println!(
+                    "  Reusing cached GN step and Cauchy point (step was rejected, reuse #{}/{})",
+                    self.cache_reuse_count, MAX_CACHE_REUSE
                 );
-
-                let step = if self.config.use_jacobi_scaling {
-                    self.jacobi_scaling.as_ref().unwrap() * &scaled_step
-                } else {
-                    scaled_step.clone()
-                };
-
-                let hessian = linear_solver.get_hessian()?;
-                let predicted_reduction =
-                    self.compute_predicted_reduction(&scaled_step, cached_grad, hessian);
-
-                return Some(StepResult {
-                    step,
-                    gradient_norm,
-                    predicted_reduction,
-                    step_type,
-                });
             }
+
+            let gradient_norm = cached_grad.norm_l2();
+            let mut steepest_descent = faer::Mat::zeros(cached_grad.nrows(), 1);
+            for i in 0..cached_grad.nrows() {
+                steepest_descent[(i, 0)] = -cached_grad[(i, 0)];
+            }
+
+            let (scaled_step, step_type) = self.compute_dog_leg_step(
+                &steepest_descent,
+                cached_cauchy,
+                cached_gn,
+                self.config.trust_region_radius,
+            );
+
+            let step = if self.config.use_jacobi_scaling {
+                self.jacobi_scaling.as_ref().unwrap() * &scaled_step
+            } else {
+                scaled_step.clone()
+            };
+
+            let hessian = linear_solver.get_hessian()?;
+            let predicted_reduction =
+                self.compute_predicted_reduction(&scaled_step, cached_grad, hessian);
+
+            return Some(StepResult {
+                step,
+                gradient_norm,
+                predicted_reduction,
+                step_type,
+            });
         }
 
         // Not reusing, compute fresh step
