@@ -2,6 +2,25 @@
 name = "apex-solver"
 version = "0.1.4"
 edition = "2024"
+authors = ["Amin Abouee <amin.abouee@gmail.com>"]
+description = "A high-performance Rust library for nonlinear least squares optimization with Lie group support, designed for SLAM, bundle adjustment, and pose graph optimization"
+license = "Apache-2.0"
+repository = "https://github.com/amin-abouee/apex-solver"
+homepage = "https://github.com/amin-abouee/apex-solver"
+documentation = "https://docs.rs/apex-solver"
+readme = "README.md"
+keywords = ["optimization", "slam", "computer-vision", "bundle-adjustment", "nonlinear-least-squares"]
+categories = ["algorithms", "science", "mathematics"]
+exclude = [
+    "data_bk/*",
+    "doc/*.md",
+    "profiles/*",
+    "output/*",
+    ".github/*",
+    ".claude/*",
+    ".rust_rules.mdc",
+    "CLAUDE.md",
+]
 
 [[bin]]
 name = "optimize_3d_graph"
