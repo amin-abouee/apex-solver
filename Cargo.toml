@@ -9,7 +9,7 @@ repository = "https://github.com/amin-abouee/apex-solver"
 homepage = "https://github.com/amin-abouee/apex-solver"
 documentation = "https://docs.rs/apex-solver"
 readme = "README.md"
-keywords = ["optimization", "slam", "computer-vision", "bundle-adjustment", "nonlinear-least-squares"]
+keywords = ["optimization", "slam", "computer-vision", "bundle-adjustment", "nls"]
 categories = ["algorithms", "science", "mathematics"]
 exclude = [
     "data_bk/*",
