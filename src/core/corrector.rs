@@ -80,8 +80,8 @@
 //! // Outliers have been downweighted appropriately
 //! ```
 
-use crate::core::loss_functions;
-use nalgebra;
+use crate::core::loss_functions::Loss;
+use nalgebra::{DMatrix, DVector};
 
 /// Corrector for applying robust loss functions via residual and Jacobian adjustment.
 ///
@@ -130,7 +130,7 @@ impl Corrector {
     /// let corrector = Corrector::new(&loss, squared_norm);
     /// // corrector is now ready to apply corrections
     /// ```
-    pub fn new(loss_function: &dyn loss_functions::Loss, sq_norm: f64) -> Self {
+    pub fn new(loss_function: &dyn Loss, sq_norm: f64) -> Self {
         // Evaluate loss function: [ρ(s), ρ'(s), ρ''(s)]
         let rho = loss_function.evaluate(sq_norm);
 
@@ -213,11 +213,7 @@ impl Corrector {
     /// corrector.correct_jacobian(&residual, &mut jacobian);
     /// // jacobian is now corrected to account for the robust loss
     /// ```
-    pub fn correct_jacobian(
-        &self,
-        residual: &nalgebra::DVector<f64>,
-        jacobian: &mut nalgebra::DMatrix<f64>,
-    ) {
+    pub fn correct_jacobian(&self, residual: &DVector<f64>, jacobian: &mut DMatrix<f64>) {
         // Common case (rho[2] <= 0): only apply first-order correction
         // This is the most common scenario for well-behaved loss functions
         if self.alpha_sq_norm == 0.0 {
@@ -273,7 +269,7 @@ impl Corrector {
     /// println!("Corrected residual norm: {}", residual.norm());
     /// // Outlier residuals are scaled down
     /// ```
-    pub fn correct_residuals(&self, residual: &mut nalgebra::DVector<f64>) {
+    pub fn correct_residuals(&self, residual: &mut DVector<f64>) {
         // Simple scaling: r̃ = √(ρ'(s)) · r
         //
         // This downweights outliers (where ρ'(s) < 1) and leaves inliers
@@ -285,13 +281,13 @@ impl Corrector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::loss_functions;
+    use crate::core::loss_functions::{CauchyLoss, HuberLoss};
 
     #[test]
     fn test_corrector_huber_inlier() {
         // Test corrector behavior for an inlier (small residual)
-        let loss = loss_functions::HuberLoss::new(1.0).unwrap();
-        let residual = nalgebra::DVector::from_vec(vec![0.1, 0.2, 0.1]); // Small residual
+        let loss = HuberLoss::new(1.0).unwrap();
+        let residual = DVector::from_vec(vec![0.1, 0.2, 0.1]); // Small residual
         let squared_norm = residual.dot(&residual); // 0.06
 
         let corrector = Corrector::new(&loss, squared_norm);
@@ -309,8 +305,8 @@ mod tests {
     #[test]
     fn test_corrector_huber_outlier() {
         // Test corrector behavior for an outlier (large residual)
-        let loss = loss_functions::HuberLoss::new(1.0).unwrap();
-        let residual = nalgebra::DVector::from_vec(vec![5.0, 5.0, 5.0]); // Large residual
+        let loss = HuberLoss::new(1.0).unwrap();
+        let residual = DVector::from_vec(vec![5.0, 5.0, 5.0]); // Large residual
         let squared_norm = residual.dot(&residual); // 75.0
 
         let corrector = Corrector::new(&loss, squared_norm);
@@ -328,8 +324,8 @@ mod tests {
     #[test]
     fn test_corrector_cauchy() {
         // Test corrector with Cauchy loss
-        let loss = loss_functions::CauchyLoss::new(1.0).unwrap();
-        let residual = nalgebra::DVector::from_vec(vec![2.0, 3.0]);
+        let loss = CauchyLoss::new(1.0).unwrap();
+        let residual = DVector::from_vec(vec![2.0, 3.0]);
         let squared_norm = residual.dot(&residual); // 13.0
 
         let corrector = Corrector::new(&loss, squared_norm);
@@ -346,13 +342,13 @@ mod tests {
     #[test]
     fn test_corrector_jacobian() {
         // Test Jacobian correction
-        let loss = loss_functions::HuberLoss::new(1.0).unwrap();
-        let residual = nalgebra::DVector::from_vec(vec![2.0, 1.0]);
+        let loss = HuberLoss::new(1.0).unwrap();
+        let residual = DVector::from_vec(vec![2.0, 1.0]);
         let squared_norm = residual.dot(&residual);
 
         let corrector = Corrector::new(&loss, squared_norm);
 
-        let mut jacobian = nalgebra::DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+        let mut jacobian = DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
 
         let original_jacobian = jacobian.clone();
         corrector.correct_jacobian(&residual, &mut jacobian);
