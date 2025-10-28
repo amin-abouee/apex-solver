@@ -59,7 +59,7 @@
 //! # Example
 //!
 //! ```
-//! use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+//! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //!
 //! let huber = HuberLoss::new(1.345).unwrap();
 //!
@@ -141,7 +141,7 @@ pub trait LossFunction: Send + Sync {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, L2Loss};
+/// use apex_solver::core::loss_functions::{LossFunction, L2Loss};
 ///
 /// let l2 = L2Loss::new();
 ///
@@ -203,7 +203,7 @@ impl LossFunction for L2Loss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, L1Loss};
+/// use apex_solver::core::loss_functions::{LossFunction, L1Loss};
 ///
 /// let l1 = L1Loss::new();
 ///
@@ -278,7 +278,7 @@ impl LossFunction for L1Loss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 ///
 /// // Create Huber loss with scale = 1.345 (standard choice)
 /// let huber = HuberLoss::new(1.345).unwrap();
@@ -401,7 +401,7 @@ impl LossFunction for HuberLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, CauchyLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, CauchyLoss};
 ///
 /// // Create Cauchy loss with scale = 2.3849 (standard choice)
 /// let cauchy = CauchyLoss::new(2.3849).unwrap();
@@ -516,7 +516,7 @@ impl LossFunction for CauchyLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, FairLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, FairLoss};
 ///
 /// let fair = FairLoss::new(1.3998).unwrap();
 ///
@@ -602,7 +602,7 @@ impl LossFunction for FairLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, GemanMcClureLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, GemanMcClureLoss};
 ///
 /// let geman = GemanMcClureLoss::new(1.0).unwrap();
 ///
@@ -677,7 +677,7 @@ impl LossFunction for GemanMcClureLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, WelschLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, WelschLoss};
 ///
 /// let welsch = WelschLoss::new(2.9846).unwrap();
 ///
@@ -761,7 +761,7 @@ impl LossFunction for WelschLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, TukeyBiweightLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, TukeyBiweightLoss};
 ///
 /// let tukey = TukeyBiweightLoss::new(4.6851).unwrap();
 ///
@@ -854,7 +854,7 @@ impl LossFunction for TukeyBiweightLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, AndrewsWaveLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, AndrewsWaveLoss};
 ///
 /// let andrews = AndrewsWaveLoss::new(1.339).unwrap();
 ///
@@ -938,7 +938,7 @@ impl LossFunction for AndrewsWaveLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, RamsayEaLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, RamsayEaLoss};
 ///
 /// let ramsay = RamsayEaLoss::new(0.3).unwrap();
 ///
@@ -1029,7 +1029,7 @@ impl LossFunction for RamsayEaLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, TrimmedMeanLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, TrimmedMeanLoss};
 ///
 /// let trimmed = TrimmedMeanLoss::new(2.0).unwrap();
 ///
@@ -1102,7 +1102,7 @@ impl LossFunction for TrimmedMeanLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, LpNormLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, LpNormLoss};
 ///
 /// let lp = LpNormLoss::new(1.5).unwrap();
 ///
@@ -1195,7 +1195,7 @@ impl LossFunction for LpNormLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, BarronGeneralLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, BarronGeneralLoss};
 ///
 /// // Cauchy-like behavior
 /// let barron = BarronGeneralLoss::new(0.0, 1.0).unwrap();
@@ -1316,7 +1316,7 @@ impl LossFunction for BarronGeneralLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, TDistributionLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, TDistributionLoss};
 ///
 /// let t_loss = TDistributionLoss::new(5.0).unwrap();
 ///
@@ -1428,7 +1428,7 @@ impl LossFunction for TDistributionLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss_Function, AdaptiveBarronLoss};
+/// use apex_solver::core::loss_functions::{LossFunction, AdaptiveBarronLoss};
 ///
 /// // Default Cauchy-like behavior
 /// let adaptive = AdaptiveBarronLoss::new(0.0, 1.0).unwrap();

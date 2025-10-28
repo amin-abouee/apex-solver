@@ -49,7 +49,7 @@
 //!
 //! ```
 //! use apex_solver::core::corrector::Corrector;
-//! use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+//! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use nalgebra::{DVector, DMatrix};
 //!
 //! // Create a robust loss function
@@ -120,7 +120,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss_Function_Function, HuberLoss};
+    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();
@@ -196,7 +196,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::{DVector, DMatrix};
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();
@@ -255,7 +255,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();

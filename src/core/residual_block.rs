@@ -34,7 +34,7 @@
 //! ```
 //! use apex_solver::core::residual_block::ResidualBlock;
 //! use apex_solver::core::factors::{Factor, BetweenFactorSE2};
-//! use apex_solver::core::loss_functions::{Loss, HuberLoss};
+//! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::SE2;
 //!
@@ -42,7 +42,7 @@
 //! let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
 //!
 //! // Add robust loss function for outlier rejection
-//! let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+//! let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn LossFunction + Send>);
 //!
 //! // Create residual block
 //! let block = ResidualBlock::new(
@@ -135,10 +135,10 @@ impl ResidualBlock {
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
     /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
-    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
+    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     ///
     /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-    /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+    /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn LossFunction + Send>);
     ///
     /// let block = ResidualBlock::new(
     ///     0,                  // First block
