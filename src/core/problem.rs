@@ -68,7 +68,7 @@
 //!
 //! // Add between factor with robust loss
 //! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-//! let loss: Option<Box<dyn apex_solver::core::loss_functions::Loss + Send>> =
+//! let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
 //!     Some(Box::new(HuberLoss::new(1.0).unwrap()));
 //! problem.add_residual_block(&["x0", "x1"], between, loss);
 //!
@@ -477,7 +477,7 @@ impl Problem {
     ///
     /// // Add between factor with robust loss (binary constraint)
     /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-    /// let loss: Option<Box<dyn apex_solver::core::loss_functions::Loss + Send>> =
+    /// let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
     ///     Some(Box::new(HuberLoss::new(1.0).unwrap()));
     /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
     ///
