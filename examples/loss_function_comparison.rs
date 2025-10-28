@@ -215,7 +215,7 @@ fn benchmark_dataset_se3(
     }
 
     // Define ALL 14 loss functions to test
-    let loss_configs: Vec<(&str, f64, Box<dyn Loss + Send>)> = vec![
+    let loss_configs: Vec<(&str, f64, Box<dyn LossFunction + Send>)> = vec![
         ("L2", 1.0, Box::new(L2Loss)),
         ("L1", 1.0, Box::new(L1Loss)),
         ("Huber", 1.345, Box::new(HuberLoss::new(1.345)?)),
@@ -275,7 +275,7 @@ fn benchmark_dataset_se3(
                 let factor = BetweenFactorSE3::new(edge.measurement.clone());
 
                 // Clone the loss function for this edge
-                let loss_clone: Option<Box<dyn Loss + Send>> = match loss_name {
+                let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
                     "L2" => Some(Box::new(L2Loss)),
                     "L1" => Some(Box::new(L1Loss)),
                     "Huber" => Some(Box::new(HuberLoss::new(scale_value).unwrap())),
@@ -420,7 +420,7 @@ fn benchmark_dataset_se2(
     }
 
     // Define ALL 14 loss functions to test
-    let loss_configs: Vec<(&str, f64, Box<dyn Loss + Send>)> = vec![
+    let loss_configs: Vec<(&str, f64, Box<dyn LossFunction + Send>)> = vec![
         ("L2", 1.0, Box::new(L2Loss)),
         ("L1", 1.0, Box::new(L1Loss)),
         ("Huber", 1.345, Box::new(HuberLoss::new(1.345)?)),
@@ -479,7 +479,7 @@ fn benchmark_dataset_se2(
                 let angle = edge.measurement.rotation_angle();
                 let factor = BetweenFactorSE2::new(trans.x, trans.y, angle);
 
-                let loss_clone: Option<Box<dyn Loss + Send>> = match loss_name {
+                let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
                     "L2" => Some(Box::new(L2Loss)),
                     "L1" => Some(Box::new(L1Loss)),
                     "Huber" => Some(Box::new(HuberLoss::new(scale_value).unwrap())),

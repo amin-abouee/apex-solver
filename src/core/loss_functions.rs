@@ -59,7 +59,7 @@
 //! # Example
 //!
 //! ```
-//! use apex_solver::core::loss_functions::{Loss, HuberLoss};
+//! use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
 //!
 //! let huber = HuberLoss::new(1.345).unwrap();
 //!
@@ -96,7 +96,7 @@ use crate::error::{ApexError, ApexResult};
 /// - Loss functions should be smooth (at least C²) for optimization stability
 /// - Typically ρ(0) = 0, ρ'(0) = 1, ρ''(0) = 0 (behaves like standard least squares near zero)
 /// - For outliers, ρ'(s) should decrease to downweight large residuals
-pub trait Loss: Send + Sync {
+pub trait LossFunction: Send + Sync {
     /// Evaluate the loss function and its first two derivatives at squared residual `s`.
     ///
     /// # Arguments
@@ -141,7 +141,7 @@ pub trait Loss: Send + Sync {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, L2Loss};
+/// use apex_solver::core::loss_functions::{Loss_Function, L2Loss};
 ///
 /// let l2 = L2Loss::new();
 ///
@@ -166,7 +166,7 @@ impl Default for L2Loss {
     }
 }
 
-impl Loss for L2Loss {
+impl LossFunction for L2Loss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         [s, 1.0, 0.0]
     }
@@ -203,7 +203,7 @@ impl Loss for L2Loss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, L1Loss};
+/// use apex_solver::core::loss_functions::{Loss_Function, L1Loss};
 ///
 /// let l1 = L1Loss::new();
 ///
@@ -227,7 +227,7 @@ impl Default for L1Loss {
     }
 }
 
-impl Loss for L1Loss {
+impl LossFunction for L1Loss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             // Near zero: use L2 to avoid singularity
@@ -278,7 +278,7 @@ impl Loss for L1Loss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
 ///
 /// // Create Huber loss with scale = 1.345 (standard choice)
 /// let huber = HuberLoss::new(1.345).unwrap();
@@ -333,7 +333,7 @@ impl HuberLoss {
     }
 }
 
-impl Loss for HuberLoss {
+impl LossFunction for HuberLoss {
     /// Evaluate Huber loss function: ρ(s), ρ'(s), ρ''(s).
     ///
     /// # Arguments
@@ -401,7 +401,7 @@ impl Loss for HuberLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, CauchyLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, CauchyLoss};
 ///
 /// // Create Cauchy loss with scale = 2.3849 (standard choice)
 /// let cauchy = CauchyLoss::new(2.3849).unwrap();
@@ -455,7 +455,7 @@ impl CauchyLoss {
     }
 }
 
-impl Loss for CauchyLoss {
+impl LossFunction for CauchyLoss {
     /// Evaluate Cauchy loss function: ρ(s), ρ'(s), ρ''(s).
     ///
     /// # Arguments
@@ -516,7 +516,7 @@ impl Loss for CauchyLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, FairLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, FairLoss};
 ///
 /// let fair = FairLoss::new(1.3998).unwrap();
 ///
@@ -548,7 +548,7 @@ impl FairLoss {
     }
 }
 
-impl Loss for FairLoss {
+impl LossFunction for FairLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             return [s, 1.0, 0.0];
@@ -602,7 +602,7 @@ impl Loss for FairLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, GemanMcClureLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, GemanMcClureLoss};
 ///
 /// let geman = GemanMcClureLoss::new(1.0).unwrap();
 ///
@@ -631,7 +631,7 @@ impl GemanMcClureLoss {
     }
 }
 
-impl Loss for GemanMcClureLoss {
+impl LossFunction for GemanMcClureLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let denom = 1.0 + s * self.c; // 1 + s/c²
         let inv = 1.0 / denom;
@@ -677,7 +677,7 @@ impl Loss for GemanMcClureLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, WelschLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, WelschLoss};
 ///
 /// let welsch = WelschLoss::new(2.9846).unwrap();
 ///
@@ -710,7 +710,7 @@ impl WelschLoss {
     }
 }
 
-impl Loss for WelschLoss {
+impl LossFunction for WelschLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let exp_term = (-s * self.inv_scale2).exp();
 
@@ -761,7 +761,7 @@ impl Loss for WelschLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, TukeyBiweightLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, TukeyBiweightLoss};
 ///
 /// let tukey = TukeyBiweightLoss::new(4.6851).unwrap();
 ///
@@ -793,7 +793,7 @@ impl TukeyBiweightLoss {
     }
 }
 
-impl Loss for TukeyBiweightLoss {
+impl LossFunction for TukeyBiweightLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
 
@@ -854,7 +854,7 @@ impl Loss for TukeyBiweightLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, AndrewsWaveLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, AndrewsWaveLoss};
 ///
 /// let andrews = AndrewsWaveLoss::new(1.339).unwrap();
 ///
@@ -888,7 +888,7 @@ impl AndrewsWaveLoss {
     }
 }
 
-impl Loss for AndrewsWaveLoss {
+impl LossFunction for AndrewsWaveLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
 
@@ -938,7 +938,7 @@ impl Loss for AndrewsWaveLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, RamsayEaLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, RamsayEaLoss};
 ///
 /// let ramsay = RamsayEaLoss::new(0.3).unwrap();
 ///
@@ -970,7 +970,7 @@ impl RamsayEaLoss {
     }
 }
 
-impl Loss for RamsayEaLoss {
+impl LossFunction for RamsayEaLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
         let ax = self.scale * x;
@@ -1029,7 +1029,7 @@ impl Loss for RamsayEaLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, TrimmedMeanLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, TrimmedMeanLoss};
 ///
 /// let trimmed = TrimmedMeanLoss::new(2.0).unwrap();
 ///
@@ -1059,7 +1059,7 @@ impl TrimmedMeanLoss {
     }
 }
 
-impl Loss for TrimmedMeanLoss {
+impl LossFunction for TrimmedMeanLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s <= self.scale2 {
             [s / 2.0, 0.5, 0.0]
@@ -1102,7 +1102,7 @@ impl Loss for TrimmedMeanLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, LpNormLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, LpNormLoss};
 ///
 /// let lp = LpNormLoss::new(1.5).unwrap();
 ///
@@ -1128,7 +1128,7 @@ impl LpNormLoss {
     }
 }
 
-impl Loss for LpNormLoss {
+impl LossFunction for LpNormLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             return [s, 1.0, 0.0];
@@ -1195,7 +1195,7 @@ impl Loss for LpNormLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, BarronGeneralLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, BarronGeneralLoss};
 ///
 /// // Cauchy-like behavior
 /// let barron = BarronGeneralLoss::new(0.0, 1.0).unwrap();
@@ -1231,7 +1231,7 @@ impl BarronGeneralLoss {
     }
 }
 
-impl Loss for BarronGeneralLoss {
+impl LossFunction for BarronGeneralLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         // Handle special case α ≈ 0 (Cauchy loss)
         if self.alpha.abs() < 1e-6 {
@@ -1316,7 +1316,7 @@ impl Loss for BarronGeneralLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, TDistributionLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, TDistributionLoss};
 ///
 /// let t_loss = TDistributionLoss::new(5.0).unwrap();
 ///
@@ -1354,7 +1354,7 @@ impl TDistributionLoss {
     }
 }
 
-impl Loss for TDistributionLoss {
+impl LossFunction for TDistributionLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         // ρ(s) = (ν + 1)/2 · log(1 + s/ν)
         let inner = 1.0 + s / self.nu;
@@ -1428,7 +1428,7 @@ impl Loss for TDistributionLoss {
 /// # Example
 ///
 /// ```
-/// use apex_solver::core::loss_functions::{Loss, AdaptiveBarronLoss};
+/// use apex_solver::core::loss_functions::{Loss_Function, AdaptiveBarronLoss};
 ///
 /// // Default Cauchy-like behavior
 /// let adaptive = AdaptiveBarronLoss::new(0.0, 1.0).unwrap();
@@ -1459,7 +1459,7 @@ impl AdaptiveBarronLoss {
     }
 }
 
-impl Loss for AdaptiveBarronLoss {
+impl LossFunction for AdaptiveBarronLoss {
     fn evaluate(&self, s: f64) -> [f64; 3] {
         self.inner.evaluate(s)
     }
@@ -1478,7 +1478,7 @@ mod tests {
     const EPSILON: f64 = 1e-6;
 
     /// Helper function to test derivatives numerically
-    fn numerical_derivative(loss: &dyn Loss, s: f64, h: f64) -> (f64, f64) {
+    fn numerical_derivative(loss: &dyn LossFunction, s: f64, h: f64) -> (f64, f64) {
         let [rho_plus, _, _] = loss.evaluate(s + h);
         let [rho_minus, _, _] = loss.evaluate(s - h);
         let [rho, _, _] = loss.evaluate(s);

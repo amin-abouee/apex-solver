@@ -49,7 +49,7 @@
 //!
 //! ```
 //! use apex_solver::core::corrector::Corrector;
-//! use apex_solver::core::loss_functions::{Loss, HuberLoss};
+//! use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
 //! use nalgebra::{DVector, DMatrix};
 //!
 //! // Create a robust loss function
@@ -80,7 +80,7 @@
 //! // Outliers have been downweighted appropriately
 //! ```
 
-use crate::core::loss_functions::Loss;
+use crate::core::loss_functions::LossFunction;
 use nalgebra::{DMatrix, DVector};
 
 /// Corrector for applying robust loss functions via residual and Jacobian adjustment.
@@ -120,7 +120,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+    /// use apex_solver::core::loss_functions::{Loss_Function_Function, HuberLoss};
     /// use nalgebra::DVector;
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();
@@ -130,7 +130,7 @@ impl Corrector {
     /// let corrector = Corrector::new(&loss, squared_norm);
     /// // corrector is now ready to apply corrections
     /// ```
-    pub fn new(loss_function: &dyn Loss, sq_norm: f64) -> Self {
+    pub fn new(loss_function: &dyn LossFunction, sq_norm: f64) -> Self {
         // Evaluate loss function: [ρ(s), ρ'(s), ρ''(s)]
         let rho = loss_function.evaluate(sq_norm);
 
@@ -196,7 +196,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
     /// use nalgebra::{DVector, DMatrix};
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();
@@ -255,7 +255,7 @@ impl Corrector {
     ///
     /// ```
     /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
     /// use nalgebra::DVector;
     ///
     /// let loss = HuberLoss::new(1.0).unwrap();
