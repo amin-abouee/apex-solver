@@ -99,8 +99,8 @@ use rayon::prelude::*;
 
 use crate::{
     core::{
-        corrector::Corrector, factors::Factor, loss_functions::Loss, residual_block::ResidualBlock,
-        variable::Variable,
+        corrector::Corrector, factors::Factor, loss_functions::LossFunction,
+        residual_block::ResidualBlock, variable::Variable,
     },
     error::{ApexError, ApexResult},
     linalg::{SparseLinearSolver, extract_variable_covariances},
@@ -489,7 +489,7 @@ impl Problem {
         &mut self,
         variable_key_size_list: &[&str],
         factor: Box<dyn Factor + Send>,
-        loss_func: Option<Box<dyn Loss + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> usize {
         let new_residual_dimension = factor.get_dimension();
         self.residual_blocks.insert(

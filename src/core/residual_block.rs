@@ -65,7 +65,7 @@
 use nalgebra::{DMatrix, DVector};
 
 use crate::core::{
-    corrector::Corrector, factors::Factor, loss_functions::Loss, variable::Variable,
+    corrector::Corrector, factors::Factor, loss_functions::LossFunction, variable::Variable,
 };
 use crate::manifold::{LieGroup, Tangent};
 
@@ -112,7 +112,7 @@ pub struct ResidualBlock {
     ///
     /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
     /// is applied to downweight outliers.
-    pub loss_func: Option<Box<dyn Loss + Send>>,
+    pub loss_func: Option<Box<dyn LossFunction + Send>>,
 }
 
 impl ResidualBlock {
@@ -135,7 +135,7 @@ impl ResidualBlock {
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
     /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
-    /// use apex_solver::core::loss_functions::{Loss, HuberLoss};
+    /// use apex_solver::core::loss_functions::{Loss_Function, HuberLoss};
     ///
     /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
     /// let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
@@ -153,7 +153,7 @@ impl ResidualBlock {
         residual_row_start_idx: usize,
         variable_key_size_list: &[&str],
         factor: Box<dyn Factor + Send>,
-        loss_func: Option<Box<dyn Loss + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> Self {
         ResidualBlock {
             residual_block_id,
@@ -255,7 +255,7 @@ mod tests {
     use super::*;
     use crate::core::{
         factors::{BetweenFactorSE2, PriorFactor},
-        loss_functions::{HuberLoss, Loss},
+        loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
     use crate::manifold::{se2::SE2, se3::SE3};
@@ -264,7 +264,7 @@ mod tests {
     #[test]
     fn test_residual_block_creation() {
         let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn LossFunction + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
@@ -326,7 +326,7 @@ mod tests {
     fn test_residual_and_jacobian_with_huber_loss() {
         // Create a between factor that will have non-zero residual
         let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
-        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn LossFunction + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
