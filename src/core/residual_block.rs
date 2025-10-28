@@ -62,10 +62,12 @@
 //! // residual and jacobian are now ready for the linear solver
 //! ```
 
-use nalgebra;
+use nalgebra::{DMatrix, DVector};
 
-use crate::core::{corrector, factors, loss_functions, variable};
-use crate::manifold;
+use crate::core::{
+    corrector::Corrector, factors::Factor, loss_functions::Loss, variable::Variable,
+};
+use crate::manifold::{LieGroup, Tangent};
 
 /// A residual block that wraps a factor with an optional robust loss function.
 ///
@@ -104,13 +106,13 @@ pub struct ResidualBlock {
     /// The factor that computes residuals and Jacobians
     ///
     /// Must implement the `Factor` trait and be thread-safe (`Send`).
-    pub factor: Box<dyn factors::Factor + Send>,
+    pub factor: Box<dyn Factor + Send>,
 
     /// Optional robust loss function for outlier rejection
     ///
     /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
     /// is applied to downweight outliers.
-    pub loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
+    pub loss_func: Option<Box<dyn Loss + Send>>,
 }
 
 impl ResidualBlock {
@@ -150,8 +152,8 @@ impl ResidualBlock {
         residual_block_id: usize,
         residual_row_start_idx: usize,
         variable_key_size_list: &[&str],
-        factor: Box<dyn factors::Factor + Send>,
-        loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn Loss + Send>>,
     ) -> Self {
         ResidualBlock {
             residual_block_id,
@@ -219,11 +221,11 @@ impl ResidualBlock {
     /// - Equivalent to standard (non-robust) least squares
     pub fn residual_and_jacobian<M>(
         &self,
-        variables: &Vec<&variable::Variable<M>>,
-    ) -> (nalgebra::DVector<f64>, nalgebra::DMatrix<f64>)
+        variables: &Vec<&Variable<M>>,
+    ) -> (DVector<f64>, DMatrix<f64>)
     where
-        M: manifold::LieGroup + Clone + Into<nalgebra::DVector<f64>>,
-        M::TangentVector: manifold::Tangent<M>,
+        M: LieGroup + Clone + Into<DVector<f64>>,
+        M::TangentVector: Tangent<M>,
     {
         // Extract variable values as DVector for the factor
         let param_vec: Vec<_> = variables.iter().map(|v| v.value.clone().into()).collect();
@@ -239,7 +241,7 @@ impl ResidualBlock {
             let squared_norm = residual.norm_squared();
 
             // Create corrector and apply to residual and Jacobian
-            let corrector = corrector::Corrector::new(loss_func.as_ref(), squared_norm);
+            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
             corrector.correct_jacobian(&residual, &mut jacobian);
             corrector.correct_residuals(&mut residual);
         }
@@ -251,15 +253,18 @@ impl ResidualBlock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::{factors, loss_functions, variable};
+    use crate::core::{
+        factors::{BetweenFactorSE2, PriorFactor},
+        loss_functions::{HuberLoss, Loss},
+        variable::Variable,
+    };
     use crate::manifold::{se2::SE2, se3::SE3};
-    use nalgebra;
+    use nalgebra::{Quaternion, dvector, vector};
 
     #[test]
     fn test_residual_block_creation() {
-        let factor = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.1));
-        let loss = Some(Box::new(loss_functions::HuberLoss::new(1.0).unwrap())
-            as Box<dyn loss_functions::Loss + Send>);
+        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
@@ -271,8 +276,8 @@ mod tests {
 
     #[test]
     fn test_residual_block_without_loss() {
-        let factor = Box::new(factors::PriorFactor {
-            data: nalgebra::dvector![0.0, 0.0, 0.0],
+        let factor = Box::new(PriorFactor {
+            data: dvector![0.0, 0.0, 0.0],
         });
 
         let block = ResidualBlock::new(1, 3, &["x0"], factor, None);
@@ -289,13 +294,13 @@ mod tests {
         let dx = 1.0;
         let dy = 0.5;
         let dtheta = 0.1;
-        let factor = Box::new(factors::BetweenFactorSE2::new(dx, dy, dtheta));
+        let factor = Box::new(BetweenFactorSE2::new(dx, dy, dtheta));
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
         // Create test variables - SE2 uses [x, y, theta] ordering
-        let var0 = variable::Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
-        let var1 = variable::Variable::new(SE2::from_xy_angle(1.0, 0.5, 0.1));
+        let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+        let var1 = Variable::new(SE2::from_xy_angle(1.0, 0.5, 0.1));
         let variables = vec![&var0, &var1];
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
@@ -320,21 +325,20 @@ mod tests {
     #[test]
     fn test_residual_and_jacobian_with_huber_loss() {
         // Create a between factor that will have non-zero residual
-        let factor = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.0));
-        let loss = Some(Box::new(loss_functions::HuberLoss::new(1.0).unwrap())
-            as Box<dyn loss_functions::Loss + Send>);
+        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
+        let loss = Some(Box::new(HuberLoss::new(1.0).unwrap()) as Box<dyn Loss + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
 
         // Create variables with significant difference to trigger loss function
-        let var0 = variable::Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
-        let var1 = variable::Variable::new(SE2::from_xy_angle(5.0, 5.0, 2.0)); // Very different from measurement [1.0, 0.0, 0.0]
+        let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+        let var1 = Variable::new(SE2::from_xy_angle(5.0, 5.0, 2.0)); // Very different from measurement [1.0, 0.0, 0.0]
         let variables = vec![&var0, &var1];
 
         let (residual_with_loss, jacobian_with_loss) = block.residual_and_jacobian(&variables);
 
         // Create same block without loss for comparison
-        let factor_no_loss = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.0));
+        let factor_no_loss = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
         let block_no_loss = ResidualBlock::new(0, 0, &["x0", "x1"], factor_no_loss, None);
         let (residual_no_loss, jacobian_no_loss) = block_no_loss.residual_and_jacobian(&variables);
 
@@ -356,17 +360,17 @@ mod tests {
     #[test]
     fn test_residual_block_se3_between_factor() {
         // Test with SE3 - use prior factor on SE3
-        let se3_data = nalgebra::dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
-        let factor = Box::new(factors::PriorFactor {
+        let se3_data = dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0]; // [tx,ty,tz,qw,qx,qy,qz]
+        let factor = Box::new(PriorFactor {
             data: se3_data.clone(),
         });
 
         let block = ResidualBlock::new(0, 0, &["x0"], factor, None);
 
         // Create SE3 variable
-        let var0 = variable::Variable::new(SE3::from_translation_quaternion(
-            nalgebra::vector![1.0, 0.5, 0.2],
-            nalgebra::Quaternion::new(1.0, 0.0, 0.0, 0.0),
+        let var0 = Variable::new(SE3::from_translation_quaternion(
+            vector![1.0, 0.5, 0.2],
+            Quaternion::new(1.0, 0.0, 0.0, 0.0),
         ));
         let variables = vec![&var0];
 
@@ -384,11 +388,11 @@ mod tests {
     #[test]
     fn test_multiple_residual_blocks_different_ids() {
         // Test creating multiple blocks with different IDs and start indices
-        let factors: Vec<Box<dyn factors::Factor + Send>> = vec![
-            Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.1)),
-            Box::new(factors::BetweenFactorSE2::new(0.8, 0.2, -0.05)),
-            Box::new(factors::PriorFactor {
-                data: nalgebra::dvector![0.0, 0.0, 0.0],
+        let factors: Vec<Box<dyn Factor + Send>> = vec![
+            Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
+            Box::new(BetweenFactorSE2::new(0.8, 0.2, -0.05)),
+            Box::new(PriorFactor {
+                data: dvector![0.0, 0.0, 0.0],
             }),
         ];
 
@@ -402,7 +406,7 @@ mod tests {
                     if i == 2 { &["x0"] } else { &["x0", "x1"] },
                     factor,
                     if i == 1 {
-                        Some(Box::new(loss_functions::HuberLoss::new(0.5).unwrap()))
+                        Some(Box::new(HuberLoss::new(0.5).unwrap()))
                     } else {
                         None
                     },
@@ -428,7 +432,7 @@ mod tests {
     #[test]
     fn test_residual_block_variable_ordering() {
         // Test that variable ordering is preserved correctly
-        let factor = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
         let block = ResidualBlock::new(0, 0, &["pose_2", "pose_1", "pose_0"], factor, None);
 
         let expected_order = vec!["pose_2", "pose_1", "pose_0"];
@@ -438,11 +442,11 @@ mod tests {
     #[test]
     fn test_residual_block_numerical_stability() {
         // Test with very small values to ensure numerical stability
-        let factor = Box::new(factors::BetweenFactorSE2::new(1e-8, 1e-8, 1e-8));
+        let factor = Box::new(BetweenFactorSE2::new(1e-8, 1e-8, 1e-8));
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
-        let var0 = variable::Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
-        let var1 = variable::Variable::new(SE2::from_xy_angle(1e-8, 1e-8, 1e-8));
+        let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+        let var1 = Variable::new(SE2::from_xy_angle(1e-8, 1e-8, 1e-8));
         let variables = vec![&var0, &var1];
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
@@ -456,11 +460,11 @@ mod tests {
     #[test]
     fn test_residual_block_large_values() {
         // Test with large values to ensure no overflow
-        let factor = Box::new(factors::BetweenFactorSE2::new(100.0, -200.0, 1.5));
+        let factor = Box::new(BetweenFactorSE2::new(100.0, -200.0, 1.5));
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
-        let var0 = variable::Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
-        let var1 = variable::Variable::new(SE2::from_xy_angle(100.0, -200.0, 1.5));
+        let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+        let var1 = Variable::new(SE2::from_xy_angle(100.0, -200.0, 1.5));
         let variables = vec![&var0, &var1];
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables);
@@ -474,21 +478,21 @@ mod tests {
     #[test]
     fn test_residual_block_loss_function_switching() {
         // Test the same residual block with and without loss function applied
-        let factor1 = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.1));
-        let factor2 = Box::new(factors::BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor1 = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor2 = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
 
         let block_with_loss = ResidualBlock::new(
             0,
             0,
             &["x0", "x1"],
             factor1,
-            Some(Box::new(loss_functions::HuberLoss::new(0.1).unwrap())),
+            Some(Box::new(HuberLoss::new(0.1).unwrap())),
         );
         let block_without_loss = ResidualBlock::new(0, 0, &["x0", "x1"], factor2, None);
 
         // Create variables that will produce significant residual
-        let var0 = variable::Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
-        let var1 = variable::Variable::new(SE2::from_xy_angle(2.0, 1.0, 0.2)); // Far from measurement
+        let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
+        let var1 = Variable::new(SE2::from_xy_angle(2.0, 1.0, 0.2)); // Far from measurement
         let variables = vec![&var0, &var1];
 
         let (res_with, jac_with) = block_with_loss.residual_and_jacobian(&variables);

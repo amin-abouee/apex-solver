@@ -83,17 +83,28 @@
 //! println!("Total residual dimension: {}", problem.total_residual_dimension);
 //! ```
 
-use std::{collections, fs, io::Write, sync};
+use std::{
+    collections::{HashMap, HashSet},
+    fs::File,
+    io::{Error, Write},
+    sync::{Arc, Mutex},
+};
 
-use faer;
-use faer::sparse;
-use nalgebra;
+use faer::{
+    Col, Mat, MatRef,
+    sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat},
+};
+use nalgebra::DVector;
 use rayon::prelude::*;
 
 use crate::{
-    core::{corrector, factors, loss_functions, residual_block, variable},
-    error, linalg, manifold,
-    manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3},
+    core::{
+        corrector::Corrector, factors::Factor, loss_functions::Loss, residual_block::ResidualBlock,
+        variable::Variable,
+    },
+    error::{ApexError, ApexResult},
+    linalg::{SparseLinearSolver, extract_variable_covariances},
+    manifold::{ManifoldType, rn, se2, se3, so2, so3},
 };
 
 /// Symbolic structure for sparse matrix operations.
@@ -107,18 +118,18 @@ use crate::{
 /// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
 /// - `order`: A fill-reducing ordering/permutation for numerical stability
 pub struct SymbolicStructure {
-    pub pattern: sparse::SymbolicSparseColMat<usize>,
-    pub order: sparse::Argsort<usize>,
+    pub pattern: SymbolicSparseColMat<usize>,
+    pub order: Argsort<usize>,
 }
 
 /// Enum to handle mixed manifold variable types
 #[derive(Clone, Debug)]
 pub enum VariableEnum {
-    Rn(variable::Variable<Rn>),
-    SE2(variable::Variable<SE2>),
-    SE3(variable::Variable<SE3>),
-    SO2(variable::Variable<SO2>),
-    SO3(variable::Variable<SO3>),
+    Rn(Variable<rn::Rn>),
+    SE2(Variable<se2::SE2>),
+    SE3(Variable<se3::SE3>),
+    SO2(Variable<so2::SO2>),
+    SO3(Variable<so3::SO3>),
 }
 
 impl VariableEnum {
@@ -134,7 +145,7 @@ impl VariableEnum {
     }
 
     /// Convert to DVector for use with Factor trait
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
+    pub fn to_vector(&self) -> DVector<f64> {
         match self {
             VariableEnum::Rn(var) => var.value.clone().into(),
             VariableEnum::SE2(var) => var.value.clone().into(),
@@ -156,7 +167,7 @@ impl VariableEnum {
     /// Uses explicit clone instead of unsafe memory copy (`IntoNalgebra`) for small vectors.
     /// This is safe and performant for typical manifold dimensions (1-6 DOF).
     ///
-    pub fn apply_tangent_step(&mut self, step_slice: faer::MatRef<f64>) {
+    pub fn apply_tangent_step(&mut self, step_slice: MatRef<f64>) {
         match self {
             VariableEnum::SE3(var) => {
                 // SE3 has 6 DOF in tangent space
@@ -169,8 +180,8 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = manifold::se3::SE3Tangent::from(step_dvector);
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = se3::SE3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -185,8 +196,8 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = manifold::se2::SE2Tangent::from(step_dvector);
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = se2::SE2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -201,8 +212,8 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = manifold::so3::SO3Tangent::from(step_dvector);
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = so3::SO3Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -215,8 +226,8 @@ impl VariableEnum {
                     step_data = 0.0;
                 }
 
-                let step_dvector = nalgebra::DVector::from_vec(vec![step_data]);
-                let tangent = manifold::so2::SO2Tangent::from(step_dvector);
+                let step_dvector = DVector::from_vec(vec![step_data]);
+                let tangent = so2::SO2Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -232,8 +243,8 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = nalgebra::DVector::from_vec(step_data);
-                let tangent = manifold::rn::RnTangent::new(step_dvector);
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = rn::RnTangent::new(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -246,7 +257,7 @@ impl VariableEnum {
     ///
     /// # Returns
     /// Reference to the covariance matrix in tangent space
-    pub fn get_covariance(&self) -> Option<&faer::Mat<f64>> {
+    pub fn get_covariance(&self) -> Option<&Mat<f64>> {
         match self {
             VariableEnum::Rn(var) => var.get_covariance(),
             VariableEnum::SE2(var) => var.get_covariance(),
@@ -263,7 +274,7 @@ impl VariableEnum {
     ///
     /// # Arguments
     /// * `cov` - Covariance matrix in tangent space
-    pub fn set_covariance(&mut self, cov: faer::Mat<f64>) {
+    pub fn set_covariance(&mut self, cov: Mat<f64>) {
         match self {
             VariableEnum::Rn(var) => var.set_covariance(cov),
             VariableEnum::SE2(var) => var.set_covariance(cov),
@@ -287,7 +298,7 @@ impl VariableEnum {
     /// Get the bounds for this variable.
     ///
     /// Returns a reference to the bounds map where keys are indices and values are (lower, upper) pairs.
-    pub fn get_bounds(&self) -> &collections::HashMap<usize, (f64, f64)> {
+    pub fn get_bounds(&self) -> &HashMap<usize, (f64, f64)> {
         match self {
             VariableEnum::Rn(var) => &var.bounds,
             VariableEnum::SE2(var) => &var.bounds,
@@ -300,7 +311,7 @@ impl VariableEnum {
     /// Get the fixed indices for this variable.
     ///
     /// Returns a reference to the set of indices that should remain fixed during optimization.
-    pub fn get_fixed_indices(&self) -> &collections::HashSet<usize> {
+    pub fn get_fixed_indices(&self) -> &HashSet<usize> {
         match self {
             VariableEnum::Rn(var) => &var.fixed_indices,
             VariableEnum::SE2(var) => &var.fixed_indices,
@@ -313,25 +324,25 @@ impl VariableEnum {
     /// Set the value of this variable from a vector representation.
     ///
     /// This is used to update the variable after applying constraints (bounds and fixed indices).
-    pub fn set_from_vector(&mut self, vec: &nalgebra::DVector<f64>) {
+    pub fn set_from_vector(&mut self, vec: &DVector<f64>) {
         match self {
             VariableEnum::Rn(var) => {
-                var.set_value(Rn::new(vec.clone()));
+                var.set_value(rn::Rn::new(vec.clone()));
             }
             VariableEnum::SE2(var) => {
-                let new_se2: SE2 = vec.clone().into();
+                let new_se2: se2::SE2 = vec.clone().into();
                 var.set_value(new_se2);
             }
             VariableEnum::SE3(var) => {
-                let new_se3: SE3 = vec.clone().into();
+                let new_se3: se3::SE3 = vec.clone().into();
                 var.set_value(new_se3);
             }
             VariableEnum::SO2(var) => {
-                let new_so2: SO2 = vec.clone().into();
+                let new_so2: so2::SO2 = vec.clone().into();
                 var.set_value(new_so2);
             }
             VariableEnum::SO3(var) => {
-                let new_so3: SO3 = vec.clone().into();
+                let new_so3: so3::SO3 = vec.clone().into();
                 var.set_value(new_so3);
             }
         }
@@ -393,15 +404,15 @@ pub struct Problem {
     residual_id_count: usize,
 
     /// Map from residual block ID to ResidualBlock instance
-    residual_blocks: collections::HashMap<usize, residual_block::ResidualBlock>,
+    residual_blocks: HashMap<usize, ResidualBlock>,
 
     /// Variables with fixed indices (e.g., fix first pose's x,y coordinates)
     /// Maps variable name -> set of indices to fix
-    pub fixed_variable_indexes: collections::HashMap<String, collections::HashSet<usize>>,
+    pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
 
     /// Variable bounds (box constraints on individual DOF)
     /// Maps variable name -> (index -> (lower_bound, upper_bound))
-    pub variable_bounds: collections::HashMap<String, collections::HashMap<usize, (f64, f64)>>,
+    pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
 }
 impl Default for Problem {
     fn default() -> Self {
@@ -429,9 +440,9 @@ impl Problem {
         Self {
             total_residual_dimension: 0,
             residual_id_count: 0,
-            residual_blocks: collections::HashMap::new(),
-            fixed_variable_indexes: collections::HashMap::new(),
-            variable_bounds: collections::HashMap::new(),
+            residual_blocks: HashMap::new(),
+            fixed_variable_indexes: HashMap::new(),
+            variable_bounds: HashMap::new(),
         }
     }
 
@@ -477,13 +488,13 @@ impl Problem {
     pub fn add_residual_block(
         &mut self,
         variable_key_size_list: &[&str],
-        factor: Box<dyn factors::Factor + Send>,
-        loss_func: Option<Box<dyn loss_functions::Loss + Send>>,
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn Loss + Send>>,
     ) -> usize {
         let new_residual_dimension = factor.get_dimension();
         self.residual_blocks.insert(
             self.residual_id_count,
-            residual_block::ResidualBlock::new(
+            ResidualBlock::new(
                 self.residual_id_count,
                 self.total_residual_dimension,
                 variable_key_size_list,
@@ -499,10 +510,7 @@ impl Problem {
         block_id
     }
 
-    pub fn remove_residual_block(
-        &mut self,
-        block_id: usize,
-    ) -> Option<residual_block::ResidualBlock> {
+    pub fn remove_residual_block(&mut self, block_id: usize) -> Option<ResidualBlock> {
         if let Some(residual_block) = self.residual_blocks.remove(&block_id) {
             self.total_residual_dimension -= residual_block.factor.get_dimension();
             Some(residual_block)
@@ -516,7 +524,7 @@ impl Problem {
             var_mut.insert(idx);
         } else {
             self.fixed_variable_indexes
-                .insert(var_to_fix.to_owned(), collections::HashSet::from([idx]));
+                .insert(var_to_fix.to_owned(), HashSet::from([idx]));
         }
     }
 
@@ -532,13 +540,13 @@ impl Problem {
         upper_bound: f64,
     ) {
         if lower_bound > upper_bound {
-            log::error!("lower bound is larger than upper bound");
+            println!("lower bound is larger than upper bound");
         } else if let Some(var_mut) = self.variable_bounds.get_mut(var_to_bound) {
             var_mut.insert(idx, (lower_bound, upper_bound));
         } else {
             self.variable_bounds.insert(
                 var_to_bound.to_owned(),
-                collections::HashMap::from([(idx, (lower_bound, upper_bound))]),
+                HashMap::from([(idx, (lower_bound, upper_bound))]),
             );
         }
     }
@@ -589,17 +597,14 @@ impl Problem {
     /// ```
     pub fn initialize_variables(
         &self,
-        initial_values: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> collections::HashMap<String, VariableEnum> {
-        let variables: collections::HashMap<String, VariableEnum> = initial_values
+        initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> HashMap<String, VariableEnum> {
+        let variables: HashMap<String, VariableEnum> = initial_values
             .iter()
             .map(|(k, v)| {
                 let variable_enum = match v.0 {
-                    manifold::ManifoldType::SO2 => {
-                        let mut var = variable::Variable::new(SO2::from(v.1.clone()));
+                    ManifoldType::SO2 => {
+                        let mut var = Variable::new(so2::SO2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -608,8 +613,8 @@ impl Problem {
                         }
                         VariableEnum::SO2(var)
                     }
-                    manifold::ManifoldType::SO3 => {
-                        let mut var = variable::Variable::new(SO3::from(v.1.clone()));
+                    ManifoldType::SO3 => {
+                        let mut var = Variable::new(so3::SO3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -618,8 +623,8 @@ impl Problem {
                         }
                         VariableEnum::SO3(var)
                     }
-                    manifold::ManifoldType::SE2 => {
-                        let mut var = variable::Variable::new(SE2::from(v.1.clone()));
+                    ManifoldType::SE2 => {
+                        let mut var = Variable::new(se2::SE2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -628,8 +633,8 @@ impl Problem {
                         }
                         VariableEnum::SE2(var)
                     }
-                    manifold::ManifoldType::SE3 => {
-                        let mut var = variable::Variable::new(SE3::from(v.1.clone()));
+                    ManifoldType::SE3 => {
+                        let mut var = Variable::new(se3::SE3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -638,8 +643,8 @@ impl Problem {
                         }
                         VariableEnum::SE3(var)
                     }
-                    manifold::ManifoldType::RN => {
-                        let mut var = variable::Variable::new(Rn::from(v.1.clone()));
+                    ManifoldType::RN => {
+                        let mut var = Variable::new(rn::Rn::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -697,13 +702,13 @@ impl Problem {
     /// Result: 9×9 sparse Jacobian with 45 non-zero entries
     pub fn build_symbolic_structure(
         &self,
-        variables: &collections::HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
         total_dof: usize,
-    ) -> error::ApexResult<SymbolicStructure> {
+    ) -> ApexResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
-        let mut indices = Vec::<sparse::Pair<usize, usize>>::new();
+        let mut indices = Vec::<Pair<usize, usize>>::new();
 
         // Iterate through all residual blocks (factors/constraints) in the problem
         // Each residual block contributes a block of entries to the Jacobian
@@ -751,7 +756,7 @@ impl Problem {
                             let global_col_idx = variable_global_idx + col_idx;
 
                             // Record this (row, col) pair as a non-zero entry
-                            indices.push(sparse::Pair::new(global_row_idx, global_col_idx));
+                            indices.push(Pair::new(global_row_idx, global_col_idx));
                         }
                     }
                 }
@@ -764,13 +769,13 @@ impl Problem {
         // 2. Sorting for column-wise storage format
         // 3. Computing a fill-reducing ordering for numerical stability
         // 4. Allocating the symbolic structure (no values yet, just pattern)
-        let (pattern, order) = sparse::SymbolicSparseColMat::try_new_from_indices(
+        let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
             self.total_residual_dimension, // Number of rows (total residual dimension)
             total_dof,                     // Number of columns (total DOF)
             &indices,                      // List of non-zero entry locations
         )
         .map_err(|_| {
-            error::ApexError::MatrixOperation(
+            ApexError::MatrixOperation(
                 "Failed to build symbolic sparse matrix structure".to_string(),
             )
         })?;
@@ -817,14 +822,12 @@ impl Problem {
     /// ```
     pub fn compute_residual_sparse(
         &self,
-        variables: &collections::HashMap<String, VariableEnum>,
-    ) -> error::ApexResult<faer::Mat<f64>> {
-        let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
-            self.total_residual_dimension,
-        )));
+        variables: &HashMap<String, VariableEnum>,
+    ) -> ApexResult<Mat<f64>> {
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         // Compute residuals in parallel (no Jacobian needed)
-        let result: Result<Vec<()>, error::ApexError> = self
+        let result: Result<Vec<()>, ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -834,13 +837,13 @@ impl Problem {
 
         result?;
 
-        let total_residual = sync::Arc::try_unwrap(total_residual)
+        let total_residual = Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                error::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+                ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
             })?
             .into_inner()
             .map_err(|_| {
-                error::ApexError::ThreadError(
+                ApexError::ThreadError(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
             })?;
@@ -897,15 +900,13 @@ impl Problem {
     /// ```
     pub fn compute_residual_and_jacobian_sparse(
         &self,
-        variables: &collections::HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> error::ApexResult<(faer::Mat<f64>, sparse::SparseColMat<usize, f64>)> {
-        let total_residual = sync::Arc::new(sync::Mutex::new(faer::Col::<f64>::zeros(
-            self.total_residual_dimension,
-        )));
+    ) -> ApexResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
-        let jacobian_values: Result<Vec<Vec<f64>>, error::ApexError> = self
+        let jacobian_values: Result<Vec<Vec<f64>>, ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -920,28 +921,26 @@ impl Problem {
 
         let jacobian_values: Vec<f64> = jacobian_values?.into_iter().flatten().collect();
 
-        let total_residual = sync::Arc::try_unwrap(total_residual)
+        let total_residual = Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                error::ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+                ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
             })?
             .into_inner()
             .map_err(|_| {
-                error::ApexError::ThreadError(
+                ApexError::ThreadError(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
             })?;
 
         // Convert faer Col to Mat (column vector as n×1 matrix)
         let residual_faer = total_residual.as_ref().as_mat().to_owned();
-        let jacobian_sparse = sparse::SparseColMat::new_from_argsort(
+        let jacobian_sparse = SparseColMat::new_from_argsort(
             symbolic_structure.pattern.clone(),
             &symbolic_structure.order,
             jacobian_values.as_slice(),
         )
         .map_err(|_| {
-            error::ApexError::MatrixOperation(
-                "Failed to create sparse Jacobian from argsort".to_string(),
-            )
+            ApexError::MatrixOperation("Failed to create sparse Jacobian from argsort".to_string())
         })?;
 
         Ok((residual_faer, jacobian_sparse))
@@ -952,11 +951,11 @@ impl Problem {
     /// Helper method for `compute_residual_sparse()`.
     fn compute_residual_block(
         &self,
-        residual_block: &residual_block::ResidualBlock,
-        variables: &collections::HashMap<String, VariableEnum>,
-        total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
-    ) -> error::ApexResult<()> {
-        let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
+        residual_block: &ResidualBlock,
+        variables: &HashMap<String, VariableEnum>,
+        total_residual: &Arc<Mutex<Col<f64>>>,
+    ) -> ApexResult<()> {
+        let mut param_vectors: Vec<DVector<f64>> = Vec::new();
 
         for var_key in &residual_block.variable_key_list {
             if let Some(variable) = variables.get(var_key) {
@@ -971,12 +970,12 @@ impl Problem {
         // Apply loss function if present (critical for robust optimization)
         if let Some(loss_func) = &residual_block.loss_func {
             let squared_norm = res.dot(&res);
-            let corrector = corrector::Corrector::new(loss_func.as_ref(), squared_norm);
+            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
             corrector.correct_residuals(&mut res);
         }
 
         let mut total_residual = total_residual.lock().map_err(|_| {
-            error::ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
+            ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
         })?;
 
         // Copy residual values from nalgebra DVector to faer Col
@@ -995,12 +994,12 @@ impl Problem {
     /// Helper method for `compute_residual_and_jacobian_sparse()`.
     fn compute_residual_and_jacobian_block(
         &self,
-        residual_block: &residual_block::ResidualBlock,
-        variables: &collections::HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &collections::HashMap<String, usize>,
-        total_residual: &sync::Arc<sync::Mutex<faer::Col<f64>>>,
-    ) -> error::ApexResult<Vec<f64>> {
-        let mut param_vectors: Vec<nalgebra::DVector<f64>> = Vec::new();
+        residual_block: &ResidualBlock,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_sparce_matrix: &HashMap<String, usize>,
+        total_residual: &Arc<Mutex<Col<f64>>>,
+    ) -> ApexResult<Vec<f64>> {
+        let mut param_vectors: Vec<DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
         let mut count_variable_local_idx: usize = 0;
@@ -1021,7 +1020,7 @@ impl Problem {
         // Apply loss function if present (critical for robust optimization)
         if let Some(loss_func) = &residual_block.loss_func {
             let squared_norm = res.dot(&res);
-            let corrector = corrector::Corrector::new(loss_func.as_ref(), squared_norm);
+            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
             corrector.correct_jacobian(&res, &mut jac);
             corrector.correct_residuals(&mut res);
         }
@@ -1029,9 +1028,7 @@ impl Problem {
         // Update total residual
         {
             let mut total_residual = total_residual.lock().map_err(|_| {
-                error::ApexError::ThreadError(
-                    "Failed to acquire lock on total residual".to_string(),
-                )
+                ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
             })?;
 
             // Copy residual values from nalgebra DVector to faer Col
@@ -1056,7 +1053,7 @@ impl Problem {
                     }
                 }
             } else {
-                return Err(error::ApexError::InvalidInput(format!(
+                return Err(ApexError::InvalidInput(format!(
                     "Missing key {} in variable-to-column-index mapping",
                     var_key
                 )));
@@ -1071,8 +1068,8 @@ impl Problem {
         &self,
         residual: &nalgebra::DVector<f64>,
         filename: &str,
-    ) -> Result<(), std::io::Error> {
-        let mut file = fs::File::create(filename)?;
+    ) -> Result<(), Error> {
+        let mut file = File::create(filename)?;
         writeln!(file, "# Residual vector - {} elements", residual.len())?;
         for (i, &value) in residual.iter().enumerate() {
             writeln!(file, "{}: {:.12}", i, value)?;
@@ -1083,10 +1080,10 @@ impl Problem {
     /// Log sparse Jacobian matrix to a text file
     pub fn log_sparse_jacobian_to_file(
         &self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
+        jacobian: &SparseColMat<usize, f64>,
         filename: &str,
-    ) -> Result<(), std::io::Error> {
-        let mut file = fs::File::create(filename)?;
+    ) -> Result<(), Error> {
+        let mut file = File::create(filename)?;
         writeln!(
             file,
             "# Sparse Jacobian matrix - {} x {} ({} non-zeros)",
@@ -1102,10 +1099,10 @@ impl Problem {
     /// Log variables to a text file
     pub fn log_variables_to_file(
         &self,
-        variables: &collections::HashMap<String, VariableEnum>,
+        variables: &HashMap<String, VariableEnum>,
         filename: &str,
-    ) -> Result<(), std::io::Error> {
-        let mut file = fs::File::create(filename)?;
+    ) -> Result<(), Error> {
+        let mut file = File::create(filename)?;
         writeln!(file, "# Variables - {} total", variables.len())?;
         writeln!(file, "# Format: variable_name: [values...]")?;
 
@@ -1142,17 +1139,17 @@ impl Problem {
     ///
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
-        variables: &mut collections::HashMap<String, VariableEnum>,
-        variable_index_map: &collections::HashMap<String, usize>,
-    ) -> Option<collections::HashMap<String, faer::Mat<f64>>> {
+        linear_solver: &mut Box<dyn SparseLinearSolver>,
+        variables: &mut HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+    ) -> Option<HashMap<String, Mat<f64>>> {
         // Compute the full covariance matrix (H^{-1}) using the linear solver
         linear_solver.compute_covariance_matrix()?;
         let full_cov = linear_solver.get_covariance_matrix()?.clone();
 
         // Extract per-variable covariance blocks from the full matrix
         let per_var_covariances =
-            linalg::extract_variable_covariances(&full_cov, variables, variable_index_map);
+            extract_variable_covariances(&full_cov, variables, variable_index_map);
 
         // Set covariances in Variable objects for easy access
         for (var_name, cov) in &per_var_covariances {
@@ -1200,7 +1197,7 @@ mod tests {
         for (i, (x, y, theta)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
             let se2_data = dvector![*x, *y, *theta];
-            initial_values.insert(var_name, (manifold::ManifoldType::SE2, se2_data));
+            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
         }
 
         // Add chain of between factors
@@ -1243,10 +1240,7 @@ mod tests {
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem() -> (
-        Problem,
-        HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -1268,7 +1262,7 @@ mod tests {
         for (i, (tx, ty, tz, qx, qy, qz, qw)) in poses.iter().enumerate() {
             let var_name = format!("x{}", i);
             let se3_data = dvector![*tx, *ty, *tz, *qw, *qx, *qy, *qz];
-            initial_values.insert(var_name, (manifold::ManifoldType::SE3, se3_data));
+            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
         }
 
         // Add between factors connecting the cube edges
