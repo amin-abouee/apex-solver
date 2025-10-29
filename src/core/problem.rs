@@ -123,7 +123,7 @@ pub struct SymbolicStructure {
 }
 
 /// Enum to handle mixed manifold variable types
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum VariableEnum {
     Rn(Variable<rn::Rn>),
     SE2(Variable<se2::SE2>),

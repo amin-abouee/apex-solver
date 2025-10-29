@@ -207,7 +207,7 @@ pub trait Factor: Send + Sync {
 /// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
 /// println!("Residual: {:?}", residual);  // Shows deviation from measurement
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BetweenFactorSE2 {
     /// The measured relative pose transformation between the two connected poses
     pub relative_pose: SE2,
@@ -411,7 +411,7 @@ impl Factor for BetweenFactorSE2 {
 ///     println!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());  // 6x12
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BetweenFactorSE3 {
     /// The measured relative pose transformation between the two connected poses
     pub relative_pose: SE3,
