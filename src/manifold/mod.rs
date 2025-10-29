@@ -32,9 +32,12 @@
 //! Operations are differentiated with respect to perturbations on the local tangent space.
 //!
 
-use nalgebra;
-use std::fmt::Debug;
+use nalgebra::{Matrix3, Vector3};
 use std::ops::{Mul, Neg};
+use std::{
+    error, fmt,
+    fmt::{Display, Formatter},
+};
 
 pub mod rn;
 pub mod se2;
@@ -68,8 +71,8 @@ pub enum ManifoldType {
     SO3,
 }
 
-impl std::fmt::Display for ManifoldError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl Display for ManifoldError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             ManifoldError::InvalidTangentDimension { expected, actual } => {
                 write!(
@@ -96,7 +99,7 @@ impl std::fmt::Display for ManifoldError {
     }
 }
 
-impl std::error::Error for ManifoldError {}
+impl error::Error for ManifoldError {}
 
 /// Result type for manifold operations.
 pub type ManifoldResult<T> = Result<T, ManifoldError>;
@@ -126,19 +129,18 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 /// - `DIM`: Space dimension - dimension of ambient space (e.g., 3 for SE(3))
 /// - `DOF`: Degrees of freedom - tangent space dimension (e.g., 6 for SE(3))
 /// - `REP_SIZE`: Representation size - underlying data size (e.g., 7 for SE(3))
-pub trait LieGroup: Clone + Debug + PartialEq {
+pub trait LieGroup: Clone + PartialEq {
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
 
     /// The Jacobian matrix type
     type JacobianMatrix: Clone
-        + Debug
         + PartialEq
         + Neg<Output = Self::JacobianMatrix>
         + Mul<Output = Self::JacobianMatrix>;
 
     /// Associated Lie algebra type
-    type LieAlgebra: Clone + Debug + PartialEq;
+    type LieAlgebra: Clone + PartialEq;
 
     // Core group operations
 
@@ -191,10 +193,10 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// * `jacobian_vector` - Optional Jacobian ∂(g ⊙ v)/∂v
     fn act(
         &self,
-        vector: &nalgebra::Vector3<f64>,
+        vector: &Vector3<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
-    ) -> nalgebra::Vector3<f64>;
+        jacobian_vector: Option<&mut Matrix3<f64>>,
+    ) -> Vector3<f64>;
 
     // Adjoint operations
 
@@ -423,7 +425,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 /// # Type Parameters
 ///
 /// - `G`: The associated Lie group type
-pub trait Tangent<Group: LieGroup>: Clone + Debug + PartialEq {
+pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     // Dimension constants
 
     /// Dimension of the tangent space

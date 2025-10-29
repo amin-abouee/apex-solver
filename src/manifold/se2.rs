@@ -3,31 +3,36 @@
 //! This module implements the Special Euclidean group SE(2), which represents
 //! rigid body transformations in 2D space (rotation + translation).
 //!
-//! SE(2) elements are represented as a combination of 2D rotation and nalgebra::Vector2 translation.
+//! SE(2) elements are represented as a combination of 2D rotation and Vector2 translation.
 //! SE(2) tangent elements are represented as [x, y, theta] = 3 components,
 //! where x,y is the translational component and theta is the rotational component.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::so2::SO2;
-use crate::manifold::{LieGroup, Tangent};
-use nalgebra;
-use std::fmt;
+use crate::manifold::{LieGroup, Tangent, so2::SO2};
+use nalgebra::{
+    Complex, DVector, Isometry2, Matrix2, Matrix3, Point2, Translation2, UnitComplex, Vector2,
+    Vector3,
+};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
 /// SE(2) group element representing rigid body transformations in 2D.
 ///
-/// Represented as a combination of 2D rotation and nalgebra::Vector2 translation.
-#[derive(Clone, Debug, PartialEq)]
+/// Represented as a combination of 2D rotation and Vector2 translation.
+#[derive(Clone, PartialEq)]
 pub struct SE2 {
-    /// Translation part as nalgebra::Vector2
-    translation: nalgebra::Vector2<f64>,
-    /// Rotation part as nalgebra::UnitComplex
-    rotation: nalgebra::UnitComplex<f64>,
+    /// Translation part as Vector2
+    translation: Vector2<f64>,
+    /// Rotation part as UnitComplex
+    rotation: UnitComplex<f64>,
 }
 
-impl fmt::Display for SE2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let t = self.translation();
         write!(
             f,
@@ -40,8 +45,8 @@ impl fmt::Display for SE2 {
 }
 
 // Conversion traits for integration with generic Problem
-impl From<nalgebra::DVector<f64>> for SE2 {
-    fn from(data: nalgebra::DVector<f64>) -> Self {
+impl From<DVector<f64>> for SE2 {
+    fn from(data: DVector<f64>) -> Self {
         if data.len() != 3 {
             panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
         }
@@ -50,9 +55,9 @@ impl From<nalgebra::DVector<f64>> for SE2 {
     }
 }
 
-impl From<SE2> for nalgebra::DVector<f64> {
+impl From<SE2> for DVector<f64> {
     fn from(se2: SE2) -> Self {
-        nalgebra::DVector::from_vec(vec![
+        DVector::from_vec(vec![
             se2.translation.x,    // x first
             se2.translation.y,    // y second
             se2.rotation.angle(), // theta third
@@ -75,16 +80,16 @@ impl SE2 {
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
         SE2 {
-            translation: nalgebra::Vector2::zeros(),
-            rotation: nalgebra::UnitComplex::identity(),
+            translation: Vector2::zeros(),
+            rotation: UnitComplex::identity(),
         }
     }
 
     /// Get the identity matrix for Jacobians.
     ///
     /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
-    pub fn jacobian_identity() -> nalgebra::Matrix3<f64> {
-        nalgebra::Matrix3::<f64>::identity()
+    pub fn jacobian_identity() -> Matrix3<f64> {
+        Matrix3::<f64>::identity()
     }
 
     /// Create a new SE2 element from translation and rotation.
@@ -92,7 +97,7 @@ impl SE2 {
     /// # Arguments
     /// * `translation` - Translation vector [x, y]
     /// * `rotation` - Unit complex number representing rotation
-    pub fn new(translation: nalgebra::Vector2<f64>, rotation: nalgebra::UnitComplex<f64>) -> Self {
+    pub fn new(translation: Vector2<f64>, rotation: UnitComplex<f64>) -> Self {
         SE2 {
             translation,
             rotation,
@@ -101,42 +106,42 @@ impl SE2 {
 
     /// Create SE2 from translation components and angle.
     pub fn from_xy_angle(x: f64, y: f64, theta: f64) -> Self {
-        let translation = nalgebra::Vector2::new(x, y);
-        let rotation = nalgebra::UnitComplex::from_angle(theta);
+        let translation = Vector2::new(x, y);
+        let rotation = UnitComplex::from_angle(theta);
         Self::new(translation, rotation)
     }
 
     /// Create SE2 from translation components and complex rotation.
     pub fn from_xy_complex(x: f64, y: f64, real: f64, imag: f64) -> Self {
-        let translation = nalgebra::Vector2::new(x, y);
-        let complex = nalgebra::Complex::new(real, imag);
-        let rotation = nalgebra::UnitComplex::from_complex(complex);
+        let translation = Vector2::new(x, y);
+        let complex = Complex::new(real, imag);
+        let rotation = UnitComplex::from_complex(complex);
         Self::new(translation, rotation)
     }
 
-    /// Create SE2 directly from an nalgebra::Isometry2.
-    pub fn from_isometry(isometry: nalgebra::Isometry2<f64>) -> Self {
+    /// Create SE2 directly from an Isometry2.
+    pub fn from_isometry(isometry: Isometry2<f64>) -> Self {
         SE2 {
             translation: isometry.translation.vector,
             rotation: isometry.rotation,
         }
     }
 
-    /// Create SE2 from nalgebra::Vector2 and SO2 components.
-    pub fn from_translation_so2(translation: nalgebra::Vector2<f64>, rotation: SO2) -> Self {
+    /// Create SE2 from Vector2 and SO2 components.
+    pub fn from_translation_so2(translation: Vector2<f64>, rotation: SO2) -> Self {
         SE2 {
             translation,
             rotation: rotation.complex(),
         }
     }
 
-    /// Get the translation part as a nalgebra::Vector2.
-    pub fn translation(&self) -> nalgebra::Vector2<f64> {
+    /// Get the translation part as a Vector2.
+    pub fn translation(&self) -> Vector2<f64> {
         self.translation
     }
 
-    /// Get the rotation part as nalgebra::UnitComplex.
-    pub fn rotation_complex(&self) -> nalgebra::UnitComplex<f64> {
+    /// Get the rotation part as UnitComplex.
+    pub fn rotation_complex(&self) -> UnitComplex<f64> {
         self.rotation
     }
 
@@ -150,21 +155,18 @@ impl SE2 {
         SO2::new(self.rotation)
     }
 
-    /// Get as an nalgebra::Isometry2 (convenience method).
-    pub fn isometry(&self) -> nalgebra::Isometry2<f64> {
-        nalgebra::Isometry2::from_parts(
-            nalgebra::Translation2::from(self.translation),
-            self.rotation,
-        )
+    /// Get as an Isometry2 (convenience method).
+    pub fn isometry(&self) -> Isometry2<f64> {
+        Isometry2::from_parts(Translation2::from(self.translation), self.rotation)
     }
 
     /// Get the transformation matrix (3x3 homogeneous matrix).
-    pub fn matrix(&self) -> nalgebra::Matrix3<f64> {
+    pub fn matrix(&self) -> Matrix3<f64> {
         self.isometry().to_homogeneous()
     }
 
     /// Get the rotation matrix (2x2).
-    pub fn rotation_matrix(&self) -> nalgebra::Matrix2<f64> {
+    pub fn rotation_matrix(&self) -> Matrix2<f64> {
         self.rotation.to_rotation_matrix().into_inner()
     }
 
@@ -197,8 +199,8 @@ impl SE2 {
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE2 {
     type TangentVector = SE2Tangent;
-    type JacobianMatrix = nalgebra::Matrix3<f64>;
-    type LieAlgebra = nalgebra::Matrix3<f64>;
+    type JacobianMatrix = Matrix3<f64>;
+    type LieAlgebra = Matrix3<f64>;
 
     /// Get the inverse.
     ///
@@ -229,7 +231,7 @@ impl LieGroup for SE2 {
         let composed_rotation = self.rotation * other.rotation;
         let composed_translation = self
             .rotation
-            .transform_point(&nalgebra::Point2::from(other.translation))
+            .transform_point(&Point2::from(other.translation))
             .coords
             + self.translation;
 
@@ -240,7 +242,7 @@ impl LieGroup for SE2 {
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = nalgebra::Matrix3::identity();
+            *jac_other = Matrix3::identity();
         }
 
         result
@@ -283,18 +285,15 @@ impl LieGroup for SE2 {
 
     fn act(
         &self,
-        vector: &nalgebra::Vector3<f64>,
+        vector: &Vector3<f64>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
-        jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
-    ) -> nalgebra::Vector3<f64> {
+        jacobian_vector: Option<&mut Matrix3<f64>>,
+    ) -> Vector3<f64> {
         // For SE(2), we operate on 2D vectors but maintain 3D interface compatibility
-        let point2d = nalgebra::Vector2::new(vector.x, vector.y);
-        let transformed_2d = self
-            .rotation
-            .transform_point(&nalgebra::Point2::from(point2d))
-            .coords
-            + self.translation;
-        let result = nalgebra::Vector3::new(transformed_2d.x, transformed_2d.y, vector.z);
+        let point2d = Vector2::new(vector.x, vector.y);
+        let transformed_2d =
+            self.rotation.transform_point(&Point2::from(point2d)).coords + self.translation;
+        let result = Vector3::new(transformed_2d.x, transformed_2d.y, vector.z);
 
         if let Some(jac_self) = jacobian_self {
             let r = self.rotation_matrix();
@@ -307,7 +306,7 @@ impl LieGroup for SE2 {
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            *jac_vector = nalgebra::Matrix3::identity();
+            *jac_vector = Matrix3::identity();
             let r = self.rotation_matrix();
             jac_vector.fixed_view_mut::<2, 2>(0, 0).copy_from(&r);
         }
@@ -316,7 +315,7 @@ impl LieGroup for SE2 {
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        let mut adjoint_matrix = nalgebra::Matrix3::identity();
+        let mut adjoint_matrix = Matrix3::identity();
         let rotation_matrix = self.rotation_matrix();
 
         adjoint_matrix
@@ -333,12 +332,11 @@ impl LieGroup for SE2 {
         let mut rng = rand::rng();
 
         // Random translation in [-1, 1]²
-        let translation =
-            nalgebra::Vector2::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
+        let translation = Vector2::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
 
         // Random rotation
         let angle = rng.random_range(-std::f64::consts::PI..std::f64::consts::PI);
-        let rotation = nalgebra::UnitComplex::from_angle(angle);
+        let rotation = UnitComplex::from_angle(angle);
 
         SE2::new(translation, rotation)
     }
@@ -375,10 +373,10 @@ impl LieGroup for SE2 {
 /// Following manif conventions, internally represented as [x, y, theta] where:
 /// - x, y: translational components
 /// - theta: rotational component
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SE2Tangent {
     /// Internal data: [x, y, theta]
-    data: nalgebra::Vector3<f64>,
+    data: Vector3<f64>,
 }
 
 impl fmt::Display for SE2Tangent {
@@ -394,22 +392,22 @@ impl fmt::Display for SE2Tangent {
 }
 
 // Conversion traits for integration with generic Problem
-impl From<nalgebra::DVector<f64>> for SE2Tangent {
-    fn from(data_vector: nalgebra::DVector<f64>) -> Self {
+impl From<DVector<f64>> for SE2Tangent {
+    fn from(data_vector: DVector<f64>) -> Self {
         if data_vector.len() != 3 {
             panic!("SE2Tangent::from expects 3-dimensional vector [x, y, theta]");
         }
         // Input order is [x, y, theta] to match G2O format
         // Internal storage is [x, y, theta]
         SE2Tangent {
-            data: nalgebra::Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
         }
     }
 }
 
-impl From<SE2Tangent> for nalgebra::DVector<f64> {
+impl From<SE2Tangent> for DVector<f64> {
     fn from(se2_tangent: SE2Tangent) -> Self {
-        nalgebra::DVector::from_vec(vec![
+        DVector::from_vec(vec![
             se2_tangent.data[0], // x first
             se2_tangent.data[1], // y second
             se2_tangent.data[2], // theta third
@@ -421,7 +419,7 @@ impl SE2Tangent {
     /// Create a new SE2Tangent from x, y, and theta components.
     pub fn new(x: f64, y: f64, theta: f64) -> Self {
         SE2Tangent {
-            data: nalgebra::Vector3::new(x, y, theta),
+            data: Vector3::new(x, y, theta),
         }
     }
 
@@ -440,9 +438,9 @@ impl SE2Tangent {
         self.data[2]
     }
 
-    /// Get the translation part as nalgebra::Vector2.
-    pub fn translation(&self) -> nalgebra::Vector2<f64> {
-        nalgebra::Vector2::new(self.x(), self.y())
+    /// Get the translation part as Vector2.
+    pub fn translation(&self) -> Vector2<f64> {
+        Vector2::new(self.x(), self.y())
     }
 }
 
@@ -469,9 +467,8 @@ impl Tangent<SE2> for SE2Tangent {
             (a, b)
         };
 
-        let translation =
-            nalgebra::Vector2::new(a * self.x() - b * self.y(), b * self.x() + a * self.y());
-        let rotation = nalgebra::UnitComplex::from_cos_sin_unchecked(cos_theta, sin_theta);
+        let translation = Vector2::new(a * self.x() - b * self.y(), b * self.x() + a * self.y());
+        let rotation = UnitComplex::from_cos_sin_unchecked(cos_theta, sin_theta);
 
         if let Some(jac) = jacobian {
             *jac = self.right_jacobian();
@@ -499,7 +496,7 @@ impl Tangent<SE2> for SE2Tangent {
             (a, b)
         };
 
-        let mut jac = nalgebra::Matrix3::identity();
+        let mut jac = Matrix3::identity();
         jac[(0, 0)] = a;
         jac[(0, 1)] = b;
         jac[(1, 0)] = -b;
@@ -539,7 +536,7 @@ impl Tangent<SE2> for SE2Tangent {
             (a, b)
         };
 
-        let mut jac = nalgebra::Matrix3::identity();
+        let mut jac = Matrix3::identity();
         jac[(0, 0)] = a;
         jac[(0, 1)] = -b;
         jac[(1, 0)] = b;
@@ -567,7 +564,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let mut jac_inv = nalgebra::Matrix3::zeros();
+        let mut jac_inv = Matrix3::zeros();
         jac_inv[(0, 1)] = -theta * 0.5;
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
@@ -606,7 +603,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let mut jac_inv = nalgebra::Matrix3::zeros();
+        let mut jac_inv = Matrix3::zeros();
         jac_inv[(0, 1)] = theta * 0.5;
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
@@ -640,7 +637,7 @@ impl Tangent<SE2> for SE2Tangent {
 
     /// Hat operator: φ^∧ (vector to matrix).
     fn hat(&self) -> <SE2 as LieGroup>::LieAlgebra {
-        nalgebra::Matrix3::new(
+        Matrix3::new(
             0.0,
             -self.angle(),
             self.x(),
@@ -702,7 +699,7 @@ impl Tangent<SE2> for SE2Tangent {
         let x = self.x();
         let y = self.y();
 
-        let mut small_adj = nalgebra::Matrix3::zeros();
+        let mut small_adj = Matrix3::zeros();
 
         // Following the C++ manif implementation structure:
         // smallAdj(0,1) = -angle();
@@ -749,15 +746,15 @@ impl Tangent<SE2> for SE2Tangent {
         match i {
             0 => {
                 // Generator E1 for x translation
-                nalgebra::Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
             1 => {
                 // Generator E2 for y translation
-                nalgebra::Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
+                Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0)
             }
             2 => {
                 // Generator E3 for rotation
-                nalgebra::Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+                Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0)
             }
             _ => unreachable!(),
         }
@@ -782,7 +779,7 @@ mod tests {
     #[test]
     fn test_se2_tangent_zero() {
         let zero = SE2Tangent::zero();
-        assert_eq!(zero.data, nalgebra::Vector3::zeros());
+        assert_eq!(zero.data, Vector3::zeros());
         assert!(zero.is_zero(1e-10));
     }
 
@@ -797,8 +794,8 @@ mod tests {
 
     #[test]
     fn test_se2_new() {
-        let translation = nalgebra::Vector2::new(1.0, 2.0);
-        let rotation = nalgebra::UnitComplex::from_angle(PI / 4.0);
+        let translation = Vector2::new(1.0, 2.0);
+        let rotation = UnitComplex::from_angle(PI / 4.0);
         let se2 = SE2::new(translation, rotation);
 
         assert!(se2.is_valid(TOLERANCE));
@@ -887,7 +884,7 @@ mod tests {
     #[test]
     fn test_se2_act() {
         let se2 = SE2::from_xy_angle(1.0, 1.0, PI / 2.0);
-        let point = nalgebra::Vector3::new(1.0, 1.0, 0.0);
+        let point = Vector3::new(1.0, 1.0, 0.0);
         let transformed_point = se2.act(&point, None, None);
 
         assert!((transformed_point.x - 0.0).abs() < TOLERANCE);
@@ -992,9 +989,9 @@ mod tests {
 
     #[test]
     fn test_se2_isometry() {
-        let translation = nalgebra::Translation2::new(1.0, 2.0);
-        let rotation = nalgebra::UnitComplex::from_angle(PI / 4.0);
-        let isometry = nalgebra::Isometry2::from_parts(translation, rotation);
+        let translation = Translation2::new(1.0, 2.0);
+        let rotation = UnitComplex::from_angle(PI / 4.0);
+        let isometry = Isometry2::from_parts(translation, rotation);
 
         let se2 = SE2::from_isometry(isometry);
         let recovered_isometry = se2.isometry();
@@ -1202,7 +1199,7 @@ mod tests {
     #[test]
     fn test_se2_act_detailed() {
         let se2 = SE2::from_xy_angle(1.0, 1.0, PI / 2.0);
-        let point = nalgebra::Vector3::new(1.0, 1.0, 0.0);
+        let point = Vector3::new(1.0, 1.0, 0.0);
         let transformed_point = se2.act(&point, None, None);
 
         assert!((transformed_point.x - 0.0).abs() < TOLERANCE);
@@ -1267,7 +1264,7 @@ mod tests {
     fn test_se2_tangent_retract_jac() {
         let se2_tan = SE2Tangent::new(4.0, 2.0, PI);
 
-        let mut j_ret = nalgebra::Matrix3::zeros();
+        let mut j_ret = Matrix3::zeros();
         let se2_exp = se2_tan.exp(Some(&mut j_ret));
 
         assert!((se2_exp.real() - PI.cos()).abs() < TOLERANCE);
@@ -1287,17 +1284,16 @@ mod tests {
         let se2 = small_tangent.exp(None);
         let recovered = se2.log(None);
 
-        let diff =
-            (nalgebra::Vector3::new(small_tangent.x(), small_tangent.y(), small_tangent.angle())
-                - nalgebra::Vector3::new(recovered.x(), recovered.y(), recovered.angle()))
-            .norm();
+        let diff = (Vector3::new(small_tangent.x(), small_tangent.y(), small_tangent.angle())
+            - Vector3::new(recovered.x(), recovered.y(), recovered.angle()))
+        .norm();
         assert!(diff < TOLERANCE);
     }
 
     #[test]
     fn test_se2_tangent_norm() {
         let tangent = SE2Tangent::new(3.0, 4.0, 0.0);
-        let norm = nalgebra::Vector3::new(tangent.x(), tangent.y(), tangent.angle()).norm();
+        let norm = Vector3::new(tangent.x(), tangent.y(), tangent.angle()).norm();
         assert!((norm - 5.0).abs() < TOLERANCE); // sqrt(3^2 + 4^2) = 5
     }
 
@@ -1396,9 +1392,9 @@ mod tests {
         let e3 = tangent.generator(2); // rotation
 
         // Expected generators for SE(2)
-        let expected_e1 = nalgebra::Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-        let expected_e2 = nalgebra::Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
-        let expected_e3 = nalgebra::Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let expected_e1 = Matrix3::new(0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let expected_e2 = Matrix3::new(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+        let expected_e3 = Matrix3::new(0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
 
         assert!((e1 - expected_e1).norm() < 1e-10);
         assert!((e2 - expected_e2).norm() < 1e-10);
