@@ -1,10 +1,17 @@
-use nalgebra;
-use std::{collections, fmt, path};
-use thiserror;
+use collections::HashMap;
+use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
+use rerun::external::glam::{Quat, Vec3};
+use std::{
+    collections, fmt,
+    fmt::{Display, Formatter},
+    io,
+    path::Path,
+};
+use thiserror::Error;
 
 // Import manifold types
 use crate::{
-    core::problem,
+    core::problem::VariableEnum,
     manifold::{se2::SE2, se3::SE3},
 };
 
@@ -17,10 +24,10 @@ pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
 
 /// Errors that can occur during graph file parsing
-#[derive(thiserror::Error, Debug)]
+#[derive(Error, Debug)]
 pub enum ApexSolverIoError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("Parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
@@ -60,7 +67,7 @@ impl VertexSE2 {
         }
     }
 
-    pub fn from_vector(id: usize, vector: nalgebra::Vector3<f64>) -> Self {
+    pub fn from_vector(id: usize, vector: Vector3<f64>) -> Self {
         Self {
             id,
             pose: SE2::from_xy_angle(vector[0], vector[1], vector[2]),
@@ -84,8 +91,8 @@ impl VertexSE2 {
     }
 }
 
-impl fmt::Display for VertexSE2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for VertexSE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "VertexSE2 [ id: {}, pose: {} ]", self.id, self.pose)
     }
 }
@@ -110,12 +117,8 @@ impl VertexSE2 {
     ///
     /// # Returns
     /// 3D position compatible with Rerun Transform3D or Points3D
-    pub fn to_rerun_position_3d(&self, scale: f32, height: f32) -> rerun::external::glam::Vec3 {
-        rerun::external::glam::Vec3::new(
-            (self.x() as f32) * scale,
-            (self.y() as f32) * scale,
-            height,
-        )
+    pub fn to_rerun_position_3d(&self, scale: f32, height: f32) -> Vec3 {
+        Vec3::new((self.x() as f32) * scale, (self.y() as f32) * scale, height)
     }
 }
 
@@ -127,11 +130,7 @@ pub struct VertexSE3 {
 }
 
 impl VertexSE3 {
-    pub fn new(
-        id: usize,
-        translation: nalgebra::Vector3<f64>,
-        rotation: nalgebra::UnitQuaternion<f64>,
-    ) -> Self {
+    pub fn new(id: usize, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
         Self {
             id,
             pose: SE3::new(translation, rotation),
@@ -139,8 +138,8 @@ impl VertexSE3 {
     }
 
     pub fn from_vector(id: usize, vector: [f64; 7]) -> Self {
-        let translation = nalgebra::Vector3::from([vector[0], vector[1], vector[2]]);
-        let rotation = nalgebra::UnitQuaternion::from_quaternion(nalgebra::Quaternion::from([
+        let translation = Vector3::from([vector[0], vector[1], vector[2]]);
+        let rotation = UnitQuaternion::from_quaternion(Quaternion::from([
             vector[3], vector[4], vector[5], vector[6],
         ]));
         Self::new(id, translation, rotation)
@@ -148,8 +147,8 @@ impl VertexSE3 {
 
     pub fn from_translation_quaternion(
         id: usize,
-        translation: nalgebra::Vector3<f64>,
-        quaternion: nalgebra::Quaternion<f64>,
+        translation: Vector3<f64>,
+        quaternion: Quaternion<f64>,
     ) -> Self {
         Self {
             id,
@@ -161,11 +160,11 @@ impl VertexSE3 {
         self.id
     }
 
-    pub fn translation(&self) -> nalgebra::Vector3<f64> {
+    pub fn translation(&self) -> Vector3<f64> {
         self.pose.translation()
     }
 
-    pub fn rotation(&self) -> nalgebra::UnitQuaternion<f64> {
+    pub fn rotation(&self) -> UnitQuaternion<f64> {
         self.pose.rotation_quaternion()
     }
 
@@ -182,8 +181,8 @@ impl VertexSE3 {
     }
 }
 
-impl fmt::Display for VertexSE3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for VertexSE3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "VertexSE3 [ id: {}, pose: {} ]", self.id, self.pose)
     }
 }
@@ -196,25 +195,15 @@ impl VertexSE3 {
     ///
     /// # Returns
     /// Tuple of (position, rotation) compatible with Rerun Transform3D
-    pub fn to_rerun_transform(
-        &self,
-        scale: f32,
-    ) -> (rerun::external::glam::Vec3, rerun::external::glam::Quat) {
+    pub fn to_rerun_transform(&self, scale: f32) -> (Vec3, Quat) {
         // Extract translation and convert to glam Vec3
         let trans = self.translation();
-        let position =
-            rerun::external::glam::Vec3::new(trans.x as f32, trans.y as f32, trans.z as f32)
-                * scale;
+        let position = Vec3::new(trans.x as f32, trans.y as f32, trans.z as f32) * scale;
 
         // Extract rotation quaternion and convert to glam Quat
         let rot = self.rotation();
         let nq = rot.as_ref();
-        let rotation = rerun::external::glam::Quat::from_xyzw(
-            nq.i as f32,
-            nq.j as f32,
-            nq.k as f32,
-            nq.w as f32,
-        );
+        let rotation = Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
 
         (position, rotation)
     }
@@ -225,8 +214,8 @@ impl VertexSE3 {
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE2,                    // Relative transformation
-    pub information: nalgebra::Matrix3<f64>, // 3x3 information matrix
+    pub measurement: SE2,          // Relative transformation
+    pub information: Matrix3<f64>, // 3x3 information matrix
 }
 
 impl EdgeSE2 {
@@ -236,7 +225,7 @@ impl EdgeSE2 {
         dx: f64,
         dy: f64,
         dtheta: f64,
-        information: nalgebra::Matrix3<f64>,
+        information: Matrix3<f64>,
     ) -> Self {
         Self {
             from,
@@ -247,8 +236,8 @@ impl EdgeSE2 {
     }
 }
 
-impl fmt::Display for EdgeSE2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for EdgeSE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "EdgeSE2 [ from: {}, to: {}, measurement: {}, information: {} ]",
@@ -262,17 +251,17 @@ impl fmt::Display for EdgeSE2 {
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
-    pub measurement: SE3,                    // Relative transformation
-    pub information: nalgebra::Matrix6<f64>, // 6x6 information matrix
+    pub measurement: SE3,          // Relative transformation
+    pub information: Matrix6<f64>, // 6x6 information matrix
 }
 
 impl EdgeSE3 {
     pub fn new(
         from: usize,
         to: usize,
-        translation: nalgebra::Vector3<f64>,
-        rotation: nalgebra::UnitQuaternion<f64>,
-        information: nalgebra::Matrix6<f64>,
+        translation: Vector3<f64>,
+        rotation: UnitQuaternion<f64>,
+        information: Matrix6<f64>,
     ) -> Self {
         Self {
             from,
@@ -283,8 +272,8 @@ impl EdgeSE3 {
     }
 }
 
-impl fmt::Display for EdgeSE3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for EdgeSE3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "EdgeSE3 [ from: {}, to: {}, measurement: {}, information: {} ]",
@@ -332,10 +321,10 @@ impl Graph {
     /// # Returns
     /// A new Graph with optimized vertices and original edges
     pub fn from_optimized_variables(
-        variables: &collections::HashMap<String, problem::VariableEnum>,
+        variables: &HashMap<String, VariableEnum>,
         original_edges: &Self,
     ) -> Self {
-        use problem::VariableEnum;
+        use VariableEnum;
 
         let mut graph = Graph::new();
 
@@ -382,8 +371,8 @@ impl Default for Graph {
     }
 }
 
-impl fmt::Display for Graph {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for Graph {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "Graph [[ vertices_se2: {} (count: {}), vertices_se3: {} (count: {}), edges_se2: {} (count: {}), edges_se3: {} (count: {}) ]]",
@@ -418,14 +407,14 @@ impl fmt::Display for Graph {
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<path::Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<path::Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
 }
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<path::Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
+pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
@@ -444,7 +433,7 @@ pub fn load_graph<P: AsRef<path::Path>>(path: P) -> Result<Graph, ApexSolverIoEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{error, io::Write};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -468,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_m3500() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_load_m3500() -> Result<(), Box<dyn error::Error>> {
         let graph = G2oLoader::load("data/M3500.g2o")?;
         println!(
             "M3500 loaded: {} vertices, {} edges",
@@ -480,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_parking_garage() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_load_parking_garage() -> Result<(), Box<dyn error::Error>> {
         let graph = G2oLoader::load("data/parking-garage.g2o")?;
         println!(
             "Parking garage loaded: {} vertices, {} edges",
@@ -492,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_sphere2500() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_load_sphere2500() -> Result<(), Box<dyn error::Error>> {
         let graph = G2oLoader::load("data/sphere2500.g2o")?;
         println!(
             "Sphere2500 loaded: {} vertices, {} edges",
@@ -504,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn test_duplicate_vertex_error() -> Result<(), std::io::Error> {
+    fn test_duplicate_vertex_error() -> Result<(), io::Error> {
         let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 0 1.0 0.0 0.0")?; // Duplicate ID
@@ -519,7 +508,7 @@ mod tests {
     }
 
     #[test]
-    fn test_toro_loader() -> Result<(), std::io::Error> {
+    fn test_toro_loader() -> Result<(), io::Error> {
         let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "VERTEX2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX2 1 1.0 0.0 0.0")?;
@@ -532,11 +521,7 @@ mod tests {
 
     #[test]
     fn test_se3_to_rerun() {
-        let vertex = VertexSE3::new(
-            0,
-            nalgebra::Vector3::new(1.0, 2.0, 3.0),
-            nalgebra::UnitQuaternion::identity(),
-        );
+        let vertex = VertexSE3::new(0, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
 
         let (pos, rot) = vertex.to_rerun_transform(0.1);
 
