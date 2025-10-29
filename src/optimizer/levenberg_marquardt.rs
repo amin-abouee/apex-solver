@@ -72,8 +72,8 @@
 //! - You want reliable convergence across diverse problem types
 //!
 //! For problems with specific structure, consider:
-//! - [`GaussNewton`](crate::optimizer::GaussNewton) if well-conditioned with good initialization
-//! - [`DogLeg`](crate::optimizer::DogLeg) for explicit trust region control
+//! - [`GaussNewton`](crate::GaussNewton) if well-conditioned with good initialization
+//! - [`DogLeg`](crate::DogLeg) for explicit trust region control
 //!
 //! # Implementation Features
 //!
@@ -100,7 +100,7 @@
 //! ## Basic usage
 //!
 //! ```no_run
-//! use apex_solver::optimizer::LevenbergMarquardt;
+//! use apex_solver::LevenbergMarquardt;
 //! use apex_solver::core::problem::Problem;
 //! use std::collections::HashMap;
 //!
@@ -148,16 +148,25 @@
 //! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 10.
 //! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
-use crate::core::problem;
+use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
 use crate::error;
-use crate::linalg;
-use crate::manifold;
-use crate::optimizer;
-use faer::sparse;
-use nalgebra;
-use std::collections;
-use std::fmt;
-use std::time;
+use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+use crate::manifold::ManifoldType;
+use crate::optimizer::{
+    ConvergenceInfo, OptimizationStatus, OptimizationVisualizer, Solver, SolverResult,
+    apply_negative_parameter_step, apply_parameter_step, compute_cost,
+};
+use faer::{
+    Mat,
+    sparse::{SparseColMat, Triplet},
+};
+use nalgebra::DVector;
+use std::collections::HashMap;
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+    time::{Duration, Instant},
+};
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]
@@ -185,13 +194,13 @@ pub struct LevenbergMarquardtSummary {
     /// Final parameter update norm
     pub final_parameter_update_norm: f64,
     /// Total time elapsed
-    pub total_time: std::time::Duration,
+    pub total_time: Duration,
     /// Average time per iteration
-    pub average_time_per_iteration: std::time::Duration,
+    pub average_time_per_iteration: Duration,
 }
 
-impl fmt::Display for LevenbergMarquardtSummary {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for LevenbergMarquardtSummary {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         writeln!(f, "Levenberg-Marquardt Optimization Summary")?;
         writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
         writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
@@ -291,12 +300,12 @@ impl fmt::Display for LevenbergMarquardtSummary {
 /// # See Also
 ///
 /// - [`LevenbergMarquardt`] - The solver that uses this configuration
-/// - [`GaussNewtonConfig`](crate::optimizer::GaussNewtonConfig) - Undamped variant
-/// - [`DogLegConfig`](crate::optimizer::DogLegConfig) - Trust region alternative
+/// - [`GaussNewtonConfig`](crate::GaussNewtonConfig) - Undamped variant
+/// - [`DogLegConfig`](crate::DogLegConfig) - Trust region alternative
 #[derive(Clone)]
 pub struct LevenbergMarquardtConfig {
     /// Type of linear solver for the linear systems
-    pub linear_solver_type: linalg::LinearSolverType,
+    pub linear_solver_type: LinearSolverType,
     /// Maximum number of iterations
     pub max_iterations: usize,
     /// Convergence tolerance for cost function
@@ -306,7 +315,7 @@ pub struct LevenbergMarquardtConfig {
     /// Convergence tolerance for gradient norm
     pub gradient_tolerance: f64,
     /// Timeout duration
-    pub timeout: Option<time::Duration>,
+    pub timeout: Option<Duration>,
     /// Enable detailed logging
     pub verbose: bool,
     /// Initial damping parameter
@@ -396,7 +405,7 @@ pub struct LevenbergMarquardtConfig {
 impl Default for LevenbergMarquardtConfig {
     fn default() -> Self {
         Self {
-            linear_solver_type: linalg::LinearSolverType::default(),
+            linear_solver_type: LinearSolverType::default(),
             // Ceres Solver default: 50 (changed from 100 for compatibility)
             max_iterations: 50,
             // Ceres Solver default: 1e-6 (changed from 1e-8 for compatibility)
@@ -439,7 +448,7 @@ impl LevenbergMarquardtConfig {
     }
 
     /// Set the linear solver type
-    pub fn with_linear_solver_type(mut self, linear_solver_type: linalg::LinearSolverType) -> Self {
+    pub fn with_linear_solver_type(mut self, linear_solver_type: LinearSolverType) -> Self {
         self.linear_solver_type = linear_solver_type;
         self
     }
@@ -469,7 +478,7 @@ impl LevenbergMarquardtConfig {
     }
 
     /// Set the timeout duration
-    pub fn with_timeout(mut self, timeout: time::Duration) -> Self {
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
     }
@@ -586,17 +595,17 @@ impl LevenbergMarquardtConfig {
 
 /// State for optimization iteration
 struct LinearizerResult {
-    variables: collections::HashMap<String, problem::VariableEnum>,
-    variable_index_map: collections::HashMap<String, usize>,
+    variables: HashMap<String, VariableEnum>,
+    variable_index_map: HashMap<String, usize>,
     sorted_vars: Vec<String>,
-    symbolic_structure: problem::SymbolicStructure,
+    symbolic_structure: SymbolicStructure,
     current_cost: f64,
     initial_cost: f64,
 }
 
 /// Result from step computation
 struct StepResult {
-    step: faer::Mat<f64>,
+    step: Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
 }
@@ -630,7 +639,7 @@ struct StepEvaluation {
 /// # Examples
 ///
 /// ```no_run
-/// use apex_solver::optimizer::LevenbergMarquardt;
+/// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
 /// use apex_solver::core::problem::Problem;
 /// use std::collections::HashMap;
 ///
@@ -654,12 +663,12 @@ struct StepEvaluation {
 /// # See Also
 ///
 /// - [`LevenbergMarquardtConfig`] - Configuration options
-/// - [`GaussNewton`](crate::optimizer::GaussNewton) - Undamped variant (faster but less robust)
-/// - [`DogLeg`](crate::optimizer::DogLeg) - Alternative trust region method
+/// - [`GaussNewton`](crate::GaussNewton) - Undamped variant (faster but less robust)
+/// - [`DogLeg`](crate::DogLeg) - Alternative trust region method
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
-    jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
-    visualizer: Option<optimizer::OptimizationVisualizer>,
+    jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    visualizer: Option<OptimizationVisualizer>,
 }
 
 impl Default for LevenbergMarquardt {
@@ -678,7 +687,7 @@ impl LevenbergMarquardt {
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
         let visualizer = if config.enable_visualization {
-            match optimizer::OptimizationVisualizer::new(true) {
+            match OptimizationVisualizer::new(true) {
                 Ok(vis) => Some(vis),
                 Err(e) => {
                     eprintln!("[WARNING] Failed to create visualizer: {}", e);
@@ -697,12 +706,10 @@ impl LevenbergMarquardt {
     }
 
     /// Create the appropriate linear solver based on configuration
-    fn create_linear_solver(&self) -> Box<dyn linalg::SparseLinearSolver> {
+    fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
         match self.config.linear_solver_type {
-            linalg::LinearSolverType::SparseCholesky => {
-                Box::new(linalg::SparseCholeskySolver::new())
-            }
-            linalg::LinearSolverType::SparseQR => Box::new(linalg::SparseQRSolver::new()),
+            LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
+            LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
         }
     }
 
@@ -746,7 +753,7 @@ impl LevenbergMarquardt {
 
     /// Compute predicted cost reduction from linear model
     /// Standard LM formula: 0.5 * step^T * (damping * step - gradient)
-    fn compute_predicted_reduction(&self, step: &faer::Mat<f64>, gradient: &faer::Mat<f64>) -> f64 {
+    fn compute_predicted_reduction(&self, step: &Mat<f64>, gradient: &Mat<f64>) -> f64 {
         // Standard Levenberg-Marquardt predicted reduction formula
         // predicted_reduction = -step^T * gradient - 0.5 * step^T * H * step
         //                     = 0.5 * step^T * (damping * step - gradient)
@@ -794,9 +801,9 @@ impl LevenbergMarquardt {
         parameter_update_norm: f64,
         gradient_norm: f64,
         trust_region_radius: f64,
-        elapsed: std::time::Duration,
+        elapsed: Duration,
         step_accepted: bool,
-    ) -> Option<optimizer::OptimizationStatus> {
+    ) -> Option<OptimizationStatus> {
         // ========================================================================
         // CRITICAL SAFETY CHECKS (perform first, before convergence checks)
         // ========================================================================
@@ -805,7 +812,7 @@ impl LevenbergMarquardt {
         // Always check for numerical instability first
         if !new_cost.is_finite() || !parameter_update_norm.is_finite() || !gradient_norm.is_finite()
         {
-            return Some(optimizer::OptimizationStatus::InvalidNumericalValues);
+            return Some(OptimizationStatus::InvalidNumericalValues);
         }
 
         // CRITERION 9: Timeout
@@ -813,13 +820,13 @@ impl LevenbergMarquardt {
         if let Some(timeout) = self.config.timeout
             && elapsed >= timeout
         {
-            return Some(optimizer::OptimizationStatus::Timeout);
+            return Some(OptimizationStatus::Timeout);
         }
 
         // CRITERION 8: Maximum Iterations
         // Check iteration count limit
         if iteration >= self.config.max_iterations {
-            return Some(optimizer::OptimizationStatus::MaxIterationsReached);
+            return Some(OptimizationStatus::MaxIterationsReached);
         }
 
         // ========================================================================
@@ -836,7 +843,7 @@ impl LevenbergMarquardt {
         // Check if gradient infinity norm is below threshold
         // This indicates we're at a critical point (local minimum, saddle, or maximum)
         if gradient_norm < self.config.gradient_tolerance {
-            return Some(optimizer::OptimizationStatus::GradientToleranceReached);
+            return Some(OptimizationStatus::GradientToleranceReached);
         }
 
         // Only check parameter and cost criteria after first iteration
@@ -848,7 +855,7 @@ impl LevenbergMarquardt {
                 * (parameter_norm + self.config.parameter_tolerance);
 
             if parameter_update_norm <= relative_step_tolerance {
-                return Some(optimizer::OptimizationStatus::ParameterToleranceReached);
+                return Some(OptimizationStatus::ParameterToleranceReached);
             }
 
             // CRITERION 3: Function Value Change Tolerance (ftol)
@@ -858,7 +865,7 @@ impl LevenbergMarquardt {
             let relative_cost_change = cost_change / current_cost.max(1e-10); // Avoid division by zero
 
             if relative_cost_change < self.config.cost_tolerance {
-                return Some(optimizer::OptimizationStatus::CostToleranceReached);
+                return Some(OptimizationStatus::CostToleranceReached);
             }
         }
 
@@ -867,13 +874,13 @@ impl LevenbergMarquardt {
         if let Some(min_cost) = self.config.min_cost_threshold
             && new_cost < min_cost
         {
-            return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
+            return Some(OptimizationStatus::MinCostThresholdReached);
         }
 
         // CRITERION 5: Trust Region Radius
         // If trust region has collapsed, optimization has converged or problem is ill-conditioned
         if trust_region_radius < self.config.min_trust_region_radius {
-            return Some(optimizer::OptimizationStatus::TrustRegionRadiusTooSmall);
+            return Some(OptimizationStatus::TrustRegionRadiusTooSmall);
         }
 
         // CRITERION 6: Singular/Ill-Conditioned Jacobian
@@ -897,9 +904,7 @@ impl LevenbergMarquardt {
     /// # Returns
     ///
     /// The L2 norm of the concatenated parameter vector
-    fn compute_parameter_norm(
-        variables: &collections::HashMap<String, problem::VariableEnum>,
-    ) -> f64 {
+    fn compute_parameter_norm(variables: &HashMap<String, VariableEnum>) -> f64 {
         variables
             .values()
             .map(|v| {
@@ -913,10 +918,8 @@ impl LevenbergMarquardt {
     /// Create Jacobi scaling matrix from Jacobian
     fn create_jacobi_scaling(
         &self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
-    ) -> sparse::SparseColMat<usize, f64> {
-        use faer::sparse::Triplet;
-
+        jacobian: &SparseColMat<usize, f64>,
+    ) -> SparseColMat<usize, f64> {
         let cols = jacobian.ncols();
         let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
             .map(|c| {
@@ -933,24 +936,21 @@ impl LevenbergMarquardt {
             })
             .collect();
 
-        sparse::SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
+        SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
             .expect("Failed to create Jacobi scaling matrix")
     }
 
     /// Initialize optimization state from problem and initial parameters
     fn initialize_optimization_state(
         &self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
     ) -> Result<LinearizerResult, error::ApexError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
         // Create column mapping for variables
-        let mut variable_index_map = collections::HashMap::new();
+        let mut variable_index_map = HashMap::new();
         let mut col_offset = 0;
         let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
         sorted_vars.sort();
@@ -966,7 +966,7 @@ impl LevenbergMarquardt {
 
         // Initial cost evaluation (residual only, no Jacobian needed)
         let residual = problem.compute_residual_sparse(&variables)?;
-        let current_cost = optimizer::compute_cost(&residual);
+        let current_cost = compute_cost(&residual);
         let initial_cost = current_cost;
 
         if self.config.verbose {
@@ -993,9 +993,9 @@ impl LevenbergMarquardt {
     /// Process Jacobian by creating and applying Jacobi scaling if enabled
     fn process_jacobian(
         &mut self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
+        jacobian: &SparseColMat<usize, f64>,
         iteration: usize,
-    ) -> sparse::SparseColMat<usize, f64> {
+    ) -> SparseColMat<usize, f64> {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
@@ -1012,9 +1012,9 @@ impl LevenbergMarquardt {
     /// Compute optimization step by solving the augmented system
     fn compute_levenberg_marquardt_step(
         &self,
-        residuals: &faer::Mat<f64>,
-        scaled_jacobian: &sparse::SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
+        residuals: &Mat<f64>,
+        scaled_jacobian: &SparseColMat<usize, f64>,
+        linear_solver: &mut Box<dyn SparseLinearSolver>,
     ) -> Option<StepResult> {
         // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
         let residuals_owned = residuals.as_ref().to_owned();
@@ -1063,10 +1063,10 @@ impl LevenbergMarquardt {
         &mut self,
         step_result: &StepResult,
         state: &mut LinearizerResult,
-        problem: &problem::Problem,
+        problem: &Problem,
     ) -> error::ApexResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
-        let _step_norm = optimizer::apply_parameter_step(
+        let _step_norm = apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
@@ -1074,7 +1074,7 @@ impl LevenbergMarquardt {
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_cost = optimizer::compute_cost(&new_residual);
+        let new_cost = compute_cost(&new_residual);
 
         // Compute step quality
         let rho = self.compute_step_quality(
@@ -1106,7 +1106,7 @@ impl LevenbergMarquardt {
             reduction
         } else {
             // Reject the step - revert parameter changes
-            optimizer::apply_negative_parameter_step(
+            apply_negative_parameter_step(
                 &mut state.variables,
                 step_result.step.as_ref(),
                 &state.sorted_vars,
@@ -1135,7 +1135,7 @@ impl LevenbergMarquardt {
         max_parameter_update_norm: f64,
         final_parameter_update_norm: f64,
         total_cost_reduction: f64,
-        total_time: std::time::Duration,
+        total_time: Duration,
     ) -> LevenbergMarquardtSummary {
         LevenbergMarquardtSummary {
             initial_cost,
@@ -1157,23 +1157,17 @@ impl LevenbergMarquardt {
             average_time_per_iteration: if iterations > 0 {
                 total_time / iterations as u32
             } else {
-                std::time::Duration::from_secs(0)
+                Duration::from_secs(0)
             },
         }
     }
 
     pub fn optimize(
         &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        error::ApexError,
-    > {
-        let start_time = time::Instant::now();
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexError> {
+        let start_time = Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1; // Initial cost evaluation
         let mut jacobian_evaluations = 0;
@@ -1358,14 +1352,14 @@ impl LevenbergMarquardt {
                     None
                 };
 
-                return Ok(optimizer::SolverResult {
+                return Ok(SolverResult {
                     status,
                     iterations: iteration + 1,
                     initial_cost: state.initial_cost,
                     final_cost: state.current_cost,
                     parameters: state.variables.into_iter().collect(),
                     elapsed_time: elapsed,
-                    convergence_info: Some(optimizer::ConvergenceInfo {
+                    convergence_info: Some(ConvergenceInfo {
                         final_gradient_norm,
                         final_parameter_update_norm,
                         cost_evaluations,
@@ -1382,7 +1376,7 @@ impl LevenbergMarquardt {
     }
 }
 // Implement Solver trait
-impl optimizer::Solver for LevenbergMarquardt {
+impl Solver for LevenbergMarquardt {
     type Config = LevenbergMarquardtConfig;
     type Error = error::ApexError;
 
@@ -1392,15 +1386,9 @@ impl optimizer::Solver for LevenbergMarquardt {
 
     fn optimize(
         &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        Self::Error,
-    > {
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error> {
         self.optimize(problem, initial_params)
     }
 }
@@ -1408,19 +1396,19 @@ impl optimizer::Solver for LevenbergMarquardt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::factors, manifold};
-    use nalgebra::dvector;
+    use crate::core::factors::Factor;
+    use nalgebra::{DMatrix, dvector};
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
     struct RosenbrockFactor1;
 
-    impl factors::Factor for RosenbrockFactor1 {
+    impl Factor for RosenbrockFactor1 {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
+            params: &[DVector<f64>],
             compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let x1 = params[0][0];
             let x2 = params[1][0];
 
@@ -1429,7 +1417,7 @@ mod tests {
 
             let jacobian = if compute_jacobian {
                 // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-                let mut jacobian = nalgebra::DMatrix::zeros(1, 2);
+                let mut jacobian = DMatrix::zeros(1, 2);
                 jacobian[(0, 0)] = -20.0 * x1;
                 jacobian[(0, 1)] = 10.0;
 
@@ -1451,12 +1439,12 @@ mod tests {
     #[derive(Debug, Clone)]
     struct RosenbrockFactor2;
 
-    impl factors::Factor for RosenbrockFactor2 {
+    impl Factor for RosenbrockFactor2 {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
+            params: &[DVector<f64>],
             compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let x1 = params[0][0];
 
             // Residual: r2 = 1 - x1
@@ -1464,7 +1452,7 @@ mod tests {
 
             let jacobian = if compute_jacobian {
                 // Jacobian: ∂r2/∂x1 = -1
-                Some(nalgebra::DMatrix::from_element(1, 1, -1.0))
+                Some(DMatrix::from_element(1, 1, -1.0))
             } else {
                 None
             };
@@ -1486,18 +1474,12 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        let mut problem = problem::Problem::new();
-        let mut initial_values = collections::HashMap::new();
+        let mut problem = Problem::new();
+        let mut initial_values = HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)
-        initial_values.insert(
-            "x1".to_string(),
-            (manifold::ManifoldType::RN, dvector![-1.2]),
-        );
-        initial_values.insert(
-            "x2".to_string(),
-            (manifold::ManifoldType::RN, dvector![1.0]),
-        );
+        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
+        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
 
         // Add custom factors (demonstrates extensibility!)
         problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
@@ -1529,10 +1511,10 @@ mod tests {
         assert!(
             matches!(
                 result.status,
-                optimizer::OptimizationStatus::Converged
-                    | optimizer::OptimizationStatus::CostToleranceReached
-                    | optimizer::OptimizationStatus::ParameterToleranceReached
-                    | optimizer::OptimizationStatus::GradientToleranceReached
+                OptimizationStatus::Converged
+                    | OptimizationStatus::CostToleranceReached
+                    | OptimizationStatus::ParameterToleranceReached
+                    | OptimizationStatus::GradientToleranceReached
             ),
             "Optimization should converge"
         );

@@ -6,15 +6,18 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem;
+use crate::core::problem::{Problem, VariableEnum};
 use crate::linalg;
-use crate::manifold;
-use faer;
-use nalgebra;
-use std::collections;
-use std::fmt;
+use crate::manifold::ManifoldType;
+use faer::{Mat, MatRef};
+use nalgebra::DVector;
+use std::collections::HashMap;
 use std::time;
-use thiserror;
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
+use thiserror::Error;
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -38,8 +41,8 @@ pub enum OptimizerType {
     DogLeg,
 }
 
-impl fmt::Display for OptimizerType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for OptimizerType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             OptimizerType::LevenbergMarquardt => write!(f, "Levenberg-Marquardt"),
             OptimizerType::GaussNewton => write!(f, "Gauss-Newton"),
@@ -49,7 +52,7 @@ impl fmt::Display for OptimizerType {
 }
 
 /// Optimizer-specific error types for apex-solver
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, Error)]
 pub enum OptimizerError {
     /// Linear system solve failed during optimization
     #[error("Linear system solve failed: {0}")]
@@ -127,8 +130,8 @@ pub struct ConvergenceInfo {
     pub jacobian_evaluations: usize,
 }
 
-impl fmt::Display for ConvergenceInfo {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for ConvergenceInfo {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(
             f,
             "Final gradient norm: {:.2e}, Final parameter update norm: {:.2e}, Cost evaluations: {}, Jacobian evaluations: {}",
@@ -171,8 +174,8 @@ pub enum OptimizationStatus {
     Failed(String),
 }
 
-impl fmt::Display for OptimizationStatus {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for OptimizationStatus {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             OptimizationStatus::Converged => write!(f, "Converged"),
             OptimizationStatus::MaxIterationsReached => write!(f, "Maximum iterations reached"),
@@ -225,7 +228,7 @@ pub struct SolverResult<T> {
     /// in tangent space. For example, for SE3 variables this would be 6×6 matrices.
     ///
     /// Enable covariance computation by setting `compute_covariances: true` in the optimizer config.
-    pub covariances: Option<std::collections::HashMap<String, faer::Mat<f64>>>,
+    pub covariances: Option<HashMap<String, Mat<f64>>>,
 }
 
 /// Core trait for optimization solvers.
@@ -241,12 +244,9 @@ pub trait Solver {
     /// Optimize the problem to minimize the cost function
     fn optimize(
         &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<SolverResult<collections::HashMap<String, problem::VariableEnum>>, Self::Error>;
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
 }
 
 /// Apply parameter update step to all variables.
@@ -268,8 +268,8 @@ pub trait Solver {
 /// how many elements it occupies in the step vector.
 ///
 pub fn apply_parameter_step(
-    variables: &mut collections::HashMap<String, problem::VariableEnum>,
-    step: faer::MatRef<f64>,
+    variables: &mut HashMap<String, VariableEnum>,
+    step: MatRef<f64>,
     variable_order: &[String],
 ) -> f64 {
     let mut step_offset = 0;
@@ -302,12 +302,10 @@ pub fn apply_parameter_step(
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
 pub fn apply_negative_parameter_step(
-    variables: &mut collections::HashMap<String, problem::VariableEnum>,
-    step: faer::MatRef<f64>,
+    variables: &mut HashMap<String, VariableEnum>,
+    step: MatRef<f64>,
     variable_order: &[String],
 ) {
-    use faer::Mat;
-
     // Create a negated version of the step vector
     let mut negative_step = Mat::zeros(step.nrows(), 1);
     for i in 0..step.nrows() {
@@ -318,7 +316,7 @@ pub fn apply_negative_parameter_step(
     apply_parameter_step(variables, negative_step.as_ref(), variable_order);
 }
 
-pub fn compute_cost(residual: &faer::Mat<f64>) -> f64 {
+pub fn compute_cost(residual: &Mat<f64>) -> f64 {
     let cost = residual.norm_l2();
     0.5 * cost * cost
 }
