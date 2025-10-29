@@ -1,13 +1,16 @@
+use faer::{
+    Mat,
+    linalg::solvers::Solve,
+    sparse::linalg::solvers::{Qr, SymbolicQr},
+    sparse::{SparseColMat, Triplet},
+};
 use std::ops::Mul;
-
-use faer;
-use faer::{linalg::solvers::Solve, sparse, sparse::linalg::solvers};
 
 use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
-    factorizer: Option<solvers::Qr<usize, f64>>,
+    factorizer: Option<Qr<usize, f64>>,
 
     /// Cached symbolic factorization for reuse across iterations.
     ///
@@ -15,28 +18,28 @@ pub struct SparseQRSolver {
     /// providing a 10-15% performance improvement for iterative optimization.
     /// For augmented systems where only lambda changes, the sparsity pattern
     /// remains the same (adding diagonal lambda*I doesn't change the pattern).
-    symbolic_factorization: Option<solvers::SymbolicQr<usize>>,
+    symbolic_factorization: Option<SymbolicQr<usize>>,
 
     /// The Hessian matrix, computed as `(J^T * W * J)`.
     ///
     /// This is `None` if the Hessian could not be computed.
-    hessian: Option<sparse::SparseColMat<usize, f64>>,
+    hessian: Option<SparseColMat<usize, f64>>,
 
     /// The gradient vector, computed as `J^T * W * r`.
     ///
     /// This is `None` if the gradient could not be computed.
-    gradient: Option<faer::Mat<f64>>,
+    gradient: Option<Mat<f64>>,
 
     /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
     ///
     /// This is `None` if the Hessian is singular or ill-conditioned.
-    covariance_matrix: Option<faer::Mat<f64>>,
+    covariance_matrix: Option<Mat<f64>>,
     /// Asymptotic standard errors of the parameters.
     ///
     /// This is `None` if the covariance matrix could not be computed.
     /// Each error is the square root of the corresponding diagonal element
     /// of the covariance matrix.
-    standard_errors: Option<faer::Mat<f64>>,
+    standard_errors: Option<Mat<f64>>,
 }
 
 impl SparseQRSolver {
@@ -51,15 +54,15 @@ impl SparseQRSolver {
         }
     }
 
-    pub fn hessian(&self) -> Option<&sparse::SparseColMat<usize, f64>> {
+    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
         self.hessian.as_ref()
     }
 
-    pub fn gradient(&self) -> Option<&faer::Mat<f64>> {
+    pub fn gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
     }
 
-    pub fn compute_standard_errors(&mut self) -> Option<&faer::Mat<f64>> {
+    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
         // // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
             self.compute_covariance_matrix();
@@ -68,7 +71,7 @@ impl SparseQRSolver {
         let n = self.hessian.as_ref().unwrap().ncols();
         // Compute standard errors as sqrt of diagonal elements
         if let Some(cov) = &self.covariance_matrix {
-            let mut std_errors = faer::Mat::zeros(n, 1);
+            let mut std_errors = Mat::zeros(n, 1);
             for i in 0..n {
                 let diag_val = cov[(i, i)];
                 if diag_val >= 0.0 {
@@ -99,9 +102,9 @@ impl Default for SparseQRSolver {
 impl SparseLinearSolver for SparseQRSolver {
     fn solve_normal_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &sparse::SparseColMat<usize, f64>,
-    ) -> LinAlgResult<faer::Mat<f64>> {
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
         // Form the normal equations explicitly: H = J^T * J
         let jt = jacobians.as_ref().transpose();
         let hessian = jt
@@ -126,7 +129,7 @@ impl SparseLinearSolver for SparseQRSolver {
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
-            let new_sym = solvers::SymbolicQr::try_new(hessian.symbolic()).map_err(|_| {
+            let new_sym = SymbolicQr::try_new(hessian.symbolic()).map_err(|_| {
                 LinAlgError::FactorizationFailed("Symbolic QR decomposition failed".to_string())
             })?;
             // Cache it (clone is cheap due to reference counting)
@@ -135,7 +138,7 @@ impl SparseLinearSolver for SparseQRSolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let qr = solvers::Qr::try_new_with_symbolic(sym, hessian.as_ref())
+        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref())
             .map_err(|_| LinAlgError::SingularMatrix)?;
 
         // Solve H * dx = -g (negate gradient to get descent direction)
@@ -149,10 +152,10 @@ impl SparseLinearSolver for SparseQRSolver {
 
     fn solve_augmented_equation(
         &mut self,
-        residuals: &faer::Mat<f64>,
-        jacobians: &sparse::SparseColMat<usize, f64>,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
-    ) -> LinAlgResult<faer::Mat<f64>> {
+    ) -> LinAlgResult<Mat<f64>> {
         let n = jacobians.ncols();
 
         // H = J^T * J
@@ -172,10 +175,10 @@ impl SparseLinearSolver for SparseQRSolver {
         // H_aug = H + lambda * I
         let mut lambda_i_triplets = Vec::with_capacity(n);
         for i in 0..n {
-            lambda_i_triplets.push(faer::sparse::Triplet::new(i, i, lambda));
+            lambda_i_triplets.push(Triplet::new(i, i, lambda));
         }
-        let lambda_i = sparse::SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets)
-            .map_err(|e| {
+        let lambda_i =
+            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
                 LinAlgError::SparseMatrixCreation(format!(
                     "Failed to create lambda*I matrix: {:?}",
                     e
@@ -192,19 +195,18 @@ impl SparseLinearSolver for SparseQRSolver {
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
-            let new_sym =
-                solvers::SymbolicQr::try_new(augmented_hessian.symbolic()).map_err(|_| {
-                    LinAlgError::FactorizationFailed(
-                        "Symbolic QR decomposition failed for augmented system".to_string(),
-                    )
-                })?;
+            let new_sym = SymbolicQr::try_new(augmented_hessian.symbolic()).map_err(|_| {
+                LinAlgError::FactorizationFailed(
+                    "Symbolic QR decomposition failed for augmented system".to_string(),
+                )
+            })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
             new_sym
         };
 
         // Perform numeric factorization
-        let qr = solvers::Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
+        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
             .map_err(|_| LinAlgError::SingularMatrix)?;
 
         let dx = qr.solve(-&gradient);
@@ -215,15 +217,15 @@ impl SparseLinearSolver for SparseQRSolver {
         Ok(dx)
     }
 
-    fn get_hessian(&self) -> Option<&sparse::SparseColMat<usize, f64>> {
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
         self.hessian.as_ref()
     }
 
-    fn get_gradient(&self) -> Option<&faer::Mat<f64>> {
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
     }
 
-    fn compute_covariance_matrix(&mut self) -> Option<&faer::Mat<f64>> {
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
         // Only compute if we have a factorizer and hessian, but no covariance matrix yet
         if self.factorizer.is_some()
             && self.hessian.is_some()
@@ -232,7 +234,7 @@ impl SparseLinearSolver for SparseQRSolver {
         {
             let n = hessian.ncols();
             // Create identity matrix
-            let identity = faer::Mat::identity(n, n);
+            let identity = Mat::identity(n, n);
 
             // Solve H * X = I to get X = H^(-1) = covariance matrix
             let cov_matrix = factorizer.solve(&identity);
@@ -241,7 +243,7 @@ impl SparseLinearSolver for SparseQRSolver {
         self.covariance_matrix.as_ref()
     }
 
-    fn get_covariance_matrix(&self) -> Option<&faer::Mat<f64>> {
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
         self.covariance_matrix.as_ref()
     }
 }
@@ -249,8 +251,6 @@ impl SparseLinearSolver for SparseQRSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use faer::Mat;
-    use faer::sparse::SparseColMat;
 
     const TOLERANCE: f64 = 1e-10;
 
@@ -258,18 +258,18 @@ mod tests {
     fn create_test_data() -> (SparseColMat<usize, f64>, Mat<f64>) {
         // Create a 4x3 overdetermined system
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 1.0),
-            faer::sparse::Triplet::new(0, 1, 0.0),
-            faer::sparse::Triplet::new(0, 2, 1.0),
-            faer::sparse::Triplet::new(1, 0, 0.0),
-            faer::sparse::Triplet::new(1, 1, 1.0),
-            faer::sparse::Triplet::new(1, 2, 1.0),
-            faer::sparse::Triplet::new(2, 0, 1.0),
-            faer::sparse::Triplet::new(2, 1, 1.0),
-            faer::sparse::Triplet::new(2, 2, 0.0),
-            faer::sparse::Triplet::new(3, 0, 1.0),
-            faer::sparse::Triplet::new(3, 1, 0.0),
-            faer::sparse::Triplet::new(3, 2, 0.0),
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 0.0),
+            Triplet::new(0, 2, 1.0),
+            Triplet::new(1, 0, 0.0),
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(1, 2, 1.0),
+            Triplet::new(2, 0, 1.0),
+            Triplet::new(2, 1, 1.0),
+            Triplet::new(2, 2, 0.0),
+            Triplet::new(3, 0, 1.0),
+            Triplet::new(3, 1, 0.0),
+            Triplet::new(3, 2, 0.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets).unwrap();
 
@@ -381,15 +381,15 @@ mod tests {
 
         // Create a rank-deficient matrix (3x3 but rank 2)
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 1.0),
-            faer::sparse::Triplet::new(0, 1, 2.0),
-            faer::sparse::Triplet::new(0, 2, 3.0),
-            faer::sparse::Triplet::new(1, 0, 2.0),
-            faer::sparse::Triplet::new(1, 1, 4.0),
-            faer::sparse::Triplet::new(1, 2, 6.0), // 2x first row
-            faer::sparse::Triplet::new(2, 0, 0.0),
-            faer::sparse::Triplet::new(2, 1, 0.0),
-            faer::sparse::Triplet::new(2, 2, 1.0),
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 2.0),
+            Triplet::new(0, 2, 3.0),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 4.0),
+            Triplet::new(1, 2, 6.0), // 2x first row
+            Triplet::new(2, 0, 0.0),
+            Triplet::new(2, 1, 0.0),
+            Triplet::new(2, 2, 1.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap();
         let residuals = Mat::from_fn(3, 1, |i, _| i as f64);
@@ -406,10 +406,10 @@ mod tests {
 
         // Simple 2x2 system
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 1.0),
-            faer::sparse::Triplet::new(0, 1, 0.0),
-            faer::sparse::Triplet::new(1, 0, 0.0),
-            faer::sparse::Triplet::new(1, 1, 1.0),
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 0.0),
+            Triplet::new(1, 0, 0.0),
+            Triplet::new(1, 1, 1.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
@@ -430,9 +430,9 @@ mod tests {
 
         // Create identity system: I * x = b
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 1.0),
-            faer::sparse::Triplet::new(1, 1, 1.0),
-            faer::sparse::Triplet::new(2, 2, 1.0),
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(2, 2, 1.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap();
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
@@ -569,10 +569,10 @@ mod tests {
 
         // Create a well-conditioned 2x2 system
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 2.0),
-            faer::sparse::Triplet::new(0, 1, 0.0),
-            faer::sparse::Triplet::new(1, 0, 0.0),
-            faer::sparse::Triplet::new(1, 1, 3.0),
+            Triplet::new(0, 0, 2.0),
+            Triplet::new(0, 1, 0.0),
+            Triplet::new(1, 0, 0.0),
+            Triplet::new(1, 1, 3.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
@@ -627,10 +627,10 @@ mod tests {
 
         // Create a singular system (rank deficient)
         let triplets = vec![
-            faer::sparse::Triplet::new(0, 0, 1.0),
-            faer::sparse::Triplet::new(0, 1, 2.0),
-            faer::sparse::Triplet::new(1, 0, 2.0),
-            faer::sparse::Triplet::new(1, 1, 4.0), // Second row is 2x first row
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 2.0),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 4.0), // Second row is 2x first row
         ];
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
