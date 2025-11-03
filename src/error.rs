@@ -3,7 +3,13 @@
 //! This module provides the main error and result types used throughout the library.
 //! All errors use the `thiserror` crate for automatic trait implementations.
 
-use crate::{io, linalg, manifold, optimizer};
+use crate::{
+    io::ApexSolverIoError, linalg::LinAlgError, manifold::ManifoldError, optimizer::OptimizerError,
+};
+use std::{
+    io::Error,
+    num::{ParseFloatError, ParseIntError},
+};
 use thiserror::Error;
 
 /// Main result type used throughout the apex-solver library
@@ -55,46 +61,46 @@ pub enum ApexError {
 
 // Conversions from standard library errors
 
-impl From<std::io::Error> for ApexError {
-    fn from(err: std::io::Error) -> Self {
+impl From<Error> for ApexError {
+    fn from(err: Error) -> Self {
         ApexError::Io(err.to_string())
     }
 }
 
-impl From<std::num::ParseFloatError> for ApexError {
-    fn from(err: std::num::ParseFloatError) -> Self {
+impl From<ParseFloatError> for ApexError {
+    fn from(err: ParseFloatError) -> Self {
         ApexError::InvalidInput(format!("Failed to parse float: {err}"))
     }
 }
 
-impl From<std::num::ParseIntError> for ApexError {
-    fn from(err: std::num::ParseIntError) -> Self {
+impl From<ParseIntError> for ApexError {
+    fn from(err: ParseIntError) -> Self {
         ApexError::InvalidInput(format!("Failed to parse integer: {err}"))
     }
 }
 
 // Convert module-specific errors to ApexError
 
-impl From<linalg::LinAlgError> for ApexError {
-    fn from(err: linalg::LinAlgError) -> Self {
+impl From<LinAlgError> for ApexError {
+    fn from(err: LinAlgError) -> Self {
         ApexError::LinearAlgebra(err.to_string())
     }
 }
 
-impl From<optimizer::OptimizerError> for ApexError {
-    fn from(err: optimizer::OptimizerError) -> Self {
+impl From<OptimizerError> for ApexError {
+    fn from(err: OptimizerError) -> Self {
         ApexError::Solver(err.to_string())
     }
 }
 
-impl From<manifold::ManifoldError> for ApexError {
-    fn from(err: manifold::ManifoldError) -> Self {
+impl From<ManifoldError> for ApexError {
+    fn from(err: ManifoldError) -> Self {
         ApexError::Manifold(err.to_string())
     }
 }
 
-impl From<io::ApexSolverIoError> for ApexError {
-    fn from(err: io::ApexSolverIoError) -> Self {
+impl From<ApexSolverIoError> for ApexError {
+    fn from(err: ApexSolverIoError) -> Self {
         ApexError::Io(err.to_string())
     }
 }
@@ -102,6 +108,7 @@ impl From<io::ApexSolverIoError> for ApexError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::ErrorKind;
 
     #[test]
     fn test_apex_error_display() {
@@ -114,7 +121,7 @@ mod tests {
 
     #[test]
     fn test_apex_error_from_io() {
-        let io_error = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");
+        let io_error = Error::new(ErrorKind::NotFound, "File not found");
         let apex_error = ApexError::from(io_error);
 
         match apex_error {
