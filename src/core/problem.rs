@@ -1246,7 +1246,7 @@ mod tests {
         let mut initial_values = HashMap::new();
 
         // Create 8 SE3 poses in a rough 3D cube pattern
-        let poses = vec![
+        let poses = [
             // Bottom face of cube
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0),   // x0: origin
             (1.0, 0.0, 0.0, 0.0, 0.0, 0.1, 0.995), // x1: +X
