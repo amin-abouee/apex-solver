@@ -6,8 +6,9 @@ A high-performance Rust-based nonlinear least squares optimization library desig
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v0.1.4)
+## Key Features (v0.1.5)
 
+- **📷 Camera Projection Factors**: 5 camera models for calibration and bundle adjustment (Double Sphere, EUCM, Kannala-Brandt, RadTan, UCM)
 - **🛡️ 15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - **✅ Enhanced Termination Criteria**: 8-9 comprehensive convergence checks with relative tolerances that scale with problem magnitude
 - **📌 Prior Factors & Fixed Variables**: Anchor poses with known values and constrain specific parameter indices
@@ -109,8 +110,18 @@ src/
 ├── core/           # Problem formulation and residual blocks
 │   ├── problem.rs      # Optimization problem definitions
 │   ├── variable.rs     # Variable management and constraints
-│   ├── factors.rs      # Between factors, prior factors
-│   └── residual_block.rs # Factor graph residual computations
+│   ├── residual_block.rs # Factor graph residual computations
+│   └── loss_functions.rs # Robust loss functions
+├── factors/        # Factor implementations (NEW in v0.1.5)
+│   ├── mod.rs          # Factor trait definition
+│   ├── se2_factor.rs   # SE(2) between factors
+│   ├── se3_factor.rs   # SE(3) between factors
+│   ├── prior_factor.rs # Prior/unary factors
+│   ├── double_sphere_factor.rs  # Camera projection
+│   ├── eucm_factor.rs           # Camera projection
+│   ├── kannala_brandt_factor.rs # Camera projection
+│   ├── rad_tan_factor.rs        # Camera projection
+│   └── ucm_factor.rs            # Camera projection
 ├── optimizer/      # Optimization algorithms
 │   ├── levenberg_marquardt.rs # LM algorithm with adaptive damping
 │   ├── gauss_newton.rs        # Fast Gauss-Newton solver
@@ -167,10 +178,11 @@ let perturbed = pose.plus(&tangent, None, None);
 
 ### Creating Custom Factors
 
-Apex Solver is extensible - you can create your own factors:
+Apex Solver is extensible - you can create your own factors. See the camera projection factors in `src/factors/` as reference implementations.
 
 ```rust
-use apex_solver::core::factors::Factor;
+use apex_solver::factors::Factor;
+use nalgebra::{DMatrix, DVector};
 
 #[derive(Debug, Clone)]
 struct MyCustomFactor {
@@ -178,12 +190,16 @@ struct MyCustomFactor {
 }
 
 impl Factor for MyCustomFactor {
-    fn linearize(&self, params: &[DVector<f64>]) -> (DVector<f64>, DMatrix<f64>) {
+    fn linearize(&self, params: &[DVector<f64>], compute_jacobian: bool) -> (DVector<f64>, Option<DMatrix<f64>>) {
         // Compute residual
-        let residual = dvector![params[0][0] - self.measurement];
+        let residual = DVector::from_vec(vec![params[0][0] - self.measurement]);
 
         // Compute Jacobian
-        let jacobian = DMatrix::from_element(1, 1, 1.0);
+        let jacobian = if compute_jacobian {
+            Some(DMatrix::from_element(1, 1, 1.0))
+        } else {
+            None
+        };
 
         (residual, jacobian)
     }
@@ -210,6 +226,215 @@ println!("SE3 edges: {}", graph.edges_se3.len());
 // Build optimization problem from graph
 let (problem, initial_values) = graph.to_problem();
 ```
+
+### Camera Projection Factors for Calibration
+
+**New in v0.1.5**: Comprehensive camera projection factors for camera calibration and bundle adjustment.
+
+Apex Solver now includes 5 camera projection factor implementations with analytical Jacobians for efficient camera parameter optimization. Each factor supports batch processing of 3D-2D point correspondences and includes validity checking.
+
+```rust
+use apex_solver::factors::{RadTanProjectionFactor, Factor};
+use nalgebra::{Matrix3xX, Matrix2xX, DVector, Vector3, Vector2};
+
+// Collect 3D-2D point correspondences
+let points_3d_vec = vec![
+    Vector3::new(0.1, 0.2, 1.0),
+    Vector3::new(-0.3, 0.1, 1.2),
+    Vector3::new(0.2, -0.1, 0.9),
+    // ... more points
+];
+
+let points_2d_vec = vec![
+    Vector2::new(325.3, 245.1),  // observed pixel coordinates
+    Vector2::new(280.5, 248.3),
+    Vector2::new(335.2, 238.7),
+    // ... more observations
+];
+
+// Convert to matrix format
+let points_3d = Matrix3xX::from_columns(&points_3d_vec);
+let points_2d = Matrix2xX::from_columns(&points_2d_vec);
+
+// Create camera projection factor
+let camera_factor = RadTanProjectionFactor::new(points_3d, points_2d);
+
+// Initial camera parameters: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+let initial_params = vec![DVector::from_vec(vec![
+    460.0, 460.0,      // focal lengths
+    320.0, 240.0,      // principal point
+    -0.28, 0.07,       // radial distortion
+    0.0002, 0.00002,   // tangential distortion
+    0.0                // additional radial
+])];
+
+// Compute residual and Jacobian
+let (residual, jacobian) = camera_factor.linearize(&initial_params, true);
+println!("Reprojection error: {:.3} pixels", residual.norm() / points_2d_vec.len() as f64);
+
+// Use in optimization problem
+problem.add_residual_block(
+    &["camera_params"],
+    Box::new(camera_factor),
+    None  // or Some(Box::new(HuberLoss::new(1.0)))
+);
+```
+
+#### Supported Camera Models
+
+| Model | Parameters | Dim | Best For | Description |
+|-------|------------|-----|----------|-------------|
+| **DoubleSphere** | fx, fy, cx, cy, α, ξ | 6 | Wide FOV fisheye | Two-sphere projection with α blending parameter |
+| **EUCM** | fx, fy, cx, cy, α, β | 6 | General fisheye | Extended unified model with β shape parameter |
+| **Kannala-Brandt** | fx, fy, cx, cy, k1-k4 | 8 | Fisheye cameras | Polynomial distortion model (equidistant) |
+| **RadTan** | fx, fy, cx, cy, k1, k2, p1, p2, k3 | 9 | Standard cameras | Brown-Conrady radial-tangential distortion |
+| **UCM** | fx, fy, cx, cy, α | 5 | Catadioptric | Unified camera model for central projection |
+
+#### Creating Camera Factors
+
+Each camera factor follows the same pattern:
+
+```rust
+use apex_solver::factors::{DoubleSphereProjectionFactor, EucmProjectionFactor, 
+                           KannalaBrandtProjectionFactor, UcmProjectionFactor};
+
+// All factors use the same constructor
+let ds_factor = DoubleSphereProjectionFactor::new(points_3d.clone(), points_2d.clone());
+let eucm_factor = EucmProjectionFactor::new(points_3d.clone(), points_2d.clone());
+let kb_factor = KannalaBrandtProjectionFactor::new(points_3d.clone(), points_2d.clone());
+let ucm_factor = UcmProjectionFactor::new(points_3d, points_2d);
+```
+
+#### Features
+
+- ✅ **Analytical Jacobians**: Hand-derived gradients for all camera models (no auto-differentiation overhead)
+- ✅ **Batch Processing**: Efficient vectorized computation for multiple point correspondences
+- ✅ **Validity Checking**: Automatic detection of invalid projections (points behind camera, distortion limits)
+- ✅ **Robust Loss Integration**: Compatible with all 15 robust loss functions for outlier rejection
+- ✅ **Thread-Safe**: Factors implement `Send + Sync` for parallel optimization
+
+#### Use Cases
+
+- **Camera Calibration**: Optimize intrinsic parameters from checkerboard or known 3D patterns
+- **Bundle Adjustment**: Joint optimization of camera parameters and 3D structure
+- **Camera Model Conversion**: Optimize one model's parameters to match another's projections
+- **Lens Distortion Correction**: Refine distortion parameters for image rectification
+
+**Note**: These factors are designed for batch optimization of camera parameters. For online visual odometry or SLAM, consider using fixed camera parameters with pose-only optimization.
+
+### How to Create a Custom Factor
+
+Creating a factor in Apex Solver involves implementing the `Factor` trait. Here's a step-by-step guide:
+
+**Step 1: Define Your Factor Struct**
+```rust
+use apex_solver::factors::Factor;
+use nalgebra::{DMatrix, DVector};
+
+#[derive(Debug, Clone)]
+pub struct MyRangeFactor {
+    /// Measured distance
+    pub measurement: f64,
+    /// Measurement uncertainty (inverse of variance)
+    pub information: f64,
+}
+```
+
+**Step 2: Implement the Factor Trait**
+
+The `Factor` trait requires two methods:
+- `linearize()` - Computes the residual and Jacobian
+- `get_dimension()` - Returns the dimension of the residual vector
+
+```rust
+impl Factor for MyRangeFactor {
+    fn linearize(
+        &self,
+        params: &[DVector<f64>],
+        compute_jacobian: bool,
+    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        // Extract parameters (2D point: [x, y])
+        let x = params[0][0];
+        let y = params[0][1];
+        
+        // Compute predicted measurement
+        let predicted_distance = (x * x + y * y).sqrt();
+        
+        // Compute residual: measurement - prediction
+        // Weighted by sqrt(information) for proper least squares
+        let residual = DVector::from_vec(vec![
+            self.information.sqrt() * (self.measurement - predicted_distance)
+        ]);
+        
+        // Compute Jacobian if requested
+        let jacobian = if compute_jacobian {
+            if predicted_distance > 1e-8 {
+                // ∂residual/∂[x, y] = -sqrt(info) * [x/d, y/d]
+                let scale = -self.information.sqrt() / predicted_distance;
+                Some(DMatrix::from_row_slice(1, 2, &[
+                    scale * x,
+                    scale * y,
+                ]))
+            } else {
+                // Degenerate case: point at origin
+                Some(DMatrix::zeros(1, 2))
+            }
+        } else {
+            None
+        };
+        
+        (residual, jacobian)
+    }
+    
+    fn get_dimension(&self) -> usize {
+        1  // One scalar residual
+    }
+}
+```
+
+**Step 3: Use Your Factor**
+```rust
+use apex_solver::core::problem::Problem;
+use apex_solver::manifold::ManifoldType;
+use std::collections::HashMap;
+
+// Create optimization problem
+let mut problem = Problem::new();
+
+// Add variable
+let mut initial_values = HashMap::new();
+initial_values.insert(
+    "point".to_string(),
+    (ManifoldType::Rn(2), DVector::from_vec(vec![1.0, 1.0]))
+);
+
+// Add factor
+let range_factor = MyRangeFactor {
+    measurement: 5.0,
+    information: 1.0,
+};
+
+problem.add_residual_block(
+    &["point"],
+    Box::new(range_factor),
+    None  // No robust loss function
+);
+
+// Solve
+let result = solver.optimize(&problem, &initial_values)?;
+```
+
+**Best Practices:**
+1. **Analytical Jacobians**: Compute derivatives analytically for best performance (see camera factors as examples)
+2. **Information Weighting**: Weight residuals by √(information) for proper least squares formulation
+3. **Numerical Stability**: Check for degenerate cases (division by zero, invalid projections)
+4. **Batch Processing**: For efficiency, process multiple measurements in a single factor (like camera factors)
+5. **Documentation**: Document the mathematical formulation and parameter ordering
+
+**Reference Implementations:**
+- Simple factors: `src/factors/prior_factor.rs`
+- Pose factors: `src/factors/se2_factor.rs`, `src/factors/se3_factor.rs`
+- Complex factors: `src/factors/rad_tan_factor.rs` (camera projection with 9 parameters)
 
 ### Available Examples
 
@@ -715,16 +940,17 @@ apex-solver/
 
 We welcome contributions! Areas of particular interest:
 
-### High Priority (v0.1.5 - Q1 2026)
+### High Priority (v0.1.6 - Q1 2026)
 - **Performance optimization** - Further caching optimizations, reduced allocations
 - **Covariance for DogLeg** - Extend uncertainty estimation to Dog Leg algorithm
 - **Enhanced error messages** - Better context and debugging information for all error cases
+- **IMU Pre-integration Factors** - Inertial measurement unit integration for visual-inertial SLAM
 
 ### Medium Priority (v0.2.0 - Q2 2026)
 - **Incremental optimization** - Efficient re-optimization when adding new factors
 - **Manifold extensions** - Sim(3), camera intrinsics, SE2(3) transformations
 - **File format support** - KITTI, EuRoC, additional SLAM dataset formats
-- **Bundle adjustment factors** - Camera reprojection, stereo constraints, IMU pre-integration
+- **Stereo Factors** - Stereo camera constraints for multi-camera systems
 - **Custom factor templates** - Macros for easier factor creation
 
 ### Future (v1.0.0+)
@@ -854,12 +1080,29 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 ## 📈 Project Status
 
-**Current Version**: 0.1.4
+**Current Version**: 0.1.5
 **Status**: Production Ready (96/100 quality score)
-**Production Ready**: Yes, for pose graph optimization and SLAM applications
-**Last Updated**: October 2025
+**Production Ready**: Yes, for pose graph optimization, SLAM, and camera calibration applications
+**Last Updated**: November 2025
 
-### What's New in v0.1.4
+### What's New in v0.1.5
+
+- ✅ **Camera Projection Factors** - 5 camera models for calibration and bundle adjustment
+  - `DoubleSphereProjectionFactor` - Wide FOV fisheye cameras (6 params: fx, fy, cx, cy, α, ξ)
+  - `EucmProjectionFactor` - Extended unified camera model (6 params: fx, fy, cx, cy, α, β)
+  - `KannalaBrandtProjectionFactor` - Fisheye polynomial model (8 params: fx, fy, cx, cy, k1-k4)
+  - `RadTanProjectionFactor` - Brown-Conrady distortion (9 params: fx, fy, cx, cy, k1, k2, p1, p2, k3)
+  - `UcmProjectionFactor` - Unified camera model (5 params: fx, fy, cx, cy, α)
+- ✅ **Factors Module Restructuring** - Dedicated `src/factors/` module with improved organization
+  - Separated pose factors (SE2, SE3, Prior) from camera projection factors
+  - Better code organization and discoverability
+- ✅ **Factor Trait Enhancement** - Updated `Factor` trait with `compute_jacobian` parameter for optional Jacobian computation
+- ✅ **Analytical Jacobians** - All camera factors use hand-derived analytical gradients (no auto-diff overhead)
+- ✅ **Batch Processing Support** - Efficient vectorized computation for multiple point correspondences
+- ✅ **Validity Checking** - Automatic detection of invalid projections in all camera models
+- ✅ **Code Quality Improvements** - Streamlined imports, renamed `Loss` trait to `LossFunction`, reduced Debug bounds
+
+### Previous Releases (v0.1.4)
 
 - ✅ **15 Robust Loss Functions** - Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - ✅ **Enhanced Termination Criteria** - 8-9 comprehensive convergence checks with relative tolerances
@@ -884,12 +1127,12 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 
 ### Roadmap
 
-**v0.1.5** (Q1 2026) - Advanced Features:
-- 🔄 **Incremental optimization** - Efficient re-optimization with new factors
+**v0.1.6** (Q1 2026) - Performance & Extensions:
+- 🚀 **Performance optimization** - Further caching and memory optimizations
+- 📊 **Covariance for DogLeg** - Uncertainty estimation for Dog Leg algorithm
+- 🎯 **IMU Pre-integration Factors** - Inertial measurement unit integration
 - 📂 **More file formats** - KITTI, EuRoC, custom SLAM datasets
-- 📷 **Bundle adjustment factors** - Reprojection, stereo constraints, IMU pre-integration
 - 📐 **Additional manifolds** - Sim(3), camera intrinsics, SE2(3)
-- 🎯 **Custom factor macros** - Simplified factor creation
 
 **v1.0.0** (Q2 2026) - Stable Release:
 - ✅ **API stability guarantees** - Semver commitment
