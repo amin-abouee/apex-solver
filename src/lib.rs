@@ -25,6 +25,7 @@
 
 pub mod core;
 pub mod error;
+pub mod factors;
 pub mod io;
 pub mod linalg;
 pub mod manifold;
@@ -33,6 +34,12 @@ pub mod optimizer;
 // Re-export core types
 pub use core::variable::Variable;
 pub use error::{ApexError, ApexResult};
+
+// Re-export factor types
+pub use factors::{
+    BetweenFactorSE2, BetweenFactorSE3, DoubleSphereProjectionFactor, EucmProjectionFactor, Factor,
+    KannalaBrandtProjectionFactor, PriorFactor, RadTanProjectionFactor, UcmProjectionFactor,
+};
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 pub use optimizer::{

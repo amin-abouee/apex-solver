@@ -1819,7 +1819,7 @@ impl optimizer::Solver for DogLeg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::factors, manifold};
+    use crate::{factors, manifold};
     use nalgebra;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)

@@ -25,8 +25,8 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
-use apex_solver::core::factors::BetweenFactorSE3;
 use apex_solver::core::problem::Problem;
+use apex_solver::factors::BetweenFactorSE3;
 use apex_solver::io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
@@ -231,7 +231,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
 /// Optimize SE2 pose graph with visualization
 fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    use apex_solver::core::factors::BetweenFactorSE2;
+    use apex_solver::factors::BetweenFactorSE2;
 
     // Create optimization problem
     let mut problem = Problem::new();

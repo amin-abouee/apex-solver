@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::core::factors::{BetweenFactorSE3, PriorFactor};
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
+use apex_solver::factors::{BetweenFactorSE3, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::manifold::se3::SE3;

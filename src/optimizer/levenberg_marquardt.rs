@@ -1396,7 +1396,7 @@ impl Solver for LevenbergMarquardt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors::Factor;
+    use crate::factors::Factor;
     use nalgebra::{DMatrix, dvector};
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
