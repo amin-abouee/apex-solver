@@ -142,6 +142,7 @@ pub mod se3_factor;
 // Camera projection factors
 pub mod double_sphere_factor;
 pub mod eucm_factor;
+pub mod fov_factor;
 pub mod kannala_brandt_factor;
 pub mod rad_tan_factor;
 pub mod ucm_factor;
@@ -149,6 +150,7 @@ pub mod ucm_factor;
 // Re-export all factor types
 pub use double_sphere_factor::DoubleSphereProjectionFactor;
 pub use eucm_factor::EucmProjectionFactor;
+pub use fov_factor::FovProjectionFactor;
 pub use kannala_brandt_factor::KannalaBrandtProjectionFactor;
 pub use prior_factor::PriorFactor;
 pub use rad_tan_factor::RadTanProjectionFactor;
