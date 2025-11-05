@@ -22,11 +22,15 @@ use thiserror::Error;
 pub mod dog_leg;
 pub mod gauss_newton;
 pub mod levenberg_marquardt;
+
+#[cfg(feature = "visualization")]
 pub mod visualization;
 
 pub use dog_leg::DogLeg;
 pub use gauss_newton::GaussNewton;
 pub use levenberg_marquardt::LevenbergMarquardt;
+
+#[cfg(feature = "visualization")]
 pub use visualization::OptimizationVisualizer;
 
 /// Type of optimization solver algorithm to use
