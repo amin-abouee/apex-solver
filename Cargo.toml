@@ -30,13 +30,25 @@ path = "bin/optimize_3d_graph.rs"
 name = "optimize_2d_graph"
 path = "bin/optimize_2d_graph.rs"
 
+[[example]]
+name = "visualize_graph_file"
+required-features = ["visualization"]
+
+[[example]]
+name = "visualize_optimization"
+required-features = ["visualization"]
+
+[features]
+default = []
+visualization = ["dep:rerun"]
+
 [dependencies]
 thiserror = "2.0.12"
 nalgebra = { version = "0.33", features = ["convert-glam029"] }
 memmap2 = "0.9"
 rayon = "1.8"
 rand = "0.9.1"
-rerun = { version = "0.26.0", features = ["sdk"] }
+rerun = { version = "0.26.0", features = ["sdk"], optional = true }
 faer = { version = "0.22", features = ["sparse"] }
 log = "0.4"
 clap = { version = "4.4", features = ["derive"] }
