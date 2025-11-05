@@ -189,8 +189,9 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(false)
-                .with_visualization(false);
+                .with_verbose(false);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(false);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -200,8 +201,9 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(false)
-                .with_visualization(false);
+                .with_verbose(false);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(false);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -212,8 +214,9 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(false)
-                .with_visualization(false);
+                .with_verbose(false);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(false);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
