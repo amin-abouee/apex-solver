@@ -178,6 +178,8 @@ pub struct LevenbergMarquardtSummary {
     pub initial_cost: f64,
     /// Final cost value
     pub final_cost: f64,
+    /// Ratio of actual to predicted reduction in cost
+    pub rho: f64,
     /// Total number of iterations performed
     pub iterations: usize,
     /// Number of successful steps (cost decreased)
@@ -207,6 +209,7 @@ impl Display for LevenbergMarquardtSummary {
         writeln!(f, "Levenberg-Marquardt Optimization Summary")?;
         writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
         writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
+        writeln!(f, "Cost reduction ratio:      {:.6e}", self.rho)?;
         writeln!(
             f,
             "Cost reduction:            {:.6e} ({:.2}%)",
@@ -1137,6 +1140,7 @@ impl LevenbergMarquardt {
         &self,
         initial_cost: f64,
         final_cost: f64,
+        rho: f64,
         iterations: usize,
         successful_steps: usize,
         unsuccessful_steps: usize,
@@ -1150,6 +1154,7 @@ impl LevenbergMarquardt {
         LevenbergMarquardtSummary {
             initial_cost,
             final_cost,
+            rho,
             iterations,
             successful_steps,
             unsuccessful_steps,
@@ -1332,6 +1337,7 @@ impl LevenbergMarquardt {
                 let summary = self.create_summary(
                     state.initial_cost,
                     state.current_cost,
+                    step_eval.rho,
                     iteration + 1,
                     successful_steps,
                     unsuccessful_steps,
