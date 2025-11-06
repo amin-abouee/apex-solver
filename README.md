@@ -295,7 +295,7 @@ problem.add_residual_block(
 Each camera factor follows the same pattern:
 
 ```rust
-use apex_solver::factors::{DoubleSphereProjectionFactor, EucmProjectionFactor, 
+use apex_solver::factors::{DoubleSphereProjectionFactor, EucmProjectionFactor,
                            KannalaBrandtProjectionFactor, UcmProjectionFactor};
 
 // All factors use the same constructor
@@ -356,16 +356,16 @@ impl Factor for MyRangeFactor {
         // Extract parameters (2D point: [x, y])
         let x = params[0][0];
         let y = params[0][1];
-        
+
         // Compute predicted measurement
         let predicted_distance = (x * x + y * y).sqrt();
-        
+
         // Compute residual: measurement - prediction
         // Weighted by sqrt(information) for proper least squares
         let residual = DVector::from_vec(vec![
             self.information.sqrt() * (self.measurement - predicted_distance)
         ]);
-        
+
         // Compute Jacobian if requested
         let jacobian = if compute_jacobian {
             if predicted_distance > 1e-8 {
@@ -382,10 +382,10 @@ impl Factor for MyRangeFactor {
         } else {
             None
         };
-        
+
         (residual, jacobian)
     }
-    
+
     fn get_dimension(&self) -> usize {
         1  // One scalar residual
     }
@@ -1079,12 +1079,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 ---
 
 ## 📈 Project Status
-
-**Current Version**: 0.1.5
-**Status**: Production Ready (96/100 quality score)
-**Production Ready**: Yes, for pose graph optimization, SLAM, and camera calibration applications
-**Last Updated**: November 2025
-
 ### What's New in v0.1.5
 
 - ✅ **Camera Projection Factors** - 5 camera models for calibration and bundle adjustment
@@ -1124,23 +1118,6 @@ Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for detai
 - ✅ **Jacobi preconditioning** - Automatic column scaling for robustness (enabled by default)
 - ✅ **Improved examples** - `covariance_estimation.rs` and `visualize_optimization.rs`
 - ✅ **Updated dependencies** - Rerun v0.26, improved Glam integration
-
-### Roadmap
-
-**v0.1.6** (Q1 2026) - Performance & Extensions:
-- 🚀 **Performance optimization** - Further caching and memory optimizations
-- 📊 **Covariance for DogLeg** - Uncertainty estimation for Dog Leg algorithm
-- 🎯 **IMU Pre-integration Factors** - Inertial measurement unit integration
-- 📂 **More file formats** - KITTI, EuRoC, custom SLAM datasets
-- 📐 **Additional manifolds** - Sim(3), camera intrinsics, SE2(3)
-
-**v1.0.0** (Q2 2026) - Stable Release:
-- ✅ **API stability guarantees** - Semver commitment
-- 🤖 **Optional auto-differentiation** - Complement to analytic Jacobians
-- 🚀 **Performance benchmarks** - Comprehensive comparison vs g2o/Ceres/GTSAM
-- 🌐 **WASM compilation** - Browser-based optimization
-- 📚 **Comprehensive tutorials** - Full documentation suite
-
 ---
 
 *Built with 🦀 Rust for performance, safety, and mathematical correctness.*
