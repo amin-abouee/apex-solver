@@ -19,8 +19,6 @@
 //! apex-solver = { version = "0.1", features = ["visualization"] }
 //! ```
 
-#![cfg(feature = "visualization")]
-
 use crate::{core::problem, io};
 use faer::sparse;
 use std::collections;
