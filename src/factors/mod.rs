@@ -24,11 +24,34 @@
 //! - **Prior factors**: Unary constraints on single variables
 //!
 //! ## Camera Projection Factors
-//! - **Double Sphere**: [`DoubleSphereProjectionFactor`]
-//! - **EUCM**: [`EucmProjectionFactor`]
-//! - **Kannala-Brandt**: [`KannalaBrandtProjectionFactor`]
-//! - **Radial-Tangential**: [`RadTanProjectionFactor`]
-//! - **UCM**: [`UcmProjectionFactor`]
+//!
+//! Each camera model provides two factor types:
+//! 1. **CameraParamsFactor**: Optimizes camera intrinsic parameters (fx, fy, cx, cy, distortion)
+//! 2. **ProjectionFactor**: Optimizes 3D point positions with fixed camera parameters
+//!
+//! ### Double Sphere
+//! - [`DoubleSphereCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`DoubleSphereProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### EUCM (Extended Unified Camera Model)
+//! - [`EucmCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`EucmProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### FOV (Field of View)
+//! - [`FovCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`FovProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### Kannala-Brandt
+//! - [`KannalaBrandtCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`KannalaBrandtProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### Radial-Tangential (RadTan)
+//! - [`RadTanCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`RadTanProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### UCM (Unified Camera Model)
+//! - [`UcmCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`UcmProjectionFactor`]: Optimize 3D point positions
 //!
 //! # Linearization
 //!
@@ -148,12 +171,26 @@ pub mod rad_tan_factor;
 pub mod ucm_factor;
 
 // Re-export all factor types
-pub use double_sphere_factor::DoubleSphereProjectionFactor;
-pub use eucm_factor::EucmProjectionFactor;
-pub use fov_factor::FovProjectionFactor;
-pub use kannala_brandt_factor::KannalaBrandtProjectionFactor;
+
+// Pose factors
 pub use prior_factor::PriorFactor;
-pub use rad_tan_factor::RadTanProjectionFactor;
 pub use se2_factor::BetweenFactorSE2;
 pub use se3_factor::BetweenFactorSE3;
-pub use ucm_factor::UcmProjectionFactor;
+
+// Camera projection factors - Double Sphere
+pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
+
+// Camera projection factors - EUCM
+pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
+
+// Camera projection factors - FOV
+pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
+
+// Camera projection factors - Kannala-Brandt
+pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
+
+// Camera projection factors - RadTan
+pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
+
+// Camera projection factors - UCM
+pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};
