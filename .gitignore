@@ -29,5 +29,4 @@ profiles/
 scripts/
 output/
 *.csv
-doc/*.md
 data_bk/
