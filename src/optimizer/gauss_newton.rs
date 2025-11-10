@@ -121,6 +121,10 @@
 //! - Björck, Å. (1996). *Numerical Methods for Least Squares Problems*. SIAM.
 
 use crate::{core::problem, error, linalg, manifold, optimizer};
+
+#[cfg(feature = "visualization")]
+use crate::optimizer::OptimizationVisualizer;
+
 use faer::sparse;
 use std::{collections, fmt, time};
 
@@ -293,9 +297,10 @@ pub struct GaussNewtonConfig {
     /// Enable real-time visualization (graphical debugging).
     ///
     /// When enabled, optimization progress is logged to a Rerun viewer.
-    /// Note: Has zero overhead when disabled.
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
     ///
     /// Default: false
+    #[cfg(feature = "visualization")]
     pub enable_visualization: bool,
 }
 
@@ -319,6 +324,7 @@ impl Default for GaussNewtonConfig {
             min_cost_threshold: None,
             max_condition_number: None,
             compute_covariances: false,
+            #[cfg(feature = "visualization")]
             enable_visualization: false,
         }
     }
@@ -421,9 +427,12 @@ impl GaussNewtonConfig {
 
     /// Enable real-time visualization.
     ///
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    ///
     /// # Arguments
     ///
     /// * `enable` - Whether to enable visualization
+    #[cfg(feature = "visualization")]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
@@ -498,7 +507,8 @@ struct CostEvaluation {
 pub struct GaussNewton {
     config: GaussNewtonConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
-    visualizer: Option<optimizer::visualization::OptimizationVisualizer>,
+    #[cfg(feature = "visualization")]
+    visualizer: Option<OptimizationVisualizer>,
 }
 
 impl Default for GaussNewton {
@@ -516,8 +526,9 @@ impl GaussNewton {
     /// Create a new Gauss-Newton solver with the given configuration.
     pub fn with_config(config: GaussNewtonConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
+        #[cfg(feature = "visualization")]
         let visualizer = if config.enable_visualization {
-            optimizer::visualization::OptimizationVisualizer::new(true).ok()
+            OptimizationVisualizer::new(true).ok()
         } else {
             None
         };
@@ -525,6 +536,7 @@ impl GaussNewton {
         Self {
             config,
             jacobi_scaling: None,
+            #[cfg(feature = "visualization")]
             visualizer,
         }
     }
@@ -1004,6 +1016,7 @@ impl GaussNewton {
             };
 
             // Rerun visualization
+            #[cfg(feature = "visualization")]
             if let Some(ref vis) = self.visualizer {
                 if let Err(e) = vis.log_scalars(
                     iteration,
@@ -1116,10 +1129,7 @@ impl optimizer::Solver for GaussNewton {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        core::{factors, problem},
-        manifold, optimizer,
-    };
+    use crate::{core::problem, factors, manifold, optimizer};
     use nalgebra::dvector;
     use std::collections;
 

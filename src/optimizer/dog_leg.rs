@@ -199,6 +199,10 @@
 //! - Ceres Solver: http://ceres-solver.org/ - Google's C++ nonlinear least squares library
 
 use crate::{core::problem, error, linalg, manifold, optimizer};
+
+#[cfg(feature = "visualization")]
+use crate::optimizer::OptimizationVisualizer;
+
 use faer::sparse;
 use std::{collections, fmt, time};
 
@@ -436,9 +440,10 @@ pub struct DogLegConfig {
     /// Enable real-time visualization (graphical debugging).
     ///
     /// When enabled, optimization progress is logged to a Rerun viewer.
-    /// Note: Has zero overhead when disabled.
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
     ///
     /// Default: false
+    #[cfg(feature = "visualization")]
     pub enable_visualization: bool,
 }
 
@@ -486,6 +491,7 @@ impl Default for DogLegConfig {
             min_relative_decrease: 1e-3,
 
             compute_covariances: false,
+            #[cfg(feature = "visualization")]
             enable_visualization: false,
         }
     }
@@ -639,9 +645,12 @@ impl DogLegConfig {
 
     /// Enable real-time visualization.
     ///
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    ///
     /// # Arguments
     ///
     /// * `enable` - Whether to enable visualization
+    #[cfg(feature = "visualization")]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
@@ -762,7 +771,8 @@ struct StepEvaluation {
 pub struct DogLeg {
     config: DogLegConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
-    visualizer: Option<optimizer::visualization::OptimizationVisualizer>,
+    #[cfg(feature = "visualization")]
+    visualizer: Option<OptimizationVisualizer>,
 
     // Adaptive mu regularization (Ceres-style)
     mu: f64,
@@ -794,8 +804,9 @@ impl DogLeg {
     /// Create a new Dog Leg solver with the given configuration.
     pub fn with_config(config: DogLegConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
+        #[cfg(feature = "visualization")]
         let visualizer = if config.enable_visualization {
-            optimizer::visualization::OptimizationVisualizer::new(true).ok()
+            OptimizationVisualizer::new(true).ok()
         } else {
             None
         };
@@ -817,6 +828,7 @@ impl DogLeg {
 
             config,
             jacobi_scaling: None,
+            #[cfg(feature = "visualization")]
             visualizer,
         }
     }
@@ -1690,6 +1702,7 @@ impl DogLeg {
             );
 
             // Rerun visualization
+            #[cfg(feature = "visualization")]
             if let Some(ref vis) = self.visualizer {
                 if let Err(e) = vis.log_scalars(
                     iteration,
@@ -1819,7 +1832,7 @@ impl optimizer::Solver for DogLeg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::factors, manifold};
+    use crate::{factors, manifold};
     use nalgebra;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)

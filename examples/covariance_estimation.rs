@@ -12,7 +12,8 @@
 //! - Data association and outlier rejection
 
 use apex_solver::{
-    core::{factors::BetweenFactorSE2, problem::Problem},
+    core::problem::Problem,
+    factors::BetweenFactorSE2,
     linalg::LinearSolverType,
     manifold::ManifoldType,
     optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig},

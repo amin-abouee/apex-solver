@@ -1,3 +1,12 @@
+//! Visualize a graph from a G2O/TORO file using Rerun
+//!
+//! This example requires the `visualization` feature to be enabled.
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example visualize_graph_file --features visualization
+//! ```
+
 use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{

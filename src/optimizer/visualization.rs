@@ -10,6 +10,14 @@
 //! - **Gradient visualization**: Vector representation with magnitude encoding
 //! - **Manifold state**: Real-time pose updates for SE2/SE3 problems
 //!
+//! # Feature Flag
+//!
+//! This module requires the `visualization` feature to be enabled. To use visualization,
+//! enable the feature in your `Cargo.toml`:
+//!
+//! ```toml
+//! apex-solver = { version = "0.1", features = ["visualization"] }
+//! ```
 
 use crate::{core::problem, io};
 use faer::sparse;

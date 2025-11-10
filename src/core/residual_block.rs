@@ -33,7 +33,7 @@
 //!
 //! ```
 //! use apex_solver::core::residual_block::ResidualBlock;
-//! use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+//! use apex_solver::factors::{Factor, BetweenFactorSE2};
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::SE2;
@@ -64,9 +64,8 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::core::{
-    corrector::Corrector, factors::Factor, loss_functions::LossFunction, variable::Variable,
-};
+use crate::core::{corrector::Corrector, loss_functions::LossFunction, variable::Variable};
+use crate::factors::Factor;
 use crate::manifold::{LieGroup, Tangent};
 
 /// A residual block that wraps a factor with an optional robust loss function.
@@ -134,7 +133,7 @@ impl ResidualBlock {
     ///
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
-    /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::factors::{Factor, BetweenFactorSE2};
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     ///
     /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
@@ -193,7 +192,7 @@ impl ResidualBlock {
     ///
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
-    /// use apex_solver::core::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::factors::{Factor, BetweenFactorSE2};
     /// use apex_solver::core::variable::Variable;
     /// use apex_solver::manifold::se2::SE2;
     ///
@@ -254,10 +253,10 @@ impl ResidualBlock {
 mod tests {
     use super::*;
     use crate::core::{
-        factors::{BetweenFactorSE2, PriorFactor},
         loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
+    use crate::factors::{BetweenFactorSE2, PriorFactor};
     use crate::manifold::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
 

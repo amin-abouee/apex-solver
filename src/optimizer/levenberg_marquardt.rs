@@ -153,9 +153,12 @@ use crate::error;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::manifold::ManifoldType;
 use crate::optimizer::{
-    ConvergenceInfo, OptimizationStatus, OptimizationVisualizer, Solver, SolverResult,
-    apply_negative_parameter_step, apply_parameter_step, compute_cost,
+    ConvergenceInfo, OptimizationStatus, Solver, SolverResult, apply_negative_parameter_step,
+    apply_parameter_step, compute_cost,
 };
+
+#[cfg(feature = "visualization")]
+use crate::optimizer::OptimizationVisualizer;
 use faer::{
     Mat,
     sparse::{SparseColMat, Triplet},
@@ -175,6 +178,8 @@ pub struct LevenbergMarquardtSummary {
     pub initial_cost: f64,
     /// Final cost value
     pub final_cost: f64,
+    /// Ratio of actual to predicted reduction in cost
+    pub rho: f64,
     /// Total number of iterations performed
     pub iterations: usize,
     /// Number of successful steps (cost decreased)
@@ -204,6 +209,7 @@ impl Display for LevenbergMarquardtSummary {
         writeln!(f, "Levenberg-Marquardt Optimization Summary")?;
         writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
         writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
+        writeln!(f, "Cost reduction ratio:      {:.6e}", self.rho)?;
         writeln!(
             f,
             "Cost reduction:            {:.6e} ({:.2}%)",
@@ -395,10 +401,11 @@ pub struct LevenbergMarquardtConfig {
     /// - Gradient vector visualization
     /// - Manifold state updates (for SE2/SE3 problems)
     ///
-    /// This is automatically disabled in release builds (zero overhead).
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
     /// Use `verbose` for terminal output; this is for graphical visualization.
     ///
     /// Default: false
+    #[cfg(feature = "visualization")]
     pub enable_visualization: bool,
 }
 
@@ -436,6 +443,7 @@ impl Default for LevenbergMarquardtConfig {
             // Existing parameters
             use_jacobi_scaling: false,
             compute_covariances: false,
+            #[cfg(feature = "visualization")]
             enable_visualization: false,
         }
     }
@@ -582,11 +590,13 @@ impl LevenbergMarquardtConfig {
     /// - Gradient vector visualization
     /// - Real-time manifold state updates (for SE2/SE3 problems)
     ///
-    /// Note: Has zero overhead when disabled. Use `verbose` for terminal logging.
+    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    /// Use `verbose` for terminal logging.
     ///
     /// # Arguments
     ///
     /// * `enable` - Whether to enable visualization
+    #[cfg(feature = "visualization")]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
@@ -668,6 +678,7 @@ struct StepEvaluation {
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    #[cfg(feature = "visualization")]
     visualizer: Option<OptimizationVisualizer>,
 }
 
@@ -686,6 +697,7 @@ impl LevenbergMarquardt {
     /// Create a new Levenberg-Marquardt solver with the given configuration.
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
         // Create visualizer if enabled (zero overhead when disabled)
+        #[cfg(feature = "visualization")]
         let visualizer = if config.enable_visualization {
             match OptimizationVisualizer::new(true) {
                 Ok(vis) => Some(vis),
@@ -701,6 +713,7 @@ impl LevenbergMarquardt {
         Self {
             config,
             jacobi_scaling: None,
+            #[cfg(feature = "visualization")]
             visualizer,
         }
     }
@@ -1127,6 +1140,7 @@ impl LevenbergMarquardt {
         &self,
         initial_cost: f64,
         final_cost: f64,
+        rho: f64,
         iterations: usize,
         successful_steps: usize,
         unsuccessful_steps: usize,
@@ -1140,6 +1154,7 @@ impl LevenbergMarquardt {
         LevenbergMarquardtSummary {
             initial_cost,
             final_cost,
+            rho,
             iterations,
             successful_steps,
             unsuccessful_steps,
@@ -1262,6 +1277,7 @@ impl LevenbergMarquardt {
             }
 
             // Rerun visualization
+            #[cfg(feature = "visualization")]
             if let Some(ref vis) = self.visualizer {
                 if let Err(e) = vis.log_scalars(
                     iteration,
@@ -1321,6 +1337,7 @@ impl LevenbergMarquardt {
                 let summary = self.create_summary(
                     state.initial_cost,
                     state.current_cost,
+                    step_eval.rho,
                     iteration + 1,
                     successful_steps,
                     unsuccessful_steps,
@@ -1337,6 +1354,7 @@ impl LevenbergMarquardt {
                 }
 
                 // Log convergence to Rerun
+                #[cfg(feature = "visualization")]
                 if let Some(ref vis) = self.visualizer {
                     let _ = vis.log_convergence(&format!("Converged: {}", status));
                 }
@@ -1396,7 +1414,7 @@ impl Solver for LevenbergMarquardt {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors::Factor;
+    use crate::factors::Factor;
     use nalgebra::{DMatrix, dvector};
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs

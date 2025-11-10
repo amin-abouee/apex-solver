@@ -1,0 +1,196 @@
+//! Factor implementations for graph-based optimization problems.
+//!
+//! Factors (also called constraints or error functions) represent measurements or relationships
+//! between variables in a factor graph. Each factor computes a residual (error) vector and its
+//! Jacobian with respect to the connected variables.
+//!
+//! # Factor Graph Formulation
+//!
+//! In graph-based SLAM and bundle adjustment, the optimization problem is represented as:
+//!
+//! ```text
+//! minimize Σ_i ||r_i(x)||²
+//! ```
+//!
+//! where:
+//! - `x` is the set of variables (poses, landmarks, etc.)
+//! - `r_i(x)` is the residual function for factor i
+//! - Each factor connects one or more variables
+//!
+//! # Factor Types
+//!
+//! ## Pose Factors
+//! - **Between factors**: Relative pose constraints (SE2, SE3)
+//! - **Prior factors**: Unary constraints on single variables
+//!
+//! ## Camera Projection Factors
+//!
+//! Each camera model provides two factor types:
+//! 1. **CameraParamsFactor**: Optimizes camera intrinsic parameters (fx, fy, cx, cy, distortion)
+//! 2. **ProjectionFactor**: Optimizes 3D point positions with fixed camera parameters
+//!
+//! ### Double Sphere
+//! - [`DoubleSphereCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`DoubleSphereProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### EUCM (Extended Unified Camera Model)
+//! - [`EucmCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`EucmProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### FOV (Field of View)
+//! - [`FovCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`FovProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### Kannala-Brandt
+//! - [`KannalaBrandtCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`KannalaBrandtProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### Radial-Tangential (RadTan)
+//! - [`RadTanCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`RadTanProjectionFactor`]: Optimize 3D point positions
+//!
+//! ### UCM (Unified Camera Model)
+//! - [`UcmCameraParamsFactor`]: Optimize camera intrinsics
+//! - [`UcmProjectionFactor`]: Optimize 3D point positions
+//!
+//! # Linearization
+//!
+//! Each factor must provide a `linearize` method that computes:
+//! 1. **Residual** `r(x)`: The error at the current variable values
+//! 2. **Jacobian** `J = ∂r/∂x`: How the residual changes with each variable
+//!
+//! This information is used by the optimizer to compute parameter updates via Newton-type methods.
+
+use nalgebra::{DMatrix, DVector};
+
+/// Trait for factor (constraint) implementations in factor graph optimization.
+///
+/// A factor represents a measurement or constraint connecting one or more variables.
+/// It computes the residual (error) and Jacobian for the current variable values,
+/// which are used by the optimizer to minimize the total cost.
+///
+/// # Implementing Custom Factors
+///
+/// To create a custom factor:
+/// 1. Implement this trait
+/// 2. Define the residual function `r(x)` (how to compute error from variable values)
+/// 3. Compute the Jacobian `J = ∂r/∂x` (analytically or numerically)
+/// 4. Return the residual dimension
+///
+/// # Thread Safety
+///
+/// Factors must be `Send + Sync` to enable parallel residual/Jacobian evaluation.
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::factors::Factor;
+/// use nalgebra::{DMatrix, DVector};
+///
+/// // Simple 1D range measurement factor
+/// struct RangeFactor {
+///     measurement: f64,  // Measured distance
+/// }
+///
+/// impl Factor for RangeFactor {
+///     fn linearize(&self, params: &[DVector<f64>], compute_jacobian: bool) -> (DVector<f64>, Option<DMatrix<f64>>) {
+///         // params[0] is a 2D point [x, y]
+///         let x = params[0][0];
+///         let y = params[0][1];
+///
+///         // Residual: measured distance - actual distance
+///         let predicted_distance = (x * x + y * y).sqrt();
+///         let residual = DVector::from_vec(vec![self.measurement - predicted_distance]);
+///
+///         // Jacobian: ∂(residual)/∂[x, y]
+///         let jacobian = if compute_jacobian {
+///             Some(DMatrix::from_row_slice(1, 2, &[
+///                 -x / predicted_distance,
+///                 -y / predicted_distance,
+///             ]))
+///         } else {
+///             None
+///         };
+///
+///         (residual, jacobian)
+///     }
+///
+///     fn get_dimension(&self) -> usize { 1 }
+/// }
+/// ```
+pub trait Factor: Send + Sync {
+    /// Compute the residual and Jacobian at the given parameter values.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Slice of variable values (one `DVector` per connected variable)
+    /// * `compute_jacobian` - Whether to compute the Jacobian matrix
+    ///
+    /// # Returns
+    ///
+    /// Tuple `(residual, jacobian)` where:
+    /// - `residual`: N-dimensional error vector
+    /// - `jacobian`: N × M matrix where M is the total DOF of all variables
+    ///
+    /// # Example
+    ///
+    /// For a between factor connecting two SE2 poses (3 DOF each):
+    /// - Input: `params = [pose1 (3×1), pose2 (3×1)]`
+    /// - Output: `(residual (3×1), jacobian (3×6))`
+    fn linearize(
+        &self,
+        params: &[DVector<f64>],
+        compute_jacobian: bool,
+    ) -> (DVector<f64>, Option<DMatrix<f64>>);
+
+    /// Get the dimension of the residual vector.
+    ///
+    /// # Returns
+    ///
+    /// Number of elements in the residual vector (number of constraints)
+    ///
+    /// # Example
+    ///
+    /// - SE2 between factor: 3 (dx, dy, dtheta)
+    /// - SE3 between factor: 6 (translation + rotation)
+    /// - Prior factor: dimension of the variable
+    fn get_dimension(&self) -> usize;
+}
+
+// Pose factors
+pub mod prior_factor;
+pub mod se2_factor;
+pub mod se3_factor;
+
+// Camera projection factors
+pub mod double_sphere_factor;
+pub mod eucm_factor;
+pub mod fov_factor;
+pub mod kannala_brandt_factor;
+pub mod rad_tan_factor;
+pub mod ucm_factor;
+
+// Re-export all factor types
+
+// Pose factors
+pub use prior_factor::PriorFactor;
+pub use se2_factor::BetweenFactorSE2;
+pub use se3_factor::BetweenFactorSE3;
+
+// Camera projection factors - Double Sphere
+pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
+
+// Camera projection factors - EUCM
+pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
+
+// Camera projection factors - FOV
+pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
+
+// Camera projection factors - Kannala-Brandt
+pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
+
+// Camera projection factors - RadTan
+pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
+
+// Camera projection factors - UCM
+pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};

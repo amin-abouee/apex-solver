@@ -3,6 +3,8 @@
 //! This example demonstrates the graphical debugging capabilities of apex-solver
 //! by loading a SLAM dataset and visualizing the optimization process with Rerun.
 //!
+//! **Note:** This example requires the `visualization` feature to be enabled.
+//!
 //! # Features
 //!
 //! - Real-time time series plots (cost, gradient norm, damping, step quality)
@@ -14,19 +16,19 @@
 //!
 //! ```bash
 //! # Visualize optimization on sphere2500 dataset
-//! cargo run --example visualize_optimization
+//! cargo run --example visualize_optimization --features visualization
 //!
 //! # Use a different dataset
-//! cargo run --example visualize_optimization -- --dataset parking-garage
+//! cargo run --example visualize_optimization --features visualization -- --dataset parking-garage
 //!
 //! # Adjust visualization frequency (log every N iterations)
-//! cargo run --example visualize_optimization -- --log-frequency 10
+//! cargo run --example visualize_optimization --features visualization -- --log-frequency 10
 //! ```
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
-use apex_solver::core::factors::BetweenFactorSE3;
 use apex_solver::core::problem::Problem;
+use apex_solver::factors::BetweenFactorSE3;
 use apex_solver::io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
@@ -166,8 +168,9 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         .with_cost_tolerance(args.cost_tolerance)
         .with_parameter_tolerance(1e-4)
         .with_gradient_tolerance(1e-8)
-        .with_verbose(args.verbose)
-        .with_visualization(true); // Enable graphical visualization!
+        .with_verbose(args.verbose);
+    #[cfg(feature = "visualization")]
+    let config = config.with_visualization(true);
 
     println!("\n=== Optimizer Configuration ===");
     println!("Max iterations:     {}", config.max_iterations);
@@ -231,7 +234,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
 /// Optimize SE2 pose graph with visualization
 fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    use apex_solver::core::factors::BetweenFactorSE2;
+    use apex_solver::factors::BetweenFactorSE2;
 
     // Create optimization problem
     let mut problem = Problem::new();
@@ -265,8 +268,9 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         .with_cost_tolerance(args.cost_tolerance)
         .with_parameter_tolerance(1e-4)
         .with_gradient_tolerance(1e-8)
-        .with_verbose(args.verbose)
-        .with_visualization(true);
+        .with_verbose(args.verbose);
+    #[cfg(feature = "visualization")]
+    let config = config.with_visualization(true);
 
     println!("\n=== Optimizer Configuration ===");
     println!("Max iterations:     {}", config.max_iterations);

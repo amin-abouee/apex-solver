@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::core::factors::{BetweenFactorSE3, PriorFactor};
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
+use apex_solver::factors::{BetweenFactorSE3, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -46,7 +46,9 @@ struct Args {
     save_output: Option<std::path::PathBuf>,
 
     /// Enable real-time Rerun visualization
+    /// (Requires the `visualization` feature to be enabled)
     #[arg(long)]
+    #[cfg(feature = "visualization")]
     with_visualizer: bool,
 
     /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2", "t-distribution", "adaptive-barron"
@@ -434,8 +436,9 @@ fn test_se3_dataset(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose)
-                .with_visualization(args.with_visualizer);
+                .with_verbose(args.verbose);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(args.with_visualizer);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -445,8 +448,9 @@ fn test_se3_dataset(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose)
-                .with_visualization(args.with_visualizer);
+                .with_verbose(args.verbose);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(args.with_visualizer);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -456,8 +460,9 @@ fn test_se3_dataset(
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
                 .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose)
-                .with_visualization(args.with_visualizer);
+                .with_verbose(args.verbose);
+            #[cfg(feature = "visualization")]
+            let config = config.with_visualization(args.with_visualizer);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(&problem, &initial_values)?
         }
@@ -581,6 +586,7 @@ fn test_se3_dataset(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
     println!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
@@ -602,6 +608,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     // Check if visualization is requested with multiple datasets
+    #[cfg(feature = "visualization")]
     if args.with_visualizer && datasets.len() > 1 {
         eprintln!(
             "\n[WARNING] Visualization is not supported when running multiple datasets (--dataset all)."

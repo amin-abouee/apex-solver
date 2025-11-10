@@ -1,6 +1,9 @@
 use collections::HashMap;
 use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
+
+#[cfg(feature = "visualization")]
 use rerun::external::glam::{Quat, Vec3};
+
 use std::{
     collections, fmt,
     fmt::{Display, Formatter},
@@ -100,6 +103,8 @@ impl Display for VertexSE2 {
 impl VertexSE2 {
     /// Convert to Rerun 2D position with scaling
     ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
     /// # Arguments
     /// * `scale` - Scale factor to apply to position
     ///
@@ -111,12 +116,15 @@ impl VertexSE2 {
 
     /// Convert to Rerun 3D position with scaling and specified height
     ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
     /// # Arguments
     /// * `scale` - Scale factor to apply to X and Y
     /// * `height` - Z coordinate for the 2D point in 3D space
     ///
     /// # Returns
     /// 3D position compatible with Rerun Transform3D or Points3D
+    #[cfg(feature = "visualization")]
     pub fn to_rerun_position_3d(&self, scale: f32, height: f32) -> Vec3 {
         Vec3::new((self.x() as f32) * scale, (self.y() as f32) * scale, height)
     }
@@ -190,11 +198,14 @@ impl Display for VertexSE3 {
 impl VertexSE3 {
     /// Convert to Rerun 3D transform components (position and rotation) with scaling
     ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
     /// # Arguments
     /// * `scale` - Scale factor to apply to position
     ///
     /// # Returns
     /// Tuple of (position, rotation) compatible with Rerun Transform3D
+    #[cfg(feature = "visualization")]
     pub fn to_rerun_transform(&self, scale: f32) -> (Vec3, Quat) {
         // Extract translation and convert to glam Vec3
         let trans = self.translation();
@@ -520,6 +531,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "visualization")]
     fn test_se3_to_rerun() {
         let vertex = VertexSE3::new(0, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
 
@@ -542,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "visualization")]
     fn test_se2_to_rerun_3d() {
         let vertex = VertexSE2::new(0, 10.0, 20.0, 0.5);
 

@@ -52,7 +52,7 @@
 //!
 //! ```
 //! use apex_solver::core::problem::Problem;
-//! use apex_solver::core::factors::{BetweenFactorSE2, PriorFactor};
+//! use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
 //! use apex_solver::core::loss_functions::HuberLoss;
 //! use apex_solver::manifold::ManifoldType;
 //! use nalgebra::{DVector, dvector};
@@ -99,10 +99,11 @@ use rayon::prelude::*;
 
 use crate::{
     core::{
-        corrector::Corrector, factors::Factor, loss_functions::LossFunction,
-        residual_block::ResidualBlock, variable::Variable,
+        corrector::Corrector, loss_functions::LossFunction, residual_block::ResidualBlock,
+        variable::Variable,
     },
     error::{ApexError, ApexResult},
+    factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
     manifold::{ManifoldType, rn, se2, se3, so2, so3},
 };
@@ -377,7 +378,7 @@ impl VariableEnum {
 ///
 /// ```
 /// use apex_solver::core::problem::Problem;
-/// use apex_solver::core::factors::BetweenFactorSE2;
+/// use apex_solver::factors::BetweenFactorSE2;
 /// use apex_solver::manifold::ManifoldType;
 /// use nalgebra::dvector;
 /// use std::collections::HashMap;
@@ -465,7 +466,7 @@ impl Problem {
     ///
     /// ```
     /// use apex_solver::core::problem::Problem;
-    /// use apex_solver::core::factors::{BetweenFactorSE2, PriorFactor};
+    /// use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
     /// use apex_solver::core::loss_functions::HuberLoss;
     /// use nalgebra::dvector;
     ///
@@ -1165,8 +1166,8 @@ impl Problem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
     use crate::core::loss_functions::HuberLoss;
+    use crate::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
     use crate::manifold::{ManifoldType, se3::SE3};
     use nalgebra::{Quaternion, Vector3, dvector};
     use std::collections::HashMap;

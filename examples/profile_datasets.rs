@@ -15,7 +15,8 @@
 //! ```
 
 use apex_solver::{
-    core::{factors::BetweenFactorSE3, problem::Problem},
+    core::problem::Problem,
+    factors::BetweenFactorSE3,
     io::{G2oLoader, GraphLoader},
     manifold::ManifoldType,
     optimizer::LevenbergMarquardt,

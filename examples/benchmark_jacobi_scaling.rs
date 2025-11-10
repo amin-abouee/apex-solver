@@ -58,7 +58,7 @@ fn main() {
     }
 
     // Add edges to problem
-    use apex_solver::core::factors::BetweenFactorSE3;
+    use apex_solver::factors::BetweenFactorSE3;
     use apex_solver::manifold::se3::SE3;
     use nalgebra::dvector;
 
