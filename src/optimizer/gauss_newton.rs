@@ -151,51 +151,142 @@ pub struct GaussNewtonSummary {
     pub total_time: time::Duration,
     /// Average time per iteration
     pub average_time_per_iteration: time::Duration,
+    /// Detailed per-iteration statistics history
+    pub iteration_history: Vec<IterationStats>,
+    /// Convergence status
+    pub convergence_status: optimizer::OptimizationStatus,
+}
+
+/// Per-iteration statistics for detailed logging (Ceres-style output).
+///
+/// Captures all relevant metrics for each optimization iteration, enabling
+/// detailed analysis and debugging of the optimization process.
+#[derive(Debug, Clone)]
+pub struct IterationStats {
+    /// Iteration number (0-indexed)
+    pub iteration: usize,
+    /// Cost function value at this iteration
+    pub cost: f64,
+    /// Change in cost from previous iteration
+    pub cost_change: f64,
+    /// L2 norm of the gradient (||J^T·r||)
+    pub gradient_norm: f64,
+    /// L2 norm of the parameter update step (||Δx||)
+    pub step_norm: f64,
+    /// Trust region ratio (not used in Gauss-Newton, always 0.0)
+    pub tr_ratio: f64,
+    /// Trust region radius (not used in Gauss-Newton, always 0.0)
+    pub tr_radius: f64,
+    /// Linear solver iterations (0 for direct solvers like Cholesky)
+    pub ls_iter: usize,
+    /// Time taken for this iteration in milliseconds
+    pub iter_time_ms: f64,
+    /// Total elapsed time since optimization started in milliseconds
+    pub total_time_ms: f64,
+    /// Whether the step was accepted (always true for Gauss-Newton)
+    pub accepted: bool,
+}
+
+impl IterationStats {
+    /// Print table header in Ceres-style format
+    pub fn print_header() {
+        println!(
+            "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
+            "iter",
+            "cost",
+            "cost_change",
+            "|gradient|",
+            "|step|",
+            "tr_ratio",
+            "tr_radius",
+            "ls_iter",
+            "iter_time",
+            "total_time",
+            "status"
+        );
+    }
+
+    /// Print single iteration line in Ceres-style format with scientific notation
+    pub fn print_line(&self) {
+        let status = if self.iteration == 0 {
+            "-"
+        } else if self.accepted {
+            "✓"
+        } else {
+            "✗"
+        };
+
+        println!(
+            "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
+            self.iteration,
+            self.cost,
+            self.cost_change,
+            self.gradient_norm,
+            self.step_norm,
+            self.tr_ratio,
+            self.tr_radius,
+            self.ls_iter,
+            self.iter_time_ms,
+            self.total_time_ms,
+            status
+        );
+    }
 }
 
 impl fmt::Display for GaussNewtonSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Gauss-Newton Optimization Summary ===")?;
-        writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
-        writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
+        // Determine if converged
+        let converged = matches!(
+            self.convergence_status,
+            optimizer::OptimizationStatus::Converged
+                | optimizer::OptimizationStatus::CostToleranceReached
+                | optimizer::OptimizationStatus::GradientToleranceReached
+                | optimizer::OptimizationStatus::ParameterToleranceReached
+        );
+
+        writeln!(f, "=== Gauss-Newton Final Result ===")?;
+
+        // Title with convergence status
+        if converged {
+            writeln!(f, "CONVERGED ({:?})", self.convergence_status)?;
+        } else {
+            writeln!(f, "DIVERGED ({:?})", self.convergence_status)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Cost:")?;
+        writeln!(f, "  Initial:   {:.6e}", self.initial_cost)?;
+        writeln!(f, "  Final:     {:.6e}", self.final_cost)?;
         writeln!(
             f,
-            "Cost reduction:            {:.6e} ({:.2}%)",
+            "  Reduction: {:.6e} ({:.2}%)",
             self.initial_cost - self.final_cost,
             100.0 * (self.initial_cost - self.final_cost) / self.initial_cost.max(1e-12)
         )?;
-        writeln!(f, "Total iterations:          {}", self.iterations)?;
+        writeln!(f)?;
+        writeln!(f, "Iterations:")?;
+        writeln!(f, "  Total: {}", self.iterations)?;
+        writeln!(f)?;
+        writeln!(f, "Gradient:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_gradient_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_gradient_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Parameter Update:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_parameter_update_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_parameter_update_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Performance:")?;
         writeln!(
             f,
-            "Average cost reduction:    {:.6e}",
-            self.average_cost_reduction
+            "  Total time:             {:.2}ms",
+            self.total_time.as_secs_f64() * 1000.0
         )?;
         writeln!(
             f,
-            "Max gradient norm:         {:.6e}",
-            self.max_gradient_norm
+            "  Average per iteration:  {:.2}ms",
+            self.average_time_per_iteration.as_secs_f64() * 1000.0
         )?;
-        writeln!(
-            f,
-            "Final gradient norm:       {:.6e}",
-            self.final_gradient_norm
-        )?;
-        writeln!(
-            f,
-            "Max parameter update norm: {:.6e}",
-            self.max_parameter_update_norm
-        )?;
-        writeln!(
-            f,
-            "Final param update norm:   {:.6e}",
-            self.final_parameter_update_norm
-        )?;
-        writeln!(f, "Total time:                {:?}", self.total_time)?;
-        writeln!(
-            f,
-            "Average time per iteration: {:?}",
-            self.average_time_per_iteration
-        )?;
+
         Ok(())
     }
 }
@@ -436,6 +527,38 @@ impl GaussNewtonConfig {
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
+    }
+
+    /// Print configuration parameters (verbose mode only)
+    pub fn print_configuration(&self) {
+        println!("Configuration:");
+        println!("  Solver:        Gauss-Newton");
+        println!("  Linear solver: {:?}", self.linear_solver_type);
+        println!("  Loss function: N/A");
+        println!("\nConvergence Criteria:");
+        println!("  Max iterations:      {}", self.max_iterations);
+        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
+        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
+        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
+        println!("  Timeout:             {:?}", self.timeout);
+        println!("\nNumerical Settings:");
+        println!(
+            "  Jacobi scaling:      {}",
+            if self.use_jacobi_scaling {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "  Compute covariances: {}",
+            if self.compute_covariances {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!();
     }
 }
 
@@ -753,14 +876,6 @@ impl GaussNewton {
         let current_cost = optimizer::compute_cost(&residual);
         let initial_cost = current_cost;
 
-        if self.config.verbose {
-            println!(
-                "Starting Gauss-Newton optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!("Initial cost: {:.6e}", current_cost);
-        }
-
         Ok(LinearizerResult {
             variables,
             variable_index_map,
@@ -780,11 +895,6 @@ impl GaussNewton {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
-
-            if self.config.verbose {
-                println!("Jacobi scaling computed for {} columns", scaling.ncols());
-            }
-
             self.jacobi_scaling = Some(scaling);
         }
         jacobian * self.jacobi_scaling.as_ref().unwrap()
@@ -809,20 +919,12 @@ impl GaussNewton {
         // Compute gradient norm for convergence check
         let gradient_norm = gradient.norm_l2();
 
-        if self.config.verbose {
-            println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
-        }
-
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
             &scaled_step * self.jacobi_scaling.as_ref().unwrap()
         } else {
             scaled_step
         };
-
-        if self.config.verbose {
-            println!("Step norm: {:.12e}", step.norm_l2());
-        }
 
         Some(StepResult {
             step,
@@ -860,21 +962,6 @@ impl GaussNewton {
         })
     }
 
-    /// Log iteration details if verbose mode is enabled
-    fn log_iteration(&self, iteration: usize, cost_eval: &CostEvaluation, step_norm: f64) {
-        if !self.config.verbose {
-            return;
-        }
-
-        println!(
-            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, step_norm = {:.6e}",
-            iteration + 1,
-            cost_eval.new_cost,
-            cost_eval.cost_reduction,
-            step_norm
-        );
-    }
-
     /// Create optimization summary
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
@@ -888,6 +975,8 @@ impl GaussNewton {
         final_parameter_update_norm: f64,
         total_cost_reduction: f64,
         total_time: time::Duration,
+        iteration_history: Vec<IterationStats>,
+        convergence_status: optimizer::OptimizationStatus,
     ) -> GaussNewtonSummary {
         GaussNewtonSummary {
             initial_cost,
@@ -908,6 +997,8 @@ impl GaussNewton {
             } else {
                 time::Duration::from_secs(0)
             },
+            iteration_history,
+            convergence_status,
         }
     }
 
@@ -940,8 +1031,19 @@ impl GaussNewton {
         let mut final_gradient_norm;
         let mut final_parameter_update_norm;
 
+        // Initialize iteration statistics tracking
+        let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
+        let mut previous_cost = state.current_cost;
+
+        // Print configuration and header if verbose
+        if self.config.verbose {
+            self.config.print_configuration();
+            IterationStats::print_header();
+        }
+
         // Main optimization loop
         loop {
+            let iter_start = time::Instant::now();
             // Evaluate residuals and Jacobian
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
                 &state.variables,
@@ -950,36 +1052,12 @@ impl GaussNewton {
             )?;
             jacobian_evaluations += 1;
 
-            if self.config.verbose {
-                println!("\n=== GAUSS-NEWTON ITERATION {} ===", iteration);
-                println!("Current cost: {:.12e}", state.current_cost);
-                println!(
-                    "Residuals shape: ({}, {})",
-                    residuals.nrows(),
-                    residuals.ncols()
-                );
-                println!("Residuals norm: {:.12e}", residuals.norm_l2());
-                println!(
-                    "Jacobian shape: ({}, {})",
-                    jacobian.nrows(),
-                    jacobian.ncols()
-                );
-            }
-
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
                 self.process_jacobian(&jacobian, iteration)
             } else {
                 jacobian
             };
-
-            if self.config.verbose {
-                println!(
-                    "Scaled Jacobian shape: ({}, {})",
-                    scaled_jacobian.nrows(),
-                    scaled_jacobian.ncols()
-                );
-            }
 
             // Compute Gauss-Newton step
             let step_result = match self.compute_gauss_newton_step(
@@ -1010,10 +1088,32 @@ impl GaussNewton {
             cost_evaluations += 1;
             total_cost_reduction += cost_eval.cost_reduction;
 
-            // Log iteration
-            if self.config.verbose {
-                self.log_iteration(iteration, &cost_eval, step_norm);
+            // Collect iteration statistics
+            let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
+            let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+            let stats = IterationStats {
+                iteration,
+                cost: state.current_cost,
+                cost_change: previous_cost - state.current_cost,
+                gradient_norm: step_result.gradient_norm,
+                step_norm,
+                tr_ratio: 0.0,  // Not used in Gauss-Newton
+                tr_radius: 0.0, // Not used in Gauss-Newton
+                ls_iter: 0,     // Direct solver (Cholesky) has no iterations
+                iter_time_ms: iter_elapsed_ms,
+                total_time_ms: total_elapsed_ms,
+                accepted: true, // Gauss-Newton always accepts steps
             };
+
+            iteration_stats.push(stats.clone());
+
+            // Print iteration line if verbose
+            if self.config.verbose {
+                stats.print_line();
+            }
+
+            previous_cost = state.current_cost;
 
             // Rerun visualization
             #[cfg(feature = "visualization")]
@@ -1065,11 +1165,12 @@ impl GaussNewton {
                     final_parameter_update_norm,
                     total_cost_reduction,
                     elapsed,
+                    iteration_stats.clone(),
+                    status.clone(),
                 );
 
-                if self.config.verbose {
-                    println!("{}", summary);
-                }
+                // Always print summary (verbose or not)
+                println!("\n{}", summary);
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
