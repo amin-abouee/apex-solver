@@ -211,9 +211,9 @@ fn test_dataset(
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
 
-    println!("Successfully loaded SE2 graph:");
-    println!("  SE2 vertices: {}", num_vertices);
-    println!("  SE2 edges: {}", num_edges);
+    println!("\nGraph Statistics:");
+    println!("  Vertices: {}", num_vertices);
+    println!("  Edges:    {}", num_edges);
 
     // Check if we have any vertices
     if num_vertices == 0 {
@@ -267,13 +267,6 @@ fn test_dataset(
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
-
-        println!(
-            "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
-            first_id,
-            optimizer_type.to_uppercase()
-        );
-        println!("  Prior value: {:?}", prior_value.as_slice());
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
         // For LM only, fix the first pose to remove gauge freedom
         // LM's damping (λI) handles the rank deficiency well with fixed variables
@@ -281,40 +274,10 @@ fn test_dataset(
         problem.fix_variable(&first_var_name, 0);
         problem.fix_variable(&first_var_name, 1);
         problem.fix_variable(&first_var_name, 2);
-        println!(
-            "Fixed first pose {} (all 3 DOF) for {} optimizer",
-            first_var_name,
-            optimizer_type.to_uppercase()
-        );
     }
 
     // Create loss function for between factors
     let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
-    let loss_name = args.loss_function.to_uppercase();
-    let loss_scale = if loss_fn.is_some() {
-        // Try to extract scale from the loss function name or use the provided scale
-        args.loss_scale
-            .unwrap_or_else(|| match args.loss_function.to_lowercase().as_str() {
-                "huber" => 1.345,
-                "cauchy" => 2.3849,
-                "fair" => 1.3999,
-                "welsch" => 2.9846,
-                "tukey" => 4.6851,
-                "geman" | "gemanmcclure" => 1.0,
-                "andrews" => 1.339,
-                "ramsay" => 0.3,
-                "trimmed" | "trimmedmean" => 2.0,
-                "lp" => 1.5,
-                _ => 1.0,
-            })
-    } else {
-        1.0
-    };
-
-    println!(
-        "Using loss function: {} (scale: {:.4})",
-        loss_name, loss_scale
-    );
 
     // Add SE2 between factors
     for edge in &graph.edges_se2 {
@@ -337,8 +300,9 @@ fn test_dataset(
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
     }
 
-    println!("\nProblem setup completed:");
-    println!("  Variables: {}", initial_values.len());
+    println!("\nProblem Structure:");
+    println!("  Variables:       {}", initial_values.len());
+    println!("  Prior factors:   {}", if needs_prior { "1" } else { "0" });
     println!("  Between factors: {}", graph.edges_se2.len());
 
     // Compute initial cost
@@ -367,9 +331,6 @@ fn test_dataset(
     // Compute initial cost using faer's norm
     let initial_cost = residual.as_ref().squared_norm_l2();
 
-    println!("\nInitial state:");
-    println!("  Initial cost: {:.6e}", initial_cost);
-
     // Determine optimizer type and run optimization
     let optimizer_name = match args.optimizer.to_lowercase().as_str() {
         "gn" => "GN",
@@ -384,15 +345,17 @@ fn test_dataset(
         }
     };
 
-    println!(
-        "\n=== STARTING {} OPTIMIZATION ===",
-        match optimizer_name {
-            "LM" => "LEVENBERG-MARQUARDT",
-            "GN" => "GAUSS-NEWTON",
-            "DL" => "DOG LEG",
-            _ => "LEVENBERG-MARQUARDT",
-        }
-    );
+    if args.verbose {
+        println!(
+            "\n=== {} OPTIMIZATION PARAMETERS ===",
+            match optimizer_name {
+                "LM" => "LEVENBERG-MARQUARDT",
+                "GN" => "GAUSS-NEWTON",
+                "DL" => "DOG LEG",
+                _ => "LEVENBERG-MARQUARDT",
+            }
+        );
+    }
 
     let start_time = Instant::now();
     let result = match optimizer_name {
@@ -434,8 +397,6 @@ fn test_dataset(
         }
     };
     let duration = start_time.elapsed();
-
-    println!("\n=== OPTIMIZATION RESULTS ===");
 
     // Determine convergence status accurately
     let (status, convergence_reason) = match &result.status {
@@ -481,18 +442,6 @@ fn test_dataset(
     };
 
     let improvement = ((initial_cost - result.final_cost) / initial_cost) * 100.0;
-
-    println!("Status: {}", status);
-    println!("Convergence reason: {}", convergence_reason);
-    println!("Initial cost: {:.6e}", initial_cost);
-    println!("Final cost: {:.6e}", result.final_cost);
-    println!(
-        "Cost reduction: {:.6e} ({:.2}%)",
-        initial_cost - result.final_cost,
-        improvement
-    );
-    println!("Iterations: {}", result.iterations);
-    println!("Execution time: {:.1}ms", duration.as_millis());
 
     // Save optimized graph if requested
     if let Some(output_base) = &args.save_output {
@@ -545,18 +494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine which datasets to test
     let datasets = if args.dataset == "all" {
-        vec![
-            "city10000",
-            "M3500",
-            "M3500a",
-            "M3500b",
-            "M3500c",
-            "intel",
-            "mit",
-            "manhattanOlson3500",
-            "ring",
-            "ringCity",
-        ]
+        vec!["intel", "mit", "manhattanOlson3500", "ring"]
     } else {
         vec![args.dataset.as_str()]
     };

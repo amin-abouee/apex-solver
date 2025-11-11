@@ -230,16 +230,6 @@ fn test_se3_dataset(
         ),
     };
 
-    if cost_tol != args.cost_tolerance
-        || param_tol != args.parameter_tolerance
-        || max_iter != args.max_iterations
-    {
-        println!(
-            "Using optimized parameters: cost_tol={:.1e}, param_tol={:.1e}, max_iter={}",
-            cost_tol, param_tol, max_iter
-        );
-    }
-
     // Load the G2O graph file
     let dataset_path = format!("data/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
@@ -247,9 +237,9 @@ fn test_se3_dataset(
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
 
-    println!("Successfully loaded SE3 graph:");
-    println!("  SE3 vertices: {}", num_vertices);
-    println!("  SE3 edges: {}", num_edges);
+    println!("\nGraph Statistics:");
+    println!("  Vertices: {}", num_vertices);
+    println!("  Edges:    {}", num_edges);
 
     if num_vertices == 0 {
         return Err(format!("No SE3 vertices found in dataset {}", dataset_name).into());
@@ -304,46 +294,10 @@ fn test_se3_dataset(
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
-
-        println!(
-            "Added soft prior factor (HuberLoss) on vertex {} to remove gauge freedom for {}",
-            first_id,
-            optimizer_type.to_uppercase()
-        );
-        println!("  Prior value: {:?}", prior_value.as_slice());
-    } else {
-        println!(
-            "Skipping prior factor for {} optimizer (has built-in regularization)",
-            optimizer_type.to_uppercase()
-        );
     }
 
     // Create loss function for between factors
     let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
-    let loss_name = args.loss_function.to_uppercase();
-    let loss_scale = if loss_fn.is_some() {
-        args.loss_scale
-            .unwrap_or_else(|| match args.loss_function.to_lowercase().as_str() {
-                "huber" => 1.345,
-                "cauchy" => 2.3849,
-                "fair" => 1.3999,
-                "welsch" => 2.9846,
-                "tukey" => 4.6851,
-                "geman" | "gemanmcclure" => 1.0,
-                "andrews" => 1.339,
-                "ramsay" => 0.3,
-                "trimmed" | "trimmedmean" => 2.0,
-                "lp" => 1.5,
-                _ => 1.0,
-            })
-    } else {
-        1.0
-    };
-
-    println!(
-        "Using loss function: {} (scale: {:.4})",
-        loss_name, loss_scale
-    );
 
     // Add SE3 between factors
     for edge in &graph.edges_se3 {
@@ -362,14 +316,10 @@ fn test_se3_dataset(
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
     }
 
-    println!("\nProblem setup completed:");
-    println!("  Variables: {}", initial_values.len());
-    println!(
-        "  Prior factors: {} (vertex {})",
-        if needs_prior { "1" } else { "0" },
-        vertex_ids.first().unwrap_or(&0)
-    );
-    println!("  Between factors: {}", graph.edges_se3.len());
+    println!("\nProblem Structure:");
+    println!("  Variables:       {}", initial_values.len());
+    println!("  Prior factors:   {}", if needs_prior { "1" } else { "0" });
+    println!("  Between factors: {}\n", graph.edges_se3.len());
 
     // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);
@@ -397,9 +347,6 @@ fn test_se3_dataset(
     // Compute initial cost using faer's norm
     let initial_cost = residual.as_ref().squared_norm_l2();
 
-    println!("\nInitial state:");
-    println!("  Initial cost: {:.6e}", initial_cost);
-
     // Determine optimizer type and run optimization
     let optimizer_name = match args.optimizer.to_lowercase().as_str() {
         "gn" => "GN",
@@ -414,19 +361,17 @@ fn test_se3_dataset(
         }
     };
 
-    println!(
-        "\n=== STARTING {} OPTIMIZATION ===",
-        match optimizer_name {
-            "LM" => "LEVENBERG-MARQUARDT",
-            "GN" => "GAUSS-NEWTON",
-            "DL" => "DOG LEG",
-            _ => "LEVENBERG-MARQUARDT",
-        }
-    );
-    println!("Configuration:");
-    println!("  Max iterations: {}", max_iter);
-    println!("  Cost tolerance: {:.2e}", cost_tol);
-    println!("  Parameter tolerance: {:.2e}", param_tol);
+    if args.verbose {
+        println!(
+            "\n=== {} OPTIMIZATION PARAMETERS ===",
+            match optimizer_name {
+                "LM" => "LEVENBERG-MARQUARDT",
+                "GN" => "GAUSS-NEWTON",
+                "DL" => "DOG LEG",
+                _ => "LEVENBERG-MARQUARDT",
+            }
+        );
+    }
 
     let start_time = Instant::now();
     let result = match optimizer_name {
@@ -468,8 +413,6 @@ fn test_se3_dataset(
         }
     };
     let duration = start_time.elapsed();
-
-    println!("\n=== OPTIMIZATION RESULTS ===");
 
     // Determine convergence status accurately
     let (status, convergence_reason) = match &result.status {
@@ -516,32 +459,6 @@ fn test_se3_dataset(
 
     let improvement = ((initial_cost - result.final_cost) / initial_cost) * 100.0;
 
-    println!("Status: {}", status);
-    println!("Convergence reason: {}", convergence_reason);
-    println!("Initial cost: {:.6e}", initial_cost);
-    println!("Final cost: {:.6e}", result.final_cost);
-    println!(
-        "Cost reduction: {:.6e} ({:.2}%)",
-        initial_cost - result.final_cost,
-        improvement
-    );
-    println!("Iterations: {}", result.iterations);
-    println!("Execution time: {:.1}ms", duration.as_millis());
-
-    // Print first vertex (x0) to verify if it moved during optimization
-    if let Some(&first_id) = vertex_ids.first() {
-        let var_name = format!("x{}", first_id);
-        if let Some(final_var) = result.parameters.get(&var_name) {
-            let final_vector = final_var.to_vector();
-            println!("\nFirst vertex (x0) after optimization:");
-            println!("  Final value: {:?}", final_vector.as_slice());
-            if let Some((_, initial_vec)) = initial_values.get(&var_name) {
-                let diff: f64 = (final_vector - initial_vec).norm();
-                println!("  Change from initial: {:.6e}", diff);
-            }
-        }
-    }
-
     // Save optimized graph if requested
     if let Some(output_base) = &args.save_output {
         println!("\nSaving optimized graph...");
@@ -565,9 +482,6 @@ fn test_se3_dataset(
         // Write to file (default: G2O format)
         use apex_solver::io::GraphLoader;
         G2oLoader::write(&optimized_graph, &output_path)?;
-
-        println!("✓ Saved optimized graph to: {}", output_path.display());
-        println!("  Status: {} ({})", status, convergence_reason);
     }
 
     Ok(DatasetResult {
@@ -592,14 +506,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
 
     // Define available SE3 datasets
-    let se3_datasets = vec![
-        "rim",
-        "sphere2500",
-        "parking-garage",
-        "torus3D",
-        "grid3D",
-        "cubicle",
-    ];
+    let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D"];
 
     let datasets = if args.dataset == "all" {
         se3_datasets
