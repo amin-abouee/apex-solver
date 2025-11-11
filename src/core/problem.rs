@@ -907,20 +907,33 @@ impl Problem {
     ) -> ApexResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
-        let jacobian_values: Result<Vec<Vec<f64>>, ApexError> = self
+        // OPTIMIZATION: Pre-allocate exact size to avoid double allocation and flattening
+        // This eliminates the Vec<Vec<f64>> → Vec<f64> conversion overhead
+        let total_nnz = symbolic_structure.pattern.compute_nnz();
+
+        // Collect block results with pre-computed sizes
+        let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, ApexError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
-                self.compute_residual_and_jacobian_block(
+                let values = self.compute_residual_and_jacobian_block(
                     residual_block,
                     variables,
                     variable_index_sparce_matrix,
                     &total_residual,
-                )
+                )?;
+                let size = values.len();
+                Ok((size, values))
             })
             .collect();
 
-        let jacobian_values: Vec<f64> = jacobian_values?.into_iter().flatten().collect();
+        let jacobian_blocks = jacobian_blocks?;
+
+        // Pre-allocate final vec with exact size
+        let mut jacobian_values = Vec::with_capacity(total_nnz);
+        for (_size, mut block_values) in jacobian_blocks {
+            jacobian_values.append(&mut block_values);
+        }
 
         let total_residual = Arc::try_unwrap(total_residual)
             .map_err(|_| {
