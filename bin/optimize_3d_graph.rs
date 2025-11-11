@@ -319,7 +319,7 @@ fn test_se3_dataset(
     println!("\nProblem Structure:");
     println!("  Variables:       {}", initial_values.len());
     println!("  Prior factors:   {}", if needs_prior { "1" } else { "0" });
-    println!("  Between factors: {}\n", graph.edges_se3.len());
+    println!("  Between factors: {}", graph.edges_se3.len());
 
     // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);
@@ -533,7 +533,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}", "=".repeat(80));
         match test_se3_dataset(dataset, &args) {
             Ok(result) => {
-                println!("Dataset {} completed: {}", dataset, result.status);
+                println!("\nDataset {} completed: {}", dataset, result.status);
                 results.push(result);
             }
             Err(e) => {

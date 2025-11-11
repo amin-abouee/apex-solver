@@ -518,7 +518,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("\n{}", "=".repeat(80));
         match test_dataset(dataset, &args) {
             Ok(result) => {
-                println!("Dataset {} completed: {}", dataset, result.status);
+                println!("\nDataset {} completed: {}", dataset, result.status);
                 results.push(result);
             }
             Err(e) => {
