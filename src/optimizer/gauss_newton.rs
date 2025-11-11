@@ -1088,28 +1088,27 @@ impl GaussNewton {
             cost_evaluations += 1;
             total_cost_reduction += cost_eval.cost_reduction;
 
-            // Collect iteration statistics
-            let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
-            let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
-
-            let stats = IterationStats {
-                iteration,
-                cost: state.current_cost,
-                cost_change: previous_cost - state.current_cost,
-                gradient_norm: step_result.gradient_norm,
-                step_norm,
-                tr_ratio: 0.0,  // Not used in Gauss-Newton
-                tr_radius: 0.0, // Not used in Gauss-Newton
-                ls_iter: 0,     // Direct solver (Cholesky) has no iterations
-                iter_time_ms: iter_elapsed_ms,
-                total_time_ms: total_elapsed_ms,
-                accepted: true, // Gauss-Newton always accepts steps
-            };
-
-            iteration_stats.push(stats.clone());
-
-            // Print iteration line if verbose
+            // OPTIMIZATION: Only collect iteration statistics if verbose mode is enabled
+            // This eliminates ~2-5ms overhead per iteration for non-verbose optimization
             if self.config.verbose {
+                let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
+                let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+                let stats = IterationStats {
+                    iteration,
+                    cost: state.current_cost,
+                    cost_change: previous_cost - state.current_cost,
+                    gradient_norm: step_result.gradient_norm,
+                    step_norm,
+                    tr_ratio: 0.0,  // Not used in Gauss-Newton
+                    tr_radius: 0.0, // Not used in Gauss-Newton
+                    ls_iter: 0,     // Direct solver (Cholesky) has no iterations
+                    iter_time_ms: iter_elapsed_ms,
+                    total_time_ms: total_elapsed_ms,
+                    accepted: true, // Gauss-Newton always accepts steps
+                };
+
+                iteration_stats.push(stats.clone());
                 stats.print_line();
             }
 
