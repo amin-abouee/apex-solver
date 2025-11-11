@@ -1169,8 +1169,10 @@ impl GaussNewton {
                     status.clone(),
                 );
 
-                // Always print summary (verbose or not)
-                println!("\n{}", summary);
+                // Print summary only if verbose is enabled
+                if self.config.verbose {
+                    println!("\n{}", summary);
+                }
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {

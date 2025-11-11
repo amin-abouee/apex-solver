@@ -1459,8 +1459,10 @@ impl LevenbergMarquardt {
                     status.clone(),
                 );
 
-                // Always print summary (verbose or not)
-                println!("\n{}", summary);
+                // Print summary only if verbose is enabled
+                if self.config.verbose {
+                    println!("\n{}", summary);
+                }
 
                 // Log convergence to Rerun
                 #[cfg(feature = "visualization")]
