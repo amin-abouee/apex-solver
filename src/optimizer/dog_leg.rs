@@ -235,68 +235,157 @@ pub struct DogLegSummary {
     pub total_time: time::Duration,
     /// Average time per iteration
     pub average_time_per_iteration: time::Duration,
+    /// Detailed per-iteration statistics history
+    pub iteration_history: Vec<IterationStats>,
+    /// Convergence status
+    pub convergence_status: optimizer::OptimizationStatus,
+}
+
+/// Per-iteration statistics for detailed logging (Ceres-style output).
+///
+/// Captures all relevant metrics for each optimization iteration, enabling
+/// detailed analysis and debugging of the optimization process.
+#[derive(Debug, Clone)]
+pub struct IterationStats {
+    /// Iteration number (0-indexed)
+    pub iteration: usize,
+    /// Cost function value at this iteration
+    pub cost: f64,
+    /// Change in cost from previous iteration
+    pub cost_change: f64,
+    /// L2 norm of the gradient (||J^T·r||)
+    pub gradient_norm: f64,
+    /// L2 norm of the parameter update step (||Δx||)
+    pub step_norm: f64,
+    /// Trust region ratio (ρ = actual_reduction / predicted_reduction)
+    pub tr_ratio: f64,
+    /// Trust region radius (Δ)
+    pub tr_radius: f64,
+    /// Linear solver iterations (0 for direct solvers like Cholesky)
+    pub ls_iter: usize,
+    /// Time taken for this iteration in milliseconds
+    pub iter_time_ms: f64,
+    /// Total elapsed time since optimization started in milliseconds
+    pub total_time_ms: f64,
+    /// Whether the step was accepted (true) or rejected (false)
+    pub accepted: bool,
+}
+
+impl IterationStats {
+    /// Print table header in Ceres-style format
+    pub fn print_header() {
+        println!(
+            "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
+            "iter",
+            "cost",
+            "cost_change",
+            "|gradient|",
+            "|step|",
+            "tr_ratio",
+            "tr_radius",
+            "ls_iter",
+            "iter_time",
+            "total_time",
+            "status"
+        );
+    }
+
+    /// Print single iteration line in Ceres-style format with scientific notation
+    pub fn print_line(&self) {
+        let status = if self.iteration == 0 {
+            "-"
+        } else if self.accepted {
+            "✓"
+        } else {
+            "✗"
+        };
+
+        println!(
+            "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
+            self.iteration,
+            self.cost,
+            self.cost_change,
+            self.gradient_norm,
+            self.step_norm,
+            self.tr_ratio,
+            self.tr_radius,
+            self.ls_iter,
+            self.iter_time_ms,
+            self.total_time_ms,
+            status
+        );
+    }
 }
 
 impl fmt::Display for DogLegSummary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "=== Dog Leg Optimization Summary ===")?;
-        writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
-        writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
+        // Determine if converged
+        let converged = matches!(
+            self.convergence_status,
+            optimizer::OptimizationStatus::Converged
+                | optimizer::OptimizationStatus::CostToleranceReached
+                | optimizer::OptimizationStatus::GradientToleranceReached
+                | optimizer::OptimizationStatus::ParameterToleranceReached
+        );
+
+        writeln!(f, "=== Dog-Leg Final Result ===")?;
+
+        // Title with convergence status
+        if converged {
+            writeln!(f, "CONVERGED ({:?})", self.convergence_status)?;
+        } else {
+            writeln!(f, "DIVERGED ({:?})", self.convergence_status)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Cost:")?;
+        writeln!(f, "  Initial:   {:.6e}", self.initial_cost)?;
+        writeln!(f, "  Final:     {:.6e}", self.final_cost)?;
         writeln!(
             f,
-            "Cost reduction:            {:.6e} ({:.2}%)",
+            "  Reduction: {:.6e} ({:.2}%)",
             self.initial_cost - self.final_cost,
             100.0 * (self.initial_cost - self.final_cost) / self.initial_cost.max(1e-12)
         )?;
-        writeln!(f, "Total iterations:          {}", self.iterations)?;
+        writeln!(f)?;
+        writeln!(f, "Iterations:")?;
+        writeln!(f, "  Total:              {}", self.iterations)?;
         writeln!(
             f,
-            "Successful steps:          {} ({:.1}%)",
+            "  Successful steps:   {} ({:.1}%)",
             self.successful_steps,
             100.0 * self.successful_steps as f64 / self.iterations.max(1) as f64
         )?;
         writeln!(
             f,
-            "Unsuccessful steps:        {} ({:.1}%)",
+            "  Unsuccessful steps: {} ({:.1}%)",
             self.unsuccessful_steps,
             100.0 * self.unsuccessful_steps as f64 / self.iterations.max(1) as f64
         )?;
+        writeln!(f)?;
+        writeln!(f, "Trust Region:")?;
+        writeln!(f, "  Final radius: {:.6e}", self.final_trust_region_radius)?;
+        writeln!(f)?;
+        writeln!(f, "Gradient:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_gradient_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_gradient_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Parameter Update:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_parameter_update_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_parameter_update_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Performance:")?;
         writeln!(
             f,
-            "Final trust region radius: {:.6e}",
-            self.final_trust_region_radius
+            "  Total time:             {:.2}ms",
+            self.total_time.as_secs_f64() * 1000.0
         )?;
         writeln!(
             f,
-            "Average cost reduction:    {:.6e}",
-            self.average_cost_reduction
+            "  Average per iteration:  {:.2}ms",
+            self.average_time_per_iteration.as_secs_f64() * 1000.0
         )?;
-        writeln!(
-            f,
-            "Max gradient norm:         {:.6e}",
-            self.max_gradient_norm
-        )?;
-        writeln!(
-            f,
-            "Final gradient norm:       {:.6e}",
-            self.final_gradient_norm
-        )?;
-        writeln!(
-            f,
-            "Max parameter update norm: {:.6e}",
-            self.max_parameter_update_norm
-        )?;
-        writeln!(
-            f,
-            "Final param update norm:   {:.6e}",
-            self.final_parameter_update_norm
-        )?;
-        writeln!(f, "Total time:                {:?}", self.total_time)?;
-        writeln!(
-            f,
-            "Average time per iteration: {:?}",
-            self.average_time_per_iteration
-        )?;
+
         Ok(())
     }
 }
@@ -655,6 +744,62 @@ impl DogLegConfig {
         self.enable_visualization = enable;
         self
     }
+
+    /// Print configuration parameters (verbose mode only)
+    pub fn print_configuration(&self) {
+        println!("Configuration:");
+        println!("  Solver:        Dog-Leg");
+        println!("  Linear solver: {:?}", self.linear_solver_type);
+        println!("  Loss function: N/A");
+        println!("\nConvergence Criteria:");
+        println!("  Max iterations:      {}", self.max_iterations);
+        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
+        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
+        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
+        println!("  Timeout:             {:?}", self.timeout);
+        println!("\nTrust Region:");
+        println!("  Initial radius:      {:.2e}", self.trust_region_radius);
+        println!(
+            "  Radius range:        [{:.2e}, {:.2e}]",
+            self.trust_region_min, self.trust_region_max
+        );
+        println!("  Min step quality:    {:.2}", self.min_step_quality);
+        println!("  Good step quality:   {:.2}", self.good_step_quality);
+        println!("  Poor step quality:   {:.2}", self.poor_step_quality);
+        println!("\nRegularization:");
+        println!("  Initial mu:          {:.2e}", self.initial_mu);
+        println!(
+            "  Mu range:            [{:.2e}, {:.2e}]",
+            self.min_mu, self.max_mu
+        );
+        println!("  Mu increase factor:  {:.2}", self.mu_increase_factor);
+        println!("\nNumerical Settings:");
+        println!(
+            "  Jacobi scaling:      {}",
+            if self.use_jacobi_scaling {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "  Step reuse:          {}",
+            if self.enable_step_reuse {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "  Compute covariances: {}",
+            if self.compute_covariances {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!();
+    }
 }
 
 /// State for optimization iteration
@@ -672,7 +817,6 @@ struct StepResult {
     step: faer::Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
-    step_type: StepType,
 }
 
 /// Type of step taken
@@ -1266,17 +1410,6 @@ impl DogLeg {
         let current_cost = residual_norm * residual_norm;
         let initial_cost = current_cost;
 
-        if self.config.verbose {
-            println!(
-                "Starting Dog Leg optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!(
-                "Initial cost: {:.6e}, initial trust region radius: {:.6e}",
-                current_cost, self.config.trust_region_radius
-            );
-        }
-
         Ok(OptimizationState {
             variables,
             variable_index_map,
@@ -1296,11 +1429,6 @@ impl DogLeg {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
-
-            if self.config.verbose {
-                println!("Jacobi scaling computed for {} columns", scaling.ncols());
-            }
-
             self.jacobi_scaling = Some(scaling);
         }
         jacobian * self.jacobi_scaling.as_ref().unwrap()
@@ -1330,20 +1458,13 @@ impl DogLeg {
             // Increment reuse counter
             self.cache_reuse_count += 1;
 
-            if self.config.verbose {
-                println!(
-                    "  Reusing cached GN step and Cauchy point (step was rejected, reuse #{}/{})",
-                    self.cache_reuse_count, MAX_CACHE_REUSE
-                );
-            }
-
             let gradient_norm = cached_grad.norm_l2();
             let mut steepest_descent = faer::Mat::zeros(cached_grad.nrows(), 1);
             for i in 0..cached_grad.nrows() {
                 steepest_descent[(i, 0)] = -cached_grad[(i, 0)];
             }
 
-            let (scaled_step, step_type) = self.compute_dog_leg_step(
+            let (scaled_step, _step_type) = self.compute_dog_leg_step(
                 &steepest_descent,
                 cached_cauchy,
                 cached_gn,
@@ -1364,20 +1485,10 @@ impl DogLeg {
                 step,
                 gradient_norm,
                 predicted_reduction,
-                step_type,
             });
         }
 
         // Not reusing, compute fresh step
-        if self.reuse_step_on_rejection
-            && self.cache_reuse_count >= MAX_CACHE_REUSE
-            && self.config.verbose
-        {
-            println!(
-                "  Cache reuse limit reached ({}), forcing fresh computation to avoid stale gradient",
-                MAX_CACHE_REUSE
-            );
-        }
         // 1. Solve for Gauss-Newton step with adaptive mu regularization (Ceres-style)
         let residuals_owned = residuals.as_ref().to_owned();
         let mut scaled_gn_step = None;
@@ -1397,10 +1508,6 @@ impl DogLeg {
             // Increase mu (Ceres-style)
             self.mu = (self.mu * self.mu_increase_factor).min(self.max_mu);
             mu_attempts += 1;
-
-            if self.config.verbose && mu_attempts < 10 {
-                println!("  Linear solve failed, increasing mu to {:.6e}", self.mu);
-            }
         }
 
         let scaled_gn_step = scaled_gn_step?;
@@ -1420,7 +1527,7 @@ impl DogLeg {
         let (alpha, cauchy_point) = self.compute_cauchy_point_and_alpha(gradient, hessian);
 
         // 5. Compute dog leg step based on trust region radius
-        let (scaled_step, step_type) = self.compute_dog_leg_step(
+        let (scaled_step, _step_type) = self.compute_dog_leg_step(
             &steepest_descent,
             &cauchy_point,
             &scaled_gn_step,
@@ -1443,22 +1550,10 @@ impl DogLeg {
         self.cached_gradient = Some(gradient.clone());
         self.cached_alpha = Some(alpha);
 
-        if self.config.verbose {
-            println!("Gradient norm: {:.12e}", gradient_norm);
-            println!("Mu (regularization): {:.12e}", self.mu);
-            println!("Alpha (Cauchy step length): {:.12e}", alpha);
-            println!("Cauchy point norm: {:.12e}", cauchy_point.norm_l2());
-            println!("GN step norm: {:.12e}", scaled_gn_step.norm_l2());
-            println!("Step type: {}", step_type);
-            println!("Step norm: {:.12e}", step.norm_l2());
-            println!("Predicted reduction: {:.12e}", predicted_reduction);
-        }
-
         Some(StepResult {
             step,
             gradient_norm,
             predicted_reduction,
-            step_type,
         })
     }
 
@@ -1488,18 +1583,6 @@ impl DogLeg {
             step_result.predicted_reduction,
         );
 
-        if self.config.verbose {
-            println!("=== STEP QUALITY EVALUATION ===");
-            println!("Old cost: {:.12e}", state.current_cost);
-            println!("New cost: {:.12e}", new_cost);
-            println!("Actual reduction: {:.12e}", state.current_cost - new_cost);
-            println!(
-                "Predicted reduction: {:.12e}",
-                step_result.predicted_reduction
-            );
-            println!("Rho: {:.12e}", rho);
-        }
-
         // Update trust region and decide acceptance
         // Filter out numerical noise with small threshold
         let accepted = rho > 1e-4;
@@ -1519,51 +1602,11 @@ impl DogLeg {
             0.0
         };
 
-        if self.config.verbose {
-            println!(
-                "Step {}, New radius: {:.6e}",
-                if accepted { "ACCEPTED" } else { "REJECTED" },
-                self.config.trust_region_radius
-            );
-        }
-
         Ok(StepEvaluation {
             accepted,
             cost_reduction,
             rho,
         })
-    }
-
-    /// Log iteration details
-    fn log_iteration(
-        &self,
-        iteration: usize,
-        step_eval: &StepEvaluation,
-        step_norm: f64,
-        step_type: StepType,
-        current_cost: f64,
-    ) {
-        if !self.config.verbose {
-            return;
-        }
-
-        let status = if step_eval.accepted {
-            "[ACCEPTED]"
-        } else {
-            "[REJECTED]"
-        };
-
-        println!(
-            "Iteration {}: cost = {:.6e}, reduction = {:.6e}, radius = {:.6e}, step_norm = {:.6e}, rho = {:.3}, type = {} {}",
-            iteration + 1,
-            current_cost,
-            step_eval.cost_reduction,
-            self.config.trust_region_radius,
-            step_norm,
-            step_eval.rho,
-            step_type,
-            status
-        );
     }
 
     /// Create optimization summary
@@ -1581,6 +1624,8 @@ impl DogLeg {
         final_parameter_update_norm: f64,
         total_cost_reduction: f64,
         total_time: time::Duration,
+        iteration_history: Vec<IterationStats>,
+        convergence_status: optimizer::OptimizationStatus,
     ) -> DogLegSummary {
         DogLegSummary {
             initial_cost,
@@ -1604,6 +1649,8 @@ impl DogLeg {
             } else {
                 time::Duration::from_secs(0)
             },
+            iteration_history,
+            convergence_status,
         }
     }
 
@@ -1635,7 +1682,18 @@ impl DogLeg {
         let mut final_gradient_norm;
         let mut final_parameter_update_norm;
 
+        // Initialize iteration statistics tracking
+        let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
+        let mut previous_cost = state.current_cost;
+
+        // Print configuration and header if verbose
+        if self.config.verbose {
+            self.config.print_configuration();
+            IterationStats::print_header();
+        }
+
         loop {
+            let iter_start = time::Instant::now();
             // Evaluate residuals and Jacobian
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
                 &state.variables,
@@ -1643,15 +1701,6 @@ impl DogLeg {
                 &state.symbolic_structure,
             )?;
             jacobian_evaluations += 1;
-
-            if self.config.verbose {
-                println!("\n=== DOG LEG ITERATION {} ===", iteration);
-                println!("Current cost: {:.12e}", state.current_cost);
-                println!(
-                    "Trust region radius: {:.12e}",
-                    self.config.trust_region_radius
-                );
-            }
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
@@ -1692,14 +1741,32 @@ impl DogLeg {
                 unsuccessful_steps += 1;
             }
 
-            // Log iteration
-            self.log_iteration(
+            // Collect iteration statistics
+            let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
+            let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+            let stats = IterationStats {
                 iteration,
-                &step_eval,
+                cost: state.current_cost,
+                cost_change: previous_cost - state.current_cost,
+                gradient_norm: step_result.gradient_norm,
                 step_norm,
-                step_result.step_type,
-                state.current_cost,
-            );
+                tr_ratio: step_eval.rho,
+                tr_radius: self.config.trust_region_radius,
+                ls_iter: 0, // Direct solver (Cholesky) has no iterations
+                iter_time_ms: iter_elapsed_ms,
+                total_time_ms: total_elapsed_ms,
+                accepted: step_eval.accepted,
+            };
+
+            iteration_stats.push(stats.clone());
+
+            // Print iteration line if verbose
+            if self.config.verbose {
+                stats.print_line();
+            }
+
+            previous_cost = state.current_cost;
 
             // Rerun visualization
             #[cfg(feature = "visualization")]
@@ -1765,11 +1832,12 @@ impl DogLeg {
                     final_parameter_update_norm,
                     total_cost_reduction,
                     elapsed,
+                    iteration_stats.clone(),
+                    status.clone(),
                 );
 
-                if self.config.verbose {
-                    println!("{}", summary);
-                }
+                // Always print summary (verbose or not)
+                println!("\n{}", summary);
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
