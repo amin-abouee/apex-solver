@@ -202,66 +202,155 @@ pub struct LevenbergMarquardtSummary {
     pub total_time: Duration,
     /// Average time per iteration
     pub average_time_per_iteration: Duration,
+    /// Detailed per-iteration statistics history
+    pub iteration_history: Vec<IterationStats>,
+    /// Convergence status
+    pub convergence_status: OptimizationStatus,
 }
 
 impl Display for LevenbergMarquardtSummary {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        writeln!(f, "Levenberg-Marquardt Optimization Summary")?;
-        writeln!(f, "Initial cost:              {:.6e}", self.initial_cost)?;
-        writeln!(f, "Final cost:                {:.6e}", self.final_cost)?;
-        writeln!(f, "Cost reduction ratio:      {:.6e}", self.rho)?;
+        // Determine if converged
+        let converged = matches!(
+            self.convergence_status,
+            OptimizationStatus::Converged
+                | OptimizationStatus::CostToleranceReached
+                | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::ParameterToleranceReached
+        );
+
+        writeln!(f, "=== Levenberg-Marquardt Final Result ===")?;
+
+        // Title with convergence status
+        if converged {
+            writeln!(f, "CONVERGED ({:?})", self.convergence_status)?;
+        } else {
+            writeln!(f, "DIVERGED ({:?})", self.convergence_status)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Cost:")?;
+        writeln!(f, "  Initial:   {:.6e}", self.initial_cost)?;
+        writeln!(f, "  Final:     {:.6e}", self.final_cost)?;
         writeln!(
             f,
-            "Cost reduction:            {:.6e} ({:.2}%)",
+            "  Reduction: {:.6e} ({:.2}%)",
             self.initial_cost - self.final_cost,
             100.0 * (self.initial_cost - self.final_cost) / self.initial_cost.max(1e-12)
         )?;
-        writeln!(f, "Total iterations:          {}", self.iterations)?;
+        writeln!(f)?;
+        writeln!(f, "Iterations:")?;
+        writeln!(f, "  Total:              {}", self.iterations)?;
         writeln!(
             f,
-            "Successful steps:          {} ({:.1}%)",
+            "  Successful steps:   {} ({:.1}%)",
             self.successful_steps,
             100.0 * self.successful_steps as f64 / self.iterations.max(1) as f64
         )?;
         writeln!(
             f,
-            "Unsuccessful steps:        {} ({:.1}%)",
+            "  Unsuccessful steps: {} ({:.1}%)",
             self.unsuccessful_steps,
             100.0 * self.unsuccessful_steps as f64 / self.iterations.max(1) as f64
         )?;
-        writeln!(f, "Final damping parameter:   {:.6e}", self.final_damping)?;
+        writeln!(f)?;
+        writeln!(f, "Gradient:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_gradient_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_gradient_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Parameter Update:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_parameter_update_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_parameter_update_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Performance:")?;
         writeln!(
             f,
-            "Average cost reduction:    {:.6e}",
-            self.average_cost_reduction
+            "  Total time:             {:.2}ms",
+            self.total_time.as_secs_f64() * 1000.0
         )?;
         writeln!(
             f,
-            "Max gradient norm:         {:.6e}",
-            self.max_gradient_norm
+            "  Average per iteration:  {:.2}ms",
+            self.average_time_per_iteration.as_secs_f64() * 1000.0
         )?;
-        writeln!(
-            f,
-            "Final gradient norm:       {:.6e}",
-            self.final_gradient_norm
-        )?;
-        writeln!(
-            f,
-            "Max parameter update norm: {:.6e}",
-            self.max_parameter_update_norm
-        )?;
-        writeln!(
-            f,
-            "Final param update norm:   {:.6e}",
-            self.final_parameter_update_norm
-        )?;
-        writeln!(f, "Total time:                {:?}", self.total_time)?;
-        writeln!(
-            f,
-            "Average time per iteration: {:?}",
-            self.average_time_per_iteration
-        )?;
+
         Ok(())
+    }
+}
+
+/// Per-iteration statistics for detailed logging (Ceres-style output).
+///
+/// Captures all relevant metrics for each optimization iteration, enabling
+/// detailed analysis and debugging of the optimization process.
+#[derive(Debug, Clone)]
+pub struct IterationStats {
+    /// Iteration number (0-indexed)
+    pub iteration: usize,
+    /// Cost function value at this iteration
+    pub cost: f64,
+    /// Change in cost from previous iteration
+    pub cost_change: f64,
+    /// L2 norm of the gradient (||J^T·r||)
+    pub gradient_norm: f64,
+    /// L2 norm of the parameter update step (||Δx||)
+    pub step_norm: f64,
+    /// Trust region ratio (ρ = actual_reduction / predicted_reduction)
+    pub tr_ratio: f64,
+    /// Trust region radius (damping parameter λ)
+    pub tr_radius: f64,
+    /// Linear solver iterations (0 for direct solvers like Cholesky)
+    pub ls_iter: usize,
+    /// Time taken for this iteration in milliseconds
+    pub iter_time_ms: f64,
+    /// Total elapsed time since optimization started in milliseconds
+    pub total_time_ms: f64,
+    /// Whether the step was accepted (true) or rejected (false)
+    pub accepted: bool,
+}
+
+impl IterationStats {
+    /// Print table header in Ceres-style format
+    pub fn print_header() {
+        println!(
+            "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
+            "iter",
+            "cost",
+            "cost_change",
+            "|gradient|",
+            "|step|",
+            "tr_ratio",
+            "tr_radius",
+            "ls_iter",
+            "iter_time",
+            "total_time",
+            "status"
+        );
+    }
+
+    /// Print single iteration line in Ceres-style format with scientific notation
+    pub fn print_line(&self) {
+        let status = if self.iteration == 0 {
+            "-"
+        } else if self.accepted {
+            "✓"
+        } else {
+            "✗"
+        };
+
+        println!(
+            "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
+            self.iteration,
+            self.cost,
+            self.cost_change,
+            self.gradient_norm,
+            self.step_norm,
+            self.tr_ratio,
+            self.tr_radius,
+            self.ls_iter,
+            self.iter_time_ms,
+            self.total_time_ms,
+            status
+        );
     }
 }
 
@@ -600,6 +689,50 @@ impl LevenbergMarquardtConfig {
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
+    }
+
+    /// Print configuration parameters (verbose mode only)
+    pub fn print_configuration(&self) {
+        println!("Configuration:");
+        println!("  Solver:        Levenberg-Marquardt");
+        println!("  Linear solver: {:?}", self.linear_solver_type);
+        println!("  Loss function: N/A");
+        println!("\nConvergence Criteria:");
+        println!("  Max iterations:      {}", self.max_iterations);
+        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
+        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
+        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
+        println!("  Timeout:             {:?}", self.timeout);
+        println!("\nDamping Parameters:");
+        println!("  Initial damping:     {:.2e}", self.damping);
+        println!(
+            "  Damping range:       [{:.2e}, {:.2e}]",
+            self.damping_min, self.damping_max
+        );
+        println!("  Increase factor:     {:.2}", self.damping_increase_factor);
+        println!("  Decrease factor:     {:.2}", self.damping_decrease_factor);
+        println!("\nTrust Region:");
+        println!("  Initial radius:      {:.2e}", self.trust_region_radius);
+        println!("  Min step quality:    {:.2}", self.min_step_quality);
+        println!("  Good step quality:   {:.2}", self.good_step_quality);
+        println!("\nNumerical Settings:");
+        println!(
+            "  Jacobi scaling:      {}",
+            if self.use_jacobi_scaling {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!(
+            "  Compute covariances: {}",
+            if self.compute_covariances {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+        println!();
     }
 }
 
@@ -982,17 +1115,6 @@ impl LevenbergMarquardt {
         let current_cost = compute_cost(&residual);
         let initial_cost = current_cost;
 
-        if self.config.verbose {
-            println!(
-                "Starting Levenberg-Marquardt optimization with {} max iterations",
-                self.config.max_iterations
-            );
-            println!(
-                "Initial cost: {:.6e}, initial damping: {:.6e}",
-                current_cost, self.config.damping
-            );
-        }
-
         Ok(LinearizerResult {
             variables,
             variable_index_map,
@@ -1012,11 +1134,6 @@ impl LevenbergMarquardt {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
             let scaling = self.create_jacobi_scaling(jacobian);
-
-            if self.config.verbose {
-                println!("Jacobi scaling computed for {} columns", scaling.ncols());
-            }
-
             self.jacobi_scaling = Some(scaling);
         }
         jacobian * self.jacobi_scaling.as_ref().unwrap()
@@ -1037,14 +1154,8 @@ impl LevenbergMarquardt {
 
         // Get cached gradient and Hessian from the solver
         let gradient = linear_solver.get_gradient()?;
-        let hessian = linear_solver.get_hessian()?;
+        let _hessian = linear_solver.get_hessian()?;
         let gradient_norm = gradient.norm_l2();
-
-        if self.config.verbose {
-            println!("Gradient (J^T*r) norm: {:.12e}", gradient_norm);
-            println!("Hessian shape: ({}, {})", hessian.nrows(), hessian.ncols());
-            println!("Damping parameter: {:.12e}", self.config.damping);
-        }
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
@@ -1053,16 +1164,8 @@ impl LevenbergMarquardt {
             scaled_step
         };
 
-        if self.config.verbose {
-            println!("Final step norm: {:.12e}", step.norm_l2());
-        }
-
         // Compute predicted reduction using scaled values
         let predicted_reduction = self.compute_predicted_reduction(&step, gradient);
-
-        if self.config.verbose {
-            println!("Predicted reduction: {:.12e}", predicted_reduction);
-        }
 
         Some(StepResult {
             step,
@@ -1095,19 +1198,6 @@ impl LevenbergMarquardt {
             new_cost,
             step_result.predicted_reduction,
         );
-
-        if self.config.verbose {
-            println!("RHO (Gain Factor) CALCULATION DETAILS");
-            println!("Old cost: {:.12e}", state.current_cost);
-            println!("New cost: {:.12e}", new_cost);
-            let actual_reduction = state.current_cost - new_cost;
-            println!("Actual cost reduction: {:.12e}", actual_reduction);
-            println!(
-                "Predicted cost reduction: {:.12e}",
-                step_result.predicted_reduction
-            );
-            println!("Rho (actual/predicted): {:.12e}", rho);
-        }
 
         // Update damping and decide whether to accept step
         let accepted = self.update_damping(rho);
@@ -1150,6 +1240,8 @@ impl LevenbergMarquardt {
         final_parameter_update_norm: f64,
         total_cost_reduction: f64,
         total_time: Duration,
+        iteration_history: Vec<IterationStats>,
+        convergence_status: OptimizationStatus,
     ) -> LevenbergMarquardtSummary {
         LevenbergMarquardtSummary {
             initial_cost,
@@ -1174,6 +1266,8 @@ impl LevenbergMarquardt {
             } else {
                 Duration::from_secs(0)
             },
+            iteration_history,
+            convergence_status,
         }
     }
 
@@ -1202,8 +1296,19 @@ impl LevenbergMarquardt {
         let mut final_gradient_norm;
         let mut final_parameter_update_norm;
 
+        // Initialize iteration statistics tracking
+        let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
+        let mut previous_cost = state.current_cost;
+
+        // Print configuration and header if verbose
+        if self.config.verbose {
+            self.config.print_configuration();
+            IterationStats::print_header();
+        }
+
         // Main optimization loop
         loop {
+            let iter_start = Instant::now();
             // Evaluate residuals and Jacobian
             let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
                 &state.variables,
@@ -1212,36 +1317,12 @@ impl LevenbergMarquardt {
             )?;
             jacobian_evaluations += 1;
 
-            if self.config.verbose {
-                println!("APEX-SOLVER DEBUG ITERATION {}", iteration);
-                println!("Current cost: {:.12e}", state.current_cost);
-                println!(
-                    "Residuals shape: ({}, {})",
-                    residuals.nrows(),
-                    residuals.ncols()
-                );
-                println!("Residuals norm: {:.12e}", residuals.norm_l2());
-                println!(
-                    "Jacobian shape: ({}, {})",
-                    jacobian.nrows(),
-                    jacobian.ncols()
-                );
-            }
-
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
                 self.process_jacobian(&jacobian, iteration)
             } else {
                 jacobian
             };
-
-            if self.config.verbose {
-                println!(
-                    "Scaled Jacobian shape: ({}, {})",
-                    scaled_jacobian.nrows(),
-                    scaled_jacobian.ncols()
-                );
-            }
 
             // Compute optimization step
             let step_result = match self.compute_levenberg_marquardt_step(
@@ -1275,6 +1356,33 @@ impl LevenbergMarquardt {
             } else {
                 unsuccessful_steps += 1;
             }
+
+            // Collect iteration statistics
+            let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
+            let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+            let stats = IterationStats {
+                iteration,
+                cost: state.current_cost,
+                cost_change: previous_cost - state.current_cost,
+                gradient_norm: step_result.gradient_norm,
+                step_norm,
+                tr_ratio: step_eval.rho,
+                tr_radius: self.config.damping,
+                ls_iter: 0, // Direct solver (Cholesky) has no iterations
+                iter_time_ms: iter_elapsed_ms,
+                total_time_ms: total_elapsed_ms,
+                accepted: step_eval.accepted,
+            };
+
+            iteration_stats.push(stats.clone());
+
+            // Print iteration line if verbose
+            if self.config.verbose {
+                stats.print_line();
+            }
+
+            previous_cost = state.current_cost;
 
             // Rerun visualization
             #[cfg(feature = "visualization")]
@@ -1347,11 +1455,12 @@ impl LevenbergMarquardt {
                     final_parameter_update_norm,
                     total_cost_reduction,
                     elapsed,
+                    iteration_stats.clone(),
+                    status.clone(),
                 );
 
-                if self.config.verbose {
-                    println!("{}", summary);
-                }
+                // Always print summary (verbose or not)
+                println!("\n{}", summary);
 
                 // Log convergence to Rerun
                 #[cfg(feature = "visualization")]
