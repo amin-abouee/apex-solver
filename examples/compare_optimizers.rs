@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -25,11 +26,11 @@ struct Args {
     verbose: bool,
 
     /// Cost tolerance for convergence
-    #[arg(long, default_value = "1e-4")]
+    #[arg(long, default_value = "1e-3")]
     cost_tolerance: f64,
 
     /// Parameter tolerance for convergence
-    #[arg(long, default_value = "1e-4")]
+    #[arg(long, default_value = "1e-3")]
     parameter_tolerance: f64,
 }
 
@@ -175,6 +176,27 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
     // Create problem
     let mut problem = Problem::new();
+
+    // Add prior factor on first vertex to handle gauge freedom
+    // This prevents rank-deficient Hessian and improves convergence for all optimizers
+    if let Some(&first_id) = vertex_ids.first() {
+        if let Some(first_vertex) = graph.vertices_se3.get(&first_id) {
+            let var_name = format!("x{}", first_id);
+            let quat = first_vertex.pose.rotation_quaternion();
+            let trans = first_vertex.pose.translation();
+            let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+
+            let prior_factor = PriorFactor { data: prior_value };
+            // Use HuberLoss with scale=1.0 (allows slight movement if needed)
+            let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+            problem.add_residual_block(
+                &[&var_name],
+                Box::new(prior_factor),
+                Some(Box::new(huber_loss)),
+            );
+        }
+    }
+
     for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
@@ -292,6 +314,27 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
     // Create problem
     let mut problem = Problem::new();
+
+    // Add prior factor on first vertex to handle gauge freedom
+    // This prevents rank-deficient Hessian and improves convergence for all optimizers
+    if let Some(&first_id) = vertex_ids.first() {
+        if let Some(first_vertex) = graph.vertices_se2.get(&first_id) {
+            let var_name = format!("x{}", first_id);
+            let trans = first_vertex.pose.translation();
+            let angle = first_vertex.pose.rotation_angle();
+            let prior_value = dvector![trans.x, trans.y, angle];
+
+            let prior_factor = PriorFactor { data: prior_value };
+            // Use HuberLoss with scale=1.0 (allows slight movement if needed)
+            let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+            problem.add_residual_block(
+                &[&var_name],
+                Box::new(prior_factor),
+                Some(Box::new(huber_loss)),
+            );
+        }
+    }
+
     for edge in &graph.edges_se2 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
