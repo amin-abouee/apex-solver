@@ -1,9 +1,42 @@
+//! Comprehensive solver comparison benchmark for apex-solver, factrs, and tiny-solver
+//!
+//! This benchmark compares three Rust nonlinear optimization libraries on standard
+//! pose graph optimization datasets (both SE2 and SE3).
+//!
+//! ## Configuration Philosophy
+//!
+//! The apex-solver configuration **exactly matches** the production settings used in
+//! `bin/optimize_2d_graph.rs` and `bin/optimize_3d_graph.rs` to ensure fair comparison:
+//!
+//! ### SE2 (2D) Configuration:
+//! - Max iterations: 150 (matches optimize_2d_graph.rs)
+//! - Cost tolerance: 1e-4
+//! - Parameter tolerance: 1e-4
+//! - Gradient tolerance: 1e-10 (enables early-exit when gradient converges)
+//!
+//! ### SE3 (3D) Configuration:
+//! - Max iterations: 100 (matches optimize_3d_graph.rs)
+//! - Cost tolerance: 1e-4
+//! - Parameter tolerance: 1e-4
+//! - Gradient tolerance: 1e-12 (tighter for SE3 due to higher complexity)
+//!
+//! ### Timing Methodology:
+//! - Timing starts immediately before `solver.optimize()` call
+//! - Problem setup (graph loading, factor creation) is excluded from timing
+//! - This matches the timing approach in optimize_*_graph.rs binaries
+//! - Each dataset is run 5 times and results are averaged for stability
+//!
+//! ### Gauge Freedom Handling:
+//! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
+//! - factrs/tiny-solver: Use their default gauge freedom handling
+
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::panic;
 use std::time::Instant;
 
 // apex-solver imports
+use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
 use apex_solver::io::{G2oLoader, GraphLoader};
@@ -45,6 +78,16 @@ const DATASETS: &[Dataset] = &[
     Dataset {
         name: "mit",
         file: "data/mit.g2o",
+        is_3d: false,
+    },
+    Dataset {
+        name: "intel",
+        file: "data/intel.g2o",
+        is_3d: false,
+    },
+    Dataset {
+        name: "manhattanOlson3500",
+        file: "data/manhattanOlson3500.g2o",
         is_3d: false,
     },
     Dataset {
@@ -162,7 +205,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
-    // Add between factors
+    // Add between factors with L2 loss (matches optimize_2d_graph.rs default)
     for edge in &graph.edges_se2 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
@@ -171,21 +214,42 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             edge.measurement.y(),
             edge.measurement.angle(),
         );
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
+        problem.add_residual_block(
+            &[&id0, &id1],
+            Box::new(between_factor),
+            Some(Box::new(L2Loss)),
+        );
     }
 
-    // Optimize
+    // Fix gauge freedom by constraining the first pose
+    // This makes the Hessian full-rank and improves convergence
+    // Matches production configuration in optimize_2d_graph.rs
+    if let Some(&first_id) = vertex_ids.first() {
+        let first_var_name = format!("x{}", first_id);
+        problem.fix_variable(&first_var_name, 0); // Fix x
+        problem.fix_variable(&first_var_name, 1); // Fix y
+        problem.fix_variable(&first_var_name, 2); // Fix theta
+    }
+
+    // Optimize with production-grade configuration matching optimize_2d_graph.rs
+    // - Max iterations: 150 (sufficient for SE2 convergence)
+    // - Cost/param tolerance: 1e-4 (balanced accuracy vs speed)
+    // - Gradient tolerance: 1e-10 (early-exit on gradient convergence, saves iterations)
     let config = LevenbergMarquardtConfig::new()
-        .with_max_iterations(40)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-6)
+        .with_max_iterations(150)
+        .with_cost_tolerance(1e-4)
+        .with_parameter_tolerance(1e-4)
+        .with_gradient_tolerance(1e-10)
         .with_verbose(false);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
+    // Start timing immediately before optimization (excludes problem setup overhead)
+    // This matches the timing approach in optimize_2d_graph.rs for fair comparison
+    let start_time = Instant::now();
     match solver.optimize(&problem, &initial_values) {
         Ok(result) => {
-            let elapsed_ms = result.elapsed_time.as_secs_f64() * 1000.0;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,
@@ -224,26 +288,42 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
-    // Add between factors
+    // Add between factors with L2 loss (matches optimize_3d_graph.rs default)
     for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
         let between_factor = BetweenFactorSE3::new(edge.measurement.clone());
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
+        problem.add_residual_block(
+            &[&id0, &id1],
+            Box::new(between_factor),
+            Some(Box::new(L2Loss)),
+        );
     }
 
-    // Optimize
+    // NO gauge freedom handling for SE3 + LM (matches optimize_3d_graph.rs)
+    // Unlike SE2, the 3D optimizer does NOT fix variables or add prior factors for LM
+    // LM's built-in damping (λI) handles the rank-deficient Hessian naturally
+    // This allows the optimizer to find better solutions with fewer iterations
+
+    // Optimize with production-grade configuration matching optimize_3d_graph.rs
+    // - Max iterations: 100 (sufficient for SE3 convergence)
+    // - Cost/param tolerance: 1e-4 (balanced accuracy vs speed)
+    // - Gradient tolerance: 1e-12 (tighter than SE2 due to SE3 complexity, enables early-exit)
     let config = LevenbergMarquardtConfig::new()
-        .with_max_iterations(40)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-6)
+        .with_max_iterations(100)
+        .with_cost_tolerance(1e-4)
+        .with_parameter_tolerance(1e-4)
+        .with_gradient_tolerance(1e-12)
         .with_verbose(false);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
+    // Start timing immediately before optimization (excludes problem setup overhead)
+    // This matches the timing approach in optimize_3d_graph.rs for fair comparison
+    let start_time = Instant::now();
     match solver.optimize(&problem, &initial_values) {
         Ok(result) => {
-            let elapsed_ms = result.elapsed_time.as_secs_f64() * 1000.0;
+            let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,

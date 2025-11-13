@@ -179,22 +179,22 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
-    if let Some(&first_id) = vertex_ids.first() {
-        if let Some(first_vertex) = graph.vertices_se3.get(&first_id) {
-            let var_name = format!("x{}", first_id);
-            let quat = first_vertex.pose.rotation_quaternion();
-            let trans = first_vertex.pose.translation();
-            let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+    if let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
+    {
+        let var_name = format!("x{}", first_id);
+        let quat = first_vertex.pose.rotation_quaternion();
+        let trans = first_vertex.pose.translation();
+        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
 
-            let prior_factor = PriorFactor { data: prior_value };
-            // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-            let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
-            problem.add_residual_block(
-                &[&var_name],
-                Box::new(prior_factor),
-                Some(Box::new(huber_loss)),
-            );
-        }
+        let prior_factor = PriorFactor { data: prior_value };
+        // Use HuberLoss with scale=1.0 (allows slight movement if needed)
+        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        problem.add_residual_block(
+            &[&var_name],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
     }
 
     for edge in &graph.edges_se3 {
@@ -317,22 +317,22 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
-    if let Some(&first_id) = vertex_ids.first() {
-        if let Some(first_vertex) = graph.vertices_se2.get(&first_id) {
-            let var_name = format!("x{}", first_id);
-            let trans = first_vertex.pose.translation();
-            let angle = first_vertex.pose.rotation_angle();
-            let prior_value = dvector![trans.x, trans.y, angle];
+    if let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
+    {
+        let var_name = format!("x{}", first_id);
+        let trans = first_vertex.pose.translation();
+        let angle = first_vertex.pose.rotation_angle();
+        let prior_value = dvector![trans.x, trans.y, angle];
 
-            let prior_factor = PriorFactor { data: prior_value };
-            // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-            let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
-            problem.add_residual_block(
-                &[&var_name],
-                Box::new(prior_factor),
-                Some(Box::new(huber_loss)),
-            );
-        }
+        let prior_factor = PriorFactor { data: prior_value };
+        // Use HuberLoss with scale=1.0 (allows slight movement if needed)
+        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        problem.add_residual_block(
+            &[&var_name],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
     }
 
     for edge in &graph.edges_se2 {
