@@ -1,6 +1,7 @@
 use apex_solver::io::load_graph;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::{Level, info, warn};
 
 /// Statistics for a single loaded graph file
 #[derive(Debug, Default)]
@@ -28,7 +29,15 @@ struct SummaryStatistics {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Loading all graph files from the data directory...\n");
+    // Initialize tracing with default info level
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(Level::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+    info!("Loading all graph files from the data directory...");
 
     let graph_files = find_graph_files()?;
 
@@ -52,7 +61,7 @@ fn find_graph_files() -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
     let mut graph_files = Vec::new();
 
     if !data_dir.exists() || !data_dir.is_dir() {
-        eprintln!("Error: data directory not found!");
+        warn!("Error: data directory not found!");
         return Ok(graph_files);
     }
 
@@ -87,22 +96,21 @@ fn get_format_name(extension: &str) -> &'static str {
 
 /// Display message when no files are found
 fn display_no_files_message() {
-    println!("No supported graph files found in the data directory.");
-    println!("Supported formats: .g2o (G2O), .graph (TORO)");
+    info!("No supported graph files found in the data directory.");
+    info!("Supported formats: .g2o (G2O), .graph (TORO)");
 }
 
 /// Display the list of found graph files
 fn display_found_files(graph_files: &[PathBuf]) {
-    println!("Found {} graph files:", graph_files.len());
+    info!("Found {} graph files:", graph_files.len());
     for file in graph_files {
         let extension = file
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("unknown");
         let format = get_format_name(extension);
-        println!("  - {} ({})", file.display(), format);
+        info!("  - {} ({})", file.display(), format);
     }
-    println!();
 }
 
 /// Process all graph files and return summary statistics
@@ -124,7 +132,6 @@ fn process_all_files(graph_files: &[PathBuf]) -> SummaryStatistics {
             }
         }
         summary.files_processed += 1;
-        println!();
     }
 
     summary
@@ -155,16 +162,16 @@ fn display_file_statistics(file_path: &Path, stats: &FileStatistics) {
         .unwrap_or("unknown");
     let format = get_format_name(extension);
 
-    println!("Loading {filename} ({format}):");
-    println!("Successfully loaded!");
-    println!("Statistics:");
-    println!("  - SE2 vertices: {}", stats.se2_vertices);
-    println!("  - SE3 vertices: {}", stats.se3_vertices);
+    info!("Loading {filename} ({format}):");
+    info!("Successfully loaded!");
+    info!("Statistics:");
+    info!("  - SE2 vertices: {}", stats.se2_vertices);
+    info!("  - SE3 vertices: {}", stats.se3_vertices);
 
-    println!("  - SE2 edges: {}", stats.se2_edges);
-    println!("  - SE3 edges: {}", stats.se3_edges);
-    println!("  - Total vertices: {}", stats.vertices);
-    println!("  - Total edges: {}", stats.edges);
+    info!("  - SE2 edges: {}", stats.se2_edges);
+    info!("  - SE3 edges: {}", stats.se3_edges);
+    info!("  - Total vertices: {}", stats.vertices);
+    info!("  - Total edges: {}", stats.edges);
 
     // Show first vertex information if available
     display_first_vertex_info(file_path);
@@ -175,7 +182,7 @@ fn display_first_vertex_info(file_path: &Path) {
     // Re-load the graph to access vertex data (could be optimized by passing the graph)
     if let Ok(graph) = load_graph(file_path) {
         if let Some(vertex_0) = graph.vertices_se2.get(&0) {
-            println!(
+            info!(
                 "  - First SE2 vertex: id={}, x={:.3}, y={:.3}, θ={:.3}",
                 vertex_0.id(),
                 vertex_0.x(),
@@ -185,7 +192,7 @@ fn display_first_vertex_info(file_path: &Path) {
         } else if let Some(vertex_0) = graph.vertices_se3.get(&0) {
             let translation = vertex_0.translation();
             let rotation = vertex_0.rotation();
-            println!(
+            info!(
                 "  - First SE3 vertex: id={}, translation=({:.3}, {:.3}, {:.3}), rotation=({:.3}, {:.3}, {:.3}, {:.3})",
                 vertex_0.id(),
                 translation.x,
@@ -210,8 +217,8 @@ fn display_load_error(file_path: &Path, error: &Box<dyn std::error::Error>) {
         .unwrap_or("unknown");
     let format = get_format_name(extension);
 
-    println!("Loading {filename} ({format}):");
-    println!("  ❌ Failed to load: {error}");
+    info!("Loading {filename} ({format}):");
+    info!("  ❌ Failed to load: {error}");
 }
 
 /// Accumulate statistics from a single file into the summary
@@ -226,25 +233,25 @@ fn accumulate_statistics(summary: &mut SummaryStatistics, stats: &FileStatistics
 
 /// Display the final summary statistics
 fn display_summary(summary: &SummaryStatistics) {
-    println!("🎯 SUMMARY STATISTICS:");
-    println!(
+    info!("🎯 SUMMARY STATISTICS:");
+    info!(
         "  Files processed: {}/{}",
         summary.successful_loads, summary.total_files
     );
-    println!("  Total SE2 vertices: {}", summary.total_se2_vertices);
-    println!("  Total SE3 vertices: {}", summary.total_se3_vertices);
+    info!("  Total SE2 vertices: {}", summary.total_se2_vertices);
+    info!("  Total SE3 vertices: {}", summary.total_se3_vertices);
 
-    println!("  Total SE2 edges: {}", summary.total_se2_edges);
-    println!("  Total SE3 edges: {}", summary.total_se3_edges);
-    println!("  Grand total vertices: {}", summary.total_vertices);
-    println!("  Grand total edges: {}", summary.total_edges);
+    info!("  Total SE2 edges: {}", summary.total_se2_edges);
+    info!("  Total SE3 edges: {}", summary.total_se3_edges);
+    info!("  Grand total vertices: {}", summary.total_vertices);
+    info!("  Grand total edges: {}", summary.total_edges);
 
     if summary.successful_loads == summary.total_files {
-        println!("\n✅ All files loaded successfully!");
+        info!("✅ All files loaded successfully!");
     } else {
         let failed_count = summary.total_files - summary.successful_loads;
-        println!(
-            "\n⚠️  {} out of {} files failed to load.",
+        info!(
+            "⚠️  {} out of {} files failed to load.",
             failed_count, summary.total_files
         );
     }
