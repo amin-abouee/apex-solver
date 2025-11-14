@@ -22,6 +22,7 @@
 use crate::{core::problem, io};
 use faer::sparse;
 use std::collections;
+use tracing::warn;
 
 /// Optimization visualizer for real-time debugging with Rerun.
 ///
@@ -70,9 +71,9 @@ impl OptimizationVisualizer {
                         rec
                     }
                     Err(e) => {
-                        eprintln!("⚠ Could not launch Rerun viewer: {}", e);
-                        eprintln!("  Saving to file 'optimization.rrd' instead");
-                        eprintln!("  View it later with: rerun optimization.rrd\n");
+                        warn!("Could not launch Rerun viewer: {}", e);
+                        warn!("Saving to file 'optimization.rrd' instead");
+                        warn!("View it later with: rerun optimization.rrd");
 
                         // Fall back to saving to file
                         rerun::RecordingStreamBuilder::new("apex-solver-optimization")
