@@ -169,7 +169,8 @@ fn update_se2_graph_from_result(
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
             && let Some(vertex) = graph.vertices_se2.get_mut(&id)
-            && let VariableEnum::SE2(se2_var) = var_value {
+            && let VariableEnum::SE2(se2_var) = var_value
+        {
             let data: DVector<f64> = se2_var.value.clone().into();
             vertex.pose = SE2::from_xy_angle(data[0], data[1], data[2]);
         }
@@ -187,7 +188,8 @@ fn update_se3_graph_from_result(
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
             && let Some(vertex) = graph.vertices_se3.get_mut(&id)
-            && let VariableEnum::SE3(se3_var) = var_value {
+            && let VariableEnum::SE3(se3_var) = var_value
+        {
             let data: DVector<f64> = se3_var.value.clone().into();
             let translation = Vector3::new(data[0], data[1], data[2]);
             let rotation = Quaternion::new(data[3], data[4], data[5], data[6]);
@@ -209,7 +211,8 @@ fn update_se2_graph_from_tiny_solver(
         // tiny-solver uses "x0", "x1", etc. as variable names
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
-            && let Some(vertex) = graph.vertices_se2.get_mut(&id) {
+            && let Some(vertex) = graph.vertices_se2.get_mut(&id)
+        {
             // tiny-solver SE2 format: [x, y, theta]
             vertex.pose = SE2::from_xy_angle(var_value[0], var_value[1], var_value[2]);
         }
@@ -226,11 +229,11 @@ fn update_se3_graph_from_tiny_solver(
     for (var_name, var_value) in tiny_solver_result {
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
-            && let Some(vertex) = graph.vertices_se3.get_mut(&id) {
+            && let Some(vertex) = graph.vertices_se3.get_mut(&id)
+        {
             // tiny-solver SE3 format: [tx, ty, tz, qx, qy, qz, qw]
             let translation = Vector3::new(var_value[0], var_value[1], var_value[2]);
-            let rotation =
-                Quaternion::new(var_value[6], var_value[3], var_value[4], var_value[5]);
+            let rotation = Quaternion::new(var_value[6], var_value[3], var_value[4], var_value[5]);
             vertex.pose = SE3::from_translation_quaternion(translation, rotation);
         }
     }
@@ -410,17 +413,6 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             Some(Box::new(L2Loss)),
         );
     }
-
-    // NO gauge freedom handling for SE2 + LM
-    // Testing shows that LM's built-in damping (λI) handles rank-deficient Hessian
-    // more efficiently than fixing variables (2.6x faster: 104ms vs 273ms on M3500)
-    // This differs from optimize_2d_graph.rs but matches SE3 benchmark approach
-    // if let Some(&first_id) = vertex_ids.first() {
-    //     let first_var_name = format!("x{}", first_id);
-    //     problem.fix_variable(&first_var_name, 0); // Fix x
-    //     problem.fix_variable(&first_var_name, 1); // Fix y
-    //     problem.fix_variable(&first_var_name, 2); // Fix theta
-    // }
 
     // Optimize with production-grade configuration matching optimize_2d_graph.rs
     // - Max iterations: 150 (sufficient for SE2 convergence)
