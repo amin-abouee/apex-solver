@@ -166,16 +166,12 @@ fn update_se2_graph_from_result(
     use nalgebra::DVector;
 
     for (var_name, var_value) in &result.parameters {
-        if let Some(id_str) = var_name.strip_prefix("x") {
-            if let Ok(id) = id_str.parse::<usize>() {
-                if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
-                    // Extract SE2 data from VariableEnum and update pose
-                    if let VariableEnum::SE2(se2_var) = var_value {
-                        let data: DVector<f64> = se2_var.value.clone().into();
-                        vertex.pose = SE2::from_xy_angle(data[0], data[1], data[2]);
-                    }
-                }
-            }
+        if let Some(id_str) = var_name.strip_prefix("x")
+            && let Ok(id) = id_str.parse::<usize>()
+            && let Some(vertex) = graph.vertices_se2.get_mut(&id)
+            && let VariableEnum::SE2(se2_var) = var_value {
+            let data: DVector<f64> = se2_var.value.clone().into();
+            vertex.pose = SE2::from_xy_angle(data[0], data[1], data[2]);
         }
     }
 }
@@ -188,18 +184,14 @@ fn update_se3_graph_from_result(
     use nalgebra::{DVector, Quaternion, Vector3};
 
     for (var_name, var_value) in &result.parameters {
-        if let Some(id_str) = var_name.strip_prefix("x") {
-            if let Ok(id) = id_str.parse::<usize>() {
-                if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
-                    // Extract SE3 data from VariableEnum and update pose
-                    if let VariableEnum::SE3(se3_var) = var_value {
-                        let data: DVector<f64> = se3_var.value.clone().into();
-                        let translation = Vector3::new(data[0], data[1], data[2]);
-                        let rotation = Quaternion::new(data[3], data[4], data[5], data[6]);
-                        vertex.pose = SE3::from_translation_quaternion(translation, rotation);
-                    }
-                }
-            }
+        if let Some(id_str) = var_name.strip_prefix("x")
+            && let Ok(id) = id_str.parse::<usize>()
+            && let Some(vertex) = graph.vertices_se3.get_mut(&id)
+            && let VariableEnum::SE3(se3_var) = var_value {
+            let data: DVector<f64> = se3_var.value.clone().into();
+            let translation = Vector3::new(data[0], data[1], data[2]);
+            let rotation = Quaternion::new(data[3], data[4], data[5], data[6]);
+            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
         }
     }
 }
@@ -215,13 +207,11 @@ fn update_se2_graph_from_tiny_solver(
 ) {
     for (var_name, var_value) in tiny_solver_result {
         // tiny-solver uses "x0", "x1", etc. as variable names
-        if let Some(id_str) = var_name.strip_prefix("x") {
-            if let Ok(id) = id_str.parse::<usize>() {
-                if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
-                    // tiny-solver SE2 format: [x, y, theta]
-                    vertex.pose = SE2::from_xy_angle(var_value[0], var_value[1], var_value[2]);
-                }
-            }
+        if let Some(id_str) = var_name.strip_prefix("x")
+            && let Ok(id) = id_str.parse::<usize>()
+            && let Some(vertex) = graph.vertices_se2.get_mut(&id) {
+            // tiny-solver SE2 format: [x, y, theta]
+            vertex.pose = SE2::from_xy_angle(var_value[0], var_value[1], var_value[2]);
         }
     }
 }
@@ -234,16 +224,14 @@ fn update_se3_graph_from_tiny_solver(
     use nalgebra::{Quaternion, Vector3};
 
     for (var_name, var_value) in tiny_solver_result {
-        if let Some(id_str) = var_name.strip_prefix("x") {
-            if let Ok(id) = id_str.parse::<usize>() {
-                if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
-                    // tiny-solver SE3 format: [tx, ty, tz, qx, qy, qz, qw]
-                    let translation = Vector3::new(var_value[0], var_value[1], var_value[2]);
-                    let rotation =
-                        Quaternion::new(var_value[6], var_value[3], var_value[4], var_value[5]);
-                    vertex.pose = SE3::from_translation_quaternion(translation, rotation);
-                }
-            }
+        if let Some(id_str) = var_name.strip_prefix("x")
+            && let Ok(id) = id_str.parse::<usize>()
+            && let Some(vertex) = graph.vertices_se3.get_mut(&id) {
+            // tiny-solver SE3 format: [tx, ty, tz, qx, qy, qz, qw]
+            let translation = Vector3::new(var_value[0], var_value[1], var_value[2]);
+            let rotation =
+                Quaternion::new(var_value[6], var_value[3], var_value[4], var_value[5]);
+            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
         }
     }
 }
@@ -442,8 +430,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(150)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-10)
-        .with_verbose(false);
+        .with_gradient_tolerance(1e-10);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -526,8 +513,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(100)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-12)
-        .with_verbose(false);
+        .with_gradient_tolerance(1e-12);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
