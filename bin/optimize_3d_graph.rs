@@ -12,6 +12,7 @@ use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
+use tracing::info;
 
 #[derive(Parser)]
 #[command(name = "optimize_3d_graph")]
@@ -24,10 +25,6 @@ struct Args {
     /// Maximum number of optimization iterations (optimized for SE3 datasets)
     #[arg(short, long, default_value = "100")]
     max_iterations: usize,
-
-    /// Enable verbose output
-    #[arg(short, long)]
-    verbose: bool,
 
     /// Cost tolerance for convergence (optimized for SE3 datasets)
     #[arg(long, default_value = "1e-4")]
@@ -361,8 +358,8 @@ fn test_se3_dataset(
         }
     };
 
-    if args.verbose {
-        println!(
+    if tracing::enabled!(tracing::Level::INFO) {
+        info!(
             "\n=== {} OPTIMIZATION PARAMETERS ===",
             match optimizer_name {
                 "LM" => "LEVENBERG-MARQUARDT",
@@ -380,8 +377,7 @@ fn test_se3_dataset(
                 .with_max_iterations(max_iter)
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
-                .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-12);
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = GaussNewton::with_config(config);
@@ -392,8 +388,7 @@ fn test_se3_dataset(
                 .with_max_iterations(max_iter)
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
-                .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-12);
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = DogLeg::with_config(config);
@@ -404,8 +399,7 @@ fn test_se3_dataset(
                 .with_max_iterations(max_iter)
                 .with_cost_tolerance(cost_tol)
                 .with_parameter_tolerance(param_tol)
-                .with_gradient_tolerance(1e-12)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-12);
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = LevenbergMarquardt::with_config(config);
@@ -503,7 +497,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
-    println!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
+    // Initialize tracing
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    info!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
 
     // Define available SE3 datasets
     let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D"];
