@@ -363,7 +363,7 @@ fn test_dataset(
     let init_cost_time = init_cost_start.elapsed();
 
     if args.profile {
-        println!(
+        info!(
             "[PROFILE] Initial cost computation: {:.2}ms",
             init_cost_time.as_secs_f64() * 1000.0
         );
@@ -580,12 +580,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if visualization is requested with multiple datasets
     #[cfg(feature = "visualization")]
     if args.with_visualizer && datasets.len() > 1 {
-        warn!(
-            "Visualization is not supported when running multiple datasets (--dataset all)."
-        );
-        warn!(
-            "Disabling visualization. To use visualization, specify a single dataset."
-        );
+        warn!("Visualization is not supported when running multiple datasets (--dataset all).");
+        warn!("Disabling visualization. To use visualization, specify a single dataset.");
         warn!("Example: --dataset M3500 --with-visualizer");
         args.with_visualizer = false;
     }
