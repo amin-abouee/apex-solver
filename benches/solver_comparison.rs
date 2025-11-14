@@ -34,6 +34,7 @@ use std::collections::HashMap;
 use std::hint::black_box;
 use std::panic;
 use std::time::Instant;
+use tracing::{Level, info};
 
 // apex-solver imports
 use apex_solver::core::loss_functions::L2Loss;
@@ -372,8 +373,6 @@ fn is_converged(status: &OptimizationStatus) -> bool {
     )
 }
 
-// ========================= apex-solver =========================
-
 fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
@@ -537,8 +536,6 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     }
 }
 
-// ========================= factrs =========================
-
 fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation (without factrs prior)
     let raw_graph = match G2oLoader::load(dataset.file) {
@@ -614,8 +611,6 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 }
-
-// ========================= tiny-solver =========================
 
 fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation
@@ -702,17 +697,26 @@ fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
 }
 
 fn main() {
-    println!("Starting solver comparison benchmark...");
-    println!("Running each configuration 5 times and averaging results...\n");
+    // Initialize tracing with default info level
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(Level::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+
+    info!("Starting solver comparison benchmark...");
+    info!("Running each configuration 5 times and averaging results...");
 
     let solvers = ["apex-solver", "factrs", "tiny-solver"];
     let mut all_results = Vec::new();
 
     for dataset in DATASETS {
-        println!("Dataset: {}", dataset.name);
+        info!("Dataset: {}", dataset.name);
 
         for solver in &solvers {
-            print!("  {} ... ", solver);
+            info!("{} ... ", solver);
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             // Run multiple times to get stable measurements
@@ -737,7 +741,7 @@ fn main() {
                     avg_result.elapsed_ms = format!("{:.2}", total_time / num_runs as f64);
                 }
 
-                println!(
+                info!(
                     "done (converged: {}, time: {} ms)",
                     avg_result.converged, avg_result.elapsed_ms
                 );
@@ -745,7 +749,6 @@ fn main() {
                 all_results.push(avg_result);
             }
         }
-        println!();
     }
 
     // Write results to CSV
@@ -759,7 +762,7 @@ fn main() {
     }
     writer.flush().expect("Failed to flush CSV writer");
 
-    println!("\nResults written to {}", csv_path);
+    info!("Results written to {}", csv_path);
 
     // Separate 2D and 3D results
     let results_2d: Vec<_> = all_results
@@ -776,14 +779,13 @@ fn main() {
 
     // Print 2D results
     if !results_2d.is_empty() {
-        println!("\n{}", "=".repeat(110));
-        println!("2D DATASETS (SE2)");
-        println!("{}", "=".repeat(110));
-        println!(
+        info!("2D DATASETS (SE2)");
+        info!("{}", "=".repeat(110));
+        info!(
             "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset", "Solver", "Final Cost", "Improvement", "Time (ms)", "Converged", "Iters"
         );
-        println!("{}", "-".repeat(110));
+        info!("{}", "-".repeat(110));
 
         for result in &results_2d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -792,7 +794,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -803,19 +805,19 @@ fn main() {
                 result.iterations
             );
         }
-        println!("{}", "=".repeat(110));
+        info!("{}\n", "=".repeat(110));
     }
 
     // Print 3D results
     if !results_3d.is_empty() {
-        println!("\n{}", "=".repeat(110));
-        println!("3D DATASETS (SE3)");
-        println!("{}", "=".repeat(110));
-        println!(
+        info!("3D DATASETS (SE3)");
+        info!("{}", "=".repeat(110));
+
+        info!(
             "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset", "Solver", "Final Cost", "Improvement", "Time (ms)", "Converged", "Iters"
         );
-        println!("{}", "-".repeat(110));
+        info!("{}", "-".repeat(110));
 
         for result in &results_3d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -824,7 +826,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -835,6 +837,6 @@ fn main() {
                 result.iterations
             );
         }
-        println!("{}", "=".repeat(110));
+        info!("{}", "=".repeat(110));
     }
 }
