@@ -12,7 +12,7 @@ use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
-use tracing::info;
+use tracing::{Level, info};
 
 #[derive(Parser)]
 #[command(name = "optimize_3d_graph")]
@@ -73,11 +73,10 @@ struct DatasetResult {
 }
 
 fn format_summary_table(results: &[DatasetResult]) {
-    println!("\n{}", "=".repeat(160));
-    println!("=== FINAL SUMMARY TABLE ===\n");
+    info!("Final summary table:");
 
     // Header
-    println!(
+    info!(
         "{:<16} | {:<10} | {:<8} | {:<6} | {:<12} | {:<12} | {:<11} | {:<5} | {:<9} | {:<20} | {:<12}",
         "Dataset",
         "Optimizer",
@@ -91,11 +90,11 @@ fn format_summary_table(results: &[DatasetResult]) {
         "Convergence",
         "Status"
     );
-    println!("{}", "-".repeat(160));
+    info!("{}", "-".repeat(160));
 
     // Rows
     for result in results {
-        println!(
+        info!(
             "{:<16} | {:<10} | {:<8} | {:<6} | {:<12.6e} | {:<12.6e} | {:>10.2}% | {:<5} | {:<9} | {:<20} | {:<12}",
             result.dataset,
             result.optimizer,
@@ -111,13 +110,13 @@ fn format_summary_table(results: &[DatasetResult]) {
         );
     }
 
-    println!("{}", "-".repeat(160));
+    info!("{}", "-".repeat(160));
 
     // Summary statistics
     let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
     let total_count = results.len();
-    println!(
-        "\nSummary: {}/{} datasets converged successfully",
+    info!(
+        "Summary: {}/{} datasets converged successfully",
         converged_count, total_count
     );
 
@@ -134,8 +133,8 @@ fn format_summary_table(results: &[DatasetResult]) {
             .map(|r| r.iterations as f64)
             .sum::<f64>()
             / converged_count as f64;
-        println!("Average time for converged datasets: {:.1}ms", avg_time);
-        println!(
+        info!("Average time for converged datasets: {:.1}ms", avg_time);
+        info!(
             "Average iterations for converged datasets: {:.1}",
             avg_iters
         );
@@ -206,16 +205,16 @@ fn test_se3_dataset(
     dataset_name: &str,
     args: &Args,
 ) -> Result<DatasetResult, Box<dyn std::error::Error>> {
-    println!(
-        "\n=== TESTING {} SE3 DATASET ===",
-        dataset_name.to_uppercase()
+    info!(
+        "Testing {} SE3 dataset by loading {}.g2o for optimization",
+        dataset_name.to_uppercase(),
+        dataset_name
     );
-    println!("Loading {}.g2o dataset for SE3 optimization", dataset_name);
 
     // Apply dataset-specific optimizations
     let (cost_tol, param_tol, max_iter) = match dataset_name {
         "grid3D" => {
-            println!("Note: grid3D requires very relaxed tolerances due to high complexity");
+            info!("Note: grid3D requires very relaxed tolerances due to high complexity");
             (1e-1, 1e-1, 30)
         }
         "rim" => (1e-3, 1e-3, args.max_iterations),
@@ -234,9 +233,10 @@ fn test_se3_dataset(
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
 
-    println!("\nGraph Statistics:");
-    println!("  Vertices: {}", num_vertices);
-    println!("  Edges:    {}", num_edges);
+    info!(
+        "Graph Statistics: Vertices: {}, Edges: {}",
+        num_vertices, num_edges
+    );
 
     if num_vertices == 0 {
         return Err(format!("No SE3 vertices found in dataset {}", dataset_name).into());
@@ -313,10 +313,12 @@ fn test_se3_dataset(
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
     }
 
-    println!("\nProblem Structure:");
-    println!("  Variables:       {}", initial_values.len());
-    println!("  Prior factors:   {}", if needs_prior { "1" } else { "0" });
-    println!("  Between factors: {}", graph.edges_se3.len());
+    info!(
+        "Problem Structure: Variables: {}, Prior factors: {}, Between factors: {}",
+        initial_values.len(),
+        if needs_prior { "1" } else { "0" },
+        graph.edges_se3.len()
+    );
 
     // Compute initial cost
     let variables = problem.initialize_variables(&initial_values);
@@ -357,18 +359,6 @@ fn test_se3_dataset(
             "LM"
         }
     };
-
-    if tracing::enabled!(tracing::Level::INFO) {
-        info!(
-            "\n=== {} OPTIMIZATION PARAMETERS ===",
-            match optimizer_name {
-                "LM" => "LEVENBERG-MARQUARDT",
-                "GN" => "GAUSS-NEWTON",
-                "DL" => "DOG LEG",
-                _ => "LEVENBERG-MARQUARDT",
-            }
-        );
-    }
 
     let start_time = Instant::now();
     let result = match optimizer_name {
@@ -455,7 +445,7 @@ fn test_se3_dataset(
 
     // Save optimized graph if requested
     if let Some(output_base) = &args.save_output {
-        println!("\nSaving optimized graph...");
+        info!("Saving optimized graph...");
 
         // Determine output path - if it's a directory, auto-generate filename
         let output_path = if output_base.is_dir() || output_base.to_string_lossy().ends_with('/') {
@@ -497,12 +487,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
-    // Initialize tracing
+    // Initialize tracing with default info level
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(Level::INFO.into())
+                .from_env_lossy(),
+        )
         .init();
 
-    info!("=== APEX-SOLVER 3D POSE GRAPH OPTIMIZATION ===");
+    info!("APEX-SOLVER 3D POSE GRAPH OPTIMIZATION\n");
 
     // Define available SE3 datasets
     let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D"];
@@ -529,10 +523,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     for dataset in &datasets {
-        println!("\n{}", "=".repeat(80));
         match test_se3_dataset(dataset, &args) {
             Ok(result) => {
-                println!("\nDataset {} completed: {}", dataset, result.status);
+                info!("Dataset {} completed: {}\n", dataset, result.status);
                 results.push(result);
             }
             Err(e) => {
@@ -548,12 +541,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
     if converged_count == results.len() {
-        println!("\nAll datasets converged successfully!");
+        info!("All datasets converged successfully");
         Ok(())
     } else if converged_count == 0 {
         Err("No datasets converged".into())
     } else {
-        println!("\n{}/{} datasets converged", converged_count, results.len());
+        info!("{}/{} datasets converged", converged_count, results.len());
         Err("Some datasets failed to converge".into())
     }
 }
