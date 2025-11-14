@@ -201,12 +201,12 @@ use crate::{core::problem, error, linalg, manifold, optimizer};
 
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
+#[cfg(feature = "visualization")]
+use tracing::warn;
 
 use faer::sparse;
 use std::{collections, fmt, time};
 use tracing::debug;
-#[cfg(feature = "visualization")]
-use tracing::warn;
 
 /// Summary statistics for the Dog Leg optimization process.
 #[derive(Debug, Clone)]

@@ -156,6 +156,9 @@ use crate::optimizer::{
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
 
+#[cfg(feature = "visualization")]
+use tracing::warn;
+
 use faer::{
     Mat,
     sparse::{SparseColMat, Triplet},
