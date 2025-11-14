@@ -126,7 +126,9 @@ use crate::optimizer::OptimizationVisualizer;
 
 use faer::sparse;
 use std::{collections, fmt, time};
-use tracing::info;
+use tracing::debug;
+#[cfg(feature = "visualization")]
+use tracing::warn;
 
 /// Summary statistics for the Gauss-Newton optimization process.
 #[derive(Debug, Clone)]
@@ -190,7 +192,7 @@ pub struct IterationStats {
 impl IterationStats {
     /// Print table header in Ceres-style format
     pub fn print_header() {
-        println!(
+        debug!(
             "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
             "iter",
             "cost",
@@ -206,7 +208,6 @@ impl IterationStats {
         );
     }
 
-    /// Print single iteration line in Ceres-style format with scientific notation
     pub fn print_line(&self) {
         let status = if self.iteration == 0 {
             "-"
@@ -216,7 +217,7 @@ impl IterationStats {
             "✗"
         };
 
-        println!(
+        debug!(
             "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
             self.iteration,
             self.cost,
@@ -244,7 +245,7 @@ impl fmt::Display for GaussNewtonSummary {
                 | optimizer::OptimizationStatus::ParameterToleranceReached
         );
 
-        writeln!(f, "=== Gauss-Newton Final Result ===")?;
+        writeln!(f, "Gauss-Newton Final Result")?;
 
         // Title with convergence status
         if converged {
@@ -521,27 +522,19 @@ impl GaussNewtonConfig {
 
     /// Print configuration parameters (info level logging)
     pub fn print_configuration(&self) {
-        info!("Configuration:");
-        info!("  Solver:        Gauss-Newton");
-        info!("  Linear solver: {:?}", self.linear_solver_type);
-        info!("  Loss function: N/A");
-        info!("  Convergence Criteria:");
-        info!("  Max iterations:      {}", self.max_iterations);
-        info!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
-        info!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
-        info!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
-        info!("  Timeout:             {:?}", self.timeout);
-        info!("  Numerical Settings:");
-        info!(
-            "  Jacobi scaling:      {}",
+        debug!(
+            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
             if self.use_jacobi_scaling {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        info!(
-            "  Compute covariances: {}",
+            },
             if self.compute_covariances {
                 "enabled"
             } else {
@@ -1024,11 +1017,9 @@ impl GaussNewton {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if info/debug level is enabled
-        if tracing::enabled!(tracing::Level::INFO) {
-            self.config.print_configuration();
-        }
+        // Print configuration and header if debug level is enabled
         if tracing::enabled!(tracing::Level::DEBUG) {
+            self.config.print_configuration();
             IterationStats::print_header();
         }
 
@@ -1116,18 +1107,18 @@ impl GaussNewton {
                     step_norm,
                     None, // No step quality rho in Gauss-Newton
                 ) {
-                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                    warn!("Failed to log scalars: {}", e);
                 }
 
                 // Log expensive visualizations (Hessian, gradient, manifolds)
                 if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                    warn!("Failed to log Hessian: {}", e);
                 }
                 if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                    warn!("Failed to log gradient: {}", e);
                 }
                 if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                    warn!("Failed to log manifolds: {}", e);
                 }
             }
 
@@ -1159,9 +1150,9 @@ impl GaussNewton {
                     status.clone(),
                 );
 
-                // Print summary only if info level is enabled
-                if tracing::enabled!(tracing::Level::INFO) {
-                    info!("\n{}", summary);
+                // Print summary only if debug level is enabled
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("{}", summary);
                 }
 
                 // Compute covariances if enabled
