@@ -114,9 +114,6 @@
 //! let mut solver = LevenbergMarquardt::new();
 //! let result = solver.optimize(&problem, &initial_values)?;
 //!
-//! println!("Status: {:?}", result.status);
-//! println!("Final cost: {:.6e}", result.final_cost);
-//! println!("Iterations: {}", result.iterations);
 //! # Ok(())
 //! # }
 //! ```
@@ -158,6 +155,7 @@ use crate::optimizer::{
 
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
+
 use faer::{
     Mat,
     sparse::{SparseColMat, Triplet},
@@ -169,7 +167,7 @@ use std::{
     fmt::{Display, Formatter},
     time::{Duration, Instant},
 };
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]
@@ -219,7 +217,7 @@ impl Display for LevenbergMarquardtSummary {
                 | OptimizationStatus::ParameterToleranceReached
         );
 
-        writeln!(f, "=== Levenberg-Marquardt Final Result ===")?;
+        writeln!(f, "Levenberg-Marquardt Final Result")?;
 
         // Title with convergence status
         if converged {
@@ -683,38 +681,27 @@ impl LevenbergMarquardtConfig {
 
     /// Print configuration parameters (verbose mode only)
     pub fn print_configuration(&self) {
-        info!("Configuration:");
-        info!("  Solver:        Levenberg-Marquardt");
-        info!("  Linear solver: {:?}", self.linear_solver_type);
-        info!("  Convergence Criteria:");
-        info!("  Max iterations:      {}", self.max_iterations);
-        info!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
-        info!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
-        info!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
-        info!("  Timeout:             {:?}", self.timeout);
-        info!("  Damping Parameters:");
-        info!("  Initial damping:     {:.2e}", self.damping);
-        info!(
-            "  Damping range:       [{:.2e}, {:.2e}]",
-            self.damping_min, self.damping_max
-        );
-        info!("  Increase factor:     {:.2}", self.damping_increase_factor);
-        info!("  Decrease factor:     {:.2}", self.damping_decrease_factor);
-        info!("  Trust Region:");
-        info!("  Initial radius:      {:.2e}", self.trust_region_radius);
-        info!("  Min step quality:    {:.2}", self.min_step_quality);
-        info!("  Good step quality:   {:.2}", self.good_step_quality);
-        info!("  Numerical Settings:");
-        info!(
-            "  Jacobi scaling:      {}",
+        debug!(
+            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Trust Region:\n  Initial radius:      {:.2e}\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
+            self.damping,
+            self.damping_min,
+            self.damping_max,
+            self.damping_increase_factor,
+            self.damping_decrease_factor,
+            self.trust_region_radius,
+            self.min_step_quality,
+            self.good_step_quality,
             if self.use_jacobi_scaling {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        info!(
-            "  Compute covariances: {}",
+            },
             if self.compute_covariances {
                 "enabled"
             } else {
@@ -816,7 +803,7 @@ impl LevenbergMarquardt {
             match OptimizationVisualizer::new(true) {
                 Ok(vis) => Some(vis),
                 Err(e) => {
-                    eprintln!("[WARNING] Failed to create visualizer: {}", e);
+                    warn!("Failed to create visualizer: {}", e);
                     None
                 }
             }
@@ -931,9 +918,7 @@ impl LevenbergMarquardt {
         elapsed: Duration,
         step_accepted: bool,
     ) -> Option<OptimizationStatus> {
-        // ========================================================================
         // CRITICAL SAFETY CHECKS (perform first, before convergence checks)
-        // ========================================================================
 
         // CRITERION 7: Invalid Numerical Values (NaN/Inf)
         // Always check for numerical instability first
@@ -955,10 +940,7 @@ impl LevenbergMarquardt {
         if iteration >= self.config.max_iterations {
             return Some(OptimizationStatus::MaxIterationsReached);
         }
-
-        // ========================================================================
         // CONVERGENCE CRITERIA (only check after successful steps)
-        // ========================================================================
 
         // Only check convergence criteria after accepted steps
         // (rejected steps don't indicate convergence)
@@ -1281,11 +1263,9 @@ impl LevenbergMarquardt {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if info level is enabled
-        if tracing::enabled!(tracing::Level::INFO) {
-            self.config.print_configuration();
-        }
+        // Print configuration and header if debug level is enabled
         if tracing::enabled!(tracing::Level::DEBUG) {
+            self.config.print_configuration();
             IterationStats::print_header();
         }
 
@@ -1377,18 +1357,18 @@ impl LevenbergMarquardt {
                     step_norm,
                     Some(step_eval.rho),
                 ) {
-                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                    warn!("Failed to log scalars: {}", e);
                 }
 
                 // Log expensive visualizations (Hessian, gradient, manifolds)
                 if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                    warn!("Failed to log Hessian: {}", e);
                 }
                 if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                    warn!("Failed to log gradient: {}", e);
                 }
                 if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                    warn!("Failed to log manifolds: {}", e);
                 }
             }
 
@@ -1441,9 +1421,9 @@ impl LevenbergMarquardt {
                     status.clone(),
                 );
 
-                // Print summary only if info level is enabled
-                if tracing::enabled!(tracing::Level::INFO) {
-                    info!("\n{}", summary);
+                // Print summary only if debug level is enabled
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("{}", summary);
                 }
 
                 // Log convergence to Rerun
@@ -1609,14 +1589,6 @@ mod tests {
         // Extract final values
         let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
         let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
-
-        println!("Rosenbrock optimization result:");
-        println!("  Status: {:?}", result.status);
-        println!("  Initial cost: {:.6e}", result.initial_cost);
-        println!("  Final cost: {:.6e}", result.final_cost);
-        println!("  Iterations: {}", result.iterations);
-        println!("  x1: {:.6} (expected 1.0)", x1_final);
-        println!("  x2: {:.6} (expected 1.0)", x2_final);
 
         // Verify convergence to [1.0, 1.0]
         assert!(
