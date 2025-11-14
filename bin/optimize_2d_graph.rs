@@ -12,6 +12,7 @@ use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
+use tracing::{Level, info};
 
 #[derive(Parser)]
 #[command(name = "optimize_2d_graph")]
@@ -50,6 +51,10 @@ struct Args {
     /// Scale parameter for the loss function (default: 1.345 for Huber)
     #[arg(long)]
     loss_scale: Option<f64>,
+
+    /// Enable detailed profiling output with timing breakdown
+    #[arg(long)]
+    profile: bool,
 }
 
 #[derive(Clone)]
@@ -68,11 +73,10 @@ struct DatasetResult {
 }
 
 fn format_summary_table(results: &[DatasetResult]) {
-    println!("\n{}", "=".repeat(160));
-    println!("=== FINAL SUMMARY TABLE ===\n");
+    info!("Final summary table:");
 
     // Header
-    println!(
+    info!(
         "{:<16} | {:<10} | {:<8} | {:<6} | {:<12} | {:<12} | {:<11} | {:<5} | {:<9} | {:<20} | {:<12}",
         "Dataset",
         "Optimizer",
@@ -86,11 +90,11 @@ fn format_summary_table(results: &[DatasetResult]) {
         "Convergence",
         "Status"
     );
-    println!("{}", "-".repeat(160));
+    info!("{}", "-".repeat(160));
 
     // Rows
     for result in results {
-        println!(
+        info!(
             "{:<16} | {:<10} | {:<8} | {:<6} | {:<12.6e} | {:<12.6e} | {:>10.2}% | {:<5} | {:<9} | {:<20} | {:<12}",
             result.dataset,
             result.optimizer,
@@ -106,13 +110,13 @@ fn format_summary_table(results: &[DatasetResult]) {
         );
     }
 
-    println!("{}", "-".repeat(160));
+    info!("{}", "-".repeat(160));
 
     // Summary statistics
     let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
     let total_count = results.len();
-    println!(
-        "\nSummary: {}/{} datasets converged successfully",
+    info!(
+        "Summary: {}/{} datasets converged successfully",
         converged_count, total_count
     );
 
@@ -129,8 +133,8 @@ fn format_summary_table(results: &[DatasetResult]) {
             .map(|r| r.iterations as f64)
             .sum::<f64>()
             / converged_count as f64;
-        println!("Average time for converged datasets: {:.1}ms", avg_time);
-        println!(
+        info!("Average time for converged datasets: {:.1}ms", avg_time);
+        info!(
             "Average iterations for converged datasets: {:.1}",
             avg_iters
         );
@@ -201,19 +205,32 @@ fn test_dataset(
     dataset_name: &str,
     args: &Args,
 ) -> Result<DatasetResult, Box<dyn std::error::Error>> {
-    println!("\n=== TESTING {} DATASET ===", dataset_name.to_uppercase());
-    println!("Loading {}.g2o dataset for SE2 optimization", dataset_name);
+    info!(
+        "Testing {} dataset by loading {}.g2o for SE2 optimization",
+        dataset_name.to_uppercase(),
+        dataset_name
+    );
 
     // Load the G2O graph file
+    let load_start = Instant::now();
     let dataset_path = format!("data/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
+    let load_time = load_start.elapsed();
+
+    if args.profile {
+        info!(
+            "[PROFILE] Graph load time: {:.2}ms",
+            load_time.as_secs_f64() * 1000.0
+        );
+    }
 
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
 
-    println!("\nGraph Statistics:");
-    println!("  Vertices: {}", num_vertices);
-    println!("  Edges:    {}", num_edges);
+    info!(
+        "Graph Statistics: Vertices: {}, Edges: {}",
+        num_vertices, num_edges
+    );
 
     // Check if we have any vertices
     if num_vertices == 0 {
@@ -221,6 +238,7 @@ fn test_dataset(
     }
 
     // Create optimization problem
+    let setup_start = Instant::now();
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
@@ -300,12 +318,24 @@ fn test_dataset(
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
     }
 
-    println!("\nProblem Structure:");
-    println!("  Variables:       {}", initial_values.len());
-    println!("  Prior factors:   {}", if needs_prior { "1" } else { "0" });
-    println!("  Between factors: {}", graph.edges_se2.len());
+    let setup_time = setup_start.elapsed();
+
+    if args.profile {
+        info!(
+            "[PROFILE] Problem setup time: {:.2}ms",
+            setup_time.as_secs_f64() * 1000.0
+        );
+    }
+
+    info!(
+        "Problem Structure: Variables: {}, Prior factors: {}, Between factors: {}",
+        initial_values.len(),
+        if needs_prior { "1" } else { "0" },
+        graph.edges_se2.len()
+    );
 
     // Compute initial cost
+    let init_cost_start = Instant::now();
     let variables = problem.initialize_variables(&initial_values);
     let mut variable_name_to_col_idx_dict = HashMap::new();
     let mut col_offset = 0;
@@ -330,6 +360,14 @@ fn test_dataset(
 
     // Compute initial cost using faer's norm
     let initial_cost = residual.as_ref().squared_norm_l2();
+    let init_cost_time = init_cost_start.elapsed();
+
+    if args.profile {
+        println!(
+            "[PROFILE] Initial cost computation: {:.2}ms",
+            init_cost_time.as_secs_f64() * 1000.0
+        );
+    }
 
     // Determine optimizer type and run optimization
     let optimizer_name = match args.optimizer.to_lowercase().as_str() {
@@ -346,15 +384,19 @@ fn test_dataset(
     };
 
     if args.verbose {
-        println!(
-            "\n=== {} OPTIMIZATION PARAMETERS ===",
+        info!(
+            "{} optimization parameters",
             match optimizer_name {
-                "LM" => "LEVENBERG-MARQUARDT",
-                "GN" => "GAUSS-NEWTON",
-                "DL" => "DOG LEG",
-                _ => "LEVENBERG-MARQUARDT",
+                "LM" => "Levenberg-Marquardt",
+                "GN" => "Gauss-Newton",
+                "DL" => "Dog Leg",
+                _ => "Levenberg-Marquardt",
             }
         );
+    }
+
+    if args.profile {
+        info!("\n[PROFILE] Starting optimization...");
     }
 
     let start_time = Instant::now();
@@ -364,8 +406,8 @@ fn test_dataset(
                 .with_max_iterations(args.max_iterations)
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-10);
+
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = GaussNewton::with_config(config);
@@ -376,8 +418,8 @@ fn test_dataset(
                 .with_max_iterations(args.max_iterations)
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-10);
+
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = DogLeg::with_config(config);
@@ -388,8 +430,8 @@ fn test_dataset(
                 .with_max_iterations(args.max_iterations)
                 .with_cost_tolerance(1e-4)
                 .with_parameter_tolerance(1e-4)
-                .with_gradient_tolerance(1e-10)
-                .with_verbose(args.verbose);
+                .with_gradient_tolerance(1e-10);
+
             #[cfg(feature = "visualization")]
             let config = config.with_visualization(args.with_visualizer);
             let mut solver = LevenbergMarquardt::with_config(config);
@@ -397,6 +439,29 @@ fn test_dataset(
         }
     };
     let duration = start_time.elapsed();
+
+    if args.profile {
+        info!(
+            "[PROFILE] Optimization time: {:.2}ms",
+            duration.as_secs_f64() * 1000.0
+        );
+        info!("[PROFILE] Total iterations: {}", result.iterations);
+        info!(
+            "[PROFILE] Time per iteration: {:.2}ms",
+            duration.as_secs_f64() * 1000.0 / result.iterations as f64
+        );
+        let total = load_time + setup_time + init_cost_time + duration;
+        info!(
+            "Profile summary: Load: {:.2}ms, Setup: {:.2}ms, Init Cost: {:.2}ms, Optimize: {:.2}ms ({} iters, {:.2}ms/iter), TOTAL: {:.2}ms",
+            load_time.as_secs_f64() * 1000.0,
+            setup_time.as_secs_f64() * 1000.0,
+            init_cost_time.as_secs_f64() * 1000.0,
+            duration.as_secs_f64() * 1000.0,
+            result.iterations,
+            duration.as_secs_f64() * 1000.0 / result.iterations as f64,
+            total.as_secs_f64() * 1000.0
+        );
+    }
 
     // Determine convergence status accurately
     let (status, convergence_reason) = match &result.status {
@@ -445,7 +510,7 @@ fn test_dataset(
 
     // Save optimized graph if requested
     if let Some(output_base) = &args.save_output {
-        println!("\nSaving optimized graph...");
+        info!("Saving optimized graph...");
 
         // Determine output path - if it's a directory, auto-generate filename
         let output_path = if output_base.is_dir() || output_base.to_string_lossy().ends_with('/') {
@@ -467,8 +532,12 @@ fn test_dataset(
         use apex_solver::io::GraphLoader;
         G2oLoader::write(&optimized_graph, &output_path)?;
 
-        println!("✓ Saved optimized graph to: {}", output_path.display());
-        println!("  Status: {} ({})", status, convergence_reason);
+        info!(
+            "✓ Saved optimized graph to: {} - Status: {} ({})",
+            output_path.display(),
+            status,
+            convergence_reason
+        );
     }
 
     Ok(DatasetResult {
@@ -490,7 +559,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
-    println!("=== APEX-SOLVER 2D POSE GRAPH OPTIMIZATION ===");
+    // Initialize tracing with default info level
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(Level::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
+
+    info!("APEX-SOLVER 2D POSE GRAPH OPTIMIZATION\n");
 
     // Determine which datasets to test
     let datasets = if args.dataset == "all" {
@@ -515,10 +593,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut results = Vec::new();
 
     for dataset in &datasets {
-        println!("\n{}", "=".repeat(80));
         match test_dataset(dataset, &args) {
             Ok(result) => {
-                println!("\nDataset {} completed: {}", dataset, result.status);
+                info!("Dataset {} completed: {}\n", dataset, result.status);
                 results.push(result);
             }
             Err(e) => {
@@ -534,12 +611,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let converged_count = results.iter().filter(|r| r.status == "CONVERGED").count();
     if converged_count == results.len() {
-        println!("\nAll datasets converged successfully!");
+        info!("All datasets converged successfully");
         Ok(())
     } else if converged_count == 0 {
         Err("No datasets converged".into())
     } else {
-        println!("\n{}/{} datasets converged", converged_count, results.len());
+        info!("{}/{} datasets converged", converged_count, results.len());
         Err("Some datasets failed to converge".into())
     }
 }
