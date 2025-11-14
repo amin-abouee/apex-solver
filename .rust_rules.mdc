@@ -293,7 +293,7 @@ mod tests {
 
 ### 6.5. Debugging Strategies
 
--   **Use `println!`**: Use `println!` statements to print debugging information.
+-   **Use `info!`**: Use `info!` statements to print debugging information.
 -   **Use a Debugger**: Use a debugger (e.g., `gdb`, `lldb`) to step through the code and inspect variables.
 -   **Use `assert!`**: Use `assert!` to check that the code behaves as expected.
 -   **Use Logging**: Use a logging library (e.g., `log`, `tracing`) to record debugging information.
