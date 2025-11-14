@@ -494,7 +494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine which datasets to test
     let datasets = if args.dataset == "all" {
-        vec!["intel", "mit", "manhattanOlson3500", "ring"]
+        vec!["M3500", "intel", "mit", "manhattanOlson3500", "ring"]
     } else {
         vec![args.dataset.as_str()]
     };
