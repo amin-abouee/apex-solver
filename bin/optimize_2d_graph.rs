@@ -12,7 +12,7 @@ use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
-use tracing::{Level, info};
+use tracing::{Level, info, warn};
 
 #[derive(Parser)]
 #[command(name = "optimize_2d_graph")]
@@ -375,7 +375,7 @@ fn test_dataset(
         "lm" => "LM",
         "dl" => "DL",
         _ => {
-            eprintln!(
+            warn!(
                 "Invalid optimizer '{}'. Using LM (Levenberg-Marquardt) as default.",
                 args.optimizer
             );
@@ -580,13 +580,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if visualization is requested with multiple datasets
     #[cfg(feature = "visualization")]
     if args.with_visualizer && datasets.len() > 1 {
-        eprintln!(
-            "\n[WARNING] Visualization is not supported when running multiple datasets (--dataset all)."
+        warn!(
+            "Visualization is not supported when running multiple datasets (--dataset all)."
         );
-        eprintln!(
-            "[WARNING] Disabling visualization. To use visualization, specify a single dataset."
+        warn!(
+            "Disabling visualization. To use visualization, specify a single dataset."
         );
-        eprintln!("[WARNING] Example: --dataset M3500 --with-visualizer\n");
+        warn!("Example: --dataset M3500 --with-visualizer");
         args.with_visualizer = false;
     }
 
@@ -599,7 +599,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 results.push(result);
             }
             Err(e) => {
-                eprintln!("Dataset {} failed: {}", dataset, e);
+                warn!("Dataset {} failed: {}", dataset, e);
             }
         }
     }
