@@ -217,9 +217,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Map to store pose parameters (quaternion [qw,qx,qy,qz] + translation [x,y,z])
     std::map<int, std::pair<std::vector<double>, std::vector<double>>> pose_params;
     for (const auto& [id, pose] : graph.poses) {
-        std::vector<double> quat = {pose.rotation.w(), pose.rotation.x(), 
+        std::vector<double> quat = {pose.rotation.w(), pose.rotation.x(),
                                      pose.rotation.y(), pose.rotation.z()};
-        std::vector<double> trans = {pose.translation.x(), pose.translation.y(), 
+        std::vector<double> trans = {pose.translation.x(), pose.translation.y(),
                                       pose.translation.z()};
         pose_params[id] = {quat, trans};
     }
@@ -292,11 +292,13 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE3("sphere2500", "../../../data/sphere2500.g2o"));
     results.push_back(BenchmarkSE3("parking-garage", "../../../data/parking-garage.g2o"));
     results.push_back(BenchmarkSE3("torus3D", "../../../data/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../data/cubicle.g2o"));
 
     // SE2 datasets
     results.push_back(BenchmarkSE2("intel", "../../../data/intel.g2o"));
     results.push_back(BenchmarkSE2("mit", "../../../data/mit.g2o"));
-    results.push_back(BenchmarkSE2("manhattanOlson3500", "../../../data/manhattanOlson3500.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
 
     // Print results
     benchmark_utils::PrintResults(results);

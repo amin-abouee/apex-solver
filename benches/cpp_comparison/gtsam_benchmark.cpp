@@ -53,10 +53,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     if (!graph.poses.empty()) {
         int first_id = graph.poses.begin()->first;
         const auto& first_pose = graph.poses.begin()->second;
-        
-        Pose2 prior_pose(first_pose.translation.x(), first_pose.translation.y(), 
+
+        Pose2 prior_pose(first_pose.translation.x(), first_pose.translation.y(),
                         first_pose.rotation);
-        
+
         // Strong prior with high information (low covariance)
         auto prior_noise = noiseModel::Diagonal::Sigmas(Vector3(0.01, 0.01, 0.01));
         graph_factors.addPrior(Symbol('x', first_id), prior_pose, prior_noise);
@@ -131,7 +131,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     // Add poses to initial values
     for (const auto& [id, pose] : graph.poses) {
-        Rot3 rotation(Quaternion(pose.rotation.w(), pose.rotation.x(), 
+        Rot3 rotation(Quaternion(pose.rotation.w(), pose.rotation.x(),
                                  pose.rotation.y(), pose.rotation.z()));
         Point3 translation(pose.translation.x(), pose.translation.y(), pose.translation.z());
         Pose3 gtsam_pose(rotation, translation);
@@ -142,13 +142,13 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     if (!graph.poses.empty()) {
         int first_id = graph.poses.begin()->first;
         const auto& first_pose = graph.poses.begin()->second;
-        
+
         Rot3 rotation(Quaternion(first_pose.rotation.w(), first_pose.rotation.x(),
                                  first_pose.rotation.y(), first_pose.rotation.z()));
-        Point3 translation(first_pose.translation.x(), first_pose.translation.y(), 
+        Point3 translation(first_pose.translation.x(), first_pose.translation.y(),
                           first_pose.translation.z());
         Pose3 prior_pose(rotation, translation);
-        
+
         // Strong prior with high information (low covariance)
         auto prior_noise = noiseModel::Diagonal::Sigmas(
             (Vector(6) << 0.01, 0.01, 0.01, 0.01, 0.01, 0.01).finished());
@@ -210,11 +210,13 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE3("sphere2500", "../../../data/sphere2500.g2o"));
     results.push_back(BenchmarkSE3("parking-garage", "../../../data/parking-garage.g2o"));
     results.push_back(BenchmarkSE3("torus3D", "../../../data/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../data/cubicle.g2o"));
 
     // SE2 datasets
     results.push_back(BenchmarkSE2("intel", "../../../data/intel.g2o"));
     results.push_back(BenchmarkSE2("mit", "../../../data/mit.g2o"));
-    results.push_back(BenchmarkSE2("manhattanOlson3500", "../../../data/manhattanOlson3500.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
 
     // Print results
     benchmark_utils::PrintResults(results);

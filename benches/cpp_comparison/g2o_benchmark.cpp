@@ -47,7 +47,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     auto linearSolver = std::make_unique<LinearSolverType>();
     auto blockSolver = std::make_unique<BlockSolverType>(std::move(linearSolver));
     auto algorithm = new OptimizationAlgorithmLevenberg(std::move(blockSolver));
-    
+
     optimizer.setAlgorithm(algorithm);
 
     // Add vertices
@@ -69,19 +69,19 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         EdgeSE2* edge = new EdgeSE2();
         edge->setVertex(0, optimizer.vertex(constraint.id_begin));
         edge->setVertex(1, optimizer.vertex(constraint.id_end));
-        
+
         SE2 measurement(constraint.measurement.translation.x(),
                        constraint.measurement.translation.y(),
                        constraint.measurement.rotation);
         edge->setMeasurement(measurement);
         edge->setInformation(constraint.information);
-        
+
         optimizer.addEdge(edge);
     }
 
     // Initialize optimizer first (required for chi2() to compute error correctly)
     optimizer.initializeOptimization();
-    
+
     // Compute initial error and cache it before optimization
     optimizer.computeActiveErrors();
     result.initial_cost = optimizer.chi2();
@@ -95,7 +95,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     result.final_cost = optimizer.chi2();
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
+
     // Check convergence based on final improvement
     result.status = (iterations < 100 || result.improvement_pct > 90.0) ? "CONVERGED" : "NOT_CONVERGED";
 
@@ -134,18 +134,18 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     auto linearSolver = std::make_unique<LinearSolverType>();
     auto blockSolver = std::make_unique<BlockSolverType>(std::move(linearSolver));
     auto algorithm = new OptimizationAlgorithmLevenberg(std::move(blockSolver));
-    
+
     optimizer.setAlgorithm(algorithm);
 
     // Add vertices
     for (const auto& [id, pose] : graph.poses) {
         VertexSE3* vertex = new VertexSE3();
         vertex->setId(id);
-        
+
         Eigen::Isometry3d isometry = Eigen::Isometry3d::Identity();
         isometry.linear() = pose.rotation.toRotationMatrix();
         isometry.translation() = pose.translation;
-        
+
         vertex->setEstimate(isometry);
         optimizer.addVertex(vertex);
     }
@@ -161,20 +161,20 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         EdgeSE3* edge = new EdgeSE3();
         edge->setVertex(0, optimizer.vertex(constraint.id_begin));
         edge->setVertex(1, optimizer.vertex(constraint.id_end));
-        
+
         Eigen::Isometry3d measurement = Eigen::Isometry3d::Identity();
         measurement.linear() = constraint.measurement.rotation.toRotationMatrix();
         measurement.translation() = constraint.measurement.translation;
-        
+
         edge->setMeasurement(measurement);
         edge->setInformation(constraint.information);
-        
+
         optimizer.addEdge(edge);
     }
 
     // Initialize optimizer first (required for chi2() to compute error correctly)
     optimizer.initializeOptimization();
-    
+
     // Compute initial error and cache it before optimization
     optimizer.computeActiveErrors();
     result.initial_cost = optimizer.chi2();
@@ -188,7 +188,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     result.final_cost = optimizer.chi2();
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
+
     // Check convergence based on final improvement
     result.status = (iterations < 100 || result.improvement_pct > 90.0) ? "CONVERGED" : "NOT_CONVERGED";
 
@@ -204,11 +204,13 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE3("sphere2500", "../../../data/sphere2500.g2o"));
     results.push_back(BenchmarkSE3("parking-garage", "../../../data/parking-garage.g2o"));
     results.push_back(BenchmarkSE3("torus3D", "../../../data/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../data/cubicle.g2o"));
 
     // SE2 datasets
     results.push_back(BenchmarkSE2("intel", "../../../data/intel.g2o"));
     results.push_back(BenchmarkSE2("mit", "../../../data/mit.g2o"));
-    results.push_back(BenchmarkSE2("manhattanOlson3500", "../../../data/manhattanOlson3500.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
 
     // Print results
     benchmark_utils::PrintResults(results);

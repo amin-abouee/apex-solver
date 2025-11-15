@@ -1,7 +1,7 @@
-//! Comprehensive solver comparison benchmark for apex-solver, factrs, and tiny-solver
+//! Comprehensive solver comparison benchmark for apex-solver, factrs, tiny-solver, and C++ solvers
 //!
-//! This benchmark compares three Rust nonlinear optimization libraries on standard
-//! pose graph optimization datasets (both SE2 and SE3).
+//! This benchmark compares three Rust nonlinear optimization libraries (apex-solver, factrs, tiny-solver)
+//! and two C++ libraries (g2o, GTSAM) on standard pose graph optimization datasets (both SE2 and SE3).
 //!
 //! ## Configuration Philosophy
 //!
@@ -33,6 +33,8 @@
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::panic;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Instant;
 use tracing::{Level, info};
 
@@ -59,8 +61,8 @@ use tiny_solver::{
 };
 
 // CSV output
-use csv::Writer;
-use serde::Serialize;
+use csv::{Reader, Writer};
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // UNIFIED COST COMPUTATION
@@ -265,14 +267,9 @@ const DATASETS: &[Dataset] = &[
         is_3d: false,
     },
     Dataset {
-        name: "manhattanOlson3500",
-        file: "data/manhattanOlson3500.g2o",
-        is_3d: false,
-    },
-    Dataset {
         name: "ring",
         file: "data/ring.g2o",
-        is_3d: true,
+        is_3d: false,
     },
     Dataset {
         name: "sphere2500",
@@ -289,6 +286,11 @@ const DATASETS: &[Dataset] = &[
         file: "data/torus3D.g2o",
         is_3d: true,
     },
+    Dataset {
+        name: "cubicle",
+        file: "data/cubicle.g2o",
+        is_3d: true,
+    },
 ];
 
 /// Benchmark result structure
@@ -296,6 +298,7 @@ const DATASETS: &[Dataset] = &[
 struct BenchmarkResult {
     dataset: String,
     solver: String,
+    language: String,
     initial_cost: String,
     final_cost: String,
     improvement_pct: String,
@@ -305,9 +308,11 @@ struct BenchmarkResult {
 }
 
 impl BenchmarkResult {
+    #[allow(clippy::too_many_arguments)]
     fn success(
         dataset: &str,
         solver: &str,
+        language: &str,
         initial_cost: f64,
         final_cost: f64,
         elapsed_ms: f64,
@@ -325,6 +330,7 @@ impl BenchmarkResult {
         Self {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
+            language: language.to_string(),
             initial_cost: format!("{:.6}", initial_cost),
             final_cost: format!("{:.6}", final_cost),
             improvement_pct,
@@ -334,10 +340,17 @@ impl BenchmarkResult {
         }
     }
 
-    fn diverged(dataset: &str, solver: &str, initial_cost: Option<f64>, elapsed_ms: f64) -> Self {
+    fn diverged(
+        dataset: &str,
+        solver: &str,
+        language: &str,
+        initial_cost: Option<f64>,
+        elapsed_ms: f64,
+    ) -> Self {
         Self {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
+            language: language.to_string(),
             initial_cost: initial_cost.map_or("-".to_string(), |c| format!("{:.6}", c)),
             final_cost: "diverged".to_string(),
             improvement_pct: "-".to_string(),
@@ -347,10 +360,11 @@ impl BenchmarkResult {
         }
     }
 
-    fn failed(dataset: &str, solver: &str, error: &str) -> Self {
+    fn failed(dataset: &str, solver: &str, language: &str, error: &str) -> Self {
         Self {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
+            language: language.to_string(),
             initial_cost: "-".to_string(),
             final_cost: "-".to_string(),
             improvement_pct: "-".to_string(),
@@ -376,7 +390,9 @@ fn is_converged(status: &OptimizationStatus) -> bool {
 fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
-        Err(e) => return BenchmarkResult::failed(dataset.name, "apex-solver", &e.to_string()),
+        Err(e) => {
+            return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
+        }
     };
 
     // Compute initial cost from G2O graph (before optimization)
@@ -442,6 +458,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             BenchmarkResult::success(
                 dataset.name,
                 "apex-solver",
+                "Rust",
                 initial_cost,
                 final_cost,
                 elapsed_ms,
@@ -449,14 +466,16 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 Some(result.iterations),
             )
         }
-        Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", &e.to_string()),
+        Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
 }
 
 fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
-        Err(e) => return BenchmarkResult::failed(dataset.name, "apex-solver", &e.to_string()),
+        Err(e) => {
+            return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
+        }
     };
 
     // Compute initial cost from G2O graph (before optimization)
@@ -525,6 +544,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             BenchmarkResult::success(
                 dataset.name,
                 "apex-solver",
+                "Rust",
                 initial_cost,
                 final_cost,
                 elapsed_ms,
@@ -532,7 +552,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 Some(result.iterations),
             )
         }
-        Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", &e.to_string()),
+        Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
 }
 
@@ -540,7 +560,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation (without factrs prior)
     let raw_graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
-        Err(e) => return BenchmarkResult::failed(dataset.name, "factrs", &e.to_string()),
+        Err(e) => return BenchmarkResult::failed(dataset.name, "factrs", "Rust", &e.to_string()),
     };
 
     // Catch panics from factrs parsing/loading
@@ -552,6 +572,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
             return BenchmarkResult::failed(
                 dataset.name,
                 "factrs",
+                "Rust",
                 "failed to load dataset (panic)",
             );
         }
@@ -583,6 +604,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
+                "Rust",
                 initial_cost,
                 final_cost,
                 elapsed_ms,
@@ -596,6 +618,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
+                "Rust",
                 initial_cost,
                 final_cost,
                 elapsed_ms,
@@ -603,12 +626,20 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 None,
             )
         }
-        Err(factrs::optimizers::OptError::FailedToStep) => {
-            BenchmarkResult::diverged(dataset.name, "factrs", Some(initial_cost), elapsed_ms)
-        }
-        Err(factrs::optimizers::OptError::InvalidSystem) => {
-            BenchmarkResult::diverged(dataset.name, "factrs", Some(initial_cost), elapsed_ms)
-        }
+        Err(factrs::optimizers::OptError::FailedToStep) => BenchmarkResult::diverged(
+            dataset.name,
+            "factrs",
+            "Rust",
+            Some(initial_cost),
+            elapsed_ms,
+        ),
+        Err(factrs::optimizers::OptError::InvalidSystem) => BenchmarkResult::diverged(
+            dataset.name,
+            "factrs",
+            "Rust",
+            Some(initial_cost),
+            elapsed_ms,
+        ),
     }
 }
 
@@ -616,7 +647,9 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation
     let mut raw_graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
-        Err(e) => return BenchmarkResult::failed(dataset.name, "tiny-solver", &e.to_string()),
+        Err(e) => {
+            return BenchmarkResult::failed(dataset.name, "tiny-solver", "Rust", &e.to_string());
+        }
     };
 
     // Catch panics from tiny-solver parsing/loading
@@ -628,6 +661,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
             return BenchmarkResult::failed(
                 dataset.name,
                 "tiny-solver",
+                "Rust",
                 "failed to load dataset (panic)",
             );
         }
@@ -670,6 +704,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
             BenchmarkResult::success(
                 dataset.name,
                 "tiny-solver",
+                "Rust",
                 initial_cost,
                 final_cost,
                 elapsed_ms,
@@ -679,9 +714,205 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
         }
         None => {
             // Optimization failed (NaN, solve failed, or other error)
-            BenchmarkResult::diverged(dataset.name, "tiny-solver", Some(initial_cost), elapsed_ms)
+            BenchmarkResult::diverged(
+                dataset.name,
+                "tiny-solver",
+                "Rust",
+                Some(initial_cost),
+                elapsed_ms,
+            )
         }
     }
+}
+
+// ========================= C++ Benchmark Integration =========================
+
+/// C++ benchmark result from CSV (matches the C++ CSV output format)
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+struct CppBenchmarkResult {
+    dataset: String,
+    manifold: String,
+    solver: String,
+    language: String,
+    vertices: usize,
+    edges: usize,
+    init_cost: f64,
+    final_cost: f64,
+    improvement_pct: f64,
+    iterations: usize,
+    time_ms: f64,
+    status: String,
+}
+
+/// Build C++ benchmarks if not already built
+fn build_cpp_benchmarks() -> Result<PathBuf, String> {
+    let bench_dir = Path::new("benches/cpp_comparison");
+    let build_dir = bench_dir.join("build");
+
+    // Check if executables already exist
+    let g2o_exe = build_dir.join("g2o_benchmark");
+    let gtsam_exe = build_dir.join("gtsam_benchmark");
+
+    if g2o_exe.exists() && gtsam_exe.exists() {
+        println!("C++ benchmarks already built");
+        return Ok(build_dir);
+    }
+
+    println!("Building C++ benchmarks...");
+
+    // Create build directory if needed
+    std::fs::create_dir_all(&build_dir)
+        .map_err(|e| format!("Failed to create build dir: {}", e))?;
+
+    // Run CMake configure
+    let cmake_output = Command::new("cmake")
+        .args(["..", "-DCMAKE_BUILD_TYPE=Release"])
+        .current_dir(&build_dir)
+        .output()
+        .map_err(|e| format!("Failed to run cmake: {}", e))?;
+
+    if !cmake_output.status.success() {
+        return Err(format!(
+            "CMake configure failed: {}",
+            String::from_utf8_lossy(&cmake_output.stderr)
+        ));
+    }
+
+    // Run CMake build
+    let build_output = Command::new("cmake")
+        .args(["--build", ".", "--config", "Release", "-j"])
+        .current_dir(&build_dir)
+        .output()
+        .map_err(|e| format!("Failed to run cmake build: {}", e))?;
+
+    if !build_output.status.success() {
+        return Err(format!(
+            "CMake build failed: {}",
+            String::from_utf8_lossy(&build_output.stderr)
+        ));
+    }
+
+    println!("C++ benchmarks built successfully");
+    Ok(build_dir)
+}
+
+/// Run a C++ benchmark executable and return path to CSV output
+fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String> {
+    // Convert to absolute path to handle working directory issues
+    let absolute_build_dir = std::fs::canonicalize(build_dir)
+        .map_err(|e| format!("Failed to canonicalize build dir: {}", e))?;
+
+    let exe_path = absolute_build_dir.join(exe_name);
+
+    if !exe_path.exists() {
+        return Err(format!("Executable not found: {:?}", exe_path));
+    }
+
+    println!("Running {} ...", exe_name);
+
+    let output = Command::new(&exe_path)
+        .current_dir(&absolute_build_dir)
+        .output()
+        .map_err(|e| format!("Failed to run {}: {}", exe_name, e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "{} failed: {}",
+            exe_name,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    // Print stdout for user visibility
+    if !output.stdout.is_empty() {
+        println!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+
+    // Determine CSV output filename based on executable name
+    let csv_name = exe_name.replace("_benchmark", "_benchmark_results.csv");
+    let csv_path = absolute_build_dir.join(&csv_name);
+
+    if !csv_path.exists() {
+        return Err(format!("CSV output not found: {:?}", csv_path));
+    }
+
+    Ok(csv_path)
+}
+
+/// Parse C++ benchmark CSV results into BenchmarkResult format
+fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
+    let mut reader =
+        Reader::from_path(csv_path).map_err(|e| format!("Failed to read CSV: {}", e))?;
+
+    let mut results = Vec::new();
+
+    for record in reader.deserialize() {
+        let cpp_result: CppBenchmarkResult =
+            record.map_err(|e| format!("Failed to parse CSV record: {}", e))?;
+
+        // Convert to BenchmarkResult format
+        let converged = cpp_result.status == "CONVERGED";
+
+        // Remove "-LM" suffix from solver name (e.g., "g2o-LM" -> "g2o", "GTSAM-LM" -> "GTSAM")
+        let solver_name = cpp_result.solver.trim_end_matches("-LM");
+
+        let result = BenchmarkResult::success(
+            &cpp_result.dataset,
+            solver_name,
+            &cpp_result.language,
+            cpp_result.init_cost,
+            cpp_result.final_cost,
+            cpp_result.time_ms,
+            converged,
+            Some(cpp_result.iterations),
+        );
+
+        results.push(result);
+    }
+
+    Ok(results)
+}
+
+/// Run all available C++ benchmarks and return combined results
+fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
+    let mut all_results = Vec::new();
+
+    // Try to build C++ benchmarks
+    let build_dir = match build_cpp_benchmarks() {
+        Ok(dir) => dir,
+        Err(e) => {
+            println!("Warning: C++ benchmarks unavailable: {}", e);
+            println!("Continuing with Rust-only benchmarks...\n");
+            return all_results;
+        }
+    };
+
+    // List of C++ benchmark executables to run
+    let cpp_benchmarks = vec![
+        "g2o_benchmark",
+        "gtsam_benchmark",
+        // Note: ceres_benchmark may not be available due to Eigen conflicts
+    ];
+
+    for exe_name in cpp_benchmarks {
+        match run_cpp_benchmark(exe_name, &build_dir) {
+            Ok(csv_path) => match parse_cpp_results(&csv_path) {
+                Ok(results) => {
+                    println!("{} completed: {} datasets", exe_name, results.len());
+                    all_results.extend(results);
+                }
+                Err(e) => {
+                    println!("Warning: Failed to parse {} results: {}", exe_name, e);
+                }
+            },
+            Err(e) => {
+                println!("Warning: Failed to run {}: {}", exe_name, e);
+            }
+        }
+    }
+
+    all_results
 }
 
 // ========================= Main Benchmark Runner =========================
@@ -751,6 +982,16 @@ fn main() {
         }
     }
 
+    // Step 2: Run C++ benchmarks
+    println!("\n{}", "=".repeat(80));
+    println!("PHASE 2: C++ Benchmarks");
+    println!("{}", "=".repeat(80));
+
+    let cpp_results = run_cpp_benchmarks();
+    all_results.extend(cpp_results);
+
+    println!();
+
     // Write results to CSV
     let csv_path = "benchmark_results.csv";
     let mut writer = Writer::from_path(csv_path).expect("Failed to create CSV file");
@@ -764,28 +1005,52 @@ fn main() {
 
     info!("Results written to {}", csv_path);
 
-    // Separate 2D and 3D results
-    let results_2d: Vec<_> = all_results
+    // Separate 2D and 3D results and sort by dataset name
+    // 2D datasets: M3500, intel, mit, ring
+    let mut results_2d: Vec<_> = all_results
         .iter()
-        .filter(|r| ["intel", "mit", "M3500", "manhattanOlson3500"].contains(&r.dataset.as_str()))
+        .filter(|r| ["intel", "mit", "M3500", "ring"].contains(&r.dataset.as_str()))
         .collect();
 
-    let results_3d: Vec<_> = all_results
+    // Sort by dataset name first, then by solver name
+    results_2d.sort_by(|a, b| {
+        a.dataset
+            .cmp(&b.dataset)
+            .then_with(|| a.solver.cmp(&b.solver))
+    });
+
+    // 3D datasets: sphere2500, parking-garage, torus3D, cubicle
+    let mut results_3d: Vec<_> = all_results
         .iter()
         .filter(|r| {
-            ["ring", "sphere2500", "parking-garage", "torus3D"].contains(&r.dataset.as_str())
+            ["sphere2500", "parking-garage", "torus3D", "cubicle"].contains(&r.dataset.as_str())
         })
         .collect();
 
+    // Sort by dataset name first, then by solver name
+    results_3d.sort_by(|a, b| {
+        a.dataset
+            .cmp(&b.dataset)
+            .then_with(|| a.solver.cmp(&b.solver))
+    });
+
     // Print 2D results
     if !results_2d.is_empty() {
-        info!("2D DATASETS (SE2)");
-        info!("{}", "=".repeat(110));
-        info!(
-            "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
-            "Dataset", "Solver", "Final Cost", "Improvement", "Time (ms)", "Converged", "Iters"
+        println!("\n{}", "=".repeat(120));
+        println!("2D DATASETS (SE2)");
+        println!("{}", "=".repeat(120));
+        println!(
+            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
+            "Dataset",
+            "Solver",
+            "Language",
+            "Final Cost",
+            "Improvement",
+            "Time (ms)",
+            "Converged",
+            "Iters"
         );
-        info!("{}", "-".repeat(110));
+        println!("{}", "-".repeat(120));
 
         for result in &results_2d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -794,10 +1059,11 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            info!(
-                "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
+            println!(
+                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
+                result.language,
                 result.final_cost,
                 improvement_display,
                 result.elapsed_ms,
@@ -810,14 +1076,21 @@ fn main() {
 
     // Print 3D results
     if !results_3d.is_empty() {
-        info!("3D DATASETS (SE3)");
-        info!("{}", "=".repeat(110));
-
-        info!(
-            "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
-            "Dataset", "Solver", "Final Cost", "Improvement", "Time (ms)", "Converged", "Iters"
+        println!("\n{}", "=".repeat(120));
+        println!("3D DATASETS (SE3)");
+        println!("{}", "=".repeat(120));
+        println!(
+            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
+            "Dataset",
+            "Solver",
+            "Language",
+            "Final Cost",
+            "Improvement",
+            "Time (ms)",
+            "Converged",
+            "Iters"
         );
-        info!("{}", "-".repeat(110));
+        println!("{}", "-".repeat(120));
 
         for result in &results_3d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -826,10 +1099,11 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            info!(
-                "{:<20} {:<15} {:<14} {:<14} {:<12} {:<8} {:<10}",
+            println!(
+                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
+                result.language,
                 result.final_cost,
                 improvement_display,
                 result.elapsed_ms,
@@ -837,6 +1111,6 @@ fn main() {
                 result.iterations
             );
         }
-        info!("{}", "=".repeat(110));
+        println!("{}", "=".repeat(120));
     }
 }
