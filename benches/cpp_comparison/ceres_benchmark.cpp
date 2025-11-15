@@ -284,8 +284,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 }
 
 int main(int argc, char** argv) {
-    std::cout << "=== CERES SOLVER BENCHMARK ===" << std::endl;
-
     std::vector<benchmark_utils::BenchmarkResult> results;
 
     // SE3 datasets
@@ -300,14 +298,5 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
     results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
 
-    // Print results
-    benchmark_utils::PrintResults(results);
-
-    // Write to CSV
-    std::string output_file = "ceres_benchmark_results.csv";
-    if (benchmark_utils::WriteResultsToCSV(output_file, results)) {
-        std::cout << "\nResults written to " << output_file << std::endl;
-    }
-
-    return 0;
+   return 0;
 }
