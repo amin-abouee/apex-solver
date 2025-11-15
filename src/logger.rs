@@ -16,10 +16,8 @@ use tracing::Level;
 /// ```no_run
 /// use apex_solver::init_logger;
 ///
-/// fn main() {
-///     init_logger();
-///     tracing::info!("Application started");
-/// }
+/// init_logger();
+/// tracing::info!("Application started");
 /// ```
 ///
 /// # Environment Variables
@@ -42,10 +40,8 @@ pub fn init_logger() {
 /// use apex_solver::init_logger_with_level;
 /// use tracing::Level;
 ///
-/// fn main() {
-///     init_logger_with_level(Level::DEBUG);
-///     tracing::debug!("Debug logging enabled");
-/// }
+/// init_logger_with_level(Level::DEBUG);
+/// tracing::debug!("Debug logging enabled");
 /// ```
 pub fn init_logger_with_level(default_level: Level) {
     tracing_subscriber::fmt()
