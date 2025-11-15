@@ -96,6 +96,7 @@ use faer::{
 };
 use nalgebra::DVector;
 use rayon::prelude::*;
+use tracing::warn;
 
 use crate::{
     core::{
@@ -541,7 +542,7 @@ impl Problem {
         upper_bound: f64,
     ) {
         if lower_bound > upper_bound {
-            println!("lower bound is larger than upper bound");
+            warn!("lower bound is larger than upper bound");
         } else if let Some(var_mut) = self.variable_bounds.get_mut(var_to_bound) {
             var_mut.insert(idx, (lower_bound, upper_bound));
         } else {
@@ -1334,11 +1335,6 @@ mod tests {
         assert_eq!(problem.num_residual_blocks(), 11); // 9 between + 1 loop closure + 1 prior
         assert_eq!(problem.total_residual_dimension, 33); // 11 * 3
         assert_eq!(initial_values.len(), 10);
-
-        println!("SE2 Problem construction test passed");
-        println!("Residual blocks: {}", problem.num_residual_blocks());
-        println!("Total residual dim: {}", problem.total_residual_dimension);
-        println!("Variables: {}", initial_values.len());
     }
 
     #[test]
@@ -1349,11 +1345,6 @@ mod tests {
         assert_eq!(problem.num_residual_blocks(), 13); // 12 between + 1 prior
         assert_eq!(problem.total_residual_dimension, 79); // 12 * 6 + 1 * 7 (SE3 between factors are 6-dim, prior factor is 7-dim)
         assert_eq!(initial_values.len(), 8);
-
-        println!("SE3 Problem construction test passed");
-        println!("Residual blocks: {}", problem.num_residual_blocks());
-        println!("Total residual dim: {}", problem.total_residual_dimension);
-        println!("Variables: {}", initial_values.len());
     }
 
     #[test]
@@ -1384,9 +1375,6 @@ mod tests {
                 name
             );
         }
-
-        println!("SE2 Variable initialization test passed");
-        println!("Variables created: {}", variables.len());
     }
 
     #[test]
@@ -1417,9 +1405,6 @@ mod tests {
                 name
             );
         }
-
-        println!("SE3 Variable initialization test passed");
-        println!("Variables created: {}", variables.len());
     }
 
     #[test]
@@ -1453,10 +1438,6 @@ mod tests {
                 total_dof
             );
         }
-
-        println!("SE2 Column mapping test passed");
-        println!("Total DOF: {}", total_dof);
-        println!("Variable mappings: {}", variable_index_sparce_matrix.len());
     }
 
     #[test]
@@ -1486,13 +1467,6 @@ mod tests {
             problem.total_residual_dimension
         );
         assert_eq!(symbolic_structure.pattern.ncols(), 30); // total DOF
-
-        println!("SE2 Symbolic structure test passed");
-        println!(
-            "Symbolic matrix: {} x {}",
-            symbolic_structure.pattern.nrows(),
-            symbolic_structure.pattern.ncols()
-        );
     }
 
     #[test]
@@ -1527,14 +1501,6 @@ mod tests {
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 30);
-
-        println!("SE2 Residual/Jacobian computation test passed");
-        println!("Residual dimensions: {}", residual_sparse.nrows());
-        println!(
-            "Jacobian dimensions: {} x {}",
-            jacobian_sparse.nrows(),
-            jacobian_sparse.ncols()
-        );
     }
 
     #[test]
@@ -1569,14 +1535,6 @@ mod tests {
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 48); // 8 variables * 6 DOF each
-
-        println!("SE3 Residual/Jacobian computation test passed");
-        println!("Residual dimensions: {}", residual_sparse.nrows());
-        println!(
-            "Jacobian dimensions: {} x {}",
-            jacobian_sparse.nrows(),
-            jacobian_sparse.ncols()
-        );
     }
 
     #[test]
@@ -1612,9 +1570,6 @@ mod tests {
         // Test removing non-existent block
         let non_existent = problem.remove_residual_block(999);
         assert!(non_existent.is_none());
-
-        println!("Residual block operations test passed");
-        println!("Block operations working correctly");
     }
 
     #[test]
@@ -1650,8 +1605,5 @@ mod tests {
         problem.remove_variable_bounds("x2");
         assert!(!problem.variable_bounds.contains_key("x2"));
         assert!(problem.variable_bounds.contains_key("x3"));
-
-        println!("Variable constraints test passed");
-        println!("Fix/unfix and bounds operations working correctly");
     }
 }
