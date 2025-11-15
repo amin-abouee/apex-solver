@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
+use tracing::{error, info, warn};
 
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -56,10 +58,10 @@ struct BenchmarkResult {
 }
 
 fn print_summary_table(results: &[BenchmarkResult]) {
-    println!("\n{}", "=".repeat(170));
-    println!("=== ROBUST LOSS FUNCTION BENCHMARK RESULTS ===\n");
+    info!("\n{}", "=".repeat(170));
+    info!("=== ROBUST LOSS FUNCTION BENCHMARK RESULTS ===\n");
 
-    println!(
+    info!(
         "{:<12} | {:<4} | {:<10} | {:<18} | {:<5} | {:<4} | {:<5} | {:<12} | {:<12} | {:<10} | {:<5} | {:<8} | {:<10}",
         "Dataset",
         "Man",
@@ -75,10 +77,10 @@ fn print_summary_table(results: &[BenchmarkResult]) {
         "Time(ms)",
         "Status"
     );
-    println!("{}", "-".repeat(170));
+    info!("{}", "-".repeat(170));
 
     for result in results {
-        println!(
+        info!(
             "{:<12} | {:<4} | {:<10} | {:<18} | {:<5.2} | {:<4} | {:<5} | {:<12.6e} | {:<12.6e} | {:>9.2}% | {:<5} | {:<8} | {:<10}",
             result.dataset,
             result.manifold,
@@ -96,7 +98,7 @@ fn print_summary_table(results: &[BenchmarkResult]) {
         );
     }
 
-    println!("{}", "-".repeat(170));
+    info!("{}", "-".repeat(170));
 }
 
 fn write_csv(
@@ -133,7 +135,7 @@ fn write_csv(
         )?;
     }
 
-    println!("\n✓ Results written to: {}", filepath);
+    info!("\n✓ Results written to: {}", filepath);
     Ok(())
 }
 
@@ -144,7 +146,7 @@ fn run_optimization(
     max_iterations: usize,
     cost_tolerance: f64,
     parameter_tolerance: f64,
-    verbose: bool,
+    _verbose: bool,
 ) -> Result<(f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
@@ -153,8 +155,7 @@ fn run_optimization(
             let config = LevenbergMarquardtConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -162,8 +163,7 @@ fn run_optimization(
             let config = GaussNewtonConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -171,8 +171,7 @@ fn run_optimization(
             let config = DogLegConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -189,15 +188,13 @@ fn benchmark_dataset_se3(
     dataset_name: &str,
     args: &Args,
 ) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
-    println!("\n{}", "=".repeat(80));
-    println!("Loading SE3 dataset: {}", dataset_name);
-    println!("{}", "=".repeat(80));
+    info!("Loading SE3 dataset: {}", dataset_name);
 
     let graph = G2oLoader::load(graph_path)?;
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
 
-    println!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
+    info!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
 
     // Create initial values from graph vertices
     let mut initial_values = HashMap::new();
@@ -260,10 +257,10 @@ fn benchmark_dataset_se3(
 
     // Test each (optimizer, loss_function) combination
     for optimizer_name in &optimizers {
-        println!("\n--- Testing Optimizer: {} ---", optimizer_name);
+        info!("--- Testing Optimizer: {} ---", optimizer_name);
 
         for &(loss_name, scale, _) in &loss_configs {
-            println!("  Testing {} (scale={:.4})...", loss_name, scale);
+            info!("  Testing {} (scale={:.4})...", loss_name, scale);
 
             let scale_value = scale;
             // Build problem with this loss function
@@ -358,7 +355,7 @@ fn benchmark_dataset_se3(
                         _ => "OTHER",
                     };
 
-                    println!(
+                    info!(
                         "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
                         initial_cost, final_cost, improvement, iterations, time_ms, status_str
                     );
@@ -380,7 +377,7 @@ fn benchmark_dataset_se3(
                     });
                 }
                 Err(e) => {
-                    eprintln!("    ✗ Error: {}", e);
+                    error!("    {}", e);
                 }
             }
         }
@@ -394,15 +391,13 @@ fn benchmark_dataset_se2(
     dataset_name: &str,
     args: &Args,
 ) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
-    println!("\n{}", "=".repeat(80));
-    println!("Loading SE2 dataset: {}", dataset_name);
-    println!("{}", "=".repeat(80));
+    info!("Loading SE2 dataset: {}", dataset_name);
 
     let graph = G2oLoader::load(graph_path)?;
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
 
-    println!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
+    info!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
 
     // Create initial values
     let mut initial_values = HashMap::new();
@@ -464,10 +459,10 @@ fn benchmark_dataset_se2(
     let mut results = Vec::new();
 
     for optimizer_name in &optimizers {
-        println!("\n--- Testing Optimizer: {} ---", optimizer_name);
+        info!("--- Testing Optimizer: {} ---", optimizer_name);
 
         for &(loss_name, scale, _) in &loss_configs {
-            println!("  Testing {} (scale={:.4})...", loss_name, scale);
+            info!("  Testing {} (scale={:.4})...", loss_name, scale);
 
             let scale_value = scale;
             let mut problem = Problem::new();
@@ -561,7 +556,7 @@ fn benchmark_dataset_se2(
                         _ => "OTHER",
                     };
 
-                    println!(
+                    info!(
                         "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
                         initial_cost, final_cost, improvement, iterations, time_ms, status_str
                     );
@@ -583,7 +578,7 @@ fn benchmark_dataset_se2(
                     });
                 }
                 Err(e) => {
-                    eprintln!("    ✗ Error: {}", e);
+                    error!("    ✗{}", e);
                 }
             }
         }
@@ -593,9 +588,9 @@ fn benchmark_dataset_se2(
 }
 
 fn print_analysis(results: &[BenchmarkResult]) {
-    println!("\n{}", "=".repeat(80));
-    println!("=== ANALYSIS AND RECOMMENDATIONS ===");
-    println!("{}", "=".repeat(80));
+    info!("\n{}", "=".repeat(80));
+    info!("=== ANALYSIS AND RECOMMENDATIONS ===");
+    info!("{}", "=".repeat(80));
 
     // Group by dataset
     let datasets: std::collections::HashSet<String> =
@@ -604,7 +599,7 @@ fn print_analysis(results: &[BenchmarkResult]) {
     datasets_vec.sort();
 
     for dataset in &datasets_vec {
-        println!("\n📊 Dataset: {}", dataset);
+        info!("\n📊 Dataset: {}", dataset);
 
         // Find best converged result for this dataset
         let converged: Vec<&BenchmarkResult> = results
@@ -613,7 +608,7 @@ fn print_analysis(results: &[BenchmarkResult]) {
             .collect();
 
         if converged.is_empty() {
-            println!("  ⚠ No converged results");
+            info!("  ⚠ No converged results");
             continue;
         }
 
@@ -622,7 +617,7 @@ fn print_analysis(results: &[BenchmarkResult]) {
             .iter()
             .min_by(|a, b| a.final_cost.partial_cmp(&b.final_cost).unwrap())
         {
-            println!(
+            info!(
                 "  ✓ Best Overall: {} + {} (cost: {:.4e}, {:.1}% improv, {} iters, {}ms)",
                 best.optimizer,
                 best.loss_function,
@@ -642,7 +637,7 @@ fn print_analysis(results: &[BenchmarkResult]) {
                 .iter()
                 .min_by(|a, b| a.final_cost.partial_cmp(&b.final_cost).unwrap())
             {
-                println!(
+                info!(
                     "  ✓ Best {}: {} (cost: {:.4e}, {} iters)",
                     opt, best.loss_function, best.final_cost, best.iterations
                 );
@@ -650,7 +645,7 @@ fn print_analysis(results: &[BenchmarkResult]) {
         }
 
         // Convergence rate per loss function
-        println!("\n  Convergence Rates:");
+        info!("\n  Convergence Rates:");
         let loss_funcs: std::collections::HashSet<String> =
             converged.iter().map(|r| r.loss_function.clone()).collect();
 
@@ -666,14 +661,14 @@ fn print_analysis(results: &[BenchmarkResult]) {
                 })
                 .count();
             let rate = (conv as f64 / total as f64) * 100.0;
-            println!("    {:<18}: {:>3}/{} ({:.0}%)", loss, conv, total, rate);
+            info!("    {:<18}: {:>3}/{} ({:.0}%)", loss, conv, total, rate);
         }
     }
 
     // Overall recommendation
-    println!("\n{}", "=".repeat(80));
-    println!("🎯 RECOMMENDED DEFAULTS");
-    println!("{}", "=".repeat(80));
+    info!("\n{}", "=".repeat(80));
+    info!("🎯 RECOMMENDED DEFAULTS");
+    info!("{}", "=".repeat(80));
 
     let _converged_all: Vec<&BenchmarkResult> =
         results.iter().filter(|r| r.status == "CONVERGED").collect();
@@ -692,12 +687,12 @@ fn print_analysis(results: &[BenchmarkResult]) {
         }
     }
 
-    println!("\nLoss Function Performance Summary:");
-    println!(
+    info!("\nLoss Function Performance Summary:");
+    info!(
         "{:<18} | {:>12} | {:>12} | {:>15}",
         "Loss Function", "Conv Rate", "Avg Improv", "Recommendation"
     );
-    println!("{}", "-".repeat(65));
+    info!("{}", "-".repeat(65));
 
     let mut loss_vec: Vec<_> = loss_stats.iter().collect();
     loss_vec.sort_by(|a, b| {
@@ -724,26 +719,29 @@ fn print_analysis(results: &[BenchmarkResult]) {
             "Poor"
         };
 
-        println!(
+        info!(
             "{:<18} | {:>11.0}% | {:>11.1}% | {:>15}",
             loss, conv_rate, avg_improv, recommendation
         );
     }
 
-    println!("\n✨ Default Recommendation: Huber (scale=1.345)");
-    println!("   Rationale: Convex, reliable convergence, good robustness");
-    println!("\n💪 For Heavy Outliers: Cauchy or Welsch");
-    println!("   Rationale: Stronger outlier suppression, still reliable");
-    println!("\n⚡ For Clean Data: L2");
-    println!("   Rationale: Fastest, optimal for Gaussian noise\n");
+    info!("   Default Recommendation: Huber (scale=1.345)");
+    info!("   Rationale: Convex, reliable convergence, good robustness");
+    info!("   For Heavy Outliers: Cauchy or Welsch");
+    info!("   Rationale: Stronger outlier suppression, still reliable");
+    info!("   For Clean Data: L2");
+    info!("   Rationale: Fastest, optimal for Gaussian noise\n");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    println!("\n╔═══════════════════════════════════════════════════════════════╗");
-    println!("║     ROBUST LOSS FUNCTION COMPARISON BENCHMARK                ║");
-    println!("╚═══════════════════════════════════════════════════════════════╝");
+    // Initialize logger with INFO level
+    init_logger();
+
+    info!("╔═══════════════════════════════════════════════════════════════╗");
+    info!("║     ROBUST LOSS FUNCTION COMPARISON BENCHMARK                 ║");
+    info!("╚═══════════════════════════════════════════════════════════════╝");
 
     let mut all_results = Vec::new();
 
@@ -751,20 +749,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let se3_datasets = vec![
         ("data/sphere2500.g2o", "sphere2500"),
         ("data/parking-garage.g2o", "parking-garage"),
-        ("data/rim.g2o", "rim"),
-        ("data/grid3D.g2o", "grid3D"),
         ("data/torus3D.g2o", "torus3D"),
-        ("data/cubicle.g2o", "cubicle"),
     ];
 
     for (path, name) in &se3_datasets {
         if std::path::Path::new(path).exists() {
             match benchmark_dataset_se3(path, name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
-                Err(e) => eprintln!("Failed to benchmark {}: {}", name, e),
+                Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }
         } else {
-            println!("⚠ Skipping {} (file not found)", name);
+            warn!("⚠ Skipping {} (file not found)", name);
         }
     }
 
@@ -783,10 +778,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if std::path::Path::new(path).exists() {
             match benchmark_dataset_se2(path, name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
-                Err(e) => eprintln!("Failed to benchmark {}: {}", name, e),
+                Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }
         } else {
-            println!("⚠ Skipping {} (file not found)", name);
+            info!("⚠ Skipping {} (file not found)", name);
         }
     }
 
@@ -800,7 +795,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         print_analysis(&all_results);
     } else {
-        println!("\n⚠ No results to display");
+        info!("\n⚠ No results to display");
     }
 
     Ok(())

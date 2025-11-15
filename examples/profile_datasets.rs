@@ -17,6 +17,7 @@
 use apex_solver::{
     core::problem::Problem,
     factors::BetweenFactorSE3,
+    init_logger,
     io::{G2oLoader, GraphLoader},
     manifold::ManifoldType,
     optimizer::LevenbergMarquardt,
@@ -26,25 +27,29 @@ use nalgebra::dvector;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
+use tracing::{info, warn};
 
 fn main() {
     // Parse command line arguments
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: {} <dataset>", args[0]);
-        eprintln!("Available datasets: rim, sphere2500, parking-garage, torus3D, grid3D, cubicle");
+        warn!("Usage: {} <dataset>", args[0]);
+        warn!("Available datasets: rim, sphere2500, parking-garage, torus3D, grid3D, cubicle");
         std::process::exit(1);
     }
+
+    // Initialize logger with INFO level
+    init_logger();
 
     let dataset = &args[1];
 
     // Load dataset
-    println!("Loading dataset: {}", dataset);
+    info!("Loading dataset: {}", dataset);
     let data_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("data");
     let file_path = data_dir.join(format!("{}.g2o", dataset));
 
     if !file_path.exists() {
-        eprintln!("Error: Dataset file not found: {:?}", file_path);
+        warn!("Error: Dataset file not found: {:?}", file_path);
         std::process::exit(1);
     }
 
@@ -52,14 +57,14 @@ fn main() {
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Error loading graph: {}", e);
+            warn!("Error loading graph: {}", e);
             std::process::exit(1);
         }
     };
 
-    println!("Loaded graph:");
-    println!("  SE3 Vertices: {}", graph.vertices_se3.len());
-    println!("  SE3 Edges: {}", graph.edges_se3.len());
+    info!("Loaded graph:");
+    info!("  SE3 Vertices: {}", graph.vertices_se3.len());
+    info!("  SE3 Edges: {}", graph.edges_se3.len());
 
     // Build problem
     let mut problem = Problem::new();
@@ -96,9 +101,9 @@ fn main() {
         );
     }
 
-    println!("Problem setup complete:");
-    println!("  Variables: {}", initial_values.len());
-    println!("  Residual blocks: {}", graph.edges_se3.len());
+    info!("Problem setup complete:");
+    info!("  Variables: {}", initial_values.len());
+    info!("  Residual blocks: {}", graph.edges_se3.len());
 
     // Configure optimizer based on dataset
     let (max_iters, cost_tol, param_tol) = match dataset.as_str() {
@@ -116,16 +121,14 @@ fn main() {
         .with_max_iterations(max_iters)
         .with_cost_tolerance(cost_tol)
         .with_parameter_tolerance(param_tol)
-        .with_verbose(false)
         .with_damping(1e-3);
 
     let mut optimizer = LevenbergMarquardt::with_config(config);
 
-    println!("\n=== Starting Optimization (Profiling Mode) ===");
-    println!("Max iterations: {}", max_iters);
-    println!("Cost tolerance: {:.2e}", cost_tol);
-    println!("Parameter tolerance: {:.2e}", param_tol);
-    println!();
+    info!("Starting Optimization (Profiling Mode)");
+    info!("Max iterations: {}", max_iters);
+    info!("Cost tolerance: {:.2e}", cost_tol);
+    info!("Parameter tolerance: {:.2e}", param_tol);
 
     // Run optimization - THIS IS THE HOT PATH TO PROFILE
     let start = std::time::Instant::now();
@@ -133,28 +136,28 @@ fn main() {
     let elapsed = start.elapsed();
 
     // Print results
-    println!("\n=== Optimization Complete ===");
+    info!("Optimization Complete");
     match result {
         Ok(solver_result) => {
-            println!("Status: {:?}", solver_result.status);
-            println!("Initial cost: {:.6e}", solver_result.initial_cost);
-            println!("Final cost: {:.6e}", solver_result.final_cost);
-            println!("Iterations: {}", solver_result.iterations);
-            println!("Time: {:.3}s", elapsed.as_secs_f64());
+            info!("Status: {:?}", solver_result.status);
+            info!("Initial cost: {:.6e}", solver_result.initial_cost);
+            info!("Final cost: {:.6e}", solver_result.final_cost);
+            info!("Iterations: {}", solver_result.iterations);
+            info!("Time: {:.3}s", elapsed.as_secs_f64());
 
             if let Some(convergence) = solver_result.convergence_info {
-                println!(
+                info!(
                     "Final gradient norm: {:.6e}",
                     convergence.final_gradient_norm
                 );
-                println!(
+                info!(
                     "Final parameter update: {:.6e}",
                     convergence.final_parameter_update_norm
                 );
             }
         }
         Err(e) => {
-            println!("Error: {}", e);
+            warn!("Error: {}", e);
             std::process::exit(1);
         }
     }

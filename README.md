@@ -48,15 +48,15 @@ let mut solver = LevenbergMarquardt::with_config(config);
 let result = solver.optimize(&problem, &initial_values)?;
 
 // Check results
-println!("Status: {:?}", result.status);
-println!("Initial cost: {:.3e}", result.initial_cost);
-println!("Final cost: {:.3e}", result.final_cost);
-println!("Iterations: {}", result.iterations);
+info!("Status: {:?}", result.status);
+info!("Initial cost: {:.3e}", result.initial_cost);
+info!("Final cost: {:.3e}", result.final_cost);
+info!("Iterations: {}", result.iterations);
 
 // Access uncertainty estimates
 if let Some(covariances) = &result.covariances {
     for (var_name, cov_matrix) in covariances {
-        println!("{}: uncertainty = {:.6}", var_name, cov_matrix[(0,0)].sqrt());
+        info!("{}: uncertainty = {:.6}", var_name, cov_matrix[(0,0)].sqrt());
     }
 }
 ```
@@ -220,8 +220,8 @@ use apex_solver::io::{G2oLoader, GraphLoader};
 
 // Load pose graph from file
 let graph = G2oLoader::load("data/parking-garage.g2o")?;
-println!("SE3 vertices: {}", graph.vertices_se3.len());
-println!("SE3 edges: {}", graph.edges_se3.len());
+info!("SE3 vertices: {}", graph.vertices_se3.len());
+info!("SE3 edges: {}", graph.edges_se3.len());
 
 // Build optimization problem from graph
 let (problem, initial_values) = graph.to_problem();
@@ -270,7 +270,7 @@ let initial_params = vec![DVector::from_vec(vec![
 
 // Compute residual and Jacobian
 let (residual, jacobian) = camera_factor.linearize(&initial_params, true);
-println!("Reprojection error: {:.3} pixels", residual.norm() / points_2d_vec.len() as f64);
+info!("Reprojection error: {:.3} pixels", residual.norm() / points_2d_vec.len() as f64);
 
 // Use in optimization problem
 problem.add_residual_block(
@@ -648,7 +648,7 @@ if let Some(covariances) = &result.covariances {
         let std_y = cov_matrix[(1, 1)].sqrt();
         let std_theta = cov_matrix[(2, 2)].sqrt();
 
-        println!("{}: σ_x={:.6}, σ_y={:.6}, σ_θ={:.6}",
+        info!("{}: σ_x={:.6}, σ_y={:.6}, σ_θ={:.6}",
                  var_name, std_x, std_y, std_theta);
     }
 }

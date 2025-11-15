@@ -7,6 +7,7 @@
 //! cargo run --example visualize_graph_file --features visualization
 //! ```
 
+use apex_solver::init_logger;
 use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
@@ -15,6 +16,7 @@ use rerun::{
     components::Color,
 };
 use std::path::PathBuf;
+use tracing::info;
 
 /// Visualize a graph from a G2O/TORO file using Rerun
 #[derive(Parser, Debug)]
@@ -44,17 +46,20 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    println!("Loading graph from: {}", args.file_path.display());
+    // Initialize logger with INFO level
+    init_logger();
+
+    info!("Loading graph from: {}", args.file_path.display());
     let graph = load_graph(&args.file_path)?;
 
     // Initialize Rerun
     let rec = RecordingStreamBuilder::new("apex-solver-graph-visualization").spawn()?;
 
     // Print statistics
-    println!("Graph loaded successfully:");
-    println!("  - SE2 vertices: {}", graph.vertices_se2.len());
-    println!("  - SE3 vertices: {}", graph.vertices_se3.len());
-    println!("  - Total vertices: {}", graph.vertex_count());
+    info!("Graph loaded successfully:");
+    info!("  - SE2 vertices: {}", graph.vertices_se2.len());
+    info!("  - SE3 vertices: {}", graph.vertices_se3.len());
+    info!("  - Total vertices: {}", graph.vertex_count());
 
     // Visualize SE3 vertices as camera frustums
     if !graph.vertices_se3.is_empty() {
@@ -73,12 +78,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if graph.vertices_se3.is_empty() && graph.vertices_se2.is_empty() {
-        println!("No poses found in the graph file.");
+        info!("No poses found in the graph file.");
         Ok(())
     } else {
         // Keep the program running until user interrupts
-        println!("Visualization ready! The Rerun viewer should open automatically.");
-        println!("Press Ctrl+C to exit.");
+        info!("Visualization ready! The Rerun viewer should open automatically.");
+        info!("Press Ctrl+C to exit.");
 
         #[allow(unreachable_code)]
         {
@@ -98,7 +103,7 @@ fn visualize_se3_poses(
     _frustum_size: f32,
     fov_degrees: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    info!(
         "Visualizing {} SE3 poses as camera frustums...",
         graph.vertices_se3.len()
     );
@@ -134,7 +139,7 @@ fn visualize_se2_poses(
     _height: f32,
     point_size: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    info!(
         "Visualizing {} SE2 poses as 2D points...",
         graph.vertices_se2.len()
     );

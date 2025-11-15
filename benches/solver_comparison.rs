@@ -36,11 +36,13 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
+use tracing::info;
 
 // apex-solver imports
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
@@ -171,12 +173,10 @@ fn update_se2_graph_from_result(
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
             && let Some(vertex) = graph.vertices_se2.get_mut(&id)
+            && let VariableEnum::SE2(se2_var) = var_value
         {
-            // Extract SE2 data from VariableEnum and update pose
-            if let VariableEnum::SE2(se2_var) = var_value {
-                let data: DVector<f64> = se2_var.value.clone().into();
-                vertex.pose = SE2::from_xy_angle(data[0], data[1], data[2]);
-            }
+            let data: DVector<f64> = se2_var.value.clone().into();
+            vertex.pose = SE2::from_xy_angle(data[0], data[1], data[2]);
         }
     }
 }
@@ -192,14 +192,12 @@ fn update_se3_graph_from_result(
         if let Some(id_str) = var_name.strip_prefix("x")
             && let Ok(id) = id_str.parse::<usize>()
             && let Some(vertex) = graph.vertices_se3.get_mut(&id)
+            && let VariableEnum::SE3(se3_var) = var_value
         {
-            // Extract SE3 data from VariableEnum and update pose
-            if let VariableEnum::SE3(se3_var) = var_value {
-                let data: DVector<f64> = se3_var.value.clone().into();
-                let translation = Vector3::new(data[0], data[1], data[2]);
-                let rotation = Quaternion::new(data[3], data[4], data[5], data[6]);
-                vertex.pose = SE3::from_translation_quaternion(translation, rotation);
-            }
+            let data: DVector<f64> = se3_var.value.clone().into();
+            let translation = Vector3::new(data[0], data[1], data[2]);
+            let rotation = Quaternion::new(data[3], data[4], data[5], data[6]);
+            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
         }
     }
 }
@@ -390,8 +388,6 @@ fn is_converged(status: &OptimizationStatus) -> bool {
     )
 }
 
-// ========================= apex-solver =========================
-
 fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
@@ -434,17 +430,6 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         );
     }
 
-    // NO gauge freedom handling for SE2 + LM
-    // Testing shows that LM's built-in damping (λI) handles rank-deficient Hessian
-    // more efficiently than fixing variables (2.6x faster: 104ms vs 273ms on M3500)
-    // This differs from optimize_2d_graph.rs but matches SE3 benchmark approach
-    // if let Some(&first_id) = vertex_ids.first() {
-    //     let first_var_name = format!("x{}", first_id);
-    //     problem.fix_variable(&first_var_name, 0); // Fix x
-    //     problem.fix_variable(&first_var_name, 1); // Fix y
-    //     problem.fix_variable(&first_var_name, 2); // Fix theta
-    // }
-
     // Optimize with production-grade configuration matching optimize_2d_graph.rs
     // - Max iterations: 150 (sufficient for SE2 convergence)
     // - Cost/param tolerance: 1e-4 (balanced accuracy vs speed)
@@ -453,8 +438,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(150)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-10)
-        .with_verbose(false);
+        .with_gradient_tolerance(1e-10);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -540,8 +524,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(100)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-12)
-        .with_verbose(false);
+        .with_gradient_tolerance(1e-12);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -573,8 +556,6 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
 }
-
-// ========================= factrs =========================
 
 fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation (without factrs prior)
@@ -662,8 +643,6 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
         ),
     }
 }
-
-// ========================= tiny-solver =========================
 
 fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation
@@ -777,11 +756,11 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let gtsam_exe = build_dir.join("gtsam_benchmark");
 
     if g2o_exe.exists() && gtsam_exe.exists() {
-        println!("C++ benchmarks already built");
+        info!("C++ benchmarks already built");
         return Ok(build_dir);
     }
 
-    println!("Building C++ benchmarks...");
+    info!("Building C++ benchmarks...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -815,7 +794,7 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    println!("C++ benchmarks built successfully");
+    info!("C++ benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -831,7 +810,7 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
         return Err(format!("Executable not found: {:?}", exe_path));
     }
 
-    println!("Running {} ...", exe_name);
+    info!("Running {} ...", exe_name);
 
     let output = Command::new(&exe_path)
         .current_dir(&absolute_build_dir)
@@ -848,7 +827,7 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
 
     // Print stdout for user visibility
     if !output.stdout.is_empty() {
-        println!("{}", String::from_utf8_lossy(&output.stdout));
+        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename based on executable name
@@ -904,8 +883,8 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let build_dir = match build_cpp_benchmarks() {
         Ok(dir) => dir,
         Err(e) => {
-            println!("Warning: C++ benchmarks unavailable: {}", e);
-            println!("Continuing with Rust-only benchmarks...\n");
+            info!("Warning: C++ benchmarks unavailable: {}", e);
+            info!("Continuing with Rust-only benchmarks...\n");
             return all_results;
         }
     };
@@ -921,15 +900,15 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
         match run_cpp_benchmark(exe_name, &build_dir) {
             Ok(csv_path) => match parse_cpp_results(&csv_path) {
                 Ok(results) => {
-                    println!("{} completed: {} datasets", exe_name, results.len());
+                    info!("{} completed: {} datasets", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
-                    println!("Warning: Failed to parse {} results: {}", exe_name, e);
+                    info!("Warning: Failed to parse {} results: {}", exe_name, e);
                 }
             },
             Err(e) => {
-                println!("Warning: Failed to run {}: {}", exe_name, e);
+                info!("Warning: Failed to run {}: {}", exe_name, e);
             }
         }
     }
@@ -950,23 +929,20 @@ fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
 }
 
 fn main() {
-    println!("=== UNIFIED SOLVER COMPARISON BENCHMARK ===");
-    println!("Comparing Rust (apex-solver, factrs, tiny-solver) and C++ (g2o, GTSAM) solvers");
-    println!("Running each Rust configuration 5 times and averaging results...\n");
+    // Initialize logger with INFO level
+    init_logger();
 
-    // Step 1: Run Rust benchmarks
-    println!("{}", "=".repeat(80));
-    println!("PHASE 1: Rust Benchmarks");
-    println!("{}", "=".repeat(80));
+    info!("Starting solver comparison benchmark...");
+    info!("Running each configuration 5 times and averaging results...");
 
     let solvers = ["apex-solver", "factrs", "tiny-solver"];
     let mut all_results = Vec::new();
 
     for dataset in DATASETS {
-        println!("Dataset: {}", dataset.name);
+        info!("Dataset: {}", dataset.name);
 
         for solver in &solvers {
-            print!("  {} ... ", solver);
+            info!("{} ... ", solver);
             std::io::Write::flush(&mut std::io::stdout()).unwrap();
 
             // Run multiple times to get stable measurements
@@ -991,7 +967,7 @@ fn main() {
                     avg_result.elapsed_ms = format!("{:.2}", total_time / num_runs as f64);
                 }
 
-                println!(
+                info!(
                     "done (converged: {}, time: {} ms)",
                     avg_result.converged, avg_result.elapsed_ms
                 );
@@ -999,18 +975,13 @@ fn main() {
                 all_results.push(avg_result);
             }
         }
-        println!();
     }
 
     // Step 2: Run C++ benchmarks
-    println!("\n{}", "=".repeat(80));
-    println!("PHASE 2: C++ Benchmarks");
-    println!("{}", "=".repeat(80));
+    info!("PHASE 2: C++ Benchmarks");
 
     let cpp_results = run_cpp_benchmarks();
     all_results.extend(cpp_results);
-
-    println!();
 
     // Write results to CSV
     let csv_path = "benchmark_results.csv";
@@ -1023,7 +994,7 @@ fn main() {
     }
     writer.flush().expect("Failed to flush CSV writer");
 
-    println!("\nResults written to {}", csv_path);
+    info!("Results written to {}", csv_path);
 
     // Separate 2D and 3D results and sort by dataset name
     // 2D datasets: M3500, intel, mit, ring
@@ -1056,10 +1027,9 @@ fn main() {
 
     // Print 2D results
     if !results_2d.is_empty() {
-        println!("\n{}", "=".repeat(120));
-        println!("2D DATASETS (SE2)");
-        println!("{}", "=".repeat(120));
-        println!(
+        info!("2D DATASETS (SE2)");
+        info!("{}", "=".repeat(120));
+        info!(
             "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset",
             "Solver",
@@ -1070,7 +1040,7 @@ fn main() {
             "Converged",
             "Iters"
         );
-        println!("{}", "-".repeat(120));
+        info!("{}", "-".repeat(120));
 
         for result in &results_2d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -1079,7 +1049,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -1091,15 +1061,14 @@ fn main() {
                 result.iterations
             );
         }
-        println!("{}", "=".repeat(120));
+        info!("{}\n", "=".repeat(120));
     }
 
     // Print 3D results
     if !results_3d.is_empty() {
-        println!("\n{}", "=".repeat(120));
-        println!("3D DATASETS (SE3)");
-        println!("{}", "=".repeat(120));
-        println!(
+        info!("3D DATASETS (SE3)");
+        info!("{}", "=".repeat(120));
+        info!(
             "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset",
             "Solver",
@@ -1110,7 +1079,7 @@ fn main() {
             "Converged",
             "Iters"
         );
-        println!("{}", "-".repeat(120));
+        info!("{}", "-".repeat(120));
 
         for result in &results_3d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -1119,7 +1088,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -1131,6 +1100,6 @@ fn main() {
                 result.iterations
             );
         }
-        println!("{}", "=".repeat(120));
+        info!("{}", "=".repeat(120));
     }
 }

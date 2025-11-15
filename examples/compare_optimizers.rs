@@ -1,9 +1,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
+use tracing::{info, warn};
 
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -50,10 +52,9 @@ struct BenchmarkResult {
 }
 
 fn print_summary_table(results: &[BenchmarkResult]) {
-    println!("\n{}", "=".repeat(150));
-    println!("=== OPTIMIZER COMPARISON SUMMARY ===\n");
+    info!("OPTIMIZER COMPARISON SUMMARY");
 
-    println!(
+    info!(
         "{:<12} | {:<8} | {:<10} | {:<8} | {:<6} | {:<12} | {:<12} | {:<11} | {:<5} | {:<9} | {:<10}",
         "Dataset",
         "Manifold",
@@ -67,10 +68,10 @@ fn print_summary_table(results: &[BenchmarkResult]) {
         "Time(ms)",
         "Status"
     );
-    println!("{}", "-".repeat(150));
+    info!("{}", "-".repeat(150));
 
     for result in results {
-        println!(
+        info!(
             "{:<12} | {:<8} | {:<10} | {:<8} | {:<6} | {:<12.6e} | {:<12.6e} | {:>10.2}% | {:<5} | {:<9} | {:<10}",
             result.dataset,
             result.manifold,
@@ -86,7 +87,7 @@ fn print_summary_table(results: &[BenchmarkResult]) {
         );
     }
 
-    println!("{}", "-".repeat(150));
+    info!("{}", "-".repeat(150));
 }
 
 fn run_optimizer_se3(
@@ -96,7 +97,6 @@ fn run_optimizer_se3(
     max_iterations: usize,
     cost_tolerance: f64,
     parameter_tolerance: f64,
-    verbose: bool,
 ) -> Result<(f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
@@ -105,8 +105,7 @@ fn run_optimizer_se3(
             let config = LevenbergMarquardtConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = LevenbergMarquardt::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -114,8 +113,7 @@ fn run_optimizer_se3(
             let config = GaussNewtonConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = GaussNewton::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -123,8 +121,7 @@ fn run_optimizer_se3(
             let config = DogLegConfig::new()
                 .with_max_iterations(max_iterations)
                 .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance)
-                .with_verbose(verbose);
+                .with_parameter_tolerance(parameter_tolerance);
             let mut solver = DogLeg::with_config(config);
             solver.optimize(problem, initial_values)?
         }
@@ -142,14 +139,13 @@ fn run_optimizer_se3(
 }
 
 fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<BenchmarkResult>) {
-    println!("\n{}", "=".repeat(80));
-    println!("=== TESTING {} (SE3) ===", dataset_name.to_uppercase());
+    info!("TESTING {} (SE3)", dataset_name.to_uppercase());
 
     let file_path = format!("data/{}.g2o", dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Failed to load {}: {}", file_path, e);
+            warn!("Failed to load {}: {}", file_path, e);
             return;
         }
     };
@@ -157,7 +153,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
 
-    println!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
+    info!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
 
     // Create initial values
     let mut initial_values = HashMap::new();
@@ -230,11 +226,11 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
     // Compute initial cost using faer's norm
     let init_cost = residual.as_ref().squared_norm_l2();
 
-    println!("Initial cost: {:.6e}", init_cost);
+    info!("Initial cost: {:.6e}", init_cost);
 
     // Test all optimizers
     for opt_name in &["LM", "GN", "DL"] {
-        println!("\n--- Testing {} ---", opt_name);
+        info!("--- Testing {} ---", opt_name);
 
         match run_optimizer_se3(
             &problem,
@@ -243,7 +239,6 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
             args.max_iterations,
             args.cost_tolerance,
             args.parameter_tolerance,
-            args.verbose,
         ) {
             Ok((final_cost, iterations, status, time_ms)) => {
                 let improvement = ((init_cost - final_cost) / init_cost) * 100.0;
@@ -255,10 +250,10 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
                     _ => "NOT_CONVERGED",
                 };
 
-                println!("Final cost: {:.6e}", final_cost);
-                println!("Iterations: {}", iterations);
-                println!("Time: {}ms", time_ms);
-                println!("Status: {}", status_str);
+                info!("Final cost: {:.6e}", final_cost);
+                info!("Iterations: {}", iterations);
+                info!("Time: {}ms", time_ms);
+                info!("Status: {}\n", status_str);
 
                 all_results.push(BenchmarkResult {
                     dataset: dataset_name.to_string(),
@@ -275,21 +270,20 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
                 });
             }
             Err(e) => {
-                eprintln!("{} failed: {}", opt_name, e);
+                warn!("{} failed: {}", opt_name, e);
             }
         }
     }
 }
 
 fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<BenchmarkResult>) {
-    println!("\n{}", "=".repeat(80));
-    println!("=== TESTING {} (SE2) ===", dataset_name.to_uppercase());
+    info!("TESTING {} (SE2)", dataset_name.to_uppercase());
 
     let file_path = format!("data/{}.g2o", dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Failed to load {}: {}", file_path, e);
+            warn!("Failed to load {}: {}", file_path, e);
             return;
         }
     };
@@ -297,7 +291,7 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
 
-    println!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
+    info!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
 
     // Create initial values
     let mut initial_values = HashMap::new();
@@ -368,11 +362,11 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
     // Compute initial cost using faer's norm
     let init_cost = residual.as_ref().squared_norm_l2();
 
-    println!("Initial cost: {:.6e}", init_cost);
+    info!("Initial cost: {:.6e}", init_cost);
 
     // Test all optimizers
     for opt_name in &["LM", "GN", "DL"] {
-        println!("\n--- Testing {} ---", opt_name);
+        info!("--- Testing {} ---", opt_name);
 
         match run_optimizer_se3(
             &problem,
@@ -381,7 +375,6 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
             args.max_iterations,
             args.cost_tolerance,
             args.parameter_tolerance,
-            args.verbose,
         ) {
             Ok((final_cost, iterations, status, time_ms)) => {
                 let improvement = ((init_cost - final_cost) / init_cost) * 100.0;
@@ -393,10 +386,10 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
                     _ => "NOT_CONVERGED",
                 };
 
-                println!("Final cost: {:.6e}", final_cost);
-                println!("Iterations: {}", iterations);
-                println!("Time: {}ms", time_ms);
-                println!("Status: {}", status_str);
+                info!("Final cost: {:.6e}", final_cost);
+                info!("Iterations: {}", iterations);
+                info!("Time: {}ms", time_ms);
+                info!("Status: {}\n", status_str);
 
                 all_results.push(BenchmarkResult {
                     dataset: dataset_name.to_string(),
@@ -413,7 +406,7 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
                 });
             }
             Err(e) => {
-                eprintln!("{} failed: {}", opt_name, e);
+                warn!("{} failed: {}", opt_name, e);
             }
         }
     }
@@ -422,14 +415,17 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 fn main() {
     let args = Args::parse();
 
-    println!("=== APEX-SOLVER OPTIMIZER COMPARISON ===");
-    println!("Comparing LM, GN, and DL optimizers on real datasets\n");
+    // Initialize logger with INFO level
+    init_logger();
+
+    info!("APEX-SOLVER OPTIMIZER COMPARISON");
+    info!("Comparing LM, GN, and DL optimizers on real datasets");
 
     let mut all_results = Vec::new();
 
     // Test SE3 datasets
-    test_se3_dataset("rim", &args, &mut all_results);
-    test_se3_dataset("cubicle", &args, &mut all_results);
+    test_se3_dataset("parking-garage", &args, &mut all_results);
+    test_se3_dataset("sphere2500", &args, &mut all_results);
 
     // Test SE2 datasets
     test_se2_dataset("intel", &args, &mut all_results);
@@ -438,5 +434,5 @@ fn main() {
     // Print summary
     print_summary_table(&all_results);
 
-    println!("\nComparison complete!");
+    info!("Comparison complete!");
 }

@@ -114,9 +114,6 @@
 //! let mut solver = LevenbergMarquardt::new();
 //! let result = solver.optimize(&problem, &initial_values)?;
 //!
-//! println!("Status: {:?}", result.status);
-//! println!("Final cost: {:.6e}", result.final_cost);
-//! println!("Iterations: {}", result.iterations);
 //! # Ok(())
 //! # }
 //! ```
@@ -133,8 +130,7 @@
 //!     .with_cost_tolerance(1e-6)
 //!     .with_damping(1e-3)  // Initial damping
 //!     .with_damping_bounds(1e-12, 1e12)  // Min/max damping
-//!     .with_jacobi_scaling(true)  // Improve conditioning
-//!     .with_verbose(true);
+//!     .with_jacobi_scaling(true);  // Improve conditioning
 //!
 //! let mut solver = LevenbergMarquardt::with_config(config);
 //! # }
@@ -159,6 +155,10 @@ use crate::optimizer::{
 
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
+
+#[cfg(feature = "visualization")]
+use tracing::warn;
+
 use faer::{
     Mat,
     sparse::{SparseColMat, Triplet},
@@ -170,6 +170,7 @@ use std::{
     fmt::{Display, Formatter},
     time::{Duration, Instant},
 };
+use tracing::debug;
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]
@@ -219,7 +220,7 @@ impl Display for LevenbergMarquardtSummary {
                 | OptimizationStatus::ParameterToleranceReached
         );
 
-        writeln!(f, "=== Levenberg-Marquardt Final Result ===")?;
+        writeln!(f, "Levenberg-Marquardt Final Result")?;
 
         // Title with convergence status
         if converged {
@@ -311,7 +312,7 @@ pub struct IterationStats {
 impl IterationStats {
     /// Print table header in Ceres-style format
     pub fn print_header() {
-        println!(
+        debug!(
             "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
             "iter",
             "cost",
@@ -337,7 +338,7 @@ impl IterationStats {
             "✗"
         };
 
-        println!(
+        debug!(
             "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
             self.iteration,
             self.cost,
@@ -370,8 +371,7 @@ impl IterationStats {
 ///     .with_max_iterations(100)
 ///     .with_damping(1e-3)
 ///     .with_damping_bounds(1e-12, 1e12)
-///     .with_jacobi_scaling(true)
-///     .with_verbose(true);
+///     .with_jacobi_scaling(true);
 /// ```
 ///
 /// # Damping Parameter Behavior
@@ -411,8 +411,6 @@ pub struct LevenbergMarquardtConfig {
     pub gradient_tolerance: f64,
     /// Timeout duration
     pub timeout: Option<Duration>,
-    /// Enable detailed logging
-    pub verbose: bool,
     /// Initial damping parameter
     pub damping: f64,
     /// Minimum damping parameter
@@ -512,7 +510,6 @@ impl Default for LevenbergMarquardtConfig {
             // Note: Typically should be 1e-4 * cost_tolerance per Ceres docs
             gradient_tolerance: 1e-10,
             timeout: None,
-            verbose: false,
             damping: 1e-4,
             damping_min: 1e-12,
             damping_max: 1e12,
@@ -577,12 +574,6 @@ impl LevenbergMarquardtConfig {
     /// Set the timeout duration
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
-        self
-    }
-
-    /// Enable or disable verbose logging
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
         self
     }
 
@@ -693,46 +684,33 @@ impl LevenbergMarquardtConfig {
 
     /// Print configuration parameters (verbose mode only)
     pub fn print_configuration(&self) {
-        println!("Configuration:");
-        println!("  Solver:        Levenberg-Marquardt");
-        println!("  Linear solver: {:?}", self.linear_solver_type);
-        println!("  Loss function: N/A");
-        println!("\nConvergence Criteria:");
-        println!("  Max iterations:      {}", self.max_iterations);
-        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
-        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
-        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
-        println!("  Timeout:             {:?}", self.timeout);
-        println!("\nDamping Parameters:");
-        println!("  Initial damping:     {:.2e}", self.damping);
-        println!(
-            "  Damping range:       [{:.2e}, {:.2e}]",
-            self.damping_min, self.damping_max
-        );
-        println!("  Increase factor:     {:.2}", self.damping_increase_factor);
-        println!("  Decrease factor:     {:.2}", self.damping_decrease_factor);
-        println!("\nTrust Region:");
-        println!("  Initial radius:      {:.2e}", self.trust_region_radius);
-        println!("  Min step quality:    {:.2}", self.min_step_quality);
-        println!("  Good step quality:   {:.2}", self.good_step_quality);
-        println!("\nNumerical Settings:");
-        println!(
-            "  Jacobi scaling:      {}",
+        debug!(
+            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Trust Region:\n  Initial radius:      {:.2e}\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
+            self.damping,
+            self.damping_min,
+            self.damping_max,
+            self.damping_increase_factor,
+            self.damping_decrease_factor,
+            self.trust_region_radius,
+            self.min_step_quality,
+            self.good_step_quality,
             if self.use_jacobi_scaling {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        println!(
-            "  Compute covariances: {}",
+            },
             if self.compute_covariances {
                 "enabled"
             } else {
                 "disabled"
             }
         );
-        println!();
     }
 }
 
@@ -782,24 +760,17 @@ struct StepEvaluation {
 /// # Examples
 ///
 /// ```no_run
-/// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
-/// use apex_solver::core::problem::Problem;
-/// use std::collections::HashMap;
+/// use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardtConfig, LevenbergMarquardt};
+/// use apex_solver::linalg::LinearSolverType;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut problem = Problem::new();
-/// // ... add factors to problem ...
+/// # fn main() {
+/// let config = LevenbergMarquardtConfig::new()
+///     .with_max_iterations(100)
+///     .with_damping(1e-3)
+///     .with_damping_bounds(1e-12, 1e12)
+///     .with_jacobi_scaling(true);
 ///
-/// let initial_values = HashMap::new();
-/// // ... initialize parameters ...
-///
-/// let mut solver = LevenbergMarquardt::new();
-/// let result = solver.optimize(&problem, &initial_values)?;
-///
-/// println!("Status: {:?}", result.status);
-/// println!("Final cost: {}", result.final_cost);
-/// println!("Iterations: {}", result.iterations);
-/// # Ok(())
+/// let mut solver = LevenbergMarquardt::with_config(config);
 /// # }
 /// ```
 ///
@@ -835,7 +806,7 @@ impl LevenbergMarquardt {
             match OptimizationVisualizer::new(true) {
                 Ok(vis) => Some(vis),
                 Err(e) => {
-                    eprintln!("[WARNING] Failed to create visualizer: {}", e);
+                    warn!("Failed to create visualizer: {}", e);
                     None
                 }
             }
@@ -950,9 +921,7 @@ impl LevenbergMarquardt {
         elapsed: Duration,
         step_accepted: bool,
     ) -> Option<OptimizationStatus> {
-        // ========================================================================
         // CRITICAL SAFETY CHECKS (perform first, before convergence checks)
-        // ========================================================================
 
         // CRITERION 7: Invalid Numerical Values (NaN/Inf)
         // Always check for numerical instability first
@@ -974,10 +943,7 @@ impl LevenbergMarquardt {
         if iteration >= self.config.max_iterations {
             return Some(OptimizationStatus::MaxIterationsReached);
         }
-
-        // ========================================================================
         // CONVERGENCE CRITERIA (only check after successful steps)
-        // ========================================================================
 
         // Only check convergence criteria after accepted steps
         // (rejected steps don't indicate convergence)
@@ -1300,8 +1266,8 @@ impl LevenbergMarquardt {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if verbose
-        if self.config.verbose {
+        // Print configuration and header if debug level is enabled
+        if tracing::enabled!(tracing::Level::DEBUG) {
             self.config.print_configuration();
             IterationStats::print_header();
         }
@@ -1357,9 +1323,9 @@ impl LevenbergMarquardt {
                 unsuccessful_steps += 1;
             }
 
-            // OPTIMIZATION: Only collect iteration statistics if verbose mode is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-verbose optimization
-            if self.config.verbose {
+            // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
+            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
+            if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -1394,18 +1360,18 @@ impl LevenbergMarquardt {
                     step_norm,
                     Some(step_eval.rho),
                 ) {
-                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                    warn!("Failed to log scalars: {}", e);
                 }
 
                 // Log expensive visualizations (Hessian, gradient, manifolds)
                 if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                    warn!("Failed to log Hessian: {}", e);
                 }
                 if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                    warn!("Failed to log gradient: {}", e);
                 }
                 if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                    warn!("Failed to log manifolds: {}", e);
                 }
             }
 
@@ -1458,9 +1424,9 @@ impl LevenbergMarquardt {
                     status.clone(),
                 );
 
-                // Print summary only if verbose is enabled
-                if self.config.verbose {
-                    println!("\n{}", summary);
+                // Print summary only if debug level is enabled
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("{}", summary);
                 }
 
                 // Log convergence to Rerun
@@ -1626,14 +1592,6 @@ mod tests {
         // Extract final values
         let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
         let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
-
-        println!("Rosenbrock optimization result:");
-        println!("  Status: {:?}", result.status);
-        println!("  Initial cost: {:.6e}", result.initial_cost);
-        println!("  Final cost: {:.6e}", result.final_cost);
-        println!("  Iterations: {}", result.iterations);
-        println!("  x1: {:.6} (expected 1.0)", x1_final);
-        println!("  x2: {:.6} (expected 1.0)", x2_final);
 
         // Verify convergence to [1.0, 1.0]
         assert!(

@@ -107,8 +107,7 @@
 //!     .with_parameter_tolerance(1e-8)
 //!     .with_gradient_tolerance(1e-10)
 //!     .with_linear_solver_type(LinearSolverType::SparseQR)  // More stable
-//!     .with_jacobi_scaling(true)  // Improve conditioning
-//!     .with_verbose(true);
+//!     .with_jacobi_scaling(true);  // Improve conditioning
 //!
 //! let mut solver = GaussNewton::with_config(config);
 //! # }
@@ -124,9 +123,12 @@ use crate::{core::problem, error, linalg, manifold, optimizer};
 
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
+#[cfg(feature = "visualization")]
+use tracing::warn;
 
 use faer::sparse;
 use std::{collections, fmt, time};
+use tracing::debug;
 
 /// Summary statistics for the Gauss-Newton optimization process.
 #[derive(Debug, Clone)]
@@ -190,7 +192,7 @@ pub struct IterationStats {
 impl IterationStats {
     /// Print table header in Ceres-style format
     pub fn print_header() {
-        println!(
+        debug!(
             "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
             "iter",
             "cost",
@@ -206,7 +208,6 @@ impl IterationStats {
         );
     }
 
-    /// Print single iteration line in Ceres-style format with scientific notation
     pub fn print_line(&self) {
         let status = if self.iteration == 0 {
             "-"
@@ -216,7 +217,7 @@ impl IterationStats {
             "✗"
         };
 
-        println!(
+        debug!(
             "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
             self.iteration,
             self.cost,
@@ -244,7 +245,7 @@ impl fmt::Display for GaussNewtonSummary {
                 | optimizer::OptimizationStatus::ParameterToleranceReached
         );
 
-        writeln!(f, "=== Gauss-Newton Final Result ===")?;
+        writeln!(f, "Gauss-Newton Final Result")?;
 
         // Title with convergence status
         if converged {
@@ -307,8 +308,7 @@ impl fmt::Display for GaussNewtonSummary {
 /// let config = GaussNewtonConfig::new()
 ///     .with_max_iterations(50)
 ///     .with_cost_tolerance(1e-6)
-///     .with_linear_solver_type(LinearSolverType::SparseQR)
-///     .with_verbose(true);
+///     .with_linear_solver_type(LinearSolverType::SparseQR);
 /// ```
 ///
 /// # Convergence Criteria
@@ -340,8 +340,6 @@ pub struct GaussNewtonConfig {
     pub gradient_tolerance: f64,
     /// Timeout duration
     pub timeout: Option<time::Duration>,
-    /// Enable detailed logging
-    pub verbose: bool,
     /// Use Jacobi column scaling (preconditioning)
     ///
     /// When enabled, normalizes Jacobian columns by their L2 norm before solving.
@@ -408,7 +406,6 @@ impl Default for GaussNewtonConfig {
             // Ceres Solver default: 1e-10 (changed from 1e-8 for compatibility)
             gradient_tolerance: 1e-10,
             timeout: None,
-            verbose: false,
             use_jacobi_scaling: false,
             min_diagonal: 1e-10,
             // New Ceres-compatible termination parameters
@@ -460,12 +457,6 @@ impl GaussNewtonConfig {
     /// Set the timeout duration
     pub fn with_timeout(mut self, timeout: time::Duration) -> Self {
         self.timeout = Some(timeout);
-        self
-    }
-
-    /// Enable or disable verbose logging
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
         self
     }
 
@@ -529,36 +520,27 @@ impl GaussNewtonConfig {
         self
     }
 
-    /// Print configuration parameters (verbose mode only)
+    /// Print configuration parameters (info level logging)
     pub fn print_configuration(&self) {
-        println!("Configuration:");
-        println!("  Solver:        Gauss-Newton");
-        println!("  Linear solver: {:?}", self.linear_solver_type);
-        println!("  Loss function: N/A");
-        println!("\nConvergence Criteria:");
-        println!("  Max iterations:      {}", self.max_iterations);
-        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
-        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
-        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
-        println!("  Timeout:             {:?}", self.timeout);
-        println!("\nNumerical Settings:");
-        println!(
-            "  Jacobi scaling:      {}",
+        debug!(
+            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
             if self.use_jacobi_scaling {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        println!(
-            "  Compute covariances: {}",
+            },
             if self.compute_covariances {
                 "enabled"
             } else {
                 "disabled"
             }
         );
-        println!();
     }
 }
 
@@ -1035,8 +1017,8 @@ impl GaussNewton {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if verbose
-        if self.config.verbose {
+        // Print configuration and header if debug level is enabled
+        if tracing::enabled!(tracing::Level::DEBUG) {
             self.config.print_configuration();
             IterationStats::print_header();
         }
@@ -1088,9 +1070,9 @@ impl GaussNewton {
             cost_evaluations += 1;
             total_cost_reduction += cost_eval.cost_reduction;
 
-            // OPTIMIZATION: Only collect iteration statistics if verbose mode is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-verbose optimization
-            if self.config.verbose {
+            // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
+            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
+            if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -1125,18 +1107,18 @@ impl GaussNewton {
                     step_norm,
                     None, // No step quality rho in Gauss-Newton
                 ) {
-                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                    warn!("Failed to log scalars: {}", e);
                 }
 
                 // Log expensive visualizations (Hessian, gradient, manifolds)
                 if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                    warn!("Failed to log Hessian: {}", e);
                 }
                 if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                    warn!("Failed to log gradient: {}", e);
                 }
                 if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                    warn!("Failed to log manifolds: {}", e);
                 }
             }
 
@@ -1168,9 +1150,9 @@ impl GaussNewton {
                     status.clone(),
                 );
 
-                // Print summary only if verbose is enabled
-                if self.config.verbose {
-                    println!("\n{}", summary);
+                // Print summary only if debug level is enabled
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("{}", summary);
                 }
 
                 // Compute covariances if enabled

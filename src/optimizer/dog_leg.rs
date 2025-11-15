@@ -183,8 +183,7 @@
 //!     .with_trust_region_bounds(1e-3, 1e6)  // Min/max radius
 //!     .with_mu_params(1e-4, 1e-8, 1.0, 10.0)  // Conservative regularization
 //!     .with_jacobi_scaling(true)  // Enable elliptical trust regions
-//!     .with_step_reuse(true)  // Enable Ceres-style caching
-//!     .with_verbose(true);
+//!     .with_step_reuse(true);  // Enable Ceres-style caching
 //!
 //! let mut solver = DogLeg::with_config(config);
 //! # }
@@ -202,9 +201,12 @@ use crate::{core::problem, error, linalg, manifold, optimizer};
 
 #[cfg(feature = "visualization")]
 use crate::optimizer::OptimizationVisualizer;
+#[cfg(feature = "visualization")]
+use tracing::warn;
 
 use faer::sparse;
 use std::{collections, fmt, time};
+use tracing::debug;
 
 /// Summary statistics for the Dog Leg optimization process.
 #[derive(Debug, Clone)]
@@ -274,7 +276,7 @@ pub struct IterationStats {
 impl IterationStats {
     /// Print table header in Ceres-style format
     pub fn print_header() {
-        println!(
+        debug!(
             "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
             "iter",
             "cost",
@@ -300,7 +302,7 @@ impl IterationStats {
             "✗"
         };
 
-        println!(
+        debug!(
             "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
             self.iteration,
             self.cost,
@@ -328,7 +330,7 @@ impl fmt::Display for DogLegSummary {
                 | optimizer::OptimizationStatus::ParameterToleranceReached
         );
 
-        writeln!(f, "=== Dog-Leg Final Result ===")?;
+        writeln!(f, "Dog-Leg Final Result")?;
 
         // Title with convergence status
         if converged {
@@ -407,8 +409,7 @@ impl fmt::Display for DogLegSummary {
 ///     .with_trust_region_radius(1e4)
 ///     .with_mu_params(1e-4, 1e-8, 1.0, 10.0)
 ///     .with_jacobi_scaling(true)
-///     .with_step_reuse(true)
-///     .with_verbose(true);
+///     .with_step_reuse(true);
 /// ```
 ///
 /// # Trust Region Behavior
@@ -456,8 +457,6 @@ pub struct DogLegConfig {
     pub gradient_tolerance: f64,
     /// Timeout duration
     pub timeout: Option<time::Duration>,
-    /// Enable detailed logging
-    pub verbose: bool,
     /// Initial trust region radius
     pub trust_region_radius: f64,
     /// Minimum trust region radius
@@ -549,7 +548,6 @@ impl Default for DogLegConfig {
             // Ceres Solver default: 1e-10 (changed from 1e-8 for compatibility)
             gradient_tolerance: 1e-10,
             timeout: None,
-            verbose: false,
             // Ceres-style: larger initial radius for better global convergence
             trust_region_radius: 1e4,
             trust_region_min: 1e-12,
@@ -625,12 +623,6 @@ impl DogLegConfig {
     /// Set the timeout duration
     pub fn with_timeout(mut self, timeout: time::Duration) -> Self {
         self.timeout = Some(timeout);
-        self
-    }
-
-    /// Enable or disable verbose logging
-    pub fn with_verbose(mut self, verbose: bool) -> Self {
-        self.verbose = verbose;
         self
     }
 
@@ -745,60 +737,42 @@ impl DogLegConfig {
         self
     }
 
-    /// Print configuration parameters (verbose mode only)
+    /// Print configuration parameters (info level logging)
     pub fn print_configuration(&self) {
-        println!("Configuration:");
-        println!("  Solver:        Dog-Leg");
-        println!("  Linear solver: {:?}", self.linear_solver_type);
-        println!("  Loss function: N/A");
-        println!("\nConvergence Criteria:");
-        println!("  Max iterations:      {}", self.max_iterations);
-        println!("  Cost tolerance:      {:.2e}", self.cost_tolerance);
-        println!("  Parameter tolerance: {:.2e}", self.parameter_tolerance);
-        println!("  Gradient tolerance:  {:.2e}", self.gradient_tolerance);
-        println!("  Timeout:             {:?}", self.timeout);
-        println!("\nTrust Region:");
-        println!("  Initial radius:      {:.2e}", self.trust_region_radius);
-        println!(
-            "  Radius range:        [{:.2e}, {:.2e}]",
-            self.trust_region_min, self.trust_region_max
-        );
-        println!("  Min step quality:    {:.2}", self.min_step_quality);
-        println!("  Good step quality:   {:.2}", self.good_step_quality);
-        println!("  Poor step quality:   {:.2}", self.poor_step_quality);
-        println!("\nRegularization:");
-        println!("  Initial mu:          {:.2e}", self.initial_mu);
-        println!(
-            "  Mu range:            [{:.2e}, {:.2e}]",
-            self.min_mu, self.max_mu
-        );
-        println!("  Mu increase factor:  {:.2}", self.mu_increase_factor);
-        println!("\nNumerical Settings:");
-        println!(
-            "  Jacobi scaling:      {}",
+        debug!(
+            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
+            self.linear_solver_type,
+            self.max_iterations,
+            self.cost_tolerance,
+            self.parameter_tolerance,
+            self.gradient_tolerance,
+            self.timeout,
+            self.trust_region_radius,
+            self.trust_region_min,
+            self.trust_region_max,
+            self.min_step_quality,
+            self.good_step_quality,
+            self.poor_step_quality,
+            self.initial_mu,
+            self.min_mu,
+            self.max_mu,
+            self.mu_increase_factor,
             if self.use_jacobi_scaling {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        println!(
-            "  Step reuse:          {}",
+            },
             if self.enable_step_reuse {
                 "enabled"
             } else {
                 "disabled"
-            }
-        );
-        println!(
-            "  Compute covariances: {}",
+            },
             if self.compute_covariances {
                 "enabled"
             } else {
                 "disabled"
             }
         );
-        println!();
     }
 }
 
@@ -1686,8 +1660,8 @@ impl DogLeg {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if verbose
-        if self.config.verbose {
+        // Print configuration and header if info/debug level is enabled
+        if tracing::enabled!(tracing::Level::DEBUG) {
             self.config.print_configuration();
             IterationStats::print_header();
         }
@@ -1741,9 +1715,9 @@ impl DogLeg {
                 unsuccessful_steps += 1;
             }
 
-            // OPTIMIZATION: Only collect iteration statistics if verbose mode is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-verbose optimization
-            if self.config.verbose {
+            // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
+            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
+            if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
@@ -1778,18 +1752,18 @@ impl DogLeg {
                     step_norm,
                     Some(step_eval.rho),
                 ) {
-                    eprintln!("[WARNING] Failed to log scalars: {}", e);
+                    warn!("Failed to log scalars: {}", e);
                 }
 
                 // Log expensive visualizations (Hessian, gradient, manifolds)
                 if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    eprintln!("[WARNING] Failed to log Hessian: {}", e);
+                    warn!("Failed to log Hessian: {}", e);
                 }
                 if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    eprintln!("[WARNING] Failed to log gradient: {}", e);
+                    warn!("Failed to log gradient: {}", e);
                 }
                 if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    eprintln!("[WARNING] Failed to log manifolds: {}", e);
+                    warn!("Failed to log manifolds: {}", e);
                 }
             }
 
@@ -1835,9 +1809,9 @@ impl DogLeg {
                     status.clone(),
                 );
 
-                // Print summary only if verbose is enabled
-                if self.config.verbose {
-                    println!("\n{}", summary);
+                // Print summary only if debug level is enabled
+                if tracing::enabled!(tracing::Level::DEBUG) {
+                    debug!("{}", summary);
                 }
 
                 // Compute covariances if enabled

@@ -153,16 +153,10 @@ if(BUILD_G2O_BENCHMARK)
     )
 endif()
 
-# Main info executable (uses Eigen@3 for consistency)
-add_executable(benchmark_info main.cpp)
-
-target_link_libraries(benchmark_info PRIVATE
-    bench_common
-)
-
 # Check if at least one benchmark can be built
 if(NOT BUILD_CERES_BENCHMARK AND NOT BUILD_GTSAM_BENCHMARK AND NOT BUILD_G2O_BENCHMARK)
-    message(FATAL_ERROR "No C++ optimization libraries found! Please install at least one of: ceres-solver, gtsam, g2o")
+    message(FATAL_ERROR "No C++ optimization libraries found!
+        Please install at least one of: ceres-solver, gtsam, g2o")
 endif()
 
 # Print summary

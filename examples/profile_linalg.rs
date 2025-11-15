@@ -13,9 +13,11 @@
 //! samply record ./target/profiling/examples/profile_linalg
 //! ```
 
+use apex_solver::init_logger;
 use apex_solver::linalg::{SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use faer::{Mat, sparse::SparseColMat};
 use std::ops::Mul;
+use tracing::info;
 
 const SMALL_SIZE: usize = 100;
 const MEDIUM_SIZE: usize = 1000;
@@ -25,15 +27,17 @@ const ITERATIONS_MEDIUM: usize = 100;
 const ITERATIONS_LARGE: usize = 10;
 
 fn main() {
-    println!("=== Profiling Linear Algebra Operations ===");
-    println!();
+    // Initialize logger with INFO level
+    init_logger();
+
+    info!("Profiling Linear Algebra Operations");
 
     profile_sparse_matrix_multiply();
     profile_sparse_dense_multiply();
     profile_cholesky_solver();
     profile_qr_solver();
 
-    println!("\n=== Profiling Complete ===");
+    info!("Profiling Complete");
 }
 
 fn create_sparse_jacobian(rows: usize, cols: usize, density: f64) -> SparseColMat<usize, f64> {
@@ -57,7 +61,7 @@ fn create_residual_vector(size: usize) -> Mat<f64> {
 }
 
 fn profile_sparse_matrix_multiply() {
-    println!("Profiling Sparse Matrix Multiplication (J^T * J)...");
+    info!("Profiling Sparse Matrix Multiplication (J^T * J)...");
 
     // Small problem
     let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
@@ -71,7 +75,7 @@ fn profile_sparse_matrix_multiply() {
             .mul(jacobian_small.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {}x{}    : {:?} per operation",
         jacobian_small.nrows(),
         jacobian_small.ncols(),
@@ -90,7 +94,7 @@ fn profile_sparse_matrix_multiply() {
             .mul(jacobian_medium.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {}x{}   : {:?} per operation",
         jacobian_medium.nrows(),
         jacobian_medium.ncols(),
@@ -109,7 +113,7 @@ fn profile_sparse_matrix_multiply() {
             .mul(jacobian_large.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_LARGE as u32;
-    println!(
+    info!(
         "  Size {}x{}  : {:?} per operation",
         jacobian_large.nrows(),
         jacobian_large.ncols(),
@@ -118,7 +122,7 @@ fn profile_sparse_matrix_multiply() {
 }
 
 fn profile_sparse_dense_multiply() {
-    println!("\nProfiling Sparse-Dense Multiplication (J^T * r)...");
+    info!("Profiling Sparse-Dense Multiplication (J^T * r)...");
 
     // Small problem
     let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
@@ -128,7 +132,7 @@ fn profile_sparse_dense_multiply() {
         let _ = jacobian_small.as_ref().transpose().mul(&residuals_small);
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {}x{} * {}x1 : {:?} per operation",
         jacobian_small.nrows(),
         jacobian_small.ncols(),
@@ -144,7 +148,7 @@ fn profile_sparse_dense_multiply() {
         let _ = jacobian_medium.as_ref().transpose().mul(&residuals_medium);
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {}x{} * {}x1: {:?} per operation",
         jacobian_medium.nrows(),
         jacobian_medium.ncols(),
@@ -160,7 +164,7 @@ fn profile_sparse_dense_multiply() {
         let _ = jacobian_large.as_ref().transpose().mul(&residuals_large);
     }
     let elapsed = start.elapsed() / ITERATIONS_LARGE as u32;
-    println!(
+    info!(
         "  Size {}x{} * {}x1: {:?} per operation",
         jacobian_large.nrows(),
         jacobian_large.ncols(),
@@ -170,7 +174,7 @@ fn profile_sparse_dense_multiply() {
 }
 
 fn profile_cholesky_solver() {
-    println!("\nProfiling Sparse Cholesky Solver...");
+    info!("Profiling Sparse Cholesky Solver...");
 
     // Small problem
     let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
@@ -182,7 +186,7 @@ fn profile_cholesky_solver() {
         let _ = solver_small.solve_normal_equation(&residuals_small, &jacobian_small);
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {} variables (normal eq)  : {:?} per solve",
         SMALL_SIZE, elapsed
     );
@@ -192,7 +196,7 @@ fn profile_cholesky_solver() {
         let _ = solver_small.solve_augmented_equation(&residuals_small, &jacobian_small, 1e-3);
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {} variables (augmented eq): {:?} per solve",
         SMALL_SIZE, elapsed
     );
@@ -207,7 +211,7 @@ fn profile_cholesky_solver() {
         let _ = solver_medium.solve_normal_equation(&residuals_medium, &jacobian_medium);
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {} variables (normal eq) : {:?} per solve",
         MEDIUM_SIZE, elapsed
     );
@@ -217,7 +221,7 @@ fn profile_cholesky_solver() {
         let _ = solver_medium.solve_augmented_equation(&residuals_medium, &jacobian_medium, 1e-3);
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {} variables (augmented eq): {:?} per solve",
         MEDIUM_SIZE, elapsed
     );
@@ -232,7 +236,7 @@ fn profile_cholesky_solver() {
         let _ = solver_large.solve_normal_equation(&residuals_large, &jacobian_large);
     }
     let elapsed = start.elapsed() / ITERATIONS_LARGE as u32;
-    println!(
+    info!(
         "  Size {} variables (normal eq) : {:?} per solve",
         LARGE_SIZE, elapsed
     );
@@ -242,14 +246,14 @@ fn profile_cholesky_solver() {
         let _ = solver_large.solve_augmented_equation(&residuals_large, &jacobian_large, 1e-3);
     }
     let elapsed = start.elapsed() / ITERATIONS_LARGE as u32;
-    println!(
+    info!(
         "  Size {} variables (augmented eq): {:?} per solve",
         LARGE_SIZE, elapsed
     );
 }
 
 fn profile_qr_solver() {
-    println!("\nProfiling Sparse QR Solver...");
+    info!("Profiling Sparse QR Solver...");
 
     // Small problem
     let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
@@ -261,7 +265,7 @@ fn profile_qr_solver() {
         let _ = solver_small.solve_normal_equation(&residuals_small, &jacobian_small);
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {} variables (normal eq)  : {:?} per solve",
         SMALL_SIZE, elapsed
     );
@@ -271,7 +275,7 @@ fn profile_qr_solver() {
         let _ = solver_small.solve_augmented_equation(&residuals_small, &jacobian_small, 1e-3);
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
-    println!(
+    info!(
         "  Size {} variables (augmented eq): {:?} per solve",
         SMALL_SIZE, elapsed
     );
@@ -286,7 +290,7 @@ fn profile_qr_solver() {
         let _ = solver_medium.solve_normal_equation(&residuals_medium, &jacobian_medium);
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {} variables (normal eq) : {:?} per solve",
         MEDIUM_SIZE, elapsed
     );
@@ -296,7 +300,7 @@ fn profile_qr_solver() {
         let _ = solver_medium.solve_augmented_equation(&residuals_medium, &jacobian_medium, 1e-3);
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
-    println!(
+    info!(
         "  Size {} variables (augmented eq): {:?} per solve",
         MEDIUM_SIZE, elapsed
     );

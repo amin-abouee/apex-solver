@@ -1,7 +1,6 @@
 #include "read_g2o.h"
 #include <iostream>
 #include <sstream>
-#include <cmath>
 
 namespace g2o_reader {
 
@@ -59,12 +58,12 @@ bool ReadG2oFile2D(const std::string& filename, Graph2D& graph) {
         else if (tag == "EDGE_SE2") {
             Constraint2D constraint;
             double x, y, theta;
-            
+
             if (!(iss >> constraint.id_begin >> constraint.id_end >> x >> y >> theta)) {
                 std::cerr << "Error parsing EDGE_SE2 at line " << line_number << std::endl;
                 continue;
             }
-            
+
             constraint.measurement = Pose2D(x, y, theta);
 
             // Read information matrix (upper triangular: 6 values for 3x3 symmetric)
@@ -77,7 +76,7 @@ bool ReadG2oFile2D(const std::string& filename, Graph2D& graph) {
             }
 
             // Fill symmetric information matrix
-            constraint.information << 
+            constraint.information <<
                 info[0], info[1], info[2],
                 info[1], info[3], info[4],
                 info[2], info[4], info[5];
@@ -85,9 +84,6 @@ bool ReadG2oFile2D(const std::string& filename, Graph2D& graph) {
             graph.constraints.push_back(constraint);
         }
     }
-
-    std::cout << "Loaded SE2 graph: " << graph.poses.size() << " vertices, " 
-              << graph.constraints.size() << " edges" << std::endl;
 
     return true;
 }
@@ -114,7 +110,7 @@ bool ReadG2oFile3D(const std::string& filename, Graph3D& graph) {
         if (tag == "VERTEX_SE3:QUAT") {
             int id;
             double tx, ty, tz, qx, qy, qz, qw;
-            
+
             if (!(iss >> id >> tx >> ty >> tz >> qx >> qy >> qz >> qw)) {
                 std::cerr << "Error parsing VERTEX_SE3:QUAT at line " << line_number << std::endl;
                 continue;
@@ -128,8 +124,8 @@ bool ReadG2oFile3D(const std::string& filename, Graph3D& graph) {
         else if (tag == "EDGE_SE3:QUAT") {
             Constraint3D constraint;
             double tx, ty, tz, qx, qy, qz, qw;
-            
-            if (!(iss >> constraint.id_begin >> constraint.id_end 
+
+            if (!(iss >> constraint.id_begin >> constraint.id_end
                      >> tx >> ty >> tz >> qx >> qy >> qz >> qw)) {
                 std::cerr << "Error parsing EDGE_SE3:QUAT at line " << line_number << std::endl;
                 continue;
@@ -163,10 +159,7 @@ bool ReadG2oFile3D(const std::string& filename, Graph3D& graph) {
         }
     }
 
-    std::cout << "Loaded SE3 graph: " << graph.poses.size() << " vertices, " 
-              << graph.constraints.size() << " edges" << std::endl;
-
-    return true;
+   return true;
 }
 
 }  // namespace g2o_reader
