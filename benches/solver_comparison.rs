@@ -755,11 +755,11 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let gtsam_exe = build_dir.join("gtsam_benchmark");
 
     if g2o_exe.exists() && gtsam_exe.exists() {
-        println!("C++ benchmarks already built");
+        info!("C++ benchmarks already built");
         return Ok(build_dir);
     }
 
-    println!("Building C++ benchmarks...");
+    info!("Building C++ benchmarks...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -793,7 +793,7 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    println!("C++ benchmarks built successfully");
+    info!("C++ benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -809,7 +809,7 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
         return Err(format!("Executable not found: {:?}", exe_path));
     }
 
-    println!("Running {} ...", exe_name);
+    info!("Running {} ...", exe_name);
 
     let output = Command::new(&exe_path)
         .current_dir(&absolute_build_dir)
@@ -826,7 +826,7 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
 
     // Print stdout for user visibility
     if !output.stdout.is_empty() {
-        println!("{}", String::from_utf8_lossy(&output.stdout));
+        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename based on executable name
@@ -882,8 +882,8 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let build_dir = match build_cpp_benchmarks() {
         Ok(dir) => dir,
         Err(e) => {
-            println!("Warning: C++ benchmarks unavailable: {}", e);
-            println!("Continuing with Rust-only benchmarks...\n");
+            info!("Warning: C++ benchmarks unavailable: {}", e);
+            info!("Continuing with Rust-only benchmarks...\n");
             return all_results;
         }
     };
@@ -899,15 +899,15 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
         match run_cpp_benchmark(exe_name, &build_dir) {
             Ok(csv_path) => match parse_cpp_results(&csv_path) {
                 Ok(results) => {
-                    println!("{} completed: {} datasets", exe_name, results.len());
+                    info!("{} completed: {} datasets", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
-                    println!("Warning: Failed to parse {} results: {}", exe_name, e);
+                    info!("Warning: Failed to parse {} results: {}", exe_name, e);
                 }
             },
             Err(e) => {
-                println!("Warning: Failed to run {}: {}", exe_name, e);
+                info!("Warning: Failed to run {}: {}", exe_name, e);
             }
         }
     }
@@ -983,14 +983,10 @@ fn main() {
     }
 
     // Step 2: Run C++ benchmarks
-    println!("\n{}", "=".repeat(80));
-    println!("PHASE 2: C++ Benchmarks");
-    println!("{}", "=".repeat(80));
+    info!("PHASE 2: C++ Benchmarks");
 
     let cpp_results = run_cpp_benchmarks();
     all_results.extend(cpp_results);
-
-    println!();
 
     // Write results to CSV
     let csv_path = "benchmark_results.csv";
@@ -1036,10 +1032,9 @@ fn main() {
 
     // Print 2D results
     if !results_2d.is_empty() {
-        println!("\n{}", "=".repeat(120));
-        println!("2D DATASETS (SE2)");
-        println!("{}", "=".repeat(120));
-        println!(
+        info!("2D DATASETS (SE2)");
+        info!("{}", "=".repeat(120));
+        info!(
             "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset",
             "Solver",
@@ -1050,7 +1045,7 @@ fn main() {
             "Converged",
             "Iters"
         );
-        println!("{}", "-".repeat(120));
+        info!("{}", "-".repeat(120));
 
         for result in &results_2d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -1059,7 +1054,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -1071,15 +1066,14 @@ fn main() {
                 result.iterations
             );
         }
-        info!("{}\n", "=".repeat(110));
+        info!("{}\n", "=".repeat(120));
     }
 
     // Print 3D results
     if !results_3d.is_empty() {
-        println!("\n{}", "=".repeat(120));
-        println!("3D DATASETS (SE3)");
-        println!("{}", "=".repeat(120));
-        println!(
+        info!("3D DATASETS (SE3)");
+        info!("{}", "=".repeat(120));
+        info!(
             "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
             "Dataset",
             "Solver",
@@ -1090,7 +1084,7 @@ fn main() {
             "Converged",
             "Iters"
         );
-        println!("{}", "-".repeat(120));
+        info!("{}", "-".repeat(120));
 
         for result in &results_3d {
             let improvement_display = if result.improvement_pct != "-" {
@@ -1099,7 +1093,7 @@ fn main() {
                 result.improvement_pct.clone()
             };
 
-            println!(
+            info!(
                 "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<8} {:<10}",
                 result.dataset,
                 result.solver,
@@ -1111,6 +1105,6 @@ fn main() {
                 result.iterations
             );
         }
-        println!("{}", "=".repeat(120));
+        info!("{}", "=".repeat(120));
     }
 }
