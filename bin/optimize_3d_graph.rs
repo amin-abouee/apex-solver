@@ -494,7 +494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("APEX-SOLVER 3D POSE GRAPH OPTIMIZATION\n");
 
     // Define available SE3 datasets
-    let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D"];
+    let se3_datasets = vec!["sphere2500", "parking-garage", "torus3D", "cubicle"];
 
     let datasets = if args.dataset == "all" {
         se3_datasets
