@@ -30,6 +30,7 @@ scripts/
 output/
 *.csv
 data_bk/
+doc/*.md
 
 # C++ benchmark build artifacts
 benches/cpp_comparison/build/
