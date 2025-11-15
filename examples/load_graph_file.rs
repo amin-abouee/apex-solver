@@ -1,7 +1,8 @@
+use apex_solver::init_logger;
 use apex_solver::io::load_graph;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 /// Statistics for a single loaded graph file
 #[derive(Debug, Default)]
@@ -29,14 +30,8 @@ struct SummaryStatistics {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
     info!("Loading all graph files from the data directory...");
 
     let graph_files = find_graph_files()?;

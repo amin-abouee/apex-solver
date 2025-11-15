@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::time::Instant;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -414,14 +415,8 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 fn main() {
     let args = Args::parse();
 
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("APEX-SOLVER OPTIMIZER COMPARISON");
     info!("Comparing LM, GN, and DL optimizers on real datasets");

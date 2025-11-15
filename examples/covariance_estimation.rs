@@ -14,23 +14,18 @@
 use apex_solver::{
     core::problem::Problem,
     factors::BetweenFactorSE2,
+    init_logger,
     linalg::LinearSolverType,
     manifold::ManifoldType,
     optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig},
 };
 use nalgebra::DVector;
 use std::collections::HashMap;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 fn main() {
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("Covariance Estimation Example\n");
 

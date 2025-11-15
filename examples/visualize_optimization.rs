@@ -29,6 +29,7 @@
 
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactorSE3;
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
@@ -37,7 +38,7 @@ use clap::Parser;
 use nalgebra::dvector;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -71,14 +72,8 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     // Construct dataset path
     let dataset_path = format!("data/{}.g2o", args.dataset);

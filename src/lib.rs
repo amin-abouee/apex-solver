@@ -28,6 +28,7 @@ pub mod error;
 pub mod factors;
 pub mod io;
 pub mod linalg;
+pub mod logger;
 pub mod manifold;
 pub mod optimizer;
 
@@ -43,6 +44,7 @@ pub use factors::{
 };
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+pub use logger::{init_logger, init_logger_with_level};
 pub use optimizer::{
     LevenbergMarquardt, OptimizerType, Solver, levenberg_marquardt::LevenbergMarquardtConfig,
 };

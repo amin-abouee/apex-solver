@@ -17,6 +17,7 @@
 use apex_solver::{
     core::problem::Problem,
     factors::BetweenFactorSE3,
+    init_logger,
     io::{G2oLoader, GraphLoader},
     manifold::ManifoldType,
     optimizer::LevenbergMarquardt,
@@ -26,7 +27,7 @@ use nalgebra::dvector;
 use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 fn main() {
     // Parse command line arguments
@@ -37,14 +38,8 @@ fn main() {
         std::process::exit(1);
     }
 
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     let dataset = &args[1];
 

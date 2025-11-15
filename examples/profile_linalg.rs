@@ -13,10 +13,11 @@
 //! samply record ./target/profiling/examples/profile_linalg
 //! ```
 
+use apex_solver::init_logger;
 use apex_solver::linalg::{SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use faer::{Mat, sparse::SparseColMat};
 use std::ops::Mul;
-use tracing::{Level, info};
+use tracing::info;
 
 const SMALL_SIZE: usize = 100;
 const MEDIUM_SIZE: usize = 1000;
@@ -26,14 +27,8 @@ const ITERATIONS_MEDIUM: usize = 100;
 const ITERATIONS_LARGE: usize = 10;
 
 fn main() {
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("Profiling Linear Algebra Operations");
 

@@ -4,6 +4,7 @@ use std::time::Instant;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE3, PriorFactor};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -12,7 +13,7 @@ use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt};
 use clap::Parser;
 use nalgebra::dvector;
-use tracing::{Level, info, warn};
+use tracing::{info, warn};
 
 #[derive(Parser)]
 #[command(name = "optimize_3d_graph")]
@@ -487,14 +488,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("APEX-SOLVER 3D POSE GRAPH OPTIMIZATION\n");
 

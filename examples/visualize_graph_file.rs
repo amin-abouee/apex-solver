@@ -7,6 +7,7 @@
 //! cargo run --example visualize_graph_file --features visualization
 //! ```
 
+use apex_solver::init_logger;
 use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
@@ -15,7 +16,7 @@ use rerun::{
     components::Color,
 };
 use std::path::PathBuf;
-use tracing::{Level, info};
+use tracing::info;
 
 /// Visualize a graph from a G2O/TORO file using Rerun
 #[derive(Parser, Debug)]
@@ -45,14 +46,8 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("Loading graph from: {}", args.file_path.display());
     let graph = load_graph(&args.file_path)?;

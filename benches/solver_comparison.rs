@@ -36,12 +36,13 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::{Level, info};
+use tracing::info;
 
 // apex-solver imports
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
@@ -928,14 +929,8 @@ fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
 }
 
 fn main() {
-    // Initialize tracing with default info level
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(Level::INFO.into())
-                .from_env_lossy(),
-        )
-        .init();
+    // Initialize logger with INFO level
+    init_logger();
 
     info!("Starting solver comparison benchmark...");
     info!("Running each configuration 5 times and averaging results...");
