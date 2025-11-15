@@ -71,6 +71,14 @@ serde = { version = "1.0", features = ["derive"] }
 name = "solver_comparison"
 harness = false
 
+[profile.dev]
+split-debuginfo = "unpacked"  # Faster linking, less memory usage
+debug = 1  # Line numbers only, not full debug info
+
+[profile.test]
+split-debuginfo = "unpacked"  # Faster linking, less memory usage
+debug = 1  # Line numbers only, not full debug info
+
 [profile.profiling]
 inherits = "release"
 debug = true  # Include debug symbols for better profiling with samply/flamegraph
