@@ -137,16 +137,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         pose_params[id] = {pose.translation.x(), pose.translation.y(), pose.rotation};
     }
 
-    // Add prior on first pose (gauge freedom)
-    if (!graph.poses.empty()) {
-        int first_id = graph.poses.begin()->first;
-        auto& first_pose = pose_params[first_id];
-        for (int i = 0; i < 3; ++i) {
-            problem.SetParameterBlockConstant(&first_pose[0] + i);
-        }
-    }
-
-    // Add edge constraints
+    // Add edge constraints first (so parameter blocks are registered)
     for (const auto& constraint : graph.constraints) {
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
@@ -160,6 +151,13 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
             sqrt_info);
 
         problem.AddResidualBlock(cost_function, nullptr, pose_a.data(), pose_b.data());
+    }
+
+    // Add prior on first pose (gauge freedom) - after residual blocks are added
+    if (!graph.poses.empty()) {
+        int first_id = graph.poses.begin()->first;
+        auto& first_pose = pose_params[first_id];
+        problem.SetParameterBlockConstant(first_pose.data());
     }
 
     // Compute initial cost
@@ -224,18 +222,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         pose_params[id] = {quat, trans};
     }
 
-    // Add prior on first pose (gauge freedom) - fix translation and rotation
-    if (!graph.poses.empty()) {
-        int first_id = graph.poses.begin()->first;
-        problem.SetParameterBlockConstant(pose_params[first_id].first.data());   // quaternion
-        problem.SetParameterBlockConstant(pose_params[first_id].second.data());  // translation
-    }
+    // Use quaternion manifold (new Ceres API)
+    ceres::Manifold* quaternion_manifold = new ceres::QuaternionManifold();
 
-    // Use quaternion parameterization
-    ceres::EigenQuaternionParameterization* quaternion_parameterization =
-        new ceres::EigenQuaternionParameterization();
-
-    // Add edge constraints
+    // Add edge constraints first (so parameter blocks are registered)
     for (const auto& constraint : graph.constraints) {
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
@@ -249,9 +239,16 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
                                 pose_a.first.data(), pose_a.second.data(),
                                 pose_b.first.data(), pose_b.second.data());
 
-        // Set quaternion parameterization
-        problem.SetParameterization(pose_a.first.data(), quaternion_parameterization);
-        problem.SetParameterization(pose_b.first.data(), quaternion_parameterization);
+        // Set quaternion manifold (new API: SetManifold instead of SetParameterization)
+        problem.SetManifold(pose_a.first.data(), quaternion_manifold);
+        problem.SetManifold(pose_b.first.data(), quaternion_manifold);
+    }
+
+    // Add prior on first pose (gauge freedom) - after residual blocks are added
+    if (!graph.poses.empty()) {
+        int first_id = graph.poses.begin()->first;
+        problem.SetParameterBlockConstant(pose_params[first_id].first.data());   // quaternion
+        problem.SetParameterBlockConstant(pose_params[first_id].second.data());  // translation
     }
 
     // Compute initial cost

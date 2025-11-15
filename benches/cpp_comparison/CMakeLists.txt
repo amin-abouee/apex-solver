@@ -12,10 +12,10 @@ endif()
 
 message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 
-# Strategy: Use Eigen 5.0.x for Ceres, Eigen@3 (3.4.x) for GTSAM and g2o
+# Strategy: Use Eigen 5.0.x for Ceres and g2o, Eigen@3 (3.4.x) for GTSAM
 # We need to explicitly set paths to avoid CMake finding the wrong version
 
-# First, find Eigen 5.0.x for Ceres
+# First, find Eigen 5.0.x for Ceres and g2o
 set(Eigen3_DIR "/opt/homebrew/Cellar/eigen/5.0.1/share/eigen3/cmake" CACHE PATH "Path to Eigen 5.x CMake config")
 find_package(Eigen3 5.0 QUIET NO_MODULE)
 if(Eigen3_FOUND)
@@ -45,7 +45,7 @@ else()
     set(BUILD_CERES_BENCHMARK FALSE)
 endif()
 
-# Now switch to Eigen@3 for GTSAM and g2o
+# Now switch to Eigen@3 for GTSAM only
 unset(Eigen3_DIR CACHE)
 set(Eigen3_DIR "/opt/homebrew/opt/eigen@3/share/eigen3/cmake" CACHE PATH "Path to Eigen3 CMake config")
 unset(Eigen3_FOUND)
@@ -59,7 +59,7 @@ if(Eigen3_FOUND)
     set(EIGEN3_VERSION_34 ${Eigen3_VERSION})
     set(EIGEN3_AVAILABLE TRUE)
 else()
-    message(WARNING "Eigen@3 not found - GTSAM and g2o benchmarks may not build")
+    message(WARNING "Eigen@3 not found - GTSAM benchmark may not build")
     set(EIGEN3_AVAILABLE FALSE)
 endif()
 
@@ -79,8 +79,8 @@ else()
     set(BUILD_GTSAM_BENCHMARK FALSE)
 endif()
 
-# Find g2o (works with Eigen@3)
-if(EIGEN3_AVAILABLE)
+# Find g2o (needs Eigen 5.0.x)
+if(EIGEN5_AVAILABLE)
     find_package(g2o QUIET)
     if(g2o_FOUND)
         message(STATUS "Found g2o")
@@ -91,35 +91,30 @@ if(EIGEN3_AVAILABLE)
         set(BUILD_G2O_BENCHMARK FALSE)
     endif()
 else()
-    message(WARNING "Eigen@3 not available - skipping g2o benchmark")
+    message(WARNING "Eigen 5.x not available - skipping g2o benchmark")
     set(BUILD_G2O_BENCHMARK FALSE)
 endif()
 
-# Common utilities library for GTSAM and g2o (use Eigen@3)
+# Common utilities library for Ceres and g2o (use Eigen 5.0.x)
 add_library(bench_common STATIC
     common/read_g2o.cpp
 )
 
 target_include_directories(bench_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${EIGEN3_INCLUDE_DIRS_34}
+    ${EIGEN5_INCLUDE_DIRS}
 )
 
 target_link_libraries(bench_common PUBLIC
     Eigen3::Eigen
 )
 
-# Ceres benchmark executable (uses Eigen 5.0.x, builds read_g2o.cpp separately)
+# Ceres benchmark executable (uses Eigen 5.0.x via bench_common)
 if(BUILD_CERES_BENCHMARK)
-    add_executable(ceres_benchmark ceres_benchmark.cpp common/read_g2o.cpp)
-
-    # Use Eigen 5.x include dirs explicitly
-    target_include_directories(ceres_benchmark PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${EIGEN5_INCLUDE_DIRS}
-    )
+    add_executable(ceres_benchmark ceres_benchmark.cpp)
 
     target_link_libraries(ceres_benchmark PRIVATE
+        bench_common
         Ceres::ceres
     )
 
@@ -127,18 +122,23 @@ if(BUILD_CERES_BENCHMARK)
     target_compile_definitions(ceres_benchmark PRIVATE EIGEN_VERSION_STRING="${EIGEN5_VERSION}")
 endif()
 
-# GTSAM benchmark executable (uses Eigen@3)
+# GTSAM benchmark executable (uses Eigen@3, builds read_g2o.cpp separately)
 if(BUILD_GTSAM_BENCHMARK)
-    add_executable(gtsam_benchmark gtsam_benchmark.cpp)
+    add_executable(gtsam_benchmark gtsam_benchmark.cpp common/read_g2o.cpp)
+
+    # Use Eigen 3.4 include dirs explicitly
+    target_include_directories(gtsam_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${EIGEN3_INCLUDE_DIRS_34}
+    )
 
     target_link_libraries(gtsam_benchmark PRIVATE
-        bench_common
         gtsam
         Eigen3::Eigen
     )
 endif()
 
-# g2o benchmark executable (uses Eigen@3)
+# g2o benchmark executable (uses Eigen 5.0.x via bench_common)
 if(BUILD_G2O_BENCHMARK)
     add_executable(g2o_benchmark g2o_benchmark.cpp)
 
@@ -151,6 +151,9 @@ if(BUILD_G2O_BENCHMARK)
         g2o::types_slam3d
         g2o::solver_eigen
     )
+
+    # Add compile definition to help debug
+    target_compile_definitions(g2o_benchmark PRIVATE EIGEN_VERSION_STRING="${EIGEN5_VERSION}")
 endif()
 
 # Check if at least one benchmark can be built
@@ -173,7 +176,7 @@ else()
     message(STATUS "  GTSAM: NOT AVAILABLE")
 endif()
 if(BUILD_G2O_BENCHMARK)
-    message(STATUS "  g2o: AVAILABLE (with Eigen ${EIGEN3_VERSION_34})")
+    message(STATUS "  g2o: AVAILABLE (with Eigen ${EIGEN5_VERSION})")
 else()
     message(STATUS "  g2o: NOT AVAILABLE")
 endif()
