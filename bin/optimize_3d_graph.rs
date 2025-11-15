@@ -510,12 +510,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Check if visualization is requested with multiple datasets
     #[cfg(feature = "visualization")]
     if args.with_visualizer && datasets.len() > 1 {
-        warn!(
-            "Visualization is not supported when running multiple datasets (--dataset all)."
-        );
-        warn!(
-            "Disabling visualization. To use visualization, specify a single dataset."
-        );
+        warn!("Visualization is not supported when running multiple datasets (--dataset all).");
+        warn!("Disabling visualization. To use visualization, specify a single dataset.");
         warn!("Example: --dataset sphere2500 --with-visualizer");
         args.with_visualizer = false;
     }
