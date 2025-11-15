@@ -298,5 +298,9 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
     results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
 
-   return 0;
+    // Write to CSV
+    std::string output_file = "ceres_benchmark_results.csv";
+    benchmark_utils::WriteResultsToCSV(output_file, results);
+
+    return 0;
 }
