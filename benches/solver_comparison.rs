@@ -890,11 +890,7 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     };
 
     // List of C++ benchmark executables to run
-    let cpp_benchmarks = vec![
-        "g2o_benchmark",
-        "gtsam_benchmark",
-        // Note: ceres_benchmark may not be available due to Eigen conflicts
-    ];
+    let cpp_benchmarks = vec!["ceres_benchmark", "g2o_benchmark", "gtsam_benchmark"];
 
     for exe_name in cpp_benchmarks {
         match run_cpp_benchmark(exe_name, &build_dir) {

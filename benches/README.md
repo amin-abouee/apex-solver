@@ -100,9 +100,9 @@ cargo bench --bench solver_comparison -- --save-baseline my-baseline
 ## C++ Benchmarks (`cpp_comparison/`)
 
 ### What It Tests
-- ✅ **GTSAM**: Georgia Tech's Smoothing and Mapping library  
-- ✅ **g2o**: General Graph Optimization framework
-- ❌ **Ceres Solver**: Currently unavailable due to Eigen version conflicts (see `cpp_comparison/CERES_STATUS.md`)
+- ✅ **Ceres Solver**: Google's C++ optimization library (uses Eigen 5.0.1)
+- ✅ **g2o**: General Graph Optimization framework (uses Eigen 5.0.1)
+- ✅ **GTSAM**: Georgia Tech's Smoothing and Mapping library (uses Eigen 3.4.1)
 
 ### Configuration
 All solvers use consistent parameters:
@@ -116,13 +116,13 @@ All solvers use consistent parameters:
 
 Install C++ dependencies (macOS):
 ```bash
-brew install eigen@3 gtsam g2o cmake
+brew install eigen eigen@3 ceres-solver gtsam g2o cmake
 ```
 
-**Note:** Ceres Solver has Eigen version compatibility issues. The current setup uses:
-- Eigen 3.4.1 (via `eigen@3`) for GTSAM and g2o
-- Both GTSAM and g2o benchmarks are fully functional
-- For Ceres status, see `cpp_comparison/CERES_STATUS.md` and `cpp_comparison/BENCHMARK_RESULTS.md`
+**Note:** The benchmark suite uses multiple Eigen versions:
+- Eigen 5.0.1 (via `eigen`) for Ceres Solver and g2o
+- Eigen 3.4.1 (via `eigen@3`) for GTSAM
+- CMake automatically handles the version switching
 
 ### Building
 
@@ -150,9 +150,9 @@ cargo run --bin run_cpp_benchmarks
 #### Manual Execution
 ```bash
 # From benches/cpp_comparison/build/
+./ceres_benchmark     # Run Ceres benchmark (✅ working)
 ./g2o_benchmark       # Run g2o benchmark (✅ working)
 ./gtsam_benchmark     # Run GTSAM benchmark (✅ working)
-# ./ceres_benchmark   # Ceres currently unavailable (❌ Eigen conflicts)
 ```
 
 ### Output
@@ -274,18 +274,25 @@ This is the **factrs-bench pattern** and is intentional.
 
 ### C++ Build Issues
 
-**Problem:** `Ceres not found or has Eigen version conflict`
+**Problem:** `Ceres not found`
 
 **Solution:**
 ```bash
-brew reinstall ceres-solver
+brew install eigen ceres-solver
 ```
 
 **Problem:** `GTSAM not found`
 
 **Solution:**
 ```bash
-brew install gtsam
+brew install eigen@3 gtsam
+```
+
+**Problem:** `g2o not found`
+
+**Solution:**
+```bash
+brew install g2o
 ```
 
 ### Rust Benchmark Issues
