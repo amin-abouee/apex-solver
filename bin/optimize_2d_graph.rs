@@ -586,7 +586,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for dataset in &datasets {
         match test_dataset(dataset, &args) {
             Ok(result) => {
-                info!("Dataset {} completed: {}\n", dataset, result.status);
+                info!("Dataset {} completed: {}", dataset, result.status);
                 results.push(result);
             }
             Err(e) => {
