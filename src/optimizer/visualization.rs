@@ -22,7 +22,7 @@
 use crate::{core::problem, io};
 use faer::sparse;
 use std::collections;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Optimization visualizer for real-time debugging with Rerun.
 ///
@@ -61,13 +61,13 @@ impl OptimizationVisualizer {
         let rec = if enabled {
             let rec = if let Some(path) = save_path {
                 // Save to file
-                println!("✓ Saving visualization to: {}", path);
+                info!("✓ Saving visualization to: {}", path);
                 rerun::RecordingStreamBuilder::new("apex-solver-optimization").save(path)?
             } else {
                 // Try to spawn Rerun viewer
                 match rerun::RecordingStreamBuilder::new("apex-solver-optimization").spawn() {
                     Ok(rec) => {
-                        println!("✓ Rerun viewer launched successfully");
+                        info!("✓ Rerun viewer launched successfully");
                         rec
                     }
                     Err(e) => {

@@ -1985,14 +1985,6 @@ mod tests {
         let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
         let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
 
-        println!("Rosenbrock optimization result (Dog Leg):");
-        println!("  Status: {:?}", result.status);
-        println!("  Initial cost: {:.6e}", result.initial_cost);
-        println!("  Final cost: {:.6e}", result.final_cost);
-        println!("  Iterations: {}", result.iterations);
-        println!("  x1: {:.6} (expected 1.0)", x1_final);
-        println!("  x2: {:.6} (expected 1.0)", x2_final);
-
         // Verify convergence to [1.0, 1.0]
         assert!(
             matches!(
