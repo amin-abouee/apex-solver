@@ -21,18 +21,28 @@ benches/
 │   ├── common/                  # Shared G2O parser and utilities
 │   ├── ceres_benchmark.cpp      # Ceres Solver benchmark
 │   ├── gtsam_benchmark.cpp      # GTSAM benchmark
-│   └── g2o_benchmark.cpp        # g2o benchmark
-├── run_all_benchmarks.sh        # Unified runner for both Rust and C++
+│   ├── g2o_benchmark.cpp        # g2o benchmark
+│   └── run_all_benchmarks.sh    # Legacy C++ benchmark runner
+├── run_all_benchmarks.sh        # Legacy unified runner for both Rust and C++
 └── README.md                    # This file
 ```
+
+**Note:** Rust binaries (`run_benchmarks` and `run_cpp_benchmarks`) are defined in `../bin/` and provide a modern alternative to the bash scripts.
 
 ## Quick Start
 
 ### Run All Benchmarks
 
+#### Option 1: Bash Scripts (Legacy)
 ```bash
 # From project root
 bash benches/run_all_benchmarks.sh
+```
+
+#### Option 2: Rust Binaries (Recommended)
+```bash
+# From project root
+cargo run --bin run_benchmarks
 ```
 
 This will:
@@ -125,6 +135,19 @@ cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 
 ### Running
 
+#### Option 1: Bash Script (Legacy)
+```bash
+# From benches/cpp_comparison/
+bash run_all_benchmarks.sh
+```
+
+#### Option 2: Rust Binary (Recommended)
+```bash
+# From project root
+cargo run --bin run_cpp_benchmarks
+```
+
+#### Manual Execution
 ```bash
 # From benches/cpp_comparison/build/
 ./g2o_benchmark       # Run g2o benchmark (✅ working)
@@ -143,6 +166,45 @@ Example CSV:
 dataset,manifold,solver,language,vertices,edges,init_cost,final_cost,improvement_pct,iterations,time_ms,status
 sphere2500,SE3,g2o-LM,C++,2500,4949,0.0,727.15,0.0,26,4176,CONVERGED
 ```
+
+## Rust Benchmark Runners
+
+As an alternative to bash scripts, this project provides Rust binaries for running benchmarks:
+
+### `run_benchmarks` Binary
+
+Unified runner that orchestrates both Rust and C++ benchmarks:
+
+```bash
+cargo run --bin run_benchmarks
+```
+
+**Features:**
+- Colored output with progress indicators
+- Automatic directory management
+- Error handling and status reporting
+- Cross-platform compatibility
+
+### `run_cpp_benchmarks` Binary
+
+Specialized runner for C++ benchmarks that handles:
+
+- CMake build configuration and compilation
+- Parallel building using all available CPU cores
+- Execution of individual C++ benchmark executables
+- Result collection and organization
+- Rust example execution for comparison
+
+```bash
+cargo run --bin run_cpp_benchmarks
+```
+
+**Advantages over bash scripts:**
+- Better error handling and recovery
+- Type safety and compile-time checks
+- Cross-platform path handling
+- Structured output and logging
+- Easier maintenance and testing
 
 ## Datasets
 
