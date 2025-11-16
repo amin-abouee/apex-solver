@@ -36,3 +36,4 @@ doc/*.md
 benches/cpp_comparison/build/
 benches/cpp_comparison/*.csv
 benches/cpp_comparison/.cache/*
+__cmake*
