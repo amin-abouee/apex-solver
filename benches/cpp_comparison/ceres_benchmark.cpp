@@ -35,8 +35,7 @@ public:
         residuals(1) = h_y - T(y_);
         residuals(2) = h_theta - T(theta_);
 
-        // Apply information matrix (sqrt for Ceres)
-        residuals = sqrt_information_.template cast<T>() * residuals;
+        // No information matrix weighting (matches Rust solver)
 
         return true;
     }
@@ -91,8 +90,7 @@ public:
         Eigen::Quaternion<T> q_error = q_ab_measured.conjugate() * q_ab;
         residuals.template tail<3>() = T(2.0) * q_error.vec();
 
-        // Apply information matrix
-        residuals = sqrt_information_.template cast<T>() * residuals;
+        // No information matrix weighting (matches Rust solver)
 
         return true;
     }
@@ -142,7 +140,8 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        Eigen::Matrix3d sqrt_info = constraint.information.llt().matrixL();
+        // Use identity matrix for unweighted residuals (matches Rust solver)
+        Eigen::Matrix3d sqrt_info = Eigen::Matrix3d::Identity();
 
         ceres::CostFunction* cost_function = PoseGraph2DErrorTerm::Create(
             constraint.measurement.translation.x(),
@@ -230,7 +229,8 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        Eigen::Matrix<double, 6, 6> sqrt_info = constraint.information.llt().matrixL();
+        // Use identity matrix for unweighted residuals (matches Rust solver)
+        Eigen::Matrix<double, 6, 6> sqrt_info = Eigen::Matrix<double, 6, 6>::Identity();
 
         ceres::CostFunction* cost_function = PoseGraph3DErrorTerm::Create(
             constraint.measurement, sqrt_info);
