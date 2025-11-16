@@ -29,7 +29,6 @@
 
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactorSE3;
-use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
@@ -70,10 +69,16 @@ struct Args {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args = Args::parse();
+    // Initialize tracing with default info level
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing::Level::INFO.into())
+                .from_env_lossy(),
+        )
+        .init();
 
-    // Initialize logger with INFO level
-    init_logger();
+    let args = Args::parse();
 
     // Construct dataset path
     let dataset_path = format!("data/{}.g2o", args.dataset);
@@ -82,7 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load graph from G2O file
     let graph = G2oLoader::load(&dataset_path)?;
 
-    info!("Dataset Statistics");
+    info!("\n=== Dataset Statistics ===");
     info!("SE3 vertices: {}", graph.vertices_se3.len());
     info!("SE3 edges:    {}", graph.edges_se3.len());
     info!("SE2 vertices: {}", graph.vertices_se2.len());
@@ -95,16 +100,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Choose appropriate workflow based on graph content
     if !graph.edges_se3.is_empty() {
-        info!("Running SE3 Optimization with Rerun Visualization");
+        info!("\n=== Running SE3 Optimization with Rerun Visualization ===");
         optimize_se3_graph(&graph, &args)?;
     } else if !graph.edges_se2.is_empty() {
-        info!("Running SE2 Optimization with Rerun Visualization");
+        info!("\n=== Running SE2 Optimization with Rerun Visualization ===");
         info!("Note: SE2 visualization is currently limited to 2D point plots");
         optimize_se2_graph(&graph, &args)?;
     }
 
     // Keep program running briefly so Rerun viewer can display data
-    info!("✓ Optimization complete!");
+    info!("\n✓ Optimization complete!");
     info!("Keeping connection open for 5 seconds...");
     std::thread::sleep(std::time::Duration::from_secs(5));
 
@@ -117,7 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Print Rerun connection instructions
     if args.save_visualization.is_some() {
-        info!("Rerun Visualization");
+        info!("\n=== Rerun Visualization ===");
         info!(
             "Saving to file: {}",
             args.save_visualization.as_ref().unwrap()
@@ -127,7 +132,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
             args.save_visualization.as_ref().unwrap()
         );
     } else {
-        info!("Rerun Visualization");
+        info!("\n=== Rerun Visualization ===");
         info!("Starting Rerun server on port 9876");
         info!("To view live data, run in another terminal:");
         info!("  rerun");
@@ -167,20 +172,18 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         initial_params.insert(var_name, (ManifoldType::SE3, pose_vec));
     }
 
-    // Configure optimizer with Rerun visualization
+    // Configure optimizer
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(args.max_iterations)
         .with_cost_tolerance(args.cost_tolerance)
         .with_parameter_tolerance(1e-4)
         .with_gradient_tolerance(1e-8);
-    #[cfg(feature = "visualization")]
-    let config = config.with_visualization(true);
 
-    info!("Optimizer Configuration");
+    info!("\n=== Optimizer Configuration ===");
     info!("Max iterations:     {}", config.max_iterations);
     info!("Cost tolerance:     {:.2e}", config.cost_tolerance);
     info!("Rerun logging:      enabled");
-    info!("Visualization Features");
+    info!("\n=== Visualization Features ===");
     info!("✓ Separate time series plots for: cost, gradient_norm, damping, step_quality");
     info!("✓ Hessian matrix: downsampled to 100×100 heat map");
     info!("✓ Gradient vector: downsampled to 100-element bar");
@@ -189,7 +192,22 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Create and run optimizer
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    info!("Starting Optimization");
+    // Add Rerun visualization observer
+    #[cfg(feature = "visualization")]
+    {
+        use apex_solver::observers::RerunObserver;
+        match RerunObserver::new(true) {
+            Ok(observer) => {
+                solver.add_observer(observer);
+                info!("✓ Rerun visualization enabled");
+            }
+            Err(e) => {
+                warn!("Warning: Failed to create Rerun observer: {}", e);
+            }
+        }
+    }
+
+    info!("\n=== Starting Optimization ===");
     info!("The Rerun viewer should open automatically.");
 
     let result = solver.optimize(&problem, &initial_params)?;
@@ -199,7 +217,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // Print summary
-    info!("Optimization Results");
+    info!("\n=== Optimization Results ===");
     info!("Status:          {}", result.status);
     info!("Initial cost:    {:.6e}", result.initial_cost);
     info!("Final cost:      {:.6e}", result.final_cost);
@@ -211,7 +229,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     info!("Elapsed time:    {:?}", result.elapsed_time);
 
     if let Some(conv_info) = &result.convergence_info {
-        info!("Convergence Info:");
+        info!("\nConvergence Info:");
         info!(
             "  Gradient norm:      {:.6e}",
             conv_info.final_gradient_norm
@@ -226,7 +244,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
     // Save optimized graph if requested
     if let Some(output_path) = &args.save_output {
-        info!("Saving Optimized Graph");
+        info!("\n=== Saving Optimized Graph ===");
         let optimized_graph = Graph::from_optimized_variables(&result.parameters, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
         info!("Saved to: {}", output_path.display());
@@ -265,16 +283,14 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         initial_params.insert(var_name, (ManifoldType::SE2, pose_vec));
     }
 
-    // Configure optimizer with Rerun visualization
+    // Configure optimizer
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(args.max_iterations)
         .with_cost_tolerance(args.cost_tolerance)
         .with_parameter_tolerance(1e-4)
         .with_gradient_tolerance(1e-8);
-    #[cfg(feature = "visualization")]
-    let config = config.with_visualization(true);
 
-    info!("Optimizer Configuration");
+    info!("\n=== Optimizer Configuration ===");
     info!("Max iterations:     {}", config.max_iterations);
     info!("Cost tolerance:     {:.2e}", config.cost_tolerance);
     info!("Rerun logging:      enabled");
@@ -282,12 +298,27 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Create and run optimizer
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    info!("Starting Optimization");
+    // Add Rerun visualization observer
+    #[cfg(feature = "visualization")]
+    {
+        use apex_solver::observers::RerunObserver;
+        match RerunObserver::new(true) {
+            Ok(observer) => {
+                solver.add_observer(observer);
+                info!("✓ Rerun visualization enabled");
+            }
+            Err(e) => {
+                warn!("Warning: Failed to create Rerun observer: {}", e);
+            }
+        }
+    }
+
+    info!("\n=== Starting Optimization ===");
 
     let result = solver.optimize(&problem, &initial_params)?;
 
     // Print summary
-    info!("Optimization Results");
+    info!("\n=== Optimization Results ===");
     info!("Status:          {}", result.status);
     info!("Initial cost:    {:.6e}", result.initial_cost);
     info!("Final cost:      {:.6e}", result.final_cost);
@@ -301,7 +332,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     if let Some(output_path) = &args.save_output {
         let optimized_graph = Graph::from_optimized_variables(&result.parameters, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
-        info!("Saved to: {}", output_path.display());
+        info!("\nSaved to: {}", output_path.display());
     }
 
     Ok(())
