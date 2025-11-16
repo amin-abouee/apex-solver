@@ -121,11 +121,6 @@
 
 use crate::{core::problem, error, linalg, manifold, optimizer};
 
-#[cfg(feature = "visualization")]
-use crate::optimizer::OptimizationVisualizer;
-#[cfg(feature = "visualization")]
-use tracing::warn;
-
 use faer::sparse;
 use std::{collections, fmt, time};
 use tracing::debug;
@@ -612,8 +607,7 @@ struct CostEvaluation {
 pub struct GaussNewton {
     config: GaussNewtonConfig,
     jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
-    #[cfg(feature = "visualization")]
-    visualizer: Option<OptimizationVisualizer>,
+    observers: optimizer::OptObserverVec,
 }
 
 impl Default for GaussNewton {
@@ -630,20 +624,35 @@ impl GaussNewton {
 
     /// Create a new Gauss-Newton solver with the given configuration.
     pub fn with_config(config: GaussNewtonConfig) -> Self {
-        // Create visualizer if enabled (zero overhead when disabled)
-        #[cfg(feature = "visualization")]
-        let visualizer = if config.enable_visualization {
-            OptimizationVisualizer::new(true).ok()
-        } else {
-            None
-        };
-
         Self {
             config,
             jacobi_scaling: None,
-            #[cfg(feature = "visualization")]
-            visualizer,
+            observers: optimizer::OptObserverVec::new(),
         }
+    }
+
+    /// Add an observer to the solver.
+    ///
+    /// Observers are notified at each iteration with the current variable values.
+    /// This enables real-time visualization, logging, metrics collection, etc.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use apex_solver::optimizer::GaussNewton;
+    /// # use apex_solver::optimizer::OptObserver;
+    /// # use std::collections::HashMap;
+    /// # use apex_solver::core::problem::VariableEnum;
+    ///
+    /// # struct MyObserver;
+    /// # impl OptObserver for MyObserver {
+    /// #     fn on_step(&self, _: &HashMap<String, VariableEnum>, _: usize) {}
+    /// # }
+    /// let mut solver = GaussNewton::new();
+    /// solver.add_observer(MyObserver);
+    /// ```
+    pub fn add_observer(&mut self, observer: impl optimizer::OptObserver + 'static) {
+        self.observers.add(observer);
     }
 
     /// Create the appropriate linear solver based on configuration
@@ -1096,31 +1105,26 @@ impl GaussNewton {
 
             previous_cost = state.current_cost;
 
-            // Rerun visualization
-            #[cfg(feature = "visualization")]
-            if let Some(ref vis) = self.visualizer {
-                if let Err(e) = vis.log_scalars(
-                    iteration,
-                    state.current_cost,
-                    step_result.gradient_norm,
-                    0.0, // Gauss-Newton doesn't use damping/trust region
-                    step_norm,
-                    None, // No step quality rho in Gauss-Newton
-                ) {
-                    warn!("Failed to log scalars: {}", e);
-                }
+            // Notify all observers with current state
+            // First set metrics data, then notify observers
+            self.observers.set_iteration_metrics(
+                state.current_cost,
+                step_result.gradient_norm,
+                None, // Gauss-Newton doesn't use damping
+                step_norm,
+                None, // Gauss-Newton doesn't use step quality
+            );
 
-                // Log expensive visualizations (Hessian, gradient, manifolds)
-                if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    warn!("Failed to log Hessian: {}", e);
-                }
-                if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    warn!("Failed to log gradient: {}", e);
-                }
-                if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    warn!("Failed to log manifolds: {}", e);
-                }
+            // Set matrix data if available and there are observers
+            if !self.observers.is_empty()
+                && let (Some(hessian), Some(gradient)) =
+                    (linear_solver.get_hessian(), linear_solver.get_gradient())
+            {
+                self.observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
             }
+
+            // Notify observers with current variable values and iteration number
+            self.observers.notify(&state.variables, iteration);
 
             // Compute parameter norm for convergence check
             let parameter_norm = Self::compute_parameter_norm(&state.variables);

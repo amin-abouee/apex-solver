@@ -23,15 +23,12 @@ pub mod dog_leg;
 pub mod gauss_newton;
 pub mod levenberg_marquardt;
 
-#[cfg(feature = "visualization")]
-pub mod visualization;
-
 pub use dog_leg::DogLeg;
 pub use gauss_newton::GaussNewton;
 pub use levenberg_marquardt::LevenbergMarquardt;
 
-#[cfg(feature = "visualization")]
-pub use visualization::OptimizationVisualizer;
+// Re-export observer types from the observers module
+pub use crate::observers::{OptObserver, OptObserverVec};
 
 /// Type of optimization solver algorithm to use
 #[derive(Default, Clone, Copy, PartialEq, Eq)]

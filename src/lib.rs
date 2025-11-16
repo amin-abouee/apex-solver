@@ -30,6 +30,7 @@ pub mod io;
 pub mod linalg;
 pub mod logger;
 pub mod manifold;
+pub mod observers;
 pub mod optimizer;
 
 // Re-export core types
@@ -46,5 +47,9 @@ pub use factors::{
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 pub use logger::{init_logger, init_logger_with_level};
 pub use optimizer::{
-    LevenbergMarquardt, OptimizerType, Solver, levenberg_marquardt::LevenbergMarquardtConfig,
+    LevenbergMarquardt, OptObserver, OptObserverVec, OptimizerType, Solver,
+    levenberg_marquardt::LevenbergMarquardtConfig,
 };
+
+#[cfg(feature = "visualization")]
+pub use observers::RerunObserver;

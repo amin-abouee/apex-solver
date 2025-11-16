@@ -149,15 +149,9 @@ use crate::error;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::manifold::ManifoldType;
 use crate::optimizer::{
-    ConvergenceInfo, OptimizationStatus, Solver, SolverResult, apply_negative_parameter_step,
-    apply_parameter_step, compute_cost,
+    ConvergenceInfo, OptObserverVec, OptimizationStatus, Solver, SolverResult,
+    apply_negative_parameter_step, apply_parameter_step, compute_cost,
 };
-
-#[cfg(feature = "visualization")]
-use crate::optimizer::OptimizationVisualizer;
-
-#[cfg(feature = "visualization")]
-use tracing::warn;
 
 use faer::{
     Mat,
@@ -480,20 +474,9 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
-    /// Enable real-time Rerun visualization (graphical debugging)
-    ///
-    /// When enabled, logs optimization progress to Rerun viewer including:
-    /// - Time series plots (cost, gradient norm, damping, step quality)
-    /// - Sparse Hessian heat map visualization
-    /// - Gradient vector visualization
-    /// - Manifold state updates (for SE2/SE3 problems)
-    ///
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
-    /// Use `verbose` for terminal output; this is for graphical visualization.
-    ///
-    /// Default: false
-    #[cfg(feature = "visualization")]
-    pub enable_visualization: bool,
+    // Note: Visualization is now handled via the observer pattern.
+    // Use `solver.add_observer(RerunObserver::new(true)?)` to enable visualization.
+    // This provides cleaner separation of concerns and allows multiple observers.
 }
 
 impl Default for LevenbergMarquardtConfig {
@@ -529,8 +512,6 @@ impl Default for LevenbergMarquardtConfig {
             // Existing parameters
             use_jacobi_scaling: false,
             compute_covariances: false,
-            #[cfg(feature = "visualization")]
-            enable_visualization: false,
         }
     }
 }
@@ -676,13 +657,12 @@ impl LevenbergMarquardtConfig {
     /// # Arguments
     ///
     /// * `enable` - Whether to enable visualization
-    #[cfg(feature = "visualization")]
-    pub fn with_visualization(mut self, enable: bool) -> Self {
-        self.enable_visualization = enable;
-        self
-    }
-
-    /// Print configuration parameters (verbose mode only)
+    // Note: with_visualization() method has been removed.
+    // Use the observer pattern instead:
+    //   let mut solver = LevenbergMarquardt::with_config(config);
+    //   solver.add_observer(RerunObserver::new(true)?);
+    // This provides cleaner separation and allows multiple observers.
+    ///   Print configuration parameters (verbose mode only)
     pub fn print_configuration(&self) {
         debug!(
             "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Trust Region:\n  Initial radius:      {:.2e}\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
@@ -782,8 +762,7 @@ struct StepEvaluation {
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<SparseColMat<usize, f64>>,
-    #[cfg(feature = "visualization")]
-    visualizer: Option<OptimizationVisualizer>,
+    observers: OptObserverVec,
 }
 
 impl Default for LevenbergMarquardt {
@@ -800,26 +779,45 @@ impl LevenbergMarquardt {
 
     /// Create a new Levenberg-Marquardt solver with the given configuration.
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
-        // Create visualizer if enabled (zero overhead when disabled)
-        #[cfg(feature = "visualization")]
-        let visualizer = if config.enable_visualization {
-            match OptimizationVisualizer::new(true) {
-                Ok(vis) => Some(vis),
-                Err(e) => {
-                    warn!("Failed to create visualizer: {}", e);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
         Self {
             config,
             jacobi_scaling: None,
-            #[cfg(feature = "visualization")]
-            visualizer,
+            observers: OptObserverVec::new(),
         }
+    }
+
+    /// Add an observer to monitor optimization progress.
+    ///
+    /// Observers are notified at each iteration with the current variable values.
+    /// This enables real-time visualization, logging, metrics collection, etc.
+    ///
+    /// # Arguments
+    ///
+    /// * `observer` - Any type implementing `OptObserver`
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
+    /// # use apex_solver::core::problem::Problem;
+    /// # use std::collections::HashMap;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut solver = LevenbergMarquardt::new();
+    ///
+    /// #[cfg(feature = "visualization")]
+    /// {
+    ///     use apex_solver::observers::RerunObserver;
+    ///     let rerun_observer = RerunObserver::new(true)?;
+    ///     solver.add_observer(rerun_observer);
+    /// }
+    ///
+    /// // ... optimize ...
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn add_observer(&mut self, observer: impl crate::optimizer::OptObserver + 'static) {
+        self.observers.add(observer);
     }
 
     /// Create the appropriate linear solver based on configuration
@@ -1349,31 +1347,27 @@ impl LevenbergMarquardt {
 
             previous_cost = state.current_cost;
 
-            // Rerun visualization
-            #[cfg(feature = "visualization")]
-            if let Some(ref vis) = self.visualizer {
-                if let Err(e) = vis.log_scalars(
-                    iteration,
-                    state.current_cost,
-                    step_result.gradient_norm,
-                    self.config.damping,
-                    step_norm,
-                    Some(step_eval.rho),
-                ) {
-                    warn!("Failed to log scalars: {}", e);
-                }
+            // Notify all observers with current state
+            // First set metrics data, then notify observers
+            self.observers.set_iteration_metrics(
+                state.current_cost,
+                step_result.gradient_norm,
+                Some(self.config.damping),
+                step_norm,
+                Some(step_eval.rho),
+            );
 
-                // Log expensive visualizations (Hessian, gradient, manifolds)
-                if let Err(e) = vis.log_hessian(linear_solver.get_hessian(), iteration) {
-                    warn!("Failed to log Hessian: {}", e);
-                }
-                if let Err(e) = vis.log_gradient(linear_solver.get_gradient(), iteration) {
-                    warn!("Failed to log gradient: {}", e);
-                }
-                if let Err(e) = vis.log_manifolds(&state.variables, iteration) {
-                    warn!("Failed to log manifolds: {}", e);
-                }
+            // Set matrix data if available and there are observers
+            if !self.observers.is_empty()
+                && let (Some(hessian), Some(gradient)) = (
+                    linear_solver.get_hessian(),
+                    linear_solver.get_gradient(),
+                ) {
+                self.observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
             }
+
+            // Notify observers with current variable values and iteration number
+            self.observers.notify(&state.variables, iteration);
 
             // Check convergence
             let elapsed = start_time.elapsed();
@@ -1427,12 +1421,6 @@ impl LevenbergMarquardt {
                 // Print summary only if debug level is enabled
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     debug!("{}", summary);
-                }
-
-                // Log convergence to Rerun
-                #[cfg(feature = "visualization")]
-                if let Some(ref vis) = self.visualizer {
-                    let _ = vis.log_convergence(&format!("Converged: {}", status));
                 }
 
                 // Compute covariances if enabled
