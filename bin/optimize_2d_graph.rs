@@ -409,9 +409,23 @@ fn test_dataset(
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10);
 
-            #[cfg(feature = "visualization")]
-            let config = config.with_visualization(args.with_visualizer);
             let mut solver = GaussNewton::with_config(config);
+
+            // Add Rerun visualization if enabled
+            #[cfg(feature = "visualization")]
+            if args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        solver.add_observer(observer);
+                        println!("✓ Rerun visualization enabled (Gauss-Newton)");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                    }
+                }
+            }
+
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
@@ -421,9 +435,23 @@ fn test_dataset(
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10);
 
-            #[cfg(feature = "visualization")]
-            let config = config.with_visualization(args.with_visualizer);
             let mut solver = DogLeg::with_config(config);
+
+            // Add Rerun visualization if enabled
+            #[cfg(feature = "visualization")]
+            if args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        solver.add_observer(observer);
+                        println!("✓ Rerun visualization enabled (Dog Leg)");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                    }
+                }
+            }
+
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
@@ -433,9 +461,23 @@ fn test_dataset(
                 .with_parameter_tolerance(1e-4)
                 .with_gradient_tolerance(1e-10);
 
-            #[cfg(feature = "visualization")]
-            let config = config.with_visualization(args.with_visualizer);
             let mut solver = LevenbergMarquardt::with_config(config);
+
+            // Add Rerun visualization if enabled
+            #[cfg(feature = "visualization")]
+            if args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        solver.add_observer(observer);
+                        println!("✓ Rerun visualization enabled (Levenberg-Marquardt)");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                    }
+                }
+            }
+
             solver.optimize(&problem, &initial_values)?
         }
     };
