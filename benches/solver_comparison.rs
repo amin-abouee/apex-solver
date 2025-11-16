@@ -298,12 +298,7 @@ impl BenchmarkResult {
         }
     }
 
-    fn diverged(
-        dataset: &str,
-        solver: &str,
-        language: &str,
-        elapsed_ms: f64,
-    ) -> Self {
+    fn diverged(dataset: &str, solver: &str, language: &str, elapsed_ms: f64) -> Self {
         Self {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
@@ -511,7 +506,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
     // Compute initial cost from raw graph using unified cost function
     // This ensures all solvers start with the same cost baseline
-    let initial_cost = if dataset.is_3d {
+    let _initial_cost = if dataset.is_3d {
         compute_se3_cost(&raw_graph)
     } else {
         compute_se2_cost(&raw_graph)
@@ -528,7 +523,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match result {
-        Ok(final_values) => {
+        Ok(_final_values) => {
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
@@ -538,7 +533,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 None, // factrs doesn't expose iteration count
             )
         }
-        Err(factrs::optimizers::OptError::MaxIterations(final_values)) => {
+        Err(factrs::optimizers::OptError::MaxIterations(_final_values)) => {
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
@@ -548,18 +543,12 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 None,
             )
         }
-        Err(factrs::optimizers::OptError::FailedToStep) => BenchmarkResult::diverged(
-            dataset.name,
-            "factrs",
-            "Rust",
-            elapsed_ms,
-        ),
-        Err(factrs::optimizers::OptError::InvalidSystem) => BenchmarkResult::diverged(
-            dataset.name,
-            "factrs",
-            "Rust",
-            elapsed_ms,
-        ),
+        Err(factrs::optimizers::OptError::FailedToStep) => {
+            BenchmarkResult::diverged(dataset.name, "factrs", "Rust", elapsed_ms)
+        }
+        Err(factrs::optimizers::OptError::InvalidSystem) => {
+            BenchmarkResult::diverged(dataset.name, "factrs", "Rust", elapsed_ms)
+        }
     }
 }
 
@@ -590,7 +579,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     let lm = LevenbergMarquardtOptimizer::default();
 
     // Compute initial cost from raw graph using unified cost function
-    let initial_cost = if dataset.is_3d {
+    let _initial_cost = if dataset.is_3d {
         compute_se3_cost(&raw_graph)
     } else {
         compute_se2_cost(&raw_graph)
@@ -615,7 +604,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
             }
 
             // Compute final cost from updated graph using unified cost function
-            let final_cost = if dataset.is_3d {
+            let _final_cost = if dataset.is_3d {
                 compute_se3_cost(&raw_graph)
             } else {
                 compute_se2_cost(&raw_graph)
@@ -632,12 +621,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
         }
         None => {
             // Optimization failed (NaN, solve failed, or other error)
-            BenchmarkResult::diverged(
-                dataset.name,
-                "tiny-solver",
-                "Rust",
-                elapsed_ms,
-            )
+            BenchmarkResult::diverged(dataset.name, "tiny-solver", "Rust", elapsed_ms)
         }
     }
 }
@@ -834,13 +818,16 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
 fn compute_normalized_scores(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
     // For now, just return results unchanged with placeholder normalized scores
     // This maintains the interface but doesn't compute actual normalized scores
-    results.iter().map(|r| {
-        let mut result = r.clone();
-        // Placeholder: assign 100 for converged, 0 for not converged
-        let score = if r.converged == "true" { 100.0 } else { 0.0 };
-        result.normalized_score = format!("{:.1}", score);
-        result
-    }).collect()
+    results
+        .iter()
+        .map(|r| {
+            let mut result = r.clone();
+            // Placeholder: assign 100 for converged, 0 for not converged
+            let score = if r.converged == "true" { 100.0 } else { 0.0 };
+            result.normalized_score = format!("{:.1}", score);
+            result
+        })
+        .collect()
 }
 
 fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
@@ -960,13 +947,7 @@ fn main() {
         info!("{}", "=".repeat(140));
         info!(
             "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
-            "Dataset",
-            "Solver",
-            "Language",
-            "Score",
-            "Time (ms)",
-            "Converged",
-            "Iters"
+            "Dataset", "Solver", "Language", "Score", "Time (ms)", "Converged", "Iters"
         );
         info!("{}", "-".repeat(110));
 
@@ -998,13 +979,7 @@ fn main() {
         info!("{}", "=".repeat(140));
         info!(
             "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
-            "Dataset",
-            "Solver",
-            "Language",
-            "Score",
-            "Time (ms)",
-            "Converged",
-            "Iters"
+            "Dataset", "Solver", "Language", "Score", "Time (ms)", "Converged", "Iters"
         );
         info!("{}", "-".repeat(110));
 
