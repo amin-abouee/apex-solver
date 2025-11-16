@@ -1359,11 +1359,11 @@ impl LevenbergMarquardt {
 
             // Set matrix data if available and there are observers
             if !self.observers.is_empty()
-                && let (Some(hessian), Some(gradient)) = (
-                    linear_solver.get_hessian(),
-                    linear_solver.get_gradient(),
-                ) {
-                self.observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
+                && let (Some(hessian), Some(gradient)) =
+                    (linear_solver.get_hessian(), linear_solver.get_gradient())
+            {
+                self.observers
+                    .set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
             }
 
             // Notify observers with current variable values and iteration number
