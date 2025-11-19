@@ -149,7 +149,7 @@ use crate::error;
 use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use crate::manifold::ManifoldType;
 use crate::optimizer::{
-    ConvergenceInfo, OptObserverVec, OptimizationStatus, Solver, SolverResult,
+    ConvergenceInfo, OptObserverVec, OptimizationStatus, OptimizerError, Solver, SolverResult,
     apply_negative_parameter_step, apply_parameter_step, compute_cost,
 };
 
@@ -1029,7 +1029,7 @@ impl LevenbergMarquardt {
     fn create_jacobi_scaling(
         &self,
         jacobian: &SparseColMat<usize, f64>,
-    ) -> SparseColMat<usize, f64> {
+    ) -> Result<SparseColMat<usize, f64>, OptimizerError> {
         let cols = jacobian.ncols();
         let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
             .map(|c| {
@@ -1047,7 +1047,7 @@ impl LevenbergMarquardt {
             .collect();
 
         SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
-            .expect("Failed to create Jacobi scaling matrix")
+            .map_err(|e| OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e))
     }
 
     /// Initialize optimization state from problem and initial parameters
@@ -1094,13 +1094,17 @@ impl LevenbergMarquardt {
         &mut self,
         jacobian: &SparseColMat<usize, f64>,
         iteration: usize,
-    ) -> SparseColMat<usize, f64> {
+    ) -> Result<SparseColMat<usize, f64>, OptimizerError> {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
-            let scaling = self.create_jacobi_scaling(jacobian);
+            let scaling = self.create_jacobi_scaling(jacobian)?;
             self.jacobi_scaling = Some(scaling);
         }
-        jacobian * self.jacobi_scaling.as_ref().unwrap()
+        let scaling = self
+            .jacobi_scaling
+            .as_ref()
+            .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+        Ok(jacobian * scaling)
     }
 
     /// Compute optimization step by solving the augmented system
@@ -1109,21 +1113,29 @@ impl LevenbergMarquardt {
         residuals: &Mat<f64>,
         scaled_jacobian: &SparseColMat<usize, f64>,
         linear_solver: &mut Box<dyn SparseLinearSolver>,
-    ) -> Option<StepResult> {
+    ) -> Result<StepResult, OptimizerError> {
         // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
         let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
             .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.damping)
-            .ok()?;
+            .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
         // Get cached gradient and Hessian from the solver
-        let gradient = linear_solver.get_gradient()?;
-        let _hessian = linear_solver.get_hessian()?;
+        let gradient = linear_solver.get_gradient().ok_or_else(|| {
+            OptimizerError::NumericalInstability("Gradient not available".into()).log()
+        })?;
+        let _hessian = linear_solver.get_hessian().ok_or_else(|| {
+            OptimizerError::NumericalInstability("Hessian not available".into()).log()
+        })?;
         let gradient_norm = gradient.norm_l2();
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
-            &scaled_step * self.jacobi_scaling.as_ref().unwrap()
+            let scaling = self
+                .jacobi_scaling
+                .as_ref()
+                .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+            &scaled_step * scaling
         } else {
             scaled_step
         };
@@ -1131,7 +1143,7 @@ impl LevenbergMarquardt {
         // Compute predicted reduction using scaled values
         let predicted_reduction = self.compute_predicted_reduction(&step, gradient);
 
-        Some(StepResult {
+        Ok(StepResult {
             step,
             gradient_norm,
             predicted_reduction,
@@ -1283,24 +1295,15 @@ impl LevenbergMarquardt {
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                self.process_jacobian(&jacobian, iteration)
+                self.process_jacobian(&jacobian, iteration)?
             } else {
                 jacobian
             };
 
             // Compute optimization step
-            let step_result = match self.compute_levenberg_marquardt_step(
-                &residuals,
-                &scaled_jacobian,
-                &mut linear_solver,
-            ) {
-                Some(result) => result,
-                None => {
-                    return Err(error::ApexError::Solver(
-                        "Linear solver failed to solve augmented system".to_string(),
-                    ));
-                }
-            };
+            let step_result = self
+                .compute_levenberg_marquardt_step(&residuals, &scaled_jacobian, &mut linear_solver)
+                .map_err(|e| error::ApexError::Solver(e.to_string()))?;
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -1548,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() {
+    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -1575,11 +1578,19 @@ mod tests {
             .with_gradient_tolerance(1e-10);
 
         let mut solver = LevenbergMarquardt::with_config(config);
-        let result = solver.optimize(&problem, &initial_values).unwrap();
+        let result = solver.optimize(&problem, &initial_values)?;
 
         // Extract final values
-        let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
-        let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
+        let x1_final = result
+            .parameters
+            .get("x1")
+            .ok_or("x1 not found")?
+            .to_vector()[0];
+        let x2_final = result
+            .parameters
+            .get("x2")
+            .ok_or("x2 not found")?
+            .to_vector()[0];
 
         // Verify convergence to [1.0, 1.0]
         assert!(
@@ -1607,5 +1618,6 @@ mod tests {
             "Final cost should be near zero, got {}",
             result.final_cost
         );
+        Ok(())
     }
 }

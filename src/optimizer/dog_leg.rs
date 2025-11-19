@@ -1344,7 +1344,7 @@ impl DogLeg {
     fn create_jacobi_scaling(
         &self,
         jacobian: &sparse::SparseColMat<usize, f64>,
-    ) -> sparse::SparseColMat<usize, f64> {
+    ) -> Result<sparse::SparseColMat<usize, f64>, optimizer::OptimizerError> {
         use faer::sparse::Triplet;
 
         let cols = jacobian.ncols();
@@ -1361,8 +1361,9 @@ impl DogLeg {
             })
             .collect();
 
-        sparse::SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
-            .expect("Failed to create Jacobi scaling matrix")
+        sparse::SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec).map_err(|e| {
+            optimizer::OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e)
+        })
     }
 
     /// Initialize optimization state
@@ -1411,13 +1412,17 @@ impl DogLeg {
         &mut self,
         jacobian: &sparse::SparseColMat<usize, f64>,
         iteration: usize,
-    ) -> sparse::SparseColMat<usize, f64> {
+    ) -> Result<sparse::SparseColMat<usize, f64>, optimizer::OptimizerError> {
         // Create Jacobi scaling on first iteration if enabled
         if iteration == 0 {
-            let scaling = self.create_jacobi_scaling(jacobian);
+            let scaling = self.create_jacobi_scaling(jacobian)?;
             self.jacobi_scaling = Some(scaling);
         }
-        jacobian * self.jacobi_scaling.as_ref().unwrap()
+        let scaling = self
+            .jacobi_scaling
+            .as_ref()
+            .ok_or_else(|| optimizer::OptimizerError::JacobiScalingNotInitialized.log())?;
+        Ok(jacobian * scaling)
     }
 
     /// Compute dog leg optimization step
@@ -1458,7 +1463,8 @@ impl DogLeg {
             );
 
             let step = if self.config.use_jacobi_scaling {
-                self.jacobi_scaling.as_ref().unwrap() * &scaled_step
+                let scaling = self.jacobi_scaling.as_ref()?;
+                scaling * &scaled_step
             } else {
                 scaled_step.clone()
             };
@@ -1522,7 +1528,8 @@ impl DogLeg {
 
         // 6. Apply inverse Jacobi scaling if enabled
         let step = if self.config.use_jacobi_scaling {
-            self.jacobi_scaling.as_ref().unwrap() * &scaled_step
+            let scaling = self.jacobi_scaling.as_ref()?;
+            scaling * &scaled_step
         } else {
             scaled_step.clone()
         };
@@ -1690,7 +1697,7 @@ impl DogLeg {
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                self.process_jacobian(&jacobian, iteration)
+                self.process_jacobian(&jacobian, iteration)?
             } else {
                 jacobian
             };
@@ -1953,7 +1960,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() {
+    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -1987,11 +1994,19 @@ mod tests {
             .with_trust_region_radius(10.0); // Start with larger trust region
 
         let mut solver = DogLeg::with_config(config);
-        let result = solver.optimize(&problem, &initial_values).unwrap();
+        let result = solver.optimize(&problem, &initial_values)?;
 
         // Extract final values
-        let x1_final = result.parameters.get("x1").unwrap().to_vector()[0];
-        let x2_final = result.parameters.get("x2").unwrap().to_vector()[0];
+        let x1_final = result
+            .parameters
+            .get("x1")
+            .ok_or("x1 not found")?
+            .to_vector()[0];
+        let x2_final = result
+            .parameters
+            .get("x2")
+            .ok_or("x2 not found")?
+            .to_vector()[0];
 
         // Verify convergence to [1.0, 1.0]
         assert!(
@@ -2019,5 +2034,6 @@ mod tests {
             "Final cost should be near zero, got {}",
             result.final_cost
         );
+        Ok(())
     }
 }

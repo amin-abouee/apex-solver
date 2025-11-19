@@ -18,6 +18,7 @@ use std::{
     fmt::{Display, Formatter},
 };
 use thiserror::Error;
+use tracing::error;
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -98,6 +99,59 @@ pub enum OptimizerError {
     /// Problem has no residual blocks
     #[error("Problem has no residual blocks")]
     NoResidualBlocks,
+
+    /// Jacobi scaling matrix creation failed
+    #[error("Failed to create Jacobi scaling matrix: {0}")]
+    JacobiScalingCreation(String),
+
+    /// Jacobi scaling not initialized when expected
+    #[error("Jacobi scaling not initialized")]
+    JacobiScalingNotInitialized,
+
+    /// Unknown or unsupported linear solver type
+    #[error("Unknown linear solver type: {0}")]
+    UnknownLinearSolver(String),
+}
+
+impl OptimizerError {
+    /// Log the error with tracing::error and return self for chaining
+    ///
+    /// This method allows for a consistent error logging pattern throughout
+    /// the optimizer module, ensuring all errors are properly recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// operation()
+    ///     .map_err(|e| OptimizerError::from(e).log())?;
+    /// ```
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with the original source error from a third-party library
+    ///
+    /// This method logs both the OptimizerError and the underlying error
+    /// from external libraries. This provides full debugging context when
+    /// errors occur in third-party code.
+    ///
+    /// # Arguments
+    /// * `source_error` - The original error from the third-party library (must implement Debug)
+    ///
+    /// # Example
+    /// ```ignore
+    /// SparseColMat::try_new_from_triplets(cols, cols, &triplets)
+    ///     .map_err(|e| {
+    ///         OptimizerError::JacobiScalingCreation(e.to_string())
+    ///             .log_with_source(e)
+    ///     })?;
+    /// ```
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
 }
 
 /// Result type for optimizer operations
