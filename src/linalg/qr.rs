@@ -258,8 +258,11 @@ mod tests {
 
     const TOLERANCE: f64 = 1e-10;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Helper function to create test data for QR solver
-    fn create_test_data() -> (SparseColMat<usize, f64>, Mat<f64>) {
+    fn create_test_data()
+    -> Result<(SparseColMat<usize, f64>, Mat<f64>), faer::sparse::CreationError> {
         // Create a 4x3 overdetermined system
         let triplets = vec![
             Triplet::new(0, 0, 1.0),
@@ -275,11 +278,11 @@ mod tests {
             Triplet::new(3, 1, 0.0),
             Triplet::new(3, 2, 0.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets).expect("Failed to create test jacobian");
+        let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets)?;
 
         let residuals = Mat::from_fn(4, 1, |i, _| (i + 1) as f64);
 
-        (jacobian, residuals)
+        Ok((jacobian, residuals))
     }
 
     /// Test basic QR solver creation
@@ -294,95 +297,82 @@ mod tests {
 
     /// Test normal equation solving with QR decomposition
     #[test]
-    fn test_qr_solve_normal_equation() {
+    fn test_qr_solve_normal_equation() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
-
-        if let Ok(solution) = result {
-            assert_eq!(solution.nrows(), 3); // Number of variables
-            assert_eq!(solution.ncols(), 1);
-        }
+        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
+        assert_eq!(solution.nrows(), 3); // Number of variables
+        assert_eq!(solution.ncols(), 1);
 
         // Verify symbolic pattern was cached
         assert!(solver.factorizer.is_some());
+        Ok(())
     }
 
     /// Test QR symbolic pattern caching
     #[test]
-    fn test_qr_factorizer_caching() {
+    fn test_qr_factorizer_caching() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let result1 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result1.is_ok());
+        let sol1 = solver.solve_normal_equation(&residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let result2 = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result2.is_ok());
+        let sol2 = solver.solve_normal_equation(&residuals, &jacobian)?;
 
         // Results should be identical
-        if let (Ok(sol1), Ok(sol2)) = (result1, result2) {
-            for i in 0..sol1.nrows() {
-                assert!((sol1[(i, 0)] - sol2[(i, 0)]).abs() < TOLERANCE);
-            }
+        for i in 0..sol1.nrows() {
+            assert!((sol1[(i, 0)] - sol2[(i, 0)]).abs() < TOLERANCE);
         }
+        Ok(())
     }
 
     /// Test augmented equation solving with QR
     #[test]
-    fn test_qr_solve_augmented_equation() {
+    fn test_qr_solve_augmented_equation() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
         let lambda = 0.1;
 
-        let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
-        assert!(result.is_ok());
-
-        if let Ok(solution) = result {
-            assert_eq!(solution.nrows(), 3); // Number of variables
-            assert_eq!(solution.ncols(), 1);
-        }
+        let solution = solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
+        assert_eq!(solution.nrows(), 3); // Number of variables
+        assert_eq!(solution.ncols(), 1);
+        Ok(())
     }
 
     /// Test augmented system with different lambda values
     #[test]
-    fn test_qr_augmented_different_lambdas() {
+    fn test_qr_augmented_different_lambdas() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
         let lambda1 = 0.01;
         let lambda2 = 1.0;
 
-        let result1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1);
-        let result2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2);
-
-        assert!(result1.is_ok());
-        assert!(result2.is_ok());
+        let sol1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1)?;
+        let sol2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2)?;
 
         // Solutions should be different due to different regularization
-        if let (Ok(sol1), Ok(sol2)) = (result1, result2) {
-            let mut different = false;
-            for i in 0..sol1.nrows() {
-                if (sol1[(i, 0)] - sol2[(i, 0)]).abs() > TOLERANCE {
-                    different = true;
-                    break;
-                }
+        let mut different = false;
+        for i in 0..sol1.nrows() {
+            if (sol1[(i, 0)] - sol2[(i, 0)]).abs() > TOLERANCE {
+                different = true;
+                break;
             }
-            assert!(
-                different,
-                "Solutions should differ with different lambda values"
-            );
         }
+        assert!(
+            different,
+            "Solutions should differ with different lambda values"
+        );
+        Ok(())
     }
 
     /// Test QR with rank-deficient matrix
     #[test]
-    fn test_qr_rank_deficient_matrix() {
+    fn test_qr_rank_deficient_matrix() -> TestResult {
         let mut solver = SparseQRSolver::new();
 
         // Create a rank-deficient matrix (3x3 but rank 2)
@@ -397,17 +387,18 @@ mod tests {
             Triplet::new(2, 1, 0.0),
             Triplet::new(2, 2, 1.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).expect("Failed to create rank deficient matrix");
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
         let residuals = Mat::from_fn(3, 1, |i, _| i as f64);
 
         // QR should still provide a least squares solution
         let result = solver.solve_normal_equation(&residuals, &jacobian);
         assert!(result.is_ok());
+        Ok(())
     }
 
     /// Test augmented system structure and dimensions
     #[test]
-    fn test_qr_augmented_system_structure() {
+    fn test_qr_augmented_system_structure() -> TestResult {
         let mut solver = SparseQRSolver::new();
 
         // Simple 2x2 system
@@ -417,22 +408,19 @@ mod tests {
             Triplet::new(1, 0, 0.0),
             Triplet::new(1, 1, 1.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create identity jacobian");
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
         let lambda = 0.5;
 
-        let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
-        assert!(result.is_ok());
-
-        if let Ok(solution) = result {
-            assert_eq!(solution.nrows(), 2); // Should return only the variable part
-            assert_eq!(solution.ncols(), 1);
-        }
+        let solution = solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
+        assert_eq!(solution.nrows(), 2); // Should return only the variable part
+        assert_eq!(solution.ncols(), 1);
+        Ok(())
     }
 
     /// Test numerical accuracy with known solution
     #[test]
-    fn test_qr_numerical_accuracy() {
+    fn test_qr_numerical_accuracy() -> TestResult {
         let mut solver = SparseQRSolver::new();
 
         // Create identity system: I * x = b
@@ -441,24 +429,22 @@ mod tests {
             Triplet::new(1, 1, 1.0),
             Triplet::new(2, 2, 1.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).expect("Failed to create identity jacobian");
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
+
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
-
-        if let Ok(solution) = result {
-            // Expected solution should be [1, 2, 3]
-            for i in 0..3 {
-                let expected = (i + 1) as f64;
-                assert!(
-                    (solution[(i, 0)] - expected).abs() < TOLERANCE,
-                    "Expected {}, got {}",
-                    expected,
-                    solution[(i, 0)]
-                );
-            }
+        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
+        // Expected solution should be [1, 2, 3]
+        for i in 0..3 {
+            let expected = (i + 1) as f64;
+            assert!(
+                (solution[(i, 0)] - expected).abs() < TOLERANCE,
+                "Expected {}, got {}",
+                expected,
+                solution[(i, 0)]
+            );
         }
+        Ok(())
     }
 
     /// Test QR solver clone functionality
@@ -473,36 +459,31 @@ mod tests {
 
     /// Test zero lambda in augmented system (should behave like normal equation)
     #[test]
-    fn test_qr_zero_lambda_augmented() {
+    fn test_qr_zero_lambda_augmented() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
-        let normal_result = solver.solve_normal_equation(&residuals, &jacobian);
-        let augmented_result = solver.solve_augmented_equation(&residuals, &jacobian, 0.0);
+        let normal_sol = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let augmented_sol = solver.solve_augmented_equation(&residuals, &jacobian, 0.0)?;
 
-        assert!(normal_result.is_ok());
-        assert!(augmented_result.is_ok());
-
-        if let (Ok(normal_sol), Ok(augmented_sol)) = (normal_result, augmented_result) {
-            // Solutions should be very close (within numerical precision)
-            for i in 0..normal_sol.nrows() {
-                assert!(
-                    (normal_sol[(i, 0)] - augmented_sol[(i, 0)]).abs() < 1e-8,
-                    "Zero lambda augmented should match normal equation"
-                );
-            }
+        // Solutions should be very close (within numerical precision)
+        for i in 0..normal_sol.nrows() {
+            assert!(
+                (normal_sol[(i, 0)] - augmented_sol[(i, 0)]).abs() < 1e-8,
+                "Zero lambda augmented should match normal equation"
+            );
         }
+        Ok(())
     }
 
     /// Test covariance matrix computation
     #[test]
-    fn test_qr_covariance_computation() {
+    fn test_qr_covariance_computation() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
+        solver.solve_normal_equation(&residuals, &jacobian)?;
 
         // Now compute covariance matrix
         let cov_matrix = solver.compute_covariance_matrix();
@@ -530,17 +511,17 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     /// Test standard errors computation
     #[test]
-    fn test_qr_standard_errors_computation() {
+    fn test_qr_standard_errors_computation() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
+        solver.solve_normal_equation(&residuals, &jacobian)?;
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -567,11 +548,12 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     /// Test covariance computation with well-conditioned system
     #[test]
-    fn test_qr_covariance_well_conditioned() {
+    fn test_qr_covariance_well_conditioned() -> TestResult {
         let mut solver = SparseQRSolver::new();
 
         // Create a well-conditioned 2x2 system
@@ -581,11 +563,10 @@ mod tests {
             Triplet::new(1, 0, 0.0),
             Triplet::new(1, 1, 3.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create positive definite jacobian");
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
+        solver.solve_normal_equation(&residuals, &jacobian)?;
 
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
@@ -598,17 +579,17 @@ mod tests {
             assert!(cov[(0, 1)].abs() < TOLERANCE);
             assert!(cov[(1, 0)].abs() < TOLERANCE);
         }
+        Ok(())
     }
 
     /// Test covariance computation caching
     #[test]
-    fn test_qr_covariance_caching() {
+    fn test_qr_covariance_caching() -> TestResult {
         let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data();
+        let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let result = solver.solve_normal_equation(&residuals, &jacobian);
-        assert!(result.is_ok());
+        solver.solve_normal_equation(&residuals, &jacobian)?;
 
         // First covariance computation
         solver.compute_covariance_matrix();
@@ -630,11 +611,12 @@ mod tests {
                 assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
             }
         }
+        Ok(())
     }
 
     /// Test that covariance computation fails gracefully for singular systems
     #[test]
-    fn test_qr_covariance_singular_system() {
+    fn test_qr_covariance_singular_system() -> TestResult {
         let mut solver = SparseQRSolver::new();
 
         // Create a singular system (rank deficient)
@@ -644,7 +626,7 @@ mod tests {
             Triplet::new(1, 0, 2.0),
             Triplet::new(1, 1, 4.0), // Second row is 2x first row
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create singular matrix");
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         // QR can handle rank-deficient systems, but covariance may be problematic
@@ -659,5 +641,6 @@ mod tests {
                 assert!(cov.ncols() == 2);
             }
         }
+        Ok(())
     }
 }
