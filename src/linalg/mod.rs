@@ -9,6 +9,7 @@ use std::{
     fmt::{Display, Formatter},
 };
 use thiserror::Error;
+use tracing::error;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverType {
@@ -37,10 +38,6 @@ pub enum LinAlgError {
     #[error("Singular matrix detected (matrix is not invertible)")]
     SingularMatrix,
 
-    /// Matrix dimensions are incompatible
-    #[error("Matrix dimension mismatch: expected {expected}, got {actual}")]
-    DimensionMismatch { expected: String, actual: String },
-
     /// Failed to create sparse matrix from triplets
     #[error("Failed to create sparse matrix: {0}")]
     SparseMatrixCreation(String),
@@ -48,18 +45,49 @@ pub enum LinAlgError {
     /// Matrix format conversion failed
     #[error("Matrix conversion failed: {0}")]
     MatrixConversion(String),
+}
 
-    /// Numerical instability detected (NaN, Inf, extreme condition number)
-    #[error("Numerical instability detected: {0}")]
-    NumericalInstability(String),
+impl LinAlgError {
+    /// Log the error with tracing::error and return self for chaining
+    ///
+    /// This method allows for a consistent error logging pattern throughout
+    /// the linalg module, ensuring all errors are properly recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// operation()
+    ///     .map_err(|e| LinAlgError::from(e).log())?;
+    /// ```
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
 
-    /// Invalid matrix operation attempted
-    #[error("Invalid matrix operation: {0}")]
-    InvalidOperation(String),
-
-    /// Linear system solve failed
-    #[error("Linear system solve failed: {0}")]
-    SolveFailed(String),
+    /// Log the error with the original source error from a third-party library
+    ///
+    /// This method logs both the LinAlgError and the underlying error
+    /// from external libraries (e.g., faer's FaerError, LltError, CreationError).
+    /// This provides full debugging context when errors occur in third-party code.
+    ///
+    /// # Arguments
+    /// * `source_error` - The original error from the third-party library (must implement Debug)
+    ///
+    /// # Example
+    /// ```ignore
+    /// SymbolicLlt::try_new(matrix.symbolic(), Side::Lower)
+    ///     .map_err(|e| {
+    ///         LinAlgError::FactorizationFailed(
+    ///             "Symbolic Cholesky decomposition failed".to_string()
+    ///         )
+    ///         .log_with_source(e)
+    ///     })?;
+    /// ```
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
 }
 
 /// Result type for linear algebra operations

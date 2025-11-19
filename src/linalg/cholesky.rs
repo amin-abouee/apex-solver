@@ -61,12 +61,14 @@ impl SparseCholeskySolver {
     }
 
     pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
-        // // Ensure covariance matrix is computed first
+        // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
             self.compute_covariance_matrix();
         }
 
-        let n = self.hessian.as_ref().unwrap().ncols();
+        // Return None if hessian is not available (solver not initialized)
+        let hessian = self.hessian.as_ref()?;
+        let n = hessian.ncols();
         // Compute standard errors as sqrt of diagonal elements
         if let Some(cov) = &self.covariance_matrix {
             let mut std_errors = Mat::zeros(n, 1);
@@ -106,10 +108,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
         let jt = jacobians.as_ref().transpose();
         let hessian = jt
             .to_col_major()
-            .map_err(|_| {
+            .map_err(|e| {
                 LinAlgError::MatrixConversion(
                     "Failed to convert transposed Jacobian to column-major format".to_string(),
                 )
+                .log_with_source(e)
             })?
             .mul(jacobians.as_ref());
 
@@ -124,10 +127,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
-            let new_sym = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower).map_err(|_| {
+            let new_sym = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower).map_err(|e| {
                 LinAlgError::FactorizationFailed(
                     "Symbolic Cholesky decomposition failed".to_string(),
                 )
+                .log_with_source(e)
             })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -136,7 +140,7 @@ impl SparseLinearSolver for SparseCholeskySolver {
 
         // Perform numeric factorization using the symbolic structure
         let cholesky = Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower)
-            .map_err(|_| LinAlgError::SingularMatrix)?;
+            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
@@ -158,10 +162,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
         let jt = jacobians.as_ref().transpose();
         let hessian = jt
             .to_col_major()
-            .map_err(|_| {
+            .map_err(|e| {
                 LinAlgError::MatrixConversion(
                     "Failed to convert transposed Jacobian to column-major format".to_string(),
                 )
+                .log_with_source(e)
             })?
             .mul(jacobians.as_ref());
 
@@ -175,10 +180,8 @@ impl SparseLinearSolver for SparseCholeskySolver {
         }
         let lambda_i =
             SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
-                LinAlgError::SparseMatrixCreation(format!(
-                    "Failed to create lambda*I matrix: {:?}",
-                    e
-                ))
+                LinAlgError::SparseMatrixCreation("Failed to create lambda*I matrix".to_string())
+                    .log_with_source(e)
             })?;
 
         let augmented_hessian = &hessian + lambda_i;
@@ -192,10 +195,11 @@ impl SparseLinearSolver for SparseCholeskySolver {
         } else {
             // Create new symbolic factorization and cache it
             let new_sym =
-                SymbolicLlt::try_new(augmented_hessian.symbolic(), Side::Lower).map_err(|_| {
+                SymbolicLlt::try_new(augmented_hessian.symbolic(), Side::Lower).map_err(|e| {
                     LinAlgError::FactorizationFailed(
                         "Symbolic Cholesky decomposition failed for augmented system".to_string(),
                     )
+                    .log_with_source(e)
                 })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -204,7 +208,7 @@ impl SparseLinearSolver for SparseCholeskySolver {
 
         // Perform numeric factorization
         let cholesky = Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), Side::Lower)
-            .map_err(|_| LinAlgError::SingularMatrix)?;
+            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
@@ -265,7 +269,7 @@ mod tests {
             Triplet::new(3, 0, 1.5), // Add a 4th row for overdetermined system
             Triplet::new(3, 2, 0.5),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets).unwrap();
+        let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets).expect("Failed to create test jacobian");
 
         let residuals = Mat::from_fn(4, 1, |i, _| match i {
             0 => 1.0,
@@ -297,9 +301,10 @@ mod tests {
         let result = solver.solve_normal_equation(&residuals, &jacobian);
         assert!(result.is_ok());
 
-        let solution = result.unwrap();
-        assert_eq!(solution.nrows(), 3);
-        assert_eq!(solution.ncols(), 1);
+        if let Ok(solution) = result {
+            assert_eq!(solution.nrows(), 3);
+            assert_eq!(solution.ncols(), 1);
+        }
 
         // Verify the symbolic pattern was cached
         assert!(solver.factorizer.is_some());
@@ -321,10 +326,10 @@ mod tests {
         assert!(result2.is_ok());
 
         // Results should be identical
-        let sol1 = result1.unwrap();
-        let sol2 = result2.unwrap();
-        for i in 0..sol1.nrows() {
-            assert!((sol1[(i, 0)] - sol2[(i, 0)]).abs() < TOLERANCE);
+        if let (Ok(sol1), Ok(sol2)) = (result1, result2) {
+            for i in 0..sol1.nrows() {
+                assert!((sol1[(i, 0)] - sol2[(i, 0)]).abs() < TOLERANCE);
+            }
         }
     }
 
@@ -338,9 +343,10 @@ mod tests {
         let result = solver.solve_augmented_equation(&residuals, &jacobian, lambda);
         assert!(result.is_ok());
 
-        let solution = result.unwrap();
-        assert_eq!(solution.nrows(), 3);
-        assert_eq!(solution.ncols(), 1);
+        if let Ok(solution) = result {
+            assert_eq!(solution.nrows(), 3);
+            assert_eq!(solution.ncols(), 1);
+        }
     }
 
     /// Test with different lambda values in augmented system
@@ -359,19 +365,19 @@ mod tests {
         assert!(result2.is_ok());
 
         // Solutions should be different due to different regularization
-        let sol1 = result1.unwrap();
-        let sol2 = result2.unwrap();
-        let mut different = false;
-        for i in 0..sol1.nrows() {
-            if (sol1[(i, 0)] - sol2[(i, 0)]).abs() > TOLERANCE {
-                different = true;
-                break;
+        if let (Ok(sol1), Ok(sol2)) = (result1, result2) {
+            let mut different = false;
+            for i in 0..sol1.nrows() {
+                if (sol1[(i, 0)] - sol2[(i, 0)]).abs() > TOLERANCE {
+                    different = true;
+                    break;
+                }
             }
+            assert!(
+                different,
+                "Solutions should differ with different lambda values"
+            );
         }
-        assert!(
-            different,
-            "Solutions should differ with different lambda values"
-        );
     }
 
     /// Test with singular matrix (should return None)
@@ -386,7 +392,7 @@ mod tests {
             Triplet::new(1, 0, 2.0),
             Triplet::new(1, 1, 4.0), // Second row is 2x first row
         ];
-        let singular_jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let singular_jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create singular test matrix");
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         let result = solver.solve_normal_equation(&residuals, &singular_jacobian);
@@ -399,7 +405,7 @@ mod tests {
     fn test_empty_matrix() {
         let mut solver = SparseCholeskySolver::new();
 
-        let empty_jacobian = SparseColMat::try_new_from_triplets(0, 0, &[]).unwrap();
+        let empty_jacobian = SparseColMat::try_new_from_triplets(0, 0, &[]).expect("Failed to create empty matrix");
         let empty_residuals = Mat::zeros(0, 1);
 
         let result = solver.solve_normal_equation(&empty_residuals, &empty_jacobian);
@@ -420,16 +426,17 @@ mod tests {
             Triplet::new(1, 0, 0.0),
             Triplet::new(1, 1, 1.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create identity jacobian");
         let residuals = Mat::from_fn(2, 1, |i, _| -((i + 1) as f64)); // [-1, -2]
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
         assert!(result.is_ok());
 
-        let solution = result.unwrap();
-        // Expected solution should be [1, 2] since J^T * J = I and J^T * (-r) = [1, 2]
-        assert!((solution[(0, 0)] - 1.0).abs() < TOLERANCE);
-        assert!((solution[(1, 0)] - 2.0).abs() < TOLERANCE);
+        if let Ok(solution) = result {
+            // Expected solution should be [1, 2] since J^T * J = I and J^T * (-r) = [1, 2]
+            assert!((solution[(0, 0)] - 1.0).abs() < TOLERANCE);
+            assert!((solution[(1, 0)] - 2.0).abs() < TOLERANCE);
+        }
     }
 
     /// Test clone functionality
@@ -456,26 +463,27 @@ mod tests {
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
 
-        let cov = cov_matrix.unwrap();
-        assert_eq!(cov.nrows(), 3); // Should be n x n where n is number of variables
-        assert_eq!(cov.ncols(), 3);
+        if let Some(cov) = cov_matrix {
+            assert_eq!(cov.nrows(), 3); // Should be n x n where n is number of variables
+            assert_eq!(cov.ncols(), 3);
 
-        // Covariance matrix should be symmetric
-        for i in 0..3 {
-            for j in 0..3 {
+            // Covariance matrix should be symmetric
+            for i in 0..3 {
+                for j in 0..3 {
+                    assert!(
+                        (cov[(i, j)] - cov[(j, i)]).abs() < TOLERANCE,
+                        "Covariance matrix should be symmetric"
+                    );
+                }
+            }
+
+            // Diagonal elements should be positive (variances)
+            for i in 0..3 {
                 assert!(
-                    (cov[(i, j)] - cov[(j, i)]).abs() < TOLERANCE,
-                    "Covariance matrix should be symmetric"
+                    cov[(i, i)] > 0.0,
+                    "Diagonal elements (variances) should be positive"
                 );
             }
-        }
-
-        // Diagonal elements should be positive (variances)
-        for i in 0..3 {
-            assert!(
-                cov[(i, i)] > 0.0,
-                "Diagonal elements (variances) should be positive"
-            );
         }
     }
 
@@ -496,24 +504,23 @@ mod tests {
         assert!(solver.covariance_matrix.is_some());
         assert!(solver.standard_errors.is_some());
 
-        let cov = solver.covariance_matrix.as_ref().unwrap();
-        let errors = solver.standard_errors.as_ref().unwrap();
+        if let (Some(cov), Some(errors)) = (&solver.covariance_matrix, &solver.standard_errors) {
+            assert_eq!(errors.nrows(), 3); // Should be n x 1 where n is number of variables
+            assert_eq!(errors.ncols(), 1);
 
-        assert_eq!(errors.nrows(), 3); // Should be n x 1 where n is number of variables
-        assert_eq!(errors.ncols(), 1);
+            // All standard errors should be positive
+            for i in 0..3 {
+                assert!(errors[(i, 0)] > 0.0, "Standard errors should be positive");
+            }
 
-        // All standard errors should be positive
-        for i in 0..3 {
-            assert!(errors[(i, 0)] > 0.0, "Standard errors should be positive");
-        }
-
-        // Verify relationship: std_error = sqrt(covariance_diagonal)
-        for i in 0..3 {
-            let expected_std_error = cov[(i, i)].sqrt();
-            assert!(
-                (errors[(i, 0)] - expected_std_error).abs() < TOLERANCE,
-                "Standard error should equal sqrt of covariance diagonal"
-            );
+            // Verify relationship: std_error = sqrt(covariance_diagonal)
+            for i in 0..3 {
+                let expected_std_error = cov[(i, i)].sqrt();
+                assert!(
+                    (errors[(i, 0)] - expected_std_error).abs() < TOLERANCE,
+                    "Standard error should equal sqrt of covariance diagonal"
+                );
+            }
         }
     }
 
@@ -529,7 +536,7 @@ mod tests {
             Triplet::new(1, 0, 1.0),
             Triplet::new(1, 1, 2.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create positive definite jacobian");
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
@@ -538,13 +545,14 @@ mod tests {
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
 
-        let cov = cov_matrix.unwrap();
-        // For this system, H = J^T * W * J = [[10, 5], [5, 5]]
-        // Covariance = H^(-1) = (1/25) * [[5, -5], [-5, 10]] = [[0.2, -0.2], [-0.2, 0.4]]
-        assert!((cov[(0, 0)] - 0.2).abs() < TOLERANCE);
-        assert!((cov[(1, 1)] - 0.4).abs() < TOLERANCE);
-        assert!((cov[(0, 1)] - (-0.2)).abs() < TOLERANCE);
-        assert!((cov[(1, 0)] - (-0.2)).abs() < TOLERANCE);
+        if let Some(cov) = cov_matrix {
+            // For this system, H = J^T * W * J = [[10, 5], [5, 5]]
+            // Covariance = H^(-1) = (1/25) * [[5, -5], [-5, 10]] = [[0.2, -0.2], [-0.2, 0.4]]
+            assert!((cov[(0, 0)] - 0.2).abs() < TOLERANCE);
+            assert!((cov[(1, 1)] - 0.4).abs() < TOLERANCE);
+            assert!((cov[(0, 1)] - (-0.2)).abs() < TOLERANCE);
+            assert!((cov[(1, 0)] - (-0.2)).abs() < TOLERANCE);
+        }
     }
 
     /// Test covariance computation caching
@@ -562,17 +570,21 @@ mod tests {
         assert!(solver.covariance_matrix.is_some());
 
         // Get pointer to first computation
-        let cov1_ptr = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+        if let Some(cov1) = &solver.covariance_matrix {
+            let cov1_ptr = cov1.as_ptr();
 
-        // Second covariance computation should return cached result
-        solver.compute_covariance_matrix();
-        assert!(solver.covariance_matrix.is_some());
+            // Second covariance computation should return cached result
+            solver.compute_covariance_matrix();
+            assert!(solver.covariance_matrix.is_some());
 
-        // Get pointer to second computation
-        let cov2_ptr = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+            // Get pointer to second computation
+            if let Some(cov2) = &solver.covariance_matrix {
+                let cov2_ptr = cov2.as_ptr();
 
-        // Should be the same pointer (cached)
-        assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
+                // Should be the same pointer (cached)
+                assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
+            }
+        }
     }
 
     /// Test Cholesky decomposition properties
@@ -582,7 +594,7 @@ mod tests {
 
         // Create a simple positive definite system
         let triplets = vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 3.0)];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets).expect("Failed to create positive definite jacobian");
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
@@ -593,9 +605,10 @@ mod tests {
         assert!(solver.hessian.is_some());
 
         // The hessian should be positive definite for Cholesky to work
-        let hessian = solver.hessian.as_ref().unwrap();
-        assert_eq!(hessian.nrows(), 2);
-        assert_eq!(hessian.ncols(), 2);
+        if let Some(hessian) = &solver.hessian {
+            assert_eq!(hessian.nrows(), 2);
+            assert_eq!(hessian.ncols(), 2);
+        }
     }
 
     /// Test numerical stability with different condition numbers
@@ -609,40 +622,41 @@ mod tests {
             Triplet::new(1, 1, 1.0),
             Triplet::new(2, 2, 1.0),
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap();
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets).expect("Failed to create identity jacobian");
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
         let result = solver.solve_normal_equation(&residuals, &jacobian);
         assert!(result.is_ok());
 
-        let solution = result.unwrap();
-        // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]
-        for i in 0..3 {
-            let expected = (i + 1) as f64;
-            assert!(
-                (solution[(i, 0)] - expected).abs() < TOLERANCE,
-                "Expected {}, got {}",
-                expected,
-                solution[(i, 0)]
-            );
+        if let Ok(solution) = result {
+            // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]
+            for i in 0..3 {
+                let expected = (i + 1) as f64;
+                assert!(
+                    (solution[(i, 0)] - expected).abs() < TOLERANCE,
+                    "Expected {}, got {}",
+                    expected,
+                    solution[(i, 0)]
+                );
+            }
         }
 
         // Covariance should be identity matrix (inverse of identity)
         let cov_matrix = solver.compute_covariance_matrix();
         assert!(cov_matrix.is_some());
-        let cov = cov_matrix.unwrap();
-
-        for i in 0..3 {
-            for j in 0..3 {
-                let expected = if i == j { 1.0 } else { 0.0 };
-                assert!(
-                    (cov[(i, j)] - expected).abs() < TOLERANCE,
-                    "Covariance[{}, {}] expected {}, got {}",
-                    i,
-                    j,
-                    expected,
-                    cov[(i, j)]
-                );
+        if let Some(cov) = cov_matrix {
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (cov[(i, j)] - expected).abs() < TOLERANCE,
+                        "Covariance[{}, {}] expected {}, got {}",
+                        i,
+                        j,
+                        expected,
+                        cov[(i, j)]
+                    );
+                }
             }
         }
     }
