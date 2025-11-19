@@ -1,0 +1,20 @@
+[book]
+authors = ["Apex Solver Contributors"]
+language = "en"
+src = "src"
+title = "Apex Solver Cookbook"
+description = "A comprehensive guide to nonlinear least squares optimization on Lie groups"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/your-org/apex-solver"
+edit-url-template = "https://github.com/your-org/apex-solver/edit/main/cookbook/{path}"
+mathjax-support = true
+
+[output.html.fold]
+enable = true
+level = 1
