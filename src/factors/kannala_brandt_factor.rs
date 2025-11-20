@@ -420,6 +420,8 @@ mod tests {
     use super::*;
     use nalgebra::Vector3;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
     fn test_camera_params_factor_creation() {
         let points_3d_vec = vec![
@@ -453,7 +455,7 @@ mod tests {
     }
 
     #[test]
-    fn test_camera_params_linearize_dimensions() {
+    fn test_camera_params_linearize_dimensions() -> TestResult {
         let points_3d_vec = vec![Vector3::new(0.0, 0.0, 1.0), Vector3::new(0.1, 0.0, 1.0)];
         let points_2d_vec = vec![Vector2::new(320.0, 240.0), Vector2::new(350.0, 240.0)];
         let points_3d = Matrix3xX::from_columns(&points_3d_vec);
@@ -468,13 +470,14 @@ mod tests {
 
         assert_eq!(residual.len(), 4);
         assert!(jacobian.is_some());
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Expected jacobian to be Some")?;
         assert_eq!(jac.nrows(), 4);
         assert_eq!(jac.ncols(), 8);
+        Ok(())
     }
 
     #[test]
-    fn test_projection_linearize_dimensions() {
+    fn test_projection_linearize_dimensions() -> TestResult {
         let points_3d_vec = vec![Vector3::new(0.0, 0.0, 1.0)];
         let points_2d_vec = vec![Vector2::new(320.0, 240.0)];
         let _points_3d = Matrix3xX::from_columns(&points_3d_vec);
@@ -489,9 +492,10 @@ mod tests {
 
         assert_eq!(residual.len(), 2);
         assert!(jacobian.is_some());
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Expected jacobian to be Some")?;
         assert_eq!(jac.nrows(), 2);
         assert_eq!(jac.ncols(), 3);
+        Ok(())
     }
 
     #[test]
@@ -513,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn test_jacobian_non_zero() {
+    fn test_jacobian_non_zero() -> TestResult {
         let points_3d_vec = vec![Vector3::new(0.1, 0.1, 1.0)];
         let points_2d_vec = vec![Vector2::new(330.0, 250.0)];
         let points_3d = Matrix3xX::from_columns(&points_3d_vec);
@@ -527,13 +531,14 @@ mod tests {
         let (_, jacobian) = factor.linearize(&params, true);
 
         assert!(jacobian.is_some());
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Expected jacobian to be Some")?;
         let has_nonzero = jac.iter().any(|&x| x.abs() > 1e-10);
         assert!(has_nonzero);
+        Ok(())
     }
 
     #[test]
-    fn test_jacobian_structure() {
+    fn test_jacobian_structure() -> TestResult {
         let points_3d_vec = vec![Vector3::new(0.2, 0.15, 1.0)];
         let points_2d_vec = vec![Vector2::new(380.0, 280.0)];
         let points_3d = Matrix3xX::from_columns(&points_3d_vec);
@@ -546,7 +551,7 @@ mod tests {
 
         let (_, jacobian) = factor.linearize(&params, true);
 
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Expected jacobian to be Some")?;
 
         // Check specific Jacobian structure
         // ∂u/∂fy should be 0
@@ -557,6 +562,7 @@ mod tests {
         assert!((jac[(0, 2)] - 1.0).abs() < 1e-12);
         // ∂v/∂cy should be 1
         assert!((jac[(1, 3)] - 1.0).abs() < 1e-12);
+        Ok(())
     }
 
     #[test]

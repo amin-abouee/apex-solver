@@ -62,6 +62,76 @@
 //! This information is used by the optimizer to compute parameter updates via Newton-type methods.
 
 use nalgebra::{DMatrix, DVector};
+use thiserror::Error;
+use tracing::error;
+
+/// Factor-specific error types for apex-solver
+#[derive(Debug, Clone, Error)]
+pub enum FactorError {
+    /// Invalid dimension mismatch between expected and actual
+    #[error("Invalid dimension: expected {expected}, got {actual}")]
+    InvalidDimension { expected: usize, actual: usize },
+
+    /// Invalid projection (point behind camera or outside valid range)
+    #[error("Invalid projection: {0}")]
+    InvalidProjection(String),
+
+    /// Jacobian computation failed
+    #[error("Jacobian computation failed: {0}")]
+    JacobianFailed(String),
+
+    /// Invalid parameter values
+    #[error("Invalid parameter values: {0}")]
+    InvalidParameters(String),
+
+    /// Numerical instability detected
+    #[error("Numerical instability: {0}")]
+    NumericalInstability(String),
+}
+
+impl FactorError {
+    /// Log the error with tracing::error and return self for chaining
+    ///
+    /// This method allows for a consistent error logging pattern throughout
+    /// the factors module, ensuring all errors are properly recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// operation()
+    ///     .map_err(|e| FactorError::from(e).log())?;
+    /// ```
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with the original source error for debugging context
+    ///
+    /// This method logs both the FactorError and the underlying error
+    /// from external libraries or internal operations, providing full
+    /// debugging context when errors occur.
+    ///
+    /// # Arguments
+    /// * `source_error` - The original error (must implement Debug)
+    ///
+    /// # Example
+    /// ```ignore
+    /// compute_jacobian()
+    ///     .map_err(|e| {
+    ///         FactorError::JacobianFailed("Matrix computation failed".to_string())
+    ///             .log_with_source(e)
+    ///     })?;
+    /// ```
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
+}
+
+/// Result type for factor operations
+pub type FactorResult<T> = Result<T, FactorError>;
 
 /// Trait for factor (constraint) implementations in factor graph optimization.
 ///
