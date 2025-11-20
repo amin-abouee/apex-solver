@@ -1,4 +1,4 @@
-use crate::io::{ApexSolverIoError, EdgeSE2, Graph, GraphLoader, VertexSE2};
+use crate::io::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
 use memmap2::Mmap;
 use std::{fs, io::Write, path::Path};
 
@@ -6,27 +6,42 @@ use std::{fs, io::Write, path::Path};
 pub struct ToroLoader;
 
 impl GraphLoader for ToroLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
-        let file = fs::File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
-        let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
-            line: 0,
-            message: format!("Invalid UTF-8: {e}"),
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
+        let path_ref = path.as_ref();
+        let file = fs::File::open(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to open TORO file: {:?}", path_ref))
+        })?;
+        let mmap = unsafe {
+            Mmap::map(&file).map_err(|e| {
+                IoError::Io(e)
+                    .log_with_source(format!("Failed to memory-map TORO file: {:?}", path_ref))
+            })?
+        };
+        let content = std::str::from_utf8(&mmap).map_err(|e| {
+            IoError::Parse {
+                line: 0,
+                message: format!("Invalid UTF-8: {e}"),
+            }
+            .log()
         })?;
 
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError> {
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
         // TORO only supports SE2
         if !graph.vertices_se3.is_empty() || !graph.edges_se3.is_empty() {
-            return Err(ApexSolverIoError::UnsupportedFormat(
+            return Err(IoError::UnsupportedFormat(
                 "TORO format only supports SE2 (2D) graphs. Use G2O format for SE3 data."
                     .to_string(),
-            ));
+            )
+            .log());
         }
 
-        let mut file = fs::File::create(path)?;
+        let path_ref = path.as_ref();
+        let mut file = fs::File::create(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to create TORO file: {:?}", path_ref))
+        })?;
 
         // Write SE2 vertices (sorted by ID)
         let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().collect();
@@ -41,7 +56,10 @@ impl GraphLoader for ToroLoader {
                 vertex.x(),
                 vertex.y(),
                 vertex.theta()
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!("Failed to write TORO vertex {}", vertex.id))
+            })?;
         }
 
         // Write SE2 edges
@@ -64,7 +82,13 @@ impl GraphLoader for ToroLoader {
                 info[(2, 2)], // i33
                 info[(0, 2)], // i13
                 info[(1, 2)]  // i23
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!(
+                    "Failed to write TORO edge {} -> {}",
+                    edge.from, edge.to
+                ))
+            })?;
         }
 
         Ok(())
@@ -72,7 +96,7 @@ impl GraphLoader for ToroLoader {
 }
 
 impl ToroLoader {
-    fn parse_content(content: &str) -> Result<Graph, ApexSolverIoError> {
+    fn parse_content(content: &str) -> Result<Graph, IoError> {
         let lines: Vec<&str> = content.lines().collect();
         let mut graph = Graph::new();
 
@@ -83,7 +107,7 @@ impl ToroLoader {
         Ok(graph)
     }
 
-    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), ApexSolverIoError> {
+    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), IoError> {
         let line = line.trim();
 
         // Skip empty lines and comments
@@ -101,7 +125,7 @@ impl ToroLoader {
                 let vertex = Self::parse_vertex2(&parts, line_num)?;
                 let id = vertex.id;
                 if graph.vertices_se2.insert(id, vertex).is_some() {
-                    return Err(ApexSolverIoError::DuplicateVertex { id });
+                    return Err(IoError::DuplicateVertex { id });
                 }
             }
             "EDGE2" => {
@@ -116,35 +140,35 @@ impl ToroLoader {
         Ok(())
     }
 
-    fn parse_vertex2(parts: &[&str], line_num: usize) -> Result<VertexSE2, ApexSolverIoError> {
+    fn parse_vertex2(parts: &[&str], line_num: usize) -> Result<VertexSE2, IoError> {
         if parts.len() < 5 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         let id = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let x = parts[2]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
 
         let y = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
 
         let theta = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
@@ -152,21 +176,21 @@ impl ToroLoader {
         Ok(VertexSE2::new(id, x, y, theta))
     }
 
-    fn parse_edge2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, ApexSolverIoError> {
+    fn parse_edge2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, IoError> {
         if parts.len() < 12 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         let from = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let to = parts[2]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
@@ -174,19 +198,19 @@ impl ToroLoader {
         // Parse measurement (dx, dy, dtheta)
         let dx = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
         let dy = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
         let dtheta = parts[5]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[5].to_string(),
             })?;
@@ -194,37 +218,37 @@ impl ToroLoader {
         // Parse TORO information matrix (I11, I12, I22, I33, I13, I23)
         let i11 = parts[6]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[6].to_string(),
             })?;
         let i12 = parts[7]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[7].to_string(),
             })?;
         let i22 = parts[8]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[8].to_string(),
             })?;
         let i33 = parts[9]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[9].to_string(),
             })?;
         let i13 = parts[10]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[10].to_string(),
             })?;
         let i23 = parts[11]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[11].to_string(),
             })?;

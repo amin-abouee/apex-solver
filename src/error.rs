@@ -3,9 +3,7 @@
 //! This module provides the main error and result types used throughout the library.
 //! All errors use the `thiserror` crate for automatic trait implementations.
 
-use crate::{
-    io::ApexSolverIoError, linalg::LinAlgError, manifold::ManifoldError, optimizer::OptimizerError,
-};
+use crate::{io::IoError, linalg::LinAlgError, manifold::ManifoldError, optimizer::OptimizerError};
 use std::{
     io::Error,
     num::{ParseFloatError, ParseIntError},
@@ -99,8 +97,8 @@ impl From<ManifoldError> for ApexError {
     }
 }
 
-impl From<ApexSolverIoError> for ApexError {
-    fn from(err: ApexSolverIoError) -> Self {
+impl From<IoError> for ApexError {
+    fn from(err: IoError) -> Self {
         ApexError::Io(err.to_string())
     }
 }
