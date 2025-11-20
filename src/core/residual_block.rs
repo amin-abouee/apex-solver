@@ -58,7 +58,7 @@
 //! let var1 = Variable::new(SE2::from_xy_angle(1.1, 0.05, 0.12));
 //! let variables = vec![&var0, &var1];
 //!
-//! let (residual, jacobian) = block.residual_and_jacobian(&variables);
+//! let Ok((residual, jacobian)) = block.residual_and_jacobian(&variables) else { todo!() };
 //! // residual and jacobian are now ready for the linear solver
 //! ```
 
@@ -205,7 +205,7 @@ impl ResidualBlock {
     /// let var1 = Variable::new(SE2::from_xy_angle(1.0, 0.0, 0.1));
     /// let variables = vec![&var0, &var1];
     ///
-    /// let (residual, jacobian) = block.residual_and_jacobian(&variables);
+    /// let Ok((residual, jacobian)) = block.residual_and_jacobian(&variables) else { todo!() };
     /// // Use residual and jacobian in optimization linear system
     /// ```
     ///
