@@ -135,6 +135,87 @@ use crate::core::problem::VariableEnum;
 use faer::Mat;
 use faer::sparse;
 use std::collections::HashMap;
+use thiserror::Error;
+use tracing::error;
+
+/// Observer-specific error types for apex-solver
+#[derive(Debug, Clone, Error)]
+pub enum ObserverError {
+    /// Failed to initialize Rerun recording stream
+    #[error("Failed to initialize Rerun recording stream: {0}")]
+    RerunInitialization(String),
+
+    /// Failed to spawn Rerun viewer process
+    #[error("Failed to spawn Rerun viewer: {0}")]
+    ViewerSpawnFailed(String),
+
+    /// Failed to save recording to file
+    #[error("Failed to save recording to file '{path}': {reason}")]
+    RecordingSaveFailed { path: String, reason: String },
+
+    /// Failed to log data to Rerun
+    #[error("Failed to log data to Rerun at '{entity_path}': {reason}")]
+    LoggingFailed { entity_path: String, reason: String },
+
+    /// Failed to convert matrix to visualization format
+    #[error("Failed to convert matrix to image: {0}")]
+    MatrixVisualizationFailed(String),
+
+    /// Failed to convert tensor data
+    #[error("Failed to create tensor data: {0}")]
+    TensorConversionFailed(String),
+
+    /// Recording stream is in invalid state
+    #[error("Recording stream is in invalid state: {0}")]
+    InvalidState(String),
+}
+
+impl ObserverError {
+    /// Log the error with tracing::error and return self for chaining
+    ///
+    /// This method allows for a consistent error logging pattern throughout
+    /// the observers module, ensuring all errors are properly recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// operation()
+    ///     .map_err(|e| ObserverError::from(e).log())?;
+    /// ```
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with the original source error from a third-party library
+    ///
+    /// This method logs both the ObserverError and the underlying error
+    /// from external libraries (e.g., Rerun's errors). This provides full
+    /// debugging context when errors occur in third-party code.
+    ///
+    /// # Arguments
+    /// * `source_error` - The original error from the third-party library (must implement Debug)
+    ///
+    /// # Example
+    /// ```ignore
+    /// rec.log(entity_path, &data)
+    ///     .map_err(|e| {
+    ///         ObserverError::LoggingFailed {
+    ///             entity_path: "world/points".to_string(),
+    ///             reason: format!("{}", e)
+    ///         }
+    ///         .log_with_source(e)
+    ///     })?;
+    /// ```
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
+}
+
+/// Result type for observer operations
+pub type ObserverResult<T> = Result<T, ObserverError>;
 
 /// Observer trait for monitoring optimization progress.
 ///
