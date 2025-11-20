@@ -283,10 +283,12 @@ mod tests {
     use super::*;
     use crate::core::loss_functions::{CauchyLoss, HuberLoss};
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn test_corrector_huber_inlier() {
+    fn test_corrector_huber_inlier() -> TestResult {
         // Test corrector behavior for an inlier (small residual)
-        let loss = HuberLoss::new(1.0).unwrap();
+        let loss = HuberLoss::new(1.0)?;
         let residual = DVector::from_vec(vec![0.1, 0.2, 0.1]); // Small residual
         let squared_norm = residual.dot(&residual); // 0.06
 
@@ -300,12 +302,14 @@ mod tests {
         let mut corrected_residual = residual.clone();
         corrector.correct_residuals(&mut corrected_residual);
         assert!((corrected_residual - residual).norm() < 1e-10);
+
+        Ok(())
     }
 
     #[test]
-    fn test_corrector_huber_outlier() {
+    fn test_corrector_huber_outlier() -> TestResult {
         // Test corrector behavior for an outlier (large residual)
-        let loss = HuberLoss::new(1.0).unwrap();
+        let loss = HuberLoss::new(1.0)?;
         let residual = DVector::from_vec(vec![5.0, 5.0, 5.0]); // Large residual
         let squared_norm = residual.dot(&residual); // 75.0
 
@@ -319,12 +323,14 @@ mod tests {
         let mut corrected_residual = residual.clone();
         corrector.correct_residuals(&mut corrected_residual);
         assert!(corrected_residual.norm() < residual.norm());
+
+        Ok(())
     }
 
     #[test]
-    fn test_corrector_cauchy() {
+    fn test_corrector_cauchy() -> TestResult {
         // Test corrector with Cauchy loss
-        let loss = CauchyLoss::new(1.0).unwrap();
+        let loss = CauchyLoss::new(1.0)?;
         let residual = DVector::from_vec(vec![2.0, 3.0]);
         let squared_norm = residual.dot(&residual); // 13.0
 
@@ -337,12 +343,14 @@ mod tests {
         let mut corrected_residual = residual.clone();
         corrector.correct_residuals(&mut corrected_residual);
         assert!(corrected_residual.norm() < residual.norm());
+
+        Ok(())
     }
 
     #[test]
-    fn test_corrector_jacobian() {
+    fn test_corrector_jacobian() -> TestResult {
         // Test Jacobian correction
-        let loss = HuberLoss::new(1.0).unwrap();
+        let loss = HuberLoss::new(1.0)?;
         let residual = DVector::from_vec(vec![2.0, 1.0]);
         let squared_norm = residual.dot(&residual);
 
@@ -358,5 +366,7 @@ mod tests {
 
         // Each element should be scaled and corrected
         // (Exact values depend on loss function derivatives)
+
+        Ok(())
     }
 }

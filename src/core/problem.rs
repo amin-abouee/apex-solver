@@ -100,8 +100,8 @@ use tracing::warn;
 
 use crate::{
     core::{
-        corrector::Corrector, loss_functions::LossFunction, residual_block::ResidualBlock,
-        variable::Variable,
+        CoreError, corrector::Corrector, loss_functions::LossFunction,
+        residual_block::ResidualBlock, variable::Variable,
     },
     error::{ApexError, ApexResult},
     factors::Factor,
@@ -776,10 +776,11 @@ impl Problem {
             total_dof,                     // Number of columns (total DOF)
             &indices,                      // List of non-zero entry locations
         )
-        .map_err(|_| {
-            ApexError::MatrixOperation(
+        .map_err(|e| {
+            CoreError::SymbolicStructure(
                 "Failed to build symbolic sparse matrix structure".to_string(),
             )
+            .log_with_source(e)
         })?;
 
         // Return the symbolic structure that will be filled with numerical values later
@@ -841,13 +842,17 @@ impl Problem {
 
         let total_residual = Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+                CoreError::ParallelComputation(
+                    "Failed to unwrap Arc for total residual".to_string(),
+                )
+                .log()
             })?
             .into_inner()
-            .map_err(|_| {
-                ApexError::ThreadError(
+            .map_err(|e| {
+                CoreError::ParallelComputation(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
+                .log_with_source(e)
             })?;
 
         // Convert faer Col to Mat (column vector as n×1 matrix)
@@ -938,13 +943,17 @@ impl Problem {
 
         let total_residual = Arc::try_unwrap(total_residual)
             .map_err(|_| {
-                ApexError::ThreadError("Failed to unwrap Arc for total residual".to_string())
+                CoreError::ParallelComputation(
+                    "Failed to unwrap Arc for total residual".to_string(),
+                )
+                .log()
             })?
             .into_inner()
-            .map_err(|_| {
-                ApexError::ThreadError(
+            .map_err(|e| {
+                CoreError::ParallelComputation(
                     "Failed to extract mutex inner value for total residual".to_string(),
                 )
+                .log_with_source(e)
             })?;
 
         // Convert faer Col to Mat (column vector as n×1 matrix)
@@ -954,8 +963,11 @@ impl Problem {
             &symbolic_structure.order,
             jacobian_values.as_slice(),
         )
-        .map_err(|_| {
-            ApexError::MatrixOperation("Failed to create sparse Jacobian from argsort".to_string())
+        .map_err(|e| {
+            CoreError::SymbolicStructure(
+                "Failed to create sparse Jacobian from argsort".to_string(),
+            )
+            .log_with_source(e)
         })?;
 
         Ok((residual_faer, jacobian_sparse))
@@ -989,8 +1001,9 @@ impl Problem {
             corrector.correct_residuals(&mut res);
         }
 
-        let mut total_residual = total_residual.lock().map_err(|_| {
-            ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
+        let mut total_residual = total_residual.lock().map_err(|e| {
+            CoreError::ParallelComputation("Failed to acquire lock on total residual".to_string())
+                .log_with_source(e)
         })?;
 
         // Copy residual values from nalgebra DVector to faer Col
@@ -1030,7 +1043,12 @@ impl Problem {
         }
 
         let (mut res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
-        let mut jac = jac_opt.expect("Jacobian should be computed when compute_jacobian=true");
+        let mut jac = jac_opt.ok_or_else(|| {
+            CoreError::FactorLinearization(
+                "Factor returned None for Jacobian when compute_jacobian=true".to_string(),
+            )
+            .log()
+        })?;
 
         // Apply loss function if present (critical for robust optimization)
         if let Some(loss_func) = &residual_block.loss_func {
@@ -1042,8 +1060,11 @@ impl Problem {
 
         // Update total residual
         {
-            let mut total_residual = total_residual.lock().map_err(|_| {
-                ApexError::ThreadError("Failed to acquire lock on total residual".to_string())
+            let mut total_residual = total_residual.lock().map_err(|e| {
+                CoreError::ParallelComputation(
+                    "Failed to acquire lock on total residual".to_string(),
+                )
+                .log_with_source(e)
             })?;
 
             // Copy residual values from nalgebra DVector to faer Col
@@ -1068,10 +1089,12 @@ impl Problem {
                     }
                 }
             } else {
-                return Err(ApexError::InvalidInput(format!(
+                return Err(CoreError::Variable(format!(
                     "Missing key {} in variable-to-column-index mapping",
                     var_key
-                )));
+                ))
+                .log()
+                .into());
             }
         }
 
@@ -1186,11 +1209,16 @@ mod tests {
     use nalgebra::{Quaternion, Vector3, dvector};
     use std::collections::HashMap;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Create a test SE2 dataset with 10 vertices in a loop
-    fn create_se2_test_problem() -> (
-        Problem,
-        HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn create_se2_test_problem() -> Result<
+        (
+            Problem,
+            HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -1229,7 +1257,7 @@ mod tests {
             problem.add_residual_block(
                 &[&format!("x{}", i), &format!("x{}", i + 1)],
                 Box::new(between_factor),
-                Some(Box::new(HuberLoss::new(1.0).unwrap())),
+                Some(Box::new(HuberLoss::new(1.0)?)),
             );
         }
 
@@ -1242,7 +1270,7 @@ mod tests {
         problem.add_residual_block(
             &["x9", "x0"],
             Box::new(loop_closure),
-            Some(Box::new(HuberLoss::new(1.0).unwrap())),
+            Some(Box::new(HuberLoss::new(1.0)?)),
         );
 
         // Add prior factor for x0
@@ -1251,11 +1279,13 @@ mod tests {
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
-        (problem, initial_values)
+        Ok((problem, initial_values))
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+    fn create_se3_test_problem()
+    -> Result<(Problem, HashMap<String, (ManifoldType, DVector<f64>)>), Box<dyn std::error::Error>>
+    {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -1314,7 +1344,7 @@ mod tests {
             problem.add_residual_block(
                 &[&format!("x{}", from_idx), &format!("x{}", to_idx)],
                 Box::new(between_factor),
-                Some(Box::new(HuberLoss::new(1.0).unwrap())),
+                Some(Box::new(HuberLoss::new(1.0)?)),
             );
         }
 
@@ -1324,32 +1354,36 @@ mod tests {
         };
         problem.add_residual_block(&["x0"], Box::new(prior_factor), None);
 
-        (problem, initial_values)
+        Ok((problem, initial_values))
     }
 
     #[test]
-    fn test_problem_construction_se2() {
-        let (problem, initial_values) = create_se2_test_problem();
+    fn test_problem_construction_se2() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
 
         // Test basic problem properties
         assert_eq!(problem.num_residual_blocks(), 11); // 9 between + 1 loop closure + 1 prior
         assert_eq!(problem.total_residual_dimension, 33); // 11 * 3
         assert_eq!(initial_values.len(), 10);
+
+        Ok(())
     }
 
     #[test]
-    fn test_problem_construction_se3() {
-        let (problem, initial_values) = create_se3_test_problem();
+    fn test_problem_construction_se3() -> TestResult {
+        let (problem, initial_values) = create_se3_test_problem()?;
 
         // Test basic problem properties
         assert_eq!(problem.num_residual_blocks(), 13); // 12 between + 1 prior
         assert_eq!(problem.total_residual_dimension, 79); // 12 * 6 + 1 * 7 (SE3 between factors are 6-dim, prior factor is 7-dim)
         assert_eq!(initial_values.len(), 8);
+
+        Ok(())
     }
 
     #[test]
-    fn test_variable_initialization_se2() {
-        let (problem, initial_values) = create_se2_test_problem();
+    fn test_variable_initialization_se2() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
 
         // Test variable initialization
         let variables = problem.initialize_variables(&initial_values);
@@ -1375,11 +1409,13 @@ mod tests {
                 name
             );
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_variable_initialization_se3() {
-        let (problem, initial_values) = create_se3_test_problem();
+    fn test_variable_initialization_se3() -> TestResult {
+        let (problem, initial_values) = create_se3_test_problem()?;
 
         // Test variable initialization
         let variables = problem.initialize_variables(&initial_values);
@@ -1405,11 +1441,13 @@ mod tests {
                 name
             );
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_column_mapping_se2() {
-        let (problem, initial_values) = create_se2_test_problem();
+    fn test_column_mapping_se2() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping for variables
@@ -1438,11 +1476,13 @@ mod tests {
                 total_dof
             );
         }
+
+        Ok(())
     }
 
     #[test]
-    fn test_symbolic_structure_se2() {
-        let (problem, initial_values) = create_se2_test_problem();
+    fn test_symbolic_structure_se2() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
@@ -1457,9 +1497,11 @@ mod tests {
         }
 
         // Build symbolic structure
-        let symbolic_structure = problem
-            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
-            .unwrap();
+        let symbolic_structure = problem.build_symbolic_structure(
+            &variables,
+            &variable_index_sparce_matrix,
+            col_offset,
+        )?;
 
         // Test symbolic structure dimensions
         assert_eq!(
@@ -1467,11 +1509,13 @@ mod tests {
             problem.total_residual_dimension
         );
         assert_eq!(symbolic_structure.pattern.ncols(), 30); // total DOF
+
+        Ok(())
     }
 
     #[test]
-    fn test_residual_jacobian_computation_se2() {
-        let (problem, initial_values) = create_se2_test_problem();
+    fn test_residual_jacobian_computation_se2() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
@@ -1486,26 +1530,28 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = problem
-            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
-            .unwrap();
-        let (residual_sparse, jacobian_sparse) = problem
-            .compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_index_sparce_matrix,
-                &symbolic_structure,
-            )
-            .unwrap();
+        let symbolic_structure = problem.build_symbolic_structure(
+            &variables,
+            &variable_index_sparce_matrix,
+            col_offset,
+        )?;
+        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_index_sparce_matrix,
+            &symbolic_structure,
+        )?;
 
         // Test sparse dimensions
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 30);
+
+        Ok(())
     }
 
     #[test]
-    fn test_residual_jacobian_computation_se3() {
-        let (problem, initial_values) = create_se3_test_problem();
+    fn test_residual_jacobian_computation_se3() -> TestResult {
+        let (problem, initial_values) = create_se3_test_problem()?;
         let variables = problem.initialize_variables(&initial_values);
 
         // Create column mapping
@@ -1520,32 +1566,34 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = problem
-            .build_symbolic_structure(&variables, &variable_index_sparce_matrix, col_offset)
-            .unwrap();
-        let (residual_sparse, jacobian_sparse) = problem
-            .compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_index_sparce_matrix,
-                &symbolic_structure,
-            )
-            .unwrap();
+        let symbolic_structure = problem.build_symbolic_structure(
+            &variables,
+            &variable_index_sparce_matrix,
+            col_offset,
+        )?;
+        let (residual_sparse, jacobian_sparse) = problem.compute_residual_and_jacobian_sparse(
+            &variables,
+            &variable_index_sparce_matrix,
+            &symbolic_structure,
+        )?;
 
         // Test sparse dimensions match
         assert_eq!(residual_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian_sparse.ncols(), 48); // 8 variables * 6 DOF each
+
+        Ok(())
     }
 
     #[test]
-    fn test_residual_block_operations() {
+    fn test_residual_block_operations() -> TestResult {
         let mut problem = Problem::new();
 
         // Test adding residual blocks
         let block_id1 = problem.add_residual_block(
             &["x0", "x1"],
             Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
-            Some(Box::new(HuberLoss::new(1.0).unwrap())),
+            Some(Box::new(HuberLoss::new(1.0)?)),
         );
 
         let block_id2 = problem.add_residual_block(
@@ -1570,10 +1618,12 @@ mod tests {
         // Test removing non-existent block
         let non_existent = problem.remove_residual_block(999);
         assert!(non_existent.is_none());
+
+        Ok(())
     }
 
     #[test]
-    fn test_variable_constraints() {
+    fn test_variable_constraints() -> TestResult {
         let mut problem = Problem::new();
 
         // Test fixing variables
@@ -1605,5 +1655,7 @@ mod tests {
         problem.remove_variable_bounds("x2");
         assert!(!problem.variable_bounds.contains_key("x2"));
         assert!(problem.variable_bounds.contains_key("x3"));
+
+        Ok(())
     }
 }

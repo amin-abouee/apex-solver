@@ -1475,6 +1475,8 @@ impl Default for AdaptiveBarronLoss {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     const EPSILON: f64 = 1e-6;
 
     /// Helper function to test derivatives numerically
@@ -1493,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn test_l2_loss() {
+    fn test_l2_loss() -> TestResult {
         let loss = L2Loss;
 
         // Test at s = 0
@@ -1507,10 +1509,12 @@ mod tests {
         assert_eq!(rho, 4.0);
         assert_eq!(rho_prime, 1.0);
         assert_eq!(rho_double_prime, 0.0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_l1_loss() {
+    fn test_l1_loss() -> TestResult {
         let loss = L1Loss;
 
         // Test at s = 0 (should handle gracefully)
@@ -1523,11 +1527,13 @@ mod tests {
         let [rho, rho_prime, _] = loss.evaluate(4.0);
         assert!((rho - 4.0).abs() < EPSILON); // ρ(s) = 2√s = 2*2 = 4
         assert!((rho_prime - 0.5).abs() < EPSILON); // ρ'(s) = 1/√s = 1/2 = 0.5
+
+        Ok(())
     }
 
     #[test]
-    fn test_fair_loss() {
-        let loss = FairLoss::new(1.3999).unwrap();
+    fn test_fair_loss() -> TestResult {
+        let loss = FairLoss::new(1.3999)?;
 
         // Test at s = 0 (special case handling)
         let [rho, rho_prime, rho_double_prime] = loss.evaluate(0.0);
@@ -1547,11 +1553,13 @@ mod tests {
         let [_, rho_prime_4, rho_double_prime_4] = loss.evaluate(4.0);
         assert!(rho_prime_4.is_finite() && rho_prime_4 > 0.0);
         assert!(rho_double_prime_4.is_finite() && rho_double_prime_4 < 0.0); // Convex near origin
+
+        Ok(())
     }
 
     #[test]
-    fn test_geman_mcclure_loss() {
-        let loss = GemanMcClureLoss::new(1.0).unwrap();
+    fn test_geman_mcclure_loss() -> TestResult {
+        let loss = GemanMcClureLoss::new(1.0)?;
 
         // Test at s = 0
         let [rho, rho_prime, _] = loss.evaluate(0.0);
@@ -1570,11 +1578,13 @@ mod tests {
         let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
+
+        Ok(())
     }
 
     #[test]
-    fn test_welsch_loss() {
-        let loss = WelschLoss::new(2.9846).unwrap();
+    fn test_welsch_loss() -> TestResult {
+        let loss = WelschLoss::new(2.9846)?;
 
         // Test at s = 0: ρ'(0) = 0.5 * exp(0) = 0.5
         let [rho, rho_prime, _] = loss.evaluate(0.0);
@@ -1593,11 +1603,13 @@ mod tests {
         let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
+
+        Ok(())
     }
 
     #[test]
-    fn test_tukey_biweight_loss() {
-        let loss = TukeyBiweightLoss::new(4.6851).unwrap();
+    fn test_tukey_biweight_loss() -> TestResult {
+        let loss = TukeyBiweightLoss::new(4.6851)?;
 
         // Test at s = 0: ρ'(0) = 0.5 * (1-0)^2 = 0.5
         let [rho, rho_prime, _] = loss.evaluate(0.0);
@@ -1617,11 +1629,13 @@ mod tests {
         let [_, rho_prime_5, rho_double_prime_5] = loss.evaluate(5.0);
         assert!(rho_prime_5.is_finite() && rho_prime_5 > 0.0);
         assert!(rho_double_prime_5.is_finite() && rho_double_prime_5 < 0.0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_andrews_wave_loss() {
-        let loss = AndrewsWaveLoss::new(1.339).unwrap();
+    fn test_andrews_wave_loss() -> TestResult {
+        let loss = AndrewsWaveLoss::new(1.339)?;
 
         // Test at s = 0: ρ'(0) = 0.5 * sin(0) = 0
         let [rho, rho_prime, _] = loss.evaluate(0.0);
@@ -1641,11 +1655,13 @@ mod tests {
         let [_, rho_prime_1, rho_double_prime_1] = loss.evaluate(1.0);
         assert!(rho_prime_1.is_finite() && rho_prime_1 > 0.0);
         assert!(rho_double_prime_1.is_finite());
+
+        Ok(())
     }
 
     #[test]
-    fn test_ramsay_ea_loss() {
-        let loss = RamsayEaLoss::new(0.3).unwrap();
+    fn test_ramsay_ea_loss() -> TestResult {
+        let loss = RamsayEaLoss::new(0.3)?;
 
         // Test at s = 0 (should handle gracefully)
         let [rho, _, _] = loss.evaluate(0.0);
@@ -1662,11 +1678,13 @@ mod tests {
         let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
+
+        Ok(())
     }
 
     #[test]
-    fn test_trimmed_mean_loss() {
-        let loss = TrimmedMeanLoss::new(2.0).unwrap();
+    fn test_trimmed_mean_loss() -> TestResult {
+        let loss = TrimmedMeanLoss::new(2.0)?;
         let scale2 = 4.0;
 
         // Test below threshold (L2 behavior)
@@ -1680,66 +1698,72 @@ mod tests {
         assert!((rho_out - scale2 / 2.0).abs() < EPSILON);
         assert_eq!(rho_prime_out, 0.0);
         assert_eq!(rho_double_prime_out, 0.0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_lp_norm_loss() {
+    fn test_lp_norm_loss() -> TestResult {
         // Test L1 (p = 1)
-        let l1 = LpNormLoss::new(1.0).unwrap();
+        let l1 = LpNormLoss::new(1.0)?;
         let [rho_l1, _, _] = l1.evaluate(4.0);
         assert!((rho_l1 - 2.0).abs() < EPSILON); // ||r||₁ = 2
 
         // Test L2 (p = 2)
-        let l2 = LpNormLoss::new(2.0).unwrap();
+        let l2 = LpNormLoss::new(2.0)?;
         let [rho_l2, rho_prime_l2, rho_double_prime_l2] = l2.evaluate(4.0);
         assert!((rho_l2 - 4.0).abs() < EPSILON);
         assert!((rho_prime_l2 - 1.0).abs() < EPSILON);
         assert_eq!(rho_double_prime_l2, 0.0);
 
         // Test fractional p (p = 0.5)
-        let l05 = LpNormLoss::new(0.5).unwrap();
+        let l05 = LpNormLoss::new(0.5)?;
         let [_, rho_prime_05, _] = l05.evaluate(4.0);
         assert!(rho_prime_05 < 1.0); // Robust behavior
 
         // Verify derivatives for p = 1.5
-        let loss = LpNormLoss::new(1.5).unwrap();
+        let loss = LpNormLoss::new(1.5)?;
         let s = 4.0;
         let [_, rho_prime, rho_double_prime] = loss.evaluate(s);
         let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
+
+        Ok(())
     }
 
     #[test]
-    fn test_barron_general_loss_special_cases() {
+    fn test_barron_general_loss_special_cases() -> TestResult {
         // α = 0 (Cauchy-like)
-        let cauchy = BarronGeneralLoss::new(0.0, 1.0).unwrap();
+        let cauchy = BarronGeneralLoss::new(0.0, 1.0)?;
         let [_, rho_prime_small, _] = cauchy.evaluate(1.0);
         let [_, rho_prime_large, _] = cauchy.evaluate(100.0);
         assert!(rho_prime_large < rho_prime_small);
 
         // α = 2 (L2)
-        let l2 = BarronGeneralLoss::new(2.0, 1.0).unwrap();
+        let l2 = BarronGeneralLoss::new(2.0, 1.0)?;
         let [rho, rho_prime, rho_double_prime] = l2.evaluate(4.0);
         assert!((rho - 4.0).abs() < EPSILON);
         assert!((rho_prime - 1.0).abs() < EPSILON);
         assert!(rho_double_prime.abs() < EPSILON);
 
         // α = 1 (Charbonnier-like)
-        let charbonnier = BarronGeneralLoss::new(1.0, 1.0).unwrap();
+        let charbonnier = BarronGeneralLoss::new(1.0, 1.0)?;
         let [_, rho_prime_char, _] = charbonnier.evaluate(4.0);
         assert!(rho_prime_char > 0.0 && rho_prime_char < 1.0);
 
         // Test α = -2 (Geman-McClure-like) - strong outlier suppression
-        let gm = BarronGeneralLoss::new(-2.0, 1.0).unwrap();
+        let gm = BarronGeneralLoss::new(-2.0, 1.0)?;
         let [_, rho_prime_small, _] = gm.evaluate(1.0);
         let [_, rho_prime_large, _] = gm.evaluate(100.0);
         assert!(rho_prime_large < rho_prime_small); // Redescending behavior
         assert!(rho_prime_large < 0.1); // Strong suppression
+
+        Ok(())
     }
 
     #[test]
-    fn test_constructor_validation() {
+    fn test_constructor_validation() -> TestResult {
         // Test that negative or zero scale parameters are rejected
         assert!(FairLoss::new(0.0).is_err());
         assert!(FairLoss::new(-1.0).is_err());
@@ -1760,16 +1784,18 @@ mod tests {
         assert!(FairLoss::new(1.0).is_ok());
         assert!(LpNormLoss::new(1.5).is_ok());
         assert!(BarronGeneralLoss::new(1.0, 1.0).is_ok());
+
+        Ok(())
     }
 
     #[test]
-    fn test_loss_comparison() {
+    fn test_loss_comparison() -> TestResult {
         // Compare robustness: L2 vs Huber vs Cauchy at outlier
         let s_outlier = 100.0;
 
         let l2 = L2Loss;
-        let huber = HuberLoss::new(1.345).unwrap();
-        let cauchy = CauchyLoss::new(2.3849).unwrap();
+        let huber = HuberLoss::new(1.345)?;
+        let cauchy = CauchyLoss::new(2.3849)?;
 
         let [_, w_l2, _] = l2.evaluate(s_outlier);
         let [_, w_huber, _] = huber.evaluate(s_outlier);
@@ -1781,11 +1807,13 @@ mod tests {
 
         // Cauchy should strongly suppress outliers
         assert!(w_cauchy < 0.1);
+
+        Ok(())
     }
 
     #[test]
-    fn test_t_distribution_loss() {
-        let loss = TDistributionLoss::new(5.0).unwrap();
+    fn test_t_distribution_loss() -> TestResult {
+        let loss = TDistributionLoss::new(5.0)?;
 
         // Test at s = 0 (should be well-defined)
         let [rho, rho_prime, _] = loss.evaluate(0.0);
@@ -1806,13 +1834,15 @@ mod tests {
         let (rho_prime_num, rho_double_prime_num) = numerical_derivative(&loss, s, 1e-5);
         assert!((rho_prime - rho_prime_num).abs() < 1e-4);
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-4);
+
+        Ok(())
     }
 
     #[test]
-    fn test_t_distribution_loss_different_nu() {
+    fn test_t_distribution_loss_different_nu() -> TestResult {
         // Test that smaller ν is more robust
-        let t3 = TDistributionLoss::new(3.0).unwrap();
-        let t10 = TDistributionLoss::new(10.0).unwrap();
+        let t3 = TDistributionLoss::new(3.0)?;
+        let t10 = TDistributionLoss::new(10.0)?;
 
         let s_outlier = 100.0;
         let [_, w_t3, _] = t3.evaluate(s_outlier);
@@ -1820,12 +1850,14 @@ mod tests {
 
         // Smaller ν should downweight more aggressively
         assert!(w_t3 < w_t10);
+
+        Ok(())
     }
 
     #[test]
-    fn test_adaptive_barron_loss() {
+    fn test_adaptive_barron_loss() -> TestResult {
         // Test default (Cauchy-like with α = 0)
-        let adaptive = AdaptiveBarronLoss::new(0.0, 1.0).unwrap();
+        let adaptive = AdaptiveBarronLoss::new(0.0, 1.0)?;
 
         // Test at s = 0
         let [rho, _, _] = adaptive.evaluate(0.0);
@@ -1838,7 +1870,7 @@ mod tests {
 
         // AdaptiveBarron wraps BarronGeneral which is already tested,
         // so we just verify the wrapper works correctly
-        let barron = BarronGeneralLoss::new(0.0, 1.0).unwrap();
+        let barron = BarronGeneralLoss::new(0.0, 1.0)?;
         let [rho_a, rho_prime_a, rho_double_prime_a] = adaptive.evaluate(4.0);
         let [rho_b, rho_prime_b, rho_double_prime_b] = barron.evaluate(4.0);
 
@@ -1846,20 +1878,24 @@ mod tests {
         assert!((rho_a - rho_b).abs() < EPSILON);
         assert!((rho_prime_a - rho_prime_b).abs() < EPSILON);
         assert!((rho_double_prime_a - rho_double_prime_b).abs() < EPSILON);
+
+        Ok(())
     }
 
     #[test]
-    fn test_adaptive_barron_default() {
+    fn test_adaptive_barron_default() -> TestResult {
         // Test default constructor
         let adaptive = AdaptiveBarronLoss::default();
 
         // Should behave like Cauchy
         let [_, rho_prime, _] = adaptive.evaluate(4.0);
         assert!(rho_prime > 0.0 && rho_prime < 1.0);
+
+        Ok(())
     }
 
     #[test]
-    fn test_new_loss_constructor_validation() {
+    fn test_new_loss_constructor_validation() -> TestResult {
         // T-distribution: reject non-positive degrees of freedom
         assert!(TDistributionLoss::new(0.0).is_err());
         assert!(TDistributionLoss::new(-1.0).is_err());
@@ -1869,5 +1905,7 @@ mod tests {
         assert!(AdaptiveBarronLoss::new(0.0, 0.0).is_err());
         assert!(AdaptiveBarronLoss::new(1.0, -1.0).is_err());
         assert!(AdaptiveBarronLoss::new(0.0, 1.0).is_ok());
+
+        Ok(())
     }
 }
