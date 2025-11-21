@@ -56,6 +56,9 @@ pub enum IoError {
 
     #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("Failed to create file '{path}': {reason}")]
+    FileCreationFailed { path: String, reason: String },
 }
 
 impl IoError {
@@ -470,7 +473,13 @@ mod tests {
 
     #[test]
     fn test_load_simple_graph() -> Result<(), IoError> {
-        let mut temp_file = NamedTempFile::new().unwrap();
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 1 1.0 0.0 0.0")?;
         writeln!(temp_file, "# This is a comment")?;
@@ -522,12 +531,18 @@ mod tests {
     }
 
     #[test]
-    fn test_toro_loader() -> Result<(), io::Error> {
-        let mut temp_file = NamedTempFile::new()?;
+    fn test_toro_loader() -> Result<(), IoError> {
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX2 1 1.0 0.0 0.0")?;
 
-        let graph = ToroLoader::load(temp_file.path()).unwrap();
+        let graph = ToroLoader::load(temp_file.path()).map_err(|e| e.log())?;
         assert_eq!(graph.vertices_se2.len(), 2);
 
         Ok(())
