@@ -2,144 +2,168 @@
 //!
 //! This module provides the main error and result types used throughout the library.
 //! All errors use the `thiserror` crate for automatic trait implementations.
+//!
+//! # Error Hierarchy
+//!
+//! The library uses a hierarchical error system where:
+//! - **`ApexSolverError`** is the top-level error exposed to users via public APIs
+//! - **Module errors** (`CoreError`, `OptimizerError`, etc.) are wrapped inside ApexSolverError
+//! - **Error sources** are preserved, allowing full error chain inspection
+//!
+//! Example error chain:
+//! ```text
+//! ApexSolverError::Core(
+//!     CoreError::SymbolicStructure {
+//!         message: "Duplicate variable index",
+//!         context: "Variable 'x42' at position 15"
+//!     }
+//! )
+//! ```
 
 use crate::{
     core::CoreError, io::IoError, linalg::LinAlgError, manifold::ManifoldError,
-    optimizer::OptimizerError,
+    observers::ObserverError, optimizer::OptimizerError,
 };
-use std::{
-    io::Error,
-    num::{ParseFloatError, ParseIntError},
-};
+use std::error::Error as StdError;
 use thiserror::Error;
 
 /// Main result type used throughout the apex-solver library
-pub type ApexResult<T> = Result<T, ApexError>;
+pub type ApexSolverResult<T> = Result<T, ApexSolverError>;
 
 /// Main error type for the apex-solver library
-#[derive(Debug, Clone, Error)]
-pub enum ApexError {
-    /// Linear algebra related errors
-    #[error("Linear algebra error: {0}")]
-    LinearAlgebra(String),
+///
+/// This is the top-level error type exposed by public APIs. It wraps module-specific
+/// errors while preserving the full error chain for debugging.
+///
+/// # Error Chain Access
+///
+/// You can access the full error chain using the `chain()` method:
+///
+/// ```rust,ignore
+/// if let Err(e) = solver.optimize(&problem, &initial_values) {
+///     eprintln!("Error: {}", e);
+///     eprintln!("Full chain: {}", e.chain());
+/// }
+/// ```
+#[derive(Debug, Error)]
+pub enum ApexSolverError {
+    /// Core module errors (problem construction, factors, variables)
+    #[error(transparent)]
+    Core(#[from] CoreError),
 
-    /// IO related errors (file loading, parsing, etc.)
-    #[error("IO error: {0}")]
-    Io(String),
+    /// Optimization algorithm errors
+    #[error(transparent)]
+    Optimizer(#[from] OptimizerError),
 
-    /// Manifold operations errors
-    #[error("Manifold error: {0}")]
-    Manifold(String),
+    /// Linear algebra errors
+    #[error(transparent)]
+    LinearAlgebra(#[from] LinAlgError),
 
-    /// Solver related errors
-    #[error("Solver error: {0}")]
-    Solver(String),
+    /// Manifold operation errors
+    #[error(transparent)]
+    Manifold(#[from] ManifoldError),
 
-    /// General computation errors
-    #[error("Computation error: {0}")]
-    Computation(String),
+    /// I/O and file parsing errors
+    #[error(transparent)]
+    Io(#[from] IoError),
 
-    /// Invalid input parameters
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
-
-    /// Memory allocation or management errors
-    #[error("Memory error: {0}")]
-    Memory(String),
-
-    /// Convergence failures
-    #[error("Convergence error: {0}")]
-    Convergence(String),
-
-    /// Matrix operation errors
-    #[error("Matrix operation error: {0}")]
-    MatrixOperation(String),
-
-    /// Thread synchronization errors
-    #[error("Thread synchronization error: {0}")]
-    ThreadError(String),
+    /// Observer/visualization errors
+    #[error(transparent)]
+    Observer(#[from] ObserverError),
 }
 
-// Conversions from standard library errors
+// Module-specific errors are automatically converted via #[from] attributes above
+// No manual From implementations needed - thiserror handles it!
 
-impl From<Error> for ApexError {
-    fn from(err: Error) -> Self {
-        ApexError::Io(err.to_string())
+impl ApexSolverError {
+    /// Get the full error chain as a string for logging and debugging.
+    ///
+    /// This method traverses the error source chain and returns a formatted string
+    /// showing the hierarchy of errors from the top-level ApexSolverError down to the
+    /// root cause.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// match solver.optimize(&problem, &initial_values) {
+    ///     Ok(result) => { /* ... */ }
+    ///     Err(e) => {
+    ///         eprintln!("Optimization failed!");
+    ///         eprintln!("Error chain: {}", e.chain());
+    ///         // Output: "Optimizer error: Linear system solve failed →
+    ///         //          Linear algebra error: Singular matrix detected"
+    ///     }
+    /// }
+    /// ```
+    pub fn chain(&self) -> String {
+        let mut chain = vec![self.to_string()];
+        let mut source = self.source();
+
+        while let Some(err) = source {
+            chain.push(format!("  → {}", err));
+            source = err.source();
+        }
+
+        chain.join("\n")
     }
-}
 
-impl From<ParseFloatError> for ApexError {
-    fn from(err: ParseFloatError) -> Self {
-        ApexError::InvalidInput(format!("Failed to parse float: {err}"))
-    }
-}
+    /// Get a compact single-line error chain for logging
+    ///
+    /// Similar to `chain()` but formats as a single line with arrow separators.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// error!("Operation failed: {}", apex_err.chain_compact());
+    /// // Output: "Optimizer error → Linear algebra error → Singular matrix"
+    /// ```
+    pub fn chain_compact(&self) -> String {
+        let mut chain = vec![self.to_string()];
+        let mut source = self.source();
 
-impl From<ParseIntError> for ApexError {
-    fn from(err: ParseIntError) -> Self {
-        ApexError::InvalidInput(format!("Failed to parse integer: {err}"))
-    }
-}
+        while let Some(err) = source {
+            chain.push(err.to_string());
+            source = err.source();
+        }
 
-// Convert module-specific errors to ApexError
-
-impl From<LinAlgError> for ApexError {
-    fn from(err: LinAlgError) -> Self {
-        ApexError::LinearAlgebra(err.to_string())
-    }
-}
-
-impl From<OptimizerError> for ApexError {
-    fn from(err: OptimizerError) -> Self {
-        ApexError::Solver(err.to_string())
-    }
-}
-
-impl From<ManifoldError> for ApexError {
-    fn from(err: ManifoldError) -> Self {
-        ApexError::Manifold(err.to_string())
-    }
-}
-
-impl From<IoError> for ApexError {
-    fn from(err: IoError) -> Self {
-        ApexError::Io(err.to_string())
-    }
-}
-
-impl From<CoreError> for ApexError {
-    fn from(err: CoreError) -> Self {
-        ApexError::Computation(err.to_string())
+        chain.join(" → ")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::ErrorKind;
 
     #[test]
-    fn test_apex_error_display() {
-        let error = ApexError::LinearAlgebra("Matrix is singular".to_string());
-        assert_eq!(
-            error.to_string(),
-            "Linear algebra error: Matrix is singular"
-        );
+    fn test_apex_solver_error_display() {
+        let linalg_error = LinAlgError::SingularMatrix;
+        let error = ApexSolverError::from(linalg_error);
+        assert!(error.to_string().contains("Singular matrix"));
     }
 
     #[test]
-    fn test_apex_error_from_io() {
-        let io_error = Error::new(ErrorKind::NotFound, "File not found");
-        let apex_error = ApexError::from(io_error);
+    fn test_apex_solver_error_chain() {
+        let linalg_error =
+            LinAlgError::FactorizationFailed("Cholesky factorization failed".to_string());
+        let error = ApexSolverError::from(linalg_error);
 
-        match apex_error {
-            ApexError::Io(msg) => assert!(msg.contains("File not found")),
-            _ => panic!("Expected IO error"),
-        }
+        let chain = error.chain();
+        assert!(chain.contains("factorization"));
+        assert!(chain.contains("Cholesky"));
     }
 
     #[test]
-    fn test_apex_result_ok() {
-        let result: ApexResult<i32> = Ok(42);
+    fn test_apex_solver_error_chain_compact() {
+        let core_error = CoreError::Variable("Invalid variable index".to_string());
+        let error = ApexSolverError::from(core_error);
+
+        let chain_compact = error.chain_compact();
+        assert!(chain_compact.contains("Invalid variable index"));
+    }
+
+    #[test]
+    fn test_apex_solver_result_ok() {
+        let result: ApexSolverResult<i32> = Ok(42);
         assert!(result.is_ok());
         if let Ok(value) = result {
             assert_eq!(value, 42);
@@ -147,8 +171,24 @@ mod tests {
     }
 
     #[test]
-    fn test_apex_result_err() {
-        let result: ApexResult<i32> = Err(ApexError::Computation("Test error".to_string()));
+    fn test_apex_solver_result_err() {
+        let core_error = CoreError::ResidualBlock("Test error".to_string());
+        let result: ApexSolverResult<i32> = Err(ApexSolverError::from(core_error));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transparent_error_conversion() {
+        // Test automatic conversion via #[from]
+        let manifold_error = ManifoldError::DimensionMismatch {
+            expected: 3,
+            actual: 2,
+        };
+
+        let apex_error: ApexSolverError = manifold_error.into();
+        match apex_error {
+            ApexSolverError::Manifold(_) => { /* Expected */ }
+            _ => panic!("Expected Manifold variant"),
+        }
     }
 }
