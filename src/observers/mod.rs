@@ -168,6 +168,10 @@ pub enum ObserverError {
     /// Recording stream is in invalid state
     #[error("Recording stream is in invalid state: {0}")]
     InvalidState(String),
+
+    /// Mutex was poisoned (thread panicked while holding lock)
+    #[error("Mutex poisoned in {context}: {reason}")]
+    MutexPoisoned { context: String, reason: String },
 }
 
 impl ObserverError {
@@ -493,7 +497,16 @@ mod tests {
 
     impl OptObserver for TestObserver {
         fn on_step(&self, _values: &HashMap<String, VariableEnum>, iteration: usize) {
-            self.calls.lock().unwrap().push(iteration);
+            // In test code, we log and ignore mutex poisoning errors since they indicate test bugs
+            if let Ok(mut guard) = self.calls.lock().map_err(|e| {
+                ObserverError::MutexPoisoned {
+                    context: "TestObserver::on_step".to_string(),
+                    reason: e.to_string(),
+                }
+                .log()
+            }) {
+                guard.push(iteration);
+            }
         }
     }
 
@@ -508,7 +521,7 @@ mod tests {
     }
 
     #[test]
-    fn test_single_observer() {
+    fn test_single_observer() -> Result<(), ObserverError> {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let observer = TestObserver {
             calls: calls.clone(),
@@ -523,11 +536,19 @@ mod tests {
         observers.notify(&HashMap::new(), 1);
         observers.notify(&HashMap::new(), 2);
 
-        assert_eq!(*calls.lock().unwrap(), vec![0, 1, 2]);
+        let guard = calls.lock().map_err(|e| {
+            ObserverError::MutexPoisoned {
+                context: "test_single_observer".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
+        assert_eq!(*guard, vec![0, 1, 2]);
+        Ok(())
     }
 
     #[test]
-    fn test_multiple_observers() {
+    fn test_multiple_observers() -> Result<(), ObserverError> {
         let calls1 = Arc::new(Mutex::new(Vec::new()));
         let calls2 = Arc::new(Mutex::new(Vec::new()));
 
@@ -546,7 +567,23 @@ mod tests {
 
         observers.notify(&HashMap::new(), 5);
 
-        assert_eq!(*calls1.lock().unwrap(), vec![5]);
-        assert_eq!(*calls2.lock().unwrap(), vec![5]);
+        let guard1 = calls1.lock().map_err(|e| {
+            ObserverError::MutexPoisoned {
+                context: "test_multiple_observers (calls1)".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
+        assert_eq!(*guard1, vec![5]);
+
+        let guard2 = calls2.lock().map_err(|e| {
+            ObserverError::MutexPoisoned {
+                context: "test_multiple_observers (calls2)".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
+        assert_eq!(*guard2, vec![5]);
+        Ok(())
     }
 }
