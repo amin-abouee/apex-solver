@@ -205,7 +205,7 @@ fn create_loss_function(
 fn test_dataset(
     dataset_name: &str,
     args: &Args,
-) -> Result<DatasetResult, Box<dyn std::error::Error>> {
+) -> Result<DatasetResult, apex_solver::error::ApexSolverError> {
     info!(
         "Testing {} dataset by loading {}.g2o for SE2 optimization",
         dataset_name.to_uppercase(),
@@ -235,7 +235,12 @@ fn test_dataset(
 
     // Check if we have any vertices
     if num_vertices == 0 {
-        return Err(format!("No SE2 vertices found in dataset {}", dataset_name).into());
+        return Err(apex_solver::io::IoError::UnsupportedFormat(format!(
+            "No SE2 vertices found in dataset {}",
+            dataset_name
+        ))
+        .log()
+        .into());
     }
 
     // Create optimization problem
@@ -280,7 +285,7 @@ fn test_dataset(
         };
         // Use HuberLoss with scale=1.0 (same as 3D version)
         // This allows the first vertex to move slightly if graph structure demands it
-        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        let huber_loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
             &[&var_name],
             Box::new(prior_factor),
@@ -296,7 +301,11 @@ fn test_dataset(
     }
 
     // Create loss function for between factors
-    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale)?;
+    let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
+        apex_solver::error::ApexSolverError::from(
+            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+        )
+    })?;
 
     // Add SE2 between factors
     for edge in &graph.edges_se2 {
@@ -311,7 +320,11 @@ fn test_dataset(
 
         // Clone the loss function for each edge
         let edge_loss = if loss_fn.is_some() {
-            Some(create_loss_function(&args.loss_function, args.loss_scale)?.unwrap())
+            create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?
         } else {
             None
         };
@@ -349,7 +362,13 @@ fn test_dataset(
 
     let symbolic_structure = problem
         .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .expect("Failed to build symbolic structure");
+        .map_err(|e| {
+            apex_solver::core::CoreError::SymbolicStructure(format!(
+                "Failed to build symbolic structure for dataset {}",
+                dataset_name
+            ))
+            .log_with_source(e)
+        })?;
 
     let (residual, _jacobian) = problem
         .compute_residual_and_jacobian_sparse(
@@ -357,7 +376,13 @@ fn test_dataset(
             &variable_name_to_col_idx_dict,
             &symbolic_structure,
         )
-        .expect("Failed to compute residual and jacobian");
+        .map_err(|e| {
+            apex_solver::core::CoreError::FactorLinearization(format!(
+                "Failed to compute residual and jacobian for dataset {}",
+                dataset_name
+            ))
+            .log_with_source(e)
+        })?;
 
     // Compute initial cost using faer's norm
     let initial_cost = residual.as_ref().squared_norm_l2();
@@ -564,7 +589,15 @@ fn test_dataset(
 
         // Create output directory if it doesn't exist
         if let Some(parent) = output_path.parent() {
-            std::fs::create_dir_all(parent)?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                apex_solver::io::IoError::log_with_source(
+                    apex_solver::io::IoError::FileCreationFailed {
+                        path: parent.display().to_string(),
+                        reason: "Failed to create directory".to_string(),
+                    },
+                    e,
+                )
+            })?;
         }
 
         // Reconstruct graph from optimized variables
@@ -632,7 +665,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 results.push(result);
             }
             Err(e) => {
-                warn!("Dataset {} failed: {}", dataset, e);
+                warn!("Dataset {} failed", dataset);
+                warn!("Error: {}", e);
+                warn!("Full error chain:\n{}", e.chain());
             }
         }
     }
