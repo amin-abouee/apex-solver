@@ -1210,15 +1210,16 @@ mod tests {
     use std::collections::HashMap;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    /// Create a test SE2 dataset with 10 vertices in a loop
-    fn create_se2_test_problem() -> Result<
+    type TestProblemResult = Result<
         (
             Problem,
             HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
         ),
         Box<dyn std::error::Error>,
-    > {
+    >;
+
+    /// Create a test SE2 dataset with 10 vertices in a loop
+    fn create_se2_test_problem() -> TestProblemResult {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
@@ -1283,9 +1284,7 @@ mod tests {
     }
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
-    fn create_se3_test_problem()
-    -> Result<(Problem, HashMap<String, (ManifoldType, DVector<f64>)>), Box<dyn std::error::Error>>
-    {
+    fn create_se3_test_problem() -> TestProblemResult {
         let mut problem = Problem::new();
         let mut initial_values = HashMap::new();
 
