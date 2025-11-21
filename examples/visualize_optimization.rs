@@ -121,16 +121,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Optimize SE3 pose graph with visualization
 fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Print Rerun connection instructions
-    if args.save_visualization.is_some() {
+    if let Some(save_path) = &args.save_visualization {
         info!("\n=== Rerun Visualization ===");
-        info!(
-            "Saving to file: {}",
-            args.save_visualization.as_ref().unwrap()
-        );
-        info!(
-            "View it later with: rerun {}",
-            args.save_visualization.as_ref().unwrap()
-        );
+        info!("Saving to file: {}", save_path);
+        info!("View it later with: rerun {}", save_path);
     } else {
         info!("\n=== Rerun Visualization ===");
         info!("Starting Rerun server on port 9876");
