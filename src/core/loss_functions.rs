@@ -1457,6 +1457,19 @@ impl AdaptiveBarronLoss {
             inner: BarronGeneralLoss::new(alpha, scale)?,
         })
     }
+
+    /// Create default instance without validation (alpha=0.0, scale=1.0).
+    ///
+    /// This is safe because the default parameters are mathematically valid.
+    const fn new_default() -> Self {
+        AdaptiveBarronLoss {
+            inner: BarronGeneralLoss {
+                alpha: 0.0,
+                scale: 1.0,
+                scale2: 1.0,
+            },
+        }
+    }
 }
 
 impl LossFunction for AdaptiveBarronLoss {
@@ -1466,8 +1479,9 @@ impl LossFunction for AdaptiveBarronLoss {
 }
 
 impl Default for AdaptiveBarronLoss {
+    /// Creates default AdaptiveBarronLoss with validated parameters (alpha=0.0, scale=1.0).
     fn default() -> Self {
-        Self::new(0.0, 1.0).unwrap()
+        Self::new_default()
     }
 }
 
