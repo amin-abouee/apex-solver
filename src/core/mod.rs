@@ -50,6 +50,10 @@ pub enum CoreError {
     /// Loss function error
     #[error("Loss function error: {0}")]
     LossFunction(String),
+
+    /// Invalid input parameter or configuration
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl CoreError {

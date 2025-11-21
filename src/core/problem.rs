@@ -103,7 +103,7 @@ use crate::{
         CoreError, corrector::Corrector, loss_functions::LossFunction,
         residual_block::ResidualBlock, variable::Variable,
     },
-    error::{ApexError, ApexResult},
+    error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
     manifold::{ManifoldType, rn, se2, se3, so2, so3},
@@ -707,7 +707,7 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         total_dof: usize,
-    ) -> ApexResult<SymbolicStructure> {
+    ) -> ApexSolverResult<SymbolicStructure> {
         // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
         // Each Pair represents one entry in the sparse matrix
         let mut indices = Vec::<Pair<usize, usize>>::new();
@@ -826,11 +826,11 @@ impl Problem {
     pub fn compute_residual_sparse(
         &self,
         variables: &HashMap<String, VariableEnum>,
-    ) -> ApexResult<Mat<f64>> {
+    ) -> ApexSolverResult<Mat<f64>> {
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         // Compute residuals in parallel (no Jacobian needed)
-        let result: Result<Vec<()>, ApexError> = self
+        let result: Result<Vec<()>, ApexSolverError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -910,7 +910,7 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> ApexResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+    ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         // OPTIMIZATION: Pre-allocate exact size to avoid double allocation and flattening
@@ -918,7 +918,7 @@ impl Problem {
         let total_nnz = symbolic_structure.pattern.compute_nnz();
 
         // Collect block results with pre-computed sizes
-        let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, ApexError> = self
+        let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, ApexSolverError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -981,7 +981,7 @@ impl Problem {
         residual_block: &ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
         total_residual: &Arc<Mutex<Col<f64>>>,
-    ) -> ApexResult<()> {
+    ) -> ApexSolverResult<()> {
         let mut param_vectors: Vec<DVector<f64>> = Vec::new();
 
         for var_key in &residual_block.variable_key_list {
@@ -1026,7 +1026,7 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         total_residual: &Arc<Mutex<Col<f64>>>,
-    ) -> ApexResult<Vec<f64>> {
+    ) -> ApexSolverResult<Vec<f64>> {
         let mut param_vectors: Vec<DVector<f64>> = Vec::new();
         let mut var_sizes: Vec<usize> = Vec::new();
         let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();

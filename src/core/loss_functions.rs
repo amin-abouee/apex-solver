@@ -76,7 +76,8 @@
 //! // rho_prime < 1.0, downweighting the outlier
 //! ```
 
-use crate::error::{ApexError, ApexResult};
+use crate::core::CoreError;
+use crate::error::ApexSolverResult;
 
 /// Trait for robust loss functions used in nonlinear least squares optimization.
 ///
@@ -320,11 +321,11 @@ impl HuberLoss {
     ///
     /// let huber = HuberLoss::new(1.345).unwrap();
     /// ```
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(HuberLoss {
             scale,
@@ -441,11 +442,11 @@ impl CauchyLoss {
     ///
     /// let cauchy = CauchyLoss::new(2.3849).unwrap();
     /// ```
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         let scale2 = scale * scale;
         Ok(CauchyLoss {
@@ -538,11 +539,11 @@ impl FairLoss {
     /// # Returns
     ///
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(FairLoss { scale })
     }
@@ -620,11 +621,11 @@ impl GemanMcClureLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         let scale2 = scale * scale;
         Ok(GemanMcClureLoss { c: 1.0 / scale2 })
@@ -696,11 +697,11 @@ impl WelschLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         let scale2 = scale * scale;
         Ok(WelschLoss {
@@ -780,11 +781,11 @@ impl TukeyBiweightLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(TukeyBiweightLoss {
             scale,
@@ -874,11 +875,11 @@ impl AndrewsWaveLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(AndrewsWaveLoss {
             scale,
@@ -957,11 +958,11 @@ impl RamsayEaLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter a (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(RamsayEaLoss {
             scale,
@@ -1047,11 +1048,11 @@ impl TrimmedMeanLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(scale: f64) -> ApexResult<Self> {
+    pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("scale needs to be larger than zero".to_string()).into(),
+            );
         }
         Ok(TrimmedMeanLoss {
             scale2: scale * scale,
@@ -1120,9 +1121,9 @@ impl LpNormLoss {
     /// # Arguments
     ///
     /// * `p` - The norm parameter (0 < p ≤ 2 for practical use)
-    pub fn new(p: f64) -> ApexResult<Self> {
+    pub fn new(p: f64) -> ApexSolverResult<Self> {
         if p <= 0.0 {
-            return Err(ApexError::InvalidInput("p must be positive".to_string()));
+            return Err(CoreError::InvalidInput("p must be positive".to_string()).into());
         }
         Ok(LpNormLoss { p })
     }
@@ -1217,11 +1218,9 @@ impl BarronGeneralLoss {
     ///
     /// * `alpha` - The shape parameter (controls robustness)
     /// * `scale` - The scale parameter c (must be positive)
-    pub fn new(alpha: f64, scale: f64) -> ApexResult<Self> {
+    pub fn new(alpha: f64, scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "scale must be positive".to_string(),
-            ));
+            return Err(CoreError::InvalidInput("scale must be positive".to_string()).into());
         }
         Ok(BarronGeneralLoss {
             alpha,
@@ -1341,11 +1340,11 @@ impl TDistributionLoss {
     /// - ν = 5.0: Default, good balance between robustness and efficiency
     /// - ν = 3.0-4.0: More robust to outliers
     /// - ν = 10.0: Less aggressive, closer to Gaussian
-    pub fn new(nu: f64) -> ApexResult<Self> {
+    pub fn new(nu: f64) -> ApexSolverResult<Self> {
         if nu <= 0.0 {
-            return Err(ApexError::InvalidInput(
-                "degrees of freedom must be positive".to_string(),
-            ));
+            return Err(
+                CoreError::InvalidInput("degrees of freedom must be positive".to_string()).into(),
+            );
         }
         Ok(TDistributionLoss {
             nu,
@@ -1452,7 +1451,7 @@ impl AdaptiveBarronLoss {
     /// # Recommended Defaults
     ///
     /// - α = 0.0, c = 1.0: General-purpose robust loss
-    pub fn new(alpha: f64, scale: f64) -> ApexResult<Self> {
+    pub fn new(alpha: f64, scale: f64) -> ApexSolverResult<Self> {
         Ok(AdaptiveBarronLoss {
             inner: BarronGeneralLoss::new(alpha, scale)?,
         })
