@@ -84,3 +84,7 @@ debug = 1  # Line numbers only, not full debug info
 [profile.profiling]
 inherits = "release"
 debug = true  # Include debug symbols for better profiling with samply/flamegraph
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
