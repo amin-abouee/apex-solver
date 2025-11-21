@@ -1374,7 +1374,7 @@ impl DogLeg {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<OptimizationState, error::ApexError> {
+    ) -> Result<OptimizationState, error::ApexSolverError> {
         let variables = problem.initialize_variables(initial_params);
 
         let mut variable_index_map = collections::HashMap::new();
@@ -1556,7 +1556,7 @@ impl DogLeg {
         step_result: &StepResult,
         state: &mut OptimizationState,
         problem: &problem::Problem,
-    ) -> error::ApexResult<StepEvaluation> {
+    ) -> error::ApexSolverResult<StepEvaluation> {
         // Apply parameter updates
         let step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
@@ -1657,7 +1657,7 @@ impl DogLeg {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        error::ApexError,
+        error::ApexSolverError,
     > {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -1710,9 +1710,10 @@ impl DogLeg {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(error::ApexError::Solver(
+                    return Err(optimizer::OptimizerError::LinearSolveFailed(
                         "Linear solver failed to solve system".to_string(),
-                    ));
+                    )
+                    .into());
                 }
             };
 
@@ -1866,7 +1867,7 @@ impl DogLeg {
 
 impl optimizer::Solver for DogLeg {
     type Config = DogLegConfig;
-    type Error = error::ApexError;
+    type Error = error::ApexSolverError;
 
     fn new() -> Self {
         Self::default()
