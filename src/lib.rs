@@ -35,7 +35,7 @@ pub mod optimizer;
 
 // Re-export core types
 pub use core::variable::Variable;
-pub use error::{ApexError, ApexResult};
+pub use error::{ApexSolverError, ApexSolverResult};
 
 // Re-export factor types
 pub use factors::{
