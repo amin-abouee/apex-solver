@@ -349,7 +349,7 @@ impl VariableEnum {
                 var.set_value(new_so2);
             }
             VariableEnum::SO3(var) => {
-                let new_so3: so3::SO3 = vec.clone().into();
+                let new_so3 = so3::SO3::try_from(vec.clone()).expect("SO3 conversion failed");
                 var.set_value(new_so3);
             }
         }
@@ -616,7 +616,7 @@ impl Problem {
             .map(|(k, v)| {
                 let variable_enum = match v.0 {
                     ManifoldType::SO2 => {
-                        let mut var = Variable::new(so2::SO2::from(v.1.clone()));
+                        let mut var = Variable::new(so2::SO2::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
