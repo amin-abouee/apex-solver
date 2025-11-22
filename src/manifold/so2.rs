@@ -262,9 +262,6 @@ impl fmt::Display for SO2Tangent {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO2Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        if data_vector.len() != 1 {
-            panic!("SO2Tangent::from expects 1-dimensional vector [angle]");
-        }
         SO2Tangent {
             data: data_vector[0],
         }

@@ -404,9 +404,6 @@ impl fmt::Display for SO3Tangent {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO3Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        if data_vector.len() != 3 {
-            panic!("SO3Tangent::from expects 3-dimensional vector [θx, θy, θz]");
-        }
         SO3Tangent {
             data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
         }

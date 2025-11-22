@@ -257,13 +257,6 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        if self.data.len() != 3 {
-            panic!(
-                "act() requires 3-dimensional Rⁿ element, got dimension {}",
-                self.data.len()
-            );
-        }
-
         if let Some(jac_self) = jacobian_self {
             *jac_self = DMatrix::identity(3, 3);
         }

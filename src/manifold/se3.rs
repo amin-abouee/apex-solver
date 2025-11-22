@@ -430,11 +430,6 @@ impl fmt::Display for SE3Tangent {
 
 impl From<DVector<f64>> for SE3Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        if data_vector.len() != 6 {
-            panic!(
-                "SE3Tangent::from expects 6-dimensional vector [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]"
-            );
-        }
         SE3Tangent {
             data: Vector6::new(
                 data_vector[0],
