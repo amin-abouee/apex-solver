@@ -178,9 +178,6 @@ impl SE3 {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SE3 {
     fn from(data: DVector<f64>) -> Self {
-        if data.len() != 7 {
-            panic!("SE3::from expects 7-dimensional vector [tx, ty, tz, qw, qx, qy, qz]");
-        }
         let translation = Vector3::new(data[0], data[1], data[2]);
         let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]);
         SE3::from_translation_quaternion(translation, quaternion)

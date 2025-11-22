@@ -612,9 +612,6 @@ impl Tangent<Rn> for RnTangent {
     /// For Euclidean space, generators are standard basis vectors.
     fn generator(&self, i: usize) -> <Rn as LieGroup>::LieAlgebra {
         let dim = self.data.len();
-        if i >= dim {
-            panic!("Generator index {} out of bounds for dimension {}", i, dim);
-        }
         let mut generator_matrix = DMatrix::zeros(dim, dim);
         generator_matrix[(i, i)] = 1.0;
         generator_matrix

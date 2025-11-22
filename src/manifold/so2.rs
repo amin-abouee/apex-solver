@@ -34,9 +34,6 @@ impl Display for SO2 {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO2 {
     fn from(data: DVector<f64>) -> Self {
-        if data.len() != 1 {
-            panic!("SO2::from expects 1-dimensional vector [angle]");
-        }
         SO2::from_angle(data[0])
     }
 }
