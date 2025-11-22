@@ -836,7 +836,12 @@ fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
         (true, "apex-solver") => apex_solver_se3(dataset),
         (_, "factrs") => factrs_benchmark(dataset),
         (_, "tiny-solver") => tiny_solver_benchmark(dataset),
-        _ => panic!("Unknown solver: {}", solver),
+        _ => BenchmarkResult::failed(
+            dataset.name,
+            solver,
+            "unknown",
+            &format!("Unknown solver: {}", solver),
+        ),
     }
 }
 
