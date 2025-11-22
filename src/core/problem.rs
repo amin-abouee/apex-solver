@@ -57,6 +57,8 @@
 //! use apex_solver::manifold::ManifoldType;
 //! use nalgebra::{DVector, dvector};
 //! use std::collections::HashMap;
+//! # use apex_solver::error::ApexSolverResult;
+//! # fn example() -> ApexSolverResult<()> {
 //!
 //! let mut problem = Problem::new();
 //!
@@ -69,7 +71,7 @@
 //! // Add between factor with robust loss
 //! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
 //! let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
-//!     Some(Box::new(HuberLoss::new(1.0).unwrap()));
+//!     Some(Box::new(HuberLoss::new(1.0)?));
 //! problem.add_residual_block(&["x0", "x1"], between, loss);
 //!
 //! // Initialize variables
@@ -81,6 +83,9 @@
 //!
 //! println!("Problem has {} residual blocks", problem.num_residual_blocks());
 //! println!("Total residual dimension: {}", problem.total_residual_dimension);
+//! # Ok(())
+//! # }
+//! # example().unwrap();
 //! ```
 
 use std::{
@@ -106,7 +111,7 @@ use crate::{
     error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
-    manifold::{ManifoldType, rn, se2, se3, so2, so3},
+    manifold::{ManifoldError, ManifoldType, rn, se2, se3, so2, so3},
 };
 
 /// Symbolic structure for sparse matrix operations.
@@ -215,7 +220,8 @@ impl VariableEnum {
                 }
 
                 let step_dvector = DVector::from_vec(step_data);
-                let tangent = so3::SO3Tangent::from(step_dvector);
+                let tangent =
+                    so3::SO3Tangent::try_from(step_dvector).expect("SO3Tangent conversion failed");
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -229,7 +235,8 @@ impl VariableEnum {
                 }
 
                 let step_dvector = DVector::from_vec(vec![step_data]);
-                let tangent = so2::SO2Tangent::from(step_dvector);
+                let tangent =
+                    so2::SO2Tangent::try_from(step_dvector).expect("SO2Tangent conversion failed");
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -340,11 +347,11 @@ impl VariableEnum {
                 var.set_value(new_se3);
             }
             VariableEnum::SO2(var) => {
-                let new_so2: so2::SO2 = vec.clone().into();
+                let new_so2 = so2::SO2::try_from(vec.clone()).expect("SO2 conversion failed");
                 var.set_value(new_so2);
             }
             VariableEnum::SO3(var) => {
-                let new_so3: so3::SO3 = vec.clone().into();
+                let new_so3 = so3::SO3::try_from(vec.clone()).expect("SO3 conversion failed");
                 var.set_value(new_so3);
             }
         }
@@ -470,6 +477,8 @@ impl Problem {
     /// use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
     /// use apex_solver::core::loss_functions::HuberLoss;
     /// use nalgebra::dvector;
+    /// # use apex_solver::error::ApexSolverResult;
+    /// # fn example() -> ApexSolverResult<()> {
     ///
     /// let mut problem = Problem::new();
     ///
@@ -480,12 +489,15 @@ impl Problem {
     /// // Add between factor with robust loss (binary constraint)
     /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
     /// let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
-    ///     Some(Box::new(HuberLoss::new(1.0).unwrap()));
+    ///     Some(Box::new(HuberLoss::new(1.0)?));
     /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
     ///
     /// assert_eq!(id1, 0);
     /// assert_eq!(id2, 1);
     /// assert_eq!(problem.num_residual_blocks(), 2);
+    /// # Ok(())
+    /// # }
+    /// # example().unwrap();
     /// ```
     pub fn add_residual_block(
         &mut self,
@@ -600,13 +612,13 @@ impl Problem {
     pub fn initialize_variables(
         &self,
         initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> HashMap<String, VariableEnum> {
-        let variables: HashMap<String, VariableEnum> = initial_values
+    ) -> Result<HashMap<String, VariableEnum>, ManifoldError> {
+        let variables: Result<HashMap<String, VariableEnum>, ManifoldError> = initial_values
             .iter()
             .map(|(k, v)| {
                 let variable_enum = match v.0 {
                     ManifoldType::SO2 => {
-                        let mut var = Variable::new(so2::SO2::from(v.1.clone()));
+                        let mut var = Variable::new(so2::SO2::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -616,7 +628,7 @@ impl Problem {
                         VariableEnum::SO2(var)
                     }
                     ManifoldType::SO3 => {
-                        let mut var = Variable::new(so3::SO3::from(v.1.clone()));
+                        let mut var = Variable::new(so3::SO3::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -626,7 +638,7 @@ impl Problem {
                         VariableEnum::SO3(var)
                     }
                     ManifoldType::SE2 => {
-                        let mut var = Variable::new(se2::SE2::from(v.1.clone()));
+                        let mut var = Variable::new(se2::SE2::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -636,7 +648,7 @@ impl Problem {
                         VariableEnum::SE2(var)
                     }
                     ManifoldType::SE3 => {
-                        let mut var = Variable::new(se3::SE3::from(v.1.clone()));
+                        let mut var = Variable::new(se3::SE3::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -646,7 +658,7 @@ impl Problem {
                         VariableEnum::SE3(var)
                     }
                     ManifoldType::RN => {
-                        let mut var = Variable::new(rn::Rn::from(v.1.clone()));
+                        let mut var = Variable::new(rn::Rn::try_from(v.1.clone())?);
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
@@ -657,7 +669,7 @@ impl Problem {
                     }
                 };
 
-                (k.to_owned(), variable_enum)
+                Ok((k.to_owned(), variable_enum))
             })
             .collect();
         variables
