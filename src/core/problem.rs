@@ -57,6 +57,8 @@
 //! use apex_solver::manifold::ManifoldType;
 //! use nalgebra::{DVector, dvector};
 //! use std::collections::HashMap;
+//! # use apex_solver::error::ApexSolverResult;
+//! # fn example() -> ApexSolverResult<()> {
 //!
 //! let mut problem = Problem::new();
 //!
@@ -69,7 +71,7 @@
 //! // Add between factor with robust loss
 //! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
 //! let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
-//!     Some(Box::new(HuberLoss::new(1.0).unwrap()));
+//!     Some(Box::new(HuberLoss::new(1.0)?));
 //! problem.add_residual_block(&["x0", "x1"], between, loss);
 //!
 //! // Initialize variables
@@ -81,6 +83,9 @@
 //!
 //! println!("Problem has {} residual blocks", problem.num_residual_blocks());
 //! println!("Total residual dimension: {}", problem.total_residual_dimension);
+//! # Ok(())
+//! # }
+//! # example().unwrap();
 //! ```
 
 use std::{
@@ -470,6 +475,8 @@ impl Problem {
     /// use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
     /// use apex_solver::core::loss_functions::HuberLoss;
     /// use nalgebra::dvector;
+    /// # use apex_solver::error::ApexSolverResult;
+    /// # fn example() -> ApexSolverResult<()> {
     ///
     /// let mut problem = Problem::new();
     ///
@@ -480,12 +487,15 @@ impl Problem {
     /// // Add between factor with robust loss (binary constraint)
     /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
     /// let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
-    ///     Some(Box::new(HuberLoss::new(1.0).unwrap()));
+    ///     Some(Box::new(HuberLoss::new(1.0)?));
     /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
     ///
     /// assert_eq!(id1, 0);
     /// assert_eq!(id2, 1);
     /// assert_eq!(problem.num_residual_blocks(), 2);
+    /// # Ok(())
+    /// # }
+    /// # example().unwrap();
     /// ```
     pub fn add_residual_block(
         &mut self,
