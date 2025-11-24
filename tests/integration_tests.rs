@@ -487,7 +487,7 @@ fn test_sphere2500_se3_converges() {
 
     // Verify performance (should complete in < 2 seconds)
     assert!(
-        result.elapsed_time.as_secs() < 550,
+        result.elapsed_time.as_secs() < 15,
         "Optimization took too long: {:?}",
         result.elapsed_time
     );
