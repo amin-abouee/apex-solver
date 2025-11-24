@@ -1343,14 +1343,6 @@ mod tests {
             .ok_or("x2 not found")?
             .to_vector()[0];
 
-        println!("Rosenbrock optimization result (Gauss-Newton):");
-        println!("  Status: {:?}", result.status);
-        println!("  Initial cost: {:.6e}", result.initial_cost);
-        println!("  Final cost: {:.6e}", result.final_cost);
-        println!("  Iterations: {}", result.iterations);
-        println!("  x1: {:.6} (expected 1.0)", x1_final);
-        println!("  x2: {:.6} (expected 1.0)", x2_final);
-
         // Verify convergence to [1.0, 1.0]
         assert!(
             matches!(
