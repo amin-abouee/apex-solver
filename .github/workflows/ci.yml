@@ -47,7 +47,7 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --release --verbose
 
       - name: Check visualization examples compile
         run: cargo check --examples --features visualization
