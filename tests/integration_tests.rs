@@ -59,8 +59,6 @@ struct TestResult {
     success: bool,
 }
 
-
-
 /// Run SE3 (3D) optimization on a dataset
 ///
 /// # Arguments

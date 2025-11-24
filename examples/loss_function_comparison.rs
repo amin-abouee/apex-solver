@@ -285,21 +285,11 @@ fn benchmark_dataset_se3(
                     "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value)?)),
                     "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value)?)),
                     "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value)?)),
-                    "Barron(α=0)" => {
-                        Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?))
-                    }
-                    "Barron(α=1)" => {
-                        Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?))
-                    }
-                    "Barron(α=-2)" => {
-                        Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?))
-                    }
-                    "TDistribution(ν=5)" => {
-                        Some(Box::new(TDistributionLoss::new(scale_value)?))
-                    }
-                    "AdaptiveBarron" => {
-                        Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?))
-                    }
+                    "Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?)),
+                    "Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?)),
+                    "Barron(α=-2)" => Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?)),
+                    "TDistribution(ν=5)" => Some(Box::new(TDistributionLoss::new(scale_value)?)),
+                    "AdaptiveBarron" => Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?)),
                     _ => None,
                 };
 
@@ -487,21 +477,11 @@ fn benchmark_dataset_se2(
                     "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value)?)),
                     "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value)?)),
                     "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value)?)),
-                    "Barron(α=0)" => {
-                        Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?))
-                    }
-                    "Barron(α=1)" => {
-                        Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?))
-                    }
-                    "Barron(α=-2)" => {
-                        Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?))
-                    }
-                    "TDistribution(ν=5)" => {
-                        Some(Box::new(TDistributionLoss::new(scale_value)?))
-                    }
-                    "AdaptiveBarron" => {
-                        Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?))
-                    }
+                    "Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?)),
+                    "Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?)),
+                    "Barron(α=-2)" => Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?)),
+                    "TDistribution(ν=5)" => Some(Box::new(TDistributionLoss::new(scale_value)?)),
+                    "AdaptiveBarron" => Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?)),
                     _ => None,
                 };
 
