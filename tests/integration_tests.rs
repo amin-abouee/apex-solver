@@ -372,11 +372,6 @@ fn test_ring_se2_converges() {
         "Optimization took too long: {:?}",
         result.elapsed_time
     );
-
-    println!(
-        "✓ ring.g2o: {} vertices, {} edges, {:.2}% improvement in {:?}",
-        result.vertices, result.edges, result.improvement_pct, result.elapsed_time
-    );
 }
 
 /// Test optimization on intel.g2o (medium SE2 dataset)
@@ -433,11 +428,6 @@ fn test_intel_se2_converges() {
         result.elapsed_time.as_secs() < 5,
         "Optimization took too long: {:?}",
         result.elapsed_time
-    );
-
-    println!(
-        "✓ intel.g2o: {} vertices, {} edges, {:.2}% improvement in {:?}",
-        result.vertices, result.edges, result.improvement_pct, result.elapsed_time
     );
 }
 
@@ -500,11 +490,6 @@ fn test_sphere2500_se3_converges() {
         result.elapsed_time.as_millis() < 550,
         "Optimization took too long: {:?}",
         result.elapsed_time
-    );
-
-    println!(
-        "✓ sphere2500.g2o: {} vertices, {} edges, {:.2}% improvement in {:?}",
-        result.vertices, result.edges, result.improvement_pct, result.elapsed_time
     );
 }
 

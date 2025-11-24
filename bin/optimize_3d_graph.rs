@@ -378,10 +378,10 @@ fn test_se3_dataset(
                 match RerunObserver::new(true) {
                     Ok(observer) => {
                         solver.add_observer(observer);
-                        println!("✓ Rerun visualization enabled (Gauss-Newton)");
+                        info!("✓ Rerun visualization enabled (Gauss-Newton)");
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                        warn!("Warning: Failed to create Rerun observer: {}", e);
                     }
                 }
             }
@@ -403,10 +403,10 @@ fn test_se3_dataset(
                 match RerunObserver::new(true) {
                     Ok(observer) => {
                         solver.add_observer(observer);
-                        println!("✓ Rerun visualization enabled (Dog Leg)");
+                        info!("✓ Rerun visualization enabled (Dog Leg)");
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                        warn!("Warning: Failed to create Rerun observer: {}", e);
                     }
                 }
             }
@@ -428,10 +428,10 @@ fn test_se3_dataset(
                 match RerunObserver::new(true) {
                     Ok(observer) => {
                         solver.add_observer(observer);
-                        println!("✓ Rerun visualization enabled (Levenberg-Marquardt)");
+                        info!("✓ Rerun visualization enabled (Levenberg-Marquardt)");
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to create Rerun observer: {}", e);
+                        warn!("Warning: Failed to create Rerun observer: {}", e);
                     }
                 }
             }
