@@ -836,8 +836,26 @@ fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
         (true, "apex-solver") => apex_solver_se3(dataset),
         (_, "factrs") => factrs_benchmark(dataset),
         (_, "tiny-solver") => tiny_solver_benchmark(dataset),
-        _ => panic!("Unknown solver: {}", solver),
+        _ => BenchmarkResult::failed(
+            dataset.name,
+            solver,
+            "unknown",
+            &format!("Unknown solver: {}", solver),
+        ),
     }
+}
+
+/// Helper function to save benchmark results to CSV
+fn save_csv_results(
+    results: &[BenchmarkResult],
+    path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut writer = Writer::from_path(path)?;
+    for result in results {
+        writer.serialize(result)?;
+    }
+    writer.flush()?;
+    Ok(())
 }
 
 fn main() {
@@ -855,7 +873,7 @@ fn main() {
 
         for solver in &solvers {
             info!("{} ... ", solver);
-            std::io::Write::flush(&mut std::io::stdout()).unwrap();
+            let _ = std::io::Write::flush(&mut std::io::stdout());
 
             // Run multiple times to get stable measurements
             let num_runs = 5;
@@ -897,16 +915,11 @@ fn main() {
 
     // Write results to CSV
     let csv_path = "benchmark_results.csv";
-    let mut writer = Writer::from_path(csv_path).expect("Failed to create CSV file");
-
-    for result in &all_results {
-        writer
-            .serialize(result)
-            .expect("Failed to write CSV record");
+    if let Err(e) = save_csv_results(&all_results, csv_path) {
+        eprintln!("Warning: Failed to save CSV results: {}", e);
+    } else {
+        info!("Results written to {}", csv_path);
     }
-    writer.flush().expect("Failed to flush CSV writer");
-
-    info!("Results written to {}", csv_path);
 
     // Compute normalized cost reduction scores for fair comparison
     let normalized_results = compute_normalized_scores(&all_results);

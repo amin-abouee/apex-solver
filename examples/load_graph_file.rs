@@ -150,7 +150,10 @@ fn load_and_analyze_file(file_path: &Path) -> Result<FileStatistics, Box<dyn std
 
 /// Display statistics for a successfully loaded file
 fn display_file_statistics(file_path: &Path, stats: &FileStatistics) {
-    let filename = file_path.file_name().unwrap().to_string_lossy();
+    let filename = file_path
+        .file_name()
+        .map(|f| f.to_string_lossy())
+        .unwrap_or_else(|| "unknown".into());
     let extension = file_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -205,7 +208,10 @@ fn display_first_vertex_info(file_path: &Path) {
 /// Display error message for failed file load
 #[allow(clippy::borrowed_box)]
 fn display_load_error(file_path: &Path, error: &Box<dyn std::error::Error>) {
-    let filename = file_path.file_name().unwrap().to_string_lossy();
+    let filename = file_path
+        .file_name()
+        .map(|f| f.to_string_lossy())
+        .unwrap_or_else(|| "unknown".into());
     let extension = file_path
         .extension()
         .and_then(|ext| ext.to_str())

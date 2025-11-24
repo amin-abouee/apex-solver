@@ -11,6 +11,7 @@ use std::{
     path::Path,
 };
 use thiserror::Error;
+use tracing::error;
 
 // Import manifold types
 use crate::{
@@ -28,7 +29,7 @@ pub use toro::ToroLoader;
 
 /// Errors that can occur during graph file parsing
 #[derive(Error, Debug)]
-pub enum ApexSolverIoError {
+pub enum IoError {
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 
@@ -55,6 +56,25 @@ pub enum ApexSolverIoError {
 
     #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("Failed to create file '{path}': {reason}")]
+    FileCreationFailed { path: String, reason: String },
+}
+
+impl IoError {
+    /// Log the error using tracing::error and return self for chaining
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with source error information using tracing::error and return self for chaining
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -418,26 +438,30 @@ impl Display for Graph {
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError>;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError>;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError>;
 }
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
+pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
         .and_then(|ext| ext.to_str())
-        .ok_or_else(|| ApexSolverIoError::UnsupportedFormat("No file extension".to_string()))?;
+        .ok_or_else(|| {
+            IoError::UnsupportedFormat("No file extension".to_string())
+                .log_with_source(format!("File path: {:?}", path_ref))
+        })?;
 
     match extension.to_lowercase().as_str() {
         "g2o" => G2oLoader::load(path),
         "graph" => ToroLoader::load(path),
-        _ => Err(ApexSolverIoError::UnsupportedFormat(format!(
-            "Unsupported extension: {extension}"
-        ))),
+        _ => Err(
+            IoError::UnsupportedFormat(format!("Unsupported extension: {extension}"))
+                .log_with_source(format!("File path: {:?}", path_ref)),
+        ),
     }
 }
 
@@ -448,8 +472,14 @@ mod tests {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_load_simple_graph() -> Result<(), ApexSolverIoError> {
-        let mut temp_file = NamedTempFile::new().unwrap();
+    fn test_load_simple_graph() -> Result<(), IoError> {
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 1 1.0 0.0 0.0")?;
         writeln!(temp_file, "# This is a comment")?;
@@ -495,21 +525,24 @@ mod tests {
         writeln!(temp_file, "VERTEX_SE2 0 1.0 0.0 0.0")?; // Duplicate ID
 
         let result = G2oLoader::load(temp_file.path());
-        assert!(matches!(
-            result,
-            Err(ApexSolverIoError::DuplicateVertex { id: 0 })
-        ));
+        assert!(matches!(result, Err(IoError::DuplicateVertex { id: 0 })));
 
         Ok(())
     }
 
     #[test]
-    fn test_toro_loader() -> Result<(), io::Error> {
-        let mut temp_file = NamedTempFile::new()?;
+    fn test_toro_loader() -> Result<(), IoError> {
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX2 1 1.0 0.0 0.0")?;
 
-        let graph = ToroLoader::load(temp_file.path()).unwrap();
+        let graph = ToroLoader::load(temp_file.path()).map_err(|e| e.log())?;
         assert_eq!(graph.vertices_se2.len(), 2);
 
         Ok(())

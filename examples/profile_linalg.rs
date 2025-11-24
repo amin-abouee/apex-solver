@@ -26,21 +26,26 @@ const ITERATIONS_SMALL: usize = 1000;
 const ITERATIONS_MEDIUM: usize = 100;
 const ITERATIONS_LARGE: usize = 10;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger with INFO level
     init_logger();
 
     info!("Profiling Linear Algebra Operations");
 
-    profile_sparse_matrix_multiply();
-    profile_sparse_dense_multiply();
-    profile_cholesky_solver();
-    profile_qr_solver();
+    profile_sparse_matrix_multiply()?;
+    profile_sparse_dense_multiply()?;
+    profile_cholesky_solver()?;
+    profile_qr_solver()?;
 
     info!("Profiling Complete");
+    Ok(())
 }
 
-fn create_sparse_jacobian(rows: usize, cols: usize, density: f64) -> SparseColMat<usize, f64> {
+fn create_sparse_jacobian(
+    rows: usize,
+    cols: usize,
+    density: f64,
+) -> Result<SparseColMat<usize, f64>, Box<dyn std::error::Error>> {
     // Create a sparse Jacobian-like matrix with given density
     let mut triplets = Vec::new();
     let nnz_per_col = ((rows as f64) * density).max(1.0) as usize;
@@ -53,25 +58,26 @@ fn create_sparse_jacobian(rows: usize, cols: usize, density: f64) -> SparseColMa
         }
     }
 
-    SparseColMat::try_new_from_triplets(rows, cols, &triplets).unwrap()
+    SparseColMat::try_new_from_triplets(rows, cols, &triplets)
+        .map_err(|e| format!("Failed to create sparse matrix {}x{}: {:?}", rows, cols, e).into())
 }
 
 fn create_residual_vector(size: usize) -> Mat<f64> {
     Mat::from_fn(size, 1, |i, _| (i as f64 * 0.1).sin())
 }
 
-fn profile_sparse_matrix_multiply() {
+fn profile_sparse_matrix_multiply() -> Result<(), Box<dyn std::error::Error>> {
     info!("Profiling Sparse Matrix Multiplication (J^T * J)...");
 
     // Small problem
-    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
+    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05)?;
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_SMALL {
         let _ = jacobian_small
             .as_ref()
             .transpose()
             .to_col_major()
-            .unwrap()
+            .map_err(|e| format!("Failed to convert to col major: {:?}", e))?
             .mul(jacobian_small.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_SMALL as u32;
@@ -83,14 +89,14 @@ fn profile_sparse_matrix_multiply() {
     );
 
     // Medium problem
-    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01);
+    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01)?;
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_MEDIUM {
         let _ = jacobian_medium
             .as_ref()
             .transpose()
             .to_col_major()
-            .unwrap()
+            .map_err(|e| format!("Failed to convert to col major: {:?}", e))?
             .mul(jacobian_medium.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_MEDIUM as u32;
@@ -102,14 +108,14 @@ fn profile_sparse_matrix_multiply() {
     );
 
     // Large problem
-    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005);
+    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005)?;
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_LARGE {
         let _ = jacobian_large
             .as_ref()
             .transpose()
             .to_col_major()
-            .unwrap()
+            .map_err(|e| format!("Failed to convert to col major: {:?}", e))?
             .mul(jacobian_large.as_ref());
     }
     let elapsed = start.elapsed() / ITERATIONS_LARGE as u32;
@@ -119,13 +125,14 @@ fn profile_sparse_matrix_multiply() {
         jacobian_large.ncols(),
         elapsed
     );
+    Ok(())
 }
 
-fn profile_sparse_dense_multiply() {
+fn profile_sparse_dense_multiply() -> Result<(), Box<dyn std::error::Error>> {
     info!("Profiling Sparse-Dense Multiplication (J^T * r)...");
 
     // Small problem
-    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
+    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05)?;
     let residuals_small = create_residual_vector(600);
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_SMALL {
@@ -141,7 +148,7 @@ fn profile_sparse_dense_multiply() {
     );
 
     // Medium problem
-    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01);
+    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01)?;
     let residuals_medium = create_residual_vector(6000);
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_MEDIUM {
@@ -157,7 +164,7 @@ fn profile_sparse_dense_multiply() {
     );
 
     // Large problem
-    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005);
+    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005)?;
     let residuals_large = create_residual_vector(60000);
     let start = std::time::Instant::now();
     for _ in 0..ITERATIONS_LARGE {
@@ -171,13 +178,14 @@ fn profile_sparse_dense_multiply() {
         residuals_large.nrows(),
         elapsed
     );
+    Ok(())
 }
 
-fn profile_cholesky_solver() {
+fn profile_cholesky_solver() -> Result<(), Box<dyn std::error::Error>> {
     info!("Profiling Sparse Cholesky Solver...");
 
     // Small problem
-    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
+    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05)?;
     let residuals_small = create_residual_vector(600);
     let mut solver_small = SparseCholeskySolver::new();
 
@@ -202,7 +210,7 @@ fn profile_cholesky_solver() {
     );
 
     // Medium problem
-    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01);
+    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01)?;
     let residuals_medium = create_residual_vector(6000);
     let mut solver_medium = SparseCholeskySolver::new();
 
@@ -227,7 +235,7 @@ fn profile_cholesky_solver() {
     );
 
     // Large problem
-    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005);
+    let jacobian_large = create_sparse_jacobian(60000, LARGE_SIZE, 0.005)?;
     let residuals_large = create_residual_vector(60000);
     let mut solver_large = SparseCholeskySolver::new();
 
@@ -250,13 +258,14 @@ fn profile_cholesky_solver() {
         "  Size {} variables (augmented eq): {:?} per solve",
         LARGE_SIZE, elapsed
     );
+    Ok(())
 }
 
-fn profile_qr_solver() {
+fn profile_qr_solver() -> Result<(), Box<dyn std::error::Error>> {
     info!("Profiling Sparse QR Solver...");
 
     // Small problem
-    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05);
+    let jacobian_small = create_sparse_jacobian(600, SMALL_SIZE, 0.05)?;
     let residuals_small = create_residual_vector(600);
     let mut solver_small = SparseQRSolver::new();
 
@@ -281,7 +290,7 @@ fn profile_qr_solver() {
     );
 
     // Medium problem
-    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01);
+    let jacobian_medium = create_sparse_jacobian(6000, MEDIUM_SIZE, 0.01)?;
     let residuals_medium = create_residual_vector(6000);
     let mut solver_medium = SparseQRSolver::new();
 
@@ -304,4 +313,5 @@ fn profile_qr_solver() {
         "  Size {} variables (augmented eq): {:?} per solve",
         MEDIUM_SIZE, elapsed
     );
+    Ok(())
 }

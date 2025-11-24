@@ -1055,7 +1055,7 @@ impl LevenbergMarquardt {
         &self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<LinearizerResult, error::ApexError> {
+    ) -> Result<LinearizerResult, error::ApexSolverError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -1156,7 +1156,7 @@ impl LevenbergMarquardt {
         step_result: &StepResult,
         state: &mut LinearizerResult,
         problem: &Problem,
-    ) -> error::ApexResult<StepEvaluation> {
+    ) -> error::ApexSolverResult<StepEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = apply_parameter_step(
             &mut state.variables,
@@ -1251,7 +1251,7 @@ impl LevenbergMarquardt {
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexError> {
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
         let start_time = Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1; // Initial cost evaluation
@@ -1301,9 +1301,11 @@ impl LevenbergMarquardt {
             };
 
             // Compute optimization step
-            let step_result = self
-                .compute_levenberg_marquardt_step(&residuals, &scaled_jacobian, &mut linear_solver)
-                .map_err(|e| error::ApexError::Solver(e.to_string()))?;
+            let step_result = self.compute_levenberg_marquardt_step(
+                &residuals,
+                &scaled_jacobian,
+                &mut linear_solver,
+            )?;
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -1463,7 +1465,7 @@ impl LevenbergMarquardt {
 // Implement Solver trait
 impl Solver for LevenbergMarquardt {
     type Config = LevenbergMarquardtConfig;
-    type Error = error::ApexError;
+    type Error = error::ApexSolverError;
 
     fn new() -> Self {
         Self::default()

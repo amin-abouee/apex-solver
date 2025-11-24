@@ -844,7 +844,7 @@ impl GaussNewton {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-    ) -> Result<LinearizerResult, error::ApexError> {
+    ) -> Result<LinearizerResult, error::ApexSolverError> {
         // Initialize variables from initial values
         let variables = problem.initialize_variables(initial_params);
 
@@ -935,7 +935,7 @@ impl GaussNewton {
         step_result: &StepResult,
         state: &mut LinearizerResult,
         problem: &problem::Problem,
-    ) -> error::ApexResult<CostEvaluation> {
+    ) -> error::ApexSolverResult<CostEvaluation> {
         // Apply parameter updates using manifold operations
         let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
@@ -1008,7 +1008,7 @@ impl GaussNewton {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        error::ApexError,
+        error::ApexSolverError,
     > {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -1064,9 +1064,10 @@ impl GaussNewton {
             ) {
                 Some(result) => result,
                 None => {
-                    return Err(error::ApexError::Solver(
+                    return Err(optimizer::OptimizerError::LinearSolveFailed(
                         "Linear solver failed to solve Gauss-Newton system".to_string(),
-                    ));
+                    )
+                    .into());
                 }
             };
 
@@ -1201,7 +1202,7 @@ impl GaussNewton {
 
 impl optimizer::Solver for GaussNewton {
     type Config = GaussNewtonConfig;
-    type Error = error::ApexError;
+    type Error = error::ApexSolverError;
 
     fn new() -> Self {
         Self::default()

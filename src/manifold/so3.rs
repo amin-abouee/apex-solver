@@ -176,9 +176,6 @@ impl SO3 {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO3 {
     fn from(data: DVector<f64>) -> Self {
-        if data.len() != 4 {
-            panic!("SO3::from expects 4-dimensional vector [w, i, j, k]");
-        }
         SO3::from_quaternion_coeffs(data[0], data[1], data[2], data[3])
     }
 }
@@ -404,9 +401,6 @@ impl fmt::Display for SO3Tangent {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO3Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        if data_vector.len() != 3 {
-            panic!("SO3Tangent::from expects 3-dimensional vector [θx, θy, θz]");
-        }
         SO3Tangent {
             data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
         }

@@ -257,13 +257,6 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        if self.data.len() != 3 {
-            panic!(
-                "act() requires 3-dimensional Rⁿ element, got dimension {}",
-                self.data.len()
-            );
-        }
-
         if let Some(jac_self) = jacobian_self {
             *jac_self = DMatrix::identity(3, 3);
         }
@@ -619,9 +612,6 @@ impl Tangent<Rn> for RnTangent {
     /// For Euclidean space, generators are standard basis vectors.
     fn generator(&self, i: usize) -> <Rn as LieGroup>::LieAlgebra {
         let dim = self.data.len();
-        if i >= dim {
-            panic!("Generator index {} out of bounds for dimension {}", i, dim);
-        }
         let mut generator_matrix = DMatrix::zeros(dim, dim);
         generator_matrix[(i, i)] = 1.0;
         generator_matrix

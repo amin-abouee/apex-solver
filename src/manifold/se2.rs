@@ -47,9 +47,6 @@ impl Display for SE2 {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SE2 {
     fn from(data: DVector<f64>) -> Self {
-        if data.len() != 3 {
-            panic!("SE2::from expects 3-dimensional vector [x, y, theta]");
-        }
         // Input order is [x, y, theta] to match G2O format
         SE2::from_xy_angle(data[0], data[1], data[2])
     }
@@ -394,9 +391,6 @@ impl fmt::Display for SE2Tangent {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SE2Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        if data_vector.len() != 3 {
-            panic!("SE2Tangent::from expects 3-dimensional vector [x, y, theta]");
-        }
         // Input order is [x, y, theta] to match G2O format
         // Internal storage is [x, y, theta]
         SE2Tangent {

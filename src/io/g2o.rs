@@ -1,4 +1,4 @@
-use crate::io::{ApexSolverIoError, EdgeSE2, EdgeSE3, Graph, GraphLoader, VertexSE2, VertexSE3};
+use crate::io::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
 use memmap2;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -8,27 +8,43 @@ use std::{fs::File, io::Write, path::Path};
 pub struct G2oLoader;
 
 impl GraphLoader for G2oLoader {
-    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, ApexSolverIoError> {
-        let file = File::open(path)?;
-        let mmap = unsafe { memmap2::Mmap::map(&file)? };
-        let content = std::str::from_utf8(&mmap).map_err(|e| ApexSolverIoError::Parse {
-            line: 0,
-            message: format!("Invalid UTF-8: {e}"),
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
+        let path_ref = path.as_ref();
+        let file = File::open(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to open G2O file: {:?}", path_ref))
+        })?;
+        let mmap = unsafe {
+            memmap2::Mmap::map(&file).map_err(|e| {
+                IoError::Io(e)
+                    .log_with_source(format!("Failed to memory-map G2O file: {:?}", path_ref))
+            })?
+        };
+        let content = std::str::from_utf8(&mmap).map_err(|e| {
+            IoError::Parse {
+                line: 0,
+                message: format!("Invalid UTF-8: {e}"),
+            }
+            .log()
         })?;
 
         Self::parse_content(content)
     }
 
-    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), ApexSolverIoError> {
-        let mut file = File::create(path)?;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
+        let path_ref = path.as_ref();
+        let mut file = File::create(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to create G2O file: {:?}", path_ref))
+        })?;
 
         // Write header comment
-        writeln!(file, "# G2O file written by Apex Solver")?;
+        writeln!(file, "# G2O file written by Apex Solver")
+            .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O header"))?;
         writeln!(
             file,
             "# Timestamp: {}",
             chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
-        )?;
+        )
+        .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O timestamp"))?;
         writeln!(
             file,
             "# SE2 vertices: {}, SE3 vertices: {}, SE2 edges: {}, SE3 edges: {}",
@@ -36,8 +52,10 @@ impl GraphLoader for G2oLoader {
             graph.vertices_se3.len(),
             graph.edges_se2.len(),
             graph.edges_se3.len()
-        )?;
-        writeln!(file)?;
+        )
+        .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O statistics"))?;
+        writeln!(file)
+            .map_err(|e| IoError::Io(e).log_with_source("Failed to write G2O header newline"))?;
 
         // Write SE2 vertices (sorted by ID)
         let mut se2_ids: Vec<_> = graph.vertices_se2.keys().collect();
@@ -52,7 +70,10 @@ impl GraphLoader for G2oLoader {
                 vertex.x(),
                 vertex.y(),
                 vertex.theta()
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!("Failed to write SE2 vertex {}", vertex.id))
+            })?;
         }
 
         // Write SE3 vertices (sorted by ID)
@@ -67,7 +88,10 @@ impl GraphLoader for G2oLoader {
                 file,
                 "VERTEX_SE3:QUAT {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
                 vertex.id, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!("Failed to write SE3 vertex {}", vertex.id))
+            })?;
         }
 
         // Write SE2 edges
@@ -90,7 +114,13 @@ impl GraphLoader for G2oLoader {
                 info[(2, 2)],
                 info[(0, 2)],
                 info[(1, 2)]
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!(
+                    "Failed to write SE2 edge {} -> {}",
+                    edge.from, edge.to
+                ))
+            })?;
         }
 
         // Write SE3 edges
@@ -104,15 +134,31 @@ impl GraphLoader for G2oLoader {
                 file,
                 "EDGE_SE3:QUAT {} {} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e} {:.17e}",
                 edge.from, edge.to, trans.x, trans.y, trans.z, quat.i, quat.j, quat.k, quat.w
-            )?;
+            )
+            .map_err(|e| {
+                IoError::Io(e).log_with_source(format!(
+                    "Failed to write SE3 edge {} -> {}",
+                    edge.from, edge.to
+                ))
+            })?;
 
             // Write upper triangular information matrix (21 values)
             for i in 0..6 {
                 for j in i..6 {
-                    write!(file, " {:.17e}", info[(i, j)])?;
+                    write!(file, " {:.17e}", info[(i, j)]).map_err(|e| {
+                        IoError::Io(e).log_with_source(format!(
+                            "Failed to write SE3 edge {} -> {} information matrix",
+                            edge.from, edge.to
+                        ))
+                    })?;
                 }
             }
-            writeln!(file)?;
+            writeln!(file).map_err(|e| {
+                IoError::Io(e).log_with_source(format!(
+                    "Failed to write SE3 edge {} -> {} newline",
+                    edge.from, edge.to
+                ))
+            })?;
         }
 
         Ok(())
@@ -121,7 +167,7 @@ impl GraphLoader for G2oLoader {
 
 impl G2oLoader {
     /// Parse G2O content with performance optimizations
-    fn parse_content(content: &str) -> Result<Graph, ApexSolverIoError> {
+    fn parse_content(content: &str) -> Result<Graph, IoError> {
         let lines: Vec<&str> = content.lines().collect();
         let minimum_lines_for_parallel = 1000;
 
@@ -146,7 +192,7 @@ impl G2oLoader {
     }
 
     /// Sequential parsing for smaller files
-    fn parse_sequential(lines: &[&str], graph: &mut Graph) -> Result<(), ApexSolverIoError> {
+    fn parse_sequential(lines: &[&str], graph: &mut Graph) -> Result<(), IoError> {
         for (line_num, line) in lines.iter().enumerate() {
             Self::parse_line(line, line_num + 1, graph)?;
         }
@@ -154,9 +200,9 @@ impl G2oLoader {
     }
 
     /// Parallel parsing for larger files
-    fn parse_parallel(lines: &[&str], graph: &mut Graph) -> Result<(), ApexSolverIoError> {
+    fn parse_parallel(lines: &[&str], graph: &mut Graph) -> Result<(), IoError> {
         // Collect parse results in parallel
-        let results: Result<Vec<_>, ApexSolverIoError> = lines
+        let results: Result<Vec<_>, IoError> = lines
             .par_iter()
             .enumerate()
             .map(|(line_num, line)| Self::parse_line_to_enum(line, line_num + 1))
@@ -170,13 +216,13 @@ impl G2oLoader {
                 ParsedItem::VertexSE2(vertex) => {
                     let id = vertex.id;
                     if graph.vertices_se2.insert(id, vertex).is_some() {
-                        return Err(ApexSolverIoError::DuplicateVertex { id });
+                        return Err(IoError::DuplicateVertex { id });
                     }
                 }
                 ParsedItem::VertexSE3(vertex) => {
                     let id = vertex.id;
                     if graph.vertices_se3.insert(id, vertex).is_some() {
-                        return Err(ApexSolverIoError::DuplicateVertex { id });
+                        return Err(IoError::DuplicateVertex { id });
                     }
                 }
                 ParsedItem::EdgeSE2(edge) => {
@@ -192,7 +238,7 @@ impl G2oLoader {
     }
 
     /// Parse a single line (for sequential processing)
-    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), ApexSolverIoError> {
+    fn parse_line(line: &str, line_num: usize, graph: &mut Graph) -> Result<(), IoError> {
         let line = line.trim();
 
         // Skip empty lines and comments
@@ -210,14 +256,14 @@ impl G2oLoader {
                 let vertex = Self::parse_vertex_se2(&parts, line_num)?;
                 let id = vertex.id;
                 if graph.vertices_se2.insert(id, vertex).is_some() {
-                    return Err(ApexSolverIoError::DuplicateVertex { id });
+                    return Err(IoError::DuplicateVertex { id });
                 }
             }
             "VERTEX_SE3:QUAT" => {
                 let vertex = Self::parse_vertex_se3(&parts, line_num)?;
                 let id = vertex.id;
                 if graph.vertices_se3.insert(id, vertex).is_some() {
-                    return Err(ApexSolverIoError::DuplicateVertex { id });
+                    return Err(IoError::DuplicateVertex { id });
                 }
             }
             "EDGE_SE2" => {
@@ -237,10 +283,7 @@ impl G2oLoader {
     }
 
     /// Parse a single line to enum (for parallel processing)
-    fn parse_line_to_enum(
-        line: &str,
-        line_num: usize,
-    ) -> Result<Option<ParsedItem>, ApexSolverIoError> {
+    fn parse_line_to_enum(line: &str, line_num: usize) -> Result<Option<ParsedItem>, IoError> {
         let line = line.trim();
 
         // Skip empty lines and comments
@@ -271,38 +314,35 @@ impl G2oLoader {
     }
 
     /// Parse VERTEX_SE2 line
-    pub fn parse_vertex_se2(
-        parts: &[&str],
-        line_num: usize,
-    ) -> Result<VertexSE2, ApexSolverIoError> {
+    pub fn parse_vertex_se2(parts: &[&str], line_num: usize) -> Result<VertexSE2, IoError> {
         if parts.len() < 5 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         let id = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let x = parts[2]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
 
         let y = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
 
         let theta = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
@@ -311,66 +351,63 @@ impl G2oLoader {
     }
 
     /// Parse VERTEX_SE3:QUAT line
-    pub fn parse_vertex_se3(
-        parts: &[&str],
-        line_num: usize,
-    ) -> Result<VertexSE3, ApexSolverIoError> {
+    pub fn parse_vertex_se3(parts: &[&str], line_num: usize) -> Result<VertexSE3, IoError> {
         if parts.len() < 9 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         let id = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let x = parts[2]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
 
         let y = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
 
         let z = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
 
         let qx = parts[5]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[5].to_string(),
             })?;
 
         let qy = parts[6]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[6].to_string(),
             })?;
 
         let qz = parts[7]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[7].to_string(),
             })?;
 
         let qw = parts[8]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[8].to_string(),
             })?;
@@ -381,7 +418,7 @@ impl G2oLoader {
         // Validate quaternion normalization
         let quat_norm = (qw * qw + qx * qx + qy * qy + qz * qz).sqrt();
         if (quat_norm - 1.0).abs() > 0.01 {
-            return Err(ApexSolverIoError::InvalidQuaternion {
+            return Err(IoError::InvalidQuaternion {
                 line: line_num,
                 norm: quat_norm,
             });
@@ -398,21 +435,21 @@ impl G2oLoader {
     }
 
     /// Parse EDGE_SE2 line
-    fn parse_edge_se2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, ApexSolverIoError> {
+    fn parse_edge_se2(parts: &[&str], line_num: usize) -> Result<EdgeSE2, IoError> {
         if parts.len() < 12 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         let from = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let to = parts[2]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
@@ -420,19 +457,19 @@ impl G2oLoader {
         // Parse measurement (dx, dy, dtheta)
         let dx = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
         let dy = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
         let dtheta = parts[5]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[5].to_string(),
             })?;
@@ -441,7 +478,7 @@ impl G2oLoader {
         let info_values: Result<Vec<f64>, _> =
             parts[6..12].iter().map(|s| s.parse::<f64>()).collect();
 
-        let info_values = info_values.map_err(|_| ApexSolverIoError::Parse {
+        let info_values = info_values.map_err(|_| IoError::Parse {
             line: line_num,
             message: "Invalid information matrix values".to_string(),
         })?;
@@ -462,23 +499,23 @@ impl G2oLoader {
     }
 
     /// Parse EDGE_SE3:QUAT line (placeholder implementation)
-    fn parse_edge_se3(parts: &[&str], line_num: usize) -> Result<EdgeSE3, ApexSolverIoError> {
+    fn parse_edge_se3(parts: &[&str], line_num: usize) -> Result<EdgeSE3, IoError> {
         // EDGE_SE3:QUAT from_id to_id tx ty tz qx qy qz qw [information matrix values]
         if parts.len() < 10 {
-            return Err(ApexSolverIoError::MissingFields { line: line_num });
+            return Err(IoError::MissingFields { line: line_num });
         }
 
         // Parse vertex IDs
         let from = parts[1]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[1].to_string(),
             })?;
 
         let to = parts[2]
             .parse::<usize>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[2].to_string(),
             })?;
@@ -486,21 +523,21 @@ impl G2oLoader {
         // Parse translation (tx, ty, tz)
         let tx = parts[3]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[3].to_string(),
             })?;
 
         let ty = parts[4]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[4].to_string(),
             })?;
 
         let tz = parts[5]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[5].to_string(),
             })?;
@@ -510,28 +547,28 @@ impl G2oLoader {
         // Parse rotation quaternion (qx, qy, qz, qw)
         let qx = parts[6]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[6].to_string(),
             })?;
 
         let qy = parts[7]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[7].to_string(),
             })?;
 
         let qz = parts[8]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[8].to_string(),
             })?;
 
         let qw = parts[9]
             .parse::<f64>()
-            .map_err(|_| ApexSolverIoError::InvalidNumber {
+            .map_err(|_| IoError::InvalidNumber {
                 line: line_num,
                 value: parts[9].to_string(),
             })?;
@@ -543,7 +580,7 @@ impl G2oLoader {
         let info_values: Result<Vec<f64>, _> =
             parts[10..31].iter().map(|s| s.parse::<f64>()).collect();
 
-        let info_values = info_values.map_err(|_| ApexSolverIoError::Parse {
+        let info_values = info_values.map_err(|_| IoError::Parse {
             line: line_num,
             message: "Invalid information matrix values".to_string(),
         })?;
@@ -603,19 +640,23 @@ enum ParsedItem {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn test_parse_vertex_se2() {
+    fn test_parse_vertex_se2() -> TestResult {
         let parts = vec!["VERTEX_SE2", "0", "1.0", "2.0", "0.5"];
-        let vertex = G2oLoader::parse_vertex_se2(&parts, 1).unwrap();
+        let vertex = G2oLoader::parse_vertex_se2(&parts, 1)?;
 
         assert_eq!(vertex.id(), 0);
         assert_eq!(vertex.x(), 1.0);
         assert_eq!(vertex.y(), 2.0);
         assert_eq!(vertex.theta(), 0.5);
+
+        Ok(())
     }
 
     #[test]
-    fn test_parse_vertex_se3() {
+    fn test_parse_vertex_se3() -> TestResult {
         let parts = vec![
             "VERTEX_SE3:QUAT",
             "1",
@@ -627,11 +668,13 @@ mod tests {
             "0.0",
             "1.0",
         ];
-        let vertex = G2oLoader::parse_vertex_se3(&parts, 1).unwrap();
+        let vertex = G2oLoader::parse_vertex_se3(&parts, 1)?;
 
         assert_eq!(vertex.id(), 1);
         assert_eq!(vertex.translation(), nalgebra::Vector3::new(1.0, 2.0, 3.0));
         assert!(vertex.rotation().quaternion().w > 0.99); // Should be identity quaternion
+
+        Ok(())
     }
 
     #[test]
@@ -639,17 +682,11 @@ mod tests {
         // Test invalid number
         let parts = vec!["VERTEX_SE2", "invalid", "1.0", "2.0", "0.5"];
         let result = G2oLoader::parse_vertex_se2(&parts, 1);
-        assert!(matches!(
-            result,
-            Err(ApexSolverIoError::InvalidNumber { .. })
-        ));
+        assert!(matches!(result, Err(IoError::InvalidNumber { .. })));
 
         // Test missing fields
         let parts = vec!["VERTEX_SE2", "0"];
         let result = G2oLoader::parse_vertex_se2(&parts, 1);
-        assert!(matches!(
-            result,
-            Err(ApexSolverIoError::MissingFields { .. })
-        ));
+        assert!(matches!(result, Err(IoError::MissingFields { .. })));
     }
 }

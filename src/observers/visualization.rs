@@ -67,7 +67,7 @@
 
 use crate::core::problem::VariableEnum;
 use crate::io;
-use crate::observers::OptObserver;
+use crate::observers::{ObserverError, ObserverResult, OptObserver};
 use faer::Mat;
 use faer::sparse;
 use std::cell::RefCell;
@@ -144,7 +144,7 @@ impl RerunObserver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new(enabled: bool) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(enabled: bool) -> ObserverResult<Self> {
         Self::new_with_options(enabled, None)
     }
 
@@ -169,15 +169,20 @@ impl RerunObserver {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn new_with_options(
-        enabled: bool,
-        save_path: Option<&str>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new_with_options(enabled: bool, save_path: Option<&str>) -> ObserverResult<Self> {
         let rec = if enabled {
             let rec = if let Some(path) = save_path {
                 // Save to file
                 info!("Saving visualization to: {}", path);
-                rerun::RecordingStreamBuilder::new("apex-solver-optimization").save(path)?
+                rerun::RecordingStreamBuilder::new("apex-solver-optimization")
+                    .save(path)
+                    .map_err(|e| {
+                        ObserverError::RecordingSaveFailed {
+                            path: path.to_string(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?
             } else {
                 // Try to spawn Rerun viewer
                 match rerun::RecordingStreamBuilder::new("apex-solver-optimization").spawn() {
@@ -192,7 +197,14 @@ impl RerunObserver {
 
                         // Fall back to saving to file
                         rerun::RecordingStreamBuilder::new("apex-solver-optimization")
-                            .save("optimization.rrd")?
+                            .save("optimization.rrd")
+                            .map_err(|e2| {
+                                ObserverError::RecordingSaveFailed {
+                                    path: "optimization.rrd".to_string(),
+                                    reason: format!("{}", e2),
+                                }
+                                .log_with_source(e2)
+                            })?
                     }
                 }
             };
@@ -294,16 +306,10 @@ impl RerunObserver {
     ///
     /// * `graph` - The graph structure loaded from G2O file
     /// * `scale` - Scale factor for visualization
-    pub fn log_initial_graph(
-        &self,
-        graph: &io::Graph,
-        scale: f32,
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.is_enabled() {
-            return Ok(());
-        }
-
-        let rec = self.rec.as_ref().unwrap();
+    pub fn log_initial_graph(&self, graph: &io::Graph, scale: f32) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
 
         // Visualize SE3 vertices only (no edges)
         for (id, vertex) in &graph.vertices_se3 {
@@ -311,13 +317,26 @@ impl RerunObserver {
             let transform = rerun::Transform3D::from_translation_rotation(position, rotation);
 
             let entity_path = format!("initial_graph/se3_poses/{}", id);
-            rec.log(entity_path.as_str(), &transform)?;
+            rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: entity_path.clone(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
 
             // Add a small pinhole camera for better visualization
             rec.log(
                 entity_path.as_str(),
                 &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(0.5, 1.0),
-            )?;
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: entity_path.clone(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         // Visualize SE2 vertices only (no edges)
@@ -335,7 +354,14 @@ impl RerunObserver {
                 &rerun::archetypes::Points2D::new(positions)
                     .with_colors(colors)
                     .with_radii([0.5 * scale]),
-            )?;
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "initial_graph/se2_poses".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         Ok(())
@@ -348,18 +374,23 @@ impl RerunObserver {
     /// # Arguments
     ///
     /// * `status` - Convergence status message
-    pub fn log_convergence(&self, status: &str) -> Result<(), Box<dyn std::error::Error>> {
-        if !self.is_enabled() {
-            return Ok(());
-        }
-
-        let rec = self.rec.as_ref().unwrap();
+    pub fn log_convergence(&self, status: &str) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
 
         // Log as a text annotation
         rec.log(
             "optimization/status",
             &rerun::archetypes::TextDocument::new(status),
-        )?;
+        )
+        .map_err(|e| {
+            ObserverError::LoggingFailed {
+                entity_path: "optimization/status".to_string(),
+                reason: format!("{}", e),
+            }
+            .log_with_source(e)
+        })?;
 
         Ok(())
     }
@@ -369,86 +400,137 @@ impl RerunObserver {
     // ========================================================================
 
     /// Log scalar time series data.
-    fn log_scalars(&self, iteration: usize, metrics: &IterationMetrics) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        let rec = self.rec.as_ref().unwrap();
+    fn log_scalars(&self, iteration: usize, metrics: &IterationMetrics) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         // Log each metric to separate entity paths for independent scaling
         if let Some(cost) = metrics.cost {
-            let _ = rec.log("cost_plot/value", &rerun::archetypes::Scalars::new([cost]));
+            rec.log("cost_plot/value", &rerun::archetypes::Scalars::new([cost]))
+                .map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: "cost_plot/value".to_string(),
+                        reason: format!("{}", e),
+                    }
+                    .log_with_source(e)
+                })?;
         }
 
         if let Some(gradient_norm) = metrics.gradient_norm {
-            let _ = rec.log(
+            rec.log(
                 "gradient_plot/norm",
                 &rerun::archetypes::Scalars::new([gradient_norm]),
-            );
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "gradient_plot/norm".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         if let Some(damping) = metrics.damping {
-            let _ = rec.log(
+            rec.log(
                 "damping_plot/lambda",
                 &rerun::archetypes::Scalars::new([damping]),
-            );
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "damping_plot/lambda".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         if let Some(step_norm) = metrics.step_norm {
-            let _ = rec.log(
+            rec.log(
                 "step_plot/norm",
                 &rerun::archetypes::Scalars::new([step_norm]),
-            );
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "step_plot/norm".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         if let Some(step_quality) = metrics.step_quality {
-            let _ = rec.log(
+            rec.log(
                 "quality_plot/rho",
                 &rerun::archetypes::Scalars::new([step_quality]),
-            );
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "quality_plot/rho".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
+
+        Ok(())
     }
 
     /// Log matrix visualizations (Hessian and gradient).
-    fn log_matrices(&self, iteration: usize, metrics: &IterationMetrics) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        let rec = self.rec.as_ref().unwrap();
+    fn log_matrices(&self, iteration: usize, metrics: &IterationMetrics) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         // Log Hessian if available
         if let Some(ref hessian) = metrics.hessian
             && let Ok(image_data) = Self::sparse_hessian_to_image(hessian)
         {
-            let _ = rec.log(
+            rec.log(
                 "optimization/matrices/hessian",
                 &rerun::archetypes::Tensor::new(image_data),
-            );
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "optimization/matrices/hessian".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
         }
 
         // Log gradient if available
         if let Some(ref gradient) = metrics.gradient {
             let grad_vec: Vec<f64> = (0..gradient.nrows()).map(|i| gradient[(i, 0)]).collect();
             if let Ok(image_data) = Self::gradient_to_image(&grad_vec) {
-                let _ = rec.log(
+                rec.log(
                     "optimization/matrices/gradient",
                     &rerun::archetypes::Tensor::new(image_data),
-                );
+                )
+                .map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: "optimization/matrices/gradient".to_string(),
+                        reason: format!("{}", e),
+                    }
+                    .log_with_source(e)
+                })?;
             }
         }
+
+        Ok(())
     }
 
     /// Log manifold states (SE2/SE3 poses).
-    fn log_manifolds(&self, iteration: usize, variables: &HashMap<String, VariableEnum>) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        let rec = self.rec.as_ref().unwrap();
+    fn log_manifolds(
+        &self,
+        iteration: usize,
+        variables: &HashMap<String, VariableEnum>,
+    ) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
         rec.set_time_sequence("iteration", iteration as i64);
 
         for (var_name, var) in variables {
@@ -474,15 +556,26 @@ impl RerunObserver {
                     let transform =
                         rerun::Transform3D::from_translation_rotation(position, rotation);
 
-                    let _ = rec.log(
-                        format!("optimized_graph/se3_poses/{}", var_name),
-                        &transform,
-                    );
+                    let entity_path = format!("optimized_graph/se3_poses/{}", var_name);
+                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                        ObserverError::LoggingFailed {
+                            entity_path: entity_path.clone(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?;
 
-                    let _ = rec.log(
-                        format!("optimized_graph/se3_poses/{}", var_name),
+                    rec.log(
+                        entity_path.as_str(),
                         &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(0.5, 1.0),
-                    );
+                    )
+                    .map_err(|e| {
+                        ObserverError::LoggingFailed {
+                            entity_path: entity_path.clone(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?;
                 }
                 VariableEnum::SE2(v) => {
                     let x = v.value.x();
@@ -494,22 +587,28 @@ impl RerunObserver {
                     let transform =
                         rerun::Transform3D::from_translation_rotation(position, rotation);
 
-                    let _ = rec.log(
-                        format!("optimized_graph/se2_poses/{}", var_name),
-                        &transform,
-                    );
+                    let entity_path = format!("optimized_graph/se2_poses/{}", var_name);
+                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                        ObserverError::LoggingFailed {
+                            entity_path: entity_path.clone(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?;
                 }
                 _ => {
                     // Skip other manifold types (SO2, SO3, Rn)
                 }
             }
         }
+
+        Ok(())
     }
 
     /// Convert sparse Hessian matrix to fixed 100×100 RGB image with heat map coloring.
     fn sparse_hessian_to_image(
         hessian: &sparse::SparseColMat<usize, f64>,
-    ) -> Result<rerun::datatypes::TensorData, Box<dyn std::error::Error>> {
+    ) -> ObserverResult<rerun::datatypes::TensorData> {
         let target_size = 100;
         let target_rows = target_size;
         let target_cols = target_size;
@@ -544,9 +643,7 @@ impl RerunObserver {
     }
 
     /// Convert gradient vector to a fixed 100-width horizontal bar image.
-    fn gradient_to_image(
-        gradient: &[f64],
-    ) -> Result<rerun::datatypes::TensorData, Box<dyn std::error::Error>> {
+    fn gradient_to_image(gradient: &[f64]) -> ObserverResult<rerun::datatypes::TensorData> {
         let n = gradient.len();
         let bar_height = 50;
         let target_width = 100;
@@ -660,10 +757,17 @@ impl OptObserver for RerunObserver {
 
         let metrics = self.iteration_metrics.borrow();
 
-        // Log all data types
-        self.log_scalars(iteration, &metrics);
-        self.log_matrices(iteration, &metrics);
-        self.log_manifolds(iteration, values);
+        // Log all data types - catch and log errors without propagating
+        // (errors in observers should not crash optimization)
+        if let Err(e) = self.log_scalars(iteration, &metrics) {
+            let _ = e.log();
+        }
+        if let Err(e) = self.log_matrices(iteration, &metrics) {
+            let _ = e.log();
+        }
+        if let Err(e) = self.log_manifolds(iteration, values) {
+            let _ = e.log();
+        }
 
         // Clear transient data for next iteration
         drop(metrics);
@@ -685,13 +789,13 @@ impl Default for RerunObserver {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_observer_creation() {
-        let observer = RerunObserver::new(false);
-        assert!(observer.is_ok());
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-        let observer = observer.unwrap();
+    #[test]
+    fn test_observer_creation() -> TestResult {
+        let observer = RerunObserver::new(false)?;
         assert!(!observer.is_enabled());
+        Ok(())
     }
 
     #[test]
@@ -710,8 +814,8 @@ mod tests {
     }
 
     #[test]
-    fn test_set_metrics() {
-        let observer = RerunObserver::new(false).unwrap();
+    fn test_set_metrics() -> TestResult {
+        let observer = RerunObserver::new(false)?;
         observer.set_iteration_metrics(1.0, 0.5, Some(0.01), 0.1, Some(0.95));
 
         let metrics = observer.iteration_metrics.borrow();
@@ -720,15 +824,17 @@ mod tests {
         assert_eq!(metrics.damping, Some(0.01));
         assert_eq!(metrics.step_norm, Some(0.1));
         assert_eq!(metrics.step_quality, Some(0.95));
+        Ok(())
     }
 
     #[test]
-    fn test_observer_trait() {
-        let observer = RerunObserver::new(false).unwrap();
+    fn test_observer_trait() -> TestResult {
+        let observer = RerunObserver::new(false)?;
         let values = HashMap::new();
 
         // Should not panic when disabled
         observer.on_step(&values, 0);
         observer.on_step(&values, 1);
+        Ok(())
     }
 }

@@ -311,8 +311,10 @@ impl Factor for FovProjectionFactor {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn test_camera_params_factor() {
+    fn test_camera_params_factor() -> TestResult {
         let points_3d =
             Matrix3xX::from_columns(&[Vector3::new(0.1, 0.1, 1.0), Vector3::new(0.2, 0.2, 1.0)]);
         let points_2d =
@@ -324,11 +326,12 @@ mod tests {
         let (residual, jacobian) = factor.linearize(&params, true);
         assert_eq!(residual.len(), 4);
         assert!(jacobian.is_some());
-        assert_eq!(jacobian.unwrap().ncols(), 5);
+        assert_eq!(jacobian.ok_or("Expected jacobian to be Some")?.ncols(), 5);
+        Ok(())
     }
 
     #[test]
-    fn test_projection_factor() {
+    fn test_projection_factor() -> TestResult {
         let points_2d =
             Matrix2xX::from_columns(&[Vector2::new(400.0, 300.0), Vector2::new(410.0, 310.0)]);
         let camera_params = DVector::from_vec(vec![400.0, 400.0, 376.0, 240.0, 1.0]);
@@ -339,7 +342,8 @@ mod tests {
         let (residual, jacobian) = factor.linearize(&params, true);
         assert_eq!(residual.len(), 4);
         assert!(jacobian.is_some());
-        assert_eq!(jacobian.unwrap().ncols(), 6);
+        assert_eq!(jacobian.ok_or("Expected jacobian to be Some")?.ncols(), 6);
+        Ok(())
     }
 
     #[test]

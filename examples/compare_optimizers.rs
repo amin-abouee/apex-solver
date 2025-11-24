@@ -138,7 +138,11 @@ fn run_optimizer_se3(
     ))
 }
 
-fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<BenchmarkResult>) {
+fn test_se3_dataset(
+    dataset_name: &str,
+    args: &Args,
+    all_results: &mut Vec<BenchmarkResult>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE3)", dataset_name.to_uppercase());
 
     let file_path = format!("data/{}.g2o", dataset_name);
@@ -146,7 +150,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         Ok(g) => g,
         Err(e) => {
             warn!("Failed to load {}: {}", file_path, e);
-            return;
+            return Ok(());
         }
     };
 
@@ -185,7 +189,7 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
         let prior_factor = PriorFactor { data: prior_value };
         // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        let huber_loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
             &[&var_name],
             Box::new(prior_factor),
@@ -211,17 +215,14 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .expect("Failed to build symbolic structure");
+    let symbolic_structure =
+        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
 
-    let (residual, _) = problem
-        .compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_name_to_col_idx_dict,
-            &symbolic_structure,
-        )
-        .expect("Failed to compute residual");
+    let (residual, _) = problem.compute_residual_and_jacobian_sparse(
+        &variables,
+        &variable_name_to_col_idx_dict,
+        &symbolic_structure,
+    )?;
 
     // Compute initial cost using faer's norm
     let init_cost = residual.as_ref().squared_norm_l2();
@@ -274,9 +275,14 @@ fn test_se3_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
             }
         }
     }
+    Ok(())
 }
 
-fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<BenchmarkResult>) {
+fn test_se2_dataset(
+    dataset_name: &str,
+    args: &Args,
+    all_results: &mut Vec<BenchmarkResult>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE2)", dataset_name.to_uppercase());
 
     let file_path = format!("data/{}.g2o", dataset_name);
@@ -284,7 +290,7 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         Ok(g) => g,
         Err(e) => {
             warn!("Failed to load {}: {}", file_path, e);
-            return;
+            return Ok(());
         }
     };
 
@@ -321,7 +327,7 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
 
         let prior_factor = PriorFactor { data: prior_value };
         // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-        let huber_loss = HuberLoss::new(1.0).expect("Failed to create HuberLoss");
+        let huber_loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
             &[&var_name],
             Box::new(prior_factor),
@@ -347,17 +353,14 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .expect("Failed to build symbolic structure");
+    let symbolic_structure =
+        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
 
-    let (residual, _) = problem
-        .compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_name_to_col_idx_dict,
-            &symbolic_structure,
-        )
-        .expect("Failed to compute residual");
+    let (residual, _) = problem.compute_residual_and_jacobian_sparse(
+        &variables,
+        &variable_name_to_col_idx_dict,
+        &symbolic_structure,
+    )?;
 
     // Compute initial cost using faer's norm
     let init_cost = residual.as_ref().squared_norm_l2();
@@ -410,6 +413,7 @@ fn test_se2_dataset(dataset_name: &str, args: &Args, all_results: &mut Vec<Bench
             }
         }
     }
+    Ok(())
 }
 
 fn main() {
@@ -424,12 +428,20 @@ fn main() {
     let mut all_results = Vec::new();
 
     // Test SE3 datasets
-    test_se3_dataset("parking-garage", &args, &mut all_results);
-    test_se3_dataset("sphere2500", &args, &mut all_results);
+    if let Err(e) = test_se3_dataset("parking-garage", &args, &mut all_results) {
+        warn!("Failed to test parking-garage dataset: {}", e);
+    }
+    if let Err(e) = test_se3_dataset("sphere2500", &args, &mut all_results) {
+        warn!("Failed to test sphere2500 dataset: {}", e);
+    }
 
     // Test SE2 datasets
-    test_se2_dataset("intel", &args, &mut all_results);
-    test_se2_dataset("mit", &args, &mut all_results);
+    if let Err(e) = test_se2_dataset("intel", &args, &mut all_results) {
+        warn!("Failed to test intel dataset: {}", e);
+    }
+    if let Err(e) = test_se2_dataset("mit", &args, &mut all_results) {
+        warn!("Failed to test mit dataset: {}", e);
+    }
 
     // Print summary
     print_summary_table(&all_results);
