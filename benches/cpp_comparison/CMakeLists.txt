@@ -98,6 +98,7 @@ endif()
 # Common utilities library for Ceres and g2o (use Eigen 5.0.x)
 add_library(bench_common STATIC
     common/read_g2o.cpp
+    common/unified_cost.cpp
 )
 
 target_include_directories(bench_common PUBLIC
@@ -124,7 +125,7 @@ endif()
 
 # GTSAM benchmark executable (uses Eigen@3, builds read_g2o.cpp separately)
 if(BUILD_GTSAM_BENCHMARK)
-    add_executable(gtsam_benchmark gtsam_benchmark.cpp common/read_g2o.cpp)
+    add_executable(gtsam_benchmark gtsam_benchmark.cpp common/read_g2o.cpp common/unified_cost.cpp)
 
     # Use Eigen 3.4 include dirs explicitly
     target_include_directories(gtsam_benchmark PRIVATE

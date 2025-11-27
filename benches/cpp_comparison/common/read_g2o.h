@@ -2,7 +2,6 @@
 
 #include <Eigen/Core>
 #include <Eigen/Geometry>
-#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -15,7 +14,7 @@ struct Pose2D {
     double rotation;  // angle in radians
 
     Pose2D() : translation(Eigen::Vector2d::Zero()), rotation(0.0) {}
-    Pose2D(double x, double y, double theta) 
+    Pose2D(double x, double y, double theta)
         : translation(x, y), rotation(theta) {}
 };
 
@@ -24,10 +23,10 @@ struct Pose3D {
     Eigen::Quaterniond rotation;
     Eigen::Vector3d translation;
 
-    Pose3D() 
-        : rotation(Eigen::Quaterniond::Identity()), 
+    Pose3D()
+        : rotation(Eigen::Quaterniond::Identity()),
           translation(Eigen::Vector3d::Zero()) {}
-    
+
     Pose3D(const Eigen::Quaterniond& q, const Eigen::Vector3d& t)
         : rotation(q), translation(t) {}
 };

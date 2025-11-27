@@ -1,5 +1,6 @@
 #include "read_g2o.h"
 #include <iostream>
+#include <fstream>
 #include <sstream>
 
 namespace g2o_reader {
