@@ -215,6 +215,54 @@ fn update_se3_graph_from_tiny_solver(
     }
 }
 
+/// Update SE2 graph vertices from factrs optimization result
+fn update_se2_graph_from_factrs(
+    graph: &mut apex_solver::io::Graph,
+    factrs_values: &factrs::containers::Values,
+) {
+    use factrs::assign_symbols;
+    use factrs::variables::SE2 as FactrsSE2;
+
+    assign_symbols!(X: FactrsSE2);
+
+    let ids: Vec<_> = graph.vertices_se2.keys().copied().collect();
+    for id in ids {
+        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE2>(X(id as u32)) {
+            let vertex = graph.vertices_se2.get_mut(&id).unwrap();
+            // factrs SE2: x, y, theta
+            vertex.pose = SE2::from_xy_angle(factrs_pose.x(), factrs_pose.y(), factrs_pose.theta());
+        }
+    }
+}
+
+/// Update SE3 graph vertices from factrs optimization result
+fn update_se3_graph_from_factrs(
+    graph: &mut apex_solver::io::Graph,
+    factrs_values: &factrs::containers::Values,
+) {
+    use factrs::assign_symbols;
+    use factrs::variables::SE3 as FactrsSE3;
+    use nalgebra::{Quaternion, Vector3};
+
+    assign_symbols!(X: FactrsSE3);
+
+    let ids: Vec<_> = graph.vertices_se3.keys().copied().collect();
+    for id in ids {
+        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE3>(X(id as u32)) {
+            let vertex = graph.vertices_se3.get_mut(&id).unwrap();
+            // Extract rotation and translation from factrs SE3
+            let rot = factrs_pose.rot();
+            let xyz = factrs_pose.xyz();
+
+            // factrs SO3 stores quaternion as (x, y, z, w)
+            let rotation = Quaternion::new(rot.w(), rot.x(), rot.y(), rot.z());
+            let translation = Vector3::new(xyz[0], xyz[1], xyz[2]);
+
+            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
+        }
+    }
+}
+
 /// Dataset information
 #[derive(Clone)]
 struct Dataset {
@@ -272,10 +320,12 @@ struct BenchmarkResult {
     dataset: String,
     solver: String,
     language: String,
-    normalized_score: String,
     elapsed_ms: String,
     converged: String,
     iterations: String,
+    initial_cost: String,
+    final_cost: String,
+    improvement_pct: String,
 }
 
 impl BenchmarkResult {
@@ -286,15 +336,25 @@ impl BenchmarkResult {
         elapsed_ms: f64,
         converged: bool,
         iterations: Option<usize>,
+        initial_cost: f64,
+        final_cost: f64,
     ) -> Self {
+        let improvement_pct = if initial_cost > 0.0 {
+            ((initial_cost - final_cost) / initial_cost) * 100.0
+        } else {
+            0.0
+        };
+
         Self {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
-            normalized_score: "-".to_string(), // Will be computed later
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: converged.to_string(),
             iterations: iterations.map_or("-".to_string(), |i| i.to_string()),
+            initial_cost: format!("{:.6e}", initial_cost),
+            final_cost: format!("{:.6e}", final_cost),
+            improvement_pct: format!("{:.2}", improvement_pct),
         }
     }
 
@@ -303,10 +363,12 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
-            normalized_score: "-".to_string(),
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: "false".to_string(),
             iterations: "-".to_string(),
+            initial_cost: "-".to_string(),
+            final_cost: "-".to_string(),
+            improvement_pct: "-".to_string(),
         }
     }
 
@@ -315,10 +377,12 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
-            normalized_score: "-".to_string(),
             elapsed_ms: "-".to_string(),
             converged: "false".to_string(),
             iterations: format!("error: {}", error),
+            initial_cost: "-".to_string(),
+            final_cost: "-".to_string(),
+            improvement_pct: "-".to_string(),
         }
     }
 }
@@ -401,6 +465,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
+                result.initial_cost,
+                result.final_cost,
             )
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
@@ -476,6 +542,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
+                result.initial_cost,
+                result.final_cost,
             )
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
@@ -484,9 +552,17 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
 
 fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation (without factrs prior)
-    let raw_graph = match G2oLoader::load(dataset.file) {
+    let mut raw_graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
         Err(e) => return BenchmarkResult::failed(dataset.name, "factrs", "Rust", &e.to_string()),
+    };
+
+    // Compute initial cost from original G2O graph BEFORE factrs adds prior
+    // factrs adds a prior factor on the second vertex which is NOT in the original file
+    let initial_cost = if dataset.is_3d {
+        compute_se3_cost(&raw_graph)
+    } else {
+        compute_se2_cost(&raw_graph)
     };
 
     // Catch panics from factrs parsing/loading
@@ -504,14 +580,6 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
         }
     };
 
-    // Compute initial cost from raw graph using unified cost function
-    // This ensures all solvers start with the same cost baseline
-    let _initial_cost = if dataset.is_3d {
-        compute_se3_cost(&raw_graph)
-    } else {
-        compute_se2_cost(&raw_graph)
-    };
-
     // Start timing
     let start = Instant::now();
 
@@ -523,7 +591,21 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     match result {
-        Ok(_final_values) => {
+        Ok(final_values) => {
+            // Update raw graph with optimized values from factrs
+            if dataset.is_3d {
+                update_se3_graph_from_factrs(&mut raw_graph, &final_values);
+            } else {
+                update_se2_graph_from_factrs(&mut raw_graph, &final_values);
+            }
+
+            // Compute final cost using unified cost function
+            let final_cost = if dataset.is_3d {
+                compute_se3_cost(&raw_graph)
+            } else {
+                compute_se2_cost(&raw_graph)
+            };
+
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
@@ -531,9 +613,25 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 true, // Successfully converged
                 None, // factrs doesn't expose iteration count
+                initial_cost,
+                final_cost,
             )
         }
-        Err(factrs::optimizers::OptError::MaxIterations(_final_values)) => {
+        Err(factrs::optimizers::OptError::MaxIterations(final_values)) => {
+            // Update raw graph with optimized values from factrs
+            if dataset.is_3d {
+                update_se3_graph_from_factrs(&mut raw_graph, &final_values);
+            } else {
+                update_se2_graph_from_factrs(&mut raw_graph, &final_values);
+            }
+
+            // Compute final cost using unified cost function
+            let final_cost = if dataset.is_3d {
+                compute_se3_cost(&raw_graph)
+            } else {
+                compute_se2_cost(&raw_graph)
+            };
+
             BenchmarkResult::success(
                 dataset.name,
                 "factrs",
@@ -541,6 +639,8 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 false, // Did not converge (max iterations)
                 None,
+                initial_cost,
+                final_cost,
             )
         }
         Err(factrs::optimizers::OptError::FailedToStep) => {
@@ -578,8 +678,15 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
     let lm = LevenbergMarquardtOptimizer::default();
 
+    // Update raw graph with initial values from tiny-solver to ensure consistent baseline
+    if dataset.is_3d {
+        update_se3_graph_from_tiny_solver(&mut raw_graph, &init);
+    } else {
+        update_se2_graph_from_tiny_solver(&mut raw_graph, &init);
+    }
+
     // Compute initial cost from raw graph using unified cost function
-    let _initial_cost = if dataset.is_3d {
+    let initial_cost = if dataset.is_3d {
         compute_se3_cost(&raw_graph)
     } else {
         compute_se2_cost(&raw_graph)
@@ -604,7 +711,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
             }
 
             // Compute final cost from updated graph using unified cost function
-            let _final_cost = if dataset.is_3d {
+            let final_cost = if dataset.is_3d {
                 compute_se3_cost(&raw_graph)
             } else {
                 compute_se2_cost(&raw_graph)
@@ -617,6 +724,8 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 true, // Successfully converged
                 None, // tiny-solver doesn't expose iteration count
+                initial_cost,
+                final_cost,
             )
         }
         None => {
@@ -765,6 +874,8 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
             cpp_result.time_ms,
             converged,
             Some(cpp_result.iterations),
+            cpp_result.init_cost,
+            cpp_result.final_cost,
         );
 
         results.push(result);
@@ -812,23 +923,7 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
 
 // ========================= Main Benchmark Runner =========================
 
-/// Compute normalized performance scores for fair comparison across solvers.
-/// Since we removed cost-based metrics, this assigns placeholder scores for now.
-/// TODO: Implement proper performance normalization based on convergence and timing.
-fn compute_normalized_scores(results: &[BenchmarkResult]) -> Vec<BenchmarkResult> {
-    // For now, just return results unchanged with placeholder normalized scores
-    // This maintains the interface but doesn't compute actual normalized scores
-    results
-        .iter()
-        .map(|r| {
-            let mut result = r.clone();
-            // Placeholder: assign 100 for converged, 0 for not converged
-            let score = if r.converged == "true" { 100.0 } else { 0.0 };
-            result.normalized_score = format!("{:.1}", score);
-            result
-        })
-        .collect()
-}
+// Normalized scores removed - we now track initial_cost, final_cost, and improvement_pct instead
 
 fn run_single_benchmark(dataset: &Dataset, solver: &str) -> BenchmarkResult {
     match (dataset.is_3d, solver) {
@@ -921,10 +1016,6 @@ fn main() {
         info!("Results written to {}", csv_path);
     }
 
-    // Compute normalized cost reduction scores for fair comparison
-    let normalized_results = compute_normalized_scores(&all_results);
-    info!("Computed normalized scores for fair comparison across solvers");
-
     // Separate 2D and 3D results and sort by dataset name
     // 2D datasets: M3500, intel, mit, ring
     let mut results_2d: Vec<_> = all_results
@@ -957,64 +1048,70 @@ fn main() {
     // Print 2D results
     if !results_2d.is_empty() {
         info!("2D DATASETS (SE2)");
-        info!("{}", "=".repeat(140));
+        info!("{}", "=".repeat(150));
         info!(
-            "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
-            "Dataset", "Solver", "Language", "Score", "Time (ms)", "Converged", "Iters"
+            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+            "Dataset",
+            "Solver",
+            "Language",
+            "Init Cost",
+            "Final Cost",
+            "Improve %",
+            "Iters",
+            "Time (ms)",
+            "Conv"
         );
-        info!("{}", "-".repeat(110));
+        info!("{}", "-".repeat(150));
 
         for result in &results_2d {
-            // Find normalized score for this result
-            let score = normalized_results
-                .iter()
-                .find(|nr| nr.dataset == result.dataset && nr.solver == result.solver)
-                .map(|nr| nr.normalized_score.clone())
-                .unwrap_or("-".to_string());
-
             info!(
-                "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
+                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
                 result.dataset,
                 result.solver,
                 result.language,
-                score,
+                result.initial_cost,
+                result.final_cost,
+                result.improvement_pct,
+                result.iterations,
                 result.elapsed_ms,
-                result.converged,
-                result.iterations
+                result.converged
             );
         }
-        info!("{}\n", "=".repeat(140));
+        info!("{}\n", "=".repeat(150));
     }
 
     // Print 3D results
     if !results_3d.is_empty() {
         info!("3D DATASETS (SE3)");
-        info!("{}", "=".repeat(140));
+        info!("{}", "=".repeat(150));
         info!(
-            "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
-            "Dataset", "Solver", "Language", "Score", "Time (ms)", "Converged", "Iters"
+            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+            "Dataset",
+            "Solver",
+            "Language",
+            "Init Cost",
+            "Final Cost",
+            "Improve %",
+            "Iters",
+            "Time (ms)",
+            "Conv"
         );
-        info!("{}", "-".repeat(110));
+        info!("{}", "-".repeat(150));
 
         for result in &results_3d {
-            // Find normalized score for this result
-            let score = normalized_results
-                .iter()
-                .find(|nr| nr.dataset == result.dataset && nr.solver == result.solver)
-                .map(|nr| nr.normalized_score.clone())
-                .unwrap_or("-".to_string());
-
             info!(
-                "{:<20} {:<15} {:<8} {:<10} {:<12} {:<8} {:<10}",
+                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
                 result.dataset,
                 result.solver,
                 result.language,
-                score,
+                result.initial_cost,
+                result.final_cost,
+                result.improvement_pct,
+                result.iterations,
                 result.elapsed_ms,
-                result.converged,
-                result.iterations
+                result.converged
             );
         }
-        info!("{}", "=".repeat(140));
+        info!("{}", "=".repeat(150));
     }
 }
