@@ -1,11 +1,11 @@
 #include <ceres/ceres.h>
 #include <Eigen/Core>
-#include <iostream>
 #include <map>
 #include <vector>
 
 #include "common/benchmark_utils.h"
 #include "common/read_g2o.h"
+#include "common/unified_cost.h"
 
 // SE2 residual (3 DOF: x, y, theta)
 class PoseGraph2DErrorTerm {
@@ -126,6 +126,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     result.vertices = graph.poses.size();
     result.edges = graph.constraints.size();
 
+    // Store initial graph for cost computation
+    g2o_reader::Graph2D initial_graph = graph;
+    
+    // Compute initial cost using unified cost function
+    result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
+
     // Create Ceres problem
     ceres::Problem problem;
 
@@ -159,11 +165,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         problem.SetParameterBlockConstant(first_pose.data());
     }
 
-    // Compute initial cost
-    double initial_cost = 0.0;
-    problem.Evaluate(ceres::Problem::EvaluateOptions(), &initial_cost, nullptr, nullptr, nullptr);
-    result.initial_cost = initial_cost;
-
     // Configure solver
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -179,10 +180,20 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     ceres::Solve(options, &problem, &summary);
     result.time_ms = timer.elapsed_ms();
 
+    // Extract optimized poses back into graph
+    for (auto& [id, pose] : graph.poses) {
+        const auto& params = pose_params[id];
+        pose.translation.x() = params[0];
+        pose.translation.y() = params[1];
+        pose.rotation = params[2];
+    }
+
+    // Compute final cost using unified cost function
+    result.final_cost = unified_cost::ComputeSE2Cost(graph);
+    
     // Extract results
-    result.final_cost = summary.final_cost;
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
-    result.improvement_pct = ((initial_cost - summary.final_cost) / initial_cost) * 100.0;
+    result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
     result.status = (summary.termination_type == ceres::CONVERGENCE) ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
@@ -207,6 +218,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     result.vertices = graph.poses.size();
     result.edges = graph.constraints.size();
+
+    // Store initial graph for cost computation
+    g2o_reader::Graph3D initial_graph = graph;
+    
+    // Compute initial cost using unified cost function
+    result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
 
     // Create Ceres problem
     ceres::Problem problem;
@@ -251,11 +268,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         problem.SetParameterBlockConstant(pose_params[first_id].second.data());  // translation
     }
 
-    // Compute initial cost
-    double initial_cost = 0.0;
-    problem.Evaluate(ceres::Problem::EvaluateOptions(), &initial_cost, nullptr, nullptr, nullptr);
-    result.initial_cost = initial_cost;
-
     // Configure solver
     ceres::Solver::Options options;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
@@ -271,10 +283,24 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     ceres::Solve(options, &problem, &summary);
     result.time_ms = timer.elapsed_ms();
 
+    // Extract optimized poses back into graph
+    for (auto& [id, pose] : graph.poses) {
+        const auto& params = pose_params[id];
+        pose.rotation.w() = params.first[0];
+        pose.rotation.x() = params.first[1];
+        pose.rotation.y() = params.first[2];
+        pose.rotation.z() = params.first[3];
+        pose.translation.x() = params.second[0];
+        pose.translation.y() = params.second[1];
+        pose.translation.z() = params.second[2];
+    }
+
+    // Compute final cost using unified cost function
+    result.final_cost = unified_cost::ComputeSE3Cost(graph);
+    
     // Extract results
-    result.final_cost = summary.final_cost;
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
-    result.improvement_pct = ((initial_cost - summary.final_cost) / initial_cost) * 100.0;
+    result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
     result.status = (summary.termination_type == ceres::CONVERGENCE) ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;

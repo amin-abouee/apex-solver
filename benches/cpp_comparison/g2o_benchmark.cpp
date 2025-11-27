@@ -10,6 +10,7 @@
 
 #include "common/benchmark_utils.h"
 #include "common/read_g2o.h"
+#include "common/unified_cost.h"
 
 using namespace g2o;
 
@@ -33,6 +34,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
 
     result.vertices = graph.poses.size();
     result.edges = graph.constraints.size();
+    
+    // Store initial graph for unified cost computation
+    g2o_reader::Graph2D initial_graph = graph;
+    
+    // Compute initial cost using unified cost function
+    result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
 
     // Create g2o optimizer
     SparseOptimizer optimizer;
@@ -77,20 +84,28 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         optimizer.addEdge(edge);
     }
 
-    // Initialize optimizer first (required for chi2() to compute error correctly)
+    // Initialize optimizer first
     optimizer.initializeOptimization();
-
-    // Compute initial error and cache it before optimization
-    optimizer.computeActiveErrors();
-    result.initial_cost = optimizer.chi2();
 
     // Optimize
     Timer timer;
     int iterations = optimizer.optimize(100);
     result.time_ms = timer.elapsed_ms();
 
-    // Extract results
-    result.final_cost = optimizer.chi2();
+    // Extract optimized poses back into graph structure
+    g2o_reader::Graph2D optimized_graph = initial_graph;  // Copy structure with constraints
+    for (auto& [id, pose] : optimized_graph.poses) {
+        VertexSE2* vertex = static_cast<VertexSE2*>(optimizer.vertex(id));
+        if (vertex) {
+            SE2 estimate = vertex->estimate();
+            pose.translation.x() = estimate[0];
+            pose.translation.y() = estimate[1];
+            pose.rotation = estimate[2];
+        }
+    }
+    
+    // Compute final cost using unified cost function
+    result.final_cost = unified_cost::ComputeSE2Cost(optimized_graph);
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
 
@@ -120,6 +135,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     result.vertices = graph.poses.size();
     result.edges = graph.constraints.size();
+    
+    // Store initial graph for unified cost computation
+    g2o_reader::Graph3D initial_graph = graph;
+    
+    // Compute initial cost using unified cost function
+    result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
 
     // Create g2o optimizer
     SparseOptimizer optimizer;
@@ -170,20 +191,27 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         optimizer.addEdge(edge);
     }
 
-    // Initialize optimizer first (required for chi2() to compute error correctly)
+    // Initialize optimizer first
     optimizer.initializeOptimization();
-
-    // Compute initial error and cache it before optimization
-    optimizer.computeActiveErrors();
-    result.initial_cost = optimizer.chi2();
 
     // Optimize
     Timer timer;
     int iterations = optimizer.optimize(100);
     result.time_ms = timer.elapsed_ms();
 
-    // Extract results
-    result.final_cost = optimizer.chi2();
+    // Extract optimized poses back into graph structure
+    g2o_reader::Graph3D optimized_graph = initial_graph;  // Copy structure with constraints
+    for (auto& [id, pose] : optimized_graph.poses) {
+        VertexSE3* vertex = static_cast<VertexSE3*>(optimizer.vertex(id));
+        if (vertex) {
+            Eigen::Isometry3d estimate = vertex->estimate();
+            pose.translation = estimate.translation();
+            pose.rotation = Eigen::Quaterniond(estimate.linear());
+        }
+    }
+    
+    // Compute final cost using unified cost function
+    result.final_cost = unified_cost::ComputeSE3Cost(optimized_graph);
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
 
