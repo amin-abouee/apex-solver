@@ -87,8 +87,15 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Optimize
     Timer timer;
     LevenbergMarquardtOptimizer optimizer(graph_factors, initial_values, params);
+    
+    // Get initial error from GTSAM
+    double initial_error = graph_factors.error(initial_values);
+    
     Values optimized_values = optimizer.optimize();
     result.time_ms = timer.elapsed_ms();
+    
+    // Get final error from GTSAM
+    double final_error = graph_factors.error(optimized_values);
 
     // Extract optimized poses back into graph
     for (auto& [id, pose] : graph.poses) {
@@ -104,7 +111,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    result.status = "CONVERGED";  // GTSAM doesn't provide explicit convergence status
+    
+    // Actual convergence check using GTSAM's internal error
+    bool actually_converged = (final_error < initial_error) && 
+                              (optimizer.iterations() < params.maxIterations) &&
+                              (result.improvement_pct > 0.0);
+    result.status = actually_converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }
@@ -187,8 +199,15 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Optimize
     Timer timer;
     LevenbergMarquardtOptimizer optimizer(graph_factors, initial_values, params);
+    
+    // Get initial error from GTSAM
+    double initial_error = graph_factors.error(initial_values);
+    
     Values optimized_values = optimizer.optimize();
     result.time_ms = timer.elapsed_ms();
+    
+    // Get final error from GTSAM
+    double final_error = graph_factors.error(optimized_values);
 
     // Extract optimized poses back into graph
     for (auto& [id, pose] : graph.poses) {
@@ -198,6 +217,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         pose.rotation.x() = quat.x();
         pose.rotation.y() = quat.y();
         pose.rotation.z() = quat.z();
+        pose.rotation.normalize();  // Ensure quaternion is normalized
         pose.translation.x() = optimized_pose.x();
         pose.translation.y() = optimized_pose.y();
         pose.translation.z() = optimized_pose.z();
@@ -209,7 +229,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    result.status = "CONVERGED";  // GTSAM doesn't provide explicit convergence status
+    
+    // Actual convergence check using GTSAM's internal error
+    bool actually_converged = (final_error < initial_error) && 
+                              (optimizer.iterations() < params.maxIterations) &&
+                              (result.improvement_pct > 0.0);
+    result.status = actually_converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }

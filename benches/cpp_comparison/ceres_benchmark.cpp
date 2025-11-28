@@ -35,7 +35,9 @@ public:
         residuals(1) = h_y - T(y_);
         residuals(2) = h_theta - T(theta_);
 
-        // No information matrix weighting (matches Rust solver)
+        // USER REQUEST: Switch to unweighted cost (no information matrix)
+        // Removed information matrix weighting to match unified cost computation
+        // Old code: residuals = sqrt_info_T * residuals;
 
         return true;
     }
@@ -83,14 +85,68 @@ public:
         // Compute residuals
         Eigen::Map<Eigen::Matrix<T, 6, 1>> residuals(residuals_ptr);
 
-        // Translation error
-        residuals.template head<3>() = t_ab - t_ab_measured;
-
-        // Rotation error (quaternion difference)
+        // Compute error: T_ab_measured^{-1} * T_ab
         Eigen::Quaternion<T> q_error = q_ab_measured.conjugate() * q_ab;
-        residuals.template tail<3>() = T(2.0) * q_error.vec();
+        Eigen::Matrix<T, 3, 1> t_error = q_ab_measured.conjugate() * (t_ab - t_ab_measured);
 
-        // No information matrix weighting (matches Rust solver)
+        // USER REQUEST: Use SO3 log map for rotation (matching unified_cost.cpp and Rust)
+        // Old Ceres code used: 2.0 * q_error.vec() (simplified approximation)
+        // New code uses full Rodriguez formula to match unified cost computation
+        
+        // SO3 log map (Rodriguez formula)
+        T qw = q_error.w();
+        // Clamp qw to avoid numerical issues
+        qw = ceres::fmax(T(-1.0), ceres::fmin(T(1.0), qw));
+        
+        Eigen::Matrix<T, 3, 1> rotation_residual;
+        if (qw > T(1.0) - T(1e-10)) {
+            // Small angle approximation
+            rotation_residual = T(2.0) * q_error.vec();
+        } else {
+            T theta = T(2.0) * ceres::acos(qw);
+            T sin_half_theta = ceres::sqrt(T(1.0) - qw * qw);
+            if (sin_half_theta < T(1e-10)) {
+                rotation_residual = T(2.0) * q_error.vec();
+            } else {
+                rotation_residual = (theta / sin_half_theta) * q_error.vec();
+            }
+        }
+
+        // Apply SE3 log map: compute J_l^{-1}(rotation) * translation
+        // This matches the unified_cost.cpp ComputeSO3LeftJacobianInverse
+        T angle_sq = rotation_residual.squaredNorm();
+        Eigen::Matrix<T, 3, 3> J_l_inv;
+        
+        if (angle_sq < T(1e-10)) {
+            // Small angle: J_l^{-1} ≈ I - 0.5 * [rotation]_x
+            Eigen::Matrix<T, 3, 3> rotation_skew;
+            rotation_skew << T(0.0), -rotation_residual(2), rotation_residual(1),
+                             rotation_residual(2), T(0.0), -rotation_residual(0),
+                             -rotation_residual(1), rotation_residual(0), T(0.0);
+            J_l_inv = Eigen::Matrix<T, 3, 3>::Identity() - T(0.5) * rotation_skew;
+        } else {
+            T theta = ceres::sqrt(angle_sq);
+            T sin_theta = ceres::sin(theta);
+            T cos_theta = ceres::cos(theta);
+            
+            Eigen::Matrix<T, 3, 3> rotation_skew;
+            rotation_skew << T(0.0), -rotation_residual(2), rotation_residual(1),
+                             rotation_residual(2), T(0.0), -rotation_residual(0),
+                             -rotation_residual(1), rotation_residual(0), T(0.0);
+            
+            T coef = T(1.0) / angle_sq - (T(1.0) + cos_theta) / (T(2.0) * theta * sin_theta);
+            J_l_inv = Eigen::Matrix<T, 3, 3>::Identity() - T(0.5) * rotation_skew + coef * (rotation_skew * rotation_skew);
+        }
+        
+        Eigen::Matrix<T, 3, 1> translation_residual = J_l_inv * t_error;
+
+        // Build 6D residual: [translation, rotation] (matching unified_cost.cpp order)
+        residuals.template head<3>() = translation_residual;
+        residuals.template tail<3>() = rotation_residual;
+
+        // USER REQUEST: Switch to unweighted cost (no information matrix)
+        // Removed information matrix weighting to match unified cost computation
+        // Old code: residuals = sqrt_info_T * residuals;
 
         return true;
     }
@@ -146,8 +202,14 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // Use identity matrix for unweighted residuals (matches Rust solver)
-        Eigen::Matrix3d sqrt_info = Eigen::Matrix3d::Identity();
+        // Compute square root information matrix
+        // We want L^T such that L*L^T = I (LLT decomposition)
+        // Eigen's LLT computes L such that L*L^T = A.
+        // We want to multiply residuals r by some matrix S such that ||Sr||^2 = r^T S^T S r = r^T I r
+        // So S^T S = I.
+        // If I = L L^T, then S = L^T satisfies S^T S = L L^T = I.
+        Eigen::LLT<Eigen::Matrix3d> llt(constraint.information);
+        Eigen::Matrix3d sqrt_info = llt.matrixU(); // matrixU is L^T
 
         ceres::CostFunction* cost_function = PoseGraph2DErrorTerm::Create(
             constraint.measurement.translation.x(),
@@ -194,7 +256,11 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Extract results
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    result.status = (summary.termination_type == ceres::CONVERGENCE) ? "CONVERGED" : "NOT_CONVERGED";
+    
+    // Check convergence: Ceres must report convergence AND show positive improvement
+    bool converged = (summary.termination_type == ceres::CONVERGENCE) && 
+                     (result.improvement_pct > 0.0);
+    result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }
@@ -246,8 +312,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // Use identity matrix for unweighted residuals (matches Rust solver)
-        Eigen::Matrix<double, 6, 6> sqrt_info = Eigen::Matrix<double, 6, 6>::Identity();
+        // Compute square root information matrix
+        Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(constraint.information);
+        Eigen::Matrix<double, 6, 6> sqrt_info = llt.matrixU();
 
         ceres::CostFunction* cost_function = PoseGraph3DErrorTerm::Create(
             constraint.measurement, sqrt_info);
@@ -301,7 +368,11 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Extract results
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    result.status = (summary.termination_type == ceres::CONVERGENCE) ? "CONVERGED" : "NOT_CONVERGED";
+    
+    // Check convergence: Ceres must report convergence AND show positive improvement
+    bool converged = (summary.termination_type == ceres::CONVERGENCE) && 
+                     (result.improvement_pct > 0.0);
+    result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }

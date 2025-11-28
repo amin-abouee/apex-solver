@@ -109,8 +109,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
 
-    // Check convergence based on final improvement
-    result.status = (iterations < 100 || result.improvement_pct > 90.0) ? "CONVERGED" : "NOT_CONVERGED";
+    // Check convergence: must show positive improvement and not hit max iterations
+    bool converged = (iterations < 100) && (result.improvement_pct > 0.0);
+    result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }
@@ -215,8 +216,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
 
-    // Check convergence based on final improvement
-    result.status = (iterations < 100 || result.improvement_pct > 90.0) ? "CONVERGED" : "NOT_CONVERGED";
+    // Check convergence: must show positive improvement and not hit max iterations
+    bool converged = (iterations < 100) && (result.improvement_pct > 0.0);
+    result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
 }
