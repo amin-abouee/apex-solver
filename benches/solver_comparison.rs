@@ -101,76 +101,136 @@ use apex_solver::manifold::se3::SE3;
 /// Returns: 0.5 * sum of information-weighted squared residuals
 fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
     let mut total_cost = 0.0;
-
+    let mut edge_count = 0;
     for edge in &graph.edges_se2 {
-        // Get the two poses
-        let pose_i = match graph.vertices_se2.get(&edge.from) {
-            Some(p) => &p.pose,
-            None => continue, // Skip if vertex missing
-        };
-        let pose_j = match graph.vertices_se2.get(&edge.to) {
-            Some(p) => &p.pose,
-            None => continue,
-        };
+        let from_idx = edge.from;
+        let to_idx = edge.to;
 
-        // Compute residual: log(measured^{-1} * actual)
-        // where actual = T_i^{-1} * T_j
-        let actual_relative = pose_i.inverse(None).compose(pose_j, None, None);
-        let error = edge
-            .measurement
-            .inverse(None)
-            .compose(&actual_relative, None, None);
-        let residual_tangent = error.log(None);
+        if let (Some(v_from), Some(v_to)) = (
+            graph.vertices_se2.get(&from_idx),
+            graph.vertices_se2.get(&to_idx),
+        ) {
+            let pose_i = v_from.pose.clone();
+            let pose_j = v_to.pose.clone();
 
-        // Convert tangent to DVector for matrix operations
-        use nalgebra::DVector;
-        let residual: DVector<f64> = residual_tangent.into();
+            // Compute error: log(T_ij^-1 * T_i^-1 * T_j)
+            // But wait, the standard definition is usually log(T_ij^-1 * (T_i^-1 * T_j))
+            // Let's stick to what we used in the factor:
+            // r = log(T_ij^-1 * T_i^-1 * T_j)
+            // Actually, let's use the exact same logic as the factor to be safe
+            // But here we just need the residual vector.
 
-        // Apply information matrix weighting: r^T * Σ^(-1) * r
-        let weighted_squared_norm = residual.dot(&(edge.information * &residual));
+            // T_i^-1 * T_j
+            let actual_relative = pose_i.inverse(None).compose(&pose_j, None, None);
 
-        // Accumulate: 0.5 * ||r||²_Σ
-        total_cost += 0.5 * weighted_squared_norm;
+            // T_ij^-1 * actual_relative
+            let error = edge
+                .measurement
+                .inverse(None)
+                .compose(&actual_relative, None, None);
+
+            let residual_tangent = error.log(None);
+
+            // Apply information matrix: r^T * Omega * r
+            // let residual_vec = residual_tangent.to_vector();
+            // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
+            // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
+
+            // USER REQUEST: Switch to unweighted cost (Euclidean distance)
+            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let weighted_sq_norm = residual_vec.norm_squared();
+
+            // Debug: print first edge details
+            if edge_count == 0 {
+                eprintln!("[DEBUG] Rust first edge ({}->{}):", from_idx, to_idx);
+                eprintln!("  Residual: {:?}", residual_vec);
+                eprintln!("  Squared norm: {}", weighted_sq_norm);
+                eprintln!("  Cost contribution: {}", 0.5 * weighted_sq_norm);
+            }
+
+            total_cost += 0.5 * weighted_sq_norm;
+            edge_count += 1;
+        }
     }
 
+    eprintln!(
+        "[DEBUG] Rust SE3 Total cost: {} (from {} edges)",
+        total_cost, edge_count
+    );
     total_cost
 }
 
 /// Compute SE3 cost from G2O graph data
 /// Returns: 0.5 * sum of information-weighted squared residuals
 fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
+    // Debug: print edge and vertex counts
+    eprintln!(
+        "[DEBUG] Rust SE3 Cost: {} edges, {} vertices",
+        graph.edges_se3.len(),
+        graph.vertices_se3.len()
+    );
+
     let mut total_cost = 0.0;
-
+    let mut edge_count = 0;
     for edge in &graph.edges_se3 {
-        // Get the two poses
-        let pose_i = match graph.vertices_se3.get(&edge.from) {
-            Some(p) => &p.pose,
-            None => continue,
-        };
-        let pose_j = match graph.vertices_se3.get(&edge.to) {
-            Some(p) => &p.pose,
-            None => continue,
-        };
+        let from_idx = edge.from;
+        let to_idx = edge.to;
 
-        // Compute residual: log(measured^{-1} * actual)
-        let actual_relative = pose_i.inverse(None).compose(pose_j, None, None);
-        let error = edge
-            .measurement
-            .inverse(None)
-            .compose(&actual_relative, None, None);
-        let residual_tangent = error.log(None);
+        if let (Some(v_from), Some(v_to)) = (
+            graph.vertices_se3.get(&from_idx),
+            graph.vertices_se3.get(&to_idx),
+        ) {
+            let pose_i = v_from.pose.clone();
+            let pose_j = v_to.pose.clone();
 
-        // Convert tangent to DVector for matrix operations
-        use nalgebra::DVector;
-        let residual: DVector<f64> = residual_tangent.into();
+            // T_i^-1 * T_j
+            let actual_relative = pose_i.inverse(None).compose(&pose_j, None, None);
 
-        // Apply information matrix weighting
-        let weighted_squared_norm = residual.dot(&(edge.information * &residual));
+            // T_ij^-1 * actual_relative
+            let error = edge
+                .measurement
+                .inverse(None)
+                .compose(&actual_relative, None, None);
 
-        // Accumulate: 0.5 * ||r||²_Σ
-        total_cost += 0.5 * weighted_squared_norm;
+            let residual_tangent = error.log(None);
+
+            // Apply information matrix: r^T * Omega * r
+            // let residual_vec = residual_tangent.to_vector();
+            // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
+            // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
+
+            // USER REQUEST: Switch to unweighted cost (Euclidean distance)
+            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let weighted_sq_norm = residual_vec.norm_squared();
+
+            // Debug: print first few edges details and problem edges
+            if edge_count < 3 || (edge_count >= 2500 && edge_count <= 2503) {
+                eprintln!(
+                    "[DEBUG] Rust edge {} ({}->{}):",
+                    edge_count, from_idx, to_idx
+                );
+                eprintln!(
+                    "  Residual: [{:.6e}, {:.6e}, {:.6e}, {:.6e}, {:.6e}, {:.6e}]",
+                    residual_vec[0],
+                    residual_vec[1],
+                    residual_vec[2],
+                    residual_vec[3],
+                    residual_vec[4],
+                    residual_vec[5]
+                );
+                eprintln!("  Squared norm: {:.6e}", weighted_sq_norm);
+                eprintln!("  Cost contribution: {:.6e}", 0.5 * weighted_sq_norm);
+            }
+
+            total_cost += 0.5 * weighted_sq_norm;
+            edge_count += 1;
+        }
     }
 
+    eprintln!(
+        "[DEBUG] Rust SE3 Total cost: {} (from {} edges)",
+        total_cost, edge_count
+    );
     total_cost
 }
 
@@ -228,7 +288,11 @@ fn update_se2_graph_from_factrs(
     let ids: Vec<_> = graph.vertices_se2.keys().copied().collect();
     for id in ids {
         if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE2>(X(id as u32)) {
-            let vertex = graph.vertices_se2.get_mut(&id).unwrap();
+            #[allow(clippy::expect_used)]
+            let vertex = graph
+                .vertices_se2
+                .get_mut(&id)
+                .expect("Vertex should exist");
             // factrs SE2: x, y, theta
             vertex.pose = SE2::from_xy_angle(factrs_pose.x(), factrs_pose.y(), factrs_pose.theta());
         }
@@ -249,7 +313,11 @@ fn update_se3_graph_from_factrs(
     let ids: Vec<_> = graph.vertices_se3.keys().copied().collect();
     for id in ids {
         if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE3>(X(id as u32)) {
-            let vertex = graph.vertices_se3.get_mut(&id).unwrap();
+            #[allow(clippy::expect_used)]
+            let vertex = graph
+                .vertices_se3
+                .get_mut(&id)
+                .expect("Vertex should exist");
             // Extract rotation and translation from factrs SE3
             let rot = factrs_pose.rot();
             let xyz = factrs_pose.xyz();
@@ -329,6 +397,7 @@ struct BenchmarkResult {
 }
 
 impl BenchmarkResult {
+    #[allow(clippy::too_many_arguments)]
     fn success(
         dataset: &str,
         solver: &str,
@@ -400,12 +469,15 @@ fn is_converged(status: &OptimizationStatus) -> bool {
 }
 
 fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
-    let graph = match G2oLoader::load(dataset.file) {
+    let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
         Err(e) => {
             return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
         }
     };
+
+    // Compute initial cost using unified cost function
+    let initial_cost = compute_se2_cost(&graph);
 
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
@@ -457,6 +529,22 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         Ok(result) => {
             let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
+            // Update graph with optimized values
+            for (var_name, var_enum) in &result.parameters {
+                #[allow(clippy::collapsible_if)]
+                if let Some(id_str) = var_name.strip_prefix("x") {
+                    if let Ok(id) = id_str.parse::<usize>() {
+                        if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
+                            let val = var_enum.to_vector();
+                            vertex.pose = SE2::from_xy_angle(val[0], val[1], val[2]);
+                        }
+                    }
+                }
+            }
+
+            // Compute final cost using unified cost function
+            let final_cost = compute_se2_cost(&graph);
+
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,
@@ -465,8 +553,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
-                result.initial_cost,
-                result.final_cost,
+                initial_cost,
+                final_cost,
             )
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
@@ -474,12 +562,15 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
 }
 
 fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
-    let graph = match G2oLoader::load(dataset.file) {
+    let mut graph = match G2oLoader::load(dataset.file) {
         Ok(g) => g,
         Err(e) => {
             return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
         }
     };
+
+    // Compute initial cost using unified cost function
+    let initial_cost = compute_se3_cost(&graph);
 
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
@@ -534,6 +625,25 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         Ok(result) => {
             let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
+            // Update graph with optimized values
+            for (var_name, var_enum) in &result.parameters {
+                #[allow(clippy::collapsible_if)]
+                if let Some(id_str) = var_name.strip_prefix("x") {
+                    if let Ok(id) = id_str.parse::<usize>() {
+                        if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
+                            use nalgebra::{Quaternion, Vector3};
+                            let val = var_enum.to_vector();
+                            let translation = Vector3::new(val[0], val[1], val[2]);
+                            let rotation = Quaternion::new(val[3], val[4], val[5], val[6]);
+                            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
+                        }
+                    }
+                }
+            }
+
+            // Compute final cost using unified cost function
+            let final_cost = compute_se3_cost(&graph);
+
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,
@@ -542,8 +652,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 elapsed_ms,
                 converged,
                 Some(result.iterations),
-                result.initial_cost,
-                result.final_cost,
+                initial_cost,
+                final_cost,
             )
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
