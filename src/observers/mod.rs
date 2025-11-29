@@ -115,8 +115,6 @@
 //!         let count = values.len();
 //!         let mut max = self.max_variables_seen.borrow_mut();
 //!         *max = (*max).max(count);
-//!
-//!         info!("Iteration {}: {} variables", iteration, count);
 //!     }
 //! }
 //! ```
@@ -265,7 +263,7 @@ pub trait OptObserver: Send {
     ///
     /// impl OptObserver for SimpleLogger {
     ///     fn on_step(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
-    ///         info!("Iteration {}: {} variables", iteration, values.len());
+    ///         // Track optimization progress
     ///     }
     /// }
     /// ```
@@ -384,7 +382,7 @@ impl OptObserverVec {
     /// struct MyObserver;
     /// impl OptObserver for MyObserver {
     ///     fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {
-    ///         info!("Optimization step!");
+    ///         // Handle optimization step
     ///     }
     /// }
     ///

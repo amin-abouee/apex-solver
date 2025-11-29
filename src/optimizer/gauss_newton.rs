@@ -86,10 +86,6 @@
 //!
 //! // Run optimization
 //! let result = solver.optimize(&problem, &initial_values)?;
-//!
-//! info!("Converged: {:?}", result.status);
-//! info!("Final cost: {:.6e}", result.final_cost);
-//! info!("Iterations: {}", result.iterations);
 //! # Ok(())
 //! # }
 //! ```
@@ -592,9 +588,6 @@ struct CostEvaluation {
 ///
 /// let mut solver = GaussNewton::new();
 /// let result = solver.optimize(&problem, &initial_values)?;
-///
-/// info!("Status: {:?}", result.status);
-/// info!("Final cost: {}", result.final_cost);
 /// # Ok(())
 /// # }
 /// ```

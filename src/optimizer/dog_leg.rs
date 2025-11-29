@@ -162,10 +162,6 @@
 //!
 //! let mut solver = DogLeg::new();
 //! let result = solver.optimize(&problem, &initial_values)?;
-//!
-//! info!("Status: {:?}", result.status);
-//! info!("Final cost: {:.6e}", result.final_cost);
-//! info!("Iterations: {}", result.iterations);
 //! # Ok(())
 //! # }
 //! ```
@@ -871,10 +867,6 @@ struct StepEvaluation {
 ///
 /// let mut solver = DogLeg::new();
 /// let result = solver.optimize(&problem, &initial_values)?;
-///
-/// info!("Status: {:?}", result.status);
-/// info!("Final cost: {}", result.final_cost);
-/// info!("Iterations: {}", result.iterations);
 /// # Ok(())
 /// # }
 /// ```

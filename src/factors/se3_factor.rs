@@ -63,12 +63,8 @@ use nalgebra::{DMatrix, DVector, Matrix6};
 /// let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
 /// let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0]);
 ///
-/// // Compute residual
+/// // Compute residual (dimension 6) and Jacobian (6x12)
 /// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
-/// info!("Residual dimension: {}", residual.len());  // 6
-/// if let Some(jac) = jacobian {
-///     info!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());  // 6x12
-/// }
 /// ```
 #[derive(Clone)]
 pub struct BetweenFactorSE3 {

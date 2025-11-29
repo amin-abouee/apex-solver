@@ -57,12 +57,6 @@
 //! let delta = SE2Tangent::from(DVector::from_vec(vec![0.1, 0.2, 0.05]));
 //! let updated_pose = var.plus(&delta);
 //! var.set_value(updated_pose);
-//!
-//! info!("Updated pose at ({}, {}, {})",
-//!     var.value.translation().x,
-//!     var.value.translation().y,
-//!     var.value.angle()
-//! );
 //! ```
 //!
 //! # Example: Variable with Constraints

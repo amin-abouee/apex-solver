@@ -281,9 +281,7 @@ impl Corrector {
     ///
     /// let corrector = Corrector::new(&loss, squared_norm);
     ///
-    /// info!("Original residual norm: {}", residual.norm());
     /// corrector.correct_residuals(&mut residual);
-    /// info!("Corrected residual norm: {}", residual.norm());
     /// // Outlier residuals are scaled down
     /// # Ok(())
     /// # }

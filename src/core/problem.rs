@@ -80,9 +80,6 @@
 //! initial_values.insert("x1".to_string(), (ManifoldType::SE2, dvector![0.9, 0.1, 0.12]));
 //!
 //! let variables = problem.initialize_variables(&initial_values);
-//!
-//! info!("Problem has {} residual blocks", problem.num_residual_blocks());
-//! info!("Total residual dimension: {}", problem.total_residual_dimension);
 //! # Ok(())
 //! # }
 //! # example().unwrap();
