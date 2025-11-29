@@ -49,7 +49,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 // apex-solver imports
 use apex_solver::core::loss_functions::L2Loss;
@@ -1075,7 +1075,7 @@ fn main() {
     // Write results to CSV
     let csv_path = "benchmark_results.csv";
     if let Err(e) = save_csv_results(&all_results, csv_path) {
-        eprintln!("Warning: Failed to save CSV results: {}", e);
+        warn!("Warning: Failed to save CSV results: {}", e);
     } else {
         info!("Results written to {}", csv_path);
     }

@@ -41,8 +41,8 @@ pub type ApexSolverResult<T> = Result<T, ApexSolverError>;
 ///
 /// ```rust,ignore
 /// if let Err(e) = solver.optimize(&problem, &initial_values) {
-///     eprintln!("Error: {}", e);
-///     eprintln!("Full chain: {}", e.chain());
+///     warn!("Error: {}", e);
+///     warn!("Full chain: {}", e.chain());
 /// }
 /// ```
 #[derive(Debug, Error)]
@@ -88,8 +88,8 @@ impl ApexSolverError {
     /// match solver.optimize(&problem, &initial_values) {
     ///     Ok(result) => { /* ... */ }
     ///     Err(e) => {
-    ///         eprintln!("Optimization failed!");
-    ///         eprintln!("Error chain: {}", e.chain());
+    ///         warn!("Optimization failed!");
+    ///         warn!("Error chain: {}", e.chain());
     ///         // Output: "Optimizer error: Linear system solve failed →
     ///         //          Linear algebra error: Singular matrix detected"
     ///     }

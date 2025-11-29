@@ -41,7 +41,7 @@ use nalgebra::{DMatrix, DVector};
 ///
 /// // Compute residual (shows deviation from prior)
 /// let (residual, jacobian) = prior.linearize(&[current_pose], true);
-/// println!("Deviation from origin: {:?}", residual);
+/// info!("Deviation from origin: {:?}", residual);
 /// ```
 ///
 /// # Implementation Note

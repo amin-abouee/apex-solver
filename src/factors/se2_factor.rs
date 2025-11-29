@@ -53,7 +53,7 @@ use nalgebra::{DMatrix, DVector, Matrix3};
 ///
 /// // Compute residual (should be small if poses are consistent)
 /// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
-/// println!("Residual: {:?}", residual);  // Shows deviation from measurement
+/// info!("Residual: {:?}", residual);  // Shows deviation from measurement
 /// ```
 #[derive(Clone)]
 pub struct BetweenFactorSE2 {

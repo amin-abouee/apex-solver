@@ -81,8 +81,8 @@
 //!
 //! let variables = problem.initialize_variables(&initial_values);
 //!
-//! println!("Problem has {} residual blocks", problem.num_residual_blocks());
-//! println!("Total residual dimension: {}", problem.total_residual_dimension);
+//! info!("Problem has {} residual blocks", problem.num_residual_blocks());
+//! info!("Total residual dimension: {}", problem.total_residual_dimension);
 //! # Ok(())
 //! # }
 //! # example().unwrap();

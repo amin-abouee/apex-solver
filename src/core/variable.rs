@@ -58,7 +58,7 @@
 //! let updated_pose = var.plus(&delta);
 //! var.set_value(updated_pose);
 //!
-//! println!("Updated pose at ({}, {}, {})",
+//! info!("Updated pose at ({}, {}, {})",
 //!     var.value.translation().x,
 //!     var.value.translation().y,
 //!     var.value.angle()

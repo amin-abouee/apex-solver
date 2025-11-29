@@ -65,9 +65,9 @@ use nalgebra::{DMatrix, DVector, Matrix6};
 ///
 /// // Compute residual
 /// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
-/// println!("Residual dimension: {}", residual.len());  // 6
+/// info!("Residual dimension: {}", residual.len());  // 6
 /// if let Some(jac) = jacobian {
-///     println!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());  // 6x12
+///     info!("Jacobian shape: {} x {}", jac.nrows(), jac.ncols());  // 6x12
 /// }
 /// ```
 #[derive(Clone)]
