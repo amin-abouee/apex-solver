@@ -14,6 +14,7 @@ categories = ["algorithms", "science", "mathematics"]
 exclude = [
     "data_bk/*",
     "doc/*.md",
+    "!doc/CHANGELOG.md",
     "profiles/*",
     "output/*",
     ".github/*",
