@@ -164,7 +164,6 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
         residual << x_tangent, y_tangent, theta_error;
 
         // Apply information matrix weighting: r^T * Σ^(-1) * r
-        // USER REQUEST: Switch to unweighted cost estimation (Euclidean distance)
         // We ignore the information matrix and just compute the squared norm of the residual.
         // double weighted_squared_norm = residual.transpose() * constraint.information * residual;
         double weighted_squared_norm = residual.squaredNorm();
@@ -231,7 +230,6 @@ double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
         residual.tail<3>() = residual_rotation;
 
         // Apply information matrix weighting: r^T * Σ^(-1) * r
-        // USER REQUEST: Switch to unweighted cost estimation (Euclidean distance)
         // double weighted_squared_norm = residual.transpose() * constraint.information * residual;
         double weighted_squared_norm = residual.squaredNorm();
 

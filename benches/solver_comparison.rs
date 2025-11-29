@@ -135,7 +135,6 @@ fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
             // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
             // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
 
-            // USER REQUEST: Switch to unweighted cost (Euclidean distance)
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
             let weighted_sq_norm = residual_vec.norm_squared();
 
@@ -177,7 +176,6 @@ fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
             // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
             // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
 
-            // USER REQUEST: Switch to unweighted cost (Euclidean distance)
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
             let weighted_sq_norm = residual_vec.norm_squared();
 

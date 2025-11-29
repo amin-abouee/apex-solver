@@ -80,7 +80,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
                        constraint.measurement.rotation);
         edge->setMeasurement(measurement);
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         edge->setInformation(Eigen::Matrix3d::Identity());
 
         optimizer.addEdge(edge);
@@ -191,7 +190,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
         edge->setMeasurement(measurement);
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         edge->setInformation(Eigen::Matrix<double, 6, 6>::Identity());
 
         optimizer.addEdge(edge);

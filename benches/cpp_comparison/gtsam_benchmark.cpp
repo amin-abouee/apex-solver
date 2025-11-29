@@ -72,7 +72,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
                          constraint.measurement.translation.y(),
                          constraint.measurement.rotation);
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         // Use unit noise model (identity covariance) instead of information-weighted
         auto noise = gtsam::noiseModel::Unit::Create(3);
 
@@ -183,7 +182,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
                           constraint.measurement.translation.z());
         Pose3 measurement(rotation, translation);
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         // Use unit noise model (identity covariance) instead of information-weighted
         auto noise = gtsam::noiseModel::Unit::Create(6);
 

@@ -33,7 +33,6 @@ public:
         residuals(1) = h_y - T(y_);
         residuals(2) = h_theta - T(theta_);
 
-        // USER REQUEST: Switch to unweighted cost (no information matrix)
         // Removed information matrix weighting to match unified cost computation
         // Old code: residuals = sqrt_info_T * residuals;
 
@@ -87,7 +86,6 @@ public:
         Eigen::Quaternion<T> q_error = q_ab_measured.conjugate() * q_ab;
         Eigen::Matrix<T, 3, 1> t_error = q_ab_measured.conjugate() * (t_ab - t_ab_measured);
 
-        // USER REQUEST: Use SO3 log map for rotation (matching unified_cost.cpp and Rust)
         // Old Ceres code used: 2.0 * q_error.vec() (simplified approximation)
         // New code uses full Rodriguez formula to match unified cost computation
 
@@ -142,7 +140,6 @@ public:
         residuals.template head<3>() = translation_residual;
         residuals.template tail<3>() = rotation_residual;
 
-        // USER REQUEST: Switch to unweighted cost (no information matrix)
         // Removed information matrix weighting to match unified cost computation
         // Old code: residuals = sqrt_info_T * residuals;
 
@@ -200,7 +197,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         // Pass identity matrix instead of sqrt(information matrix)
         Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
 
@@ -305,7 +301,6 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // USER REQUEST: Use unweighted cost (ignore information matrix)
         // Pass identity matrix instead of sqrt(information matrix)
         Eigen::Matrix<double, 6, 6> identity = Eigen::Matrix<double, 6, 6>::Identity();
 
