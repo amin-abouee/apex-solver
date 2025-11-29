@@ -1,6 +1,5 @@
 #include "unified_cost.h"
 #include <cmath>
-#include <iostream>
 #include <Eigen/Dense>
 
 namespace unified_cost {
@@ -76,14 +75,11 @@ Eigen::Matrix3d ComputeSO3LeftJacobianInverse(const Eigen::Vector3d& theta_vec) 
 }  // anonymous namespace
 
 double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
-    // Verify graph has edges
     if (graph.constraints.empty()) {
-        std::cerr << "Warning: Graph has no constraints!" << std::endl;
         return 0.0;
     }
-    
+
     double total_cost = 0.0;
-    int skipped_edges = 0;
 
     for (const auto& constraint : graph.constraints) {
         // Get the two poses
@@ -92,7 +88,6 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
 
         // Skip if either vertex is missing
         if (pose_i_it == graph.poses.end() || pose_j_it == graph.poses.end()) {
-            skipped_edges++;
             continue;
         }
 
@@ -177,29 +172,16 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
         // Accumulate: 0.5 * ||r||²
         total_cost += 0.5 * weighted_squared_norm;
     }
-    
-    if (skipped_edges > 0) {
-        std::cerr << "Warning: Skipped " << skipped_edges << " SE2 edges due to missing vertices" << std::endl;
-    }
 
     return total_cost;
 }
 
 double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
-    // Verify graph has edges
     if (graph.constraints.empty()) {
-        std::cerr << "Warning: Graph has no constraints!" << std::endl;
         return 0.0;
     }
-    
-    // Debug: print edge count
-    std::cerr << "[DEBUG] SE3 Cost: " << graph.constraints.size() << " edges, " 
-              << graph.poses.size() << " vertices" << std::endl;
-    std::cerr << "[DEBUG] Using UNWEIGHTED cost (no information matrix)" << std::endl;
-    
+
     double total_cost = 0.0;
-    int skipped_edges = 0;
-    int edge_count = 0;
 
     for (const auto& constraint : graph.constraints) {
         // Get the two poses
@@ -208,7 +190,6 @@ double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
 
         // Skip if either vertex is missing
         if (pose_i_it == graph.poses.end() || pose_j_it == graph.poses.end()) {
-            skipped_edges++;
             continue;
         }
 
@@ -254,40 +235,9 @@ double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
         // double weighted_squared_norm = residual.transpose() * constraint.information * residual;
         double weighted_squared_norm = residual.squaredNorm();
 
-        // Debug: print first few edges details and edges around the problem area
-        if (edge_count < 3 || (edge_count >= 2500 && edge_count <= 2503)) {
-            std::cerr << "[DEBUG] Edge " << edge_count << " (" << constraint.id_begin << "->" << constraint.id_end << "):" << std::endl;
-            std::cerr << "  Residual: [" << residual.transpose() << "]" << std::endl;
-            std::cerr << "  Squared norm (unweighted): " << weighted_squared_norm << std::endl;
-            
-            // Check what information-weighted would be
-            double info_weighted = residual.transpose() * constraint.information * residual;
-            std::cerr << "  Squared norm (info-weighted): " << info_weighted << std::endl;
-            std::cerr << "  Information matrix diagonal: [" 
-                      << constraint.information(0,0) << ", "
-                      << constraint.information(1,1) << ", "
-                      << constraint.information(2,2) << ", "
-                      << constraint.information(3,3) << ", "
-                      << constraint.information(4,4) << ", "
-                      << constraint.information(5,5) << "]" << std::endl;
-            std::cerr << "  Cost contribution: " << (0.5 * weighted_squared_norm) << std::endl;
-        }
-
         // Accumulate: 0.5 * ||r||²
         total_cost += 0.5 * weighted_squared_norm;
-        edge_count++;
-        
-        // Debug: print cumulative cost every 1000 edges
-        if (edge_count % 1000 == 0) {
-            std::cerr << "[DEBUG] After " << edge_count << " edges: cumulative cost = " << total_cost << std::endl;
-        }
     }
-    
-    if (skipped_edges > 0) {
-        std::cerr << "Warning: Skipped " << skipped_edges << " SE3 edges due to missing vertices" << std::endl;
-    }
-    
-    std::cerr << "[DEBUG] SE3 Total cost (UNWEIGHTED): " << total_cost << " (from " << edge_count << " edges)" << std::endl;
 
     return total_cost;
 }

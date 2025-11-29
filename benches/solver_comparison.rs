@@ -101,7 +101,6 @@ use apex_solver::manifold::se3::SE3;
 /// Returns: 0.5 * sum of information-weighted squared residuals
 fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
     let mut total_cost = 0.0;
-    let mut edge_count = 0;
     for edge in &graph.edges_se2 {
         let from_idx = edge.from;
         let to_idx = edge.to;
@@ -140,38 +139,17 @@ fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
             let weighted_sq_norm = residual_vec.norm_squared();
 
-            // Debug: print first edge details
-            if edge_count == 0 {
-                eprintln!("[DEBUG] Rust first edge ({}->{}):", from_idx, to_idx);
-                eprintln!("  Residual: {:?}", residual_vec);
-                eprintln!("  Squared norm: {}", weighted_sq_norm);
-                eprintln!("  Cost contribution: {}", 0.5 * weighted_sq_norm);
-            }
-
             total_cost += 0.5 * weighted_sq_norm;
-            edge_count += 1;
         }
     }
 
-    eprintln!(
-        "[DEBUG] Rust SE3 Total cost: {} (from {} edges)",
-        total_cost, edge_count
-    );
     total_cost
 }
 
 /// Compute SE3 cost from G2O graph data
 /// Returns: 0.5 * sum of information-weighted squared residuals
 fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
-    // Debug: print edge and vertex counts
-    eprintln!(
-        "[DEBUG] Rust SE3 Cost: {} edges, {} vertices",
-        graph.edges_se3.len(),
-        graph.vertices_se3.len()
-    );
-
     let mut total_cost = 0.0;
-    let mut edge_count = 0;
     for edge in &graph.edges_se3 {
         let from_idx = edge.from;
         let to_idx = edge.to;
@@ -203,34 +181,10 @@ fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
             let weighted_sq_norm = residual_vec.norm_squared();
 
-            // Debug: print first few edges details and problem edges
-            if edge_count < 3 || (edge_count >= 2500 && edge_count <= 2503) {
-                eprintln!(
-                    "[DEBUG] Rust edge {} ({}->{}):",
-                    edge_count, from_idx, to_idx
-                );
-                eprintln!(
-                    "  Residual: [{:.6e}, {:.6e}, {:.6e}, {:.6e}, {:.6e}, {:.6e}]",
-                    residual_vec[0],
-                    residual_vec[1],
-                    residual_vec[2],
-                    residual_vec[3],
-                    residual_vec[4],
-                    residual_vec[5]
-                );
-                eprintln!("  Squared norm: {:.6e}", weighted_sq_norm);
-                eprintln!("  Cost contribution: {:.6e}", 0.5 * weighted_sq_norm);
-            }
-
             total_cost += 0.5 * weighted_sq_norm;
-            edge_count += 1;
         }
     }
 
-    eprintln!(
-        "[DEBUG] Rust SE3 Total cost: {} (from {} edges)",
-        total_cost, edge_count
-    );
     total_cost
 }
 

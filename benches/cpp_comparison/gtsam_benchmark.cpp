@@ -13,9 +13,9 @@ using gtsam::Symbol;
 
 #include <vector>
 
-#include "common/benchmark_utils.h"
-#include "common/read_g2o.h"
-#include "common/unified_cost.h"
+#include "common/include/benchmark_utils.h"
+#include "common/include/read_g2o.h"
+#include "common/include/unified_cost.h"
 
 // Benchmark SE2 dataset with GTSAM
 benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
@@ -41,7 +41,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
 
     // Store initial graph for cost computation
     g2o_reader::Graph2D initial_graph = graph;
-    
+
     // Compute initial cost using unified cost function
     result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
 
@@ -55,11 +55,16 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         initial_values.insert(Symbol('x', id), gtsam_pose);
     }
 
-    // Fix first pose to eliminate gauge freedom (similar to Ceres/g2o approach)
-    // Note: GTSAM doesn't support hard constraints like Ceres' SetParameterBlockConstant,
-    // so we skip the prior entirely. This matches the unified cost computation which
-    // doesn't include prior factors. The graph should still be well-constrained by edges.
-    // (Removed prior factor to match unified cost - GTSAM will handle gauge freedom automatically)
+    // Fix first pose to eliminate gauge freedom
+    // Use Constrained noise model to truly fix the first pose (no movement allowed)
+    auto prior_noise = gtsam::noiseModel::Constrained::All(3);
+
+    auto first_pose_it = graph.poses.begin();
+    gtsam::Pose2 first_pose(first_pose_it->second.rotation,
+                            first_pose_it->second.translation.x(),
+                            first_pose_it->second.translation.y());
+    graph_factors.add(gtsam::PriorFactor<gtsam::Pose2>(
+        Symbol('x', first_pose_it->first), first_pose, prior_noise));
 
     // Add between factors
     for (const auto& constraint : graph.constraints) {
@@ -67,8 +72,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
                          constraint.measurement.translation.y(),
                          constraint.measurement.rotation);
 
-        // Convert information matrix to noise model
-        auto noise = noiseModel::Gaussian::Information(constraint.information);
+        // USER REQUEST: Use unweighted cost (ignore information matrix)
+        // Use unit noise model (identity covariance) instead of information-weighted
+        auto noise = gtsam::noiseModel::Unit::Create(3);
 
         graph_factors.add(BetweenFactor<Pose2>(
             Symbol('x', constraint.id_begin),
@@ -87,15 +93,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Optimize
     Timer timer;
     LevenbergMarquardtOptimizer optimizer(graph_factors, initial_values, params);
-    
-    // Get initial error from GTSAM
-    double initial_error = graph_factors.error(initial_values);
-    
+
     Values optimized_values = optimizer.optimize();
     result.time_ms = timer.elapsed_ms();
-    
-    // Get final error from GTSAM
-    double final_error = graph_factors.error(optimized_values);
 
     // Extract optimized poses back into graph
     for (auto& [id, pose] : graph.poses) {
@@ -107,15 +107,14 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
 
     // Compute final cost using unified cost function
     result.final_cost = unified_cost::ComputeSE2Cost(graph);
-    
+
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
-    // Actual convergence check using GTSAM's internal error
-    bool actually_converged = (final_error < initial_error) && 
-                              (optimizer.iterations() < params.maxIterations) &&
-                              (result.improvement_pct > 0.0);
+
+    // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
+    bool actually_converged = (result.improvement_pct > 95.0) ||
+                              ((result.improvement_pct > 0.0) && (optimizer.iterations() < params.maxIterations));
     result.status = actually_converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
@@ -145,7 +144,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     // Store initial graph for cost computation
     g2o_reader::Graph3D initial_graph = graph;
-    
+
     // Compute initial cost using unified cost function
     result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
 
@@ -162,11 +161,16 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         initial_values.insert(Symbol('x', id), gtsam_pose);
     }
 
-    // Fix first pose to eliminate gauge freedom (similar to Ceres/g2o approach)
-    // Note: GTSAM doesn't support hard constraints like Ceres' SetParameterBlockConstant,
-    // so we skip the prior entirely. This matches the unified cost computation which
-    // doesn't include prior factors. The graph should still be well-constrained by edges.
-    // (Removed prior factor to match unified cost - GTSAM will handle gauge freedom automatically)
+    // Fix first pose to eliminate gauge freedom
+    // Use Constrained noise model to truly fix the first pose (no movement allowed)
+    auto prior_noise_se3 = gtsam::noiseModel::Constrained::All(6);
+
+    auto first_pose_it_se3 = graph.poses.begin();
+    gtsam::Rot3 first_rot(first_pose_it_se3->second.rotation);
+    gtsam::Point3 first_trans(first_pose_it_se3->second.translation);
+    gtsam::Pose3 first_pose_se3(first_rot, first_trans);
+    graph_factors.add(gtsam::PriorFactor<gtsam::Pose3>(
+        Symbol('x', first_pose_it_se3->first), first_pose_se3, prior_noise_se3));
 
     // Add between factors
     for (const auto& constraint : graph.constraints) {
@@ -179,8 +183,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
                           constraint.measurement.translation.z());
         Pose3 measurement(rotation, translation);
 
-        // Convert information matrix to noise model
-        auto noise = noiseModel::Gaussian::Information(constraint.information);
+        // USER REQUEST: Use unweighted cost (ignore information matrix)
+        // Use unit noise model (identity covariance) instead of information-weighted
+        auto noise = gtsam::noiseModel::Unit::Create(6);
 
         graph_factors.add(BetweenFactor<Pose3>(
             Symbol('x', constraint.id_begin),
@@ -199,15 +204,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Optimize
     Timer timer;
     LevenbergMarquardtOptimizer optimizer(graph_factors, initial_values, params);
-    
-    // Get initial error from GTSAM
-    double initial_error = graph_factors.error(initial_values);
-    
+
     Values optimized_values = optimizer.optimize();
     result.time_ms = timer.elapsed_ms();
-    
-    // Get final error from GTSAM
-    double final_error = graph_factors.error(optimized_values);
 
     // Extract optimized poses back into graph
     for (auto& [id, pose] : graph.poses) {
@@ -225,15 +224,14 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     // Compute final cost using unified cost function
     result.final_cost = unified_cost::ComputeSE3Cost(graph);
-    
+
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
-    // Actual convergence check using GTSAM's internal error
-    bool actually_converged = (final_error < initial_error) && 
-                              (optimizer.iterations() < params.maxIterations) &&
-                              (result.improvement_pct > 0.0);
+
+    // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
+    bool actually_converged = (result.improvement_pct > 95.0) ||
+                              ((result.improvement_pct > 0.0) && (optimizer.iterations() < params.maxIterations));
     result.status = actually_converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;

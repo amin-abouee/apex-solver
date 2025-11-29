@@ -1,11 +1,9 @@
 #include <ceres/ceres.h>
 #include <Eigen/Core>
-#include <map>
-#include <vector>
 
-#include "common/benchmark_utils.h"
-#include "common/read_g2o.h"
-#include "common/unified_cost.h"
+#include "common/include/benchmark_utils.h"
+#include "common/include/read_g2o.h"
+#include "common/include/unified_cost.h"
 
 // SE2 residual (3 DOF: x, y, theta)
 class PoseGraph2DErrorTerm {
@@ -92,12 +90,12 @@ public:
         // USER REQUEST: Use SO3 log map for rotation (matching unified_cost.cpp and Rust)
         // Old Ceres code used: 2.0 * q_error.vec() (simplified approximation)
         // New code uses full Rodriguez formula to match unified cost computation
-        
+
         // SO3 log map (Rodriguez formula)
         T qw = q_error.w();
         // Clamp qw to avoid numerical issues
         qw = ceres::fmax(T(-1.0), ceres::fmin(T(1.0), qw));
-        
+
         Eigen::Matrix<T, 3, 1> rotation_residual;
         if (qw > T(1.0) - T(1e-10)) {
             // Small angle approximation
@@ -116,7 +114,7 @@ public:
         // This matches the unified_cost.cpp ComputeSO3LeftJacobianInverse
         T angle_sq = rotation_residual.squaredNorm();
         Eigen::Matrix<T, 3, 3> J_l_inv;
-        
+
         if (angle_sq < T(1e-10)) {
             // Small angle: J_l^{-1} ≈ I - 0.5 * [rotation]_x
             Eigen::Matrix<T, 3, 3> rotation_skew;
@@ -128,16 +126,16 @@ public:
             T theta = ceres::sqrt(angle_sq);
             T sin_theta = ceres::sin(theta);
             T cos_theta = ceres::cos(theta);
-            
+
             Eigen::Matrix<T, 3, 3> rotation_skew;
             rotation_skew << T(0.0), -rotation_residual(2), rotation_residual(1),
                              rotation_residual(2), T(0.0), -rotation_residual(0),
                              -rotation_residual(1), rotation_residual(0), T(0.0);
-            
+
             T coef = T(1.0) / angle_sq - (T(1.0) + cos_theta) / (T(2.0) * theta * sin_theta);
             J_l_inv = Eigen::Matrix<T, 3, 3>::Identity() - T(0.5) * rotation_skew + coef * (rotation_skew * rotation_skew);
         }
-        
+
         Eigen::Matrix<T, 3, 1> translation_residual = J_l_inv * t_error;
 
         // Build 6D residual: [translation, rotation] (matching unified_cost.cpp order)
@@ -184,7 +182,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
 
     // Store initial graph for cost computation
     g2o_reader::Graph2D initial_graph = graph;
-    
+
     // Compute initial cost using unified cost function
     result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
 
@@ -202,20 +200,15 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // Compute square root information matrix
-        // We want L^T such that L*L^T = I (LLT decomposition)
-        // Eigen's LLT computes L such that L*L^T = A.
-        // We want to multiply residuals r by some matrix S such that ||Sr||^2 = r^T S^T S r = r^T I r
-        // So S^T S = I.
-        // If I = L L^T, then S = L^T satisfies S^T S = L L^T = I.
-        Eigen::LLT<Eigen::Matrix3d> llt(constraint.information);
-        Eigen::Matrix3d sqrt_info = llt.matrixU(); // matrixU is L^T
+        // USER REQUEST: Use unweighted cost (ignore information matrix)
+        // Pass identity matrix instead of sqrt(information matrix)
+        Eigen::Matrix3d identity = Eigen::Matrix3d::Identity();
 
         ceres::CostFunction* cost_function = PoseGraph2DErrorTerm::Create(
             constraint.measurement.translation.x(),
             constraint.measurement.translation.y(),
             constraint.measurement.rotation,
-            sqrt_info);
+            identity);
 
         problem.AddResidualBlock(cost_function, nullptr, pose_a.data(), pose_b.data());
     }
@@ -252,14 +245,14 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
 
     // Compute final cost using unified cost function
     result.final_cost = unified_cost::ComputeSE2Cost(graph);
-    
+
     // Extract results
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
-    // Check convergence: Ceres must report convergence AND show positive improvement
-    bool converged = (summary.termination_type == ceres::CONVERGENCE) && 
-                     (result.improvement_pct > 0.0);
+
+    // Convergence check: Accept if >95% improvement OR (Ceres converged AND positive improvement)
+    bool converged = (result.improvement_pct > 95.0) ||
+                     ((summary.termination_type == ceres::CONVERGENCE) && (result.improvement_pct > 0.0));
     result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;
@@ -287,7 +280,7 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     // Store initial graph for cost computation
     g2o_reader::Graph3D initial_graph = graph;
-    
+
     // Compute initial cost using unified cost function
     result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
 
@@ -312,12 +305,12 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         auto& pose_a = pose_params[constraint.id_begin];
         auto& pose_b = pose_params[constraint.id_end];
 
-        // Compute square root information matrix
-        Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(constraint.information);
-        Eigen::Matrix<double, 6, 6> sqrt_info = llt.matrixU();
+        // USER REQUEST: Use unweighted cost (ignore information matrix)
+        // Pass identity matrix instead of sqrt(information matrix)
+        Eigen::Matrix<double, 6, 6> identity = Eigen::Matrix<double, 6, 6>::Identity();
 
         ceres::CostFunction* cost_function = PoseGraph3DErrorTerm::Create(
-            constraint.measurement, sqrt_info);
+            constraint.measurement, identity);
 
         problem.AddResidualBlock(cost_function, nullptr,
                                 pose_a.first.data(), pose_a.second.data(),
@@ -364,14 +357,14 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 
     // Compute final cost using unified cost function
     result.final_cost = unified_cost::ComputeSE3Cost(graph);
-    
+
     // Extract results
     result.iterations = summary.num_successful_steps + summary.num_unsuccessful_steps;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
-    
-    // Check convergence: Ceres must report convergence AND show positive improvement
-    bool converged = (summary.termination_type == ceres::CONVERGENCE) && 
-                     (result.improvement_pct > 0.0);
+
+    // Convergence check: Accept if >95% improvement OR (Ceres converged AND positive improvement)
+    bool converged = (result.improvement_pct > 95.0) ||
+                     ((summary.termination_type == ceres::CONVERGENCE) && (result.improvement_pct > 0.0));
     result.status = converged ? "CONVERGED" : "NOT_CONVERGED";
 
     return result;

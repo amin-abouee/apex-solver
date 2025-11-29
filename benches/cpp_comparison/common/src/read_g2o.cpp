@@ -139,11 +139,16 @@ bool ReadG2oFile3D(const std::string& filename, Graph3D& graph) {
 
             // Read information matrix (upper triangular: 21 values for 6x6 symmetric)
             double info[21];
+            bool info_read_success = true;
             for (int i = 0; i < 21; ++i) {
                 if (!(iss >> info[i])) {
                     std::cerr << "Error reading information matrix at line " << line_number << std::endl;
+                    info_read_success = false;
                     break;
                 }
+            }
+            if (!info_read_success) {
+                continue;
             }
 
             // Fill symmetric 6x6 information matrix from upper triangular
