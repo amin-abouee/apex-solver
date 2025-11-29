@@ -38,4 +38,4 @@ benches/cpp_comparison/*.csv
 benches/cpp_comparison/.cache/*
 __cmake*
 CLAUDE.md
-book
+cookbook
