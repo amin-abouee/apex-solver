@@ -108,7 +108,7 @@ use crate::{
     error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
-    manifold::{ManifoldType, rn, se2, se3, so2, so3},
+    manifold::{ManifoldType, rn, se_2_3, se2, se3, sgal3, sim3, so2, so3},
 };
 
 /// Symbolic structure for sparse matrix operations.
@@ -132,6 +132,9 @@ pub enum VariableEnum {
     Rn(Variable<rn::Rn>),
     SE2(Variable<se2::SE2>),
     SE3(Variable<se3::SE3>),
+    SE23(Variable<se_2_3::SE_2_3>),
+    SGal3(Variable<sgal3::SGal3>),
+    Sim3(Variable<sim3::Sim3>),
     SO2(Variable<so2::SO2>),
     SO3(Variable<so3::SO3>),
 }
@@ -143,6 +146,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => var.get_size(),
             VariableEnum::SE2(var) => var.get_size(),
             VariableEnum::SE3(var) => var.get_size(),
+            VariableEnum::SE23(var) => var.get_size(),
+            VariableEnum::SGal3(var) => var.get_size(),
+            VariableEnum::Sim3(var) => var.get_size(),
             VariableEnum::SO2(var) => var.get_size(),
             VariableEnum::SO3(var) => var.get_size(),
         }
@@ -154,6 +160,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => var.value.clone().into(),
             VariableEnum::SE2(var) => var.value.clone().into(),
             VariableEnum::SE3(var) => var.value.clone().into(),
+            VariableEnum::SE23(var) => var.value.clone().into(),
+            VariableEnum::SGal3(var) => var.value.clone().into(),
+            VariableEnum::Sim3(var) => var.value.clone().into(),
             VariableEnum::SO2(var) => var.value.clone().into(),
             VariableEnum::SO3(var) => var.value.clone().into(),
         }
@@ -235,6 +244,54 @@ impl VariableEnum {
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
+            VariableEnum::SE23(var) => {
+                // SE_2(3) has 9 DOF in tangent space
+                let mut step_data: Vec<f64> = (0..9).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 9 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = se_2_3::SE_2_3Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::SGal3(var) => {
+                // SGal(3) has 10 DOF in tangent space
+                let mut step_data: Vec<f64> = (0..10).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 10 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = sgal3::SGal3Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
+            VariableEnum::Sim3(var) => {
+                // Sim(3) has 7 DOF in tangent space
+                let mut step_data: Vec<f64> = (0..7).map(|i| step_slice[(i, 0)]).collect();
+
+                // Enforce fixed indices: zero out step components for fixed DOF
+                for &fixed_idx in &var.fixed_indices {
+                    if fixed_idx < 7 {
+                        step_data[fixed_idx] = 0.0;
+                    }
+                }
+
+                let step_dvector = DVector::from_vec(step_data);
+                let tangent = sim3::Sim3Tangent::from(step_dvector);
+                let new_value = var.plus(&tangent);
+                var.set_value(new_value);
+            }
             VariableEnum::Rn(var) => {
                 // Rn has dynamic size
                 let size = var.get_size();
@@ -266,6 +323,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => var.get_covariance(),
             VariableEnum::SE2(var) => var.get_covariance(),
             VariableEnum::SE3(var) => var.get_covariance(),
+            VariableEnum::SE23(var) => var.get_covariance(),
+            VariableEnum::SGal3(var) => var.get_covariance(),
+            VariableEnum::Sim3(var) => var.get_covariance(),
             VariableEnum::SO2(var) => var.get_covariance(),
             VariableEnum::SO3(var) => var.get_covariance(),
         }
@@ -283,6 +343,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => var.set_covariance(cov),
             VariableEnum::SE2(var) => var.set_covariance(cov),
             VariableEnum::SE3(var) => var.set_covariance(cov),
+            VariableEnum::SE23(var) => var.set_covariance(cov),
+            VariableEnum::SGal3(var) => var.set_covariance(cov),
+            VariableEnum::Sim3(var) => var.set_covariance(cov),
             VariableEnum::SO2(var) => var.set_covariance(cov),
             VariableEnum::SO3(var) => var.set_covariance(cov),
         }
@@ -294,6 +357,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => var.clear_covariance(),
             VariableEnum::SE2(var) => var.clear_covariance(),
             VariableEnum::SE3(var) => var.clear_covariance(),
+            VariableEnum::SE23(var) => var.clear_covariance(),
+            VariableEnum::SGal3(var) => var.clear_covariance(),
+            VariableEnum::Sim3(var) => var.clear_covariance(),
             VariableEnum::SO2(var) => var.clear_covariance(),
             VariableEnum::SO3(var) => var.clear_covariance(),
         }
@@ -307,6 +373,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => &var.bounds,
             VariableEnum::SE2(var) => &var.bounds,
             VariableEnum::SE3(var) => &var.bounds,
+            VariableEnum::SE23(var) => &var.bounds,
+            VariableEnum::SGal3(var) => &var.bounds,
+            VariableEnum::Sim3(var) => &var.bounds,
             VariableEnum::SO2(var) => &var.bounds,
             VariableEnum::SO3(var) => &var.bounds,
         }
@@ -320,6 +389,9 @@ impl VariableEnum {
             VariableEnum::Rn(var) => &var.fixed_indices,
             VariableEnum::SE2(var) => &var.fixed_indices,
             VariableEnum::SE3(var) => &var.fixed_indices,
+            VariableEnum::SE23(var) => &var.fixed_indices,
+            VariableEnum::SGal3(var) => &var.fixed_indices,
+            VariableEnum::Sim3(var) => &var.fixed_indices,
             VariableEnum::SO2(var) => &var.fixed_indices,
             VariableEnum::SO3(var) => &var.fixed_indices,
         }
@@ -340,6 +412,18 @@ impl VariableEnum {
             VariableEnum::SE3(var) => {
                 let new_se3: se3::SE3 = vec.clone().into();
                 var.set_value(new_se3);
+            }
+            VariableEnum::SE23(var) => {
+                let new_se23: se_2_3::SE_2_3 = vec.clone().into();
+                var.set_value(new_se23);
+            }
+            VariableEnum::SGal3(var) => {
+                let new_sgal3: sgal3::SGal3 = vec.clone().into();
+                var.set_value(new_sgal3);
+            }
+            VariableEnum::Sim3(var) => {
+                let new_sim3: sim3::Sim3 = vec.clone().into();
+                var.set_value(new_sim3);
             }
             VariableEnum::SO2(var) => {
                 let new_so2: so2::SO2 = vec.clone().into();
@@ -661,6 +745,36 @@ impl Problem {
                             var.bounds = bounds.clone();
                         }
                         VariableEnum::Rn(var)
+                    }
+                    ManifoldType::SE23 => {
+                        let mut var = Variable::new(se_2_3::SE_2_3::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SE23(var)
+                    }
+                    ManifoldType::SGal3 => {
+                        let mut var = Variable::new(sgal3::SGal3::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::SGal3(var)
+                    }
+                    ManifoldType::Sim3 => {
+                        let mut var = Variable::new(sim3::Sim3::from(v.1.clone()));
+                        if let Some(indexes) = self.fixed_variable_indexes.get(k) {
+                            var.fixed_indices = indexes.clone();
+                        }
+                        if let Some(bounds) = self.variable_bounds.get(k) {
+                            var.bounds = bounds.clone();
+                        }
+                        VariableEnum::Sim3(var)
                     }
                 };
 

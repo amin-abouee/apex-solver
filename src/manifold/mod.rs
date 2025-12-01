@@ -42,6 +42,9 @@ use std::{
 pub mod rn;
 pub mod se2;
 pub mod se3;
+pub mod se_2_3;
+pub mod sgal3;
+pub mod sim3;
 pub mod so2;
 pub mod so3;
 
@@ -67,6 +70,9 @@ pub enum ManifoldType {
     RN,
     SE2,
     SE3,
+    SE23,
+    SGal3,
+    Sim3,
     SO2,
     SO3,
 }
