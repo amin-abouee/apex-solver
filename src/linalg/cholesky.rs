@@ -139,8 +139,13 @@ impl SparseLinearSolver for SparseCholeskySolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let cholesky = Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower)
-            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
+        let cholesky =
+            Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower).map_err(|e| {
+                LinAlgError::SingularMatrix(
+                    "Cholesky factorization failed (matrix may be singular)".to_string(),
+                )
+                .log_with_source(e)
+            })?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
@@ -208,7 +213,12 @@ impl SparseLinearSolver for SparseCholeskySolver {
 
         // Perform numeric factorization
         let cholesky = Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), Side::Lower)
-            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
+            .map_err(|e| {
+                LinAlgError::SingularMatrix(
+                    "Cholesky factorization failed (matrix may be singular)".to_string(),
+                )
+                .log_with_source(e)
+            })?;
 
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
