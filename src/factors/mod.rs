@@ -237,6 +237,7 @@ pub mod double_sphere_factor;
 pub mod eucm_factor;
 pub mod fov_factor;
 pub mod kannala_brandt_factor;
+pub mod pinhole_factor;
 pub mod rad_tan_factor;
 pub mod ucm_factor;
 
@@ -258,6 +259,11 @@ pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
 
 // Camera projection factors - Kannala-Brandt
 pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
+
+// Camera projection factors - Pinhole
+pub use pinhole_factor::{
+    BundleAdjustmentFactor, PinholeCameraParamsFactor, PinholeProjectionFactor,
+};
 
 // Camera projection factors - RadTan
 pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
