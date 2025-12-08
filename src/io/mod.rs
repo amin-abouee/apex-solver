@@ -20,10 +20,12 @@ use crate::{
 };
 
 // Module declarations
+pub mod bal;
 pub mod g2o;
 pub mod toro;
 
 // Re-exports
+pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
 
