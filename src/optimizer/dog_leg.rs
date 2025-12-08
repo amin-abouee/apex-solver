@@ -962,6 +962,10 @@ impl DogLeg {
                 Box::new(linalg::SparseCholeskySolver::new())
             }
             linalg::LinearSolverType::SparseQR => Box::new(linalg::SparseQRSolver::new()),
+            linalg::LinearSolverType::SparseSchurComplement => {
+                // Schur complement solver requires special handling - fallback to Cholesky
+                Box::new(linalg::SparseCholeskySolver::new())
+            }
         }
     }
 
