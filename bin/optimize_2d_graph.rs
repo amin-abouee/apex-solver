@@ -3,7 +3,7 @@ use std::time::Instant;
 
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
+use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -312,11 +312,8 @@ fn test_dataset(
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
 
-        let dx = edge.measurement.translation().x;
-        let dy = edge.measurement.translation().y;
-        let dtheta = edge.measurement.angle();
-
-        let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
+        let relative_pose = edge.measurement.clone();
+        let between_factor = BetweenFactor::new(relative_pose);
 
         // Clone the loss function for each edge
         let edge_loss = if loss_fn.is_some() {

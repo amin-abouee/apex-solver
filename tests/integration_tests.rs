@@ -33,7 +33,7 @@
 
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
+use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
@@ -127,7 +127,7 @@ fn run_se3_optimization(
         let id1 = format!("x{}", edge.to);
         let relative_pose = edge.measurement.clone();
 
-        let between_factor = BetweenFactorSE3::new(relative_pose);
+        let between_factor = BetweenFactor::new(relative_pose);
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 
@@ -241,9 +241,7 @@ fn run_se2_optimization(
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
 
-        let measurement = &edge.measurement;
-        let between_factor =
-            BetweenFactorSE2::new(measurement.x(), measurement.y(), measurement.angle());
+        let between_factor = BetweenFactor::new(edge.measurement.clone());
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 

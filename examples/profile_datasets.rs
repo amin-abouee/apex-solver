@@ -16,7 +16,7 @@
 
 use apex_solver::{
     core::problem::Problem,
-    factors::BetweenFactorSE3,
+    factors::BetweenFactor,
     init_logger,
     io::{G2oLoader, GraphLoader},
     manifold::ManifoldType,
@@ -92,7 +92,7 @@ fn main() {
         let id1 = format!("x{}", edge.to);
 
         let relative_pose = edge.measurement.clone();
-        let between_factor = BetweenFactorSE3::new(relative_pose);
+        let between_factor = BetweenFactor::new(relative_pose);
 
         problem.add_residual_block(
             &[&id0, &id1],

@@ -65,6 +65,42 @@ use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 use tracing::error;
 
+// Pose factors
+pub mod between_factor;
+pub mod prior_factor;
+
+// Camera projection factors
+pub mod double_sphere_factor;
+pub mod eucm_factor;
+pub mod fov_factor;
+pub mod kannala_brandt_factor;
+pub mod rad_tan_factor;
+pub mod ucm_factor;
+
+// Re-export all factor types
+
+// Pose factors
+pub use between_factor::BetweenFactor;
+pub use prior_factor::PriorFactor;
+
+// Camera projection factors - Double Sphere
+pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
+
+// Camera projection factors - EUCM
+pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
+
+// Camera projection factors - FOV
+pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
+
+// Camera projection factors - Kannala-Brandt
+pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
+
+// Camera projection factors - RadTan
+pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
+
+// Camera projection factors - UCM
+pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};
+
 /// Factor-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
 pub enum FactorError {
@@ -226,41 +262,3 @@ pub trait Factor: Send + Sync {
     /// - Prior factor: dimension of the variable
     fn get_dimension(&self) -> usize;
 }
-
-// Pose factors
-pub mod prior_factor;
-pub mod se2_factor;
-pub mod se3_factor;
-
-// Camera projection factors
-pub mod double_sphere_factor;
-pub mod eucm_factor;
-pub mod fov_factor;
-pub mod kannala_brandt_factor;
-pub mod rad_tan_factor;
-pub mod ucm_factor;
-
-// Re-export all factor types
-
-// Pose factors
-pub use prior_factor::PriorFactor;
-pub use se2_factor::BetweenFactorSE2;
-pub use se3_factor::BetweenFactorSE3;
-
-// Camera projection factors - Double Sphere
-pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
-
-// Camera projection factors - EUCM
-pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
-
-// Camera projection factors - FOV
-pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
-
-// Camera projection factors - Kannala-Brandt
-pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
-
-// Camera projection factors - RadTan
-pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
-
-// Camera projection factors - UCM
-pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};

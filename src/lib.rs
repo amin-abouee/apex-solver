@@ -39,9 +39,8 @@ pub use error::{ApexSolverError, ApexSolverResult};
 
 // Re-export factor types
 pub use factors::{
-    BetweenFactorSE2, BetweenFactorSE3, DoubleSphereProjectionFactor, EucmProjectionFactor, Factor,
-    FovProjectionFactor, KannalaBrandtProjectionFactor, PriorFactor, RadTanProjectionFactor,
-    UcmProjectionFactor,
+    BetweenFactor, DoubleSphereProjectionFactor, EucmProjectionFactor, Factor, FovProjectionFactor,
+    KannalaBrandtProjectionFactor, PriorFactor, RadTanProjectionFactor, UcmProjectionFactor,
 };
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};

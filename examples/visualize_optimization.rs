@@ -28,7 +28,7 @@
 //! The Rerun viewer will open automatically showing optimization progress.
 
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactorSE3;
+use apex_solver::factors::BetweenFactor;
 use apex_solver::io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::LevenbergMarquardt;
@@ -141,7 +141,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         let from_key = format!("x{}", edge.from);
         let to_key = format!("x{}", edge.to);
 
-        let factor = BetweenFactorSE3::new(edge.measurement.clone());
+        let factor = BetweenFactor::new(edge.measurement.clone());
 
         let var_keys: Vec<&str> = vec![from_key.as_str(), to_key.as_str()];
         problem.add_residual_block(&var_keys, Box::new(factor), None);
@@ -249,7 +249,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
 /// Optimize SE2 pose graph with visualization
 fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    use apex_solver::factors::BetweenFactorSE2;
+    use apex_solver::factors::BetweenFactor;
 
     // Create optimization problem
     let mut problem = Problem::new();
@@ -259,11 +259,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
         let from_key = format!("x{}", edge.from);
         let to_key = format!("x{}", edge.to);
 
-        let factor = BetweenFactorSE2::new(
-            edge.measurement.x(),
-            edge.measurement.y(),
-            edge.measurement.angle(),
-        );
+        let factor = BetweenFactor::new(edge.measurement.clone());
 
         let var_keys: Vec<&str> = vec![from_key.as_str(), to_key.as_str()];
         problem.add_residual_block(&var_keys, Box::new(factor), None);
