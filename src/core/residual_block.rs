@@ -33,7 +33,7 @@
 //!
 //! ```
 //! use apex_solver::core::residual_block::ResidualBlock;
-//! use apex_solver::factors::{Factor, BetweenFactorSE2};
+//! use apex_solver::factors::{Factor, BetweenFactor};
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::SE2;
@@ -41,7 +41,7 @@
 //! # fn example() -> ApexSolverResult<()> {
 //!
 //! // Create a between factor (measurement between two poses)
-//! let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+//! let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
 //!
 //! // Add robust loss function for outlier rejection
 //! let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
@@ -140,12 +140,13 @@ impl ResidualBlock {
     ///
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
-    /// use apex_solver::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::factors::{Factor, BetweenFactor};
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
+    /// use apex_solver::manifold::se2::SE2;
     /// # use apex_solver::error::ApexSolverResult;
     /// # fn example() -> ApexSolverResult<()> {
     ///
-    /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
     /// let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
     ///
     /// let block = ResidualBlock::new(
@@ -204,11 +205,11 @@ impl ResidualBlock {
     ///
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
-    /// use apex_solver::factors::{Factor, BetweenFactorSE2};
+    /// use apex_solver::factors::{Factor, BetweenFactor};
     /// use apex_solver::core::variable::Variable;
     /// use apex_solver::manifold::se2::SE2;
     ///
-    /// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
     /// let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
     ///
     /// let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
@@ -272,7 +273,7 @@ mod tests {
         loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
-    use crate::factors::{BetweenFactorSE2, PriorFactor};
+    use crate::factors::{BetweenFactor, PriorFactor};
     use crate::manifold::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
 
@@ -280,7 +281,7 @@ mod tests {
 
     #[test]
     fn test_residual_block_creation() -> TestResult {
-        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
         let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
@@ -315,7 +316,7 @@ mod tests {
         let dx = 1.0;
         let dy = 0.5;
         let dtheta = 0.1;
-        let factor = Box::new(BetweenFactorSE2::new(dx, dy, dtheta));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(dx, dy, dtheta)));
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
@@ -348,7 +349,7 @@ mod tests {
     #[test]
     fn test_residual_and_jacobian_with_huber_loss() -> TestResult {
         // Create a between factor that will have non-zero residual
-        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0)));
         let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
 
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, loss);
@@ -361,7 +362,7 @@ mod tests {
         let (residual_with_loss, jacobian_with_loss) = block.residual_and_jacobian(&variables)?;
 
         // Create same block without loss for comparison
-        let factor_no_loss = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0));
+        let factor_no_loss = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0)));
         let block_no_loss = ResidualBlock::new(0, 0, &["x0", "x1"], factor_no_loss, None);
         let (residual_no_loss, jacobian_no_loss) =
             block_no_loss.residual_and_jacobian(&variables)?;
@@ -417,8 +418,8 @@ mod tests {
     fn test_multiple_residual_blocks_different_ids() -> TestResult {
         // Test creating multiple blocks with different IDs and start indices
         let factors: Vec<Box<dyn Factor + Send>> = vec![
-            Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
-            Box::new(BetweenFactorSE2::new(0.8, 0.2, -0.05)),
+            Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
+            Box::new(BetweenFactor::new(SE2::from_xy_angle(0.8, 0.2, -0.05))),
             Box::new(PriorFactor {
                 data: dvector![0.0, 0.0, 0.0],
             }),
@@ -464,7 +465,7 @@ mod tests {
     #[test]
     fn test_residual_block_variable_ordering() -> TestResult {
         // Test that variable ordering is preserved correctly
-        let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
         let block = ResidualBlock::new(0, 0, &["pose_2", "pose_1", "pose_0"], factor, None);
 
         let expected_order = vec!["pose_2", "pose_1", "pose_0"];
@@ -476,7 +477,7 @@ mod tests {
     #[test]
     fn test_residual_block_numerical_stability() -> TestResult {
         // Test with very small values to ensure numerical stability
-        let factor = Box::new(BetweenFactorSE2::new(1e-8, 1e-8, 1e-8));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1e-8, 1e-8, 1e-8)));
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
         let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
@@ -496,7 +497,7 @@ mod tests {
     #[test]
     fn test_residual_block_large_values() -> TestResult {
         // Test with large values to ensure no overflow
-        let factor = Box::new(BetweenFactorSE2::new(100.0, -200.0, 1.5));
+        let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(100.0, -200.0, 1.5)));
         let block = ResidualBlock::new(0, 0, &["x0", "x1"], factor, None);
 
         let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));
@@ -516,8 +517,8 @@ mod tests {
     #[test]
     fn test_residual_block_loss_function_switching() -> TestResult {
         // Test the same residual block with and without loss function applied
-        let factor1 = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
-        let factor2 = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+        let factor1 = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
+        let factor2 = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
 
         let block_with_loss = ResidualBlock::new(
             0,
