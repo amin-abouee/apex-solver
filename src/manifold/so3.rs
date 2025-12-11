@@ -346,6 +346,14 @@ impl LieGroup for SO3 {
         }
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix3::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         // Normalize the quaternion
         let q = self.quaternion.into_inner().normalize();

@@ -287,6 +287,16 @@ impl LieGroup for Rn {
         Rn::new(data)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        // Default to 3D identity for compatibility
+        DMatrix::identity(3, 3)
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        // Default to 3D zero matrix for compatibility
+        DMatrix::zeros(3, 3)
+    }
+
     /// Normalize the vector (no-op for Euclidean space, but could normalize to unit length).
     fn normalize(&mut self) {
         // For Euclidean space, we could normalize to unit length
