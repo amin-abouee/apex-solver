@@ -13,10 +13,10 @@
 
 use apex_solver::{
     core::problem::Problem,
-    factors::BetweenFactorSE2,
+    factors::BetweenFactor,
     init_logger,
     linalg::LinearSolverType,
-    manifold::ManifoldType,
+    manifold::{ManifoldType, se2::SE2},
     optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig},
 };
 use nalgebra::DVector;
@@ -37,26 +37,26 @@ fn main() {
     // Add odometry constraints (between consecutive poses)
     problem.add_residual_block(
         &["x0", "x1"],
-        Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.0)), // Move 1m forward
+        Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))), // Move 1m forward
         None,
     );
 
     problem.add_residual_block(
         &["x1", "x2"],
-        Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)), // Move 1m forward, turn 0.1 rad
+        Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))), // Move 1m forward, turn 0.1 rad
         None,
     );
 
     problem.add_residual_block(
         &["x2", "x3"],
-        Box::new(BetweenFactorSE2::new(1.0, 0.0, -0.1)), // Move 1m forward, turn -0.1 rad
+        Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, -0.1))), // Move 1m forward, turn -0.1 rad
         None,
     );
 
     // Add a loop closure constraint
     problem.add_residual_block(
         &["x0", "x3"],
-        Box::new(BetweenFactorSE2::new(3.0, 0.0, 0.0)), // Direct measurement from x0 to x3
+        Box::new(BetweenFactor::new(SE2::from_xy_angle(3.0, 0.0, 0.0))), // Direct measurement from x0 to x3
         None,
     );
 
