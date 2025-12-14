@@ -211,6 +211,14 @@ impl LieGroup for SO2 {
         SO2::from_angle(rand::random::<f64>() * 2.0 * std::f64::consts::PI)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix1::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix1::<f64>::zeros()
+    }
+
     /// Normalize the underlying complex number.
     fn normalize(&mut self) {
         self.complex.renormalize();

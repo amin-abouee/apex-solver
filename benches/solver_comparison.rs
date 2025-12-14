@@ -54,7 +54,7 @@ use tracing::{info, warn};
 // apex-solver imports
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -450,11 +450,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     for edge in &graph.edges_se2 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
-        let between_factor = BetweenFactorSE2::new(
-            edge.measurement.x(),
-            edge.measurement.y(),
-            edge.measurement.angle(),
-        );
+        let between_factor = BetweenFactor::new(edge.measurement.clone());
         problem.add_residual_block(
             &[&id0, &id1],
             Box::new(between_factor),
@@ -545,7 +541,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     for edge in &graph.edges_se3 {
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
-        let between_factor = BetweenFactorSE3::new(edge.measurement.clone());
+        let between_factor = BetweenFactor::new(edge.measurement.clone());
         problem.add_residual_block(
             &[&id0, &id1],
             Box::new(between_factor),
