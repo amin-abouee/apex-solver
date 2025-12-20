@@ -69,7 +69,10 @@ use tracing::error;
 pub mod between_factor;
 pub mod prior_factor;
 
-// Camera projection factors
+// New unified camera module
+pub mod camera;
+
+// Legacy camera projection factors (to be deprecated)
 pub mod double_sphere_factor;
 pub mod eucm_factor;
 pub mod fov_factor;

@@ -4,21 +4,39 @@ use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
 use std::marker::PhantomData;
 use tracing::warn;
 
-use super::traits::{BundleAdjustment, CameraModel, OptimizeParams};
+use super::{CameraModel, OptimizeParams};
 use crate::factors::Factor;
 use crate::manifold::LieGroup;
 use crate::manifold::se3::SE3;
+
+/// Trait for optimization configuration.
+///
+/// This trait allows accessing the compile-time boolean flags for
+/// parameter optimization (pose, landmarks, intrinsics).
+pub trait OptimizationConfig:
+    Send + Sync + 'static + Clone + Copy + std::fmt::Debug + Default
+{
+    const POSE: bool;
+    const LANDMARK: bool;
+    const INTRINSIC: bool;
+}
+
+impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for OptimizeParams<P, L, I> {
+    const POSE: bool = P;
+    const LANDMARK: bool = L;
+    const INTRINSIC: bool = I;
+}
 
 /// Generic projection factor for bundle adjustment and structure from motion.
 ///
 /// This factor computes reprojection errors between observed 2D image points
 /// and projected 3D landmarks. It supports flexible optimization configurations
-/// via const generics.
+/// via generic types implementing `OptimizationConfig`.
 ///
 /// # Type Parameters
 ///
 /// - `CAM`: Camera model implementing [`CameraModel`] trait
-/// - `OPT`: Optimization configuration (default: [`BundleAdjustment`])
+/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](super::BundleAdjustment))
 ///
 /// # Examples
 ///
@@ -32,14 +50,15 @@ use crate::manifold::se3::SE3;
 ///     Vector2::new(200.0, 250.0),
 /// ]);
 ///
-/// // Bundle adjustment (default)
-/// let factor = ProjectionFactor::new(observations, camera);
+/// // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
+/// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+///     ProjectionFactor::new(observations, camera);
 /// ```
 #[derive(Clone, Debug)]
-pub struct ProjectionFactor<CAM, OPT = BundleAdjustment>
+pub struct ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
-    OPT: Copy + Default,
+    OP: OptimizationConfig,
 {
     /// 2D observations in image coordinates (2×N for N observations)
     pub observations: Matrix2xX<f64>,
@@ -47,20 +66,24 @@ where
     /// Camera model with intrinsic parameters
     pub camera: CAM,
 
-    /// Fixed pose (required when OPT::POSE = false)
+    /// Fixed pose (required when POSE = false)
     pub fixed_pose: Option<SE3>,
 
-    /// Fixed landmarks (required when OPT::LANDMARK = false), 3×N matrix
+    /// Fixed landmarks (required when LANDMARK = false), 3×N matrix
     pub fixed_landmarks: Option<Matrix3xX<f64>>,
 
     /// Log warnings for cheirality exceptions (points behind camera)
     pub verbose_cheirality: bool,
 
     /// Phantom data for optimization type
-    _phantom: PhantomData<OPT>,
+    _phantom: PhantomData<OP>,
 }
 
-impl<CAM: CameraModel, OPT: Copy + Default> ProjectionFactor<CAM, OPT> {
+impl<CAM, OP> ProjectionFactor<CAM, OP>
+where
+    CAM: CameraModel,
+    OP: OptimizationConfig,
+{
     /// Create a new projection factor.
     ///
     /// # Arguments
@@ -71,7 +94,8 @@ impl<CAM: CameraModel, OPT: Copy + Default> ProjectionFactor<CAM, OPT> {
     /// # Example
     ///
     /// ```ignore
-    /// let factor = ProjectionFactor::new(observations, camera);
+    /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+    ///     ProjectionFactor::new(observations, camera);
     /// ```
     pub fn new(observations: Matrix2xX<f64>, camera: CAM) -> Self {
         Self {
@@ -84,7 +108,7 @@ impl<CAM: CameraModel, OPT: Copy + Default> ProjectionFactor<CAM, OPT> {
         }
     }
 
-    /// Set fixed pose (required when OPT::POSE = false).
+    /// Set fixed pose (required when POSE = false).
     ///
     /// # Example
     ///
@@ -96,7 +120,7 @@ impl<CAM: CameraModel, OPT: Copy + Default> ProjectionFactor<CAM, OPT> {
         self
     }
 
-    /// Set fixed landmarks (required when OPT::LANDMARK = false).
+    /// Set fixed landmarks (required when LANDMARK = false).
     ///
     /// # Example
     ///
@@ -120,124 +144,7 @@ impl<CAM: CameraModel, OPT: Copy + Default> ProjectionFactor<CAM, OPT> {
     pub fn num_observations(&self) -> usize {
         self.observations.ncols()
     }
-}
 
-// Convenience constructors for common patterns
-impl<CAM: CameraModel> ProjectionFactor<CAM, BundleAdjustment> {
-    /// Bundle Adjustment: N observations of N landmarks from ONE pose.
-    ///
-    /// Optimizes pose and landmarks with fixed intrinsics.
-    pub fn for_bundle_adjustment(observations: Matrix2xX<f64>, camera: CAM) -> Self {
-        Self::new(observations, camera)
-    }
-}
-
-impl<CAM: CameraModel> ProjectionFactor<CAM, OptimizeParams<true, true, true>> {
-    /// Self-Calibration: optimize pose + landmarks + intrinsics.
-    pub fn for_self_calibration(observations: Matrix2xX<f64>, camera: CAM) -> Self {
-        Self::new(observations, camera)
-    }
-}
-
-impl<CAM: CameraModel> ProjectionFactor<CAM, OptimizeParams<false, false, true>> {
-    /// Camera Calibration: optimize intrinsics with fixed pose and landmarks.
-    pub fn for_calibration(
-        observations: Matrix2xX<f64>,
-        camera: CAM,
-        fixed_pose: SE3,
-        fixed_landmarks: Matrix3xX<f64>,
-    ) -> Self {
-        Self::new(observations, camera)
-            .with_fixed_pose(fixed_pose)
-            .with_fixed_landmarks(fixed_landmarks)
-    }
-}
-
-impl<CAM: CameraModel> ProjectionFactor<CAM, OptimizeParams<true, false, false>> {
-    /// Visual Odometry: optimize pose with fixed landmarks.
-    pub fn for_visual_odometry(
-        observations: Matrix2xX<f64>,
-        camera: CAM,
-        fixed_landmarks: Matrix3xX<f64>,
-    ) -> Self {
-        Self::new(observations, camera).with_fixed_landmarks(fixed_landmarks)
-    }
-}
-
-impl<CAM: CameraModel> ProjectionFactor<CAM, OptimizeParams<false, true, false>> {
-    /// Triangulation/Structure: optimize landmarks with fixed pose.
-    pub fn for_triangulation(observations: Matrix2xX<f64>, camera: CAM, fixed_pose: SE3) -> Self {
-        Self::new(observations, camera).with_fixed_pose(fixed_pose)
-    }
-}
-
-// Factor trait implementation with const generic dispatch
-impl<CAM, const P: bool, const L: bool, const I: bool> Factor
-    for ProjectionFactor<CAM, OptimizeParams<P, L, I>>
-where
-    CAM: CameraModel,
-{
-    fn linearize(
-        &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-        let mut param_idx = 0;
-
-        // Get pose (from params if optimized, else from fixed_pose)
-        let pose: SE3 = if P {
-            let p = SE3::from(params[param_idx].clone());
-            param_idx += 1;
-            p
-        } else {
-            self.fixed_pose.clone().unwrap_or_else(|| {
-                panic!("Fixed pose required when POSE = false. Use with_fixed_pose() when creating ProjectionFactor with OptimizeParams<false, _, _>")
-            })
-        };
-
-        // Get landmarks (3×N)
-        let landmarks: Matrix3xX<f64> = if L {
-            let flat = &params[param_idx];
-            let n = flat.len() / 3;
-            param_idx += 1;
-            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
-        } else {
-            self.fixed_landmarks.clone().unwrap_or_else(|| {
-                panic!("Fixed landmarks required when LANDMARK = false. Use with_fixed_landmarks() when creating ProjectionFactor with OptimizeParams<_, false, _>")
-            })
-        };
-
-        // Get camera intrinsics
-        let camera: CAM = if I {
-            CAM::from_params(params[param_idx].as_slice())
-        } else {
-            self.camera.clone()
-        };
-
-        // Verify dimensions
-        let n = self.observations.ncols();
-        assert_eq!(
-            landmarks.ncols(),
-            n,
-            "Number of landmarks ({}) must match observations ({})",
-            landmarks.ncols(),
-            n
-        );
-
-        // Compute residuals and Jacobians
-        self.evaluate_internal(&pose, &landmarks, &camera, compute_jacobian)
-    }
-
-    fn get_dimension(&self) -> usize {
-        self.observations.ncols() * 2
-    }
-}
-
-impl<CAM, const P: bool, const L: bool, const I: bool>
-    ProjectionFactor<CAM, OptimizeParams<P, L, I>>
-where
-    CAM: CameraModel,
-{
     /// Internal evaluation function that computes residuals and Jacobians.
     fn evaluate_internal(
         &self,
@@ -254,13 +161,13 @@ where
 
         // Calculate total Jacobian dimension
         let mut jacobian_cols = 0;
-        if P {
+        if OP::POSE {
             jacobian_cols += 6; // SE3 tangent space
         }
-        if L {
+        if OP::LANDMARK {
             jacobian_cols += n * 3; // 3D landmarks
         }
-        if I {
+        if OP::INTRINSIC {
             jacobian_cols += CAM::INTRINSIC_DIM;
         }
 
@@ -316,7 +223,7 @@ where
                 let mut col_offset = 0;
 
                 // Jacobian w.r.t. pose
-                if P {
+                if OP::POSE {
                     let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, pose);
                     // Chain rule: ∂uv/∂pose = ∂uv/∂p_cam * ∂p_cam/∂pose
                     let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
@@ -330,7 +237,7 @@ where
                 }
 
                 // Jacobian w.r.t. landmarks
-                if L {
+                if OP::LANDMARK {
                     // For this landmark (3 DOF)
                     let d_uv_d_pcam = camera.jacobian_point(&p_cam);
                     // d(p_cam)/d(p_world) = R^T (rotation part of pose inverse)
@@ -345,12 +252,12 @@ where
                 }
 
                 // Update column offset for intrinsics (if landmarks are optimized)
-                if L {
+                if OP::LANDMARK {
                     col_offset += n * 3;
                 }
 
                 // Jacobian w.r.t. intrinsics (shared across all observations)
-                if I {
+                if OP::INTRINSIC {
                     let d_uv_d_intrinsics = camera.jacobian_intrinsics(&p_cam);
                     for r in 0..2 {
                         for c in 0..CAM::INTRINSIC_DIM {
@@ -365,10 +272,83 @@ where
     }
 }
 
+// Factor trait implementation with generic dispatch
+impl<CAM, OP> Factor for ProjectionFactor<CAM, OP>
+where
+    CAM: CameraModel,
+    OP: OptimizationConfig,
+{
+    fn linearize(
+        &self,
+        params: &[DVector<f64>],
+        compute_jacobian: bool,
+    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        let mut param_idx = 0;
+
+        // Get pose (from params if optimized, else from fixed_pose)
+        let pose: SE3 = if OP::POSE {
+            if param_idx >= params.len() {
+                panic!("Missing pose parameter");
+            }
+            let p = SE3::from(params[param_idx].clone());
+            param_idx += 1;
+            p
+        } else {
+            self.fixed_pose.clone().unwrap_or_else(|| {
+                panic!("Fixed pose required when POSE = false. Use with_fixed_pose() when creating ProjectionFactor with OptimizeParams<false, _, _>")
+            })
+        };
+
+        // Get landmarks (3×N)
+        let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
+            if param_idx >= params.len() {
+                panic!("Missing landmark parameters");
+            }
+            let flat = &params[param_idx];
+            let n = flat.len() / 3;
+            param_idx += 1;
+            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+        } else {
+            self.fixed_landmarks.clone().unwrap_or_else(|| {
+                panic!("Fixed landmarks required when LANDMARK = false. Use with_fixed_landmarks() when creating ProjectionFactor with OptimizeParams<_, false, _>")
+            })
+        };
+
+        // Get camera intrinsics
+        let camera: CAM = if OP::INTRINSIC {
+            if param_idx >= params.len() {
+                panic!("Missing intrinsic parameters");
+            }
+            CAM::from_params(params[param_idx].as_slice())
+        } else {
+            self.camera.clone()
+        };
+
+        // Verify dimensions
+        let n = self.observations.ncols();
+        assert_eq!(
+            landmarks.ncols(),
+            n,
+            "Number of landmarks ({}) must match observations ({})",
+            landmarks.ncols(),
+            n
+        );
+
+        // Compute residuals and Jacobians
+        self.evaluate_internal(&pose, &landmarks, &camera, compute_jacobian)
+    }
+
+    fn get_dimension(&self) -> usize {
+        self.observations.ncols() * 2
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::camera::{OnlyIntrinsics, PinholeCamera, SelfCalibration};
+    use crate::factors::camera::{
+        BundleAdjustment, OnlyIntrinsics, PinholeCamera, SelfCalibration,
+    };
     use nalgebra::{Vector2, Vector3};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -378,6 +358,7 @@ mod tests {
         let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
+        // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
             ProjectionFactor::new(observations, camera);
 
@@ -401,7 +382,10 @@ mod tests {
         let observations = Matrix2xX::from_columns(&[uv]);
         let _landmarks = Matrix3xX::from_columns(&[p_world]);
 
-        let factor = ProjectionFactor::for_bundle_adjustment(observations, camera);
+        // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
+        // Corrected: using OptimizeParams directly if needed, but BundleAdjustment alias is cleaner
+        let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+            ProjectionFactor::new(observations, camera);
 
         // Linearize
         let pose_vec: DVector<f64> = pose.clone().into();
@@ -432,10 +416,8 @@ mod tests {
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
-        let factor = ProjectionFactor::<PinholeCamera, SelfCalibration>::for_self_calibration(
-            observations,
-            camera,
-        );
+        let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
+            ProjectionFactor::new(observations, camera);
 
         // Linearize with all parameters
         let pose_vec: DVector<f64> = pose.into();
@@ -467,12 +449,10 @@ mod tests {
         let observations = Matrix2xX::from_columns(&[uv]);
         let landmarks = Matrix3xX::from_columns(&[p_world]);
 
-        let factor = ProjectionFactor::<PinholeCamera, OnlyIntrinsics>::for_calibration(
-            observations,
-            camera,
-            pose,
-            landmarks,
-        );
+        let factor: ProjectionFactor<PinholeCamera, OnlyIntrinsics> =
+            ProjectionFactor::new(observations, camera)
+                .with_fixed_pose(pose)
+                .with_fixed_landmarks(landmarks);
 
         // Only intrinsics are optimized
         let intrinsics_vec = DVector::from_vec(vec![500.0, 500.0, 320.0, 240.0]);
@@ -495,8 +475,8 @@ mod tests {
         let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
-        let factor =
-            ProjectionFactor::for_bundle_adjustment(observations, camera).with_verbose_cheirality();
+        let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+            ProjectionFactor::new(observations, camera).with_verbose_cheirality();
 
         let pose = SE3::identity();
         // Landmark behind camera
