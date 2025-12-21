@@ -213,53 +213,10 @@ impl CameraModel for DoubleSphereCamera {
         jac[(1, 3)] = 1.0;
 
         // ∂residual / ∂alpha
-        // From factor: jac_matrix[(i * 2, 4)] = (gamma - d2) * u_cx;
-        // Here residual = projection - obs
-        // projection = fx * x / denom + cx
-        // d(projection)/d(alpha) = fx * x * (-1/denom^2) * d(denom)/d(alpha)
-        // d(denom)/d(alpha) = d2 - gamma
-        // So d(projection)/d(alpha) = fx * x / denom * (gamma - d2) / denom = u_cx * (gamma - d2) / denom
-        // Wait, the factor implementation says:
-        // jac_matrix[(i * 2, 4)] = (gamma - d2) * u_cx;
-        // where u_cx in factor is (point_2d_obs[0] - cx) which is roughly fx * x / denom
-        // Let's re-derive carefully.
-        // u = fx * x / denom + cx
-        // du/dalpha = -fx * x / denom^2 * d(denom)/dalpha
-        // d(denom)/dalpha = d2 - gamma
-        // du/dalpha = -fx * x / denom * (d2 - gamma) / denom
-        //           = - (u - cx) * (d2 - gamma) / denom
-        //           = (u - cx) * (gamma - d2) / denom
-        // The factor used u_cx = point_2d[0] - cx.
-        // And jacobian was (gamma - d2) * u_cx  (Wait, did it miss / denom?)
-        // Let's check factor code again.
-        // let u_cx = point_2d[0] - cx;
-        // jac_matrix[(i * 2, 4)] = (gamma - d2) * u_cx;
-        // Wait, residual in factor is: fx * x - u_cx * denom
-        // residual = fx * x - (u_obs - cx) * denom
-        // d(res)/d(alpha) = -(u_obs - cx) * d(denom)/d(alpha) = -(u_obs - cx) * (d2 - gamma) = (u_obs - cx) * (gamma - d2)
-        // Correct.
-        // But here we want d(projection)/d(alpha).
-        // projection = fx * x / denom + cx.
-        // d(proj)/d(alpha) = -fx * x / denom^2 * (d2 - gamma)
-        //                  = (fx * x / denom) * (gamma - d2) / denom
-
         jac[(0, 4)] = u_cx * (gamma - d2) / denom;
         jac[(1, 4)] = v_cy * (gamma - d2) / denom;
 
         // ∂residual / ∂xi
-        // Factor:
-        // let coeff = (alpha * d1 * gamma) / d2 + (m_alpha * d1);
-        // jac_matrix[(i * 2, 5)] = -u_cx * coeff;
-        // d(res)/d(xi) = -(u_obs - cx) * d(denom)/d(xi)
-        // d(denom)/d(xi) = alpha * d(d2)/d(xi) + m_alpha * d(gamma)/d(xi)
-        // d(gamma)/d(xi) = d1
-        // d(d2)/d(xi) = 1/(2*d2) * 2 * gamma * d(gamma)/d(xi) = gamma * d1 / d2
-        // d(denom)/d(xi) = alpha * gamma * d1 / d2 + m_alpha * d1 = d1 * (alpha * gamma / d2 + m_alpha)
-        // This matches `coeff`.
-        // So d(proj)/d(xi) = -fx * x / denom^2 * coeff
-        //                  = -(fx * x / denom) * coeff / denom
-        //                  = -u_cx * coeff / denom
-
         let coeff = (self.alpha * d1 * gamma) / d2 + (m_alpha * d1);
         jac[(0, 5)] = -u_cx * coeff / denom;
         jac[(1, 5)] = -v_cy * coeff / denom;

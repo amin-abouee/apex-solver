@@ -13,9 +13,7 @@ use crate::manifold::se3::SE3;
 ///
 /// This trait allows accessing the compile-time boolean flags for
 /// parameter optimization (pose, landmarks, intrinsics).
-pub trait OptimizationConfig:
-    Send + Sync + 'static + Clone + Copy + std::fmt::Debug + Default
-{
+pub trait OptimizationConfig: Send + Sync + 'static + Clone + Copy + Default {
     const POSE: bool;
     const LANDMARK: bool;
     const INTRINSIC: bool;
@@ -54,7 +52,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
 ///     ProjectionFactor::new(observations, camera);
 /// ```
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
