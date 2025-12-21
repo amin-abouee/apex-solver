@@ -1,6 +1,6 @@
 # Plan: High-Performance Linear Solver Optimization
 
-## Phase 1: Profiling and Baseline Establishment
+## Phase 1: Profiling and Baseline Establishment [checkpoint: 0385e4d]
 - [x] Task: Establish baseline performance metrics using existing datasets (`sphere2500`, `torus3D`). 4309070
 - [x] Task: Generate flamegraphs for the `LinearSolver::solve` path to identify current bottlenecks. 1c58b3e
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Profiling and Baseline Establishment' (Protocol in workflow.md)
