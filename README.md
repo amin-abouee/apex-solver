@@ -235,96 +235,208 @@ let (problem, initial_values) = graph.to_problem();
 
 **New in v0.1.5**: Comprehensive camera projection factors for camera calibration and bundle adjustment.
 
-Apex Solver now includes 5 camera projection factor implementations with analytical Jacobians for efficient camera parameter optimization. Each factor supports batch processing of 3D-2D point correspondences and includes validity checking.
-
-```rust
-use apex_solver::factors::{RadTanProjectionFactor, Factor};
-use nalgebra::{Matrix3xX, Matrix2xX, DVector, Vector3, Vector2};
-
-// Collect 3D-2D point correspondences
-let points_3d_vec = vec![
-    Vector3::new(0.1, 0.2, 1.0),
-    Vector3::new(-0.3, 0.1, 1.2),
-    Vector3::new(0.2, -0.1, 0.9),
-    // ... more points
-];
-
-let points_2d_vec = vec![
-    Vector2::new(325.3, 245.1),  // observed pixel coordinates
-    Vector2::new(280.5, 248.3),
-    Vector2::new(335.2, 238.7),
-    // ... more observations
-];
-
-// Convert to matrix format
-let points_3d = Matrix3xX::from_columns(&points_3d_vec);
-let points_2d = Matrix2xX::from_columns(&points_2d_vec);
-
-// Create camera projection factor
-let camera_factor = RadTanProjectionFactor::new(points_3d, points_2d);
-
-// Initial camera parameters: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
-let initial_params = vec![DVector::from_vec(vec![
-    460.0, 460.0,      // focal lengths
-    320.0, 240.0,      // principal point
-    -0.28, 0.07,       // radial distortion
-    0.0002, 0.00002,   // tangential distortion
-    0.0                // additional radial
-])];
-
-// Compute residual and Jacobian
-let (residual, jacobian) = camera_factor.linearize(&initial_params, true);
-info!("Reprojection error: {:.3} pixels", residual.norm() / points_2d_vec.len() as f64);
-
-// Use in optimization problem
-problem.add_residual_block(
-    &["camera_params"],
-    Box::new(camera_factor),
-    None  // or Some(Box::new(HuberLoss::new(1.0)))
-);
-```
+Apex Solver now includes **7 camera projection factor implementations** with analytical Jacobians for efficient camera parameter optimization. Each factor supports flexible optimization configurations to optimize any combination of camera pose, 3D landmarks, and camera intrinsics.
 
 #### Supported Camera Models
 
-| Model | Parameters | Dim | Best For | Description |
-|-------|------------|-----|----------|-------------|
-| **DoubleSphere** | fx, fy, cx, cy, α, ξ | 6 | Wide FOV fisheye | Two-sphere projection with α blending parameter |
-| **EUCM** | fx, fy, cx, cy, α, β | 6 | General fisheye | Extended unified model with β shape parameter |
-| **Kannala-Brandt** | fx, fy, cx, cy, k1-k4 | 8 | Fisheye cameras | Polynomial distortion model (equidistant) |
-| **RadTan** | fx, fy, cx, cy, k1, k2, p1, p2, k3 | 9 | Standard cameras | Brown-Conrady radial-tangential distortion |
-| **UCM** | fx, fy, cx, cy, α | 5 | Catadioptric | Unified camera model for central projection |
+| Model | Params | Intrinsics | Field of View | Use Case |
+|-------|--------|-----------|---------------|----------|
+| **Pinhole** | 4 | fx, fy, cx, cy | ~60° | Standard perspective cameras |
+| **RadTan** | 9 | fx, fy, cx, cy, k1, k2, p1, p2, k3 | ~90° | Standard lens distortion (OpenCV compatible) |
+| **UCM** | 5 | fx, fy, cx, cy, alpha | >90° | Fisheye and wide-angle cameras |
+| **EUCM** | 6 | fx, fy, cx, cy, alpha, beta | >180° | Extreme fisheye and omnidirectional |
+| **Kannala-Brandt** | 8 | fx, fy, cx, cy, k1, k2, k3, k4 | ~180° | GoPro-style fisheye cameras |
+| **FOV** | 5 | fx, fy, cx, cy, w | Wide | Field-of-view based distortion model |
+| **Double Sphere** | 6 | fx, fy, cx, cy, xi, alpha | >180° | Wide-angle and omnidirectional |
 
-#### Creating Camera Factors
+All models support analytical Jacobians (numerically verified to ±1e-5 accuracy).
 
-Each camera factor follows the same pattern:
+#### Optimization Configurations
+
+The camera projection factors use compile-time configuration to specify which parameters to optimize. This provides **zero runtime overhead** compared to runtime flags.
+
+**Available Configurations:**
+
+| Configuration | Optimizes | Use Case |
+|---------------|-----------|----------|
+| `SelfCalibration` | Pose + Landmarks + Intrinsics | Full structure-from-motion with unknown camera |
+| `BundleAdjustment` | Pose + Landmarks | Standard bundle adjustment with calibrated camera |
+| `OnlyPose` | Pose only | Visual odometry, camera tracking |
+| `OnlyLandmarks` | Landmarks only | Triangulation with known poses |
+| `OnlyIntrinsics` | Intrinsics only | Camera calibration with known structure |
+| `PoseAndIntrinsics` | Pose + Intrinsics | Camera calibration during motion |
+| `LandmarksAndIntrinsics` | Landmarks + Intrinsics | Rare scenario: calibrate with known trajectory |
+
+The type system ensures you provide fixed parameters when needed (e.g., `OnlyPose` requires fixed landmarks via `.with_fixed_landmarks()`).
+
+#### Example: Self-Calibration (Optimize Everything)
+
+Optimize camera pose, 3D landmarks, and camera intrinsics simultaneously:
 
 ```rust
-use apex_solver::factors::{DoubleSphereProjectionFactor, EucmProjectionFactor,
-                           KannalaBrandtProjectionFactor, UcmProjectionFactor};
+use apex_solver::factors::camera::{PinholeCamera, ProjectionFactor, SelfCalibration};
 
-// All factors use the same constructor
-let ds_factor = DoubleSphereProjectionFactor::new(points_3d.clone(), points_2d.clone());
-let eucm_factor = EucmProjectionFactor::new(points_3d.clone(), points_2d.clone());
-let kb_factor = KannalaBrandtProjectionFactor::new(points_3d.clone(), points_2d.clone());
-let ucm_factor = UcmProjectionFactor::new(points_3d, points_2d);
+// Create camera with initial guess
+let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+
+// Observations: 2D pixel coordinates (2 rows × N points)
+let observations = Matrix2xX::from_columns(&[
+    Vector2::new(100.0, 150.0),
+    Vector2::new(200.0, 250.0),
+    // ... more observations
+]);
+
+// Create factor that optimizes pose, landmarks, AND intrinsics
+let factor: ProjectionFactor<PinholeCamera, SelfCalibration> = 
+    ProjectionFactor::new(observations, camera);
+
+// Add to problem with 3 variable blocks
+problem.add_residual_block(
+    &["camera_pose", "landmarks_3d", "camera_intrinsics"],
+    Box::new(factor),
+    None,
+);
+
+// Initialize variables
+initial_values.insert("camera_pose", (ManifoldType::SE3, pose_vec));
+initial_values.insert("landmarks_3d", (ManifoldType::RN, landmarks_vec));  // Flattened [x0,y0,z0,x1,y1,z1,...]
+initial_values.insert("camera_intrinsics", (ManifoldType::RN, intrinsics_vec));  // [fx, fy, cx, cy, ...]
+
+// Optimize
+let result = solver.optimize(&problem, &initial_values)?;
+
+// Extract optimized intrinsics
+let optimized_intrinsics = result.parameters.get("camera_intrinsics")?.to_vector();
 ```
+
+#### Example: Bundle Adjustment (Fixed Intrinsics)
+
+Optimize only pose and landmarks with known camera calibration:
+
+```rust
+use apex_solver::factors::camera::{RadTanCamera, ProjectionFactor, BundleAdjustment};
+
+let camera = RadTanCamera::new(/* 9 calibrated parameters */);
+
+// BundleAdjustment optimizes only pose and landmarks
+let factor: ProjectionFactor<RadTanCamera, BundleAdjustment> = 
+    ProjectionFactor::new(observations, camera);
+
+// Only 2 variable blocks (no camera_intrinsics)
+problem.add_residual_block(
+    &["camera_pose", "landmarks_3d"],
+    Box::new(factor),
+    None,
+);
+```
+
+#### Example: Visual Odometry (Pose-Only)
+
+Track camera motion with fixed landmarks and intrinsics:
+
+```rust
+use apex_solver::factors::camera::{PinholeCamera, ProjectionFactor, OnlyPose};
+
+let camera = PinholeCamera::new(520.0, 520.0, 320.0, 240.0);
+let known_landmarks = Matrix3xX::from_columns(&[/* known 3D points */]);
+
+// OnlyPose requires fixed landmarks
+let factor: ProjectionFactor<PinholeCamera, OnlyPose> = 
+    ProjectionFactor::new(observations, camera)
+        .with_fixed_landmarks(known_landmarks);
+
+// Only optimize camera pose
+problem.add_residual_block(
+    &["camera_pose"],
+    Box::new(factor),
+    None,
+);
+```
+
+#### Example: Camera Calibration (Intrinsics-Only)
+
+Calibrate camera from observations of known 3D structure:
+
+```rust
+use apex_solver::factors::camera::{PinholeCamera, ProjectionFactor, OnlyIntrinsics};
+
+let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);  // Initial guess
+let known_pose = SE3::identity();
+let known_landmarks = Matrix3xX::from_columns(&[/* calibration target */]);
+
+// OnlyIntrinsics requires both fixed pose and landmarks
+let factor: ProjectionFactor<PinholeCamera, OnlyIntrinsics> = 
+    ProjectionFactor::new(observations, camera)
+        .with_fixed_pose(known_pose)
+        .with_fixed_landmarks(known_landmarks);
+
+// Only optimize intrinsics
+problem.add_residual_block(
+    &["camera_intrinsics"],
+    Box::new(factor),
+    None,
+);
+```
+
+#### Extracting Optimized Parameters
+
+After optimization, retrieve the optimized camera parameters:
+
+```rust
+// Get optimized intrinsics vector
+let intrinsics_vec = result.parameters
+    .get("camera_intrinsics")?
+    .to_vector();
+
+// Convert back to camera model
+let optimized_camera = PinholeCamera::from_params(intrinsics_vec.as_slice());
+
+// Or extract individual parameters
+let fx = intrinsics_vec[0];
+let fy = intrinsics_vec[1];
+let cx = intrinsics_vec[2];
+let cy = intrinsics_vec[3];
+```
+
+For models with distortion parameters, the ordering matches the constructor:
+- **Pinhole**: `[fx, fy, cx, cy]`
+- **RadTan**: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
+- **UCM**: `[fx, fy, cx, cy, alpha]`
+- **EUCM**: `[fx, fy, cx, cy, alpha, beta]`
+- **Kannala-Brandt**: `[fx, fy, cx, cy, k1, k2, k3, k4]`
+- **FOV**: `[fx, fy, cx, cy, w]`
+- **Double Sphere**: `[fx, fy, cx, cy, xi, alpha]`
 
 #### Features
 
-- ✅ **Analytical Jacobians**: Hand-derived gradients for all camera models (no auto-differentiation overhead)
-- ✅ **Batch Processing**: Efficient vectorized computation for multiple point correspondences
-- ✅ **Validity Checking**: Automatic detection of invalid projections (points behind camera, distortion limits)
-- ✅ **Robust Loss Integration**: Compatible with all 15 robust loss functions for outlier rejection
-- ✅ **Thread-Safe**: Factors implement `Send + Sync` for parallel optimization
+- **All camera models** support all optimization modes (pose-only, landmark-only, intrinsics-only, or any combination)
+- **Compile-time configuration** via const generics - zero runtime overhead for unused parameter optimizations
+- **Analytical Jacobians** for all models - numerically verified to ±1e-5 relative error
+- **Batch projection** support for efficient multi-point processing
+- **Cheirality checking** - automatically handles points behind camera (invalid projections)
+- **OpenCV compatibility** - RadTan model matches cv::CALIB_RATIONAL_MODEL format
+- **Type-safe API** - compiler ensures you provide fixed parameters when needed
+- **Tested extensively** - integration tests verify <10% parameter recovery error
 
-#### Use Cases
+#### Technical Details
 
-- **Camera Calibration**: Optimize intrinsic parameters from checkerboard or known 3D patterns
-- **Bundle Adjustment**: Joint optimization of camera parameters and 3D structure
-- **Camera Model Conversion**: Optimize one model's parameters to match another's projections
-- **Lens Distortion Correction**: Refine distortion parameters for image rectification
+**Coordinate Conventions:**
+- Camera frame: +Z forward, +X right, +Y down (standard computer vision convention)
+- World-to-camera transformation: `p_camera = pose.inverse() * p_world`
+- Residual computation: `residual = observed_pixel - projected_pixel`
 
-**Note**: These factors are designed for batch optimization of camera parameters. For online visual odometry or SLAM, consider using fixed camera parameters with pose-only optimization.
+**Jacobian Computation:**
+- All Jacobians are **analytical** (not numerical differentiation)
+- Pose Jacobians use right perturbation on SE3: `δT = exp(ξ^) ∘ T`
+- Tangent space parameterization: `[vx, vy, vz, ωx, ωy, ωz]` (translation first, then rotation)
+- Chain rule for pose: `∂pixel/∂pose = ∂pixel/∂p_cam * ∂p_cam/∂pose`
+
+**Performance:**
+- Symbolic structure pre-computation enables efficient sparse Jacobian assembly
+- Cholesky factorization cached across iterations when intrinsics are fixed
+- Parallel residual evaluation via rayon when multiple cameras/observations present
+
+See `tests/camera_*_integration.rs` for complete working examples with all 7 camera models.
 
 ### How to Create a Custom Factor
 
