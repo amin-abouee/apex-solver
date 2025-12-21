@@ -8,10 +8,6 @@
 //! The double_sphere model is the simplest camera model with no distortion,
 //! making it an ideal starting point for testing self-calibration.
 
-// Allow expect() in test code
-#![allow(clippy::expect_used)]
-#![allow(clippy::unwrap_used)]
-
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::camera::double_sphere::DoubleSphereCamera;
 use apex_solver::factors::camera::{CameraModel, ProjectionFactor, SelfCalibration};
@@ -21,13 +17,14 @@ use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX};
 use std::collections::HashMap;
-use tracing::info;
 
 mod camera_test_utils;
 use camera_test_utils::*;
 
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+
 #[test]
-fn test_double_sphere_self_calibration_50_points() {
+fn test_double_sphere_self_calibration_50_points() -> TestResult {
     // ============================================================================
     // 1. Ground Truth Setup
     // ============================================================================
@@ -52,9 +49,7 @@ fn test_double_sphere_self_calibration_50_points() {
 
     for landmark in &true_landmarks {
         // Project to image (landmarks already in camera frame at identity pose)
-        let pixel = true_camera
-            .project(landmark)
-            .expect("Projection should succeed");
+        let pixel = true_camera.project(landmark).ok_or("Projection failed")?;
         observations.push(pixel);
     }
 
@@ -126,38 +121,11 @@ fn test_double_sphere_self_calibration_50_points() {
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    let result = solver
-        .optimize(&problem, &initial_values)
-        .expect("Optimization should succeed");
+    let result = solver.optimize(&problem, &initial_values)?;
 
     // ============================================================================
     // 7. Verify Convergence
     // ============================================================================
-
-    info!("\n========================================");
-    info!("DoubleSphere Self-Calibration Results:");
-    info!("========================================");
-    info!("  Initial cost:       {:.6e}", result.initial_cost);
-    info!("  Final cost:         {:.6e}", result.final_cost);
-    info!("  Iterations:         {}", result.iterations);
-    info!("  Status:             {:?}", result.status);
-    info!(
-        "  Final gradient norm: {:.6e}",
-        result
-            .convergence_info
-            .as_ref()
-            .map(|ci| ci.final_gradient_norm)
-            .unwrap_or(0.0)
-    );
-    info!(
-        "  Final param update:  {:.6e}",
-        result
-            .convergence_info
-            .as_ref()
-            .map(|ci| ci.final_parameter_update_norm)
-            .unwrap_or(0.0)
-    );
-    info!("========================================");
 
     // Check convergence status
     assert!(
@@ -176,11 +144,6 @@ fn test_double_sphere_self_calibration_50_points() {
     // ============================================================================
 
     let cost_reduction = (result.initial_cost - result.final_cost) / result.initial_cost;
-    info!(
-        "  Cost reduction:     {:.4} ({:.2}%)\n",
-        cost_reduction,
-        cost_reduction * 100.0
-    );
 
     assert!(
         cost_reduction > 0.90,
@@ -196,28 +159,13 @@ fn test_double_sphere_self_calibration_50_points() {
     let final_intrinsics = result
         .parameters
         .get("intrinsics")
-        .expect("Should have intrinsics")
+        .ok_or("Missing intrinsics parameter")?
         .to_vector();
     let true_intrinsics = [500.0, 500.0, 320.0, 240.0, 0.5, 0.8];
-
-    info!("Intrinsics Recovery:");
-    info!(
-        "  True intrinsics:  fx={:.2}, fy={:.2}, cx={:.2}, cy={:.2}",
-        true_intrinsics[0], true_intrinsics[1], true_intrinsics[2], true_intrinsics[3]
-    );
-    info!(
-        "  Initial (noisy):  fx={:.2}, fy={:.2}, cx={:.2}, cy={:.2}",
-        noisy_intrinsics[0], noisy_intrinsics[1], noisy_intrinsics[2], noisy_intrinsics[3]
-    );
-    info!(
-        "  Final (optimized): fx={:.2}, fy={:.2}, cx={:.2}, cy={:.2}",
-        final_intrinsics[0], final_intrinsics[1], final_intrinsics[2], final_intrinsics[3]
-    );
 
     // Check intrinsic parameter recovery
     for i in 0..4 {
         let param_error = (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i];
-        info!("  Param {} relative error: {:.4}%", i, param_error * 100.0);
 
         // DoubleSphere should recover intrinsics very accurately (no distortion, well-conditioned)
         assert!(
@@ -228,5 +176,5 @@ fn test_double_sphere_self_calibration_50_points() {
         );
     }
 
-    info!("========================================\n");
+    Ok(())
 }
