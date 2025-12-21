@@ -1,0 +1,17 @@
+Baseline Results (2025-12-21)
+-----------------------------
+Dataset: sphere2500
+Time: 222.31 ms
+Iterations: 5
+
+Dataset: torus3D
+Time: 2188.71 ms
+Iterations: 27
+
+Other Datasets:
+M3500: 113.79 ms
+intel: 31.93 ms
+mit: 185.06 ms
+ring: 9.84 ms
+cubicle: 605.17 ms
+parking-garage: 170.62 ms
