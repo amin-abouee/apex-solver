@@ -228,6 +228,8 @@ impl CameraModel for EucmCamera {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn assert_approx_eq(a: f64, b: f64, eps: f64) {
         assert!(
             (a - b).abs() < eps,
@@ -246,16 +248,17 @@ mod tests {
     }
 
     #[test]
-    fn test_projection_at_optical_axis() {
+    fn test_projection_at_optical_axis() -> TestResult {
         let camera = EucmCamera::new(1000.0, 1000.0, 500.0, 500.0, 0.5, 1.0);
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).unwrap();
+        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
         assert_approx_eq(uv.x, 500.0, 1e-10);
         assert_approx_eq(uv.y, 500.0, 1e-10);
+        Ok(())
     }
 
     #[test]
-    fn test_jacobian_point_numerical() {
+    fn test_jacobian_point_numerical() -> TestResult {
         let camera = EucmCamera::new(1000.0, 1000.0, 500.0, 500.0, 0.6, 0.8);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -268,8 +271,12 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).unwrap();
-            let uv_minus = camera.project(&p_minus).unwrap();
+            let uv_plus = camera
+                .project(&p_plus)
+                .ok_or("Projection failed for p_plus")?;
+            let uv_minus = camera
+                .project(&p_minus)
+                .ok_or("Projection failed for p_minus")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -284,10 +291,11 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn test_jacobian_intrinsics_numerical() {
+    fn test_jacobian_intrinsics_numerical() -> TestResult {
         let camera = EucmCamera::new(1000.0, 1000.0, 500.0, 500.0, 0.6, 0.8);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -304,8 +312,12 @@ mod tests {
             let cam_plus = EucmCamera::from_params(params_plus.as_slice());
             let cam_minus = EucmCamera::from_params(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).unwrap();
-            let uv_minus = cam_minus.project(&p_cam).unwrap();
+            let uv_plus = cam_plus
+                .project(&p_cam)
+                .ok_or("Projection failed for cam_plus")?;
+            let uv_minus = cam_minus
+                .project(&p_cam)
+                .ok_or("Projection failed for cam_minus")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -320,5 +332,6 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 }

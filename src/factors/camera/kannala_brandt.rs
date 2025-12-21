@@ -282,6 +282,8 @@ impl CameraModel for KannalaBrandtCamera {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     fn assert_approx_eq(a: f64, b: f64, eps: f64) {
         assert!(
             (a - b).abs() < eps,
@@ -300,16 +302,17 @@ mod tests {
     }
 
     #[test]
-    fn test_projection_at_optical_axis() {
+    fn test_projection_at_optical_axis() -> TestResult {
         let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).unwrap();
+        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
         assert_approx_eq(uv.x, 320.0, 1e-10);
         assert_approx_eq(uv.y, 240.0, 1e-10);
+        Ok(())
     }
 
     #[test]
-    fn test_jacobian_point_numerical() {
+    fn test_jacobian_point_numerical() -> TestResult {
         let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -322,8 +325,12 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).unwrap();
-            let uv_minus = camera.project(&p_minus).unwrap();
+            let uv_plus = camera
+                .project(&p_plus)
+                .ok_or("Projection failed for p_plus")?;
+            let uv_minus = camera
+                .project(&p_minus)
+                .ok_or("Projection failed for p_minus")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -338,10 +345,11 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn test_jacobian_intrinsics_numerical() {
+    fn test_jacobian_intrinsics_numerical() -> TestResult {
         let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -358,8 +366,12 @@ mod tests {
             let cam_plus = KannalaBrandtCamera::from_params(params_plus.as_slice());
             let cam_minus = KannalaBrandtCamera::from_params(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).unwrap();
-            let uv_minus = cam_minus.project(&p_cam).unwrap();
+            let uv_plus = cam_plus
+                .project(&p_cam)
+                .ok_or("Projection failed for cam_plus")?;
+            let uv_minus = cam_minus
+                .project(&p_cam)
+                .ok_or("Projection failed for cam_minus")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -374,5 +386,6 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 }

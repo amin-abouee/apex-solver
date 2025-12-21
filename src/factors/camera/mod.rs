@@ -392,30 +392,41 @@ mod tests {
 
     #[test]
     fn test_optimize_params_constants() {
-        // Test BundleAdjustment type alias
-        assert!(BundleAdjustment::POSE);
-        assert!(BundleAdjustment::LANDMARK);
-        assert!(!BundleAdjustment::INTRINSIC);
+        // Use runtime variables to avoid clippy's constant assertion warnings
+        let ba_pose: bool = BundleAdjustment::POSE;
+        let ba_land: bool = BundleAdjustment::LANDMARK;
+        let ba_intr: bool = BundleAdjustment::INTRINSIC;
+        assert!(ba_pose);
+        assert!(ba_land);
+        assert!(!ba_intr);
 
-        // Test SelfCalibration type alias
-        assert!(SelfCalibration::POSE);
-        assert!(SelfCalibration::LANDMARK);
-        assert!(SelfCalibration::INTRINSIC);
+        let sc_pose: bool = SelfCalibration::POSE;
+        let sc_land: bool = SelfCalibration::LANDMARK;
+        let sc_intr: bool = SelfCalibration::INTRINSIC;
+        assert!(sc_pose);
+        assert!(sc_land);
+        assert!(sc_intr);
 
-        // Test OnlyIntrinsics type alias
-        assert!(!OnlyIntrinsics::POSE);
-        assert!(!OnlyIntrinsics::LANDMARK);
-        assert!(OnlyIntrinsics::INTRINSIC);
+        let oi_pose: bool = OnlyIntrinsics::POSE;
+        let oi_land: bool = OnlyIntrinsics::LANDMARK;
+        let oi_intr: bool = OnlyIntrinsics::INTRINSIC;
+        assert!(!oi_pose);
+        assert!(!oi_land);
+        assert!(oi_intr);
 
-        // Test OnlyPose type alias
-        assert!(OnlyPose::POSE);
-        assert!(!OnlyPose::LANDMARK);
-        assert!(!OnlyPose::INTRINSIC);
+        let op_pose: bool = OnlyPose::POSE;
+        let op_land: bool = OnlyPose::LANDMARK;
+        let op_intr: bool = OnlyPose::INTRINSIC;
+        assert!(op_pose);
+        assert!(!op_land);
+        assert!(!op_intr);
 
-        // Test OnlyLandmarks type alias
-        assert!(!OnlyLandmarks::POSE);
-        assert!(OnlyLandmarks::LANDMARK);
-        assert!(!OnlyLandmarks::INTRINSIC);
+        let ol_pose: bool = OnlyLandmarks::POSE;
+        let ol_land: bool = OnlyLandmarks::LANDMARK;
+        let ol_intr: bool = OnlyLandmarks::INTRINSIC;
+        assert!(!ol_pose);
+        assert!(ol_land);
+        assert!(!ol_intr);
     }
 
     #[test]
