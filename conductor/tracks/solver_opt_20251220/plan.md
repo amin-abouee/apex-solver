@@ -2,7 +2,7 @@
 
 ## Phase 1: Profiling and Baseline Establishment
 - [x] Task: Establish baseline performance metrics using existing datasets (`sphere2500`, `torus3D`). 4309070
-- [ ] Task: Generate flamegraphs for the `LinearSolver::solve` path to identify current bottlenecks.
+- [x] Task: Generate flamegraphs for the `LinearSolver::solve` path to identify current bottlenecks. 1c58b3e
 - [ ] Task: Conductor - User Manual Verification 'Phase 1: Profiling and Baseline Establishment' (Protocol in workflow.md)
 
 ## Phase 2: Solver Pattern Optimization
