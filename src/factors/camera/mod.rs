@@ -363,12 +363,24 @@ pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
 // SUBMODULES
 // ============================================================================
 
+pub mod double_sphere;
+pub mod eucm;
+pub mod fov;
+pub mod kannala_brandt;
 pub mod pinhole;
 pub mod projection_factor;
+pub mod rad_tan;
+pub mod ucm;
 
 // Re-export main types
+pub use double_sphere::DoubleSphereCamera;
+pub use eucm::EucmCamera;
+pub use fov::FovCamera;
+pub use kannala_brandt::KannalaBrandtCamera;
 pub use pinhole::PinholeCamera;
 pub use projection_factor::ProjectionFactor;
+pub use rad_tan::RadTanCamera;
+pub use ucm::UcmCamera;
 
 // ============================================================================
 // TESTS

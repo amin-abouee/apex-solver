@@ -1,6 +1,6 @@
 //! Pinhole camera model (no distortion).
 
-use super::traits::{CameraModel, skew_symmetric};
+use super::{CameraModel, skew_symmetric};
 use crate::manifold::LieGroup;
 use crate::manifold::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -47,9 +47,6 @@ pub struct PinholeCamera {
     pub cy: f64,
 }
 
-/// Number of intrinsic parameters for pinhole camera
-pub const PINHOLE_INTRINSIC_DIM: usize = 4;
-
 impl PinholeCamera {
     /// Create a new pinhole camera.
     ///
@@ -74,7 +71,7 @@ impl PinholeCamera {
 }
 
 impl CameraModel for PinholeCamera {
-    const INTRINSIC_DIM: usize = PINHOLE_INTRINSIC_DIM;
+    const INTRINSIC_DIM: usize = 4;
     type IntrinsicJacobian = SMatrix<f64, 2, 4>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
