@@ -44,13 +44,9 @@ use std::time::{Duration, Instant};
 
 /// Test result capturing all optimization metrics
 #[derive(Debug)]
-#[allow(dead_code)]
 struct TestResult {
-    dataset_name: String,
-    optimizer: String,
     vertices: usize,
     edges: usize,
-    initial_cost: f64,
     final_cost: f64,
     improvement_pct: f64,
     iterations: usize,
@@ -160,11 +156,8 @@ fn run_se3_optimization(
     );
 
     let test_result = TestResult {
-        dataset_name: dataset_name.to_string(),
-        optimizer: "LevenbergMarquardt".to_string(),
         vertices: num_vertices,
         edges: num_edges,
-        initial_cost: result.initial_cost,
         final_cost: result.final_cost,
         improvement_pct,
         iterations: result.iterations,
@@ -274,11 +267,8 @@ fn run_se2_optimization(
     );
 
     let test_result = TestResult {
-        dataset_name: dataset_name.to_string(),
-        optimizer: "LevenbergMarquardt".to_string(),
         vertices: num_vertices,
         edges: num_edges,
-        initial_cost: result.initial_cost,
         final_cost: result.final_cost,
         improvement_pct,
         iterations: result.iterations,
