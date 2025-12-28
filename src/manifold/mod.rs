@@ -405,9 +405,7 @@ pub trait LieGroup: Clone + PartialEq {
         }
 
         if let Some(jac_other) = jacobian_other {
-            // Note: jacobian_identity() is now implemented in concrete types
-            // This will be handled by the concrete implementation
-            *jac_other = other.adjoint();
+            *jac_other = Self::jacobian_identity();
         }
 
         result
