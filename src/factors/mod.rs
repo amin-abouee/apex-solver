@@ -25,33 +25,16 @@
 //!
 //! ## Camera Projection Factors
 //!
-//! Each camera model provides two factor types:
-//! 1. **CameraParamsFactor**: Optimizes camera intrinsic parameters (fx, fy, cx, cy, distortion)
-//! 2. **ProjectionFactor**: Optimizes 3D point positions with fixed camera parameters
+//! Use [`ProjectionFactor`](camera::ProjectionFactor) with a specific [`CameraModel`](camera::CameraModel).
 //!
-//! ### Double Sphere
-//! - [`DoubleSphereCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`DoubleSphereProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### EUCM (Extended Unified Camera Model)
-//! - [`EucmCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`EucmProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### FOV (Field of View)
-//! - [`FovCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`FovProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### Kannala-Brandt
-//! - [`KannalaBrandtCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`KannalaBrandtProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### Radial-Tangential (RadTan)
-//! - [`RadTanCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`RadTanProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### UCM (Unified Camera Model)
-//! - [`UcmCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`UcmProjectionFactor`]: Optimize 3D point positions
+//! Supported camera models:
+//! - [`PinholeCamera`](camera::PinholeCamera)
+//! - [`DoubleSphereCamera`](camera::DoubleSphereCamera)
+//! - [`EucmCamera`](camera::EucmCamera)
+//! - [`FovCamera`](camera::FovCamera)
+//! - [`KannalaBrandtCamera`](camera::KannalaBrandtCamera)
+//! - [`RadTanCamera`](camera::RadTanCamera)
+//! - [`UcmCamera`](camera::UcmCamera)
 //!
 //! # Linearization
 //!
@@ -69,37 +52,14 @@ use tracing::error;
 pub mod between_factor;
 pub mod prior_factor;
 
-// Camera projection factors
-pub mod double_sphere_factor;
-pub mod eucm_factor;
-pub mod fov_factor;
-pub mod kannala_brandt_factor;
-pub mod rad_tan_factor;
-pub mod ucm_factor;
+// Unified camera module
+pub mod camera;
 
 // Re-export all factor types
 
 // Pose factors
 pub use between_factor::BetweenFactor;
 pub use prior_factor::PriorFactor;
-
-// Camera projection factors - Double Sphere
-pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
-
-// Camera projection factors - EUCM
-pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
-
-// Camera projection factors - FOV
-pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
-
-// Camera projection factors - Kannala-Brandt
-pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
-
-// Camera projection factors - RadTan
-pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
-
-// Camera projection factors - UCM
-pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};
 
 /// Factor-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
