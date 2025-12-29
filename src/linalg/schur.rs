@@ -19,9 +19,10 @@ use std::collections::HashMap;
 use tracing::debug;
 
 /// Schur complement solver variant
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchurVariant {
     /// Standard: Direct sparse Cholesky factorization of S
+    #[default]
     Sparse,
     /// Iterative: Conjugate Gradients on reduced system
     Iterative,
@@ -29,24 +30,13 @@ pub enum SchurVariant {
     PowerSeries,
 }
 
-impl Default for SchurVariant {
-    fn default() -> Self {
-        Self::Sparse
-    }
-}
-
 /// Preconditioner type for iterative solvers
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchurPreconditioner {
     None,
     /// Block diagonal of Schur complement (Schur-Jacobi)
+    #[default]
     BlockDiagonal,
-}
-
-impl Default for SchurPreconditioner {
-    fn default() -> Self {
-        Self::BlockDiagonal
-    }
 }
 
 /// Configuration for Schur complement variable ordering
@@ -98,7 +88,8 @@ impl SchurBlockStructure {
         if self.camera_blocks.is_empty() {
             (0, 0)
         } else {
-            let start = self.camera_blocks.first().unwrap().1;
+            // Safe: we just checked is_empty() is false
+            let start = self.camera_blocks.first().map(|b| b.1).unwrap_or(0);
             (start, start + self.camera_dof)
         }
     }
@@ -107,7 +98,8 @@ impl SchurBlockStructure {
         if self.landmark_blocks.is_empty() {
             (0, 0)
         } else {
-            let start = self.landmark_blocks.first().unwrap().1;
+            // Safe: we just checked is_empty() is false
+            let start = self.landmark_blocks.first().map(|b| b.1).unwrap_or(0);
             (start, start + self.landmark_dof)
         }
     }
@@ -733,7 +725,10 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
 
         // 3. Add damping to H_cc and H_pp
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let cam_size = structure.camera_dof;
 
         // Add λI to H_cc
@@ -939,6 +934,7 @@ impl crate::linalg::SparseLinearSolver for SchurSolverAdapter {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -965,7 +961,8 @@ mod tests {
     #[test]
     fn test_3x3_block_inversion() {
         let block = Matrix3::new(2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0);
-        let inv = SparseSchurComplementSolver::invert_landmark_blocks(&[block]).unwrap();
+        let inv = SparseSchurComplementSolver::invert_landmark_blocks(&[block])
+            .expect("Test: Block inversion should succeed");
         assert!((inv[0][(0, 0)] - 0.5).abs() < 1e-10);
     }
 
@@ -988,11 +985,13 @@ mod tests {
 
         // Create simple 2x2 H_cc (camera block)
         let h_cc_triplets = vec![Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 5.0)];
-        let h_cc = SparseColMat::try_new_from_triplets(2, 2, &h_cc_triplets).unwrap();
+        let h_cc = SparseColMat::try_new_from_triplets(2, 2, &h_cc_triplets)
+            .expect("Test: H_cc matrix creation should succeed");
 
         // Create 2x3 H_cp (coupling block - 1 landmark with 3 DOF)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets).unwrap();
+        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
+            .expect("Test: H_cp matrix creation should succeed");
 
         // Create H_pp^{-1} as identity scaled by 0.5
         let hpp_inv = vec![Matrix3::new(0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5)];
@@ -1009,7 +1008,7 @@ mod tests {
         // Actually the formula computes sum over all landmark DOF
         let s = solver
             .compute_schur_complement(&h_cc, &h_cp, &hpp_inv)
-            .unwrap();
+            .expect("Test: Schur complement computation should succeed");
 
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
@@ -1036,7 +1035,8 @@ mod tests {
 
         // H_cp (2x3)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets).unwrap();
+        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
+            .expect("Test: H_cp matrix creation should succeed");
 
         // H_pp^{-1} (identity)
         let hpp_inv = vec![Matrix3::identity()];
@@ -1047,7 +1047,7 @@ mod tests {
         // H_pp^{-1} * [0; 0; 3] = [0; 0; 3]
         let delta_p = solver
             .back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv)
-            .unwrap();
+            .expect("Test: Back substitution should succeed");
 
         assert_eq!(delta_p.nrows(), 3);
         assert!((delta_p[(0, 0)]).abs() < 1e-10);
@@ -1067,7 +1067,8 @@ mod tests {
 
         // H_cp (2x3)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets).unwrap();
+        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
+            .expect("Test: H_cp matrix creation should succeed");
 
         // H_pp^{-1} (2*identity)
         let hpp_inv = vec![Matrix3::new(2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0)];
@@ -1078,7 +1079,7 @@ mod tests {
         // g_reduced = [1; 2] - [2; 4] = [-1; -2]
         let g_reduced = solver
             .compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv)
-            .unwrap();
+            .expect("Test: Reduced gradient computation should succeed");
 
         assert_eq!(g_reduced.nrows(), 2);
         assert!((g_reduced[(0, 0)] + 1.0).abs() < 1e-10);

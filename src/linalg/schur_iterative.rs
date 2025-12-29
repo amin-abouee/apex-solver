@@ -110,7 +110,10 @@ impl IterativeSchurSolver {
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let cam_dof = structure.camera_dof;
 
@@ -140,7 +143,10 @@ impl IterativeSchurSolver {
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let (lm_start, lm_end) = structure.landmark_col_range();
         let lm_dof = structure.landmark_dof;
@@ -171,7 +177,10 @@ impl IterativeSchurSolver {
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let (lm_start, lm_end) = structure.landmark_col_range();
         let cam_dof = structure.camera_dof;
@@ -198,7 +207,10 @@ impl IterativeSchurSolver {
 
     /// Apply H_pp^{-1} using cached block inverses
     fn apply_landmark_inverse(&self, input: &Mat<f64>, output: &mut Mat<f64>) -> LinAlgResult<()> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
         for (block_idx, (_, start_col, _)) in structure.landmark_blocks.iter().enumerate() {
             let inv_block = &self.landmark_block_inverses[block_idx];
@@ -458,10 +470,14 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         self.gradient = Some(gradient.clone());
 
         // Extract structure info before mutable borrow
-        let cam_dof = self.block_structure.as_ref().unwrap().camera_dof;
-        let lm_dof = self.block_structure.as_ref().unwrap().landmark_dof;
-        let (cam_start, _cam_end) = self.block_structure.as_ref().unwrap().camera_col_range();
-        let (lm_start, _lm_end) = self.block_structure.as_ref().unwrap().landmark_col_range();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+        let cam_dof = structure.camera_dof;
+        let lm_dof = structure.landmark_dof;
+        let (cam_start, _cam_end) = structure.camera_col_range();
+        let (lm_start, _lm_end) = structure.landmark_col_range();
 
         // Invert landmark blocks
         self.invert_landmark_blocks(&hessian)?;
@@ -481,7 +497,12 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         let mut temp = Mat::<f64>::zeros(lm_dof, 1);
         self.apply_landmark_inverse(&g_lm, &mut temp)?;
 
-        let correction = self.extract_camera_landmark_mvp(self.hessian.as_ref().unwrap(), &temp)?;
+        let correction = self.extract_camera_landmark_mvp(
+            self.hessian
+                .as_ref()
+                .ok_or_else(|| LinAlgError::InvalidInput("Hessian not initialized".into()))?,
+            &temp,
+        )?;
         for i in 0..cam_dof {
             g_reduced[(i, 0)] -= correction[(i, 0)];
         }
@@ -491,8 +512,12 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         let delta_cam = self.solve_pcg(&g_reduced, &precond)?;
 
         // Back-substitute for landmarks
-        let hcp_t_delta_cam =
-            self.extract_camera_landmark_transpose_mvp(self.hessian.as_ref().unwrap(), &delta_cam)?;
+        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(
+            self.hessian
+                .as_ref()
+                .ok_or_else(|| LinAlgError::InvalidInput("Hessian not initialized".into()))?,
+            &delta_cam,
+        )?;
 
         let mut rhs_lm = Mat::<f64>::zeros(lm_dof, 1);
         for i in 0..lm_dof {
