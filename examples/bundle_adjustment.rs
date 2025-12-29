@@ -1,18 +1,22 @@
-//! Bundle Adjustment Example with Pinhole Camera Model
+//! Bundle Adjustment Example with BAL Pinhole Camera Model
 //!
 //! This example demonstrates bundle adjustment optimization using:
-//! - Simple pinhole camera model (no distortion)
-//! - Optimizing 3D point positions with fixed camera parameters
+//! - BAL pinhole camera model with radial distortion
+//! - Optimizing both camera poses (SE3) and 3D point positions
 //! - Comparison of different linear solvers (SparseCholesky vs Schur variants)
 //!
 //! The example loads BAL (Bundle Adjustment in the Large) dataset files and optimizes
-//! 3D landmark positions to minimize reprojection error.
+//! camera poses and 3D landmark positions to minimize reprojection error.
 
+use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BundleAdjustmentFactor;
+use apex_solver::factors::camera::{BALPinholeCamera, ReprojectionFactor};
 use apex_solver::io::{BalDataset, BalLoader};
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
+use apex_solver::manifold::LieGroup;
 use apex_solver::manifold::ManifoldType;
+use apex_solver::manifold::se3::SE3;
+use apex_solver::manifold::so3::SO3;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::Parser;
@@ -22,11 +26,9 @@ use std::error::Error;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
-// Removed axis_angle_to_se3 - using RN(6) directly for compatibility with BundleAdjustmentFactor
-
 #[derive(Parser, Debug)]
 #[command(name = "bundle_adjustment")]
-#[command(about = "Bundle adjustment optimization with pinhole camera model")]
+#[command(about = "Bundle adjustment optimization with BAL pinhole camera model")]
 struct Args {
     /// Dataset size to load (21, 49, or 89)
     #[arg(short, long, default_value = "21")]
@@ -56,6 +58,7 @@ struct OptimizationMetrics {
     iterations: usize,
     total_time: Duration,
     success: bool,
+    num_observations: usize,
 }
 
 impl OptimizationMetrics {
@@ -72,6 +75,16 @@ impl OptimizationMetrics {
             self.total_time / self.iterations as u32
         } else {
             Duration::ZERO
+        }
+    }
+
+    fn rms_reprojection_error(&self) -> f64 {
+        // Cost = sum of squared residuals, RMS = sqrt(cost / num_observations)
+        // But residual dimension is 2 per observation (u, v)
+        if self.num_observations > 0 {
+            (self.final_cost / self.num_observations as f64).sqrt()
+        } else {
+            0.0
         }
     }
 }
@@ -95,7 +108,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    info!("Bundle Adjustment with Pinhole Camera Model");
+    info!("Bundle Adjustment with BAL Pinhole Camera Model");
     info!("");
 
     // Load BAL dataset
@@ -211,38 +224,43 @@ fn main() -> Result<(), Box<dyn Error>> {
 fn setup_bal_problem(
     dataset: &BalDataset,
     num_points: usize,
-) -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+) -> (
+    Problem,
+    HashMap<String, (ManifoldType, DVector<f64>)>,
+    usize,
+) {
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
     let num_points = num_points.min(dataset.points.len());
 
-    // Add camera poses as variables (RN with 6 DOF: axis-angle rotation + translation)
-    // Use zero-padded names for proper lexicographic sorting
+    // Add camera poses as SE3 variables
+    // BAL convention (from https://grail.cs.washington.edu/projects/bal/):
+    // The rotation R and translation t stored in BAL files represent a WORLD-TO-CAMERA
+    // transformation: P_cam = R * X_world + t
+    //
+    // We store the pose as SE3 with (R, t) directly as world-to-camera.
+    // The ReprojectionFactor uses pose.act(p_world) which computes:
+    //   pose.act(p_world) = R * p_world + t = P_cam
+    // This matches the BAL convention exactly.
     for i in 0..dataset.cameras.len() {
         let cam = &dataset.cameras[i];
-        let pose_vec = DVector::from_vec(vec![
-            cam.rotation[0],    // rx (axis-angle)
-            cam.rotation[1],    // ry
-            cam.rotation[2],    // rz
-            cam.translation[0], // tx
-            cam.translation[1], // ty
-            cam.translation[2], // tz
-        ]);
-        initial_values.insert(format!("cam_{:04}", i), (ManifoldType::RN, pose_vec));
+
+        let axis_angle = Vector3::new(cam.rotation[0], cam.rotation[1], cam.rotation[2]);
+        let t_bal = Vector3::new(cam.translation[0], cam.translation[1], cam.translation[2]);
+        let r_bal = SO3::from_scaled_axis(axis_angle);
+
+        // Store BAL (R, t) as world-to-camera SE3
+        // ReprojectionFactor will use pose.act() to get camera coordinates
+        let se3 = SE3::from_translation_so3(t_bal, r_bal);
+
+        // SE3 is stored as 7D vector: [qw, qx, qy, qz, tx, ty, tz]
+        let pose_vec: DVector<f64> = se3.into();
+        initial_values.insert(format!("cam_{:04}", i), (ManifoldType::SE3, pose_vec));
     }
 
-    // First pass: collect which points actually have observations
-    let mut observed_points = std::collections::HashSet::new();
-    for obs in &dataset.observations {
-        if obs.point_index < num_points {
-            observed_points.insert(obs.point_index);
-        }
-    }
-
-    // Add only observed 3D world points as variables (RN with 3 DOF)
-    // Use zero-padded names for proper lexicographic sorting
-    for &j in &observed_points {
+    // Add landmarks as RN variables (optimize both poses and landmarks)
+    for j in 0..num_points {
         let point = &dataset.points[j];
         let point_vec = DVector::from_vec(vec![
             point.position[0],
@@ -252,36 +270,177 @@ fn setup_bal_problem(
         initial_values.insert(format!("pt_{:05}", j), (ManifoldType::RN, point_vec));
     }
 
-    // Add ProjectionFactors (one per observation)
-    // Each factor connects [camera_i, point_j]
-    let mut factor_count = 0;
+    // Debug: Compute initial reprojection error with correct convention
+    let mut total_error_sq = 0.0;
+    let mut valid_count = 0;
+    let mut max_error = 0.0_f64;
+    let mut errors = Vec::new();
+
+    // Also test via SE3 to verify the factor will work
+    let mut se3_valid_count = 0;
+    let mut se3_total_error_sq = 0.0;
+
     for obs in &dataset.observations {
         if obs.point_index >= num_points {
+            continue;
+        }
+        let cam = &dataset.cameras[obs.camera_index];
+        let pt = &dataset.points[obs.point_index];
+
+        let axis_angle = Vector3::new(cam.rotation[0], cam.rotation[1], cam.rotation[2]);
+        let t_bal = Vector3::new(cam.translation[0], cam.translation[1], cam.translation[2]);
+        let r_bal = SO3::from_scaled_axis(axis_angle);
+        let p_world = Vector3::new(pt.position[0], pt.position[1], pt.position[2]);
+
+        // BAL convention (official): p_cam = R * p_world + t (world-to-camera)
+        let p_cam = r_bal.rotation_matrix() * p_world + t_bal;
+
+        // Test via SE3 (how the factor will compute it)
+        let se3 = SE3::from_translation_so3(t_bal, r_bal);
+        let p_cam_se3 = se3.act(&p_world, None, None);
+
+        // Check if point is behind camera (BAL uses -Z forward)
+        if p_cam.z >= 0.0 {
+            continue;
+        }
+
+        // Project with BAL pinhole model (negative Z forward)
+        let inv_neg_z = -1.0 / p_cam.z;
+        let x_n = p_cam.x * inv_neg_z;
+        let y_n = p_cam.y * inv_neg_z;
+
+        // Radial distortion
+        let r_sq = x_n * x_n + y_n * y_n;
+        let distortion = 1.0 + cam.k1 * r_sq + cam.k2 * r_sq * r_sq;
+        let x_d = x_n * distortion;
+        let y_d = y_n * distortion;
+
+        // Pixel coordinates
+        let u = cam.focal_length * x_d;
+        let v = cam.focal_length * y_d;
+
+        let error_x = u - obs.x;
+        let error_y = v - obs.y;
+        let error = (error_x * error_x + error_y * error_y).sqrt();
+
+        total_error_sq += error_x * error_x + error_y * error_y;
+        max_error = max_error.max(error);
+        valid_count += 1;
+        if errors.len() < 10 {
+            errors.push(format!("{:.1}", error));
+        }
+
+        // Check SE3 version
+        if p_cam_se3.z < 0.0 {
+            let inv_neg_z_se3 = -1.0 / p_cam_se3.z;
+            let x_n_se3 = p_cam_se3.x * inv_neg_z_se3;
+            let y_n_se3 = p_cam_se3.y * inv_neg_z_se3;
+            let r_sq_se3 = x_n_se3 * x_n_se3 + y_n_se3 * y_n_se3;
+            let distortion_se3 = 1.0 + cam.k1 * r_sq_se3 + cam.k2 * r_sq_se3 * r_sq_se3;
+            let u_se3 = cam.focal_length * x_n_se3 * distortion_se3;
+            let v_se3 = cam.focal_length * y_n_se3 * distortion_se3;
+            let err_x_se3 = u_se3 - obs.x;
+            let err_y_se3 = v_se3 - obs.y;
+            se3_total_error_sq += err_x_se3 * err_x_se3 + err_y_se3 * err_y_se3;
+            se3_valid_count += 1;
+        }
+    }
+
+    let rms_error = if valid_count > 0 {
+        (total_error_sq / valid_count as f64).sqrt()
+    } else {
+        0.0
+    };
+    let se3_rms = if se3_valid_count > 0 {
+        (se3_total_error_sq / se3_valid_count as f64).sqrt()
+    } else {
+        0.0
+    };
+    info!(
+        "Initial RMS error (direct): {:.3} pixels (valid: {}/{})",
+        rms_error,
+        valid_count,
+        num_points * dataset.cameras.len()
+    );
+    info!(
+        "Initial RMS error (via SE3): {:.3} pixels (valid: {})",
+        se3_rms, se3_valid_count
+    );
+    if valid_count > 0 {
+        info!("First 10 errors: {:?}, max: {:.1}", errors, max_error);
+    }
+
+    // Count observations per point to check for under-constrained points
+    let mut point_obs_count: HashMap<usize, usize> = HashMap::new();
+    for obs in &dataset.observations {
+        if obs.point_index < num_points {
+            *point_obs_count.entry(obs.point_index).or_insert(0) += 1;
+        }
+    }
+
+    // Only include points with at least 2 observations (needed for triangulation)
+    let valid_points: std::collections::HashSet<usize> = point_obs_count
+        .iter()
+        .filter(|&(_, count)| *count >= 2)
+        .map(|(&idx, _)| idx)
+        .collect();
+
+    info!(
+        "Points with >= 2 observations: {}/{}",
+        valid_points.len(),
+        num_points
+    );
+
+    // Add reprojection factors (one per observation)
+    // Each factor connects one camera pose (SE3) to one 3D landmark (R3)
+    let mut total_obs = 0;
+    for obs in &dataset.observations {
+        if obs.point_index >= num_points || !valid_points.contains(&obs.point_index) {
             continue;
         }
 
         let cam = &dataset.cameras[obs.camera_index];
 
-        // Create camera intrinsics vector [fx, fy, cx, cy]
-        let camera_intrinsics = DVector::from_vec(vec![
-            cam.focal_length, // fx
-            cam.focal_length, // fy (same as fx for BAL)
-            0.0,              // cx (principal point at origin)
-            0.0,              // cy
-        ]);
+        // Create BAL camera with distortion
+        let camera = BALPinholeCamera::new(
+            cam.focal_length,
+            cam.focal_length, // fy = fx for BAL
+            0.0,              // cx = 0 (principal point at origin)
+            0.0,              // cy = 0
+            cam.k1,
+            cam.k2,
+        );
 
-        // Create BundleAdjustmentFactor for this observation
-        // Connects one camera pose to one 3D landmark
-        let factor = Box::new(BundleAdjustmentFactor::new(
-            Vector2::new(obs.x, obs.y), // observed pixel coordinates
-            camera_intrinsics,
-        ));
+        // Create reprojection factor for this observation
+        let observation = Vector2::new(obs.x, obs.y);
+        let factor = ReprojectionFactor::new(observation, camera);
 
-        let camera_var = format!("cam_{:04}", obs.camera_index);
-        let point_var = format!("pt_{:05}", obs.point_index);
+        let camera_name = format!("cam_{:04}", obs.camera_index);
+        let point_name = format!("pt_{:05}", obs.point_index);
 
-        problem.add_residual_block(&[&camera_var, &point_var], factor, None);
-        factor_count += 1;
+        // Use Huber loss to handle outliers robustly
+        let huber_loss = HuberLoss::new(1.0).expect("Valid Huber scale"); // Scale of 1 pixel
+        problem.add_residual_block(
+            &[&camera_name, &point_name],
+            Box::new(factor),
+            Some(Box::new(huber_loss)),
+        );
+        total_obs += 1;
+    }
+
+    // Only add variables for valid points
+    // (Clear old point values and re-add only valid ones)
+    let old_values = initial_values.clone();
+    initial_values.clear();
+    for (name, value) in old_values {
+        if name.starts_with("cam_") {
+            initial_values.insert(name, value);
+        } else if name.starts_with("pt_") {
+            let idx: usize = name[3..].parse().unwrap_or(usize::MAX);
+            if valid_points.contains(&idx) {
+                initial_values.insert(name, value);
+            }
+        }
     }
 
     // Fix first camera to remove gauge freedom (prevents singular matrix)
@@ -291,16 +450,20 @@ fn setup_bal_problem(
 
     info!("Problem setup:");
     info!("Cameras: {}", dataset.cameras.len());
-    info!("3D points: {} (observed)", observed_points.len());
-    info!("Observations (factors): {}", factor_count);
+    info!("3D points: {}", num_points);
+    info!("Observations (total): {}", total_obs);
+    info!("Reprojection factors: {} (one per observation)", total_obs);
     info!("Fixed cameras: 1 (cam_0000 - gauge fixing)");
+    info!("Optimization mode: Full bundle adjustment (poses + landmarks)");
     info!(
-        "Total parameters: {}",
-        dataset.cameras.len() * 6 + observed_points.len() * 3
+        "Total parameters: {} (cameras: {}, landmarks: {})",
+        dataset.cameras.len() * 6 + num_points * 3,
+        dataset.cameras.len() * 6,
+        num_points * 3
     );
     info!("");
 
-    (problem, initial_values)
+    (problem, initial_values, total_obs)
 }
 
 fn run_bundle_adjustment(
@@ -310,7 +473,7 @@ fn run_bundle_adjustment(
     max_iterations: usize,
 ) -> Result<OptimizationMetrics, Box<dyn Error>> {
     // Setup problem
-    let (problem, initial_values) = setup_bal_problem(dataset, num_points);
+    let (problem, initial_values, num_observations) = setup_bal_problem(dataset, num_points);
 
     // Determine linear solver type and Schur variant
     let (linear_solver_type, schur_variant) = match solver_name {
@@ -334,9 +497,9 @@ fn run_bundle_adjustment(
     let mut config = LevenbergMarquardtConfig::new()
         .with_linear_solver_type(linear_solver_type)
         .with_max_iterations(max_iterations)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-8)
-        .with_damping(1e-3);
+        .with_cost_tolerance(1e-12)
+        .with_parameter_tolerance(1e-14)
+        .with_damping(1e-3); // Standard damping
 
     // For Schur complement solvers, configure the variant and preconditioner
     if solver_name.starts_with("schur") {
@@ -346,14 +509,9 @@ fn run_bundle_adjustment(
     }
 
     info!("Starting optimization");
-    info!("Linear solver: {}", linear_solver_type);
+    info!("Linear solver: {:?}", linear_solver_type);
     if solver_name.starts_with("schur") {
         info!("Schur variant: {:?}", schur_variant);
-        info!(
-            "Cameras/Landmarks: {} cameras (SE3, 6 DOF), {} points (3 DOF)",
-            dataset.cameras.len(),
-            num_points
-        );
     }
     info!("Max iterations: {}", max_iterations);
     info!("Cost tolerance: {:.0e}", config.cost_tolerance);
@@ -366,6 +524,23 @@ fn run_bundle_adjustment(
     let result = solver.optimize(&problem, &initial_values)?;
     let elapsed = start.elapsed();
 
+    // Print convergence details
+    info!("Convergence details:");
+    info!("  Status: {:?}", result.status);
+    if let Some(ref conv_info) = result.convergence_info {
+        info!(
+            "  Final gradient norm: {:.6e}",
+            conv_info.final_gradient_norm
+        );
+        info!(
+            "  Final parameter update norm: {:.6e}",
+            conv_info.final_parameter_update_norm
+        );
+        info!("  Cost evaluations: {}", conv_info.cost_evaluations);
+        info!("  Jacobian evaluations: {}", conv_info.jacobian_evaluations);
+    }
+    info!("");
+
     Ok(OptimizationMetrics {
         solver_name: solver_name.to_string(),
         initial_cost: result.initial_cost,
@@ -373,6 +548,7 @@ fn run_bundle_adjustment(
         iterations: result.iterations,
         total_time: elapsed,
         success: matches!(result.status, OptimizationStatus::Converged),
+        num_observations,
     })
 }
 
@@ -381,7 +557,11 @@ fn print_metrics(metrics: &OptimizationMetrics) {
     info!("Initial cost: {:.6e}", metrics.initial_cost);
     info!("Final cost: {:.6e}", metrics.final_cost);
     info!("Cost reduction: {:.2}%", metrics.cost_reduction_percent());
-    info!("Iterations: {}", metrics.iterations);
+    info!(
+        "Iterations: {} / {}",
+        metrics.iterations,
+        if metrics.success { "converged" } else { "max" }
+    );
     info!("Total time: {:?}", metrics.total_time);
     info!("Time/iteration: {:?}", metrics.time_per_iteration());
     info!(
@@ -389,67 +569,50 @@ fn print_metrics(metrics: &OptimizationMetrics) {
         if metrics.success {
             "Converged"
         } else {
-            "Failed"
+            "Failed (max iterations reached)"
         }
     );
+    info!("");
+
+    // Analysis
+    info!("=== Convergence Analysis ===");
+    info!("Number of observations: {}", metrics.num_observations);
+    let rms = metrics.rms_reprojection_error();
+    info!("RMS reprojection error: {:.3} pixels", rms);
+    info!(
+        "Cost per observation: {:.3}",
+        metrics.final_cost / metrics.num_observations as f64
+    );
+    if rms < 1.0 {
+        info!("✓ Excellent: RMS error < 1 pixel");
+    } else if rms < 2.0 {
+        info!("✓ Good: RMS error < 2 pixels");
+    } else if rms < 5.0 {
+        info!("~ Acceptable: RMS error < 5 pixels");
+    } else {
+        info!("✗ Poor: RMS error > 5 pixels (needs more iterations or better initialization)");
+    }
 }
 
 fn print_comparison_table(all_metrics: &[OptimizationMetrics]) {
-    info!("Solver Comparison - Accuracy and Performance");
+    info!("=== Solver Comparison ===");
     info!("");
-
-    // Header
     info!(
-        "{:<25} {:>15} {:>15} {:>12} {:>12} {:>10}",
-        "Solver", "Initial Cost", "Final Cost", "Reduction%", "Time(s)", "Iters"
+        "{:<20} {:>12} {:>12} {:>10} {:>12} {:>10}",
+        "Solver", "Init Cost", "Final Cost", "Reduction", "Time", "RMS (px)"
     );
+    info!("{}", "-".repeat(80));
 
-    // Data rows
-    for metrics in all_metrics {
-        let reduction = metrics.cost_reduction_percent();
-        let time_s = metrics.total_time.as_secs_f64();
-
+    for m in all_metrics {
         info!(
-            "{:<25} {:>15.6e} {:>15.6e} {:>11.2}% {:>11.3}s {:>10}",
-            metrics.solver_name,
-            metrics.initial_cost,
-            metrics.final_cost,
-            reduction,
-            time_s,
-            metrics.iterations
+            "{:<20} {:>12.3e} {:>12.3e} {:>9.2}% {:>12.2?} {:>10.3}",
+            m.solver_name,
+            m.initial_cost,
+            m.final_cost,
+            m.cost_reduction_percent(),
+            m.total_time,
+            m.rms_reprojection_error()
         );
     }
     info!("");
-
-    // Find best solver by each metric (with safe comparisons)
-    if let Some(fastest) = all_metrics.iter().min_by_key(|m| m.total_time) {
-        info!(
-            "Fastest: {} ({:.3}s)",
-            fastest.solver_name,
-            fastest.total_time.as_secs_f64()
-        );
-    }
-
-    if let Some(best_cost) = all_metrics.iter().filter(|m| m.success).min_by(|a, b| {
-        a.final_cost
-            .partial_cmp(&b.final_cost)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) {
-        info!(
-            "Best Final Cost: {} ({:.6e})",
-            best_cost.solver_name, best_cost.final_cost
-        );
-    }
-
-    if let Some(best_reduction) = all_metrics.iter().filter(|m| m.success).max_by(|a, b| {
-        a.cost_reduction_percent()
-            .partial_cmp(&b.cost_reduction_percent())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) {
-        info!(
-            "Best Reduction: {} ({:.2}%)",
-            best_reduction.solver_name,
-            best_reduction.cost_reduction_percent()
-        );
-    }
 }
