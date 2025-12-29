@@ -16,6 +16,7 @@ use faer::{
 };
 use nalgebra::Matrix3;
 use std::collections::HashMap;
+use tracing::debug;
 
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -230,31 +231,23 @@ impl SparseSchurComplementSolver {
             ));
         }
 
-        // Debug: Print block structure
-        eprintln!("\n[DEBUG] Schur Block Structure:");
-        eprintln!(
-            "  Cameras: {} variables, {} total DOF",
+        // Debug: Log block structure
+        debug!(
+            "Schur Block Structure: {} cameras ({} DOF, cols {:?}), {} landmarks ({} DOF, cols {:?})",
             structure.camera_blocks.len(),
-            structure.camera_dof
-        );
-        eprintln!("  Camera column range: {:?}", structure.camera_col_range());
-        eprintln!(
-            "  Landmarks: {} variables, {} total DOF",
+            structure.camera_dof,
+            structure.camera_col_range(),
             structure.landmark_blocks.len(),
-            structure.landmark_dof
-        );
-        eprintln!(
-            "  Landmark column range: {:?}",
+            structure.landmark_dof,
             structure.landmark_col_range()
         );
 
-        // Check for gaps in column ranges
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let (land_start, land_end) = structure.landmark_col_range();
-        eprintln!("  Camera blocks contiguous: {}", cam_end == land_start);
+        // Validate column ranges are contiguous
+        let (_cam_start, cam_end) = structure.camera_col_range();
+        let (land_start, _land_end) = structure.landmark_col_range();
         if cam_end != land_start {
-            eprintln!(
-                "  WARNING: Gap between camera and landmark blocks! cam_end={}, land_start={}",
+            debug!(
+                "WARNING: Gap between camera and landmark blocks! cam_end={}, land_start={}",
                 cam_end, land_start
             );
         }
@@ -447,20 +440,34 @@ impl SparseSchurComplementSolver {
 
                     for k in 0..3 {
                         let result_col = col_start + k;
-                        h_cp_hpp_inv[(row, result_col)] += value * hpp_inv_block[(k, local_col)];
+                        h_cp_hpp_inv[(row, result_col)] += value * hpp_inv_block[(local_col, k)];
                     }
                 }
             }
         }
 
         // Compute correction = (H_cp * H_pp^{-1}) * H_cp^T
+        // correction[i,j] = Σ_k (H_cp * H_pp^{-1})[i,k] * H_cp[j,k]
         let mut triplets = Vec::new();
 
         for col_idx in 0..cam_size {
             for row_idx in 0..cam_size {
                 let mut sum: f64 = 0.0;
                 for k in 0..land_size {
-                    sum += h_cp_hpp_inv[(row_idx, k)] * h_cp_hpp_inv[(col_idx, k)];
+                    // Get H_cp[col_idx, k] from the sparse matrix
+                    let h_cp_col_k = {
+                        let row_indices = symbolic.row_idx_of_col_raw(k);
+                        let col_values = h_cp.val_of_col(k);
+                        let mut val = 0.0;
+                        for (idx, &row) in row_indices.iter().enumerate() {
+                            if row == col_idx {
+                                val = col_values[idx];
+                                break;
+                            }
+                        }
+                        val
+                    };
+                    sum += h_cp_hpp_inv[(row_idx, k)] * h_cp_col_k;
                 }
                 if sum.abs() > 1e-14 {
                     triplets.push(Triplet::new(row_idx, col_idx, sum));
@@ -650,7 +657,9 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         }
 
         self.hessian = Some(hessian.clone());
-        self.gradient = Some(neg_gradient.clone());
+        // Store the positive gradient (J^T * r) for predicted reduction calculation
+        // The Schur solver internally uses neg_gradient (-J^T * r) for the solve
+        self.gradient = Some(gradient.clone());
 
         // 2. Extract blocks
         let h_cc = self.extract_camera_block(&hessian)?;
@@ -713,7 +722,9 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         }
 
         self.hessian = Some(hessian.clone());
-        self.gradient = Some(neg_gradient.clone());
+        // Store the positive gradient (J^T * r) for predicted reduction calculation
+        // The Schur solver internally uses neg_gradient (-J^T * r) for the solve
+        self.gradient = Some(gradient.clone());
 
         // 2. Extract blocks
         let h_cc = self.extract_camera_block(&hessian)?;
@@ -815,13 +826,12 @@ impl SparseSchurComplementSolver {
             delta[(land_start + i, 0)] = delta_p[(i, 0)];
         }
 
-        // Debug: Check update magnitude
-        let delta_c_norm = delta_c.norm_l2();
-        let delta_p_norm = delta_p.norm_l2();
-        let delta_norm = delta.norm_l2();
-        eprintln!(
-            "[DEBUG] Update norms: delta_c={:.6e}, delta_p={:.6e}, combined={:.6e}",
-            delta_c_norm, delta_p_norm, delta_norm
+        // Debug: Log update magnitude
+        debug!(
+            "Update norms: delta_c={:.6e}, delta_p={:.6e}, combined={:.6e}",
+            delta_c.norm_l2(),
+            delta_p.norm_l2(),
+            delta.norm_l2()
         );
 
         Ok(delta)
@@ -1004,8 +1014,14 @@ mod tests {
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
         // Verify the actual computed values (diagonal elements of Schur complement)
-        assert!((s[(0, 0)] - 3.75).abs() < 1e-10, "S(0,0) = {}", s[(0, 0)]);
-        assert!((s[(1, 1)] - 4.0).abs() < 1e-10, "S(1,1) = {}", s[(1, 1)]);
+        // S = H_cc - H_cp * H_pp^{-1} * H_cp^T
+        // H_cp * H_pp^{-1} = [[0.5, 0, 0], [0, 1.0, 0]]
+        // (H_cp * H_pp^{-1}) * H_cp^T:
+        //   (0,0) = 0.5*1 = 0.5
+        //   (1,1) = 1.0*2 = 2.0
+        // S(0,0) = 4 - 0.5 = 3.5, S(1,1) = 5 - 2.0 = 3.0
+        assert!((s[(0, 0)] - 3.5).abs() < 1e-10, "S(0,0) = {}", s[(0, 0)]);
+        assert!((s[(1, 1)] - 3.0).abs() < 1e-10, "S(1,1) = {}", s[(1, 1)]);
     }
 
     #[test]
