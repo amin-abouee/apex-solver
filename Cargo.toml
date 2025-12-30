@@ -31,6 +31,10 @@ path = "bin/optimize_3d_graph.rs"
 name = "optimize_2d_graph"
 path = "bin/optimize_2d_graph.rs"
 
+[[bin]]
+name = "bundle_adjustment"
+path = "bin/bundle_adjustment.rs"
+
 
 [[example]]
 name = "visualize_graph_file"

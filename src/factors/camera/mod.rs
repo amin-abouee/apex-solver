@@ -74,7 +74,6 @@ pub mod fov;
 pub mod kannala_brandt;
 pub mod pinhole;
 pub mod rad_tan;
-pub mod reprojection_factor;
 pub mod ucm;
 
 // Re-export main types
@@ -85,7 +84,6 @@ pub use fov::FovCamera;
 pub use kannala_brandt::KannalaBrandtCamera;
 pub use pinhole::PinholeCamera;
 pub use rad_tan::RadTanCamera;
-pub use reprojection_factor::ReprojectionFactor;
 pub use ucm::UcmCamera;
 
 // ============================================================================

@@ -55,7 +55,6 @@ pub mod prior_factor;
 pub mod projection_factor;
 
 pub use between_factor::BetweenFactor;
-pub use camera::reprojection_factor::ReprojectionFactor;
 pub use prior_factor::PriorFactor;
 pub use projection_factor::ProjectionFactor;
 
