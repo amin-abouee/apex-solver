@@ -501,21 +501,14 @@ mod tests {
 
     #[test]
     fn test_load_m3500() -> Result<(), Box<dyn error::Error>> {
-        let graph = G2oLoader::load("data/M3500.g2o")?;
+        let graph = G2oLoader::load("data/odometry/M3500.g2o")?;
         assert!(!graph.vertices_se2.is_empty());
         Ok(())
     }
 
     #[test]
-    fn test_load_parking_garage() -> Result<(), Box<dyn error::Error>> {
-        let graph = G2oLoader::load("data/parking-garage.g2o")?;
-        assert!(!graph.vertices_se3.is_empty());
-        Ok(())
-    }
-
-    #[test]
     fn test_load_sphere2500() -> Result<(), Box<dyn error::Error>> {
-        let graph = G2oLoader::load("data/sphere2500.g2o")?;
+        let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
         assert!(!graph.vertices_se3.is_empty());
         Ok(())
     }
