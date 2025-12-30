@@ -54,6 +54,10 @@ pub enum LinAlgError {
     /// Invalid input provided to linear solver
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// Solver in invalid state (e.g., initialized incorrectly)
+    #[error("Invalid solver state: {0}")]
+    InvalidState(String),
 }
 
 impl LinAlgError {
