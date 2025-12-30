@@ -405,99 +405,172 @@ impl SparseSchurComplementSolver {
     }
 
     /// Compute Schur complement: S = H_cc - H_cp * H_pp^{-1} * H_cp^T
+    ///
+    /// This is an efficient implementation that exploits:
+    /// 1. Block-diagonal structure of H_pp (each landmark is independent)
+    /// 2. Sparsity of H_cp (each landmark connects to only a few cameras)
+    /// 3. Dense accumulation for the small camera-camera matrix S
+    ///
+    /// Algorithm:
+    /// For each landmark block p:
+    ///   - Get the cameras that observe this landmark (non-zero rows in H_cp column block)
+    ///   - Compute contribution: H_cp[:, p] * H_pp[p,p]^{-1} * H_cp[:, p]^T
+    ///   - This is an outer product of sparse vectors, producing a small dense update
+    ///   - Accumulate into the dense result S
     fn compute_schur_complement(
         &self,
         h_cc: &SparseColMat<usize, f64>,
         h_cp: &SparseColMat<usize, f64>,
         hpp_inv_blocks: &[Matrix3<f64>],
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        // Infer sizes from matrices
         let cam_size = h_cc.nrows();
-        let land_size = h_cp.ncols();
+        let h_cp_symbolic = h_cp.symbolic();
 
-        // Compute H_cp * H_pp^{-1} by multiplying each 3-column block
-        let mut h_cp_hpp_inv = Mat::<f64>::zeros(cam_size, land_size);
-        let symbolic = h_cp.symbolic();
+        // Use a dense matrix for S since the Schur complement is typically dense
+        // For 89 cameras, this is only 89*89*8 = 63KB - very cache-friendly
+        let mut s_dense = vec![0.0f64; cam_size * cam_size];
 
-        for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
-            let col_start = block_idx * 3;
-
-            for local_col in 0..3 {
-                let global_col = col_start + local_col;
-                let row_indices = symbolic.row_idx_of_col_raw(global_col);
-                let col_values = h_cp.val_of_col(global_col);
-
-                for (idx, &row) in row_indices.iter().enumerate() {
-                    let value = col_values[idx];
-
-                    for k in 0..3 {
-                        let result_col = col_start + k;
-                        h_cp_hpp_inv[(row, result_col)] += value * hpp_inv_block[(local_col, k)];
-                    }
-                }
-            }
-        }
-
-        // Compute correction = (H_cp * H_pp^{-1}) * H_cp^T
-        // correction[i,j] = Σ_k (H_cp * H_pp^{-1})[i,k] * H_cp[j,k]
-        let mut triplets = Vec::new();
-
-        for col_idx in 0..cam_size {
-            for row_idx in 0..cam_size {
-                let mut sum: f64 = 0.0;
-                for k in 0..land_size {
-                    // Get H_cp[col_idx, k] from the sparse matrix
-                    let h_cp_col_k = {
-                        let row_indices = symbolic.row_idx_of_col_raw(k);
-                        let col_values = h_cp.val_of_col(k);
-                        let mut val = 0.0;
-                        for (idx, &row) in row_indices.iter().enumerate() {
-                            if row == col_idx {
-                                val = col_values[idx];
-                                break;
-                            }
-                        }
-                        val
-                    };
-                    sum += h_cp_hpp_inv[(row_idx, k)] * h_cp_col_k;
-                }
-                if sum.abs() > 1e-14 {
-                    triplets.push(Triplet::new(row_idx, col_idx, sum));
-                }
-            }
-        }
-
-        let correction = SparseColMat::try_new_from_triplets(cam_size, cam_size, &triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Correction: {:?}", e)))?;
-
-        // S = H_cc - correction
-        let mut s_triplets = Vec::new();
+        // First, add H_cc to S
         let h_cc_symbolic = h_cc.symbolic();
-
         for col in 0..h_cc.ncols() {
             let row_indices = h_cc_symbolic.row_idx_of_col_raw(col);
             let col_values = h_cc.val_of_col(col);
-
             for (idx, &row) in row_indices.iter().enumerate() {
-                s_triplets.push(Triplet::new(row, col, col_values[idx]));
+                s_dense[row * cam_size + col] += col_values[idx];
             }
         }
 
-        let correction_symbolic = correction.symbolic();
-        for col in 0..correction.ncols() {
-            let row_indices = correction_symbolic.row_idx_of_col_raw(col);
-            let col_values = correction.val_of_col(col);
+        // Pre-allocate vectors for camera data per landmark
+        // Max cameras per landmark is bounded by number of cameras
+        let mut cam_rows: Vec<usize> = Vec::with_capacity(32);
+        let mut h_cp_block: Vec<[f64; 3]> = Vec::with_capacity(32);
+        let mut contrib_block: Vec<[f64; 3]> = Vec::with_capacity(32);
 
-            for (idx, &row) in row_indices.iter().enumerate() {
-                if let Some(entry) = s_triplets.iter_mut().find(|t| t.row == row && t.col == col) {
-                    *entry = Triplet::new(row, col, entry.val - col_values[idx]);
+        // Process each landmark block independently
+        for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
+            let col_start = block_idx * 3;
+
+            // Clear vectors for this landmark
+            cam_rows.clear();
+            h_cp_block.clear();
+
+            // Extract camera rows that observe this landmark and their H_cp values
+            // We iterate through the 3 columns of this landmark block
+            if col_start + 2 >= h_cp.ncols() {
+                continue;
+            }
+
+            // Get all camera rows from the first column
+            let row_indices_0 = h_cp_symbolic.row_idx_of_col_raw(col_start);
+            let col_values_0 = h_cp.val_of_col(col_start);
+            let row_indices_1 = h_cp_symbolic.row_idx_of_col_raw(col_start + 1);
+            let col_values_1 = h_cp.val_of_col(col_start + 1);
+            let row_indices_2 = h_cp_symbolic.row_idx_of_col_raw(col_start + 2);
+            let col_values_2 = h_cp.val_of_col(col_start + 2);
+
+            // Build a map from camera row to values (using the fact that rows are sorted)
+            // Since CSC columns have sorted row indices, we can merge them efficiently
+            let mut i0 = 0;
+            let mut i1 = 0;
+            let mut i2 = 0;
+
+            while i0 < row_indices_0.len() || i1 < row_indices_1.len() || i2 < row_indices_2.len() {
+                let r0 = if i0 < row_indices_0.len() {
+                    row_indices_0[i0]
                 } else {
-                    s_triplets.push(Triplet::new(row, col, -col_values[idx]));
+                    usize::MAX
+                };
+                let r1 = if i1 < row_indices_1.len() {
+                    row_indices_1[i1]
+                } else {
+                    usize::MAX
+                };
+                let r2 = if i2 < row_indices_2.len() {
+                    row_indices_2[i2]
+                } else {
+                    usize::MAX
+                };
+
+                let min_row = r0.min(r1).min(r2);
+                if min_row == usize::MAX {
+                    break;
+                }
+
+                let v0 = if r0 == min_row {
+                    i0 += 1;
+                    col_values_0[i0 - 1]
+                } else {
+                    0.0
+                };
+                let v1 = if r1 == min_row {
+                    i1 += 1;
+                    col_values_1[i1 - 1]
+                } else {
+                    0.0
+                };
+                let v2 = if r2 == min_row {
+                    i2 += 1;
+                    col_values_2[i2 - 1]
+                } else {
+                    0.0
+                };
+
+                cam_rows.push(min_row);
+                h_cp_block.push([v0, v1, v2]);
+            }
+
+            if cam_rows.is_empty() {
+                continue;
+            }
+
+            // Compute H_cp * H_pp^{-1} for each camera observing this landmark
+            contrib_block.clear();
+            for h_cp_row in &h_cp_block {
+                // contrib = h_cp_row * hpp_inv_block (1x3 * 3x3 = 1x3)
+                let c0 = h_cp_row[0] * hpp_inv_block[(0, 0)]
+                    + h_cp_row[1] * hpp_inv_block[(1, 0)]
+                    + h_cp_row[2] * hpp_inv_block[(2, 0)];
+                let c1 = h_cp_row[0] * hpp_inv_block[(0, 1)]
+                    + h_cp_row[1] * hpp_inv_block[(1, 1)]
+                    + h_cp_row[2] * hpp_inv_block[(2, 1)];
+                let c2 = h_cp_row[0] * hpp_inv_block[(0, 2)]
+                    + h_cp_row[1] * hpp_inv_block[(1, 2)]
+                    + h_cp_row[2] * hpp_inv_block[(2, 2)];
+                contrib_block.push([c0, c1, c2]);
+            }
+
+            // Compute outer product: (H_cp * H_pp^{-1}) * H_cp^T
+            // For each pair of cameras (i, j) observing this landmark:
+            //   S[i, j] -= contrib[i] · h_cp[j]
+            let n_cams = cam_rows.len();
+            for i in 0..n_cams {
+                let cam_i = cam_rows[i];
+                let contrib_i = &contrib_block[i];
+
+                for j in 0..n_cams {
+                    let cam_j = cam_rows[j];
+                    let h_cp_j = &h_cp_block[j];
+
+                    // Dot product
+                    let dot = contrib_i[0] * h_cp_j[0]
+                        + contrib_i[1] * h_cp_j[1]
+                        + contrib_i[2] * h_cp_j[2];
+
+                    s_dense[cam_i * cam_size + cam_j] -= dot;
                 }
             }
         }
 
-        s_triplets.retain(|t| t.val.abs() > 1e-14);
+        // Convert dense matrix to sparse (filtering near-zeros)
+        let mut s_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        for col in 0..cam_size {
+            for row in 0..cam_size {
+                let val = s_dense[row * cam_size + col];
+                if val.abs() > 1e-14 {
+                    s_triplets.push(Triplet::new(row, col, val));
+                }
+            }
+        }
 
         SparseColMat::try_new_from_triplets(cam_size, cam_size, &s_triplets)
             .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))
