@@ -424,13 +424,13 @@ impl SparseSchurComplementSolver {
         // Extract diagonal for Jacobi preconditioner
         let symbolic = a.symbolic();
         let mut precond = vec![1.0; n];
-        for col in 0..n {
+        for (col, precond_val) in precond.iter_mut().enumerate().take(n) {
             let row_indices = symbolic.row_idx_of_col_raw(col);
             let col_values = a.val_of_col(col);
             for (idx, &row) in row_indices.iter().enumerate() {
                 if row == col {
                     let diag = col_values[idx];
-                    precond[col] = if diag.abs() > 1e-12 { 1.0 / diag } else { 1.0 };
+                    *precond_val = if diag.abs() > 1e-12 { 1.0 / diag } else { 1.0 };
                     break;
                 }
             }
