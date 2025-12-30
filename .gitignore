@@ -28,9 +28,10 @@ Cargo.lock
 profiles/
 scripts/
 output/
+doc/*.md
 *.csv
 data_bk/
-doc/*.md
+
 
 # C++ benchmark build artifacts
 benches/cpp_comparison/build/
@@ -39,3 +40,7 @@ benches/cpp_comparison/.cache/*
 __cmake*
 CLAUDE.md
 cookbook
+conductor
+
+# macOS system files
+**/.DS_Store
