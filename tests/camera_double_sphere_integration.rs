@@ -9,8 +9,9 @@
 //! making it an ideal starting point for testing self-calibration.
 
 use apex_solver::core::problem::Problem;
+use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::camera::double_sphere::DoubleSphereCamera;
-use apex_solver::factors::camera::{CameraModel, ProjectionFactor, SelfCalibration};
+use apex_solver::factors::camera::{CameraModel, SelfCalibration};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::manifold::se3::SE3;
 use apex_solver::optimizer::OptimizationStatus;

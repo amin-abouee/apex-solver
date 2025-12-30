@@ -146,7 +146,10 @@
 
 use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
 use crate::error;
-use crate::linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+use crate::linalg::{
+    LinearSolverType, SchurPreconditioner, SchurSolverAdapter, SchurVariant, SparseCholeskySolver,
+    SparseLinearSolver, SparseQRSolver,
+};
 use crate::manifold::ManifoldType;
 use crate::optimizer::{
     ConvergenceInfo, OptObserverVec, OptimizationStatus, OptimizerError, Solver, SolverResult,
@@ -474,6 +477,25 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
+    /// Schur complement solver variant (for bundle adjustment problems)
+    ///
+    /// When using LinearSolverType::SparseSchurComplement, this determines which
+    /// variant of the Schur complement method to use:
+    /// - Sparse: Direct sparse Cholesky factorization (most accurate, moderate speed)
+    /// - Iterative: Preconditioned Conjugate Gradients (memory efficient, good for large problems)
+    /// - PowerSeries: Power series approximation (fastest, less accurate)
+    ///
+    /// Default: Sparse
+    pub schur_variant: SchurVariant,
+    /// Schur complement preconditioner type
+    ///
+    /// Determines the preconditioning strategy for iterative Schur methods:
+    /// - Diagonal: Simple diagonal preconditioner (fast, less effective)
+    /// - BlockDiagonal: Block-diagonal preconditioner (balanced)
+    /// - IncompleteCholesky: Incomplete Cholesky factorization (slower, more effective)
+    ///
+    /// Default: Diagonal
+    pub schur_preconditioner: SchurPreconditioner,
     // Note: Visualization is now handled via the observer pattern.
     // Use `solver.add_observer(RerunObserver::new(true)?)` to enable visualization.
     // This provides cleaner separation of concerns and allows multiple observers.
@@ -512,6 +534,9 @@ impl Default for LevenbergMarquardtConfig {
             // Existing parameters
             use_jacobi_scaling: false,
             compute_covariances: false,
+            // Schur complement parameters
+            schur_variant: SchurVariant::default(),
+            schur_preconditioner: SchurPreconditioner::default(),
         }
     }
 }
@@ -640,6 +665,18 @@ impl LevenbergMarquardtConfig {
     /// after convergence, then extracts per-variable covariance blocks.
     pub fn with_compute_covariances(mut self, compute_covariances: bool) -> Self {
         self.compute_covariances = compute_covariances;
+        self
+    }
+
+    /// Set Schur complement solver variant
+    pub fn with_schur_variant(mut self, variant: SchurVariant) -> Self {
+        self.schur_variant = variant;
+        self
+    }
+
+    /// Set Schur complement preconditioner
+    pub fn with_schur_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
+        self.schur_preconditioner = preconditioner;
         self
     }
 
@@ -818,14 +855,6 @@ impl LevenbergMarquardt {
     /// ```
     pub fn add_observer(&mut self, observer: impl crate::optimizer::OptObserver + 'static) {
         self.observers.add(observer);
-    }
-
-    /// Create the appropriate linear solver based on configuration
-    fn create_linear_solver(&self) -> Box<dyn SparseLinearSolver> {
-        match self.config.linear_solver_type {
-            LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
-            LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
-        }
     }
 
     /// Update damping parameter based on step quality using trust region approach
@@ -1262,8 +1291,26 @@ impl LevenbergMarquardt {
         // Initialize optimization state
         let mut state = self.initialize_optimization_state(problem, initial_params)?;
 
-        // Create linear solver
-        let mut linear_solver = self.create_linear_solver();
+        // Create linear solver - must be after variable initialization for Schur solver
+        let mut linear_solver: Box<dyn SparseLinearSolver> = match self.config.linear_solver_type {
+            LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
+            LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
+            LinearSolverType::SparseSchurComplement => Box::new(
+                SchurSolverAdapter::new_with_structure_and_config(
+                    &state.variables,
+                    &state.variable_index_map,
+                    self.config.schur_variant,
+                    self.config.schur_preconditioner,
+                )
+                .map_err(|e| {
+                    OptimizerError::LinearSolveFailed(format!(
+                        "Failed to initialize Schur solver: {}",
+                        e
+                    ))
+                    .log()
+                })?,
+            ),
+        };
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;

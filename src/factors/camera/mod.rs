@@ -16,7 +16,8 @@
 //! which parameters to optimize at compile time:
 //!
 //! ```rust
-//! use apex_solver::factors::camera::{OptimizeParams, ProjectionFactor, PinholeCamera};
+//! use apex_solver::factors::camera::{OptimizeParams, PinholeCamera};
+//! use apex_solver::factors::ProjectionFactor;
 //!
 //! // Bundle Adjustment: optimize pose + landmarks (intrinsics fixed)
 //! type BundleAdjustment = OptimizeParams<true, true, false>;
@@ -33,7 +34,8 @@
 //! ## Bundle Adjustment
 //!
 //! ```rust
-//! use apex_solver::factors::camera::{ProjectionFactor, BundleAdjustment, PinholeCamera};
+//! use apex_solver::factors::camera::{BundleAdjustment, PinholeCamera};
+//! use apex_solver::factors::ProjectionFactor;
 //! use nalgebra::{Matrix2xX, Vector2};
 //!
 //! let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
@@ -46,7 +48,8 @@
 //! ## Self-Calibration with Fixed Values
 //!
 //! ```rust
-//! use apex_solver::factors::camera::{ProjectionFactor, OnlyIntrinsics, PinholeCamera};
+//! use apex_solver::factors::camera::{OnlyIntrinsics, PinholeCamera};
+//! use apex_solver::factors::ProjectionFactor;
 //! use apex_solver::manifold::se3::SE3;
 //! use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
 //!
@@ -63,6 +66,25 @@
 
 use crate::manifold::se3::SE3;
 use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
+
+pub mod bal_pinhole;
+pub mod double_sphere;
+pub mod eucm;
+pub mod fov;
+pub mod kannala_brandt;
+pub mod pinhole;
+pub mod rad_tan;
+pub mod ucm;
+
+// Re-export main types
+pub use bal_pinhole::BALPinholeCamera;
+pub use double_sphere::DoubleSphereCamera;
+pub use eucm::EucmCamera;
+pub use fov::FovCamera;
+pub use kannala_brandt::KannalaBrandtCamera;
+pub use pinhole::PinholeCamera;
+pub use rad_tan::RadTanCamera;
+pub use ucm::UcmCamera;
 
 // ============================================================================
 // OPTIMIZATION CONFIGURATION
@@ -358,29 +380,6 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
 pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
-
-// ============================================================================
-// SUBMODULES
-// ============================================================================
-
-pub mod double_sphere;
-pub mod eucm;
-pub mod fov;
-pub mod kannala_brandt;
-pub mod pinhole;
-pub mod projection_factor;
-pub mod rad_tan;
-pub mod ucm;
-
-// Re-export main types
-pub use double_sphere::DoubleSphereCamera;
-pub use eucm::EucmCamera;
-pub use fov::FovCamera;
-pub use kannala_brandt::KannalaBrandtCamera;
-pub use pinhole::PinholeCamera;
-pub use projection_factor::ProjectionFactor;
-pub use rad_tan::RadTanCamera;
-pub use ucm::UcmCamera;
 
 // ============================================================================
 // TESTS

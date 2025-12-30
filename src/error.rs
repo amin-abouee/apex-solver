@@ -136,7 +136,7 @@ mod tests {
 
     #[test]
     fn test_apex_solver_error_display() {
-        let linalg_error = LinAlgError::SingularMatrix;
+        let linalg_error = LinAlgError::SingularMatrix("test singular matrix".to_string());
         let error = ApexSolverError::from(linalg_error);
         assert!(error.to_string().contains("Singular matrix"));
     }

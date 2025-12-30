@@ -138,6 +138,17 @@ pub enum VariableEnum {
 }
 
 impl VariableEnum {
+    /// Get the manifold type for this variable
+    pub fn manifold_type(&self) -> ManifoldType {
+        match self {
+            VariableEnum::Rn(_) => ManifoldType::RN,
+            VariableEnum::SE2(_) => ManifoldType::SE2,
+            VariableEnum::SE3(_) => ManifoldType::SE3,
+            VariableEnum::SO2(_) => ManifoldType::SO2,
+            VariableEnum::SO3(_) => ManifoldType::SO3,
+        }
+    }
+
     /// Get the tangent space size for this variable
     pub fn get_size(&self) -> usize {
         match self {

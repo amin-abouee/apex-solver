@@ -1,5 +1,8 @@
 pub mod cholesky;
 pub mod qr;
+pub mod schur;
+pub mod schur_iterative;
+pub mod schur_power_series;
 
 use crate::core::problem::VariableEnum;
 use faer::{Mat, sparse::SparseColMat};
@@ -16,6 +19,7 @@ pub enum LinearSolverType {
     #[default]
     SparseCholesky,
     SparseQR,
+    SparseSchurComplement,
 }
 
 impl Display for LinearSolverType {
@@ -23,6 +27,7 @@ impl Display for LinearSolverType {
         match self {
             LinearSolverType::SparseCholesky => write!(f, "Sparse Cholesky"),
             LinearSolverType::SparseQR => write!(f, "Sparse QR"),
+            LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
         }
     }
 }
@@ -35,8 +40,8 @@ pub enum LinAlgError {
     FactorizationFailed(String),
 
     /// Singular or near-singular matrix detected
-    #[error("Singular matrix detected (matrix is not invertible)")]
-    SingularMatrix,
+    #[error("Singular matrix detected: {0}")]
+    SingularMatrix(String),
 
     /// Failed to create sparse matrix from triplets
     #[error("Failed to create sparse matrix: {0}")]
@@ -45,6 +50,14 @@ pub enum LinAlgError {
     /// Matrix format conversion failed
     #[error("Matrix conversion failed: {0}")]
     MatrixConversion(String),
+
+    /// Invalid input provided to linear solver
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
+    /// Solver in invalid state (e.g., initialized incorrectly)
+    #[error("Invalid solver state: {0}")]
+    InvalidState(String),
 }
 
 impl LinAlgError {
@@ -118,6 +131,47 @@ pub type LinAlgResult<T> = Result<T, LinAlgError>;
 //     pub standard_errors: Option<Mat<f64>>,
 // }
 
+/// Trait for structured sparse linear solvers that require variable information.
+///
+/// This trait extends the basic sparse solver interface to support solvers that
+/// exploit problem structure (e.g., Schur complement for bundle adjustment).
+/// These solvers need access to variable information to partition the problem.
+pub trait StructuredSparseLinearSolver {
+    /// Initialize the solver's block structure from problem variables.
+    ///
+    /// This must be called before solving to set up the internal structure.
+    ///
+    /// # Arguments
+    /// * `variables` - Map of variable names to their typed instances
+    /// * `variable_index_map` - Map from variable names to starting column indices
+    fn initialize_structure(
+        &mut self,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+    ) -> LinAlgResult<()>;
+
+    /// Solve the normal equation: (J^T * J) * dx = -J^T * r
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Solve the augmented equation: (J^T * J + λI) * dx = -J^T * r
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Get the cached Hessian matrix
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
+
+    /// Get the cached gradient vector
+    fn get_gradient(&self) -> Option<&Mat<f64>>;
+}
+
 /// Trait for sparse linear solvers that can solve both normal and augmented equations
 pub trait SparseLinearSolver {
     /// Solve the normal equation: (J^T * J) * dx = -J^T * r
@@ -167,6 +221,12 @@ pub trait SparseLinearSolver {
 
 pub use cholesky::SparseCholeskySolver;
 pub use qr::SparseQRSolver;
+pub use schur::{
+    SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
+    SparseSchurComplementSolver,
+};
+pub use schur_iterative::IterativeSchurSolver;
+pub use schur_power_series::PowerSeriesSchurSolver;
 
 /// Extract per-variable covariance blocks from the full covariance matrix.
 ///

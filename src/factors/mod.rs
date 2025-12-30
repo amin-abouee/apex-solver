@@ -50,16 +50,13 @@ use tracing::error;
 
 // Pose factors
 pub mod between_factor;
-pub mod prior_factor;
-
-// Unified camera module
 pub mod camera;
+pub mod prior_factor;
+pub mod projection_factor;
 
-// Re-export all factor types
-
-// Pose factors
 pub use between_factor::BetweenFactor;
 pub use prior_factor::PriorFactor;
+pub use projection_factor::ProjectionFactor;
 
 /// Factor-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
