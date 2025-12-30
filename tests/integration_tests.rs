@@ -72,7 +72,7 @@ fn run_se3_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file
-    let dataset_path = format!("data/{}.g2o", dataset_name);
+    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se3.len();
@@ -186,7 +186,7 @@ fn run_se2_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file
-    let dataset_path = format!("data/{}.g2o", dataset_name);
+    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se2.len();
