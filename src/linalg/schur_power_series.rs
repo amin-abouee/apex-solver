@@ -130,8 +130,14 @@ impl PowerSeriesSchurSolver {
 
     /// Apply H_pp to a vector (landmark block only)
     fn apply_landmark_hessian(&self, input: &Mat<f64>, output: &mut Mat<f64>) -> LinAlgResult<()> {
-        let structure = self.block_structure.as_ref().unwrap();
-        let hessian = self.hessian.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+        let hessian = self
+            .hessian
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not initialized".into()))?;
         let (lm_start, lm_end) = structure.landmark_col_range();
         let symbolic = hessian.symbolic();
 
@@ -159,7 +165,10 @@ impl PowerSeriesSchurSolver {
 
     /// Apply diagonal inverse D^{-1} to a vector
     fn apply_diagonal_inverse(&self, input: &Mat<f64>, output: &mut Mat<f64>) -> LinAlgResult<()> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let lm_start = structure.landmark_col_range().0;
 
         for (block_idx, (_, start_col, _)) in structure.landmark_blocks.iter().enumerate() {
@@ -191,7 +200,10 @@ impl PowerSeriesSchurSolver {
         input: &Mat<f64>,
         output: &mut Mat<f64>,
     ) -> LinAlgResult<()> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let lm_dof = structure.landmark_dof;
 
         // w_0 = D^{-1} * v
@@ -239,12 +251,16 @@ impl PowerSeriesSchurSolver {
     }
 
     /// Extract H_cc block and multiply with vector
+    #[allow(dead_code)]
     fn extract_camera_block_mvp(
         &self,
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let cam_dof = structure.camera_dof;
 
@@ -273,7 +289,10 @@ impl PowerSeriesSchurSolver {
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let (lm_start, lm_end) = structure.landmark_col_range();
         let lm_dof = structure.landmark_dof;
@@ -303,7 +322,10 @@ impl PowerSeriesSchurSolver {
         hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let (lm_start, lm_end) = structure.landmark_col_range();
         let cam_dof = structure.camera_dof;
@@ -409,10 +431,14 @@ impl StructuredSparseLinearSolver for PowerSeriesSchurSolver {
         self.gradient = Some(gradient.clone());
 
         // Extract structure info before mutable borrow
-        let cam_dof = self.block_structure.as_ref().unwrap().camera_dof;
-        let lm_dof = self.block_structure.as_ref().unwrap().landmark_dof;
-        let (cam_start, _cam_end) = self.block_structure.as_ref().unwrap().camera_col_range();
-        let (lm_start, _lm_end) = self.block_structure.as_ref().unwrap().landmark_col_range();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+        let cam_dof = structure.camera_dof;
+        let lm_dof = structure.landmark_dof;
+        let (cam_start, _cam_end) = structure.camera_col_range();
+        let (lm_start, _lm_end) = structure.landmark_col_range();
 
         // Extract diagonal blocks and their inverses
         self.extract_landmark_diagonal_blocks(&hessian)?;
@@ -433,8 +459,12 @@ impl StructuredSparseLinearSolver for PowerSeriesSchurSolver {
         self.apply_landmark_inverse_power_series(&g_lm, &mut hpp_inv_g)?;
 
         // Compute reduced RHS: g_c - H_cp * H_pp^{-1} * g_p
-        let correction =
-            self.extract_camera_landmark_mvp(self.hessian.as_ref().unwrap(), &hpp_inv_g)?;
+        let correction = self.extract_camera_landmark_mvp(
+            self.hessian
+                .as_ref()
+                .ok_or_else(|| LinAlgError::InvalidState("Hessian not initialized".into()))?,
+            &hpp_inv_g,
+        )?;
         let mut g_reduced = g_cam.clone();
         for i in 0..cam_dof {
             g_reduced[(i, 0)] -= correction[(i, 0)];
@@ -453,7 +483,11 @@ impl StructuredSparseLinearSolver for PowerSeriesSchurSolver {
         use faer::sparse::linalg::solvers::{Llt, SymbolicLlt};
 
         // Extract H_cc
-        let h_cc = self.extract_camera_hessian_block(self.hessian.as_ref().unwrap())?;
+        let h_cc = self.extract_camera_hessian_block(
+            self.hessian
+                .as_ref()
+                .ok_or_else(|| LinAlgError::InvalidState("Hessian not initialized".into()))?,
+        )?;
 
         // Approximate Schur complement (simplified - should iterate)
         let symbolic_llt = SymbolicLlt::try_new(h_cc.symbolic(), Side::Lower)
@@ -467,8 +501,12 @@ impl StructuredSparseLinearSolver for PowerSeriesSchurSolver {
         let delta_cam = llt.solve(&g_reduced);
 
         // Back-substitute for landmarks
-        let hcp_t_delta_cam =
-            self.extract_camera_landmark_transpose_mvp(self.hessian.as_ref().unwrap(), &delta_cam)?;
+        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(
+            self.hessian
+                .as_ref()
+                .ok_or_else(|| LinAlgError::InvalidState("Hessian not initialized".into()))?,
+            &delta_cam,
+        )?;
 
         let mut rhs_lm = Mat::<f64>::zeros(lm_dof, 1);
         for i in 0..lm_dof {
@@ -556,7 +594,10 @@ impl PowerSeriesSchurSolver {
         &self,
         hessian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let structure = self.block_structure.as_ref().unwrap();
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let (cam_start, cam_end) = structure.camera_col_range();
         let cam_dof = structure.camera_dof;
         let symbolic = hessian.symbolic();
