@@ -1,16 +1,19 @@
-//! Bundle Adjustment Example with BAL Pinhole Camera Model
+//! Bundle Adjustment Example with BAL Pinhole Camera Model (using ProjectionFactor)
 //!
 //! This example demonstrates bundle adjustment optimization using:
 //! - BAL pinhole camera model with radial distortion
 //! - Optimizing both camera poses (SE3) and 3D point positions
-//! - Comparison of different linear solvers (SparseCholesky vs Schur variants)
+//! - Using generic ProjectionFactor (Camera-to-World convention)
 //!
 //! The example loads BAL (Bundle Adjustment in the Large) dataset files and optimizes
 //! camera poses and 3D landmark positions to minimize reprojection error.
 
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::camera::{BALPinholeCamera, ReprojectionFactor};
+use apex_solver::factors::{
+    ProjectionFactor,
+    camera::{BALPinholeCamera, BundleAdjustment},
+};
 use apex_solver::io::{BalDataset, BalLoader};
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
 use apex_solver::manifold::LieGroup;
@@ -20,15 +23,15 @@ use apex_solver::manifold::so3::SO3;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::Parser;
-use nalgebra::{DVector, Vector2, Vector3};
+use nalgebra::{DVector, Matrix2xX, Vector3};
 use std::collections::HashMap;
 use std::error::Error;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
-#[command(name = "bundle_adjustment")]
-#[command(about = "Bundle adjustment optimization with BAL pinhole camera model")]
+#[command(name = "bundle_adjustment_projection")]
+#[command(about = "Bundle adjustment with ProjectionFactor")]
 struct Args {
     /// Dataset size to load (21, 49, or 89)
     #[arg(short, long, default_value = "21")]
@@ -39,7 +42,7 @@ struct Args {
     solver: String,
 
     /// Maximum number of iterations
-    #[arg(short, long, default_value = "20")]
+    #[arg(short, long, default_value = "100")]
     max_iterations: usize,
 
     /// Maximum number of points to use (for faster testing)
@@ -102,13 +105,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         21 => "data/bundle_adjustment/problem-21-11315-pre.txt",
         49 => "data/bundle_adjustment/problem-49-7776-pre.txt",
         89 => "data/bundle_adjustment/problem-89-110973-pre.txt",
+        1723 => "data/bundle_adjustment/problem-1723-156502-pre.txt",
         _ => {
-            warn!("Invalid dataset size. Choose 21, 49, or 89.");
+            warn!("Invalid dataset size. Choose 21, 49, 89, or 1723.");
             std::process::exit(1);
         }
     };
 
-    info!("Bundle Adjustment with BAL Pinhole Camera Model");
+    info!("Bundle Adjustment with BAL Pinhole Camera Model (ProjectionFactor)");
     info!("");
 
     // Load BAL dataset
@@ -241,10 +245,10 @@ fn setup_bal_problem(
     // The rotation R and translation t stored in BAL files represent a WORLD-TO-CAMERA
     // transformation: P_cam = R * X_world + t
     //
-    // We store the pose as SE3 with (R, t) directly as world-to-camera.
-    // The ReprojectionFactor uses pose.act(p_world) which computes:
-    //   pose.act(p_world) = R * p_world + t = P_cam
-    // This matches the BAL convention exactly.
+    // ProjectionFactor uses world-to-camera convention (matching ReprojectionFactor):
+    // It computes P_cam = pose.act(X_world) = R * X_world + t
+    //
+    // So we store the BAL pose directly as world-to-camera (no inversion needed).
     for i in 0..dataset.cameras.len() {
         let cam = &dataset.cameras[i];
 
@@ -252,12 +256,12 @@ fn setup_bal_problem(
         let t_bal = Vector3::new(cam.translation[0], cam.translation[1], cam.translation[2]);
         let r_bal = SO3::from_scaled_axis(axis_angle);
 
-        // Store BAL (R, t) as world-to-camera SE3
-        // ReprojectionFactor will use pose.act() to get camera coordinates
-        let se3 = SE3::from_translation_so3(t_bal, r_bal);
+        // BAL gives World-to-Camera (T_wc): P_cam = R * X_world + t
+        // Store directly as world-to-camera (no inversion!)
+        let se3_wc = SE3::from_translation_so3(t_bal, r_bal);
 
-        // SE3 is stored as 7D vector: [qw, qx, qy, qz, tx, ty, tz]
-        let pose_vec: DVector<f64> = se3.into();
+        // Store as SE3 variable
+        let pose_vec: DVector<f64> = se3_wc.into();
         initial_values.insert(format!("cam_{:04}", i), (ManifoldType::SE3, pose_vec));
     }
 
@@ -393,7 +397,7 @@ fn setup_bal_problem(
         num_points
     );
 
-    // Add reprojection factors (one per observation)
+    // Add projection factors (one per observation)
     // Each factor connects one camera pose (SE3) to one 3D landmark (R3)
     let mut total_obs = 0;
     for obs in &dataset.observations {
@@ -413,9 +417,13 @@ fn setup_bal_problem(
             cam.k2,
         );
 
-        // Create reprojection factor for this observation
-        let observation = Vector2::new(obs.x, obs.y);
-        let factor = ReprojectionFactor::new(observation, camera);
+        // Create projection factor for this observation
+        // ProjectionFactor expects Matrix2xX of observations (2 rows, N columns)
+        let observations = Matrix2xX::from_column_slice(&[obs.x, obs.y]);
+
+        // Use generic ProjectionFactor with BundleAdjustment configuration
+        let factor =
+            ProjectionFactor::<BALPinholeCamera, BundleAdjustment>::new(observations, camera);
 
         let camera_name = format!("cam_{:04}", obs.camera_index);
         let point_name = format!("pt_{:05}", obs.point_index);
