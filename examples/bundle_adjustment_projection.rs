@@ -244,10 +244,10 @@ fn setup_bal_problem(
     // The rotation R and translation t stored in BAL files represent a WORLD-TO-CAMERA
     // transformation: P_cam = R * X_world + t
     //
-    // ProjectionFactor now uses world-to-camera convention (like ReprojectionFactor).
+    // ProjectionFactor uses world-to-camera convention (matching ReprojectionFactor):
     // It computes P_cam = pose.act(X_world) = R * X_world + t
     //
-    // So we store the BAL pose (World-to-Camera) directly.
+    // So we store the BAL pose directly as world-to-camera (no inversion needed).
     for i in 0..dataset.cameras.len() {
         let cam = &dataset.cameras[i];
 
@@ -255,12 +255,12 @@ fn setup_bal_problem(
         let t_bal = Vector3::new(cam.translation[0], cam.translation[1], cam.translation[2]);
         let r_bal = SO3::from_scaled_axis(axis_angle);
 
-        // Store BAL (R, t) as world-to-camera SE3
-        // ProjectionFactor will use pose.act() to get camera coordinates
-        let se3 = SE3::from_translation_so3(t_bal, r_bal);
+        // BAL gives World-to-Camera (T_wc): P_cam = R * X_world + t
+        // Store directly as world-to-camera (no inversion!)
+        let se3_wc = SE3::from_translation_so3(t_bal, r_bal);
 
-        // SE3 is stored as 7D vector: [qw, qx, qy, qz, tx, ty, tz]
-        let pose_vec: DVector<f64> = se3.into();
+        // Store as SE3 variable
+        let pose_vec: DVector<f64> = se3_wc.into();
         initial_values.insert(format!("cam_{:04}", i), (ManifoldType::SE3, pose_vec));
     }
 

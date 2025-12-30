@@ -1,6 +1,6 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
-use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
+use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3, Matrix3xX, Vector3};
 use std::marker::PhantomData;
 use tracing::warn;
 
@@ -8,6 +8,12 @@ use crate::factors::Factor;
 use crate::factors::camera::{CameraModel, OptimizeParams};
 use crate::manifold::LieGroup;
 use crate::manifold::se3::SE3;
+
+/// Compute skew-symmetric matrix from vector.
+/// [v]× such that [v]× * w = v × w (cross product)
+fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
+    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
+}
 
 /// Trait for optimization configuration.
 ///
@@ -181,8 +187,9 @@ where
             let p_world = landmarks.column(i).into_owned();
 
             // Transform point to camera frame
-            // For bundle adjustment: pose is world-to-camera (BAL convention)
-            // p_cam = R * p_world + t
+            // World-to-camera convention: pose is T_wc where p_cam = R * p_world + t
+            // This matches BAL dataset format and ReprojectionFactor
+            // pose.act() computes exactly: R * p_world + t = p_cam
             let p_cam = pose.act(&p_world, None, None);
 
             // Check validity and project
@@ -221,7 +228,8 @@ where
             if let Some(ref mut jac) = jacobian_matrix {
                 let mut col_offset = 0;
 
-                // Jacobian w.r.t. pose
+                // Jacobian w.r.t. pose (world-to-camera convention)
+                // This matches ReprojectionFactor exactly
                 if OP::POSE {
                     // Jacobian of projection w.r.t. point in camera frame
                     let d_uv_d_pcam = camera.jacobian_point(&p_cam);
@@ -244,7 +252,7 @@ where
                     // ∂p_cam/∂δρ = R
                     // ∂p_cam/∂δθ = -R * [p_world]×
                     let rotation = pose.rotation_so3().rotation_matrix();
-                    let p_world_skew = super::camera::skew_symmetric(&p_world);
+                    let p_world_skew = skew_symmetric(&p_world);
 
                     let d_pcam_d_pose = nalgebra::SMatrix::<f64, 3, 6>::from_fn(|r, c| {
                         if c < 3 {
@@ -262,7 +270,7 @@ where
                     });
 
                     // Chain rule: ∂uv/∂pose = ∂uv/∂p_cam * ∂p_cam/∂pose
-                    let d_uv_d_pose = d_uv_d_pcam.clone() * d_pcam_d_pose;
+                    let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
 
                     for r in 0..2 {
                         for c in 0..6 {
@@ -272,7 +280,7 @@ where
                     col_offset += 6;
                 }
 
-                // Jacobian w.r.t. landmarks
+                // Jacobian w.r.t. landmarks (world-to-camera convention)
                 if OP::LANDMARK {
                     // For this landmark (3 DOF)
                     let d_uv_d_pcam = camera.jacobian_point(&p_cam);
@@ -409,19 +417,19 @@ mod tests {
         let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
 
         // Create known landmark and observation
+        // World-to-camera convention: p_cam = R * p_world + t
+        // With identity pose: p_cam = p_world
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
-        // Project to get observation
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(&p_world, None, None);
+        // Project to get observation using world-to-camera convention
+        let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
         let _landmarks = Matrix3xX::from_columns(&[p_world]);
 
         // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
-        // Corrected: using OptimizeParams directly if needed, but BundleAdjustment alias is cleaner
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
             ProjectionFactor::new(observations, camera);
 
@@ -449,8 +457,8 @@ mod tests {
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
-        // Get observation
-        let p_cam = pose.inverse(None).act(&p_world, None, None);
+        // Get observation using world-to-camera convention
+        let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
@@ -481,7 +489,8 @@ mod tests {
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 
-        let p_cam = pose.inverse(None).act(&p_world, None, None);
+        // World-to-camera convention
+        let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
