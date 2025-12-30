@@ -6,7 +6,10 @@
 //! 3. POWER_SERIES_SCHUR - Power series approximation (PSSC/PoBA)
 
 use crate::core::problem::VariableEnum;
-use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
+use crate::linalg::{
+    LinAlgError, LinAlgResult, StructuredSparseLinearSolver, schur_iterative::IterativeSchurSolver,
+    schur_power_series::PowerSeriesSchurSolver,
+};
 use crate::manifold::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -129,6 +132,10 @@ pub struct SparseSchurComplementSolver {
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
+
+    // Delegate solvers for non-sparse variants
+    iterative_solver: Option<IterativeSchurSolver>,
+    power_series_solver: Option<PowerSeriesSchurSolver>,
 }
 
 impl SparseSchurComplementSolver {
@@ -143,6 +150,8 @@ impl SparseSchurComplementSolver {
             power_series_order: 3,
             hessian: None,
             gradient: None,
+            iterative_solver: None,
+            power_series_solver: None,
         }
     }
 
@@ -402,6 +411,128 @@ impl SparseSchurComplementSolver {
         })?;
 
         Ok(cholesky.solve(b))
+    }
+
+    /// Solve using Preconditioned Conjugate Gradients (PCG)
+    ///
+    /// Uses Jacobi (diagonal) preconditioning for simplicity and robustness.
+    fn solve_with_pcg(&self, a: &SparseColMat<usize, f64>, b: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
+        let n = b.nrows();
+        let max_iterations = self.cg_max_iterations;
+        let tolerance = self.cg_tolerance;
+
+        // Extract diagonal for Jacobi preconditioner
+        let symbolic = a.symbolic();
+        let mut precond = vec![1.0; n];
+        for col in 0..n {
+            let row_indices = symbolic.row_idx_of_col_raw(col);
+            let col_values = a.val_of_col(col);
+            for (idx, &row) in row_indices.iter().enumerate() {
+                if row == col {
+                    let diag = col_values[idx];
+                    precond[col] = if diag.abs() > 1e-12 { 1.0 / diag } else { 1.0 };
+                    break;
+                }
+            }
+        }
+
+        // Initialize
+        let mut x = Mat::<f64>::zeros(n, 1);
+
+        // r = b - A*x (x starts at 0, so r = b)
+        let mut r = b.clone();
+
+        // z = M^{-1} * r (Jacobi preconditioning)
+        let mut z = Mat::<f64>::zeros(n, 1);
+        for i in 0..n {
+            z[(i, 0)] = precond[i] * r[(i, 0)];
+        }
+
+        let mut p = z.clone();
+
+        let mut rz_old = 0.0;
+        for i in 0..n {
+            rz_old += r[(i, 0)] * z[(i, 0)];
+        }
+
+        // Compute initial residual norm for relative tolerance
+        let mut r_norm_init = 0.0;
+        for i in 0..n {
+            r_norm_init += r[(i, 0)] * r[(i, 0)];
+        }
+        r_norm_init = r_norm_init.sqrt();
+        let abs_tol = tolerance * r_norm_init.max(1.0);
+
+        for _iter in 0..max_iterations {
+            // Ap = A * p (sparse matrix-vector product)
+            let mut ap = Mat::<f64>::zeros(n, 1);
+            for col in 0..n {
+                let row_indices = symbolic.row_idx_of_col_raw(col);
+                let col_values = a.val_of_col(col);
+                for (idx, &row) in row_indices.iter().enumerate() {
+                    ap[(row, 0)] += col_values[idx] * p[(col, 0)];
+                }
+            }
+
+            // alpha = (r^T z) / (p^T Ap)
+            let mut p_ap = 0.0;
+            for i in 0..n {
+                p_ap += p[(i, 0)] * ap[(i, 0)];
+            }
+
+            if p_ap.abs() < 1e-30 {
+                break;
+            }
+
+            let alpha = rz_old / p_ap;
+
+            // x = x + alpha * p
+            for i in 0..n {
+                x[(i, 0)] += alpha * p[(i, 0)];
+            }
+
+            // r = r - alpha * Ap
+            for i in 0..n {
+                r[(i, 0)] -= alpha * ap[(i, 0)];
+            }
+
+            // Check convergence
+            let mut r_norm = 0.0;
+            for i in 0..n {
+                r_norm += r[(i, 0)] * r[(i, 0)];
+            }
+            r_norm = r_norm.sqrt();
+
+            if r_norm < abs_tol {
+                break;
+            }
+
+            // z = M^{-1} * r
+            for i in 0..n {
+                z[(i, 0)] = precond[i] * r[(i, 0)];
+            }
+
+            // beta = (r_{k+1}^T z_{k+1}) / (r_k^T z_k)
+            let mut rz_new = 0.0;
+            for i in 0..n {
+                rz_new += r[(i, 0)] * z[(i, 0)];
+            }
+
+            if rz_old.abs() < 1e-30 {
+                break;
+            }
+
+            let beta = rz_new / rz_old;
+
+            // p = z + beta * p
+            for i in 0..n {
+                p[(i, 0)] = z[(i, 0)] + beta * p[(i, 0)];
+            }
+
+            rz_old = rz_new;
+        }
+
+        Ok(x)
     }
 
     /// Compute Schur complement: S = H_cc - H_cp * H_pp^{-1} * H_cp^T
@@ -693,7 +824,31 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         variables: &HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
     ) -> LinAlgResult<()> {
-        self.build_block_structure(variables, variable_index_map)
+        // Build block structure for all variants
+        self.build_block_structure(variables, variable_index_map)?;
+
+        // Initialize delegate solver based on variant
+        match self.variant {
+            SchurVariant::Iterative => {
+                let mut solver =
+                    IterativeSchurSolver::with_cg_params(self.cg_max_iterations, self.cg_tolerance);
+                solver.initialize_structure(variables, variable_index_map)?;
+                self.iterative_solver = Some(solver);
+            }
+            SchurVariant::PowerSeries => {
+                let mut solver = PowerSeriesSchurSolver::with_series_params(
+                    self.power_series_order,
+                    self.cg_tolerance,
+                );
+                solver.initialize_structure(variables, variable_index_map)?;
+                self.power_series_solver = Some(solver);
+            }
+            SchurVariant::Sparse => {
+                // No delegate solver needed for sparse variant
+            }
+        }
+
+        Ok(())
     }
 
     fn solve_normal_equation(
@@ -708,6 +863,12 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
                 "Block structure not built. Call initialize_structure() first.".to_string(),
             ));
         }
+
+        // All variants (Sparse, Iterative, PowerSeries) use the same Schur complement formation
+        // They differ only in how S*δc = g_reduced is solved:
+        // - Sparse: Cholesky factorization
+        // - Iterative: PCG
+        // - PowerSeries: Cholesky (power series used only for back-substitution)
 
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
@@ -735,29 +896,23 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         // 3. Invert H_pp blocks
         let hpp_inv_blocks = Self::invert_landmark_blocks(&hpp_blocks)?;
 
-        match self.variant {
-            SchurVariant::Sparse => {
-                // 4. Compute Schur complement S
-                let s = self.compute_schur_complement(&h_cc, &h_cp, &hpp_inv_blocks)?;
+        // 4. Compute Schur complement S
+        let s = self.compute_schur_complement(&h_cc, &h_cp, &hpp_inv_blocks)?;
 
-                // 5. Compute reduced gradient
-                let g_reduced =
-                    self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
+        // 5. Compute reduced gradient
+        let g_reduced = self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
 
-                // 6. Solve S * δc = g_reduced
-                let delta_c = self.solve_with_cholesky(&s, &g_reduced)?;
+        // 6. Solve S * δc = g_reduced (Cholesky for Sparse, PCG for Iterative)
+        let delta_c = match self.variant {
+            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            _ => self.solve_with_cholesky(&s, &g_reduced)?,
+        };
 
-                // 7. Back-substitute for δp
-                let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
+        // 7. Back-substitute for δp
+        let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
 
-                // 8. Combine results
-                self.combine_updates(&delta_c, &delta_p)
-            }
-            _ => Err(LinAlgError::InvalidInput(format!(
-                "Variant {:?} not yet implemented",
-                self.variant
-            ))),
-        }
+        // 8. Combine results
+        self.combine_updates(&delta_c, &delta_p)
     }
 
     fn solve_augmented_equation(
@@ -774,6 +929,7 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             ));
         }
 
+        // All variants use the same Schur complement formation with damping
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
             .transpose()
@@ -835,29 +991,23 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         // 4. Invert damped H_pp blocks
         let hpp_inv_blocks = Self::invert_landmark_blocks(&hpp_blocks)?;
 
-        match self.variant {
-            SchurVariant::Sparse => {
-                // 5. Compute Schur complement with damped matrices
-                let s = self.compute_schur_complement(&h_cc_damped, &h_cp, &hpp_inv_blocks)?;
+        // 5. Compute Schur complement with damped matrices
+        let s = self.compute_schur_complement(&h_cc_damped, &h_cp, &hpp_inv_blocks)?;
 
-                // 6. Compute reduced gradient
-                let g_reduced =
-                    self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
+        // 6. Compute reduced gradient
+        let g_reduced = self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
 
-                // 7. Solve S * δc = g_reduced
-                let delta_c = self.solve_with_cholesky(&s, &g_reduced)?;
+        // 7. Solve S * δc = g_reduced (Cholesky for Sparse, PCG for Iterative)
+        let delta_c = match self.variant {
+            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            _ => self.solve_with_cholesky(&s, &g_reduced)?,
+        };
 
-                // 8. Back-substitute for δp
-                let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
+        // 8. Back-substitute for δp
+        let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
 
-                // 9. Combine results
-                self.combine_updates(&delta_c, &delta_p)
-            }
-            _ => Err(LinAlgError::InvalidInput(format!(
-                "Variant {:?} not yet implemented",
-                self.variant
-            ))),
-        }
+        // 9. Combine results
+        self.combine_updates(&delta_c, &delta_p)
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {

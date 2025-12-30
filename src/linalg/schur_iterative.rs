@@ -387,6 +387,81 @@ impl IterativeSchurSolver {
 
         Ok(())
     }
+
+    /// Internal solve using the already-cached Hessian and gradient.
+    /// This avoids rebuilding the Hessian which would lose the damping from solve_augmented_equation.
+    fn solve_with_cached_hessian(&mut self) -> LinAlgResult<Mat<f64>> {
+        let hessian = self
+            .hessian
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not cached".into()))?
+            .clone();
+        let gradient = self
+            .gradient
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Gradient not cached".into()))?
+            .clone();
+
+        // Extract structure info
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+        let cam_dof = structure.camera_dof;
+        let lm_dof = structure.landmark_dof;
+        let (cam_start, _cam_end) = structure.camera_col_range();
+        let (lm_start, _lm_end) = structure.landmark_col_range();
+
+        // Invert landmark blocks
+        self.invert_landmark_blocks(&hessian)?;
+
+        // Extract reduced RHS: g_c - H_cp * H_pp^{-1} * g_p
+        let mut g_reduced = Mat::<f64>::zeros(cam_dof, 1);
+        for i in 0..cam_dof {
+            g_reduced[(i, 0)] = gradient[(cam_start + i, 0)];
+        }
+
+        let mut g_lm = Mat::<f64>::zeros(lm_dof, 1);
+        for i in 0..lm_dof {
+            g_lm[(i, 0)] = gradient[(lm_start + i, 0)];
+        }
+
+        let mut temp = Mat::<f64>::zeros(lm_dof, 1);
+        self.apply_landmark_inverse(&g_lm, &mut temp)?;
+
+        let correction = self.extract_camera_landmark_mvp(&hessian, &temp)?;
+        for i in 0..cam_dof {
+            g_reduced[(i, 0)] -= correction[(i, 0)];
+        }
+
+        // Solve S*δc = g_reduced using PCG
+        let precond = self.compute_preconditioner()?;
+        let delta_cam = self.solve_pcg(&g_reduced, &precond)?;
+
+        // Back-substitute for landmarks
+        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(&hessian, &delta_cam)?;
+
+        let mut rhs_lm = Mat::<f64>::zeros(lm_dof, 1);
+        for i in 0..lm_dof {
+            rhs_lm[(i, 0)] = g_lm[(i, 0)] - hcp_t_delta_cam[(i, 0)];
+        }
+
+        let mut delta_lm = Mat::<f64>::zeros(lm_dof, 1);
+        self.apply_landmark_inverse(&rhs_lm, &mut delta_lm)?;
+
+        // Combine camera and landmark updates
+        let total_dof = cam_dof + lm_dof;
+        let mut delta = Mat::<f64>::zeros(total_dof, 1);
+
+        for i in 0..cam_dof {
+            delta[(cam_start + i, 0)] = delta_cam[(i, 0)];
+        }
+        for i in 0..lm_dof {
+            delta[(lm_start + i, 0)] = delta_lm[(i, 0)];
+        }
+
+        Ok(delta)
+    }
 }
 
 impl Default for IterativeSchurSolver {
@@ -466,79 +541,11 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
             gradient[(i, 0)] = -jtr[(i, 0)];
         }
 
-        self.hessian = Some(hessian.clone());
-        self.gradient = Some(gradient.clone());
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
 
-        // Extract structure info before mutable borrow
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-        let cam_dof = structure.camera_dof;
-        let lm_dof = structure.landmark_dof;
-        let (cam_start, _cam_end) = structure.camera_col_range();
-        let (lm_start, _lm_end) = structure.landmark_col_range();
-
-        // Invert landmark blocks
-        self.invert_landmark_blocks(&hessian)?;
-
-        // Extract reduced RHS: g_c - H_cp * H_pp^{-1} * g_p
-
-        let mut g_reduced = Mat::<f64>::zeros(cam_dof, 1);
-        for i in 0..cam_dof {
-            g_reduced[(i, 0)] = gradient[(cam_start + i, 0)];
-        }
-
-        let mut g_lm = Mat::<f64>::zeros(lm_dof, 1);
-        for i in 0..lm_dof {
-            g_lm[(i, 0)] = gradient[(lm_start + i, 0)];
-        }
-
-        let mut temp = Mat::<f64>::zeros(lm_dof, 1);
-        self.apply_landmark_inverse(&g_lm, &mut temp)?;
-
-        let correction = self.extract_camera_landmark_mvp(
-            self.hessian
-                .as_ref()
-                .ok_or_else(|| LinAlgError::InvalidInput("Hessian not initialized".into()))?,
-            &temp,
-        )?;
-        for i in 0..cam_dof {
-            g_reduced[(i, 0)] -= correction[(i, 0)];
-        }
-
-        // Solve S*δc = g_reduced using PCG
-        let precond = self.compute_preconditioner()?;
-        let delta_cam = self.solve_pcg(&g_reduced, &precond)?;
-
-        // Back-substitute for landmarks
-        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(
-            self.hessian
-                .as_ref()
-                .ok_or_else(|| LinAlgError::InvalidInput("Hessian not initialized".into()))?,
-            &delta_cam,
-        )?;
-
-        let mut rhs_lm = Mat::<f64>::zeros(lm_dof, 1);
-        for i in 0..lm_dof {
-            rhs_lm[(i, 0)] = g_lm[(i, 0)] - hcp_t_delta_cam[(i, 0)];
-        }
-
-        let mut delta_lm = Mat::<f64>::zeros(lm_dof, 1);
-        self.apply_landmark_inverse(&rhs_lm, &mut delta_lm)?;
-
-        // Combine camera and landmark updates
-        let total_dof = cam_dof + lm_dof;
-        let mut delta = Mat::<f64>::zeros(total_dof, 1);
-
-        for i in 0..cam_dof {
-            delta[(cam_start + i, 0)] = delta_cam[(i, 0)];
-        }
-        for i in 0..lm_dof {
-            delta[(lm_start + i, 0)] = delta_lm[(i, 0)];
-        }
-
-        Ok(delta)
+        // Solve using the cached Hessian
+        self.solve_with_cached_hessian()
     }
 
     fn solve_augmented_equation(
@@ -588,8 +595,9 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         self.hessian = Some(hessian);
         self.gradient = Some(gradient.clone());
 
-        // Continue with normal solve
-        self.solve_normal_equation(residuals, jacobian)
+        // Solve using the cached damped Hessian (don't call solve_normal_equation
+        // which would rebuild the Hessian without damping)
+        self.solve_with_cached_hessian()
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
