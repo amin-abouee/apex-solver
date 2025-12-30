@@ -39,14 +39,14 @@ pub use error::{ApexSolverError, ApexSolverResult};
 
 // Re-export factor types
 
-pub use factors::{BetweenFactor, Factor, PriorFactor};
+pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export new unified camera module types
 
 pub use factors::camera::{
     BundleAdjustment, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
     LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose, OptimizeParams, PinholeCamera,
-    PoseAndIntrinsics, ProjectionFactor, RadTanCamera, SelfCalibration, UcmCamera,
+    PoseAndIntrinsics, RadTanCamera, SelfCalibration, UcmCamera,
 };
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
