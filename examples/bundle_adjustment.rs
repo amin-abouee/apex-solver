@@ -221,14 +221,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+struct ProblemSetup {
+    problem: Problem,
+    initial_values: HashMap<String, (ManifoldType, DVector<f64>)>,
+    num_observations: usize,
+}
+
 fn setup_bal_problem(
     dataset: &BalDataset,
     num_points: usize,
-) -> (
-    Problem,
-    HashMap<String, (ManifoldType, DVector<f64>)>,
-    usize,
-) {
+) -> Result<ProblemSetup, Box<dyn Error>> {
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
@@ -419,7 +421,7 @@ fn setup_bal_problem(
         let point_name = format!("pt_{:05}", obs.point_index);
 
         // Use Huber loss to handle outliers robustly
-        let huber_loss = HuberLoss::new(1.0).expect("Valid Huber scale"); // Scale of 1 pixel
+        let huber_loss = HuberLoss::new(1.0)?; // Scale of 1 pixel
         problem.add_residual_block(
             &[&camera_name, &point_name],
             Box::new(factor),
@@ -435,8 +437,8 @@ fn setup_bal_problem(
     for (name, value) in old_values {
         if name.starts_with("cam_") {
             initial_values.insert(name, value);
-        } else if name.starts_with("pt_") {
-            let idx: usize = name[3..].parse().unwrap_or(usize::MAX);
+        } else if let Some(stripped) = name.strip_prefix("pt_") {
+            let idx: usize = stripped.parse().unwrap_or(usize::MAX);
             if valid_points.contains(&idx) {
                 initial_values.insert(name, value);
             }
@@ -463,7 +465,11 @@ fn setup_bal_problem(
     );
     info!("");
 
-    (problem, initial_values, total_obs)
+    Ok(ProblemSetup {
+        problem,
+        initial_values,
+        num_observations: total_obs,
+    })
 }
 
 fn run_bundle_adjustment(
@@ -473,7 +479,10 @@ fn run_bundle_adjustment(
     max_iterations: usize,
 ) -> Result<OptimizationMetrics, Box<dyn Error>> {
     // Setup problem
-    let (problem, initial_values, num_observations) = setup_bal_problem(dataset, num_points);
+    let setup = setup_bal_problem(dataset, num_points)?;
+    let problem = setup.problem;
+    let initial_values = setup.initial_values;
+    let num_observations = setup.num_observations;
 
     // Determine linear solver type and Schur variant
     let (linear_solver_type, schur_variant) = match solver_name {
