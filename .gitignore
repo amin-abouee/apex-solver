@@ -25,6 +25,7 @@ Cargo.lock
 
 .cursor/
 .vscode/
+.claude/
 profiles/
 scripts/
 output/
