@@ -110,6 +110,21 @@ target_link_libraries(bench_common PUBLIC
     Eigen3::Eigen
 )
 
+# Bundle Adjustment common utilities library (Eigen 5.0.x)
+add_library(ba_common STATIC
+    common/src/read_bal.cpp
+    common/src/ba_cost.cpp
+)
+
+target_include_directories(ba_common PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/common/include
+    ${EIGEN5_INCLUDE_DIRS}
+)
+
+target_link_libraries(ba_common PUBLIC
+    Eigen3::Eigen
+)
+
 # Ceres benchmark executable (uses Eigen 5.0.x via bench_common)
 if(BUILD_CERES_BENCHMARK)
     add_executable(ceres_benchmark ceres_benchmark.cpp)
@@ -121,6 +136,26 @@ if(BUILD_CERES_BENCHMARK)
 
     # Add compile definition to help debug
     target_compile_definitions(ceres_benchmark PRIVATE EIGEN_VERSION_STRING="${EIGEN5_VERSION}")
+
+    # Ceres Bundle Adjustment benchmark (with OpenMP)
+    add_executable(ceres_ba_benchmark ceres_ba_benchmark.cpp)
+
+    target_link_libraries(ceres_ba_benchmark PRIVATE
+        ba_common
+        Ceres::ceres
+    )
+
+    # OpenMP for multi-threading (as per paper requirements)
+    find_package(OpenMP)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(ceres_ba_benchmark PRIVATE OpenMP::OpenMP_CXX)
+        message(STATUS "Ceres BA: OpenMP enabled")
+    else()
+        message(WARNING "OpenMP not found - Ceres BA will be single-threaded")
+    endif()
+
+    # Optimization flags (-O3 -march=native as per paper)
+    target_compile_options(ceres_ba_benchmark PRIVATE -O3 -march=native)
 endif()
 
 # GTSAM benchmark executable (uses Eigen@3, builds read_g2o.cpp separately)
@@ -137,6 +172,33 @@ if(BUILD_GTSAM_BENCHMARK)
         gtsam
         Eigen3::Eigen
     )
+
+    # GTSAM Bundle Adjustment benchmark (with OneTBB)
+    add_executable(gtsam_ba_benchmark gtsam_ba_benchmark.cpp common/src/read_bal.cpp common/src/ba_cost.cpp)
+
+    # Use Eigen 3.4 include dirs explicitly
+    target_include_directories(gtsam_ba_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/common/include
+        ${EIGEN3_INCLUDE_DIRS_34}
+    )
+
+    target_link_libraries(gtsam_ba_benchmark PRIVATE
+        gtsam
+        Eigen3::Eigen
+    )
+
+    # Intel OneTBB for GTSAM (as per paper requirements)
+    find_package(TBB)
+    if(TBB_FOUND)
+        target_link_libraries(gtsam_ba_benchmark PRIVATE TBB::tbb)
+        message(STATUS "GTSAM BA: Intel OneTBB enabled")
+    else()
+        message(WARNING "Intel OneTBB not found - GTSAM BA may be single-threaded")
+        message(WARNING "To install: brew install tbb")
+    endif()
+
+    # Optimization flags (-O3 -march=native as per paper)
+    target_compile_options(gtsam_ba_benchmark PRIVATE -O3 -march=native)
 endif()
 
 # g2o benchmark executable (uses Eigen 5.0.x via bench_common)
@@ -155,6 +217,30 @@ if(BUILD_G2O_BENCHMARK)
 
     # Add compile definition to help debug
     target_compile_definitions(g2o_benchmark PRIVATE EIGEN_VERSION_STRING="${EIGEN5_VERSION}")
+
+    # g2o Bundle Adjustment benchmark (with OpenMP)
+    add_executable(g2o_ba_benchmark g2o_ba_benchmark.cpp)
+
+    target_link_libraries(g2o_ba_benchmark PRIVATE
+        ba_common
+        Eigen3::Eigen
+        g2o::core
+        g2o::stuff
+        g2o::types_sba
+        g2o::solver_eigen
+    )
+
+    # OpenMP for multi-threading (as per paper requirements)
+    find_package(OpenMP)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(g2o_ba_benchmark PRIVATE OpenMP::OpenMP_CXX)
+        message(STATUS "g2o BA: OpenMP enabled")
+    else()
+        message(WARNING "OpenMP not found - g2o BA will be single-threaded")
+    endif()
+
+    # Optimization flags (-O3 -march=native as per paper)
+    target_compile_options(g2o_ba_benchmark PRIVATE -O3 -march=native)
 endif()
 
 # Check if at least one benchmark can be built
@@ -184,13 +270,24 @@ endif()
 message(STATUS "  Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "")
 message(STATUS "Executables to build:")
+message(STATUS "  Pose Graph Benchmarks:")
 if(BUILD_CERES_BENCHMARK)
-    message(STATUS "  - ceres_benchmark")
+    message(STATUS "    - ceres_benchmark")
 endif()
 if(BUILD_GTSAM_BENCHMARK)
-    message(STATUS "  - gtsam_benchmark")
+    message(STATUS "    - gtsam_benchmark")
 endif()
 if(BUILD_G2O_BENCHMARK)
-    message(STATUS "  - g2o_benchmark")
+    message(STATUS "    - g2o_benchmark")
+endif()
+message(STATUS "  Bundle Adjustment Benchmarks:")
+if(BUILD_CERES_BENCHMARK)
+    message(STATUS "    - ceres_ba_benchmark (with OpenMP)")
+endif()
+if(BUILD_GTSAM_BENCHMARK)
+    message(STATUS "    - gtsam_ba_benchmark (with OneTBB)")
+endif()
+if(BUILD_G2O_BENCHMARK)
+    message(STATUS "    - g2o_ba_benchmark (with OpenMP)")
 endif()
 message(STATUS "")
