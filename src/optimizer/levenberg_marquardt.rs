@@ -532,6 +532,8 @@ impl Default for LevenbergMarquardtConfig {
             max_condition_number: None,
             min_relative_decrease: 1e-3,
             // Existing parameters
+            // Jacobi scaling disabled by default for Schur solvers (incompatible with block structure)
+            // Enable manually for Cholesky/QR solvers on mixed-scale problems
             use_jacobi_scaling: false,
             compute_covariances: false,
             // Schur complement parameters
@@ -1486,12 +1488,20 @@ impl LevenbergMarquardt {
                     None
                 };
 
+                // Convert to HashMap for result
+                let final_parameters: HashMap<String, VariableEnum> =
+                    state.variables.into_iter().collect();
+
+                // Notify observers that optimization is complete
+                self.observers
+                    .notify_complete(&final_parameters, iteration + 1);
+
                 return Ok(SolverResult {
                     status,
                     iterations: iteration + 1,
                     initial_cost: state.initial_cost,
                     final_cost: state.current_cost,
-                    parameters: state.variables.into_iter().collect(),
+                    parameters: final_parameters,
                     elapsed_time: elapsed,
                     convergence_info: Some(ConvergenceInfo {
                         final_gradient_norm,
