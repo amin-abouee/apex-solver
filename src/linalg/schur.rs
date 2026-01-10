@@ -145,8 +145,8 @@ impl SparseSchurComplementSolver {
             ordering: SchurOrdering::default(),
             variant: SchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
-            cg_max_iterations: 100,
-            cg_tolerance: 1e-6,
+            cg_max_iterations: 300,
+            cg_tolerance: 1e-4,
             power_series_order: 3,
             hessian: None,
             gradient: None,
@@ -292,17 +292,88 @@ impl SparseSchurComplementSolver {
         Ok(blocks)
     }
 
-    /// Invert all 3×3 blocks
+    /// Invert all 3×3 blocks with numerical robustness
+    ///
+    /// This function checks the condition number of each block and applies
+    /// additional regularization for ill-conditioned blocks to prevent
+    /// numerical instability in the Schur complement computation.
     fn invert_landmark_blocks(blocks: &[Matrix3<f64>]) -> LinAlgResult<Vec<Matrix3<f64>>> {
-        blocks
+        Self::invert_landmark_blocks_with_lambda(blocks, 0.0)
+    }
+
+    /// Invert all 3×3 blocks with numerical robustness and optional damping
+    ///
+    /// # Arguments
+    /// * `blocks` - The 3×3 H_pp diagonal blocks to invert
+    /// * `lambda` - LM damping parameter (already added to blocks if > 0)
+    ///
+    /// For severely ill-conditioned blocks, additional regularization is applied
+    /// to ensure numerical stability.
+    fn invert_landmark_blocks_with_lambda(
+        blocks: &[Matrix3<f64>],
+        lambda: f64,
+    ) -> LinAlgResult<Vec<Matrix3<f64>>> {
+        // Thresholds for numerical robustness
+        const CONDITION_THRESHOLD: f64 = 1e10; // Max acceptable condition number
+        const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12; // Below this is considered singular
+        const REGULARIZATION_SCALE: f64 = 1e-6; // Scale for additional regularization
+
+        let mut ill_conditioned_count = 0;
+        let mut regularized_count = 0;
+
+        let result: LinAlgResult<Vec<Matrix3<f64>>> = blocks
             .iter()
             .enumerate()
             .map(|(i, block)| {
-                block.try_inverse().ok_or_else(|| {
-                    LinAlgError::SingularMatrix(format!("Landmark block {} is singular", i))
-                })
+                // Compute symmetric eigenvalues for condition number check
+                // For a 3x3 SPD matrix, eigenvalues give us the condition number
+                let eigenvalues = block.symmetric_eigenvalues();
+                let min_ev = eigenvalues.min();
+                let max_ev = eigenvalues.max();
+
+                if min_ev < MIN_EIGENVALUE_THRESHOLD {
+                    // Severely ill-conditioned: add strong regularization
+                    regularized_count += 1;
+                    let reg = lambda.max(REGULARIZATION_SCALE) + max_ev * REGULARIZATION_SCALE;
+                    let regularized = block + Matrix3::identity() * reg;
+                    regularized.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!(
+                            "Landmark block {} singular even with regularization (min_ev={:.2e})",
+                            i, min_ev
+                        ))
+                    })
+                } else if max_ev / min_ev > CONDITION_THRESHOLD {
+                    // Ill-conditioned but not singular: add moderate regularization
+                    ill_conditioned_count += 1;
+                    let extra_reg = max_ev * REGULARIZATION_SCALE;
+                    let regularized = block + Matrix3::identity() * extra_reg;
+                    regularized.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!(
+                            "Landmark block {} ill-conditioned (cond={:.2e})",
+                            i,
+                            max_ev / min_ev
+                        ))
+                    })
+                } else {
+                    // Well-conditioned: standard inversion
+                    block.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!("Landmark block {} is singular", i))
+                    })
+                }
             })
-            .collect()
+            .collect();
+
+        // Log statistics about conditioning
+        if ill_conditioned_count > 0 || regularized_count > 0 {
+            debug!(
+                "Landmark block conditioning: {} ill-conditioned, {} regularized out of {}",
+                ill_conditioned_count,
+                regularized_count,
+                blocks.len()
+            );
+        }
+
+        result
     }
 
     /// Extract H_cc (camera-camera block)
@@ -396,7 +467,10 @@ impl SparseSchurComplementSolver {
         Ok((g_c, g_p))
     }
 
-    /// Solve using Cholesky
+    /// Solve S * x = b using Cholesky factorization with automatic regularization
+    ///
+    /// If the initial factorization fails (matrix not positive definite),
+    /// we add small regularization to the diagonal and retry.
     fn solve_with_cholesky(
         &self,
         a: &SparseColMat<usize, f64>,
@@ -406,11 +480,92 @@ impl SparseSchurComplementSolver {
             LinAlgError::FactorizationFailed(format!("Symbolic Cholesky failed: {:?}", e))
         })?;
 
-        let cholesky = Llt::try_new_with_symbolic(sym, a.as_ref(), Side::Lower).map_err(|e| {
-            LinAlgError::SingularMatrix(format!("Schur complement singular: {:?}", e))
-        })?;
+        // First attempt: direct factorization
+        match Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
+            Ok(cholesky) => return Ok(cholesky.solve(b)),
+            Err(e) => {
+                debug!(
+                    "Cholesky factorization failed: {:?}. Applying regularization.",
+                    e
+                );
+            }
+        }
 
-        Ok(cholesky.solve(b))
+        // Retry with exponentially increasing regularization
+        let n = a.nrows();
+        let symbolic = a.symbolic();
+
+        // Compute trace and max diagonal for scaling
+        let mut trace = 0.0;
+        let mut max_diag = 0.0f64;
+        for col in 0..n {
+            let row_indices = symbolic.row_idx_of_col_raw(col);
+            let col_values = a.val_of_col(col);
+            for (idx, &row) in row_indices.iter().enumerate() {
+                if row == col {
+                    trace += col_values[idx];
+                    max_diag = max_diag.max(col_values[idx].abs());
+                }
+            }
+        }
+
+        // Try multiple regularization levels
+        let avg_diag = trace / n as f64;
+        let base_reg = avg_diag.max(max_diag).max(1.0);
+
+        for attempt in 0..5 {
+            let reg = base_reg * 10.0f64.powi(attempt - 4); // 1e-4, 1e-3, 1e-2, 1e-1, 1.0 times base
+            debug!(
+                "Cholesky attempt {}: regularization = {:.2e}",
+                attempt + 2,
+                reg
+            );
+
+            let mut triplets = Vec::with_capacity(n * 10);
+            for col in 0..n {
+                let row_indices = symbolic.row_idx_of_col_raw(col);
+                let col_values = a.val_of_col(col);
+                for (idx, &row) in row_indices.iter().enumerate() {
+                    triplets.push(Triplet::new(row, col, col_values[idx]));
+                }
+            }
+
+            for i in 0..n {
+                triplets.push(Triplet::new(i, i, reg));
+            }
+
+            let a_reg = match SparseColMat::try_new_from_triplets(n, n, &triplets) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("Failed to create regularized matrix: {:?}", e);
+                    continue;
+                }
+            };
+
+            // Need to create a new symbolic structure for the regularized matrix
+            let sym_reg = match SymbolicLlt::try_new(a_reg.symbolic(), Side::Lower) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Symbolic factorization failed: {:?}", e);
+                    continue;
+                }
+            };
+
+            match Llt::try_new_with_symbolic(sym_reg, a_reg.as_ref(), Side::Lower) {
+                Ok(cholesky) => {
+                    debug!("Cholesky succeeded with regularization {:.2e}", reg);
+                    return Ok(cholesky.solve(b));
+                }
+                Err(e) => {
+                    debug!("Cholesky failed with reg {:.2e}: {:?}", reg, e);
+                }
+            }
+        }
+
+        Err(LinAlgError::SingularMatrix(format!(
+            "Schur complement singular after 5 regularization attempts (max reg = {:.2e})",
+            base_reg
+        )))
     }
 
     /// Solve using Preconditioned Conjugate Gradients (PCG)
@@ -692,12 +847,24 @@ impl SparseSchurComplementSolver {
             }
         }
 
+        // Symmetrize the Schur complement to ensure numerical symmetry
+        // Due to floating-point accumulation errors across 156K+ landmarks,
+        // S can become slightly asymmetric. Force symmetry: S = 0.5 * (S + S^T)
+        for i in 0..cam_size {
+            for j in (i + 1)..cam_size {
+                let avg = (s_dense[i * cam_size + j] + s_dense[j * cam_size + i]) * 0.5;
+                s_dense[i * cam_size + j] = avg;
+                s_dense[j * cam_size + i] = avg;
+            }
+        }
+
         // Convert dense matrix to sparse (filtering near-zeros)
+        // Use slightly larger threshold to avoid numerical noise issues
         let mut s_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         for col in 0..cam_size {
             for row in 0..cam_size {
                 let val = s_dense[row * cam_size + col];
-                if val.abs() > 1e-14 {
+                if val.abs() > 1e-12 {
                     s_triplets.push(Triplet::new(row, col, val));
                 }
             }
