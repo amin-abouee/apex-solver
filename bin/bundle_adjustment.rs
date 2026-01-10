@@ -53,19 +53,19 @@ struct Args {
     file: PathBuf,
 
     /// Solver: cholesky, schur, schur-iterative, schur-power-series, all
-    #[arg(short, long, value_enum, default_value = "schur")]
+    #[arg(short, long, value_enum, default_value = "schur-iterative")]
     solver: SolverChoice,
 
     /// Maximum iterations
-    #[arg(short = 'i', long, default_value = "100")]
+    #[arg(short = 'i', long, default_value = "300")]
     max_iterations: usize,
 
     /// Cost tolerance
-    #[arg(long, default_value = "1e-12")]
+    #[arg(long, default_value = "1e-6")]
     cost_tolerance: f64,
 
     /// Parameter tolerance
-    #[arg(long, default_value = "1e-14")]
+    #[arg(long, default_value = "1e-8")]
     parameter_tolerance: f64,
 
     /// Loss function: l2, huber, cauchy
@@ -83,6 +83,72 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable real-time Rerun visualization
+    /// (Requires the `visualization` feature to be enabled)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    with_visualizer: bool,
+
+    /// Show only camera poses (hide landmarks)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_cameras_only: bool,
+
+    /// Show only 3D landmarks (hide cameras)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_landmarks_only: bool,
+
+    /// Hide camera frustums from visualization
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_hide_cameras: bool,
+
+    /// Hide 3D landmark points from visualization
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_hide_landmarks: bool,
+
+    /// Hide time series plots (cost, gradient, etc.)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_hide_plots: bool,
+
+    /// Hide matrix visualizations (Hessian, gradient)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_hide_matrices: bool,
+
+    /// Camera frustum field of view in radians
+    #[arg(long, default_value = "0.5")]
+    #[cfg(feature = "visualization")]
+    vis_camera_fov: f32,
+
+    /// Camera frustum aspect ratio
+    #[arg(long, default_value = "1.0")]
+    #[cfg(feature = "visualization")]
+    vis_camera_aspect: f32,
+
+    /// Camera frustum scale factor
+    #[arg(long, default_value = "1.0")]
+    #[cfg(feature = "visualization")]
+    vis_camera_scale: f32,
+
+    /// 3D landmark point size/radius
+    #[arg(long, default_value = "0.02")]
+    #[cfg(feature = "visualization")]
+    vis_point_size: f32,
+
+    /// Save visualization to file instead of spawning viewer
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_save_path: Option<String>,
+
+    /// Show optimization progress at each iteration (default: show only initial and final)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    vis_iterative: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum, Debug, PartialEq, Eq)]
@@ -358,11 +424,14 @@ fn setup_bal_problem(
         problem.fix_variable("cam_0000", dof_idx);
     }
 
-    debug!("Problem setup complete:");
-    debug!("  Cameras: {}", dataset.cameras.len());
-    debug!("  Valid points: {}", valid_points.len());
-    debug!("  Observations: {}", total_obs);
-    debug!("  Fixed: cam_0000 (gauge fixing)");
+    info!("Problem setup complete:");
+    info!("  Cameras: {}", dataset.cameras.len());
+    info!("  Total points in file: {}", dataset.points.len());
+    info!("  Points to optimize: {}", num_points);
+    info!("  Valid points (>= 2 observations): {}", valid_points.len());
+    info!("  Filtered points: {}", num_points - valid_points.len());
+    info!("  Total observations: {}", total_obs);
+    info!("  Fixed: cam_0000 (gauge fixing)");
 
     Ok(ProblemSetup {
         problem,
@@ -430,6 +499,49 @@ fn create_solver_config(solver: SolverChoice, args: &Args) -> LevenbergMarquardt
     }
 
     config
+}
+
+/// Build visualization configuration from CLI arguments
+#[cfg(feature = "visualization")]
+fn build_visualization_config(args: &Args) -> apex_solver::observers::VisualizationConfig {
+    use apex_solver::observers::{VisualizationConfig, VisualizationMode};
+
+    // Determine visualization mode based on CLI flag
+    let mode = if args.vis_iterative {
+        VisualizationMode::Iterative
+    } else {
+        VisualizationMode::InitialAndFinal
+    };
+
+    let mut config = VisualizationConfig::for_bundle_adjustment().with_visualization_mode(mode);
+
+    // Handle mutually exclusive presets
+    if args.vis_cameras_only {
+        config = config.with_show_landmarks(false);
+    } else if args.vis_landmarks_only {
+        config = config.with_show_cameras(false);
+    }
+
+    // Individual hide flags
+    if args.vis_hide_cameras {
+        config = config.with_show_cameras(false);
+    }
+    if args.vis_hide_landmarks {
+        config = config.with_show_landmarks(false);
+    }
+    if args.vis_hide_plots {
+        config = config.with_show_plots(false);
+    }
+    if args.vis_hide_matrices {
+        config = config.with_show_matrices(false);
+    }
+
+    // Appearance settings
+    config
+        .with_camera_fov(args.vis_camera_fov)
+        .with_camera_aspect_ratio(args.vis_camera_aspect)
+        .with_camera_frustum_scale(args.vis_camera_scale)
+        .with_landmark_point_size(args.vis_point_size)
 }
 
 /// Run bundle adjustment with a specific solver
@@ -512,6 +624,49 @@ fn run_bundle_adjustment(
     // Run optimization
     let start = Instant::now();
     let mut lm_solver = LevenbergMarquardt::with_config(config);
+
+    // Add Rerun visualization if enabled
+    #[cfg(feature = "visualization")]
+    if args.with_visualizer {
+        use apex_solver::observers::RerunObserver;
+
+        let vis_config = build_visualization_config(args);
+        let save_path = args.vis_save_path.as_deref();
+
+        match RerunObserver::with_config(true, save_path, vis_config.clone()) {
+            Ok(observer) => {
+                // Log initial state before optimization
+                if let Err(e) = observer.log_initial_ba_state(&initial_values) {
+                    warn!("Failed to log initial BA state: {}", e);
+                }
+                lm_solver.add_observer(observer);
+                info!("Rerun visualization enabled (Bundle Adjustment)");
+                info!("  - Camera poses inverted (T_wc -> T_cw) for display");
+                if vis_config.show_cameras {
+                    info!(
+                        "  - Camera frustums: FOV={:.2} rad, scale={:.2}",
+                        vis_config.camera_fov, vis_config.camera_frustum_scale
+                    );
+                }
+                if vis_config.show_landmarks {
+                    info!(
+                        "  - 3D landmarks: point size={:.3}",
+                        vis_config.landmark_point_size
+                    );
+                }
+                if !vis_config.show_cameras {
+                    info!("  - Cameras hidden");
+                }
+                if !vis_config.show_landmarks {
+                    info!("  - Landmarks hidden");
+                }
+            }
+            Err(e) => {
+                warn!("Failed to create Rerun observer: {}", e);
+            }
+        }
+    }
+
     let result = lm_solver.optimize(&problem, &initial_values)?;
     let elapsed = start.elapsed();
 
