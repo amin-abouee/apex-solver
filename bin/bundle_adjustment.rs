@@ -30,17 +30,18 @@ use std::time::{Duration, Instant};
 use apex_solver::core::loss_functions::{CauchyLoss, HuberLoss, L2Loss, LossFunction};
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::{BALPinholeCamera, BundleAdjustment};
+use apex_solver::factors::camera::{BALPinholeCamera, BundleAdjustment, CameraModel, SelfCalibration};
 use apex_solver::init_logger;
-use apex_solver::io::{BalDataset, BalLoader};
+use apex_solver::io::{BalDataset, BalLoader, BalObservation};
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
-use apex_solver::manifold::ManifoldType;
+use apex_solver::manifold::{LieGroup, ManifoldType};
 use apex_solver::manifold::se3::SE3;
 use apex_solver::manifold::so3::SO3;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::core::problem::VariableEnum;
 use clap::{Parser, ValueEnum};
-use nalgebra::{DVector, Matrix2xX, Vector3};
+use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 use tracing::{debug, error, info, warn};
 
 /// Bundle adjustment optimization for BAL datasets
@@ -79,6 +80,10 @@ struct Args {
     /// Limit number of points (for testing)
     #[arg(short = 'n', long)]
     num_points: Option<usize>,
+
+    /// Optimize camera intrinsics (focal length, k1, k2) in addition to pose and landmarks
+    #[arg(long)]
+    optimize_intrinsics: bool,
 
     /// Verbose output
     #[arg(short, long)]
@@ -190,6 +195,8 @@ struct OptimizationResult {
     num_observations: usize,
     initial_cost: f64,
     final_cost: f64,
+    /// True RMSE computed from raw reprojection errors (not loss-modified)
+    true_rmse: f64,
     iterations: usize,
     time: Duration,
     status: String,
@@ -204,16 +211,88 @@ impl OptimizationResult {
             0.0
         }
     }
+}
 
-    fn rms_error(&self) -> f64 {
-        // Cost = sum of squared residuals (u^2 + v^2 per observation)
-        // RMS = sqrt(cost / num_observations)
-        if self.num_observations > 0 {
-            (self.final_cost / self.num_observations as f64).sqrt()
+/// Compute true RMSE from raw reprojection errors (not loss-modified).
+///
+/// This matches how Ceres computes RMSE: directly from residuals, ignoring
+/// any robust loss function weighting.
+fn compute_true_rmse(
+    dataset: &BalDataset,
+    optimized_values: &HashMap<String, VariableEnum>,
+    valid_observations: &[&BalObservation],
+    use_optimized_intrinsics: bool,
+) -> f64 {
+    let mut total_squared_error = 0.0;
+    let mut valid_count = 0;
+
+    for obs in valid_observations {
+        // Get optimized camera pose
+        let cam_name = format!("cam_{:04}", obs.camera_index);
+        let cam_var = match optimized_values.get(&cam_name) {
+            Some(v) => v,
+            None => continue,
+        };
+        let pose = SE3::from(cam_var.to_vector());
+
+        // Get optimized point
+        let pt_name = format!("pt_{:05}", obs.point_index);
+        let pt_var = match optimized_values.get(&pt_name) {
+            Some(v) => v,
+            None => continue,
+        };
+        let pt_vec = pt_var.to_vector();
+        let p_world = Vector3::new(pt_vec[0], pt_vec[1], pt_vec[2]);
+
+        // Get camera intrinsics (optimized or from dataset)
+        let camera = if use_optimized_intrinsics {
+            let intr_name = format!("intr_{:04}", obs.camera_index);
+            if let Some(intr_var) = optimized_values.get(&intr_name) {
+                let intr_vec = intr_var.to_vector();
+                // BALPinholeCamera intrinsics: [fx, fy, cx, cy, k1, k2]
+                BALPinholeCamera::new(
+                    intr_vec[0], // fx
+                    intr_vec[1], // fy
+                    intr_vec[2], // cx
+                    intr_vec[3], // cy
+                    intr_vec[4], // k1
+                    intr_vec[5], // k2
+                )
+            } else {
+                // Fallback to dataset intrinsics
+                let cam = &dataset.cameras[obs.camera_index];
+                BALPinholeCamera::new(cam.focal_length, cam.focal_length, 0.0, 0.0, cam.k1, cam.k2)
+            }
         } else {
-            0.0
+            let cam = &dataset.cameras[obs.camera_index];
+            BALPinholeCamera::new(cam.focal_length, cam.focal_length, 0.0, 0.0, cam.k1, cam.k2)
+        };
+
+        // Transform point to camera frame using world-to-camera convention
+        let p_cam = pose.act(&p_world, None, None);
+
+        // Check if point is valid (in front of camera)
+        if !camera.is_valid_point(&p_cam) {
+            continue;
         }
+
+        // Project point
+        let uv = match camera.project(&p_cam) {
+            Some(proj) => proj,
+            None => continue,
+        };
+
+        // Compute residual (predicted - observed)
+        let residual = Vector2::new(uv.x - obs.x, uv.y - obs.y);
+        total_squared_error += residual.norm_squared();
+        valid_count += 1;
     }
+
+    if valid_count == 0 {
+        return 0.0;
+    }
+
+    (total_squared_error / valid_count as f64).sqrt()
 }
 
 /// Problem setup containing problem, initial values, and metadata
@@ -286,6 +365,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                     num_observations: 0,
                     initial_cost: 0.0,
                     final_cost: 0.0,
+                    true_rmse: 0.0,
                     iterations: 0,
                     time: Duration::ZERO,
                     status: "FAILED".to_string(),
@@ -486,7 +566,7 @@ fn create_solver_config(solver: SolverChoice, args: &Args) -> LevenbergMarquardt
         .with_max_iterations(args.max_iterations)
         .with_cost_tolerance(args.cost_tolerance)
         .with_parameter_tolerance(args.parameter_tolerance)
-        .with_damping(1e-3);
+        .with_damping(1.0);  // Higher initial damping for BA robustness
 
     // Configure Schur-specific settings
     if matches!(
@@ -495,7 +575,8 @@ fn create_solver_config(solver: SolverChoice, args: &Args) -> LevenbergMarquardt
     ) {
         config = config
             .with_schur_variant(schur_variant)
-            .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal);
+            // Use true Schur-Jacobi preconditioner for best PCG convergence
+            .with_schur_preconditioner(SchurPreconditioner::SchurJacobi);
     }
 
     config
@@ -556,18 +637,20 @@ fn run_bundle_adjustment(
 
     // For loss function, we need to recreate the problem with loss
     let mut problem = Problem::new();
-    let initial_values = setup.initial_values;
+    let mut initial_values = setup.initial_values;
 
-    // Re-add variables by fixing first camera
+    // Re-add variables by fixing first camera pose
     for dof_idx in 0..6 {
         problem.fix_variable("cam_0000", dof_idx);
     }
 
-    // Count valid points
+    // Count valid points and determine which cameras have observations
     let mut point_obs_count: HashMap<usize, usize> = HashMap::new();
+    let mut cameras_with_obs: std::collections::HashSet<usize> = std::collections::HashSet::new();
     for obs in &dataset.observations {
         if obs.point_index < num_points {
             *point_obs_count.entry(obs.point_index).or_insert(0) += 1;
+            cameras_with_obs.insert(obs.camera_index);
         }
     }
 
@@ -577,7 +660,40 @@ fn run_bundle_adjustment(
         .map(|(&idx, _)| idx)
         .collect();
 
+    // Recompute cameras with observations after filtering valid points
+    cameras_with_obs.clear();
+    for obs in &dataset.observations {
+        if obs.point_index < num_points && valid_points.contains(&obs.point_index) {
+            cameras_with_obs.insert(obs.camera_index);
+        }
+    }
+
+    // Add intrinsic variables ONLY for cameras that have observations
+    if args.optimize_intrinsics {
+        for cam_idx in &cameras_with_obs {
+            let cam = &dataset.cameras[*cam_idx];
+            // BAL intrinsics: [focal_length, k1, k2]
+            // Note: BAL uses same fx=fy, cx=cy=0
+            let intrinsics_vec = DVector::from_vec(vec![
+                cam.focal_length,
+                cam.focal_length, // fy = fx
+                0.0,              // cx = 0
+                0.0,              // cy = 0
+                cam.k1,
+                cam.k2,
+            ]);
+            initial_values.insert(
+                format!("intr_{:04}", cam_idx),
+                (ManifoldType::RN, intrinsics_vec),
+            );
+        }
+        info!("Intrinsic optimization enabled: {} camera intrinsic blocks added (of {} total cameras)",
+              cameras_with_obs.len(), dataset.cameras.len());
+    }
+
     // Add projection factors with loss function
+    // Collect valid observations for RMSE computation later
+    let mut valid_observations: Vec<&BalObservation> = Vec::new();
     let mut total_obs = 0;
     for obs in &dataset.observations {
         if obs.point_index >= num_points || !valid_points.contains(&obs.point_index) {
@@ -589,14 +705,29 @@ fn run_bundle_adjustment(
             BALPinholeCamera::new(cam.focal_length, cam.focal_length, 0.0, 0.0, cam.k1, cam.k2);
 
         let observations = Matrix2xX::from_column_slice(&[obs.x, obs.y]);
-        let factor =
-            ProjectionFactor::<BALPinholeCamera, BundleAdjustment>::new(observations, camera);
 
         let camera_name = format!("cam_{:04}", obs.camera_index);
         let point_name = format!("pt_{:05}", obs.point_index);
-
         let loss = create_loss_function(&args.loss_function, args.loss_scale)?;
-        problem.add_residual_block(&[&camera_name, &point_name], Box::new(factor), Some(loss));
+
+        if args.optimize_intrinsics {
+            // SelfCalibration mode: optimize pose + landmarks + intrinsics
+            let factor =
+                ProjectionFactor::<BALPinholeCamera, SelfCalibration>::new(observations, camera);
+            let intrinsics_name = format!("intr_{:04}", obs.camera_index);
+            problem.add_residual_block(
+                &[&camera_name, &point_name, &intrinsics_name],
+                Box::new(factor),
+                Some(loss),
+            );
+        } else {
+            // BundleAdjustment mode: optimize pose + landmarks only
+            let factor =
+                ProjectionFactor::<BALPinholeCamera, BundleAdjustment>::new(observations, camera);
+            problem.add_residual_block(&[&camera_name, &point_name], Box::new(factor), Some(loss));
+        }
+
+        valid_observations.push(obs);
         total_obs += 1;
     }
 
@@ -693,6 +824,18 @@ fn run_bundle_adjustment(
         OptimizationStatus::Failed(msg) => ("FAILED", format!("Failed: {}", msg)),
     };
 
+    // Compute true RMSE from raw reprojection errors
+    let true_rmse = compute_true_rmse(dataset, &result.parameters, &valid_observations, args.optimize_intrinsics);
+
+    // Note: 6-param intrinsics (fx,fy,cx,cy,k1,k2) doesn't match BAL format (f,k1,k2)
+    // TODO: Create a 3-param BAL intrinsics model matching Ceres for proper intrinsic optimization
+    if args.optimize_intrinsics {
+        let rmse_with_original = compute_true_rmse(dataset, &result.parameters, &valid_observations, false);
+        warn!("Intrinsic optimization uses 6-param model; BAL only has 3 params (f,k1,k2)");
+        info!("  RMSE with optimized intrinsics: {:.3} px", true_rmse);
+        info!("  RMSE with original intrinsics: {:.3} px", rmse_with_original);
+    }
+
     Ok(OptimizationResult {
         solver_name: solver.display_name().to_string(),
         num_cameras: setup.num_cameras,
@@ -700,6 +843,7 @@ fn run_bundle_adjustment(
         num_observations: total_obs,
         initial_cost: result.initial_cost,
         final_cost: result.final_cost,
+        true_rmse,
         iterations: result.iterations,
         time: elapsed,
         status: status.to_string(),
@@ -713,7 +857,7 @@ fn print_single_result(result: &OptimizationResult) {
     info!("  Initial cost: {:.6e}", result.initial_cost);
     info!("  Final cost: {:.6e}", result.final_cost);
     info!("  Cost reduction: {:.2}%", result.cost_reduction_percent());
-    info!("  RMS reprojection error: {:.3} pixels", result.rms_error());
+    info!("  RMS reprojection error: {:.3} pixels", result.true_rmse);
     info!("  Iterations: {}", result.iterations);
     info!("  Time: {:.2?}", result.time);
     info!(
@@ -744,7 +888,7 @@ fn print_comparison_table(results: &[OptimizationResult]) {
             r.initial_cost,
             r.final_cost,
             r.cost_reduction_percent(),
-            r.rms_error(),
+            r.true_rmse,
             r.iterations,
             time_str,
             r.status
