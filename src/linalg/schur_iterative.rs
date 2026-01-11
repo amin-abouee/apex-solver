@@ -14,7 +14,7 @@
 //! Uses block-diagonal (Schur-Jacobi) preconditioner extracted from diagonal
 //! blocks of the Schur complement.
 
-use super::schur::{SchurBlockStructure, SchurOrdering};
+use super::schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
 use crate::core::problem::VariableEnum;
 use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
 use faer::Mat;
@@ -34,6 +34,9 @@ pub struct IterativeSchurSolver {
     max_cg_iterations: usize,
     cg_tolerance: f64,
 
+    // Preconditioner type
+    preconditioner_type: SchurPreconditioner,
+
     // Cached for matrix-vector products
     landmark_block_inverses: Vec<Matrix3<f64>>,
     hessian: Option<SparseColMat<usize, f64>>,
@@ -46,12 +49,14 @@ pub struct IterativeSchurSolver {
 
 impl IterativeSchurSolver {
     /// Create a new iterative Schur solver with default parameters
+    /// Default: Schur-Jacobi preconditioner, 50 max iterations, 1e-6 tolerance
     pub fn new() -> Self {
         Self {
             block_structure: None,
             ordering: SchurOrdering::default(),
-            max_cg_iterations: 300,
-            cg_tolerance: 1e-4,
+            max_cg_iterations: 50,  // Reduced from 300 - good preconditioner needs fewer
+            cg_tolerance: 1e-6,     // Tighter tolerance for better convergence
+            preconditioner_type: SchurPreconditioner::SchurJacobi,
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
@@ -67,6 +72,27 @@ impl IterativeSchurSolver {
             ordering: SchurOrdering::default(),
             max_cg_iterations: max_iterations,
             cg_tolerance: tolerance,
+            preconditioner_type: SchurPreconditioner::SchurJacobi,
+            landmark_block_inverses: Vec::new(),
+            hessian: None,
+            gradient: None,
+            workspace_lm: Vec::new(),
+            workspace_cam: Vec::new(),
+        }
+    }
+
+    /// Create solver with full configuration
+    pub fn with_config(
+        max_iterations: usize,
+        tolerance: f64,
+        preconditioner: SchurPreconditioner,
+    ) -> Self {
+        Self {
+            block_structure: None,
+            ordering: SchurOrdering::default(),
+            max_cg_iterations: max_iterations,
+            cg_tolerance: tolerance,
+            preconditioner_type: preconditioner,
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
@@ -345,11 +371,14 @@ impl IterativeSchurSolver {
         Ok(())
     }
 
-    /// Compute block-Jacobi preconditioner: inverts camera diagonal blocks
+    /// Compute block-Jacobi preconditioner: inverts camera diagonal blocks of H_cc only
     ///
     /// Instead of scalar diagonal (1/H_ii), this inverts the full camera blocks.
     /// For cameras with 6 DOF (SE3), this creates 6×6 inverse blocks.
-    /// This significantly improves PCG convergence (30-50% fewer iterations).
+    ///
+    /// NOTE: This is NOT the true Schur-Jacobi preconditioner. It only uses
+    /// diagonal blocks of H_cc, not the Schur complement S. For better convergence,
+    /// use `compute_schur_jacobi_preconditioner()` instead.
     fn compute_block_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
         let structure = self
             .block_structure
@@ -441,6 +470,125 @@ impl IterativeSchurSolver {
         }
 
         Ok(z)
+    }
+
+    /// Compute TRUE Schur-Jacobi preconditioner: diagonal blocks of the Schur complement S
+    ///
+    /// This is what Ceres Solver uses for SCHUR_JACOBI preconditioner.
+    ///
+    /// For each camera i:
+    ///   S[i,i] = H_cc[i,i] - Σ_j H_cp[i,j] * H_pp[j,j]^{-1} * H_cp[i,j]^T
+    ///
+    /// where the sum is over all landmarks j observed by camera i.
+    ///
+    /// This preconditioner captures the effect of point elimination on each camera block,
+    /// leading to much faster PCG convergence (typically 20-40 iterations vs 100+).
+    fn compute_schur_jacobi_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+
+        let hessian = self
+            .hessian
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
+
+        let symbolic = hessian.symbolic();
+
+        // Compute S[i,i] for each camera in parallel
+        // S[i,i] = H_cc[i,i] - Σ_j H_cp[i,j] * H_pp[j,j]^{-1} * H_cp[i,j]^T
+        let precond_blocks: Vec<DMatrix<f64>> = structure
+            .camera_blocks
+            .par_iter()
+            .map(|(_, cam_col_start, cam_size)| {
+                // Step 1: Extract H_cc[i,i] diagonal block
+                let mut s_ii = DMatrix::<f64>::zeros(*cam_size, *cam_size);
+
+                for local_col in 0..*cam_size {
+                    let global_col = cam_col_start + local_col;
+                    let row_indices = symbolic.row_idx_of_col_raw(global_col);
+                    let col_values = hessian.val_of_col(global_col);
+
+                    for (idx, &global_row) in row_indices.iter().enumerate() {
+                        if global_row >= *cam_col_start && global_row < cam_col_start + cam_size {
+                            let local_row = global_row - cam_col_start;
+                            s_ii[(local_row, local_col)] = col_values[idx];
+                        }
+                    }
+                }
+
+                // Step 2: For each landmark observed by this camera, subtract contribution
+
+                for (lm_block_idx, (_, lm_col_start, _)) in structure.landmark_blocks.iter().enumerate() {
+                    // Extract H_cp[i,j] block (cam_size x 3)
+                    let mut h_cp = DMatrix::<f64>::zeros(*cam_size, 3);
+                    let mut has_connection = false;
+
+                    for col_offset in 0..3 {
+                        let global_col = lm_col_start + col_offset;
+                        let row_indices = symbolic.row_idx_of_col_raw(global_col);
+                        let col_values = hessian.val_of_col(global_col);
+
+                        for (idx, &global_row) in row_indices.iter().enumerate() {
+                            if global_row >= *cam_col_start && global_row < cam_col_start + cam_size {
+                                let local_row = global_row - cam_col_start;
+                                h_cp[(local_row, col_offset)] = col_values[idx];
+                                has_connection = true;
+                            }
+                        }
+                    }
+
+                    if !has_connection {
+                        continue; // This landmark is not observed by this camera
+                    }
+
+                    // Get H_pp[j,j]^{-1} from cached inverses
+                    let hpp_inv = &self.landmark_block_inverses[lm_block_idx];
+
+                    // Compute contribution: H_cp * H_pp^{-1} * H_cp^T
+                    // First: temp = H_cp * H_pp^{-1} (cam_size x 3)
+                    let mut temp = DMatrix::<f64>::zeros(*cam_size, 3);
+                    for i in 0..*cam_size {
+                        for j in 0..3 {
+                            let mut sum = 0.0;
+                            for k in 0..3 {
+                                sum += h_cp[(i, k)] * hpp_inv[(k, j)];
+                            }
+                            temp[(i, j)] = sum;
+                        }
+                    }
+
+                    // Then: contribution = temp * H_cp^T (cam_size x cam_size)
+                    for i in 0..*cam_size {
+                        for j in 0..*cam_size {
+                            let mut sum = 0.0;
+                            for k in 0..3 {
+                                sum += temp[(i, k)] * h_cp[(j, k)];
+                            }
+                            s_ii[(i, j)] -= sum;
+                        }
+                    }
+                }
+
+                // Step 3: Invert S[i,i] with regularization if needed
+                match s_ii.clone().try_inverse() {
+                    Some(inv) => inv,
+                    None => {
+                        // Add regularization and retry
+                        let trace = s_ii.trace();
+                        let reg = (1e-6 * trace.abs() / *cam_size as f64).max(1e-8);
+                        for i in 0..*cam_size {
+                            s_ii[(i, i)] += reg;
+                        }
+                        s_ii.try_inverse()
+                            .unwrap_or_else(|| DMatrix::identity(*cam_size, *cam_size))
+                    }
+                }
+            })
+            .collect();
+
+        Ok(precond_blocks)
     }
 
     /// Legacy scalar diagonal preconditioner (kept for comparison)
@@ -738,8 +886,26 @@ impl IterativeSchurSolver {
         // Initialize workspace buffers if needed
         self.init_workspaces();
 
-        // Solve S*δc = g_reduced using PCG with block preconditioner
-        let precond_blocks = self.compute_block_preconditioner()?;
+        // Solve S*δc = g_reduced using PCG with appropriate preconditioner
+        let precond_blocks = match self.preconditioner_type {
+            SchurPreconditioner::SchurJacobi => {
+                // True Schur-Jacobi: diagonal blocks of S (Ceres-style, best convergence)
+                self.compute_schur_jacobi_preconditioner()?
+            }
+            SchurPreconditioner::BlockDiagonal => {
+                // Block diagonal of H_cc only (faster to compute, worse convergence)
+                self.compute_block_preconditioner()?
+            }
+            SchurPreconditioner::None => {
+                // Identity preconditioner (for debugging)
+                let structure = self.block_structure.as_ref().unwrap();
+                structure
+                    .camera_blocks
+                    .iter()
+                    .map(|(_, _, size)| DMatrix::identity(*size, *size))
+                    .collect()
+            }
+        };
 
         // Use workspace buffers for PCG iterations
         let mut workspace_lm = std::mem::take(&mut self.workspace_lm);
@@ -803,7 +969,7 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
             })?;
             let size = variable.get_size();
 
-            if self.ordering.should_eliminate(&manifold_type) {
+            if self.ordering.should_eliminate(&manifold_type, size) {
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
@@ -934,14 +1100,30 @@ mod tests {
     #[test]
     fn test_iterative_schur_creation() {
         let solver = IterativeSchurSolver::new();
-        assert_eq!(solver.max_cg_iterations, 100);
+        // Default: 50 max iterations, 1e-6 tolerance, Schur-Jacobi preconditioner
+        assert_eq!(solver.max_cg_iterations, 50);
         assert_eq!(solver.cg_tolerance, 1e-6);
+        assert_eq!(solver.preconditioner_type, SchurPreconditioner::SchurJacobi);
     }
 
     #[test]
     fn test_with_custom_params() {
-        let solver = IterativeSchurSolver::with_cg_params(50, 1e-8);
-        assert_eq!(solver.max_cg_iterations, 50);
+        let solver = IterativeSchurSolver::with_cg_params(100, 1e-8);
+        assert_eq!(solver.max_cg_iterations, 100);
         assert_eq!(solver.cg_tolerance, 1e-8);
+        // Should still use default Schur-Jacobi preconditioner
+        assert_eq!(solver.preconditioner_type, SchurPreconditioner::SchurJacobi);
+    }
+
+    #[test]
+    fn test_with_full_config() {
+        let solver = IterativeSchurSolver::with_config(
+            200,
+            1e-10,
+            SchurPreconditioner::BlockDiagonal,
+        );
+        assert_eq!(solver.max_cg_iterations, 200);
+        assert_eq!(solver.cg_tolerance, 1e-10);
+        assert_eq!(solver.preconditioner_type, SchurPreconditioner::BlockDiagonal);
     }
 }

@@ -36,22 +36,30 @@ pub enum SchurVariant {
 /// Preconditioner type for iterative solvers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchurPreconditioner {
+    /// No preconditioning
     None,
-    /// Block diagonal of Schur complement (Schur-Jacobi)
-    #[default]
+    /// Block diagonal of H_cc only (fast but less effective)
     BlockDiagonal,
+    /// True Schur-Jacobi: Block diagonal of S = H_cc - H_cp * H_pp^{-1} * H_cp^T
+    /// This is what Ceres uses and provides much better PCG convergence
+    #[default]
+    SchurJacobi,
 }
 
 /// Configuration for Schur complement variable ordering
 #[derive(Debug, Clone)]
 pub struct SchurOrdering {
     pub eliminate_types: Vec<ManifoldType>,
+    /// Only eliminate RN variables with this exact size (default: 3 for 3D landmarks)
+    /// This prevents intrinsic variables (6 DOF) from being eliminated
+    pub eliminate_rn_size: Option<usize>,
 }
 
 impl Default for SchurOrdering {
     fn default() -> Self {
         Self {
             eliminate_types: vec![ManifoldType::RN],
+            eliminate_rn_size: Some(3), // Only eliminate 3D landmarks, not intrinsics
         }
     }
 }
@@ -61,8 +69,23 @@ impl SchurOrdering {
         Self::default()
     }
 
-    pub fn should_eliminate(&self, manifold_type: &ManifoldType) -> bool {
-        self.eliminate_types.contains(manifold_type)
+    /// Check if a variable should be eliminated (treated as landmark)
+    ///
+    /// For RN variables, also checks the size to distinguish landmarks (3 DOF)
+    /// from intrinsics (6 DOF) which should be kept in the camera block.
+    pub fn should_eliminate(&self, manifold_type: &ManifoldType, size: usize) -> bool {
+        if !self.eliminate_types.contains(manifold_type) {
+            return false;
+        }
+
+        // For RN variables, check size constraint if specified
+        if *manifold_type == ManifoldType::RN {
+            if let Some(required_size) = self.eliminate_rn_size {
+                return size == required_size;
+            }
+        }
+
+        true
     }
 }
 
@@ -1331,8 +1354,12 @@ mod tests {
     #[test]
     fn test_schur_ordering_default() {
         let ordering = SchurOrdering::default();
-        assert!(ordering.should_eliminate(&ManifoldType::RN));
-        assert!(!ordering.should_eliminate(&ManifoldType::SE3));
+        // 3D landmarks (RN with size 3) should be eliminated
+        assert!(ordering.should_eliminate(&ManifoldType::RN, 3));
+        // Camera intrinsics (RN with size 6) should NOT be eliminated
+        assert!(!ordering.should_eliminate(&ManifoldType::RN, 6));
+        // SE3 poses should NOT be eliminated
+        assert!(!ordering.should_eliminate(&ManifoldType::SE3, 6));
     }
 
     #[test]
