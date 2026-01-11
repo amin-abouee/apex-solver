@@ -515,7 +515,7 @@ impl Default for LevenbergMarquardtConfig {
             // Note: Typically should be 1e-4 * cost_tolerance per Ceres docs
             gradient_tolerance: 1e-10,
             timeout: None,
-            damping: 1e-4,
+            damping: 1e-3,  // Increased from 1e-4 for better initial convergence on BA
             damping_min: 1e-12,
             damping_max: 1e12,
             damping_increase_factor: 10.0,
@@ -680,6 +680,37 @@ impl LevenbergMarquardtConfig {
     pub fn with_schur_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
         self.schur_preconditioner = preconditioner;
         self
+    }
+
+    /// Configuration optimized for bundle adjustment problems.
+    ///
+    /// This preset uses settings tuned for large-scale bundle adjustment:
+    /// - **Schur complement solver** with iterative PCG (memory efficient)
+    /// - **Schur-Jacobi preconditioner** (Ceres-style, best PCG convergence)
+    /// - **Higher initial damping** (1.0) for robustness on poorly-initialized BA
+    /// - **100 max iterations** (BA often needs more iterations)
+    /// - **Tighter tolerances** for accurate reconstruction
+    ///
+    /// This configuration matches Ceres Solver's recommended BA settings and
+    /// should achieve similar convergence quality.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+    ///
+    /// let config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    /// ```
+    pub fn for_bundle_adjustment() -> Self {
+        Self::default()
+            .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
+            .with_schur_variant(SchurVariant::Iterative)
+            .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
+            .with_damping(1.0)  // Higher initial damping for robustness
+            .with_max_iterations(100)
+            .with_cost_tolerance(1e-6)
+            .with_parameter_tolerance(1e-8)
+            .with_gradient_tolerance(1e-10)
     }
 
     /// Enable real-time visualization (graphical debugging).
