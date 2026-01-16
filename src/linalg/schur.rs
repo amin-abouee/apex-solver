@@ -786,21 +786,17 @@ impl SparseSchurComplementSolver {
         let mut h_cp_block: Vec<[f64; 3]> = Vec::with_capacity(32);
         let mut contrib_block: Vec<[f64; 3]> = Vec::with_capacity(32);
 
-        // Process each landmark block independently
+        // Process each landmark block independently (sequential for efficiency)
         for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
             let col_start = block_idx * 3;
 
-            // Clear vectors for this landmark
             cam_rows.clear();
             h_cp_block.clear();
 
-            // Extract camera rows that observe this landmark and their H_cp values
-            // We iterate through the 3 columns of this landmark block
             if col_start + 2 >= h_cp.ncols() {
                 continue;
             }
 
-            // Get all camera rows from the first column
             let row_indices_0 = h_cp_symbolic.row_idx_of_col_raw(col_start);
             let col_values_0 = h_cp.val_of_col(col_start);
             let row_indices_1 = h_cp_symbolic.row_idx_of_col_raw(col_start + 1);
@@ -808,8 +804,6 @@ impl SparseSchurComplementSolver {
             let row_indices_2 = h_cp_symbolic.row_idx_of_col_raw(col_start + 2);
             let col_values_2 = h_cp.val_of_col(col_start + 2);
 
-            // Build a map from camera row to values (using the fact that rows are sorted)
-            // Since CSC columns have sorted row indices, we can merge them efficiently
             let mut i0 = 0;
             let mut i1 = 0;
             let mut i2 = 0;
@@ -863,10 +857,8 @@ impl SparseSchurComplementSolver {
                 continue;
             }
 
-            // Compute H_cp * H_pp^{-1} for each camera observing this landmark
             contrib_block.clear();
             for h_cp_row in &h_cp_block {
-                // contrib = h_cp_row * hpp_inv_block (1x3 * 3x3 = 1x3)
                 let c0 = h_cp_row[0] * hpp_inv_block[(0, 0)]
                     + h_cp_row[1] * hpp_inv_block[(1, 0)]
                     + h_cp_row[2] * hpp_inv_block[(2, 0)];
@@ -879,23 +871,16 @@ impl SparseSchurComplementSolver {
                 contrib_block.push([c0, c1, c2]);
             }
 
-            // Compute outer product: (H_cp * H_pp^{-1}) * H_cp^T
-            // For each pair of cameras (i, j) observing this landmark:
-            //   S[i, j] -= contrib[i] · h_cp[j]
             let n_cams = cam_rows.len();
             for i in 0..n_cams {
                 let cam_i = cam_rows[i];
                 let contrib_i = &contrib_block[i];
-
                 for j in 0..n_cams {
                     let cam_j = cam_rows[j];
                     let h_cp_j = &h_cp_block[j];
-
-                    // Dot product
                     let dot = contrib_i[0] * h_cp_j[0]
                         + contrib_i[1] * h_cp_j[1]
                         + contrib_i[2] * h_cp_j[2];
-
                     s_dense[cam_i * cam_size + cam_j] -= dot;
                 }
             }
