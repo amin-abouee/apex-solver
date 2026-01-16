@@ -16,20 +16,20 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 // apex-solver imports
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::camera::BALPinholeCamera;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::BundleAdjustment;
 use apex_solver::init_logger;
 use apex_solver::io::BalLoader;
+// Note: LinearSolverType, SchurPreconditioner, SchurVariant are now set via for_bundle_adjustment()
+#[allow(unused_imports)]
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
-use apex_solver::manifold::{LieGroup, ManifoldType};
 use apex_solver::manifold::se3::SE3;
 use apex_solver::manifold::so3::SO3;
+use apex_solver::manifold::{LieGroup, ManifoldType};
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector3};
@@ -120,6 +120,42 @@ fn is_converged(status: &OptimizationStatus) -> bool {
     )
 }
 
+/// Compute raw reprojection RMSE without loss function (matching Ceres RMSE calculation)
+/// This computes RMSE from raw squared residuals, not the Huber-weighted cost
+fn compute_raw_rmse_from_cameras(
+    cameras: &[DVector<f64>],
+    points: &[Vector3<f64>],
+    observations: &[(usize, usize, f64, f64)], // (cam_idx, pt_idx, obs_x, obs_y)
+) -> f64 {
+    use apex_solver::factors::BALCameraFactor;
+
+    let mut total_sq_error = 0.0;
+    let mut valid_count = 0;
+
+    for &(cam_idx, pt_idx, obs_x, obs_y) in observations {
+        let camera = &cameras[cam_idx];
+        let point = &points[pt_idx];
+
+        // Create factor and compute residual without Jacobian
+        use apex_solver::factors::Factor; // Import trait for linearize method
+        let factor = BALCameraFactor::new(obs_x, obs_y);
+        let pt_vec = DVector::from_vec(vec![point.x, point.y, point.z]);
+        let (residual, _) = factor.linearize(&[camera.clone(), pt_vec], false);
+
+        // Check for invalid projections (behind camera returns 1e6 residual)
+        if residual[0].abs() < 1e5 && residual[1].abs() < 1e5 {
+            total_sq_error += residual[0] * residual[0] + residual[1] * residual[1];
+            valid_count += 1;
+        }
+    }
+
+    if valid_count == 0 {
+        return 0.0;
+    }
+
+    (total_sq_error / valid_count as f64).sqrt()
+}
+
 /// Run Apex Solver bundle adjustment benchmark
 fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     info!("\n=== Apex Solver Benchmark ===");
@@ -130,64 +166,69 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         Ok(d) => d,
         Err(e) => {
             error!("Failed to load BAL dataset: {}", e);
-            return BABenchmarkResult::failed("problem-1723-156502-pre", "apex-solver", "Rust", &e.to_string());
+            return BABenchmarkResult::failed(
+                "problem-1723-156502-pre",
+                "apex-solver",
+                "Rust",
+                &e.to_string(),
+            );
         }
     };
 
-    info!("Dataset: {} cameras, {} points, {} observations",
-          dataset.cameras.len(), dataset.points.len(), dataset.observations.len());
+    info!(
+        "Dataset: {} cameras, {} points, {} observations",
+        dataset.cameras.len(),
+        dataset.points.len(),
+        dataset.observations.len()
+    );
 
     // Setup problem
     info!("Building optimization problem...");
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
-    // Add camera poses as SE3 variables
-    // BAL convention: World-to-Camera transformation (P_cam = R * X_world + t)
+    // Add cameras as 9-parameter vectors (matching Ceres exactly)
+    // camera[0,1,2]: axis-angle rotation
+    // camera[3,4,5]: translation
+    // camera[6]: focal length
+    // camera[7]: k1 radial distortion
+    // camera[8]: k2 radial distortion
     for (i, cam) in dataset.cameras.iter().enumerate() {
         let var_name = format!("cam_{:04}", i);
 
-        let r_wc = SO3::from_scaled_axis(cam.rotation);
-        let se3_wc = SE3::from_translation_so3(cam.translation, r_wc);
+        // Pack all camera parameters into 9-element vector
+        let camera_vec = DVector::from_vec(vec![
+            cam.rotation.x,
+            cam.rotation.y,
+            cam.rotation.z,
+            cam.translation.x,
+            cam.translation.y,
+            cam.translation.z,
+            cam.focal_length,
+            cam.k1,
+            cam.k2,
+        ]);
 
-        // Store directly as world-to-camera (ProjectionFactor expects this)
-        let pose_vec: DVector<f64> = se3_wc.into();
-
-        initial_values.insert(var_name, (ManifoldType::SE3, pose_vec));
+        initial_values.insert(var_name, (ManifoldType::RN, camera_vec));
     }
 
     // Add landmarks as R3 variables
     for (j, point) in dataset.points.iter().enumerate() {
         let var_name = format!("pt_{:05}", j);
-        let point_vec = DVector::from_vec(vec![
-            point.position.x, point.position.y, point.position.z
-        ]);
+        let point_vec =
+            DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
         initial_values.insert(var_name, (ManifoldType::RN, point_vec));
     }
 
-    // Add projection factors
-    info!("Adding {} projection factors...", dataset.observations.len());
+    // Add projection factors using Ceres-compatible BALCameraFactor (9-param camera)
+    info!(
+        "Adding {} projection factors (9-param cameras, matching Ceres)...",
+        dataset.observations.len()
+    );
     for obs in &dataset.observations {
-        let cam = &dataset.cameras[obs.camera_index];
-
-        // Create BAL pinhole camera model
-        let camera_model = BALPinholeCamera::new(
-            cam.focal_length,
-            cam.focal_length,
-            0.0,  // u0 = 0 (principal point at origin)
-            0.0,  // v0 = 0
-            cam.k1,
-            cam.k2,
-        );
-
-        // Observation as 2x1 matrix
-        let observations_mat = Matrix2xX::from_column_slice(&[obs.x, obs.y]);
-
-        // Create projection factor (optimizes pose + landmark)
-        let factor = ProjectionFactor::<BALPinholeCamera, BundleAdjustment>::new(
-            observations_mat,
-            camera_model,
-        );
+        // Create Ceres-compatible factor
+        use apex_solver::factors::BALCameraFactor;
+        let factor = BALCameraFactor::new(obs.x, obs.y);
 
         let cam_name = format!("cam_{:04}", obs.camera_index);
         let pt_name = format!("pt_{:05}", obs.point_index);
@@ -197,28 +238,24 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         problem.add_residual_block(&[&cam_name, &pt_name], Box::new(factor), Some(loss));
     }
 
-    // Fix first camera (gauge freedom)
+    // Fix first camera (gauge freedom) - all 9 DOF
     info!("Fixing first camera for gauge freedom...");
-    for dof in 0..6 {
+    for dof in 0..9 {
         problem.fix_variable("cam_0000", dof);
     }
 
-    // Configure solver (schur-iterative as specified)
+    // Configure solver using BA-optimized preset (matches Ceres settings)
     info!("Configuring solver...");
-    let config = LevenbergMarquardtConfig::new()
-        .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-        .with_schur_variant(SchurVariant::Iterative)
-        .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal)
-        .with_max_iterations(100)
-        .with_cost_tolerance(1e-12)
-        .with_parameter_tolerance(1e-14);
+    let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
 
-    info!("Solver configuration:");
-    info!("  Linear solver: Schur Complement (Iterative)");
-    info!("  Preconditioner: Block Diagonal (Jacobi)");
-    info!("  Max iterations: 100");
-    info!("  Cost tolerance: 1e-12");
-    info!("  Parameter tolerance: 1e-14");
+    info!("Solver configuration (BA-optimized preset):");
+    info!("  Linear solver: {:?}", config.linear_solver_type);
+    info!("  Schur variant: {:?}", config.schur_variant);
+    info!("  Preconditioner: {:?}", config.schur_preconditioner);
+    info!("  Initial damping: {:e}", config.damping);
+    info!("  Max iterations: {}", config.max_iterations);
+    info!("  Cost tolerance: {:e}", config.cost_tolerance);
+    info!("  Parameter tolerance: {:e}", config.parameter_tolerance);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -229,7 +266,12 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
-            return BABenchmarkResult::failed("problem-1723-156502-pre", "apex-solver", "Rust", &e.to_string());
+            return BABenchmarkResult::failed(
+                "problem-1723-156502-pre",
+                "apex-solver",
+                "Rust",
+                &e.to_string(),
+            );
         }
     };
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -253,34 +295,83 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     info!("  Initial RMSE: {:.3} pixels", initial_rmse);
     info!("  Final RMSE: {:.3} pixels", final_rmse);
 
-    // Update dataset with optimized values (for potential visualization)
+    // Extract optimized cameras and points for raw RMSE calculation
+    let mut final_cameras: Vec<DVector<f64>> = dataset
+        .cameras
+        .iter()
+        .map(|cam| {
+            DVector::from_vec(vec![
+                cam.rotation.x,
+                cam.rotation.y,
+                cam.rotation.z,
+                cam.translation.x,
+                cam.translation.y,
+                cam.translation.z,
+                cam.focal_length,
+                cam.k1,
+                cam.k2,
+            ])
+        })
+        .collect();
+    let mut final_points: Vec<Vector3<f64>> = dataset.points.iter().map(|p| p.position).collect();
+
+    // Update from optimized values
     for (var_name, var_enum) in &result.parameters {
         if let Some(id_str) = var_name.strip_prefix("cam_") {
             if let Ok(id) = id_str.parse::<usize>() {
-                if id < dataset.cameras.len() {
+                if id < final_cameras.len() {
                     let val = var_enum.to_vector();
-                    // Extract SE3: [tx, ty, tz, qw, qx, qy, qz]
-                    let trans = Vector3::new(val[0], val[1], val[2]);
-                    let quat = nalgebra::UnitQuaternion::from_quaternion(
-                        nalgebra::Quaternion::new(val[3], val[4], val[5], val[6])
-                    );
-                    let se3 = SE3::from_translation_quaternion(trans, quat.into_inner());
-
-                    // Convert back to axis-angle for camera storage
-                    let axis_angle_dv: DVector<f64> = se3.rotation_so3().log(None).into();
-                    dataset.cameras[id].rotation = Vector3::new(axis_angle_dv[0], axis_angle_dv[1], axis_angle_dv[2]);
-                    dataset.cameras[id].translation = se3.translation();
+                    // 9-param camera: [aa_x, aa_y, aa_z, tx, ty, tz, f, k1, k2]
+                    if val.len() == 9 {
+                        final_cameras[id] = val;
+                    }
                 }
             }
         } else if let Some(id_str) = var_name.strip_prefix("pt_") {
             if let Ok(id) = id_str.parse::<usize>() {
-                if id < dataset.points.len() {
+                if id < final_points.len() {
                     let val = var_enum.to_vector();
-                    dataset.points[id].position = Vector3::new(val[0], val[1], val[2]);
+                    final_points[id] = Vector3::new(val[0], val[1], val[2]);
                 }
             }
         }
     }
+
+    // Build observations tuple for raw RMSE
+    let obs_tuples: Vec<(usize, usize, f64, f64)> = dataset
+        .observations
+        .iter()
+        .map(|o| (o.camera_index, o.point_index, o.x, o.y))
+        .collect();
+
+    // Compute raw RMSE (matching Ceres calculation - no loss function)
+    let initial_cameras: Vec<DVector<f64>> = dataset
+        .cameras
+        .iter()
+        .map(|cam| {
+            DVector::from_vec(vec![
+                cam.rotation.x,
+                cam.rotation.y,
+                cam.rotation.z,
+                cam.translation.x,
+                cam.translation.y,
+                cam.translation.z,
+                cam.focal_length,
+                cam.k1,
+                cam.k2,
+            ])
+        })
+        .collect();
+    let initial_points: Vec<Vector3<f64>> = dataset.points.iter().map(|p| p.position).collect();
+
+    // PERF: Skip raw RMSE computation to avoid 678K extra factor evaluations
+    // let raw_initial_rmse =
+    //     compute_raw_rmse_from_cameras(&initial_cameras, &initial_points, &obs_tuples);
+    // let raw_final_rmse = compute_raw_rmse_from_cameras(&final_cameras, &final_points, &obs_tuples);
+    //
+    // info!("\nRaw RMSE (matching Ceres, no loss):");
+    // info!("  Initial raw RMSE: {:.3} pixels", raw_initial_rmse);
+    // info!("  Final raw RMSE: {:.3} pixels", raw_final_rmse);
 
     let improvement_pct = ((initial_mse - final_mse) / initial_mse) * 100.0;
     let converged = is_converged(&result.status);
@@ -301,7 +392,11 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         final_rmse,
         elapsed_ms,
         result.iterations,
-        if converged { "CONVERGED" } else { "NOT_CONVERGED" },
+        if converged {
+            "CONVERGED"
+        } else {
+            "NOT_CONVERGED"
+        },
     )
 }
 
@@ -326,8 +421,7 @@ struct CppBAResult {
 /// Build C++ benchmarks if not already built
 fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     // Use CARGO_MANIFEST_DIR to get absolute path to project root
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let bench_dir = Path::new(&manifest_dir).join("benches/cpp_comparison");
     let build_dir = bench_dir.join("build");
 
@@ -380,7 +474,11 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
 }
 
 /// Run a C++ benchmark executable and return path to CSV output
-fn run_cpp_benchmark(exe_name: &str, build_dir: &Path, dataset_path: &str) -> Result<PathBuf, String> {
+fn run_cpp_benchmark(
+    exe_name: &str,
+    build_dir: &Path,
+    dataset_path: &str,
+) -> Result<PathBuf, String> {
     let exe_path = build_dir.join(exe_name);
 
     if !exe_path.exists() {
@@ -472,7 +570,11 @@ fn run_cpp_ba_benchmarks(dataset_path: &str) -> Vec<BABenchmarkResult> {
         .unwrap_or_else(|_| dataset_path.to_string());
 
     // List of C++ benchmark executables to run
-    let cpp_benchmarks = vec!["ceres_ba_benchmark", "gtsam_ba_benchmark", "g2o_ba_benchmark"];
+    let cpp_benchmarks = vec![
+        "ceres_ba_benchmark",
+        "gtsam_ba_benchmark",
+        "g2o_ba_benchmark",
+    ];
 
     for exe_name in cpp_benchmarks {
         match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path) {
@@ -514,13 +616,24 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
     info!("{}", "=".repeat(160));
     info!(
         "{:<25} {:<15} {:<8} {:<10} {:<10} {:<10} {:<12} {:<12} {:<8} {:<12} {:<10}",
-        "Dataset", "Solver", "Language", "Cameras", "Points", "Obs",
-        "Init RMSE", "Final RMSE", "Iters", "Time (s)", "Status"
+        "Dataset",
+        "Solver",
+        "Language",
+        "Cameras",
+        "Points",
+        "Obs",
+        "Init RMSE",
+        "Final RMSE",
+        "Iters",
+        "Time (s)",
+        "Status"
     );
     info!("{}", "-".repeat(160));
 
     for result in results {
-        let time_s = result.time_ms.parse::<f64>()
+        let time_s = result
+            .time_ms
+            .parse::<f64>()
             .map(|t| format!("{:.2}", t / 1000.0))
             .unwrap_or_else(|_| result.time_ms.clone());
 
