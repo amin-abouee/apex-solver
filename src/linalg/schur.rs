@@ -19,7 +19,7 @@ use faer::{
 };
 use nalgebra::Matrix3;
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -69,23 +69,39 @@ impl SchurOrdering {
         Self::default()
     }
 
-    /// Check if a variable should be eliminated (treated as landmark)
+    /// Check if a variable should be eliminated (treated as landmark).
     ///
-    /// For RN variables, also checks the size to distinguish landmarks (3 DOF)
-    /// from intrinsics (6 DOF) which should be kept in the camera block.
-    pub fn should_eliminate(&self, manifold_type: &ManifoldType, size: usize) -> bool {
-        if !self.eliminate_types.contains(manifold_type) {
-            return false;
-        }
-
-        // For RN variables, check size constraint if specified
-        if *manifold_type == ManifoldType::RN {
-            if let Some(required_size) = self.eliminate_rn_size {
-                return size == required_size;
+    /// Uses variable name pattern matching for robust classification:
+    /// - Variables starting with "pt_" are landmarks (must be RN with 3 DOF)
+    /// - All other variables are camera parameters (poses, intrinsics)
+    ///
+    /// This correctly handles shared intrinsics (single RN variable for all cameras)
+    /// without misclassifying them as landmarks.
+    pub fn should_eliminate(&self, name: &str, manifold_type: &ManifoldType, size: usize) -> bool {
+        // Use explicit name pattern matching
+        if name.starts_with("pt_") {
+            // This is a landmark - verify constraints
+            if !self.eliminate_types.contains(manifold_type) {
+                panic!(
+                    "Landmark {} has manifold type {:?}, expected RN",
+                    name, manifold_type
+                );
             }
-        }
 
-        true
+            // Check size constraint if specified
+            if let Some(required_size) = self.eliminate_rn_size {
+                if size != required_size {
+                    panic!(
+                        "Landmark {} has {} DOF, expected {}",
+                        name, size, required_size
+                    );
+                }
+            }
+            true
+        } else {
+            // Camera parameter (pose, intrinsic, etc.) - keep in camera block
+            false
+        }
     }
 }
 
@@ -168,8 +184,8 @@ impl SparseSchurComplementSolver {
             ordering: SchurOrdering::default(),
             variant: SchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
-            cg_max_iterations: 300,
-            cg_tolerance: 1e-4,
+            cg_max_iterations: 200, // Match Ceres (was 500)
+            cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             power_series_order: 3,
             hessian: None,
             gradient: None,
@@ -220,20 +236,24 @@ impl SparseSchurComplementSolver {
                 LinAlgError::InvalidInput(format!("Variable {} not found in index map", name))
             })?;
             let size = variable.get_size();
+            let manifold_type = match variable {
+                VariableEnum::SE3(_) => ManifoldType::SE3,
+                VariableEnum::SE2(_) => ManifoldType::SE2,
+                VariableEnum::SO3(_) => ManifoldType::SO3,
+                VariableEnum::SO2(_) => ManifoldType::SO2,
+                VariableEnum::Rn(_) => ManifoldType::RN,
+            };
 
-            // Detect cameras vs landmarks by DOF:
-            // - Landmarks (3D points): 3 DOF
-            // - Cameras (poses): 6 DOF (SE3) or other sizes
-            // In bundle adjustment, we eliminate landmarks (3 DOF variables)
-            if size == 3 {
-                // This is a landmark (3D point) - to be eliminated
+            // Use name-based classification via SchurOrdering
+            if self.ordering.should_eliminate(name, &manifold_type, size) {
+                // Landmark - to be eliminated
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
                 structure.landmark_dof += size;
                 structure.num_landmarks += 1;
             } else {
-                // This is a camera pose - kept in reduced system
+                // Camera parameter - kept in reduced system
                 structure
                     .camera_blocks
                     .push((name.clone(), start_col, size));
@@ -255,15 +275,26 @@ impl SparseSchurComplementSolver {
             ));
         }
 
-        // Debug: Log block structure
-        debug!(
-            "Schur Block Structure: {} cameras ({} DOF, cols {:?}), {} landmarks ({} DOF, cols {:?})",
+        // Log block structure for diagnostics
+        info!("Schur complement block structure:");
+        info!(
+            "  Camera blocks: {} variables, {} total DOF",
             structure.camera_blocks.len(),
-            structure.camera_dof,
-            structure.camera_col_range(),
+            structure.camera_dof
+        );
+        info!(
+            "  Landmark blocks: {} variables, {} total DOF",
             structure.landmark_blocks.len(),
-            structure.landmark_dof,
+            structure.landmark_dof
+        );
+        debug!("  Camera column range: {:?}", structure.camera_col_range());
+        debug!(
+            "  Landmark column range: {:?}",
             structure.landmark_col_range()
+        );
+        info!(
+            "  Schur complement S size: {} × {}",
+            structure.camera_dof, structure.camera_dof
         );
 
         // Validate column ranges are contiguous
@@ -1143,6 +1174,17 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         let mut hpp_blocks = self.extract_landmark_blocks(&hessian)?;
         let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
 
+        // Log matrix dimensions for diagnostics
+        debug!("Iteration matrices:");
+        debug!(
+            "  Hessian (J^T*J): {} × {}",
+            hessian.nrows(),
+            hessian.ncols()
+        );
+        debug!("  H_cc (camera): {} × {}", h_cc.nrows(), h_cc.ncols());
+        debug!("  H_cp (coupling): {} × {}", h_cp.nrows(), h_cp.ncols());
+        debug!("  H_pp blocks: {} (3×3 each)", hpp_blocks.len());
+
         // 3. Add damping to H_cc and H_pp
         let structure = self
             .block_structure
@@ -1352,14 +1394,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_schur_ordering_default() {
+    fn test_schur_ordering_shared_intrinsics() {
         let ordering = SchurOrdering::default();
-        // 3D landmarks (RN with size 3) should be eliminated
-        assert!(ordering.should_eliminate(&ManifoldType::RN, 3));
-        // Camera intrinsics (RN with size 6) should NOT be eliminated
-        assert!(!ordering.should_eliminate(&ManifoldType::RN, 6));
-        // SE3 poses should NOT be eliminated
-        assert!(!ordering.should_eliminate(&ManifoldType::SE3, 6));
+
+        // Landmarks should be eliminated
+        assert!(ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3));
+        assert!(ordering.should_eliminate("pt_12345", &ManifoldType::RN, 3));
+
+        // Camera poses should NOT be eliminated
+        assert!(!ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6));
+        assert!(!ordering.should_eliminate("cam_0042", &ManifoldType::SE3, 6));
+
+        // Shared intrinsics (RN, 3 DOF) should NOT be eliminated - KEY TEST!
+        assert!(!ordering.should_eliminate("shared_intrinsics", &ManifoldType::RN, 3));
+
+        // Per-camera intrinsics should NOT be eliminated
+        assert!(!ordering.should_eliminate("intr_0000", &ManifoldType::RN, 3));
+        assert!(!ordering.should_eliminate("intr_0042", &ManifoldType::RN, 3));
+    }
+
+    #[test]
+    fn test_schur_ordering_multiple_intrinsic_groups() {
+        let ordering = SchurOrdering::default();
+
+        // Test that multiple intrinsic groups are NOT eliminated (camera parameters)
+        assert!(
+            !ordering.should_eliminate("intr_group_0000", &ManifoldType::RN, 3),
+            "Intrinsic group 0 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0001", &ManifoldType::RN, 3),
+            "Intrinsic group 1 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0005", &ManifoldType::RN, 3),
+            "Intrinsic group 5 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0042", &ManifoldType::RN, 3),
+            "Intrinsic group 42 should be camera parameter (not eliminated)"
+        );
+
+        // Verify landmarks are still eliminated
+        assert!(
+            ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3),
+            "Landmarks should still be eliminated"
+        );
+
+        // Verify camera poses are not eliminated
+        assert!(
+            !ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6),
+            "Camera poses should not be eliminated"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has manifold type")]
+    fn test_schur_ordering_invalid_landmark_type() {
+        let ordering = SchurOrdering::default();
+        // Landmark with wrong manifold type should panic
+        ordering.should_eliminate("pt_00000", &ManifoldType::SE3, 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "has 6 DOF")]
+    fn test_schur_ordering_invalid_landmark_size() {
+        let ordering = SchurOrdering::default();
+        // Landmark with wrong size should panic
+        ordering.should_eliminate("pt_00000", &ManifoldType::RN, 6);
     }
 
     #[test]
@@ -1388,9 +1490,9 @@ mod tests {
         let solver = SparseSchurComplementSolver::new()
             .with_variant(SchurVariant::Iterative)
             .with_preconditioner(SchurPreconditioner::BlockDiagonal)
-            .with_cg_params(50, 1e-8);
+            .with_cg_params(100, 1e-8);
 
-        assert_eq!(solver.cg_max_iterations, 50);
+        assert_eq!(solver.cg_max_iterations, 100);
         assert!((solver.cg_tolerance - 1e-8).abs() < 1e-12);
     }
 

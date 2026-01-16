@@ -49,13 +49,14 @@ pub struct IterativeSchurSolver {
 
 impl IterativeSchurSolver {
     /// Create a new iterative Schur solver with default parameters
-    /// Default: Schur-Jacobi preconditioner, 50 max iterations, 1e-6 tolerance
+    /// Default: Schur-Jacobi preconditioner, 500 max iterations, 1e-9 relative tolerance
+    /// These tighter settings match Ceres Solver behavior for accurate step computation.
     pub fn new() -> Self {
         Self {
             block_structure: None,
             ordering: SchurOrdering::default(),
-            max_cg_iterations: 50,  // Reduced from 300 - good preconditioner needs fewer
-            cg_tolerance: 1e-6,     // Tighter tolerance for better convergence
+            max_cg_iterations: 500,  // More iterations for large BA problems
+            cg_tolerance: 1e-9,  // Tighter tolerance for accurate steps
             preconditioner_type: SchurPreconditioner::SchurJacobi,
             landmark_block_inverses: Vec::new(),
             hessian: None,
@@ -969,7 +970,7 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
             })?;
             let size = variable.get_size();
 
-            if self.ordering.should_eliminate(&manifold_type, size) {
+            if self.ordering.should_eliminate(name, &manifold_type, size) {
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
@@ -1100,9 +1101,9 @@ mod tests {
     #[test]
     fn test_iterative_schur_creation() {
         let solver = IterativeSchurSolver::new();
-        // Default: 50 max iterations, 1e-6 tolerance, Schur-Jacobi preconditioner
-        assert_eq!(solver.max_cg_iterations, 50);
-        assert_eq!(solver.cg_tolerance, 1e-6);
+        // Default: 500 max iterations, 1e-9 tolerance, Schur-Jacobi preconditioner
+        assert_eq!(solver.max_cg_iterations, 500);
+        assert_eq!(solver.cg_tolerance, 1e-9);
         assert_eq!(solver.preconditioner_type, SchurPreconditioner::SchurJacobi);
     }
 

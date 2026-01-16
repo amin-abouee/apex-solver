@@ -371,7 +371,7 @@ impl StructuredSparseLinearSolver for PowerSeriesSchurSolver {
             })?;
             let size = variable.get_size();
 
-            if self.ordering.should_eliminate(&manifold_type, size) {
+            if self.ordering.should_eliminate(name, &manifold_type, size) {
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
