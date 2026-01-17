@@ -200,9 +200,9 @@ where
                         i, p_cam.x, p_cam.y, p_cam.z
                     );
                 }
-                // Invalid projection: use large residual
-                residuals[i * 2] = 1e6;
-                residuals[i * 2 + 1] = 1e6;
+                // Invalid projection: use zero residual (matches Ceres convention)
+                residuals[i * 2] = 0.0;
+                residuals[i * 2 + 1] = 0.0;
                 // Jacobian rows remain zero
                 continue;
             }
@@ -214,8 +214,8 @@ where
                     if self.verbose_cheirality {
                         warn!("Projection failed for point {}", i);
                     }
-                    residuals[i * 2] = 1e6;
-                    residuals[i * 2 + 1] = 1e6;
+                    residuals[i * 2] = 0.0;
+                    residuals[i * 2 + 1] = 0.0;
                     continue;
                 }
             };
