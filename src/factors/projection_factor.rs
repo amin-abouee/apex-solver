@@ -535,8 +535,8 @@ mod tests {
 
         let (residual, _) = factor.linearize(&params, false);
 
-        // Should have large residual
-        assert!((residual[0] - 1e6).abs() < 1.0);
-        assert!((residual[1] - 1e6).abs() < 1.0);
+        // Invalid projections should have zero residual (Ceres convention)
+        assert!(residual[0].abs() < 1e-10);
+        assert!(residual[1].abs() < 1e-10);
     }
 }

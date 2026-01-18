@@ -77,7 +77,7 @@ pub mod rad_tan;
 pub mod ucm;
 
 // Re-export main types
-pub use bal_pinhole::BALPinholeCamera;
+pub use bal_pinhole::{BALPinholeCamera, BALPinholeCameraStrict};
 pub use double_sphere::DoubleSphereCamera;
 pub use eucm::EucmCamera;
 pub use fov::FovCamera;
