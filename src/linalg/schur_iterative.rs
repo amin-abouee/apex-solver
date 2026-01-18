@@ -45,6 +45,10 @@ pub struct IterativeSchurSolver {
     // Workspace buffers for Schur operator (avoid repeated allocations)
     workspace_lm: Vec<f64>,  // landmark DOF sized buffer
     workspace_cam: Vec<f64>, // camera DOF sized buffer
+
+    // Visibility index: camera_block_idx -> Vec<landmark_block_idx>
+    // This avoids O(cameras * landmarks) iteration in preconditioner computation
+    camera_to_landmark_visibility: Vec<Vec<usize>>,
 }
 
 impl IterativeSchurSolver {
@@ -55,14 +59,15 @@ impl IterativeSchurSolver {
         Self {
             block_structure: None,
             ordering: SchurOrdering::default(),
-            max_cg_iterations: 500,  // More iterations for large BA problems
-            cg_tolerance: 1e-9,  // Tighter tolerance for accurate steps
+            max_cg_iterations: 500, // More iterations for large BA problems
+            cg_tolerance: 1e-9,     // Tighter tolerance for accurate steps
             preconditioner_type: SchurPreconditioner::SchurJacobi,
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
+            camera_to_landmark_visibility: Vec::new(),
         }
     }
 
@@ -79,6 +84,7 @@ impl IterativeSchurSolver {
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
+            camera_to_landmark_visibility: Vec::new(),
         }
     }
 
@@ -99,6 +105,7 @@ impl IterativeSchurSolver {
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
+            camera_to_landmark_visibility: Vec::new(),
         }
     }
 
@@ -497,12 +504,17 @@ impl IterativeSchurSolver {
 
         let symbolic = hessian.symbolic();
 
+        // Borrow visibility index for use in parallel iterator
+        let visibility = &self.camera_to_landmark_visibility;
+
         // Compute S[i,i] for each camera in parallel
         // S[i,i] = H_cc[i,i] - Σ_j H_cp[i,j] * H_pp[j,j]^{-1} * H_cp[i,j]^T
+        // Using visibility index: only iterate over connected landmarks (O(observations) instead of O(cameras * landmarks))
         let precond_blocks: Vec<DMatrix<f64>> = structure
             .camera_blocks
             .par_iter()
-            .map(|(_, cam_col_start, cam_size)| {
+            .enumerate()
+            .map(|(cam_idx, (_, cam_col_start, cam_size))| {
                 // Step 1: Extract H_cc[i,i] diagonal block
                 let mut s_ii = DMatrix::<f64>::zeros(*cam_size, *cam_size);
 
@@ -519,12 +531,22 @@ impl IterativeSchurSolver {
                     }
                 }
 
-                // Step 2: For each landmark observed by this camera, subtract contribution
+                // Step 2: For each landmark OBSERVED by this camera (visibility-indexed)
+                // This is the key optimization: O(avg_landmarks_per_camera) instead of O(all_landmarks)
+                let visible_landmarks = if cam_idx < visibility.len() {
+                    &visibility[cam_idx]
+                } else {
+                    &Vec::new() as &Vec<usize>
+                };
 
-                for (lm_block_idx, (_, lm_col_start, _)) in structure.landmark_blocks.iter().enumerate() {
+                for &lm_block_idx in visible_landmarks {
+                    if lm_block_idx >= structure.landmark_blocks.len() {
+                        continue;
+                    }
+                    let (_, lm_col_start, _) = &structure.landmark_blocks[lm_block_idx];
+
                     // Extract H_cp[i,j] block (cam_size x 3)
                     let mut h_cp = DMatrix::<f64>::zeros(*cam_size, 3);
-                    let mut has_connection = false;
 
                     for col_offset in 0..3 {
                         let global_col = lm_col_start + col_offset;
@@ -532,16 +554,12 @@ impl IterativeSchurSolver {
                         let col_values = hessian.val_of_col(global_col);
 
                         for (idx, &global_row) in row_indices.iter().enumerate() {
-                            if global_row >= *cam_col_start && global_row < cam_col_start + cam_size {
+                            if global_row >= *cam_col_start && global_row < cam_col_start + cam_size
+                            {
                                 let local_row = global_row - cam_col_start;
                                 h_cp[(local_row, col_offset)] = col_values[idx];
-                                has_connection = true;
                             }
                         }
-                    }
-
-                    if !has_connection {
-                        continue; // This landmark is not observed by this camera
                     }
 
                     // Get H_pp[j,j]^{-1} from cached inverses
@@ -838,6 +856,59 @@ impl IterativeSchurSolver {
         Ok(())
     }
 
+    /// Build camera->landmark visibility index from H_cp structure
+    ///
+    /// This scans the Hessian to find which landmarks each camera observes,
+    /// enabling O(observations) preconditioner computation instead of O(cameras * landmarks).
+    fn build_visibility_index(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
+        let structure = self
+            .block_structure
+            .as_ref()
+            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
+
+        let symbolic = hessian.symbolic();
+        let (cam_start, cam_end) = structure.camera_col_range();
+        let num_cameras = structure.camera_blocks.len();
+
+        // Build a map from global camera row -> camera block index
+        let mut cam_row_to_block: HashMap<usize, usize> = HashMap::new();
+        for (cam_idx, (_, start_col, size)) in structure.camera_blocks.iter().enumerate() {
+            for offset in 0..*size {
+                cam_row_to_block.insert(start_col + offset, cam_idx);
+            }
+        }
+
+        // Initialize visibility: one vec per camera
+        let mut visibility: Vec<Vec<usize>> = vec![Vec::new(); num_cameras];
+
+        // Scan landmark columns to find camera connections
+        for (lm_block_idx, (_, lm_col_start, _)) in structure.landmark_blocks.iter().enumerate() {
+            // Check first column of this landmark block (all 3 columns have same row pattern)
+            let global_col = *lm_col_start;
+            if global_col >= hessian.ncols() {
+                continue;
+            }
+
+            let row_indices = symbolic.row_idx_of_col_raw(global_col);
+
+            // Find which cameras observe this landmark
+            for &row in row_indices {
+                if row >= cam_start
+                    && row < cam_end
+                    && let Some(&cam_idx) = cam_row_to_block.get(&row)
+                {
+                    // Only add if not already present (avoid duplicates)
+                    if visibility[cam_idx].last() != Some(&lm_block_idx) {
+                        visibility[cam_idx].push(lm_block_idx);
+                    }
+                }
+            }
+        }
+
+        self.camera_to_landmark_visibility = visibility;
+        Ok(())
+    }
+
     /// Internal solve using the already-cached Hessian and gradient.
     /// This avoids rebuilding the Hessian which would lose the damping from solve_augmented_equation.
     fn solve_with_cached_hessian(&mut self) -> LinAlgResult<Mat<f64>> {
@@ -864,6 +935,9 @@ impl IterativeSchurSolver {
 
         // Invert landmark blocks
         self.invert_landmark_blocks(&hessian)?;
+
+        // Build visibility index for efficient preconditioner computation
+        self.build_visibility_index(&hessian)?;
 
         // Extract reduced RHS: g_c - H_cp * H_pp^{-1} * g_p
         let mut g_reduced = Mat::<f64>::zeros(cam_dof, 1);
@@ -899,7 +973,9 @@ impl IterativeSchurSolver {
             }
             SchurPreconditioner::None => {
                 // Identity preconditioner (for debugging)
-                let structure = self.block_structure.as_ref().unwrap();
+                let structure = self.block_structure.as_ref().ok_or_else(|| {
+                    LinAlgError::InvalidInput("Block structure not initialized".into())
+                })?;
                 structure
                     .camera_blocks
                     .iter()
@@ -1118,13 +1194,13 @@ mod tests {
 
     #[test]
     fn test_with_full_config() {
-        let solver = IterativeSchurSolver::with_config(
-            200,
-            1e-10,
-            SchurPreconditioner::BlockDiagonal,
-        );
+        let solver =
+            IterativeSchurSolver::with_config(200, 1e-10, SchurPreconditioner::BlockDiagonal);
         assert_eq!(solver.max_cg_iterations, 200);
         assert_eq!(solver.cg_tolerance, 1e-10);
-        assert_eq!(solver.preconditioner_type, SchurPreconditioner::BlockDiagonal);
+        assert_eq!(
+            solver.preconditioner_type,
+            SchurPreconditioner::BlockDiagonal
+        );
     }
 }

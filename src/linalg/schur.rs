@@ -89,13 +89,16 @@ impl SchurOrdering {
             }
 
             // Check size constraint if specified
-            if let Some(required_size) = self.eliminate_rn_size {
-                if size != required_size {
-                    panic!(
-                        "Landmark {} has {} DOF, expected {}",
-                        name, size, required_size
-                    );
-                }
+            if self
+                .eliminate_rn_size
+                .is_some_and(|required_size| size != required_size)
+            {
+                panic!(
+                    "Landmark {} has {} DOF, expected {}",
+                    name,
+                    size,
+                    self.eliminate_rn_size.unwrap_or(0)
+                );
             }
             true
         } else {
@@ -1070,11 +1073,21 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             ));
         }
 
-        // All variants (Sparse, Iterative, PowerSeries) use the same Schur complement formation
+        // For PowerSeries variant, delegate to the specialized solver
+        if self.variant == SchurVariant::PowerSeries {
+            if let Some(solver) = self.power_series_solver.as_mut() {
+                return solver.solve_normal_equation(residuals, jacobians);
+            } else {
+                return Err(LinAlgError::InvalidState(
+                    "PowerSeries solver not initialized".to_string(),
+                ));
+            }
+        }
+
+        // Sparse and Iterative variants use the same Schur complement formation
         // They differ only in how S*δc = g_reduced is solved:
         // - Sparse: Cholesky factorization
         // - Iterative: PCG
-        // - PowerSeries: Cholesky (power series used only for back-substitution)
 
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
@@ -1135,7 +1148,18 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             ));
         }
 
-        // All variants use the same Schur complement formation with damping
+        // For PowerSeries variant, delegate to the specialized solver
+        if self.variant == SchurVariant::PowerSeries {
+            if let Some(solver) = self.power_series_solver.as_mut() {
+                return solver.solve_augmented_equation(residuals, jacobians, lambda);
+            } else {
+                return Err(LinAlgError::InvalidState(
+                    "PowerSeries solver not initialized".to_string(),
+                ));
+            }
+        }
+
+        // Sparse and Iterative variants use the same Schur complement formation with damping
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
             .transpose()
@@ -1228,10 +1252,22 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        // For PowerSeries variant, delegate to the specialized solver
+        if self.variant == SchurVariant::PowerSeries
+            && let Some(solver) = self.power_series_solver.as_ref()
+        {
+            return solver.get_hessian();
+        }
         self.hessian.as_ref()
     }
 
     fn get_gradient(&self) -> Option<&Mat<f64>> {
+        // For PowerSeries variant, delegate to the specialized solver
+        if self.variant == SchurVariant::PowerSeries
+            && let Some(solver) = self.power_series_solver.as_ref()
+        {
+            return solver.get_gradient();
+        }
         self.gradient.as_ref()
     }
 }
