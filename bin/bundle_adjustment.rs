@@ -48,8 +48,6 @@ enum SolverArg {
     /// Implicit Schur: iterative PCG solver (default, most efficient)
     #[default]
     Implicit,
-    /// Power series approximation of Schur complement
-    PowerSeries,
 }
 
 impl From<SolverArg> for SchurVariant {
@@ -57,7 +55,6 @@ impl From<SolverArg> for SchurVariant {
         match arg {
             SolverArg::Explicit => SchurVariant::Sparse,
             SolverArg::Implicit => SchurVariant::Iterative,
-            SolverArg::PowerSeries => SchurVariant::PowerSeries,
         }
     }
 }
