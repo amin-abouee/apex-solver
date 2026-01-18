@@ -2,7 +2,6 @@ pub mod cholesky;
 pub mod qr;
 pub mod schur;
 pub mod schur_iterative;
-pub mod schur_power_series;
 
 use crate::core::problem::VariableEnum;
 use faer::{Mat, sparse::SparseColMat};
@@ -226,7 +225,6 @@ pub use schur::{
     SparseSchurComplementSolver,
 };
 pub use schur_iterative::IterativeSchurSolver;
-pub use schur_power_series::PowerSeriesSchurSolver;
 
 /// Extract per-variable covariance blocks from the full covariance matrix.
 ///

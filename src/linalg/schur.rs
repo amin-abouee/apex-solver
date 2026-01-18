@@ -8,7 +8,6 @@
 use crate::core::problem::VariableEnum;
 use crate::linalg::{
     LinAlgError, LinAlgResult, StructuredSparseLinearSolver, schur_iterative::IterativeSchurSolver,
-    schur_power_series::PowerSeriesSchurSolver,
 };
 use crate::manifold::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -29,8 +28,6 @@ pub enum SchurVariant {
     Sparse,
     /// Iterative: Conjugate Gradients on reduced system
     Iterative,
-    /// Power Series: Approximate H_pp^{-1} with power series
-    PowerSeries,
 }
 
 /// Preconditioner type for iterative solvers
@@ -168,16 +165,12 @@ pub struct SparseSchurComplementSolver {
     cg_max_iterations: usize,
     cg_tolerance: f64,
 
-    // Power series parameters
-    power_series_order: usize,
-
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
 
-    // Delegate solvers for non-sparse variants
+    // Delegate solver for iterative variant
     iterative_solver: Option<IterativeSchurSolver>,
-    power_series_solver: Option<PowerSeriesSchurSolver>,
 }
 
 impl SparseSchurComplementSolver {
@@ -189,11 +182,9 @@ impl SparseSchurComplementSolver {
             preconditioner: SchurPreconditioner::default(),
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
-            power_series_order: 3,
             hessian: None,
             gradient: None,
             iterative_solver: None,
-            power_series_solver: None,
         }
     }
 
@@ -215,11 +206,6 @@ impl SparseSchurComplementSolver {
     pub fn with_cg_params(mut self, max_iter: usize, tol: f64) -> Self {
         self.cg_max_iterations = max_iter;
         self.cg_tolerance = tol;
-        self
-    }
-
-    pub fn with_power_series_order(mut self, order: usize) -> Self {
-        self.power_series_order = order;
         self
     }
 
@@ -1044,14 +1030,6 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
                 solver.initialize_structure(variables, variable_index_map)?;
                 self.iterative_solver = Some(solver);
             }
-            SchurVariant::PowerSeries => {
-                let mut solver = PowerSeriesSchurSolver::with_series_params(
-                    self.power_series_order,
-                    self.cg_tolerance,
-                );
-                solver.initialize_structure(variables, variable_index_map)?;
-                self.power_series_solver = Some(solver);
-            }
             SchurVariant::Sparse => {
                 // No delegate solver needed for sparse variant
             }
@@ -1071,17 +1049,6 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             return Err(LinAlgError::InvalidInput(
                 "Block structure not built. Call initialize_structure() first.".to_string(),
             ));
-        }
-
-        // For PowerSeries variant, delegate to the specialized solver
-        if self.variant == SchurVariant::PowerSeries {
-            if let Some(solver) = self.power_series_solver.as_mut() {
-                return solver.solve_normal_equation(residuals, jacobians);
-            } else {
-                return Err(LinAlgError::InvalidState(
-                    "PowerSeries solver not initialized".to_string(),
-                ));
-            }
         }
 
         // Sparse and Iterative variants use the same Schur complement formation
@@ -1146,17 +1113,6 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             return Err(LinAlgError::InvalidInput(
                 "Block structure not built. Call initialize_structure() first.".to_string(),
             ));
-        }
-
-        // For PowerSeries variant, delegate to the specialized solver
-        if self.variant == SchurVariant::PowerSeries {
-            if let Some(solver) = self.power_series_solver.as_mut() {
-                return solver.solve_augmented_equation(residuals, jacobians, lambda);
-            } else {
-                return Err(LinAlgError::InvalidState(
-                    "PowerSeries solver not initialized".to_string(),
-                ));
-            }
         }
 
         // Sparse and Iterative variants use the same Schur complement formation with damping
@@ -1252,22 +1208,10 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
-        // For PowerSeries variant, delegate to the specialized solver
-        if self.variant == SchurVariant::PowerSeries
-            && let Some(solver) = self.power_series_solver.as_ref()
-        {
-            return solver.get_hessian();
-        }
         self.hessian.as_ref()
     }
 
     fn get_gradient(&self) -> Option<&Mat<f64>> {
-        // For PowerSeries variant, delegate to the specialized solver
-        if self.variant == SchurVariant::PowerSeries
-            && let Some(solver) = self.power_series_solver.as_ref()
-        {
-            return solver.get_gradient();
-        }
         self.gradient.as_ref()
     }
 }
