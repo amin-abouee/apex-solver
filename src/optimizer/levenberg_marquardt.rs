@@ -167,7 +167,7 @@ use std::{
     fmt::{Display, Formatter},
     time::{Duration, Instant},
 };
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]
@@ -515,7 +515,7 @@ impl Default for LevenbergMarquardtConfig {
             // Note: Typically should be 1e-4 * cost_tolerance per Ceres docs
             gradient_tolerance: 1e-10,
             timeout: None,
-            damping: 1e-3,  // Increased from 1e-4 for better initial convergence on BA
+            damping: 1e-3, // Increased from 1e-4 for better initial convergence on BA
             damping_min: 1e-12,
             damping_max: 1e12,
             damping_increase_factor: 10.0,
@@ -687,9 +687,9 @@ impl LevenbergMarquardtConfig {
     /// This preset uses settings tuned for large-scale bundle adjustment:
     /// - **Schur complement solver** with iterative PCG (memory efficient)
     /// - **Schur-Jacobi preconditioner** (Ceres-style, best PCG convergence)
-    /// - **Higher initial damping** (1.0) for robustness on poorly-initialized BA
-    /// - **100 max iterations** (BA often needs more iterations)
-    /// - **Tighter tolerances** for accurate reconstruction
+    /// - **Moderate initial damping** (1e-3) - not too aggressive
+    /// - **200 max iterations** (BA often needs more iterations for full convergence)
+    /// - **Very tight tolerances** matching Ceres Solver for accurate reconstruction
     ///
     /// This configuration matches Ceres Solver's recommended BA settings and
     /// should achieve similar convergence quality.
@@ -706,11 +706,12 @@ impl LevenbergMarquardtConfig {
             .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
             .with_schur_variant(SchurVariant::Iterative)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
-            .with_damping(1.0)  // Higher initial damping for robustness
-            .with_max_iterations(100)
-            .with_cost_tolerance(1e-6)
-            .with_parameter_tolerance(1e-8)
-            .with_gradient_tolerance(1e-10)
+            .with_damping(1e-3) // Moderate initial damping (Ceres default)
+            .with_max_iterations(20) // Reduced for early stop when RMSE < 1px
+            // Match Ceres tolerances for faster convergence
+            .with_cost_tolerance(1e-6) // Ceres function_tolerance (was 1e-12)
+            .with_parameter_tolerance(1e-8) // Ceres parameter_tolerance (was 1e-14)
+            .with_gradient_tolerance(1e-10) // Relaxed (was 1e-16)
     }
 
     /// Enable real-time visualization (graphical debugging).
