@@ -35,7 +35,6 @@ path = "bin/optimize_2d_graph.rs"
 name = "bundle_adjustment"
 path = "bin/bundle_adjustment.rs"
 
-
 [[example]]
 name = "visualize_graph_file"
 required-features = ["visualization"]
@@ -76,6 +75,10 @@ serde = { version = "1.0", features = ["derive"] }
 
 [[bench]]
 name = "solver_comparison"
+harness = false
+
+[[bench]]
+name = "bundle_adjustment_comparison"
 harness = false
 
 [profile.dev]
