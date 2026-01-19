@@ -499,7 +499,10 @@ fn run_cpp_benchmark(
         // Check if timeout exceeded
         if start.elapsed() >= SOLVER_TIMEOUT {
             let timeout_mins = SOLVER_TIMEOUT.as_secs() / 60;
-            error!("{} TIMEOUT EXCEEDED ({} minutes), killing process", exe_name, timeout_mins);
+            error!(
+                "{} TIMEOUT EXCEEDED ({} minutes), killing process",
+                exe_name, timeout_mins
+            );
             let _ = child.kill();
             let _ = child.wait(); // Clean up zombie process
             return Err(format!("TIMEOUT ({} minutes)", timeout_mins));
@@ -638,12 +641,8 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
                         .collect::<Vec<_>>()
                         .join("");
 
-                    let timeout_result = BABenchmarkResult::failed(
-                        dataset_name,
-                        &solver_name,
-                        "C++",
-                        &e,
-                    );
+                    let timeout_result =
+                        BABenchmarkResult::failed(dataset_name, &solver_name, "C++", &e);
                     all_results.push(timeout_result);
                 }
             }
@@ -690,7 +689,8 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
 
         if let Some(first_result) = dataset_results.first() {
             // Print dataset info on one line (use first non-failed result for counts)
-            let info_result = dataset_results.iter()
+            let info_result = dataset_results
+                .iter()
                 .find(|r| r.num_cameras > 0)
                 .unwrap_or(first_result);
 

@@ -167,7 +167,7 @@ use std::{
     fmt::{Display, Formatter},
     time::{Duration, Instant},
 };
-use tracing::{debug};
+use tracing::debug;
 
 /// Summary statistics for the Levenberg-Marquardt optimization process.
 #[derive(Debug, Clone)]

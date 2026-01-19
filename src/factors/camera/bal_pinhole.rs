@@ -423,11 +423,7 @@ impl CameraModel for BALPinholeCameraStrict {
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
-                if r == c {
-                    -1.0
-                } else {
-                    0.0
-                }
+                if r == c { -1.0 } else { 0.0 }
             } else {
                 p_cam_skew[(r, c - 3)]
             }
