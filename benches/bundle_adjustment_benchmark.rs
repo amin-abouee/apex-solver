@@ -720,6 +720,9 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
                     result.status
                 );
             }
+
+            // Add empty line between datasets
+            info!("");
         }
     }
 
@@ -767,9 +770,14 @@ fn run_benchmark_comparison() {
         all_results.extend(cpp_results);
     }
 
-    // Save results to CSV
-    let output_path = "ba_comparison_results.csv";
-    if let Err(e) = save_csv_results(&all_results, output_path) {
+    // Save results to CSV in output/ folder
+    let output_dir = "output";
+    if let Err(e) = std::fs::create_dir_all(output_dir) {
+        warn!("Warning: Failed to create output directory: {}", e);
+    }
+
+    let output_path = format!("{}/ba_comparison_results.csv", output_dir);
+    if let Err(e) = save_csv_results(&all_results, &output_path) {
         warn!("Warning: Failed to save CSV results: {}", e);
     } else {
         info!("Results written to {}", output_path);
