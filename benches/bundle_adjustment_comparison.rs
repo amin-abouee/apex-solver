@@ -1,32 +1,56 @@
 //! Bundle Adjustment Benchmark Comparison
 //!
-//! Compares Apex Solver against Ceres, GTSAM, and g2o on BAL datasets.
+//! Compares Apex Solver (Iterative Schur) against Ceres, GTSAM, and g2o
+//! on 4 standard BAL datasets: Ladybug, Trafalgar, Dubrovnik, Venice.
 //!
 //! This benchmark tests convergence and performance on large-scale bundle adjustment
-//! problems to diagnose issues with Apex Solver's implementation.
+//! problems across multiple solvers.
 //!
-//! Metrics:
+//! ## Usage
+//!
+//! ```bash
+//! cargo bench --bench bundle_adjustment_comparison
+//! ```
+//!
+//! ## Datasets Tested
+//!
+//! - **Ladybug**: 89 cameras, 110,973 landmarks, 562,976 observations
+//! - **Trafalgar**: 257 cameras, 65,132 landmarks, 225,911 observations
+//! - **Dubrovnik**: 356 cameras, 226,730 landmarks, 1,255,268 observations
+//! - **Venice**: 1778 cameras, 993,923 landmarks, 5,001,946 observations
+//!
+//! ## Solvers Compared
+//!
+//! - **Apex (Iterative Schur)**: PCG with Schur-Jacobi preconditioner, SelfCalibration mode
+//! - **Ceres**: Google's sparse nonlinear least squares solver
+//! - **GTSAM**: Georgia Tech Smoothing and Mapping
+//! - **g2o**: General Graph Optimization
+//!
+//! ## Metrics
 //! - Initial/Final MSE (Mean Squared Error in pixels²)
 //! - Initial/Final RMSE (Root Mean Squared Error in pixels)
 //! - Runtime in seconds (optimization only, excludes parsing)
 //! - Number of iterations
 //! - Convergence status
 
+use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
+
+/// Timeout duration for each solver (5 minutes)
+const SOLVER_TIMEOUT: Duration = Duration::from_secs(300);
 
 // apex-solver imports
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::{BALPinholeCameraStrict, BundleAdjustment};
+use apex_solver::factors::camera::{BALPinholeCameraStrict, SelfCalibration};
 use apex_solver::init_logger;
 use apex_solver::io::BalLoader;
-// Note: LinearSolverType, SchurPreconditioner, SchurVariant are now set via for_bundle_adjustment()
-#[allow(unused_imports)]
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::manifold::se3::SE3;
@@ -39,6 +63,35 @@ use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 use csv::{Reader, Writer};
 use serde::{Deserialize, Serialize};
 
+/// Dataset configuration
+#[derive(Debug, Clone)]
+struct DatasetConfig {
+    name: String,
+    path: String,
+}
+
+/// Get all datasets to benchmark
+fn get_datasets() -> Vec<DatasetConfig> {
+    vec![
+        DatasetConfig {
+            name: "Ladybug".to_string(),
+            path: "data/bundle_adjustment/Ladybug/problem-1723-156502-pre.txt".to_string(),
+        },
+        DatasetConfig {
+            name: "Trafalgar".to_string(),
+            path: "data/bundle_adjustment/Trafalgar/problem-257-65132-pre.txt".to_string(),
+        },
+        DatasetConfig {
+            name: "Dubrovnik".to_string(),
+            path: "data/bundle_adjustment/Dubrovnik/problem-356-226730-pre.txt".to_string(),
+        },
+        DatasetConfig {
+            name: "Venice".to_string(),
+            path: "data/bundle_adjustment/Venice/problem-1778-993923-pre.txt".to_string(),
+        },
+    ]
+}
+
 /// Bundle Adjustment Benchmark Result
 #[derive(Debug, Clone, Serialize)]
 struct BABenchmarkResult {
@@ -48,11 +101,9 @@ struct BABenchmarkResult {
     num_cameras: usize,
     num_points: usize,
     num_observations: usize,
-    initial_mse: String,
-    final_mse: String,
     initial_rmse: String,
     final_rmse: String,
-    time_ms: String,
+    time_seconds: String,
     iterations: String,
     status: String,
 }
@@ -60,50 +111,44 @@ struct BABenchmarkResult {
 impl BABenchmarkResult {
     #[allow(clippy::too_many_arguments)]
     fn success(
-        dataset: &str,
+        dataset_name: &str,
         solver: &str,
         language: &str,
         num_cameras: usize,
         num_points: usize,
         num_observations: usize,
-        initial_mse: f64,
-        final_mse: f64,
         initial_rmse: f64,
         final_rmse: f64,
-        time_ms: f64,
+        time_seconds: f64,
         iterations: usize,
         status: &str,
     ) -> Self {
         Self {
-            dataset: dataset.to_string(),
+            dataset: dataset_name.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
             num_cameras,
             num_points,
             num_observations,
-            initial_mse: format!("{:.6e}", initial_mse),
-            final_mse: format!("{:.6e}", final_mse),
             initial_rmse: format!("{:.6}", initial_rmse),
             final_rmse: format!("{:.6}", final_rmse),
-            time_ms: format!("{:.2}", time_ms),
+            time_seconds: format!("{:.2}", time_seconds),
             iterations: iterations.to_string(),
             status: status.to_string(),
         }
     }
 
-    fn failed(dataset: &str, solver: &str, language: &str, error: &str) -> Self {
+    fn failed(dataset_name: &str, solver: &str, language: &str, error: &str) -> Self {
         Self {
-            dataset: dataset.to_string(),
+            dataset: dataset_name.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
             num_cameras: 0,
             num_points: 0,
             num_observations: 0,
-            initial_mse: "-".to_string(),
-            final_mse: "-".to_string(),
             initial_rmse: "-".to_string(),
             final_rmse: "-".to_string(),
-            time_ms: "-".to_string(),
+            time_seconds: "-".to_string(),
             iterations: format!("error: {}", error),
             status: "FAILED".to_string(),
         }
@@ -121,9 +166,47 @@ fn is_converged(status: &OptimizationStatus) -> bool {
     )
 }
 
-fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
-    info!("\n=== Apex Solver Benchmark ===");
+/// Run Apex Solver bundle adjustment with SelfCalibration + Iterative Schur
+fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
+    info!("Apex Solver Benchmark ({})", dataset_name);
 
+    // Run solver in separate thread with timeout
+    let dataset_name_owned = dataset_name.to_string();
+    let dataset_path_owned = dataset_path.to_string();
+
+    let handle =
+        thread::spawn(move || apex_solver_ba_impl(&dataset_name_owned, &dataset_path_owned));
+
+    // Wait for completion with timeout
+    let start = Instant::now();
+    loop {
+        if start.elapsed() >= SOLVER_TIMEOUT {
+            error!(
+                "Apex solver TIMEOUT EXCEEDED (5 minutes) for {}",
+                dataset_name
+            );
+            return BABenchmarkResult::failed(
+                dataset_name,
+                "Apex-Iterative",
+                "Rust",
+                "TIMEOUT EXCEEDED (5 minutes)",
+            );
+        }
+
+        // Check if thread completed
+        if handle.is_finished() {
+            return handle.join().unwrap_or_else(|_| {
+                BABenchmarkResult::failed(dataset_name, "Apex-Iterative", "Rust", "Thread panicked")
+            });
+        }
+
+        // Sleep briefly to avoid busy-waiting
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Implementation of Apex Solver BA (runs in separate thread)
+fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
     // Load dataset
     info!("Loading BAL dataset from {}", dataset_path);
     let dataset = match BalLoader::load(dataset_path) {
@@ -131,8 +214,8 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         Err(e) => {
             error!("Failed to load BAL dataset: {}", e);
             return BABenchmarkResult::failed(
-                "problem-1723-156502-pre",
-                "apex-solver",
+                dataset_name,
+                "Apex-Iterative",
                 "Rust",
                 &e.to_string(),
             );
@@ -162,7 +245,7 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         }
     }
 
-    // Add cameras as SE3 poses + intrinsic variables
+    // Add cameras as SE3 poses
     for (i, cam) in dataset.cameras.iter().enumerate() {
         // Convert axis-angle to SE3
         let axis_angle = Vector3::new(cam.rotation.x, cam.rotation.y, cam.rotation.z);
@@ -174,7 +257,7 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         let pose_name = format!("pose_{:04}", i);
         initial_values.insert(pose_name, (ManifoldType::SE3, DVector::from(pose)));
 
-        // Add intrinsics: [focal, k1, k2] (3 DOF)
+        // Add intrinsics: [focal, k1, k2] (3 DOF) for SelfCalibration mode
         let intrinsics_name = format!("intr_{:04}", i);
         let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
         initial_values.insert(intrinsics_name, (ManifoldType::RN, intrinsics_vec));
@@ -189,8 +272,9 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     }
 
     // Add projection factors using ProjectionFactor with SE3 + BALPinholeCameraStrict
+    // SelfCalibration mode: optimize pose + landmarks + intrinsics
     info!(
-        "Adding {} projection factors (SE3 + BALPinholeCameraStrict)...",
+        "Adding {} projection factors (SelfCalibration mode)...",
         dataset.observations.len()
     );
     for obs in &dataset.observations {
@@ -199,10 +283,11 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
-        let factor: ProjectionFactor<BALPinholeCameraStrict, BundleAdjustment> =
+        let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
             ProjectionFactor::new(observations, camera);
 
         let pose_name = format!("pose_{:04}", obs.camera_index);
+        let intr_name = format!("intr_{:04}", obs.camera_index);
         let pt_name = format!("pt_{:05}", obs.point_index);
 
         // Use Huber loss (matching C++ implementations)
@@ -210,7 +295,11 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
             Ok(l) => Box::new(l),
             Err(_) => continue,
         };
-        problem.add_residual_block(&[&pose_name, &pt_name], Box::new(factor), Some(loss));
+        problem.add_residual_block(
+            &[&pose_name, &pt_name, &intr_name],
+            Box::new(factor),
+            Some(loss),
+        );
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
@@ -223,11 +312,19 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
         problem.fix_variable("intr_0000", dof);
     }
 
-    // Configure solver using BA-optimized preset (matches Ceres settings)
+    // Configure solver with Iterative Schur + Schur-Jacobi preconditioner
     info!("Configuring solver...");
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    let config = LevenbergMarquardtConfig::new()
+        .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
+        .with_max_iterations(50)
+        .with_cost_tolerance(1e-6)
+        .with_parameter_tolerance(1e-8)
+        .with_damping(1e-3)
+        .with_schur_variant(SchurVariant::Iterative)
+        .with_schur_preconditioner(SchurPreconditioner::SchurJacobi);
 
-    info!("Solver configuration (BA-optimized preset):");
+    info!("Solver configuration:");
+    info!("  Mode: SelfCalibration (pose + landmarks + intrinsics)");
     info!("  Linear solver: {:?}", config.linear_solver_type);
     info!("  Schur variant: {:?}", config.schur_variant);
     info!("  Preconditioner: {:?}", config.schur_preconditioner);
@@ -239,26 +336,26 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     let mut solver = LevenbergMarquardt::with_config(config);
 
     // Optimize (timing excludes setup)
-    info!("\nStarting optimization...");
+    info!("Starting optimization...");
     let start = Instant::now();
     let result = match solver.optimize(&problem, &initial_values) {
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
             return BABenchmarkResult::failed(
-                "problem-1723-156502-pre",
-                "apex-solver",
+                dataset_name,
+                "Apex-Iterative",
                 "Rust",
                 &e.to_string(),
             );
         }
     };
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let elapsed_seconds = start.elapsed().as_secs_f64();
 
-    info!("\nOptimization completed!");
+    info!("Optimization completed!");
     info!("Status: {:?}", result.status);
     info!("Iterations: {}", result.iterations);
-    info!("Time: {:.2} seconds", elapsed_ms / 1000.0);
+    info!("Time: {:.2} seconds", elapsed_seconds);
 
     // Compute initial and final RMSE from solver costs
     // Cost = sum of squared residuals, RMSE = sqrt(cost / num_observations)
@@ -268,63 +365,11 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     let final_mse = result.final_cost / num_obs;
     let final_rmse = final_mse.sqrt();
 
-    info!("\nMetrics:");
+    info!("Metrics:");
     info!("  Initial cost: {:.6e}", result.initial_cost);
     info!("  Final cost: {:.6e}", result.final_cost);
     info!("  Initial RMSE: {:.3} pixels", initial_rmse);
     info!("  Final RMSE: {:.3} pixels", final_rmse);
-
-    // Extract optimized points (cameras not extracted since format changed)
-    let mut final_points: Vec<Vector3<f64>> = dataset.points.iter().map(|p| p.position).collect();
-
-    // Update from optimized values
-    for (var_name, var_enum) in &result.parameters {
-        if let Some(id_str) = var_name.strip_prefix("pt_")
-            && let Ok(id) = id_str.parse::<usize>()
-            && id < final_points.len()
-        {
-            let val = var_enum.to_vector();
-            if val.len() >= 3 {
-                final_points[id] = Vector3::new(val[0], val[1], val[2]);
-            }
-        }
-    }
-
-    // Build observations tuple for raw RMSE (currently unused)
-    let _obs_tuples: Vec<(usize, usize, f64, f64)> = dataset
-        .observations
-        .iter()
-        .map(|o| (o.camera_index, o.point_index, o.x, o.y))
-        .collect();
-
-    // Compute raw RMSE (matching Ceres calculation - no loss function)
-    let _initial_cameras: Vec<DVector<f64>> = dataset
-        .cameras
-        .iter()
-        .map(|cam| {
-            DVector::from_vec(vec![
-                cam.rotation.x,
-                cam.rotation.y,
-                cam.rotation.z,
-                cam.translation.x,
-                cam.translation.y,
-                cam.translation.z,
-                cam.focal_length,
-                cam.k1,
-                cam.k2,
-            ])
-        })
-        .collect();
-    let _initial_points: Vec<Vector3<f64>> = dataset.points.iter().map(|p| p.position).collect();
-
-    // PERF: Skip raw RMSE computation to avoid 678K extra factor evaluations
-    // let raw_initial_rmse =
-    //     compute_raw_rmse_from_cameras(&initial_cameras, &initial_points, &obs_tuples);
-    // let raw_final_rmse = compute_raw_rmse_from_cameras(&final_cameras, &final_points, &obs_tuples);
-    //
-    // info!("\nRaw RMSE (matching Ceres, no loss):");
-    // info!("  Initial raw RMSE: {:.3} pixels", raw_initial_rmse);
-    // info!("  Final raw RMSE: {:.3} pixels", raw_final_rmse);
 
     let improvement_pct = ((initial_mse - final_mse) / initial_mse) * 100.0;
     let converged = is_converged(&result.status);
@@ -333,17 +378,15 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
     info!("  Converged: {}", converged);
 
     BABenchmarkResult::success(
-        "problem-1723-156502-pre",
-        "apex-solver",
+        dataset_name,
+        "Apex-Iterative",
         "Rust",
         dataset.cameras.len(),
         dataset.points.len(),
         dataset.observations.len(),
-        initial_mse,
-        final_mse,
         initial_rmse,
         final_rmse,
-        elapsed_ms,
+        elapsed_seconds,
         result.iterations,
         if converged {
             "CONVERGED"
@@ -355,6 +398,7 @@ fn apex_solver_ba(dataset_path: &str) -> BABenchmarkResult {
 
 /// C++ BA benchmark result from CSV
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Fields needed for CSV deserialization
 struct CppBAResult {
     dataset: String,
     solver: String,
@@ -440,19 +484,50 @@ fn run_cpp_benchmark(
 
     info!("Running {} ...", exe_name);
 
-    let output = Command::new(&exe_path)
+    // Spawn process (non-blocking)
+    let mut child = Command::new(&exe_path)
         .arg(dataset_path)
         .current_dir(build_dir)
-        .output()
-        .map_err(|e| format!("Failed to run {}: {}", exe_name, e))?;
+        .spawn()
+        .map_err(|e| format!("Failed to spawn {}: {}", exe_name, e))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "{} failed: {}",
-            exe_name,
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    // Monitor process with timeout
+    let start = Instant::now();
+    loop {
+        // Check if timeout exceeded
+        if start.elapsed() >= SOLVER_TIMEOUT {
+            error!("{} TIMEOUT EXCEEDED (5 minutes), killing process", exe_name);
+            let _ = child.kill();
+            let _ = child.wait(); // Clean up zombie process
+            return Err(format!("{} TIMEOUT EXCEEDED (5 minutes)", exe_name));
+        }
+
+        // Check if process completed
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return Err(format!(
+                        "{} failed with exit code: {:?}",
+                        exe_name,
+                        status.code()
+                    ));
+                }
+                break; // Process completed successfully
+            }
+            Ok(None) => {
+                // Still running, sleep briefly
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                return Err(format!("Error waiting for {}: {}", exe_name, e));
+            }
+        }
     }
+
+    // Process completed, read output
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("Failed to get output from {}: {}", exe_name, e))?;
 
     // Print stdout for user visibility
     if !output.stdout.is_empty() {
@@ -471,7 +546,10 @@ fn run_cpp_benchmark(
 }
 
 /// Parse C++ benchmark CSV results
-fn parse_cpp_ba_results(csv_path: &Path) -> Result<Vec<BABenchmarkResult>, String> {
+fn parse_cpp_ba_results(
+    csv_path: &Path,
+    dataset_name: &str,
+) -> Result<Vec<BABenchmarkResult>, String> {
     let mut reader =
         Reader::from_path(csv_path).map_err(|e| format!("Failed to read CSV: {}", e))?;
 
@@ -481,18 +559,17 @@ fn parse_cpp_ba_results(csv_path: &Path) -> Result<Vec<BABenchmarkResult>, Strin
         let cpp_result: CppBAResult =
             record.map_err(|e| format!("Failed to parse CSV record: {}", e))?;
 
+        // Use the passed dataset_name instead of extracting from CSV
         let result = BABenchmarkResult::success(
-            &cpp_result.dataset,
+            dataset_name,
             &cpp_result.solver,
             &cpp_result.language,
             cpp_result.num_cameras,
             cpp_result.num_points,
             cpp_result.num_observations,
-            cpp_result.initial_mse,
-            cpp_result.final_mse,
             cpp_result.initial_rmse,
             cpp_result.final_rmse,
-            cpp_result.time_ms,
+            cpp_result.time_ms / 1000.0, // Convert ms to seconds
             cpp_result.iterations,
             &cpp_result.status,
         );
@@ -503,15 +580,15 @@ fn parse_cpp_ba_results(csv_path: &Path) -> Result<Vec<BABenchmarkResult>, Strin
     Ok(results)
 }
 
-/// Run all C++ benchmarks
-fn run_cpp_ba_benchmarks(dataset_path: &str) -> Vec<BABenchmarkResult> {
+/// Run all C++ benchmarks for a given dataset
+fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchmarkResult> {
     let mut all_results = Vec::new();
 
     // Try to build C++ benchmarks
     let build_dir = match build_cpp_benchmarks() {
         Ok(dir) => dir,
         Err(e) => {
-            warn!("C++ benchmarks unavailable: {}", e);
+            warn!("C++ benchmarks unavailable for {}: {}", dataset_name, e);
             warn!("Continuing with Rust-only benchmark...\n");
             return all_results;
         }
@@ -531,7 +608,7 @@ fn run_cpp_ba_benchmarks(dataset_path: &str) -> Vec<BABenchmarkResult> {
 
     for exe_name in cpp_benchmarks {
         match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path) {
-            Ok(csv_path) => match parse_cpp_ba_results(&csv_path) {
+            Ok(csv_path) => match parse_cpp_ba_results(&csv_path, dataset_name) {
                 Ok(results) => {
                     info!("{} completed: {} results", exe_name, results.len());
                     all_results.extend(results);
@@ -562,89 +639,126 @@ fn save_csv_results(
     Ok(())
 }
 
-/// Print comparison table
+/// Print comparison table grouped by dataset
 fn print_comparison_table(results: &[BABenchmarkResult]) {
-    info!("\n{}", "=".repeat(160));
-    info!("BUNDLE ADJUSTMENT COMPARISON");
-    info!("{}", "=".repeat(160));
-    info!(
-        "{:<25} {:<15} {:<8} {:<10} {:<10} {:<10} {:<12} {:<12} {:<8} {:<12} {:<10}",
-        "Dataset",
-        "Solver",
-        "Language",
-        "Cameras",
-        "Points",
-        "Obs",
-        "Init RMSE",
-        "Final RMSE",
-        "Iters",
-        "Time (s)",
-        "Status"
-    );
-    info!("{}", "-".repeat(160));
+    info!("{}", "=".repeat(150));
+    info!("BUNDLE ADJUSTMENT COMPARISON RESULTS");
+    info!("{}", "=".repeat(150));
 
+    // Group results by dataset
+    let mut results_by_dataset: HashMap<String, Vec<&BABenchmarkResult>> = HashMap::new();
     for result in results {
-        let time_s = result
-            .time_ms
-            .parse::<f64>()
-            .map(|t| format!("{:.2}", t / 1000.0))
-            .unwrap_or_else(|_| result.time_ms.clone());
-
-        info!(
-            "{:<25} {:<15} {:<8} {:<10} {:<10} {:<10} {:<12} {:<12} {:<8} {:<12} {:<10}",
-            result.dataset,
-            result.solver,
-            result.language,
-            result.num_cameras,
-            result.num_points,
-            result.num_observations,
-            result.initial_rmse,
-            result.final_rmse,
-            result.iterations,
-            time_s,
-            result.status
-        );
+        results_by_dataset
+            .entry(result.dataset.clone())
+            .or_default()
+            .push(result);
     }
 
-    info!("{}", "=".repeat(160));
+    // Sort dataset names
+    let mut dataset_names: Vec<String> = results_by_dataset.keys().cloned().collect();
+    dataset_names.sort();
+
+    for dataset_name in dataset_names {
+        let dataset_results = &results_by_dataset[&dataset_name];
+
+        if let Some(first_result) = dataset_results.first() {
+            info!("Dataset: {}", dataset_name);
+            info!(
+                "  Cameras: {}, Landmarks: {}, Observations: {}",
+                first_result.num_cameras, first_result.num_points, first_result.num_observations
+            );
+            info!("{}", "-".repeat(150));
+            info!(
+                "{:<20} {:<10} {:<15} {:<15} {:<15} {:<10} {:<12}",
+                "Solver", "Language", "Initial RMSE", "Final RMSE", "Time (s)", "Iters", "Status"
+            );
+            info!("{}", "-".repeat(150));
+
+            for result in dataset_results {
+                info!(
+                    "{:<20} {:<10} {:<15} {:<15} {:<15} {:<10} {:<12}",
+                    result.solver,
+                    result.language,
+                    result.initial_rmse,
+                    result.final_rmse,
+                    result.time_seconds,
+                    result.iterations,
+                    result.status
+                );
+            }
+        }
+    }
+
+    info!("{}", "=".repeat(150));
 }
 
-fn main() {
+/// Run the full benchmark comparison
+fn run_benchmark_comparison() {
     // Initialize logger
     init_logger();
 
-    info!("BUNDLE ADJUSTMENT BENCHMARK");
-    info!("Testing dataset: problem-1723-156502-pre.txt");
-    info!("Running each solver once (C++ benchmarks are already averaged)...\n");
+    info!("BUNDLE ADJUSTMENT BENCHMARK COMPARISON");
+    info!("Testing 4 datasets: Ladybug, Trafalgar, Dubrovnik, Venice");
+    info!("Apex Solver: SelfCalibration mode + Iterative Schur + Schur-Jacobi preconditioner\n");
 
-    let dataset_path = "data/bundle_adjustment/problem-1723-156502-pre.txt";
+    let datasets = get_datasets();
     let mut all_results = Vec::new();
 
-    // Phase 1: Apex Solver (Rust)
-    info!("========================================");
-    info!("PHASE 1: Apex Solver (Rust)");
-    info!("========================================");
+    // Run benchmarks for each dataset
+    for dataset in &datasets {
+        info!("{}", "=".repeat(150));
+        info!("DATASET: {}", dataset.name);
+        info!("PATH: {}", dataset.path);
+        info!("{}", "=".repeat(150));
 
-    let apex_result = apex_solver_ba(dataset_path);
-    all_results.push(apex_result);
+        // Verify dataset file exists
+        if !Path::new(&dataset.path).exists() {
+            error!("Dataset file not found: {}", dataset.path);
+            error!("Skipping {}...", dataset.name);
+            continue;
+        }
 
-    // Phase 2: C++ Solvers
-    info!("\n========================================");
-    info!("PHASE 2: C++ Solvers (Ceres, GTSAM, g2o)");
-    info!("========================================");
+        // Phase 1: Apex Solver (Rust)
+        info!("Phase 1: Apex Solver");
+        let apex_result = apex_solver_ba(&dataset.name, &dataset.path);
+        all_results.push(apex_result);
 
-    let cpp_results = run_cpp_ba_benchmarks(dataset_path);
-    all_results.extend(cpp_results);
-
-    // Save and display results
-    let csv_path = "ba_benchmark_results.csv";
-    if let Err(e) = save_csv_results(&all_results, csv_path) {
-        warn!("Warning: Failed to save CSV results: {}", e);
-    } else {
-        info!("\nResults written to {}", csv_path);
+        // Phase 2: C++ Solvers
+        info!("Phase 2: C++ Solvers (Ceres, GTSAM, g2o)");
+        let cpp_results = run_cpp_ba_benchmarks(&dataset.name, &dataset.path);
+        all_results.extend(cpp_results);
     }
 
+    // Save results to CSV
+    let output_path = "ba_comparison_results.csv";
+    if let Err(e) = save_csv_results(&all_results, output_path) {
+        warn!("Warning: Failed to save CSV results: {}", e);
+    } else {
+        info!("Results written to {}", output_path);
+    }
+
+    // Print comparison table
     print_comparison_table(&all_results);
 
     info!("\nBenchmark completed!");
 }
+
+/// Criterion benchmark function
+fn criterion_benchmark(c: &mut Criterion) {
+    let mut group = c.benchmark_group("bundle_adjustment_comparison");
+
+    // Configure to run with sample_size(10)
+    group.sample_size(10);
+
+    // Benchmark all datasets
+    group.bench_function("all_datasets", |b| {
+        b.iter(|| {
+            run_benchmark_comparison();
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, criterion_benchmark);
+criterion_main!(benches);
