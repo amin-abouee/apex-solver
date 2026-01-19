@@ -1,9 +1,9 @@
 #include <ceres/ceres.h>
 #include <Eigen/Core>
 
-#include "common/include/benchmark_utils.h"
-#include "common/include/read_g2o.h"
-#include "common/include/unified_cost.h"
+#include "../../common/include/benchmark_utils.h"
+#include "../../common/include/read_g2o.h"
+#include "../../common/include/unified_cost.h"
 
 // SE2 residual (3 DOF: x, y, theta)
 class PoseGraph2DErrorTerm {
@@ -369,19 +369,19 @@ int main(int argc, char** argv) {
     std::vector<benchmark_utils::BenchmarkResult> results;
 
     // SE3 datasets
-    results.push_back(BenchmarkSE3("sphere2500", "../../../data/sphere2500.g2o"));
-    results.push_back(BenchmarkSE3("parking-garage", "../../../data/parking-garage.g2o"));
-    results.push_back(BenchmarkSE3("torus3D", "../../../data/torus3D.g2o"));
-    results.push_back(BenchmarkSE3("cubicle", "../../../data/cubicle.g2o"));
+    results.push_back(BenchmarkSE3("sphere2500", "../../../data/odometry/sphere2500.g2o"));
+    results.push_back(BenchmarkSE3("parking-garage", "../../../data/odometry/parking-garage.g2o"));
+    results.push_back(BenchmarkSE3("torus3D", "../../../data/odometry/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../data/odometry/cubicle.g2o"));
 
     // SE2 datasets
-    results.push_back(BenchmarkSE2("intel", "../../../data/intel.g2o"));
-    results.push_back(BenchmarkSE2("mit", "../../../data/mit.g2o"));
-    results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
-    results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
+    results.push_back(BenchmarkSE2("intel", "../../../data/odometry/intel.g2o"));
+    results.push_back(BenchmarkSE2("mit", "../../../data/odometry/mit.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../data/odometry/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../data/odometry/M3500.g2o"));
 
     // Write to CSV
-    std::string output_file = "ceres_benchmark_results.csv";
+    std::string output_file = "ceres_odometry_benchmark_results.csv";
     benchmark_utils::WriteResultsToCSV(output_file, results);
 
     return 0;

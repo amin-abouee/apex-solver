@@ -1,4 +1,4 @@
-//! Comprehensive solver comparison benchmark for apex-solver, factrs, tiny-solver, and C++ solvers
+//! Comprehensive odometry pose benchmark for apex-solver, factrs, tiny-solver, and C++ solvers
 //!
 //! This benchmark compares three Rust nonlinear optimization libraries (apex-solver, factrs, tiny-solver)
 //! and two C++ libraries (g2o, GTSAM) on standard pose graph optimization datasets (both SE2 and SE3).
@@ -294,42 +294,42 @@ struct Dataset {
 const DATASETS: &[Dataset] = &[
     Dataset {
         name: "M3500",
-        file: "data/M3500.g2o",
+        file: "data/odometry/M3500.g2o",
         is_3d: false,
     },
     Dataset {
         name: "mit",
-        file: "data/mit.g2o",
+        file: "data/odometry/mit.g2o",
         is_3d: false,
     },
     Dataset {
         name: "intel",
-        file: "data/intel.g2o",
+        file: "data/odometry/intel.g2o",
         is_3d: false,
     },
     Dataset {
         name: "ring",
-        file: "data/ring.g2o",
+        file: "data/odometry/ring.g2o",
         is_3d: false,
     },
     Dataset {
         name: "sphere2500",
-        file: "data/sphere2500.g2o",
+        file: "data/odometry/sphere2500.g2o",
         is_3d: true,
     },
     Dataset {
         name: "parking-garage",
-        file: "data/parking-garage.g2o",
+        file: "data/odometry/parking-garage.g2o",
         is_3d: true,
     },
     Dataset {
         name: "torus3D",
-        file: "data/torus3D.g2o",
+        file: "data/odometry/torus3D.g2o",
         is_3d: true,
     },
     Dataset {
         name: "cubicle",
-        file: "data/cubicle.g2o",
+        file: "data/odometry/cubicle.g2o",
         is_3d: true,
     },
 ];
@@ -805,7 +805,7 @@ struct CppBenchmarkResult {
     language: String,
     vertices: usize,
     edges: usize,
-    init_cost: f64,
+    initial_cost: f64,
     final_cost: f64,
     improvement_pct: f64,
     iterations: usize,
@@ -819,8 +819,8 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let build_dir = bench_dir.join("build");
 
     // Check if executables already exist
-    let g2o_exe = build_dir.join("g2o_benchmark");
-    let gtsam_exe = build_dir.join("gtsam_benchmark");
+    let g2o_exe = build_dir.join("g2o_odometry_benchmark");
+    let gtsam_exe = build_dir.join("gtsam_odometry_benchmark");
 
     if g2o_exe.exists() && gtsam_exe.exists() {
         info!("C++ benchmarks already built");
@@ -932,7 +932,7 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
             cpp_result.time_ms,
             converged,
             Some(cpp_result.iterations),
-            cpp_result.init_cost,
+            cpp_result.initial_cost,
             cpp_result.final_cost,
         );
 
@@ -956,8 +956,12 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
         }
     };
 
-    // List of C++ benchmark executables to run
-    let cpp_benchmarks = vec!["ceres_benchmark", "g2o_benchmark", "gtsam_benchmark"];
+    // List of C++ benchmark executables to run (odometry benchmarks)
+    let cpp_benchmarks = vec![
+        "ceres_odometry_benchmark",
+        "g2o_odometry_benchmark",
+        "gtsam_odometry_benchmark",
+    ];
 
     for exe_name in cpp_benchmarks {
         match run_cpp_benchmark(exe_name, &build_dir) {
@@ -1066,8 +1070,8 @@ fn main() {
     let cpp_results = run_cpp_benchmarks();
     all_results.extend(cpp_results);
 
-    // Write results to CSV
-    let csv_path = "benchmark_results.csv";
+    // Write results to CSV in output folder
+    let csv_path = "output/odometry_pose_benchmark_results.csv";
     if let Err(e) = save_csv_results(&all_results, csv_path) {
         warn!("Warning: Failed to save CSV results: {}", e);
     } else {

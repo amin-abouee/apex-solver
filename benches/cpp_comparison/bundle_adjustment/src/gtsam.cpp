@@ -10,7 +10,7 @@
 #include <gtsam/slam/GeneralSFMFactor.h>
 #include <gtsam/inference/Symbol.h>
 
-#include "common/include/ba_benchmark_utils.h"
+#include "../../common/include/ba_benchmark_utils.h"
 
 #include <thread>
 #include <fstream>

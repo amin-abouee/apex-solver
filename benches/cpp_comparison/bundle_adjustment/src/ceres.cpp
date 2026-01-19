@@ -1,9 +1,9 @@
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <thread>
-#include "common/include/read_bal.h"
-#include "common/include/ba_cost.h"
-#include "common/include/ba_benchmark_utils.h"
+#include "../../common/include/read_bal.h"
+#include "../../common/include/ba_cost.h"
+#include "../../common/include/ba_benchmark_utils.h"
 
 // Ceres cost function for BAL reprojection error
 struct BALReprojectionError {
