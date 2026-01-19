@@ -41,8 +41,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 
-/// Timeout duration for each solver (5 minutes)
-const SOLVER_TIMEOUT: Duration = Duration::from_secs(300);
+/// Timeout duration for each solver (10 minutes)
+const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
 use apex_solver::core::loss_functions::HuberLoss;
@@ -181,15 +181,16 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
     let start = Instant::now();
     loop {
         if start.elapsed() >= SOLVER_TIMEOUT {
+            let timeout_mins = SOLVER_TIMEOUT.as_secs() / 60;
             error!(
-                "Apex solver TIMEOUT EXCEEDED (5 minutes) for {}",
-                dataset_name
+                "Apex solver TIMEOUT EXCEEDED ({} minutes) for {}",
+                timeout_mins, dataset_name
             );
             return BABenchmarkResult::failed(
                 dataset_name,
                 "Apex-Iterative",
                 "Rust",
-                "TIMEOUT EXCEEDED (5 minutes)",
+                &format!("TIMEOUT ({} minutes)", timeout_mins),
             );
         }
 
@@ -223,7 +224,8 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     };
 
     info!(
-        "Dataset: {} cameras, {} points, {} observations",
+        "Dataset: {}: Cameras: {}, Landmarks: {}, Observations: {}",
+        dataset_name,
         dataset.cameras.len(),
         dataset.points.len(),
         dataset.observations.len()
@@ -496,10 +498,11 @@ fn run_cpp_benchmark(
     loop {
         // Check if timeout exceeded
         if start.elapsed() >= SOLVER_TIMEOUT {
-            error!("{} TIMEOUT EXCEEDED (5 minutes), killing process", exe_name);
+            let timeout_mins = SOLVER_TIMEOUT.as_secs() / 60;
+            error!("{} TIMEOUT EXCEEDED ({} minutes), killing process", exe_name, timeout_mins);
             let _ = child.kill();
             let _ = child.wait(); // Clean up zombie process
-            return Err(format!("{} TIMEOUT EXCEEDED (5 minutes)", exe_name));
+            return Err(format!("TIMEOUT ({} minutes)", timeout_mins));
         }
 
         // Check if process completed
@@ -619,6 +622,30 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
             },
             Err(e) => {
                 warn!("Failed to run {}: {}", exe_name, e);
+                // Create timeout result if error contains "TIMEOUT"
+                if e.contains("TIMEOUT") {
+                    // Extract solver name from exe_name (e.g., "ceres_ba_benchmark" -> "Ceres")
+                    let solver_name = exe_name.replace("_ba_benchmark", "");
+                    let solver_name = solver_name
+                        .split('_')
+                        .map(|s| {
+                            let mut c = s.chars();
+                            match c.next() {
+                                None => String::new(),
+                                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+
+                    let timeout_result = BABenchmarkResult::failed(
+                        dataset_name,
+                        &solver_name,
+                        "C++",
+                        &e,
+                    );
+                    all_results.push(timeout_result);
+                }
             }
         }
     }
@@ -662,10 +689,17 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
         let dataset_results = &results_by_dataset[&dataset_name];
 
         if let Some(first_result) = dataset_results.first() {
-            info!("Dataset: {}", dataset_name);
+            // Print dataset info on one line (use first non-failed result for counts)
+            let info_result = dataset_results.iter()
+                .find(|r| r.num_cameras > 0)
+                .unwrap_or(first_result);
+
             info!(
-                "  Cameras: {}, Landmarks: {}, Observations: {}",
-                first_result.num_cameras, first_result.num_points, first_result.num_observations
+                "Dataset: {}: Cameras: {}, Landmarks: {}, Observations: {}",
+                dataset_name,
+                info_result.num_cameras,
+                info_result.num_points,
+                info_result.num_observations
             );
             info!("{}", "-".repeat(150));
             info!(
@@ -694,8 +728,12 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
 
 /// Run the full benchmark comparison
 fn run_benchmark_comparison() {
-    // Initialize logger
-    init_logger();
+    // Initialize logger only once (avoid panic on multiple calls)
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        init_logger();
+    });
 
     info!("BUNDLE ADJUSTMENT BENCHMARK COMPARISON");
     info!("Testing 4 datasets: Ladybug, Trafalgar, Dubrovnik, Venice");
@@ -744,20 +782,10 @@ fn run_benchmark_comparison() {
 }
 
 /// Criterion benchmark function
-fn criterion_benchmark(c: &mut Criterion) {
-    let mut group = c.benchmark_group("bundle_adjustment_comparison");
-
-    // Configure to run with sample_size(10)
-    group.sample_size(10);
-
-    // Benchmark all datasets
-    group.bench_function("all_datasets", |b| {
-        b.iter(|| {
-            run_benchmark_comparison();
-        });
-    });
-
-    group.finish();
+fn criterion_benchmark(_c: &mut Criterion) {
+    // This is a comparison benchmark, not a performance benchmark
+    // Run once directly instead of using Criterion's timing infrastructure
+    run_benchmark_comparison();
 }
 
 criterion_group!(benches, criterion_benchmark);
