@@ -78,7 +78,7 @@ name = "solver_comparison"
 harness = false
 
 [[bench]]
-name = "bundle_adjustment_comparison"
+name = "bundle_adjustment_benchmark"
 harness = false
 
 [profile.dev]
