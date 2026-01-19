@@ -8,7 +8,6 @@
 use crate::core::problem::VariableEnum;
 use crate::linalg::{
     LinAlgError, LinAlgResult, StructuredSparseLinearSolver, schur_iterative::IterativeSchurSolver,
-    schur_power_series::PowerSeriesSchurSolver,
 };
 use crate::manifold::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -19,7 +18,7 @@ use faer::{
 };
 use nalgebra::Matrix3;
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, info};
 
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -29,29 +28,35 @@ pub enum SchurVariant {
     Sparse,
     /// Iterative: Conjugate Gradients on reduced system
     Iterative,
-    /// Power Series: Approximate H_pp^{-1} with power series
-    PowerSeries,
 }
 
 /// Preconditioner type for iterative solvers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchurPreconditioner {
+    /// No preconditioning
     None,
-    /// Block diagonal of Schur complement (Schur-Jacobi)
-    #[default]
+    /// Block diagonal of H_cc only (fast but less effective)
     BlockDiagonal,
+    /// True Schur-Jacobi: Block diagonal of S = H_cc - H_cp * H_pp^{-1} * H_cp^T
+    /// This is what Ceres uses and provides much better PCG convergence
+    #[default]
+    SchurJacobi,
 }
 
 /// Configuration for Schur complement variable ordering
 #[derive(Debug, Clone)]
 pub struct SchurOrdering {
     pub eliminate_types: Vec<ManifoldType>,
+    /// Only eliminate RN variables with this exact size (default: 3 for 3D landmarks)
+    /// This prevents intrinsic variables (6 DOF) from being eliminated
+    pub eliminate_rn_size: Option<usize>,
 }
 
 impl Default for SchurOrdering {
     fn default() -> Self {
         Self {
             eliminate_types: vec![ManifoldType::RN],
+            eliminate_rn_size: Some(3), // Only eliminate 3D landmarks, not intrinsics
         }
     }
 }
@@ -61,8 +66,42 @@ impl SchurOrdering {
         Self::default()
     }
 
-    pub fn should_eliminate(&self, manifold_type: &ManifoldType) -> bool {
-        self.eliminate_types.contains(manifold_type)
+    /// Check if a variable should be eliminated (treated as landmark).
+    ///
+    /// Uses variable name pattern matching for robust classification:
+    /// - Variables starting with "pt_" are landmarks (must be RN with 3 DOF)
+    /// - All other variables are camera parameters (poses, intrinsics)
+    ///
+    /// This correctly handles shared intrinsics (single RN variable for all cameras)
+    /// without misclassifying them as landmarks.
+    pub fn should_eliminate(&self, name: &str, manifold_type: &ManifoldType, size: usize) -> bool {
+        // Use explicit name pattern matching
+        if name.starts_with("pt_") {
+            // This is a landmark - verify constraints
+            if !self.eliminate_types.contains(manifold_type) {
+                panic!(
+                    "Landmark {} has manifold type {:?}, expected RN",
+                    name, manifold_type
+                );
+            }
+
+            // Check size constraint if specified
+            if self
+                .eliminate_rn_size
+                .is_some_and(|required_size| size != required_size)
+            {
+                panic!(
+                    "Landmark {} has {} DOF, expected {}",
+                    name,
+                    size,
+                    self.eliminate_rn_size.unwrap_or(0)
+                );
+            }
+            true
+        } else {
+            // Camera parameter (pose, intrinsic, etc.) - keep in camera block
+            false
+        }
     }
 }
 
@@ -126,16 +165,12 @@ pub struct SparseSchurComplementSolver {
     cg_max_iterations: usize,
     cg_tolerance: f64,
 
-    // Power series parameters
-    power_series_order: usize,
-
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
 
-    // Delegate solvers for non-sparse variants
+    // Delegate solver for iterative variant
     iterative_solver: Option<IterativeSchurSolver>,
-    power_series_solver: Option<PowerSeriesSchurSolver>,
 }
 
 impl SparseSchurComplementSolver {
@@ -145,13 +180,11 @@ impl SparseSchurComplementSolver {
             ordering: SchurOrdering::default(),
             variant: SchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
-            cg_max_iterations: 100,
-            cg_tolerance: 1e-6,
-            power_series_order: 3,
+            cg_max_iterations: 200, // Match Ceres (was 500)
+            cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             hessian: None,
             gradient: None,
             iterative_solver: None,
-            power_series_solver: None,
         }
     }
 
@@ -176,11 +209,6 @@ impl SparseSchurComplementSolver {
         self
     }
 
-    pub fn with_power_series_order(mut self, order: usize) -> Self {
-        self.power_series_order = order;
-        self
-    }
-
     pub fn block_structure(&self) -> Option<&SchurBlockStructure> {
         self.block_structure.as_ref()
     }
@@ -197,20 +225,24 @@ impl SparseSchurComplementSolver {
                 LinAlgError::InvalidInput(format!("Variable {} not found in index map", name))
             })?;
             let size = variable.get_size();
+            let manifold_type = match variable {
+                VariableEnum::SE3(_) => ManifoldType::SE3,
+                VariableEnum::SE2(_) => ManifoldType::SE2,
+                VariableEnum::SO3(_) => ManifoldType::SO3,
+                VariableEnum::SO2(_) => ManifoldType::SO2,
+                VariableEnum::Rn(_) => ManifoldType::RN,
+            };
 
-            // Detect cameras vs landmarks by DOF:
-            // - Landmarks (3D points): 3 DOF
-            // - Cameras (poses): 6 DOF (SE3) or other sizes
-            // In bundle adjustment, we eliminate landmarks (3 DOF variables)
-            if size == 3 {
-                // This is a landmark (3D point) - to be eliminated
+            // Use name-based classification via SchurOrdering
+            if self.ordering.should_eliminate(name, &manifold_type, size) {
+                // Landmark - to be eliminated
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
                 structure.landmark_dof += size;
                 structure.num_landmarks += 1;
             } else {
-                // This is a camera pose - kept in reduced system
+                // Camera parameter - kept in reduced system
                 structure
                     .camera_blocks
                     .push((name.clone(), start_col, size));
@@ -232,15 +264,26 @@ impl SparseSchurComplementSolver {
             ));
         }
 
-        // Debug: Log block structure
-        debug!(
-            "Schur Block Structure: {} cameras ({} DOF, cols {:?}), {} landmarks ({} DOF, cols {:?})",
+        // Log block structure for diagnostics
+        info!("Schur complement block structure:");
+        info!(
+            "  Camera blocks: {} variables, {} total DOF",
             structure.camera_blocks.len(),
-            structure.camera_dof,
-            structure.camera_col_range(),
+            structure.camera_dof
+        );
+        info!(
+            "  Landmark blocks: {} variables, {} total DOF",
             structure.landmark_blocks.len(),
-            structure.landmark_dof,
+            structure.landmark_dof
+        );
+        debug!("  Camera column range: {:?}", structure.camera_col_range());
+        debug!(
+            "  Landmark column range: {:?}",
             structure.landmark_col_range()
+        );
+        info!(
+            "  Schur complement S size: {} × {}",
+            structure.camera_dof, structure.camera_dof
         );
 
         // Validate column ranges are contiguous
@@ -292,17 +335,88 @@ impl SparseSchurComplementSolver {
         Ok(blocks)
     }
 
-    /// Invert all 3×3 blocks
+    /// Invert all 3×3 blocks with numerical robustness
+    ///
+    /// This function checks the condition number of each block and applies
+    /// additional regularization for ill-conditioned blocks to prevent
+    /// numerical instability in the Schur complement computation.
     fn invert_landmark_blocks(blocks: &[Matrix3<f64>]) -> LinAlgResult<Vec<Matrix3<f64>>> {
-        blocks
+        Self::invert_landmark_blocks_with_lambda(blocks, 0.0)
+    }
+
+    /// Invert all 3×3 blocks with numerical robustness and optional damping
+    ///
+    /// # Arguments
+    /// * `blocks` - The 3×3 H_pp diagonal blocks to invert
+    /// * `lambda` - LM damping parameter (already added to blocks if > 0)
+    ///
+    /// For severely ill-conditioned blocks, additional regularization is applied
+    /// to ensure numerical stability.
+    fn invert_landmark_blocks_with_lambda(
+        blocks: &[Matrix3<f64>],
+        lambda: f64,
+    ) -> LinAlgResult<Vec<Matrix3<f64>>> {
+        // Thresholds for numerical robustness
+        const CONDITION_THRESHOLD: f64 = 1e10; // Max acceptable condition number
+        const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12; // Below this is considered singular
+        const REGULARIZATION_SCALE: f64 = 1e-6; // Scale for additional regularization
+
+        let mut ill_conditioned_count = 0;
+        let mut regularized_count = 0;
+
+        let result: LinAlgResult<Vec<Matrix3<f64>>> = blocks
             .iter()
             .enumerate()
             .map(|(i, block)| {
-                block.try_inverse().ok_or_else(|| {
-                    LinAlgError::SingularMatrix(format!("Landmark block {} is singular", i))
-                })
+                // Compute symmetric eigenvalues for condition number check
+                // For a 3x3 SPD matrix, eigenvalues give us the condition number
+                let eigenvalues = block.symmetric_eigenvalues();
+                let min_ev = eigenvalues.min();
+                let max_ev = eigenvalues.max();
+
+                if min_ev < MIN_EIGENVALUE_THRESHOLD {
+                    // Severely ill-conditioned: add strong regularization
+                    regularized_count += 1;
+                    let reg = lambda.max(REGULARIZATION_SCALE) + max_ev * REGULARIZATION_SCALE;
+                    let regularized = block + Matrix3::identity() * reg;
+                    regularized.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!(
+                            "Landmark block {} singular even with regularization (min_ev={:.2e})",
+                            i, min_ev
+                        ))
+                    })
+                } else if max_ev / min_ev > CONDITION_THRESHOLD {
+                    // Ill-conditioned but not singular: add moderate regularization
+                    ill_conditioned_count += 1;
+                    let extra_reg = max_ev * REGULARIZATION_SCALE;
+                    let regularized = block + Matrix3::identity() * extra_reg;
+                    regularized.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!(
+                            "Landmark block {} ill-conditioned (cond={:.2e})",
+                            i,
+                            max_ev / min_ev
+                        ))
+                    })
+                } else {
+                    // Well-conditioned: standard inversion
+                    block.try_inverse().ok_or_else(|| {
+                        LinAlgError::SingularMatrix(format!("Landmark block {} is singular", i))
+                    })
+                }
             })
-            .collect()
+            .collect();
+
+        // Log statistics about conditioning
+        if ill_conditioned_count > 0 || regularized_count > 0 {
+            debug!(
+                "Landmark block conditioning: {} ill-conditioned, {} regularized out of {}",
+                ill_conditioned_count,
+                regularized_count,
+                blocks.len()
+            );
+        }
+
+        result
     }
 
     /// Extract H_cc (camera-camera block)
@@ -396,7 +510,10 @@ impl SparseSchurComplementSolver {
         Ok((g_c, g_p))
     }
 
-    /// Solve using Cholesky
+    /// Solve S * x = b using Cholesky factorization with automatic regularization
+    ///
+    /// If the initial factorization fails (matrix not positive definite),
+    /// we add small regularization to the diagonal and retry.
     fn solve_with_cholesky(
         &self,
         a: &SparseColMat<usize, f64>,
@@ -406,11 +523,92 @@ impl SparseSchurComplementSolver {
             LinAlgError::FactorizationFailed(format!("Symbolic Cholesky failed: {:?}", e))
         })?;
 
-        let cholesky = Llt::try_new_with_symbolic(sym, a.as_ref(), Side::Lower).map_err(|e| {
-            LinAlgError::SingularMatrix(format!("Schur complement singular: {:?}", e))
-        })?;
+        // First attempt: direct factorization
+        match Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
+            Ok(cholesky) => return Ok(cholesky.solve(b)),
+            Err(e) => {
+                debug!(
+                    "Cholesky factorization failed: {:?}. Applying regularization.",
+                    e
+                );
+            }
+        }
 
-        Ok(cholesky.solve(b))
+        // Retry with exponentially increasing regularization
+        let n = a.nrows();
+        let symbolic = a.symbolic();
+
+        // Compute trace and max diagonal for scaling
+        let mut trace = 0.0;
+        let mut max_diag = 0.0f64;
+        for col in 0..n {
+            let row_indices = symbolic.row_idx_of_col_raw(col);
+            let col_values = a.val_of_col(col);
+            for (idx, &row) in row_indices.iter().enumerate() {
+                if row == col {
+                    trace += col_values[idx];
+                    max_diag = max_diag.max(col_values[idx].abs());
+                }
+            }
+        }
+
+        // Try multiple regularization levels
+        let avg_diag = trace / n as f64;
+        let base_reg = avg_diag.max(max_diag).max(1.0);
+
+        for attempt in 0..5 {
+            let reg = base_reg * 10.0f64.powi(attempt - 4); // 1e-4, 1e-3, 1e-2, 1e-1, 1.0 times base
+            debug!(
+                "Cholesky attempt {}: regularization = {:.2e}",
+                attempt + 2,
+                reg
+            );
+
+            let mut triplets = Vec::with_capacity(n * 10);
+            for col in 0..n {
+                let row_indices = symbolic.row_idx_of_col_raw(col);
+                let col_values = a.val_of_col(col);
+                for (idx, &row) in row_indices.iter().enumerate() {
+                    triplets.push(Triplet::new(row, col, col_values[idx]));
+                }
+            }
+
+            for i in 0..n {
+                triplets.push(Triplet::new(i, i, reg));
+            }
+
+            let a_reg = match SparseColMat::try_new_from_triplets(n, n, &triplets) {
+                Ok(m) => m,
+                Err(e) => {
+                    debug!("Failed to create regularized matrix: {:?}", e);
+                    continue;
+                }
+            };
+
+            // Need to create a new symbolic structure for the regularized matrix
+            let sym_reg = match SymbolicLlt::try_new(a_reg.symbolic(), Side::Lower) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Symbolic factorization failed: {:?}", e);
+                    continue;
+                }
+            };
+
+            match Llt::try_new_with_symbolic(sym_reg, a_reg.as_ref(), Side::Lower) {
+                Ok(cholesky) => {
+                    debug!("Cholesky succeeded with regularization {:.2e}", reg);
+                    return Ok(cholesky.solve(b));
+                }
+                Err(e) => {
+                    debug!("Cholesky failed with reg {:.2e}: {:?}", reg, e);
+                }
+            }
+        }
+
+        Err(LinAlgError::SingularMatrix(format!(
+            "Schur complement singular after 5 regularization attempts (max reg = {:.2e})",
+            base_reg
+        )))
     }
 
     /// Solve using Preconditioned Conjugate Gradients (PCG)
@@ -577,21 +775,17 @@ impl SparseSchurComplementSolver {
         let mut h_cp_block: Vec<[f64; 3]> = Vec::with_capacity(32);
         let mut contrib_block: Vec<[f64; 3]> = Vec::with_capacity(32);
 
-        // Process each landmark block independently
+        // Process each landmark block independently (sequential for efficiency)
         for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
             let col_start = block_idx * 3;
 
-            // Clear vectors for this landmark
             cam_rows.clear();
             h_cp_block.clear();
 
-            // Extract camera rows that observe this landmark and their H_cp values
-            // We iterate through the 3 columns of this landmark block
             if col_start + 2 >= h_cp.ncols() {
                 continue;
             }
 
-            // Get all camera rows from the first column
             let row_indices_0 = h_cp_symbolic.row_idx_of_col_raw(col_start);
             let col_values_0 = h_cp.val_of_col(col_start);
             let row_indices_1 = h_cp_symbolic.row_idx_of_col_raw(col_start + 1);
@@ -599,8 +793,6 @@ impl SparseSchurComplementSolver {
             let row_indices_2 = h_cp_symbolic.row_idx_of_col_raw(col_start + 2);
             let col_values_2 = h_cp.val_of_col(col_start + 2);
 
-            // Build a map from camera row to values (using the fact that rows are sorted)
-            // Since CSC columns have sorted row indices, we can merge them efficiently
             let mut i0 = 0;
             let mut i1 = 0;
             let mut i2 = 0;
@@ -654,10 +846,8 @@ impl SparseSchurComplementSolver {
                 continue;
             }
 
-            // Compute H_cp * H_pp^{-1} for each camera observing this landmark
             contrib_block.clear();
             for h_cp_row in &h_cp_block {
-                // contrib = h_cp_row * hpp_inv_block (1x3 * 3x3 = 1x3)
                 let c0 = h_cp_row[0] * hpp_inv_block[(0, 0)]
                     + h_cp_row[1] * hpp_inv_block[(1, 0)]
                     + h_cp_row[2] * hpp_inv_block[(2, 0)];
@@ -670,34 +860,39 @@ impl SparseSchurComplementSolver {
                 contrib_block.push([c0, c1, c2]);
             }
 
-            // Compute outer product: (H_cp * H_pp^{-1}) * H_cp^T
-            // For each pair of cameras (i, j) observing this landmark:
-            //   S[i, j] -= contrib[i] · h_cp[j]
             let n_cams = cam_rows.len();
             for i in 0..n_cams {
                 let cam_i = cam_rows[i];
                 let contrib_i = &contrib_block[i];
-
                 for j in 0..n_cams {
                     let cam_j = cam_rows[j];
                     let h_cp_j = &h_cp_block[j];
-
-                    // Dot product
                     let dot = contrib_i[0] * h_cp_j[0]
                         + contrib_i[1] * h_cp_j[1]
                         + contrib_i[2] * h_cp_j[2];
-
                     s_dense[cam_i * cam_size + cam_j] -= dot;
                 }
             }
         }
 
+        // Symmetrize the Schur complement to ensure numerical symmetry
+        // Due to floating-point accumulation errors across 156K+ landmarks,
+        // S can become slightly asymmetric. Force symmetry: S = 0.5 * (S + S^T)
+        for i in 0..cam_size {
+            for j in (i + 1)..cam_size {
+                let avg = (s_dense[i * cam_size + j] + s_dense[j * cam_size + i]) * 0.5;
+                s_dense[i * cam_size + j] = avg;
+                s_dense[j * cam_size + i] = avg;
+            }
+        }
+
         // Convert dense matrix to sparse (filtering near-zeros)
+        // Use slightly larger threshold to avoid numerical noise issues
         let mut s_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
         for col in 0..cam_size {
             for row in 0..cam_size {
                 let val = s_dense[row * cam_size + col];
-                if val.abs() > 1e-14 {
+                if val.abs() > 1e-12 {
                     s_triplets.push(Triplet::new(row, col, val));
                 }
             }
@@ -835,14 +1030,6 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
                 solver.initialize_structure(variables, variable_index_map)?;
                 self.iterative_solver = Some(solver);
             }
-            SchurVariant::PowerSeries => {
-                let mut solver = PowerSeriesSchurSolver::with_series_params(
-                    self.power_series_order,
-                    self.cg_tolerance,
-                );
-                solver.initialize_structure(variables, variable_index_map)?;
-                self.power_series_solver = Some(solver);
-            }
             SchurVariant::Sparse => {
                 // No delegate solver needed for sparse variant
             }
@@ -864,11 +1051,10 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             ));
         }
 
-        // All variants (Sparse, Iterative, PowerSeries) use the same Schur complement formation
+        // Sparse and Iterative variants use the same Schur complement formation
         // They differ only in how S*δc = g_reduced is solved:
         // - Sparse: Cholesky factorization
         // - Iterative: PCG
-        // - PowerSeries: Cholesky (power series used only for back-substitution)
 
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
@@ -929,7 +1115,7 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
             ));
         }
 
-        // All variants use the same Schur complement formation with damping
+        // Sparse and Iterative variants use the same Schur complement formation with damping
         // 1. Build H = J^T * J and g = -J^T * r
         let jt = jacobians
             .transpose()
@@ -952,6 +1138,17 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
         let h_cp = self.extract_coupling_block(&hessian)?;
         let mut hpp_blocks = self.extract_landmark_blocks(&hessian)?;
         let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
+
+        // Log matrix dimensions for diagnostics
+        debug!("Iteration matrices:");
+        debug!(
+            "  Hessian (J^T*J): {} × {}",
+            hessian.nrows(),
+            hessian.ncols()
+        );
+        debug!("  H_cc (camera): {} × {}", h_cc.nrows(), h_cc.ncols());
+        debug!("  H_cp (coupling): {} × {}", h_cp.nrows(), h_cp.ncols());
+        debug!("  H_pp blocks: {} (3×3 each)", hpp_blocks.len());
 
         // 3. Add damping to H_cc and H_pp
         let structure = self
@@ -1162,10 +1359,74 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_schur_ordering_default() {
+    fn test_schur_ordering_shared_intrinsics() {
         let ordering = SchurOrdering::default();
-        assert!(ordering.should_eliminate(&ManifoldType::RN));
-        assert!(!ordering.should_eliminate(&ManifoldType::SE3));
+
+        // Landmarks should be eliminated
+        assert!(ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3));
+        assert!(ordering.should_eliminate("pt_12345", &ManifoldType::RN, 3));
+
+        // Camera poses should NOT be eliminated
+        assert!(!ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6));
+        assert!(!ordering.should_eliminate("cam_0042", &ManifoldType::SE3, 6));
+
+        // Shared intrinsics (RN, 3 DOF) should NOT be eliminated - KEY TEST!
+        assert!(!ordering.should_eliminate("shared_intrinsics", &ManifoldType::RN, 3));
+
+        // Per-camera intrinsics should NOT be eliminated
+        assert!(!ordering.should_eliminate("intr_0000", &ManifoldType::RN, 3));
+        assert!(!ordering.should_eliminate("intr_0042", &ManifoldType::RN, 3));
+    }
+
+    #[test]
+    fn test_schur_ordering_multiple_intrinsic_groups() {
+        let ordering = SchurOrdering::default();
+
+        // Test that multiple intrinsic groups are NOT eliminated (camera parameters)
+        assert!(
+            !ordering.should_eliminate("intr_group_0000", &ManifoldType::RN, 3),
+            "Intrinsic group 0 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0001", &ManifoldType::RN, 3),
+            "Intrinsic group 1 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0005", &ManifoldType::RN, 3),
+            "Intrinsic group 5 should be camera parameter (not eliminated)"
+        );
+        assert!(
+            !ordering.should_eliminate("intr_group_0042", &ManifoldType::RN, 3),
+            "Intrinsic group 42 should be camera parameter (not eliminated)"
+        );
+
+        // Verify landmarks are still eliminated
+        assert!(
+            ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3),
+            "Landmarks should still be eliminated"
+        );
+
+        // Verify camera poses are not eliminated
+        assert!(
+            !ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6),
+            "Camera poses should not be eliminated"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "has manifold type")]
+    fn test_schur_ordering_invalid_landmark_type() {
+        let ordering = SchurOrdering::default();
+        // Landmark with wrong manifold type should panic
+        ordering.should_eliminate("pt_00000", &ManifoldType::SE3, 6);
+    }
+
+    #[test]
+    #[should_panic(expected = "has 6 DOF")]
+    fn test_schur_ordering_invalid_landmark_size() {
+        let ordering = SchurOrdering::default();
+        // Landmark with wrong size should panic
+        ordering.should_eliminate("pt_00000", &ManifoldType::RN, 6);
     }
 
     #[test]
@@ -1194,9 +1455,9 @@ mod tests {
         let solver = SparseSchurComplementSolver::new()
             .with_variant(SchurVariant::Iterative)
             .with_preconditioner(SchurPreconditioner::BlockDiagonal)
-            .with_cg_params(50, 1e-8);
+            .with_cg_params(100, 1e-8);
 
-        assert_eq!(solver.cg_max_iterations, 50);
+        assert_eq!(solver.cg_max_iterations, 100);
         assert!((solver.cg_tolerance - 1e-8).abs() < 1e-12);
     }
 

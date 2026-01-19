@@ -277,6 +277,213 @@ impl CameraModel for BALPinholeCamera {
     }
 }
 
+/// Strict BAL camera model matching Snavely's Bundler convention.
+///
+/// This camera model uses EXACTLY 3 intrinsic parameters matching the BAL file format:
+/// - Single focal length (f): fx = fy
+/// - Two radial distortion coefficients (k1, k2)
+/// - NO principal point (cx = cy = 0 by convention)
+///
+/// This matches the intrinsic parameterization used by:
+/// - Ceres Solver bundle adjustment examples
+/// - GTSAM bundle adjustment
+/// - Original Bundler software
+///
+/// # Parameters
+///
+/// - `f`: Single focal length in pixels (fx = fy = f)
+/// - `k1`: First radial distortion coefficient
+/// - `k2`: Second radial distortion coefficient
+///
+/// # Projection Model
+///
+/// For a 3D point `p_cam = (x, y, z)` in camera frame where z < 0:
+/// ```text
+/// x_n = x / (-z)
+/// y_n = y / (-z)
+/// r² = x_n² + y_n²
+/// distortion = 1 + k1*r² + k2*r⁴
+/// x_d = x_n * distortion
+/// y_d = y_n * distortion
+/// u = f * x_d      (no cx offset)
+/// v = f * y_d      (no cy offset)
+/// ```
+///
+/// # Usage
+///
+/// This camera model should be used for bundle adjustment problems that read
+/// BAL format files, to ensure parameter compatibility and avoid degenerate
+/// optimization (extra DOF from fx≠fy or non-zero principal point).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BALPinholeCameraStrict {
+    /// Single focal length (fx = fy = f)
+    pub f: f64,
+    /// First radial distortion coefficient
+    pub k1: f64,
+    /// Second radial distortion coefficient
+    pub k2: f64,
+}
+
+impl BALPinholeCameraStrict {
+    /// Create a new strict BAL pinhole camera with distortion.
+    #[must_use]
+    pub const fn new(f: f64, k1: f64, k2: f64) -> Self {
+        Self { f, k1, k2 }
+    }
+
+    /// Create a strict BAL pinhole camera without distortion (k1=0, k2=0).
+    #[must_use]
+    pub const fn new_no_distortion(f: f64) -> Self {
+        Self {
+            f,
+            k1: 0.0,
+            k2: 0.0,
+        }
+    }
+}
+
+impl CameraModel for BALPinholeCameraStrict {
+    const INTRINSIC_DIM: usize = 3; // f, k1, k2
+    type IntrinsicJacobian = SMatrix<f64, 2, 3>;
+    type PointJacobian = SMatrix<f64, 2, 3>;
+
+    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+        const MIN_DEPTH: f64 = 1e-6;
+        // BAL convention: negative Z is in front
+        if p_cam.z > -MIN_DEPTH {
+            return None;
+        }
+        let inv_neg_z = -1.0 / p_cam.z;
+
+        // Normalized coordinates
+        let x_n = p_cam.x * inv_neg_z;
+        let y_n = p_cam.y * inv_neg_z;
+
+        // Radial distortion
+        let r2 = x_n * x_n + y_n * y_n;
+        let r4 = r2 * r2;
+        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+
+        // Apply distortion and focal length (no principal point offset)
+        let x_d = x_n * distortion;
+        let y_d = y_n * distortion;
+
+        Some(Vector2::new(self.f * x_d, self.f * y_d))
+    }
+
+    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
+        const MIN_DEPTH: f64 = 1e-6;
+        p_cam.z < -MIN_DEPTH
+    }
+
+    fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
+        let inv_neg_z = -1.0 / p_cam.z;
+        let x_n = p_cam.x * inv_neg_z;
+        let y_n = p_cam.y * inv_neg_z;
+
+        // Radial distortion
+        let r2 = x_n * x_n + y_n * y_n;
+        let r4 = r2 * r2;
+        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+
+        // Derivative of distortion w.r.t. r²
+        let d_dist_dr2 = self.k1 + 2.0 * self.k2 * r2;
+
+        // Jacobian components (same derivation as BALPinholeCamera)
+        let dxn_dz = x_n * inv_neg_z;
+        let dyn_dz = y_n * inv_neg_z;
+
+        let dx_d_dxn = distortion + x_n * d_dist_dr2 * 2.0 * x_n;
+        let dx_d_dyn = x_n * d_dist_dr2 * 2.0 * y_n;
+        let dy_d_dxn = y_n * d_dist_dr2 * 2.0 * x_n;
+        let dy_d_dyn = distortion + y_n * d_dist_dr2 * 2.0 * y_n;
+
+        // Chain rule with single focal length f (not fx/fy)
+        let du_dx = self.f * (dx_d_dxn * inv_neg_z);
+        let du_dy = self.f * (dx_d_dyn * inv_neg_z);
+        let du_dz = self.f * (dx_d_dxn * dxn_dz + dx_d_dyn * dyn_dz);
+
+        let dv_dx = self.f * (dy_d_dxn * inv_neg_z);
+        let dv_dy = self.f * (dy_d_dyn * inv_neg_z);
+        let dv_dz = self.f * (dy_d_dxn * dxn_dz + dy_d_dyn * dyn_dz);
+
+        SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
+    }
+
+    fn jacobian_pose(
+        &self,
+        p_world: &Vector3<f64>,
+        pose: &SE3,
+    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
+        let pose_inv = pose.inverse(None);
+        let p_cam = pose_inv.act(p_world, None, None);
+
+        let d_uv_d_pcam = self.jacobian_point(&p_cam);
+        let p_cam_skew = skew_symmetric(&p_cam);
+
+        let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
+            if c < 3 {
+                if r == c { -1.0 } else { 0.0 }
+            } else {
+                p_cam_skew[(r, c - 3)]
+            }
+        });
+
+        (d_uv_d_pcam, d_pcam_d_pose)
+    }
+
+    fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
+        let inv_neg_z = -1.0 / p_cam.z;
+        let x_n = p_cam.x * inv_neg_z;
+        let y_n = p_cam.y * inv_neg_z;
+
+        // Radial distortion
+        let r2 = x_n * x_n + y_n * y_n;
+        let r4 = r2 * r2;
+        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+
+        let x_d = x_n * distortion;
+        let y_d = y_n * distortion;
+
+        // Jacobian ∂(u,v)/∂(f,k1,k2)
+        // u = f * x_d  (no cx)
+        // v = f * y_d  (no cy)
+        //
+        // ∂u/∂f = x_d
+        // ∂u/∂k1 = f * x_n * r²
+        // ∂u/∂k2 = f * x_n * r⁴
+        //
+        // ∂v/∂f = y_d
+        // ∂v/∂k1 = f * y_n * r²
+        // ∂v/∂k2 = f * y_n * r⁴
+        SMatrix::<f64, 2, 3>::new(
+            x_d,
+            self.f * x_n * r2,
+            self.f * x_n * r4,
+            y_d,
+            self.f * y_n * r2,
+            self.f * y_n * r4,
+        )
+    }
+
+    fn intrinsics_vec(&self) -> DVector<f64> {
+        DVector::from_vec(vec![self.f, self.k1, self.k2])
+    }
+
+    fn from_params(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 3,
+            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
+            params.len()
+        );
+        Self {
+            f: params[0],
+            k1: params[1],
+            k2: params[2],
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

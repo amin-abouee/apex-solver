@@ -57,4 +57,4 @@ pub use optimizer::{
 };
 
 #[cfg(feature = "visualization")]
-pub use observers::RerunObserver;
+pub use observers::{RerunObserver, VisualizationConfig};
