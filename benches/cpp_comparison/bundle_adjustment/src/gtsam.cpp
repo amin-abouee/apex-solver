@@ -10,17 +10,13 @@
 #include <gtsam/slam/GeneralSFMFactor.h>
 #include <gtsam/inference/Symbol.h>
 
-#include "common/include/ba_benchmark_utils.h"
+#include "../../common/include/ba_benchmark_utils.h"
+#include "../include/gtsam_ba.h"
 
 #include <thread>
 #include <fstream>
 
-using namespace gtsam;
-using symbol_shorthand::C;  // Camera 
-using symbol_shorthand::P;  // 3D points
-
-// Define the SfM camera type (Pose + Cal3Bundler)
-using SfmCamera = PinholeCamera<Cal3Bundler>;
+// Type aliases and using declarations moved to gtsam_ba.h
 
 benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path) {
     using namespace benchmark_utils;

@@ -13,9 +13,10 @@ using gtsam::Symbol;
 
 #include <vector>
 
-#include "common/include/benchmark_utils.h"
-#include "common/include/read_g2o.h"
-#include "common/include/unified_cost.h"
+#include "../../common/include/benchmark_utils.h"
+#include "../../common/include/read_g2o.h"
+#include "../../common/include/unified_cost.h"
+#include "../include/gtsam_odometry.h"
 
 // Benchmark SE2 dataset with GTSAM
 benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
@@ -42,8 +43,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Store initial graph for cost computation
     g2o_reader::Graph2D initial_graph = graph;
 
-    // Compute initial cost using unified cost function
-    result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
+    // Compute initial cost using unified cost function (both metrics)
+    auto initial_metrics = unified_cost::ComputeSE2CostMetrics(initial_graph);
+    result.initial_chi2 = initial_metrics.chi2_cost;
+    result.initial_cost = initial_metrics.unweighted_cost;
 
     // Create factor graph and initial values
     NonlinearFactorGraph graph_factors;
@@ -104,12 +107,15 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         pose.rotation = optimized_pose.theta();
     }
 
-    // Compute final cost using unified cost function
-    result.final_cost = unified_cost::ComputeSE2Cost(graph);
+    // Compute final cost using unified cost function (both metrics)
+    auto final_metrics = unified_cost::ComputeSE2CostMetrics(graph);
+    result.final_chi2 = final_metrics.chi2_cost;
+    result.final_cost = final_metrics.unweighted_cost;
 
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
+    result.chi2_improvement_pct = ((result.initial_chi2 - result.final_chi2) / result.initial_chi2) * 100.0;
 
     // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
     bool actually_converged = (result.improvement_pct > 95.0) ||
@@ -144,8 +150,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Store initial graph for cost computation
     g2o_reader::Graph3D initial_graph = graph;
 
-    // Compute initial cost using unified cost function
-    result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
+    // Compute initial cost using unified cost function (both metrics)
+    auto initial_metrics = unified_cost::ComputeSE3CostMetrics(initial_graph);
+    result.initial_chi2 = initial_metrics.chi2_cost;
+    result.initial_cost = initial_metrics.unweighted_cost;
 
     // Create factor graph and initial values
     NonlinearFactorGraph graph_factors;
@@ -220,12 +228,15 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         pose.translation.z() = optimized_pose.z();
     }
 
-    // Compute final cost using unified cost function
-    result.final_cost = unified_cost::ComputeSE3Cost(graph);
+    // Compute final cost using unified cost function (both metrics)
+    auto final_metrics = unified_cost::ComputeSE3CostMetrics(graph);
+    result.final_chi2 = final_metrics.chi2_cost;
+    result.final_cost = final_metrics.unweighted_cost;
 
     // Extract results
     result.iterations = optimizer.iterations();
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
+    result.chi2_improvement_pct = ((result.initial_chi2 - result.final_chi2) / result.initial_chi2) * 100.0;
 
     // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
     bool actually_converged = (result.improvement_pct > 95.0) ||
@@ -239,19 +250,19 @@ int main(int argc, char** argv) {
     std::vector<benchmark_utils::BenchmarkResult> results;
 
     // SE3 datasets
-    results.push_back(BenchmarkSE3("sphere2500", "../../../data/sphere2500.g2o"));
-    results.push_back(BenchmarkSE3("parking-garage", "../../../data/parking-garage.g2o"));
-    results.push_back(BenchmarkSE3("torus3D", "../../../data/torus3D.g2o"));
-    results.push_back(BenchmarkSE3("cubicle", "../../../data/cubicle.g2o"));
+    results.push_back(BenchmarkSE3("sphere2500", "../../../data/odometry/sphere2500.g2o"));
+    results.push_back(BenchmarkSE3("parking-garage", "../../../data/odometry/parking-garage.g2o"));
+    results.push_back(BenchmarkSE3("torus3D", "../../../data/odometry/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../data/odometry/cubicle.g2o"));
 
     // SE2 datasets
-    results.push_back(BenchmarkSE2("intel", "../../../data/intel.g2o"));
-    results.push_back(BenchmarkSE2("mit", "../../../data/mit.g2o"));
-    results.push_back(BenchmarkSE2("ring", "../../../data/ring.g2o"));
-    results.push_back(BenchmarkSE2("M3500", "../../../data/M3500.g2o"));
+    results.push_back(BenchmarkSE2("city10000", "../../../data/odometry/city10000.g2o"));
+    results.push_back(BenchmarkSE2("mit", "../../../data/odometry/mit.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../data/odometry/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../data/odometry/M3500.g2o"));
 
     // Write to CSV
-    std::string output_file = "gtsam_benchmark_results.csv";
+    std::string output_file = "gtsam_odometry_benchmark_results.csv";
     benchmark_utils::WriteResultsToCSV(output_file, results);
 
     return 0;
