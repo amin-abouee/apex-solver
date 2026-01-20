@@ -137,7 +137,7 @@ fn compute_se2_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
 
             // Chi-squared: r^T * Omega * r (information-weighted)
-            let weighted_sq = &residual_vec.transpose() * &edge.information * &residual_vec;
+            let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
 
             // Unweighted: 0.5 * ||r||^2
@@ -182,7 +182,7 @@ fn compute_se3_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
 
             // Chi-squared: r^T * Omega * r (information-weighted)
-            let weighted_sq = &residual_vec.transpose() * &edge.information * &residual_vec;
+            let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
 
             // Unweighted: 0.5 * ||r||^2
