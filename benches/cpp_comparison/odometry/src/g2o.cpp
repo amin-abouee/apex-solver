@@ -38,8 +38,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
     // Store initial graph for unified cost computation
     g2o_reader::Graph2D initial_graph = graph;
 
-    // Compute initial cost using unified cost function
-    result.initial_cost = unified_cost::ComputeSE2Cost(initial_graph);
+    // Compute initial cost using unified cost function (both metrics)
+    auto initial_metrics = unified_cost::ComputeSE2CostMetrics(initial_graph);
+    result.initial_chi2 = initial_metrics.chi2_cost;
+    result.initial_cost = initial_metrics.unweighted_cost;
 
     // Create g2o optimizer
     SparseOptimizer optimizer;
@@ -105,10 +107,13 @@ benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,
         }
     }
 
-    // Compute final cost using unified cost function
-    result.final_cost = unified_cost::ComputeSE2Cost(optimized_graph);
+    // Compute final cost using unified cost function (both metrics)
+    auto final_metrics = unified_cost::ComputeSE2CostMetrics(optimized_graph);
+    result.final_chi2 = final_metrics.chi2_cost;
+    result.final_cost = final_metrics.unweighted_cost;
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
+    result.chi2_improvement_pct = ((result.initial_chi2 - result.final_chi2) / result.initial_chi2) * 100.0;
 
     // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
     bool converged = (result.improvement_pct > 95.0) ||
@@ -142,8 +147,10 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
     // Store initial graph for unified cost computation
     g2o_reader::Graph3D initial_graph = graph;
 
-    // Compute initial cost using unified cost function
-    result.initial_cost = unified_cost::ComputeSE3Cost(initial_graph);
+    // Compute initial cost using unified cost function (both metrics)
+    auto initial_metrics = unified_cost::ComputeSE3CostMetrics(initial_graph);
+    result.initial_chi2 = initial_metrics.chi2_cost;
+    result.initial_cost = initial_metrics.unweighted_cost;
 
     // Create g2o optimizer
     SparseOptimizer optimizer;
@@ -214,10 +221,13 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
         }
     }
 
-    // Compute final cost using unified cost function
-    result.final_cost = unified_cost::ComputeSE3Cost(optimized_graph);
+    // Compute final cost using unified cost function (both metrics)
+    auto final_metrics = unified_cost::ComputeSE3CostMetrics(optimized_graph);
+    result.final_chi2 = final_metrics.chi2_cost;
+    result.final_cost = final_metrics.unweighted_cost;
     result.iterations = iterations;
     result.improvement_pct = ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0;
+    result.chi2_improvement_pct = ((result.initial_chi2 - result.final_chi2) / result.initial_chi2) * 100.0;
 
     // Convergence check: Accept if >95% improvement OR (positive improvement and didn't hit max iterations)
     bool converged = (result.improvement_pct > 95.0) ||

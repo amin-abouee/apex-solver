@@ -32,13 +32,9 @@ Eigen::Vector3d SO3LogMap(const Eigen::Quaterniond& q) {
     // Clamp qw to [-1, 1] to avoid numerical issues with acos
     double qw = std::clamp(q.w(), -1.0, 1.0);
 
-    // The angle of rotation is 2 * acos(qw)
-    // However, we need to handle the case where the angle is close to 0
-    // and ensure we return the axis-angle vector
-
     // If w is close to 1 (angle close to 0)
     if (qw > 1.0 - 1e-10) {
-        // Small angle approximation: 2 * vec / w (or just 2 * vec since w ~ 1)
+        // Small angle approximation: 2 * vec
         return 2.0 * q.vec();
     }
 
@@ -53,7 +49,6 @@ Eigen::Vector3d SO3LogMap(const Eigen::Quaterniond& q) {
 }
 
 /// Compute inverse left Jacobian of SO(3)
-/// J_l^{-1}(theta) = I - 0.5*[theta]_x + (1/theta^2 - (1+cos(theta))/(2*theta*sin(theta))) * [theta]_x^2
 Eigen::Matrix3d ComputeSO3LeftJacobianInverse(const Eigen::Vector3d& theta_vec) {
     double angle_sq = theta_vec.squaredNorm();
     Eigen::Matrix3d theta_skew = Skew(theta_vec);
@@ -72,14 +67,42 @@ Eigen::Matrix3d ComputeSO3LeftJacobianInverse(const Eigen::Vector3d& theta_vec) 
     return Eigen::Matrix3d::Identity() - 0.5 * theta_skew + coef * (theta_skew * theta_skew);
 }
 
+/// Compute SE2 residual and return both chi2 and unweighted contributions
+std::pair<double, double> ComputeSE2ResidualCosts(
+    const Eigen::Vector3d& residual,
+    const Eigen::Matrix3d& information) {
+    
+    // Chi-squared: r^T * Omega * r
+    double chi2 = residual.transpose() * information * residual;
+    
+    // Unweighted: 0.5 * ||r||^2
+    double unweighted = 0.5 * residual.squaredNorm();
+    
+    return {chi2, unweighted};
+}
+
+/// Compute SE3 residual and return both chi2 and unweighted contributions
+std::pair<double, double> ComputeSE3ResidualCosts(
+    const Eigen::Matrix<double, 6, 1>& residual,
+    const Eigen::Matrix<double, 6, 6>& information) {
+    
+    // Chi-squared: r^T * Omega * r
+    double chi2 = residual.transpose() * information * residual;
+    
+    // Unweighted: 0.5 * ||r||^2
+    double unweighted = 0.5 * residual.squaredNorm();
+    
+    return {chi2, unweighted};
+}
+
 }  // anonymous namespace
 
-double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
+CostMetrics ComputeSE2CostMetrics(const g2o_reader::Graph2D& graph) {
+    CostMetrics metrics{0.0, 0.0};
+    
     if (graph.constraints.empty()) {
-        return 0.0;
+        return metrics;
     }
-
-    double total_cost = 0.0;
 
     for (const auto& constraint : graph.constraints) {
         // Get the two poses
@@ -95,8 +118,7 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
         const auto& pose_j = pose_j_it->second;
 
         // Compute actual relative transformation: T_i^{-1} * T_j
-        // For SE2: T = [R t; 0 1] where R is 2x2 rotation matrix
-
+        
         // T_i^{-1}
         double cos_i = std::cos(pose_i.rotation);
         double sin_i = std::sin(pose_i.rotation);
@@ -134,9 +156,6 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
         theta_error = NormalizeAngle(theta_error);
 
         // Convert to tangent space using exact SE2 log map
-        // For SE2, the log map maps the translation part using V^{-1}
-        // [x, y] = V^{-1} * t_error
-
         double theta = theta_error;
         double theta_sq = theta * theta;
         double a, b;
@@ -163,24 +182,21 @@ double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
         Eigen::Vector3d residual;
         residual << x_tangent, y_tangent, theta_error;
 
-        // Apply information matrix weighting: r^T * Σ^(-1) * r
-        // We ignore the information matrix and just compute the squared norm of the residual.
-        // double weighted_squared_norm = residual.transpose() * constraint.information * residual;
-        double weighted_squared_norm = residual.squaredNorm();
-
-        // Accumulate: 0.5 * ||r||²
-        total_cost += 0.5 * weighted_squared_norm;
+        // Compute both metrics
+        auto [chi2, unweighted] = ComputeSE2ResidualCosts(residual, constraint.information);
+        metrics.chi2_cost += chi2;
+        metrics.unweighted_cost += unweighted;
     }
 
-    return total_cost;
+    return metrics;
 }
 
-double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
+CostMetrics ComputeSE3CostMetrics(const g2o_reader::Graph3D& graph) {
+    CostMetrics metrics{0.0, 0.0};
+    
     if (graph.constraints.empty()) {
-        return 0.0;
+        return metrics;
     }
-
-    double total_cost = 0.0;
 
     for (const auto& constraint : graph.constraints) {
         // Get the two poses
@@ -215,12 +231,10 @@ double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
 
         // Convert to tangent space (6D vector via SE3 log map)
 
-        // Rotation component (last 3 elements) using SO3 log map
+        // Rotation component using SO3 log map
         Eigen::Vector3d residual_rotation = SO3LogMap(q_error);
 
-        // Translation component (first 3 elements)
-        // For SE3, the log map maps the translation part using J_l^{-1} of SO3
-        // rho = J_l^{-1}(theta) * t
+        // Translation component using J_l^{-1}
         Eigen::Matrix3d J_l_inv = ComputeSO3LeftJacobianInverse(residual_rotation);
         Eigen::Vector3d residual_translation = J_l_inv * t_error;
 
@@ -229,15 +243,22 @@ double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
         residual.head<3>() = residual_translation;
         residual.tail<3>() = residual_rotation;
 
-        // Apply information matrix weighting: r^T * Σ^(-1) * r
-        // double weighted_squared_norm = residual.transpose() * constraint.information * residual;
-        double weighted_squared_norm = residual.squaredNorm();
-
-        // Accumulate: 0.5 * ||r||²
-        total_cost += 0.5 * weighted_squared_norm;
+        // Compute both metrics
+        auto [chi2, unweighted] = ComputeSE3ResidualCosts(residual, constraint.information);
+        metrics.chi2_cost += chi2;
+        metrics.unweighted_cost += unweighted;
     }
 
-    return total_cost;
+    return metrics;
+}
+
+// Legacy functions (for backward compatibility)
+double ComputeSE2Cost(const g2o_reader::Graph2D& graph) {
+    return ComputeSE2CostMetrics(graph).unweighted_cost;
+}
+
+double ComputeSE3Cost(const g2o_reader::Graph3D& graph) {
+    return ComputeSE3CostMetrics(graph).unweighted_cost;
 }
 
 }  // namespace unified_cost

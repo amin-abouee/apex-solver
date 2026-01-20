@@ -97,10 +97,22 @@ use apex_solver::manifold::LieGroup;
 use apex_solver::manifold::se2::SE2;
 use apex_solver::manifold::se3::SE3;
 
-/// Compute SE2 cost from G2O graph data
-/// Returns: 0.5 * sum of information-weighted squared residuals
-fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
-    let mut total_cost = 0.0;
+/// Dual cost metrics for benchmarking
+#[derive(Debug, Clone, Copy)]
+struct CostMetrics {
+    /// Chi-squared cost: sum of r^T * Omega * r (information-weighted)
+    chi2_cost: f64,
+    /// Unweighted cost: 0.5 * sum ||r||^2
+    unweighted_cost: f64,
+}
+
+/// Compute both SE2 cost metrics from G2O graph data
+/// - Chi-squared: sum of r^T * Omega * r (information-weighted)
+/// - Unweighted: 0.5 * sum ||r||^2
+fn compute_se2_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
+    let mut chi2_cost = 0.0;
+    let mut unweighted_cost = 0.0;
+
     for edge in &graph.edges_se2 {
         let from_idx = edge.from;
         let to_idx = edge.to;
@@ -112,13 +124,6 @@ fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
             let pose_i = v_from.pose.clone();
             let pose_j = v_to.pose.clone();
 
-            // Compute error: log(T_ij^-1 * T_i^-1 * T_j)
-            // But wait, the standard definition is usually log(T_ij^-1 * (T_i^-1 * T_j))
-            // Let's stick to what we used in the factor:
-            // r = log(T_ij^-1 * T_i^-1 * T_j)
-            // Actually, let's use the exact same logic as the factor to be safe
-            // But here we just need the residual vector.
-
             // T_i^-1 * T_j
             let actual_relative = pose_i.inverse(None).compose(&pose_j, None, None);
 
@@ -129,26 +134,30 @@ fn compute_se2_cost(graph: &apex_solver::io::Graph) -> f64 {
                 .compose(&actual_relative, None, None);
 
             let residual_tangent = error.log(None);
-
-            // Apply information matrix: r^T * Omega * r
-            // let residual_vec = residual_tangent.to_vector();
-            // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
-            // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
-
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
-            let weighted_sq_norm = residual_vec.norm_squared();
 
-            total_cost += 0.5 * weighted_sq_norm;
+            // Chi-squared: r^T * Omega * r (information-weighted)
+            let weighted_sq = &residual_vec.transpose() * &edge.information * &residual_vec;
+            chi2_cost += weighted_sq[(0, 0)];
+
+            // Unweighted: 0.5 * ||r||^2
+            unweighted_cost += 0.5 * residual_vec.norm_squared();
         }
     }
 
-    total_cost
+    CostMetrics {
+        chi2_cost,
+        unweighted_cost,
+    }
 }
 
-/// Compute SE3 cost from G2O graph data
-/// Returns: 0.5 * sum of information-weighted squared residuals
-fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
-    let mut total_cost = 0.0;
+/// Compute both SE3 cost metrics from G2O graph data
+/// - Chi-squared: sum of r^T * Omega * r (information-weighted)
+/// - Unweighted: 0.5 * sum ||r||^2
+fn compute_se3_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
+    let mut chi2_cost = 0.0;
+    let mut unweighted_cost = 0.0;
+
     for edge in &graph.edges_se3 {
         let from_idx = edge.from;
         let to_idx = edge.to;
@@ -170,20 +179,21 @@ fn compute_se3_cost(graph: &apex_solver::io::Graph) -> f64 {
                 .compose(&actual_relative, None, None);
 
             let residual_tangent = error.log(None);
-
-            // Apply information matrix: r^T * Omega * r
-            // let residual_vec = residual_tangent.to_vector();
-            // let weighted_sq_norm = residual_vec.transpose() * edge.information * residual_vec;
-            // total_cost += 0.5 * weighted_sq_norm[(0, 0)];
-
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
-            let weighted_sq_norm = residual_vec.norm_squared();
 
-            total_cost += 0.5 * weighted_sq_norm;
+            // Chi-squared: r^T * Omega * r (information-weighted)
+            let weighted_sq = &residual_vec.transpose() * &edge.information * &residual_vec;
+            chi2_cost += weighted_sq[(0, 0)];
+
+            // Unweighted: 0.5 * ||r||^2
+            unweighted_cost += 0.5 * residual_vec.norm_squared();
         }
     }
 
-    total_cost
+    CostMetrics {
+        chi2_cost,
+        unweighted_cost,
+    }
 }
 
 // Note: Computing factrs final cost using unified cost function is complex due to
@@ -334,7 +344,7 @@ const DATASETS: &[Dataset] = &[
     },
 ];
 
-/// Benchmark result structure
+/// Benchmark result structure with dual metrics
 #[derive(Debug, Clone, Serialize)]
 struct BenchmarkResult {
     dataset: String,
@@ -343,7 +353,11 @@ struct BenchmarkResult {
     elapsed_ms: String,
     converged: String,
     iterations: String,
-    initial_cost: String,
+    // Dual metrics
+    initial_chi2: String, // Chi-squared (information-weighted)
+    final_chi2: String,
+    chi2_improvement_pct: String,
+    initial_cost: String, // Unweighted cost
     final_cost: String,
     improvement_pct: String,
 }
@@ -357,11 +371,19 @@ impl BenchmarkResult {
         elapsed_ms: f64,
         converged: bool,
         iterations: Option<usize>,
-        initial_cost: f64,
-        final_cost: f64,
+        initial_metrics: CostMetrics,
+        final_metrics: CostMetrics,
     ) -> Self {
-        let improvement_pct = if initial_cost > 0.0 {
-            ((initial_cost - final_cost) / initial_cost) * 100.0
+        let improvement_pct = if initial_metrics.unweighted_cost > 0.0 {
+            ((initial_metrics.unweighted_cost - final_metrics.unweighted_cost)
+                / initial_metrics.unweighted_cost)
+                * 100.0
+        } else {
+            0.0
+        };
+        let chi2_improvement_pct = if initial_metrics.chi2_cost > 0.0 {
+            ((initial_metrics.chi2_cost - final_metrics.chi2_cost) / initial_metrics.chi2_cost)
+                * 100.0
         } else {
             0.0
         };
@@ -373,8 +395,11 @@ impl BenchmarkResult {
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: converged.to_string(),
             iterations: iterations.map_or("-".to_string(), |i| i.to_string()),
-            initial_cost: format!("{:.6e}", initial_cost),
-            final_cost: format!("{:.6e}", final_cost),
+            initial_chi2: format!("{:.6e}", initial_metrics.chi2_cost),
+            final_chi2: format!("{:.6e}", final_metrics.chi2_cost),
+            chi2_improvement_pct: format!("{:.2}", chi2_improvement_pct),
+            initial_cost: format!("{:.6e}", initial_metrics.unweighted_cost),
+            final_cost: format!("{:.6e}", final_metrics.unweighted_cost),
             improvement_pct: format!("{:.2}", improvement_pct),
         }
     }
@@ -387,6 +412,9 @@ impl BenchmarkResult {
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: "false".to_string(),
             iterations: "-".to_string(),
+            initial_chi2: "-".to_string(),
+            final_chi2: "-".to_string(),
+            chi2_improvement_pct: "-".to_string(),
             initial_cost: "-".to_string(),
             final_cost: "-".to_string(),
             improvement_pct: "-".to_string(),
@@ -401,6 +429,9 @@ impl BenchmarkResult {
             elapsed_ms: "-".to_string(),
             converged: "false".to_string(),
             iterations: format!("error: {}", error),
+            initial_chi2: "-".to_string(),
+            final_chi2: "-".to_string(),
+            chi2_improvement_pct: "-".to_string(),
             initial_cost: "-".to_string(),
             final_cost: "-".to_string(),
             improvement_pct: "-".to_string(),
@@ -429,7 +460,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     };
 
     // Compute initial cost using unified cost function
-    let initial_cost = compute_se2_cost(&graph);
+    let initial_cost = compute_se2_cost_metrics(&graph);
 
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
@@ -491,7 +522,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             }
 
             // Compute final cost using unified cost function
-            let final_cost = compute_se2_cost(&graph);
+            let final_cost = compute_se2_cost_metrics(&graph);
 
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
@@ -518,7 +549,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     };
 
     // Compute initial cost using unified cost function
-    let initial_cost = compute_se3_cost(&graph);
+    let initial_cost = compute_se3_cost_metrics(&graph);
 
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
@@ -590,7 +621,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             }
 
             // Compute final cost using unified cost function
-            let final_cost = compute_se3_cost(&graph);
+            let final_cost = compute_se3_cost_metrics(&graph);
 
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
@@ -618,9 +649,9 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Compute initial cost from original G2O graph BEFORE factrs adds prior
     // factrs adds a prior factor on the second vertex which is NOT in the original file
     let initial_cost = if dataset.is_3d {
-        compute_se3_cost(&raw_graph)
+        compute_se3_cost_metrics(&raw_graph)
     } else {
-        compute_se2_cost(&raw_graph)
+        compute_se2_cost_metrics(&raw_graph)
     };
 
     // Catch panics from factrs parsing/loading
@@ -659,9 +690,9 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
             // Compute final cost using unified cost function
             let final_cost = if dataset.is_3d {
-                compute_se3_cost(&raw_graph)
+                compute_se3_cost_metrics(&raw_graph)
             } else {
-                compute_se2_cost(&raw_graph)
+                compute_se2_cost_metrics(&raw_graph)
             };
 
             BenchmarkResult::success(
@@ -685,9 +716,9 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
             // Compute final cost using unified cost function
             let final_cost = if dataset.is_3d {
-                compute_se3_cost(&raw_graph)
+                compute_se3_cost_metrics(&raw_graph)
             } else {
-                compute_se2_cost(&raw_graph)
+                compute_se2_cost_metrics(&raw_graph)
             };
 
             BenchmarkResult::success(
@@ -745,9 +776,9 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
     // Compute initial cost from raw graph using unified cost function
     let initial_cost = if dataset.is_3d {
-        compute_se3_cost(&raw_graph)
+        compute_se3_cost_metrics(&raw_graph)
     } else {
-        compute_se2_cost(&raw_graph)
+        compute_se2_cost_metrics(&raw_graph)
     };
 
     // Start timing
@@ -770,9 +801,9 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
             // Compute final cost from updated graph using unified cost function
             let final_cost = if dataset.is_3d {
-                compute_se3_cost(&raw_graph)
+                compute_se3_cost_metrics(&raw_graph)
             } else {
-                compute_se2_cost(&raw_graph)
+                compute_se2_cost_metrics(&raw_graph)
             };
 
             BenchmarkResult::success(
@@ -795,7 +826,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
 // ========================= C++ Benchmark Integration =========================
 
-/// C++ benchmark result from CSV (matches the C++ CSV output format)
+/// C++ benchmark result from CSV (matches the C++ CSV output format with dual metrics)
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 struct CppBenchmarkResult {
@@ -805,6 +836,10 @@ struct CppBenchmarkResult {
     language: String,
     vertices: usize,
     edges: usize,
+    // Dual metrics from C++
+    initial_chi2: f64,
+    final_chi2: f64,
+    chi2_improvement_pct: f64,
     initial_cost: f64,
     final_cost: f64,
     improvement_pct: f64,
@@ -925,6 +960,16 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
         // Remove "-LM" suffix from solver name (e.g., "g2o-LM" -> "g2o", "GTSAM-LM" -> "GTSAM")
         let solver_name = cpp_result.solver.trim_end_matches("-LM");
 
+        // Create CostMetrics from C++ values
+        let initial_metrics = CostMetrics {
+            chi2_cost: cpp_result.initial_chi2,
+            unweighted_cost: cpp_result.initial_cost,
+        };
+        let final_metrics = CostMetrics {
+            chi2_cost: cpp_result.final_chi2,
+            unweighted_cost: cpp_result.final_cost,
+        };
+
         let result = BenchmarkResult::success(
             &cpp_result.dataset,
             solver_name,
@@ -932,8 +977,8 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
             cpp_result.time_ms,
             converged,
             Some(cpp_result.iterations),
-            cpp_result.initial_cost,
-            cpp_result.final_cost,
+            initial_metrics,
+            final_metrics,
         );
 
         results.push(result);
@@ -1110,12 +1155,15 @@ fn main() {
     // Print 2D results
     if !results_2d.is_empty() {
         info!("2D DATASETS (SE2)");
-        info!("{}", "=".repeat(150));
+        info!("{}", "=".repeat(200));
         info!(
-            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+            "{:<15} {:<12} {:<6} {:<12} {:<12} {:<10} {:<12} {:<12} {:<10} {:<8} {:<10} {:<6}",
             "Dataset",
             "Solver",
-            "Language",
+            "Lang",
+            "Init Chi2",
+            "Final Chi2",
+            "Chi2 Imp%",
             "Init Cost",
             "Final Cost",
             "Improve %",
@@ -1123,14 +1171,17 @@ fn main() {
             "Time (ms)",
             "Conv"
         );
-        info!("{}", "-".repeat(150));
+        info!("{}", "-".repeat(200));
 
         for result in &results_2d {
             info!(
-                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+                "{:<15} {:<12} {:<6} {:<12} {:<12} {:<10} {:<12} {:<12} {:<10} {:<8} {:<10} {:<6}",
                 result.dataset,
                 result.solver,
                 result.language,
+                result.initial_chi2,
+                result.final_chi2,
+                result.chi2_improvement_pct,
                 result.initial_cost,
                 result.final_cost,
                 result.improvement_pct,
@@ -1139,18 +1190,21 @@ fn main() {
                 result.converged
             );
         }
-        info!("{}\n", "=".repeat(150));
+        info!("{}\n", "=".repeat(200));
     }
 
     // Print 3D results
     if !results_3d.is_empty() {
         info!("3D DATASETS (SE3)");
-        info!("{}", "=".repeat(150));
+        info!("{}", "=".repeat(200));
         info!(
-            "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+            "{:<15} {:<12} {:<6} {:<12} {:<12} {:<10} {:<12} {:<12} {:<10} {:<8} {:<10} {:<6}",
             "Dataset",
             "Solver",
-            "Language",
+            "Lang",
+            "Init Chi2",
+            "Final Chi2",
+            "Chi2 Imp%",
             "Init Cost",
             "Final Cost",
             "Improve %",
@@ -1158,14 +1212,17 @@ fn main() {
             "Time (ms)",
             "Conv"
         );
-        info!("{}", "-".repeat(150));
+        info!("{}", "-".repeat(200));
 
         for result in &results_3d {
             info!(
-                "{:<20} {:<15} {:<8} {:<14} {:<14} {:<12} {:<10} {:<12} {:<8}",
+                "{:<15} {:<12} {:<6} {:<12} {:<12} {:<10} {:<12} {:<12} {:<10} {:<8} {:<10} {:<6}",
                 result.dataset,
                 result.solver,
                 result.language,
+                result.initial_chi2,
+                result.final_chi2,
+                result.chi2_improvement_pct,
                 result.initial_cost,
                 result.final_cost,
                 result.improvement_pct,
@@ -1174,6 +1231,6 @@ fn main() {
                 result.converged
             );
         }
-        info!("{}", "=".repeat(150));
+        info!("{}", "=".repeat(200));
     }
 }
