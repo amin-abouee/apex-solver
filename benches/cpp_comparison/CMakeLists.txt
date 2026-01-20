@@ -139,6 +139,9 @@ target_link_libraries(ba_common PUBLIC
 if(BUILD_CERES_BENCHMARK)
     # Ceres Odometry Benchmark
     add_executable(ceres_odometry_benchmark odometry/src/ceres.cpp)
+    target_include_directories(ceres_odometry_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/odometry/include
+    )
     target_link_libraries(ceres_odometry_benchmark PRIVATE
         odometry_common
         Ceres::ceres
@@ -170,13 +173,14 @@ endif()
 # =============================================================================
 if(BUILD_GTSAM_BENCHMARK)
     # GTSAM Odometry Benchmark (uses Eigen@3, builds common sources separately)
-    add_executable(gtsam_odometry_benchmark 
-        odometry/src/gtsam.cpp 
-        common/src/read_g2o.cpp 
+    add_executable(gtsam_odometry_benchmark
+        odometry/src/gtsam.cpp
+        common/src/read_g2o.cpp
         common/src/unified_cost.cpp
     )
     target_include_directories(gtsam_odometry_benchmark PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/common/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/odometry/include
         ${EIGEN3_INCLUDE_DIRS_34}
     )
     target_link_libraries(gtsam_odometry_benchmark PRIVATE
@@ -185,9 +189,9 @@ if(BUILD_GTSAM_BENCHMARK)
     )
 
     # GTSAM Bundle Adjustment Benchmark
-    add_executable(gtsam_ba_benchmark 
-        bundle_adjustment/src/gtsam.cpp 
-        common/src/read_bal.cpp 
+    add_executable(gtsam_ba_benchmark
+        bundle_adjustment/src/gtsam.cpp
+        common/src/read_bal.cpp
         common/src/ba_cost.cpp
     )
     target_include_directories(gtsam_ba_benchmark PRIVATE
@@ -219,6 +223,9 @@ endif()
 if(BUILD_G2O_BENCHMARK)
     # g2o Odometry Benchmark
     add_executable(g2o_odometry_benchmark odometry/src/g2o.cpp)
+    target_include_directories(g2o_odometry_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/odometry/include
+    )
     target_link_libraries(g2o_odometry_benchmark PRIVATE
         odometry_common
         Eigen3::Eigen

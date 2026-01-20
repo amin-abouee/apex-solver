@@ -313,8 +313,8 @@ const DATASETS: &[Dataset] = &[
         is_3d: false,
     },
     Dataset {
-        name: "intel",
-        file: "data/odometry/intel.g2o",
+        name: "city10000",
+        file: "data/odometry/city10000.g2o",
         is_3d: false,
     },
     Dataset {
@@ -1127,7 +1127,7 @@ fn main() {
     // 2D datasets: M3500, intel, mit, ring
     let mut results_2d: Vec<_> = all_results
         .iter()
-        .filter(|r| ["intel", "mit", "M3500", "ring"].contains(&r.dataset.as_str()))
+        .filter(|r| ["city10000", "mit", "M3500", "ring"].contains(&r.dataset.as_str()))
         .collect();
 
     // Sort by dataset name first, then by solver name

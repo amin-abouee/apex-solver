@@ -11,6 +11,7 @@
 #include "../../common/include/benchmark_utils.h"
 #include "../../common/include/read_g2o.h"
 #include "../../common/include/unified_cost.h"
+#include "../include/g2o_benchmark.h"
 
 using namespace g2o;
 
@@ -247,7 +248,7 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkSE3("cubicle", "../../../data/odometry/cubicle.g2o"));
 
     // SE2 datasets
-    results.push_back(BenchmarkSE2("intel", "../../../data/odometry/intel.g2o"));
+    results.push_back(BenchmarkSE2("city10000", "../../../data/odometry/city10000.g2o"));
     results.push_back(BenchmarkSE2("mit", "../../../data/odometry/mit.g2o"));
     results.push_back(BenchmarkSE2("ring", "../../../data/odometry/ring.g2o"));
     results.push_back(BenchmarkSE2("M3500", "../../../data/odometry/M3500.g2o"));
