@@ -4,7 +4,7 @@
 #include "../../common/include/benchmark_utils.h"
 #include "../../common/include/read_g2o.h"
 #include "../../common/include/unified_cost.h"
-#include "../include/ceres_benchmark.h"
+#include "../include/ceres_odometry.h"
 
 // Cost functor classes moved to ceres_benchmark.h
 

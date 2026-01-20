@@ -16,7 +16,7 @@ using gtsam::Symbol;
 #include "../../common/include/benchmark_utils.h"
 #include "../../common/include/read_g2o.h"
 #include "../../common/include/unified_cost.h"
-#include "../include/gtsam_benchmark.h"
+#include "../include/gtsam_odometry.h"
 
 // Benchmark SE2 dataset with GTSAM
 benchmark_utils::BenchmarkResult BenchmarkSE2(const std::string& dataset_name,

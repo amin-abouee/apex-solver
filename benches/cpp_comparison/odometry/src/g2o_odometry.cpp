@@ -11,7 +11,7 @@
 #include "../../common/include/benchmark_utils.h"
 #include "../../common/include/read_g2o.h"
 #include "../../common/include/unified_cost.h"
-#include "../include/g2o_benchmark.h"
+#include "../include/g2o_odometry.h"
 
 using namespace g2o;
 
