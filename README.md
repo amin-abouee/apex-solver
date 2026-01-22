@@ -19,7 +19,7 @@ A high-performance Rust-based nonlinear least squares optimization library desig
 - **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3) with analytic Jacobians
 - **⚡ High Performance**: Sparse linear algebra with persistent symbolic factorization (10-15% speedup)
 - **📝 G2O I/O**: Read and write G2O format files for seamless integration with SLAM ecosystems
-- **🔧 Production Tools**: Binary executables (`optimize_3d_graph`, `optimize_2d_graph`) for command-line workflows
+- **🔧 Production Tools**: Binary executable (`pose_graph_g2o`) for command-line 2D/3D pose graph optimization
 - **🧪 Comprehensive Benchmarks**: Performance comparison across 6 optimization libraries (apex-solver, factrs, tiny-solver, Ceres, g2o, GTSAM) on 8 standard datasets
 - **✅ Production-Grade Code Quality**: Removed all unwrap/expect from codebase, comprehensive error handling with Result types throughout
 - **📊 Tracing Integration**: All println!/eprintln! replaced with structured tracing framework with centralized logging configuration
@@ -558,8 +558,8 @@ Run these examples to explore the library's capabilities:
 
 ```bash
 # NEW: Binary executables for production use
-cargo run --bin optimize_3d_graph -- --dataset sphere2500 --optimizer lm
-cargo run --bin optimize_2d_graph -- --dataset M3500 --save-output result.g2o
+cargo run --bin pose_graph_g2o -- --dataset sphere2500 --optimizer lm
+cargo run --bin pose_graph_g2o -- --dataset M3500 --save-output result.g2o
 
 # Load and analyze graph files
 cargo run --example load_graph_file
@@ -874,8 +874,8 @@ G2oWriter::write("optimized_sphere2500.g2o", &result, &graph)?;
 **Command-Line Usage**:
 ```bash
 # Optimize and save in one command
-cargo run --bin optimize_3d_graph -- --dataset sphere2500 --save-output sphere_opt.g2o
-cargo run --bin optimize_2d_graph -- --dataset M3500 --save-output M3500_opt.g2o
+cargo run --bin pose_graph_g2o -- --dataset sphere2500 --save-output sphere_opt.g2o
+cargo run --bin pose_graph_g2o -- --dataset M3500 --save-output M3500_opt.g2o
 ```
 
 ---
