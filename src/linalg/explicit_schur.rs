@@ -1,13 +1,41 @@
-//! Sparse Schur Complement Solver for Bundle Adjustment
+//! # Explicit Schur Complement Solver
 //!
-//! This module implements the Sparse Schur Complement solver with three variants:
-//! 1. SPARSE_SCHUR - Standard direct factorization
-//! 2. ITERATIVE_SCHUR - Preconditioned Conjugate Gradients
-//! 3. POWER_SERIES_SCHUR - Power series approximation (PSSC/PoBA)
+//! This module implements the **Explicit Schur Complement** method for bundle adjustment
+//! and structured optimization problems.
+//!
+//! ## Explicit vs Implicit Schur Complement
+//!
+//! **Explicit Schur:** This formulation physically constructs the reduced camera matrix
+//! (S = B - E C⁻¹ Eᵀ) in memory and solves it using direct sparse Cholesky factorization.
+//! It provides the most accurate results with moderate memory usage.
+//!
+//! **Implicit Schur:** The alternative formulation (see [`implicit_schur`](super::implicit_schur))
+//! never constructs S explicitly, instead solving the system using matrix-free PCG.
+//! It's more memory-efficient for very large problems.
+//!
+//! ## When to Use Explicit Schur
+//!
+//! - Medium-to-large bundle adjustment problems (< 10,000 cameras)
+//! - When accuracy is paramount
+//! - When you have sufficient memory to store the reduced camera system
+//! - When direct factorization is faster than iterative methods
+//!
+//! ## Usage Example
+//!
+//! ```ignore
+//! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant};
+//!
+//! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
+//!     &variables,
+//!     &variable_index_map,
+//!     SchurVariant::Sparse, // Explicit Schur with Cholesky
+//!     SchurPreconditioner::None,
+//! )?;
+//! ```
 
 use crate::core::problem::VariableEnum;
 use crate::linalg::{
-    LinAlgError, LinAlgResult, StructuredSparseLinearSolver, schur_iterative::IterativeSchurSolver,
+    LinAlgError, LinAlgResult, StructuredSparseLinearSolver, implicit_schur::IterativeSchurSolver,
 };
 use crate::manifold::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};

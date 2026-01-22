@@ -1,20 +1,45 @@
-//! Iterative Schur Complement Solver using Preconditioned Conjugate Gradients
+//! # Implicit Schur Complement Solver
 //!
-//! This variant solves the Schur complement system S*δc = g_reduced using PCG
-//! instead of direct factorization, which is faster for large-scale problems.
+//! This module implements the **Implicit Schur Complement** method using matrix-free
+//! Preconditioned Conjugate Gradients (PCG) for bundle adjustment.
 //!
-//! # Algorithm
+//! ## Explicit vs Implicit Schur Complement
+//!
+//! **Implicit Schur:** This formulation never constructs the reduced camera matrix S
+//! explicitly. Instead, it solves the linear system using a matrix-free approach where
+//! only the matrix-vector product S·x is computed. This is highly memory-efficient for
+//! large-scale problems.
+//!
+//! **Explicit Schur:** The alternative formulation (see [`explicit_schur`](super::explicit_schur))
+//! physically constructs S = B - E C⁻¹ Eᵀ in memory and uses sparse Cholesky factorization.
+//!
+//! ## When to Use Implicit Schur
+//!
+//! - Very large bundle adjustment problems (> 10,000 cameras)
+//! - Memory-constrained environments
+//! - When iterative methods converge well (good preconditioning)
+//! - When the reduced camera system S is too large to store explicitly
+//!
+//! ## Algorithm
 //!
 //! 1. Form Schur complement implicitly: S = H_cc - H_cp * H_pp^{-1} * H_cp^T
-//! 2. Solve S*δc = g_reduced using PCG
+//! 2. Solve S*δc = g_reduced using PCG (matrix-free)
 //! 3. Back-substitute: δp = H_pp^{-1} * (g_p - H_cp^T * δc)
 //!
-//! # Preconditioner
+//! ## Usage Example
 //!
-//! Uses block-diagonal (Schur-Jacobi) preconditioner extracted from diagonal
-//! blocks of the Schur complement.
+//! ```ignore
+//! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//!
+//! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
+//!     &variables,
+//!     &variable_index_map,
+//!     SchurVariant::Iterative, // Implicit Schur with PCG
+//!     SchurPreconditioner::SchurJacobi, // Recommended for PCG
+//! )?;
+//! ```
 
-use super::schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
+use super::explicit_schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
 use crate::core::problem::VariableEnum;
 use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
 use faer::Mat;

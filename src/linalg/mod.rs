@@ -1,7 +1,7 @@
 pub mod cholesky;
+pub mod explicit_schur;
+pub mod implicit_schur;
 pub mod qr;
-pub mod schur;
-pub mod schur_iterative;
 
 use crate::core::problem::VariableEnum;
 use faer::{Mat, sparse::SparseColMat};
@@ -219,12 +219,12 @@ pub trait SparseLinearSolver {
 }
 
 pub use cholesky::SparseCholeskySolver;
-pub use qr::SparseQRSolver;
-pub use schur::{
+pub use explicit_schur::{
     SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
     SparseSchurComplementSolver,
 };
-pub use schur_iterative::IterativeSchurSolver;
+pub use implicit_schur::IterativeSchurSolver;
+pub use qr::SparseQRSolver;
 
 /// Extract per-variable covariance blocks from the full covariance matrix.
 ///
