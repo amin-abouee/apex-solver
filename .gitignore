@@ -32,16 +32,15 @@ output/
 doc/*.md
 *.csv
 data_bk/
-
+CLAUDE.md
+cookbook
+deprecated
 
 # C++ benchmark build artifacts
 benches/cpp_comparison/build/
 benches/cpp_comparison/*.csv
 benches/cpp_comparison/.cache/*
 __cmake*
-CLAUDE.md
-cookbook
-conductor
 
 # macOS system files
 **/.DS_Store

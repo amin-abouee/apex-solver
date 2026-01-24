@@ -22,7 +22,7 @@
 //! This module requires the `visualization` feature to be enabled:
 //!
 //! ```toml
-//! apex-solver = { version = "0.1", features = ["visualization"] }
+//! apex-solver = { version = "1.0", features = ["visualization"] }
 //! ```
 //!
 //! # Examples

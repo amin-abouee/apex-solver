@@ -2,6 +2,38 @@
 
 This document provides step-by-step instructions for setting up and running the C++ benchmarks for apex-solver.
 
+## Prerequisites
+
+### Git LFS (Required)
+
+The benchmark datasets are stored using Git LFS. You must have Git LFS installed and initialized:
+
+```bash
+# Install Git LFS (if not already installed)
+brew install git-lfs  # macOS
+# or
+sudo apt-get install git-lfs  # Ubuntu/Debian
+
+# Initialize Git LFS in your repository
+git lfs install
+
+# Pull LFS files (if cloning existing repo)
+git lfs pull
+```
+
+**Verify datasets are downloaded:**
+```bash
+# Check file sizes (should show actual MB, not KB pointers)
+ls -lh data/odometry/
+ls -lh data/bundle_adjustment/
+```
+
+If files show as ~1KB, they are LFS pointers and need to be pulled:
+```bash
+git lfs fetch --all
+git lfs checkout
+```
+
 ## Quick Start
 
 ```bash
@@ -124,9 +156,11 @@ cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 
 ## Datasets
 
-### Odometry Datasets
+**Note**: All datasets are stored via Git LFS. Ensure you have run `git lfs pull` before running benchmarks.
 
-Located in `data/odometry/`:
+### Odometry Datasets (Git LFS)
+
+Located in `data/odometry/` (all `.g2o` files tracked via LFS):
 
 **SE3 (3D Pose Graphs):**
 | Dataset | Vertices | Edges | Description |
@@ -144,9 +178,9 @@ Located in `data/odometry/`:
 | ring | 901 | 991 | Ring topology |
 | M3500 | 3,500 | 5,453 | Manhattan grid |
 
-### Bundle Adjustment Datasets
+### Bundle Adjustment Datasets (Git LFS)
 
-Located in `data/bundle_adjustment/`:
+Located in `data/bundle_adjustment/` (all `.txt` files tracked via LFS):
 
 | Dataset | Cameras | Points | Observations |
 |---------|---------|--------|--------------|
@@ -194,6 +228,21 @@ cargo bench solver_comparison
 ```
 
 ## Troubleshooting
+
+### "Cannot open file" or datasets appear corrupted
+**Cause:** Git LFS files not downloaded (files are LFS pointers instead of actual data)
+**Solution:** 
+```bash
+# Check if files are LFS pointers (they'll be ~1KB instead of MB/GB)
+ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
+
+# Pull LFS files
+git lfs fetch --all
+git lfs checkout
+
+# Verify LFS status
+git lfs ls-files  # Should list all .g2o and .txt files
+```
 
 ### "No C++ optimization libraries found"
 **Cause:** None of Ceres, GTSAM, or g2o are installed/detected.

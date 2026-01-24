@@ -1,6 +1,6 @@
 [package]
 name = "apex-solver"
-version = "0.1.6"
+version = "1.0.0"
 edition = "2024"
 authors = ["Amin Abouee <amin.abouee@gmail.com>"]
 description = "A high-performance Rust library for nonlinear least squares optimization with Lie group support, designed for SLAM, bundle adjustment, and pose graph optimization"
