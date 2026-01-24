@@ -5,6 +5,7 @@
 
 use apex_solver::manifold::LieGroup;
 use apex_solver::manifold::se3::{SE3, SE3Tangent};
+use apex_solver::manifold::so3::SO3;
 use nalgebra::{DVector, Vector3};
 
 /// Generate N 3D points in a realistic scene (hemisphere in front of camera)
@@ -191,9 +192,150 @@ pub fn unflatten_landmarks(flat: &DVector<f64>) -> Vec<Vector3<f64>> {
         .collect()
 }
 
+/// Generate planar calibration target points on a wall at fixed Z depth.
+///
+/// Creates a regular grid of 3D points suitable for simulating calibration
+/// patterns like ArUco markers or chessboard corners.
+///
+/// # Arguments
+/// * `num_x` - Number of points along X axis
+/// * `num_y` - Number of points along Y axis
+/// * `spacing` - Distance between adjacent points (meters)
+/// * `wall_z` - Z coordinate of the wall (distance from camera)
+///
+/// # Returns
+/// Vector of 3D points arranged in a grid, centered at (0, 0, wall_z)
+///
+/// # Example
+/// ```ignore
+/// // 20x10 grid with 10cm spacing at 3m distance
+/// let points = generate_wall_calibration_points(20, 10, 0.1, 3.0);
+/// assert_eq!(points.len(), 200);
+/// ```
+pub fn generate_wall_calibration_points(
+    num_x: usize,
+    num_y: usize,
+    spacing: f64,
+    wall_z: f64,
+) -> Vec<Vector3<f64>> {
+    let mut points = Vec::with_capacity(num_x * num_y);
+
+    // Center the grid around origin
+    let offset_x = (num_x - 1) as f64 * spacing / 2.0;
+    let offset_y = (num_y - 1) as f64 * spacing / 2.0;
+
+    for iy in 0..num_y {
+        for ix in 0..num_x {
+            let x = ix as f64 * spacing - offset_x;
+            let y = iy as f64 * spacing - offset_y;
+            points.push(Vector3::new(x, y, wall_z));
+        }
+    }
+
+    points
+}
+
+/// Generate camera poses distributed on a horizontal arc facing a target.
+///
+/// Creates camera poses suitable for multi-view calibration scenarios.
+/// All cameras face the +Z direction (towards the wall/target).
+///
+/// # Arguments
+/// * `num_cameras` - Number of cameras to generate
+/// * `arc_spread` - Horizontal spread of the arc (half-width in meters)
+/// * `_distance` - Reserved for future use (e.g., curved arc depth)
+///
+/// # Returns
+/// Vector of SE3 poses, each representing a camera position and orientation
+///
+/// # Example
+/// ```ignore
+/// // 5 cameras spread over 0.6m (±0.3m from center)
+/// let poses = generate_arc_camera_poses(5, 0.3, 3.0);
+/// assert_eq!(poses.len(), 5);
+/// ```
+pub fn generate_arc_camera_poses(num_cameras: usize, arc_spread: f64, _distance: f64) -> Vec<SE3> {
+    let mut poses = Vec::with_capacity(num_cameras);
+
+    for i in 0..num_cameras {
+        // Distribute cameras evenly across the arc
+        // t ranges from -0.5 to +0.5
+        let t = if num_cameras > 1 {
+            (i as f64 / (num_cameras - 1) as f64) - 0.5
+        } else {
+            0.0
+        };
+
+        // Camera position on horizontal arc
+        let x = t * 2.0 * arc_spread;
+        let y = 0.0;
+        let z = 0.0;
+
+        // All cameras face +Z direction (identity rotation)
+        // For a more realistic setup, we could add small rotations
+        // to point towards the center of the wall
+        let translation = Vector3::new(x, y, z);
+        let rotation = SO3::identity();
+
+        let pose = SE3::from_translation_so3(translation, rotation);
+        poses.push(pose);
+    }
+
+    poses
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_generate_wall_calibration_points() {
+        let points = generate_wall_calibration_points(20, 10, 0.1, 3.0);
+        assert_eq!(points.len(), 200);
+
+        // All points should be at z = 3.0
+        for pt in &points {
+            assert!(
+                (pt.z - 3.0).abs() < 1e-10,
+                "Point should be at z=3.0: {:?}",
+                pt
+            );
+        }
+
+        // Check centering: first and last points should be symmetric
+        let first = &points[0];
+        let last = &points[199];
+
+        // First point: bottom-left corner
+        assert!((first.x - (-0.95)).abs() < 1e-10); // (20-1)*0.1/2 = 0.95
+        assert!((first.y - (-0.45)).abs() < 1e-10); // (10-1)*0.1/2 = 0.45
+
+        // Last point: top-right corner
+        assert!((last.x - 0.95).abs() < 1e-10);
+        assert!((last.y - 0.45).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_generate_arc_camera_poses() {
+        let poses = generate_arc_camera_poses(5, 0.3, 3.0);
+        assert_eq!(poses.len(), 5);
+
+        // Check camera positions
+        let translations: Vec<_> = poses.iter().map(|p| p.translation()).collect();
+
+        // Camera 0 should be at x = -0.3 (leftmost)
+        assert!((translations[0].x - (-0.3)).abs() < 1e-10);
+        // Camera 2 should be at x = 0 (center)
+        assert!(translations[2].x.abs() < 1e-10);
+        // Camera 4 should be at x = 0.3 (rightmost)
+        assert!((translations[4].x - 0.3).abs() < 1e-10);
+
+        // All cameras at y = 0, z = 0
+        for t in &translations {
+            assert!(t.y.abs() < 1e-10);
+            assert!(t.z.abs() < 1e-10);
+        }
+    }
 
     #[test]
     fn test_generate_scene_points() {

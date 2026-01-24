@@ -839,10 +839,17 @@ impl Problem {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use apex_solver::core::problem::Problem;
+    /// # use std::collections::HashMap;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let problem = Problem::new();
+    /// # let variables = HashMap::new();
     /// // Initial cost evaluation (no Jacobian needed)
     /// let residual = problem.compute_residual_sparse(&variables)?;
     /// let initial_cost = residual.norm_l2() * residual.norm_l2();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn compute_residual_sparse(
         &self,
@@ -916,14 +923,16 @@ impl Problem {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Inside optimizer loop:
-    /// let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
-    ///     &variables,
-    ///     &variable_index_map,
-    ///     &symbolic_structure,
-    /// )?;
-    ///
+    /// ```
+    /// # use apex_solver::core::problem::Problem;
+    /// # use std::collections::HashMap;
+    /// // Inside optimizer loop, compute both residual and Jacobian for linearization
+    /// // let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
+    /// //     &variables,
+    /// //     &variable_index_map,
+    /// //     &symbolic_structure,
+    /// // )?;
+    /// //
     /// // Use for linear system: J^T J dx = -J^T r
     /// ```
     pub fn compute_residual_and_jacobian_sparse(

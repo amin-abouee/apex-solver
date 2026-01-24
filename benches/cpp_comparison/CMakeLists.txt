@@ -18,7 +18,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # =============================================================================
 
 # First, find Eigen 5.0.x for Ceres and g2o
-set(Eigen3_DIR "/opt/homebrew/Cellar/eigen/5.0.1/share/eigen3/cmake" CACHE PATH "Path to Eigen 5.x CMake config")
+set(Eigen3_DIR "/opt/homebrew/opt/eigen/share/eigen3/cmake" CACHE PATH "Path to Eigen 5.x CMake config")
 find_package(Eigen3 5.0 QUIET NO_MODULE)
 if(Eigen3_FOUND)
     message(STATUS "Found Eigen 5.x: ${EIGEN3_INCLUDE_DIRS}")

@@ -44,8 +44,9 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 ///
 /// # Examples
 ///
-/// ```ignore
-/// use apex_solver::factors::camera::{ProjectionFactor, PinholeCamera, BundleAdjustment};
+/// ```
+/// use apex_solver::factors::projection_factor::ProjectionFactor;
+/// use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
 /// use nalgebra::{Matrix2xX, Vector2};
 ///
 /// let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
@@ -97,7 +98,12 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use nalgebra::{Matrix2xX, Vector2};
+    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
     ///     ProjectionFactor::new(observations, camera);
     /// ```
@@ -116,7 +122,14 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use apex_solver::manifold::se3::SE3;
+    /// # use nalgebra::{Matrix2xX, Vector2};
+    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
+    /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// let factor = factor.with_fixed_pose(SE3::identity());
     /// ```
     pub fn with_fixed_pose(mut self, pose: SE3) -> Self {
@@ -128,7 +141,14 @@ where
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
+    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
+    /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
+    /// # let landmarks = Matrix3xX::from_columns(&[Vector3::new(0.1, 0.2, 1.0)]);
     /// let factor = factor.with_fixed_landmarks(landmarks);
     /// ```
     pub fn with_fixed_landmarks(mut self, landmarks: Matrix3xX<f64>) -> Self {

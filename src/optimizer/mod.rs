@@ -120,9 +120,14 @@ impl OptimizerError {
     /// the optimizer module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::optimizer::OptimizerError;
+    /// # fn operation() -> Result<(), OptimizerError> { Ok(()) }
+    /// # fn example() -> Result<(), OptimizerError> {
     /// operation()
-    ///     .map_err(|e| OptimizerError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -140,12 +145,17 @@ impl OptimizerError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
-    /// SparseColMat::try_new_from_triplets(cols, cols, &triplets)
+    /// ```
+    /// # use apex_solver::optimizer::OptimizerError;
+    /// # fn sparse_matrix_op() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), OptimizerError> {
+    /// sparse_matrix_op()
     ///     .map_err(|e| {
     ///         OptimizerError::JacobiScalingCreation(e.to_string())
     ///             .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
