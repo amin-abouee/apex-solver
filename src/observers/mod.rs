@@ -179,9 +179,14 @@ impl ObserverError {
     /// the observers module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::observers::ObserverError;
+    /// # fn operation() -> Result<(), ObserverError> { Ok(()) }
+    /// # fn example() -> Result<(), ObserverError> {
     /// operation()
-    ///     .map_err(|e| ObserverError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -199,8 +204,11 @@ impl ObserverError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
-    /// rec.log(entity_path, &data)
+    /// ```no_run
+    /// # use apex_solver::observers::ObserverError;
+    /// # fn rec_log() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), ObserverError> {
+    /// rec_log()
     ///     .map_err(|e| {
     ///         ObserverError::LoggingFailed {
     ///             entity_path: "world/points".to_string(),
@@ -208,6 +216,8 @@ impl ObserverError {
     ///         }
     ///         .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
