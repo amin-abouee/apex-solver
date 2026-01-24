@@ -116,6 +116,10 @@ pub struct RadTanCamera {
 
 impl RadTanCamera {
     /// Create a new RadTan camera.
+    ///
+    /// # Design Note
+    /// The RadTan camera model requires 9 intrinsic parameters (4 intrinsics + 5 distortion coefficients).
+    /// This is a fundamental property of the model and cannot be reduced without changing the model itself.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         fx: f64,

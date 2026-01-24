@@ -36,6 +36,10 @@ pub struct KannalaBrandtCamera {
 
 impl KannalaBrandtCamera {
     /// Create a new Kannala-Brandt camera.
+    ///
+    /// # Design Note
+    /// The Kannala-Brandt camera model requires 8 intrinsic parameters (4 intrinsics + 4 distortion coefficients).
+    /// This is a fundamental property of the model and cannot be reduced without changing the model itself.
     #[allow(clippy::too_many_arguments)]
     pub const fn new(
         fx: f64,
