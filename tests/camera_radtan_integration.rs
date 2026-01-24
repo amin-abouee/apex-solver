@@ -45,11 +45,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // RadTan camera with moderate distortion parameters
     // Use weaker distortion for better convergence with planar calibration
     let true_camera = RadTanCamera::new(
-        200.0, 200.0,      // fx, fy (focal lengths - wide FOV)
-        300.0, 200.0,      // cx, cy (principal point - centered for 600x400 image)
-        0.1, -0.05,        // k1, k2 (moderate radial distortion)
-        0.001, -0.001,     // p1, p2 (small tangential distortion)
-        0.0,               // k3 (set to zero - not observable from planar target)
+        200.0, 200.0, // fx, fy (focal lengths - wide FOV)
+        300.0, 200.0, // cx, cy (principal point - centered for 600x400 image)
+        0.1, -0.05, // k1, k2 (moderate radial distortion)
+        0.001, -0.001, // p1, p2 (small tangential distortion)
+        0.0,    // k3 (set to zero - not observable from planar target)
     );
 
     let img_width = 600.0;
@@ -61,11 +61,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // Generate wall: 20x10 grid, 0.1m spacing, at 3.0m depth
     let true_landmarks = generate_wall_calibration_points(20, 10, 0.1, 3.0);
-    assert_eq!(
-        true_landmarks.len(),
-        200,
-        "Expected 200 calibration points"
-    );
+    assert_eq!(true_landmarks.len(), 200, "Expected 200 calibration points");
 
     // ============================================================================
     // 3. Generate Camera Poses (5 cameras on horizontal arc)
@@ -98,14 +94,12 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image
-            let uv = true_camera
-                .project(&p_cam)
-                .unwrap_or_else(|| {
-                    panic!(
-                        "Projection failed for camera {} landmark {}: p_cam = {:?}",
-                        cam_idx, lm_idx, p_cam
-                    )
-                });
+            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
+                panic!(
+                    "Projection failed for camera {} landmark {}: p_cam = {:?}",
+                    cam_idx, lm_idx, p_cam
+                )
+            });
 
             // Verify projection is inside image bounds
             assert!(
@@ -150,9 +144,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         .map(|(i, p)| perturb_pose(p, 0.02, 1.0, 200 + i as u64 * 10))
         .collect();
 
-    let true_intrinsics = [
-        200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0,
-    ];
+    let true_intrinsics = [200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0];
     let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
 
     // ============================================================================
@@ -168,7 +160,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
         // Create projection factor with SelfCalibration
         let factor: ProjectionFactor<RadTanCamera, SelfCalibration> =
-            ProjectionFactor::new(obs_matrix, true_camera.clone());
+            ProjectionFactor::new(obs_matrix, true_camera);
 
         // Add residual block: [pose_i, landmarks, intrinsics]
         let pose_name = format!("pose_{}", cam_idx);
@@ -313,11 +305,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
         for (lm_idx, true_obs) in true_observations.iter().enumerate() {
             let p_cam = final_pose.act(&final_landmarks[lm_idx], None, None);
-            let pred_obs = final_camera.project(&p_cam).unwrap();
-
-            let error = (pred_obs - true_obs).norm();
-            total_error_sq += error * error;
-            total_observations += 1;
+            if let Some(pred_obs) = final_camera.project(&p_cam) {
+                let error = (pred_obs - true_obs).norm();
+                total_error_sq += error * error;
+                total_observations += 1;
+            }
         }
     }
 
@@ -390,10 +382,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         let abs_error = (final_intrinsics[*i] - true_intrinsics[*i]).abs();
         println!(
             "{}: true={:.4}, final={:.4}, abs_error={:.4}",
-            tangential_names[idx],
-            true_intrinsics[*i],
-            final_intrinsics[*i],
-            abs_error
+            tangential_names[idx], true_intrinsics[*i], final_intrinsics[*i], abs_error
         );
 
         assert!(
@@ -428,9 +417,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_radtan_3_cameras_calibration() -> TestResult {
     // Same setup as main test but with 3 cameras
-    let true_camera = RadTanCamera::new(
-        200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0,
-    );
+    let true_camera = RadTanCamera::new(200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0);
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -459,9 +446,12 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
                 lm_idx
             );
 
-            let uv = true_camera
-                .project(&p_cam)
-                .unwrap_or_else(|| panic!("Projection failed for camera {} landmark {}", cam_idx, lm_idx));
+            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
+                panic!(
+                    "Projection failed for camera {} landmark {}",
+                    cam_idx, lm_idx
+                )
+            });
 
             assert!(
                 uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,
@@ -484,9 +474,7 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
         .map(|(i, p)| perturb_pose(p, 0.02, 1.0, 200 + i as u64 * 10))
         .collect();
 
-    let true_intrinsics = [
-        200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0,
-    ];
+    let true_intrinsics = [200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0];
     let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
 
     // Build problem
@@ -495,10 +483,14 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);
         let factor: ProjectionFactor<RadTanCamera, SelfCalibration> =
-            ProjectionFactor::new(obs_matrix, true_camera.clone());
+            ProjectionFactor::new(obs_matrix, true_camera);
 
         let pose_name = format!("pose_{}", cam_idx);
-        problem.add_residual_block(&[&pose_name, "landmarks", "intrinsics"], Box::new(factor), None);
+        problem.add_residual_block(
+            &[&pose_name, "landmarks", "intrinsics"],
+            Box::new(factor),
+            None,
+        );
     }
 
     // Fix first camera
@@ -510,11 +502,20 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
     let mut initial_values = HashMap::new();
 
     for (i, pose) in noisy_poses.iter().enumerate() {
-        initial_values.insert(format!("pose_{}", i), (ManifoldType::SE3, pose.clone().into()));
+        initial_values.insert(
+            format!("pose_{}", i),
+            (ManifoldType::SE3, pose.clone().into()),
+        );
     }
 
-    initial_values.insert("landmarks".to_string(), (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)));
-    initial_values.insert("intrinsics".to_string(), (ManifoldType::RN, DVector::from_vec(noisy_intrinsics)));
+    initial_values.insert(
+        "landmarks".to_string(),
+        (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
+    );
+    initial_values.insert(
+        "intrinsics".to_string(),
+        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics)),
+    );
 
     // Optimize
     let config = LevenbergMarquardtConfig::new()

@@ -254,11 +254,7 @@ pub fn generate_wall_calibration_points(
 /// let poses = generate_arc_camera_poses(5, 0.3, 3.0);
 /// assert_eq!(poses.len(), 5);
 /// ```
-pub fn generate_arc_camera_poses(
-    num_cameras: usize,
-    arc_spread: f64,
-    _distance: f64,
-) -> Vec<SE3> {
+pub fn generate_arc_camera_poses(num_cameras: usize, arc_spread: f64, _distance: f64) -> Vec<SE3> {
     let mut poses = Vec::with_capacity(num_cameras);
 
     for i in 0..num_cameras {

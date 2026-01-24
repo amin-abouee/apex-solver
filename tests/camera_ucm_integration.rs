@@ -45,7 +45,7 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
     let true_camera = UcmCamera::new(
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy (center of 600x400)
-        0.7, // alpha
+        0.7,   // alpha
     );
 
     // Image bounds for projection validation
@@ -99,9 +99,12 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera
-                .project(&p_cam)
-                .unwrap_or_else(|| panic!("Projection failed for camera {} landmark {}", cam_idx, lm_idx));
+            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
+                panic!(
+                    "Projection failed for camera {} landmark {}",
+                    cam_idx, lm_idx
+                )
+            });
 
             // Verify within image bounds
             assert!(
@@ -202,7 +205,10 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
     // Intrinsics (RN manifold, [fx, fy, cx, cy, alpha])
     initial_values.insert(
         "intrinsics".to_string(),
-        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics.clone())),
+        (
+            ManifoldType::RN,
+            DVector::from_vec(noisy_intrinsics.clone()),
+        ),
     );
 
     // ============================================================================
@@ -338,7 +344,7 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
     let true_camera = UcmCamera::new(
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy
-        0.7, // alpha
+        0.7,   // alpha
     );
 
     let img_width = 600.0;
@@ -355,12 +361,14 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam) {
-                if let Some(uv) = true_camera.project(&p_cam) {
-                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
-                        cam_obs.push(uv);
-                    }
-                }
+            if true_camera.is_valid_point(&p_cam)
+                && let Some(uv) = true_camera.project(&p_cam)
+                && uv.x >= 0.0
+                && uv.x < img_width
+                && uv.y >= 0.0
+                && uv.y < img_height
+            {
+                cam_obs.push(uv);
             }
         }
         all_observations.push(cam_obs);

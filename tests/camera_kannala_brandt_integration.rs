@@ -103,9 +103,12 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera
-                .project(&p_cam)
-                .unwrap_or_else(|| panic!("Projection failed for camera {} landmark {}", cam_idx, lm_idx));
+            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
+                panic!(
+                    "Projection failed for camera {} landmark {}",
+                    cam_idx, lm_idx
+                )
+            });
 
             // Verify within image bounds
             assert!(
@@ -208,7 +211,10 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
     // Intrinsics (RN manifold, [fx, fy, cx, cy, k1, k2, k3, k4])
     initial_values.insert(
         "intrinsics".to_string(),
-        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics.clone())),
+        (
+            ManifoldType::RN,
+            DVector::from_vec(noisy_intrinsics.clone()),
+        ),
     );
 
     // ============================================================================
@@ -309,17 +315,15 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             (abs_error, "abs")
         } else {
             // Relative error for fx, fy, cx, cy, k1, k2
-            let rel_error = (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs().max(0.01);
+            let rel_error = (final_intrinsics[i] - true_intrinsics[i]).abs()
+                / true_intrinsics[i].abs().max(0.01);
             (rel_error, "rel")
         };
 
         if error_type == "abs" {
             println!(
                 "  {}: true={:.4}, final={:.4}, error={:.4} (absolute)",
-                param_names[i],
-                true_intrinsics[i],
-                final_intrinsics[i],
-                error
+                param_names[i], true_intrinsics[i], final_intrinsics[i], error
             );
             assert!(
                 error < 0.25,
@@ -390,12 +394,14 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam) {
-                if let Some(uv) = true_camera.project(&p_cam) {
-                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
-                        cam_obs.push(uv);
-                    }
-                }
+            if true_camera.is_valid_point(&p_cam)
+                && let Some(uv) = true_camera.project(&p_cam)
+                && uv.x >= 0.0
+                && uv.x < img_width
+                && uv.y >= 0.0
+                && uv.y < img_height
+            {
+                cam_obs.push(uv);
             }
         }
         all_observations.push(cam_obs);

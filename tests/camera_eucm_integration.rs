@@ -100,9 +100,12 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera
-                .project(&p_cam)
-                .unwrap_or_else(|| panic!("Projection failed for camera {} landmark {}", cam_idx, lm_idx));
+            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
+                panic!(
+                    "Projection failed for camera {} landmark {}",
+                    cam_idx, lm_idx
+                )
+            });
 
             // Verify within image bounds
             assert!(
@@ -203,7 +206,10 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
     // Intrinsics (RN manifold, [fx, fy, cx, cy, alpha, beta])
     initial_values.insert(
         "intrinsics".to_string(),
-        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics.clone())),
+        (
+            ManifoldType::RN,
+            DVector::from_vec(noisy_intrinsics.clone()),
+        ),
     );
 
     // ============================================================================
@@ -357,12 +363,14 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam) {
-                if let Some(uv) = true_camera.project(&p_cam) {
-                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
-                        cam_obs.push(uv);
-                    }
-                }
+            if true_camera.is_valid_point(&p_cam)
+                && let Some(uv) = true_camera.project(&p_cam)
+                && uv.x >= 0.0
+                && uv.x < img_width
+                && uv.y >= 0.0
+                && uv.y < img_height
+            {
+                cam_obs.push(uv);
             }
         }
         all_observations.push(cam_obs);
