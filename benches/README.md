@@ -7,6 +7,50 @@ This directory contains two comprehensive benchmarks for evaluating Apex Solver 
 
 ---
 
+## Prerequisites
+
+### Git LFS
+
+All benchmark datasets are stored using **Git LFS** to avoid bloating the repository:
+
+- **Bundle adjustment datasets**: `data/bundle_adjustment/**/*.txt` (~1.9GB)
+- **Odometry datasets**: `data/odometry/**/*.g2o` (~11MB)
+
+#### Setup
+
+```bash
+# Install Git LFS
+brew install git-lfs  # macOS
+# or
+sudo apt-get install git-lfs  # Ubuntu/Debian
+
+# Initialize and pull LFS files
+git lfs install
+git lfs pull
+```
+
+#### Troubleshooting
+
+If benchmarks fail with "file not found" or data appears corrupted:
+
+1. **Check if files are LFS pointers** (they'll be ~1KB instead of MB/GB):
+   ```bash
+   ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
+   ```
+
+2. **Pull LFS files**:
+   ```bash
+   git lfs fetch --all
+   git lfs checkout
+   ```
+
+3. **Verify LFS status**:
+   ```bash
+   git lfs ls-files  # Should list all .g2o and .txt files
+   ```
+
+---
+
 ## 1. Bundle Adjustment Benchmark
 
 Compares **Apex Solver (Iterative Schur)** against **Ceres**, **GTSAM**, and **g2o** on 4 large-scale BAL datasets.
@@ -194,6 +238,10 @@ cat output/ba_comparison_results.csv
 - **BAL datasets**: [Bundle Adjustment in the Large](https://grail.cs.washington.edu/projects/bal/)
 - **G2O datasets**: Standard SLAM benchmarks from g2o repository
 
+**Storage**: All datasets are managed via Git LFS to keep the repository lightweight:
+- Bundle adjustment: `.txt` files (~1.9GB total)
+- Odometry: `.g2o` files (~11MB total)
+
 Datasets are expected in:
-- `data/bundle_adjustment/[dataset]/problem-*.txt` (BAL format)
-- `data/*.g2o` (G2O format)
+- `data/bundle_adjustment/[dataset]/problem-*.txt` (BAL format, LFS)
+- `data/odometry/*.g2o` (G2O format, LFS)
