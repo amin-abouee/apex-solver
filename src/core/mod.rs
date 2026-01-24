@@ -63,9 +63,14 @@ impl CoreError {
     /// the core module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::core::CoreError;
+    /// # fn operation() -> Result<(), CoreError> { Ok(()) }
+    /// # fn example() -> Result<(), CoreError> {
     /// operation()
-    ///     .map_err(|e| CoreError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -83,7 +88,10 @@ impl CoreError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::core::CoreError;
+    /// # fn matrix_operation() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), CoreError> {
     /// matrix_operation()
     ///     .map_err(|e| {
     ///         CoreError::SymbolicStructure(
@@ -91,6 +99,8 @@ impl CoreError {
     ///         )
     ///         .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
