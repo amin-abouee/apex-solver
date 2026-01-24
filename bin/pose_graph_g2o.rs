@@ -80,19 +80,12 @@ struct Args {
 struct CostMetrics {
     /// Chi-squared cost: sum of r^T * Omega * r (information-weighted)
     chi2_cost: f64,
-    /// Unweighted cost: 0.5 * sum ||r||^2
-    /// Note: This field is computed for consistency with odometry_pose_benchmark.rs
-    /// but not currently used since initial_cost comes from the Problem's residual
-    #[allow(dead_code)]
-    unweighted_cost: f64,
 }
 
-/// Compute both SE2 cost metrics from G2O graph data
+/// Compute SE2 cost metrics from G2O graph data
 /// - Chi-squared: sum of r^T * Omega * r (information-weighted)
-/// - Unweighted: 0.5 * sum ||r||^2
 fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
-    let mut unweighted_cost = 0.0;
 
     for edge in &graph.edges_se2 {
         let from_idx = edge.from;
@@ -120,24 +113,16 @@ fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
-
-            // Unweighted: 0.5 * ||r||^2
-            unweighted_cost += 0.5 * residual_vec.norm_squared();
         }
     }
 
-    CostMetrics {
-        chi2_cost,
-        unweighted_cost,
-    }
+    CostMetrics { chi2_cost }
 }
 
-/// Compute both SE3 cost metrics from G2O graph data
-/// - Chi-squared: sum of r^T * Omega * r (information-weighted)
-/// - Unweighted: 0.5 * sum ||r||^2
+/// Compute SE3 cost metrics from G2O graph data
+/// Returns chi-squared: sum of r^T * Omega * r (information-weighted)
 fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
-    let mut unweighted_cost = 0.0;
 
     for edge in &graph.edges_se3 {
         let from_idx = edge.from;
@@ -165,16 +150,10 @@ fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
-
-            // Unweighted: 0.5 * ||r||^2
-            unweighted_cost += 0.5 * residual_vec.norm_squared();
         }
     }
 
-    CostMetrics {
-        chi2_cost,
-        unweighted_cost,
-    }
+    CostMetrics { chi2_cost }
 }
 
 #[derive(Clone)]
