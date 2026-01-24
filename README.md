@@ -27,40 +27,67 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 ## 🚀 Quick Start
 
 ```rust
+use std::collections::HashMap;
+use apex_solver::core::problem::Problem;
+use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use apex_solver::linalg::LinearSolverType;
+use apex_solver::manifold::ManifoldType;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use nalgebra::dvector;
 
-// Load a pose graph from file
-let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
-let (problem, initial_values) = graph.to_problem();
-
-// Configure optimizer
-let config = LevenbergMarquardtConfig::new()
-    .with_linear_solver_type(LinearSolverType::SparseCholesky)
-    .with_max_iterations(100)
-    .with_cost_tolerance(1e-6)
-    .with_compute_covariances(true)     // Enable uncertainty estimation
-    .with_jacobi_scaling(true)          // Enable preconditioning (default)
-    .with_visualization(true);          // Enable Rerun visualization
-
-// Create and run optimizer
-let mut solver = LevenbergMarquardt::with_config(config);
-let result = solver.optimize(&problem, &initial_values)?;
-
-// Check results
-info!("Status: {:?}", result.status);
-info!("Initial cost: {:.3e}", result.initial_cost);
-info!("Final cost: {:.3e}", result.final_cost);
-info!("Iterations: {}", result.iterations);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Load pose graph from G2O file
+    let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
+    
+    // Create optimization problem
+    let mut problem = Problem::new();
+    let mut initial_values = HashMap::new();
+    
+    // Add SE3 poses as variables
+    for (&id, vertex) in &graph.vertices_se3 {
+        let var_name = format!("x{}", id);
+        let quat = vertex.pose.rotation_quaternion();
+        let trans = vertex.pose.translation();
+        let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+        initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+    }
+    
+    // Add between factors (relative pose constraints)
+    for edge in &graph.edges_se3 {
+        let factor = BetweenFactor::new(edge.measurement.clone());
+        problem.add_residual_block(
+            &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
+            Box::new(factor),
+            None,  // Optional: add HuberLoss for robustness
+        );
+    }
+    
+    // Configure and run optimizer
+    let config = LevenbergMarquardtConfig::new()
+        .with_linear_solver_type(LinearSolverType::SparseCholesky)
+        .with_max_iterations(100)
+        .with_cost_tolerance(1e-6)
+        .with_compute_covariances(true);  // Enable uncertainty estimation
+    
+    let mut solver = LevenbergMarquardt::with_config(config);
+    let result = solver.optimize(&problem, &initial_values)?;
+    
+    println!("Status: {:?}", result.status);
+    println!("Initial cost: {:.3e}", result.initial_cost);
+    println!("Final cost: {:.3e}", result.final_cost);
+    println!("Iterations: {}", result.iterations);
+    
+    Ok(())
+}
 ```
 
 **Result**:
 ```
 Status: CostToleranceReached
-Initial cost: 2.317e+05
-Final cost: 3.421e+02
-Iterations: 12
+Initial cost: 1.280e+05
+Final cost: 2.130e+01
+Iterations: 5
 ```
 
 ---
@@ -221,27 +248,50 @@ Large-scale bundle adjustment benchmarks optimizing **camera poses, 3D landmarks
 ### Example 1: Basic Pose Graph Optimization
 
 ```rust
+use std::collections::HashMap;
+use apex_solver::core::problem::Problem;
+use apex_solver::factors::BetweenFactor;
 use apex_solver::io::{G2oLoader, GraphLoader};
+use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
-use apex_solver::linalg::LinearSolverType;
+use nalgebra::dvector;
 
 // Load pose graph
-let graph = G2oLoader::load("data/sphere2500.g2o")?;
-let (problem, initial_values) = graph.to_problem();
+let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
 
-// Configure optimizer
+// Build optimization problem
+let mut problem = Problem::new();
+let mut initial_values = HashMap::new();
+
+// Add SE3 poses as variables
+for (&id, vertex) in &graph.vertices_se3 {
+    let quat = vertex.pose.rotation_quaternion();
+    let trans = vertex.pose.translation();
+    initial_values.insert(
+        format!("x{}", id),
+        (ManifoldType::SE3, dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k])
+    );
+}
+
+// Add between factors
+for edge in &graph.edges_se3 {
+    problem.add_residual_block(
+        &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
+        Box::new(BetweenFactor::new(edge.measurement.clone())),
+        None,
+    );
+}
+
+// Configure and solve
 let config = LevenbergMarquardtConfig::new()
-    .with_linear_solver_type(LinearSolverType::SparseCholesky)
     .with_max_iterations(100)
-    .with_cost_tolerance(1e-6)
-    .with_verbose(true);
+    .with_cost_tolerance(1e-6);
 
-// Solve
 let mut solver = LevenbergMarquardt::with_config(config);
 let result = solver.optimize(&problem, &initial_values)?;
 
-info!("Optimized {} poses in {} iterations", 
-      result.values.len(), result.iterations);
+println!("Optimized {} poses in {} iterations", 
+    result.parameters.len(), result.iterations);
 ```
 
 ### Example 2: Custom Factor Implementation
@@ -306,86 +356,86 @@ problem.add_residual_block(
 
 ### Example 3: Self-Calibration Bundle Adjustment
 
-Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously:
+Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously using `ProjectionFactor<CameraModel, OptConfig>`:
 
 ```rust
+use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
-use apex_solver::core::factors::ProjectionFactorRadialTangential;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::camera::{BALPinholeCameraStrict, SelfCalibration};
 use apex_solver::linalg::LinearSolverType;
 use apex_solver::manifold::ManifoldType;
-use nalgebra::DVector;
-use std::collections::HashMap;
+use apex_solver::manifold::se3::SE3;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use nalgebra::{DVector, Matrix2xX, Vector2};
 
-fn main() -> Result<(), ApexError> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
 
-    // Add camera intrinsic variables (fx, fy, cx, cy, k1, k2, p1, p2)
-    initial_values.insert(
-        "intrinsics".to_string(),
-        (ManifoldType::Rn, dvector![800.0, 800.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0])
-    );
-
-    // Add camera pose variables (SE3)
-    for cam_id in 0..num_cameras {
-        let pose_vec = /* initial SE3 pose as 7-vector: [qw, qx, qy, qz, tx, ty, tz] */;
+    // Add camera poses (SE3) and per-camera intrinsics
+    for (i, cam) in cameras.iter().enumerate() {
+        // SE3 pose: [tx, ty, tz, qw, qi, qj, qk]
+        let pose = SE3::from_translation_so3(cam.translation, cam.rotation);
         initial_values.insert(
-            format!("cam_{}", cam_id),
-            (ManifoldType::SE3, pose_vec)
+            format!("pose_{:04}", i),
+            (ManifoldType::SE3, DVector::from(pose))
         );
-    }
-
-    // Add 3D landmark variables (points)
-    for lm_id in 0..num_landmarks {
-        let point_vec = dvector![x, y, z];
+        
+        // Per-camera intrinsics: [focal, k1, k2]
         initial_values.insert(
-            format!("landmark_{}", lm_id),
-            (ManifoldType::Rn, point_vec)
+            format!("intr_{:04}", i),
+            (ManifoldType::RN, DVector::from_vec(vec![cam.focal, cam.k1, cam.k2]))
         );
     }
 
-    // Add projection factors linking cameras, landmarks, and intrinsics
-    for observation in &observations {
-        let factor = ProjectionFactorRadialTangential::new(
-            format!("cam_{}", observation.camera_id),
-            format!("landmark_{}", observation.landmark_id),
-            "intrinsics".to_string(),
-            observation.pixel_coords,      // 2D measurement
-            observation.information,       // 2×2 information matrix
+    // Add 3D landmarks
+    for (j, point) in landmarks.iter().enumerate() {
+        initial_values.insert(
+            format!("pt_{:05}", j),
+            (ManifoldType::RN, DVector::from_vec(vec![point.x, point.y, point.z]))
         );
-        problem.add_residual_block(Box::new(factor), None);
     }
 
-    // Optimize all variables simultaneously with Explicit Schur Complement
-    let config = LevenbergMarquardtConfig::new()
-        .with_optimizer_type(OptimizerType::LevenbergMarquardt)
-        .with_linear_solver_type(LinearSolverType::ExplicitSchur)  // Best for BA
+    // Add projection factors with SelfCalibration optimization type
+    for obs in &observations {
+        let camera = BALPinholeCameraStrict::new(obs.focal, obs.k1, obs.k2);
+        let measurements = Matrix2xX::from_columns(&[Vector2::new(obs.u, obs.v)]);
+        
+        // ProjectionFactor<CameraModel, OptConfig> with compile-time optimization config
+        let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
+            ProjectionFactor::new(measurements, camera);
+        
+        problem.add_residual_block(
+            &[&format!("pose_{:04}", obs.cam_id), 
+              &format!("pt_{:05}", obs.pt_id),
+              &format!("intr_{:04}", obs.cam_id)],
+            Box::new(factor),
+            None,  // Or Some(Box::new(HuberLoss::new(1.0)?)) for robustness
+        );
+    }
+
+    // Fix first camera for gauge freedom
+    for dof in 0..6 {
+        problem.fix_variable("pose_0000", dof);
+    }
+
+    // Configure with Schur complement solver (best for BA)
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment()
         .with_max_iterations(50)
         .with_cost_tolerance(1e-6);
 
     let mut solver = LevenbergMarquardt::with_config(config);
     let result = solver.optimize(&problem, &initial_values)?;
 
-    // Extract optimized camera intrinsics
-    let optimized_intrinsics = result.values
-        .get("intrinsics")
-        .unwrap()
-        .to_vector();
-
-    println!("Optimized camera intrinsics:");
-    println!("  fx = {:.2}", optimized_intrinsics[0]);
-    println!("  fy = {:.2}", optimized_intrinsics[1]);
-    println!("  cx = {:.2}", optimized_intrinsics[2]);
-    println!("  cy = {:.2}", optimized_intrinsics[3]);
-    println!("  k1 = {:.6}", optimized_intrinsics[4]);
-    println!("  k2 = {:.6}", optimized_intrinsics[5]);
+    println!("Status: {:?}", result.status);
+    println!("Final RMSE: {:.3} pixels", (result.final_cost / observations.len() as f64).sqrt());
 
     Ok(())
 }
 ```
 
-**Supported Optimization Modes**:
+**Optimization Types** (compile-time configuration):
 - `SelfCalibration`: Optimize pose + landmarks + intrinsics (shown above)
 - `BundleAdjustment`: Optimize pose + landmarks (fixed intrinsics)
 - `OnlyPose`: Visual odometry with fixed landmarks and intrinsics
@@ -490,13 +540,23 @@ config.with_linear_solver_type(LinearSolverType::ImplicitSchur)  // For very lar
 
 ## 🎨 Interactive Visualization
 
-Real-time optimization debugging with integrated [Rerun](https://rerun.io/) visualization:
+Real-time optimization debugging with integrated [Rerun](https://rerun.io/) visualization using the observer pattern:
 
 ```rust
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+
 let config = LevenbergMarquardtConfig::new()
-    .with_visualization(true);  // Enable visualization
+    .with_max_iterations(100);
 
 let mut solver = LevenbergMarquardt::with_config(config);
+
+// Add Rerun visualization observer (requires `visualization` feature)
+#[cfg(feature = "visualization")]
+{
+    use apex_solver::observers::RerunObserver;
+    solver.add_observer(RerunObserver::new(true)?);  // true = spawn viewer
+}
+
 let result = solver.optimize(&problem, &initial_values)?;
 ```
 
@@ -505,13 +565,14 @@ let result = solver.optimize(&problem, &initial_values)?;
 - Matrix visualizations: Hessian heat map, gradient vector
 - 3D poses: SE3 camera frusta, SE2 2D points
 
-**Launch Visualization**:
+**Run Examples**:
 ```bash
-cargo run --example visualize_optimization
-cargo run --example visualize_optimization -- --dataset parking-garage
+# Enable visualization feature and run
+cargo run --release --bin optimize_3d_graph -- --dataset sphere2500 --with-visualizer
+cargo run --release --bin optimize_2d_graph -- --dataset intel --with-visualizer
 ```
 
-Zero overhead when disabled in release builds.
+Zero overhead when disabled (feature-gated).
 
 ---
 
