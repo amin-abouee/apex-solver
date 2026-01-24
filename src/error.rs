@@ -39,11 +39,16 @@ pub type ApexSolverResult<T> = Result<T, ApexSolverError>;
 ///
 /// You can access the full error chain using the `chain()` method:
 ///
-/// ```rust,ignore
-/// if let Err(e) = solver.optimize(&problem, &initial_values) {
+/// ```no_run
+/// # use apex_solver::error::ApexSolverError;
+/// # use tracing::warn;
+/// # fn solver_optimize() -> Result<(), ApexSolverError> { Ok(()) }
+/// # fn example() {
+/// if let Err(e) = solver_optimize() {
 ///     warn!("Error: {}", e);
 ///     warn!("Full chain: {}", e.chain());
 /// }
+/// # }
 /// ```
 #[derive(Debug, Error)]
 pub enum ApexSolverError {
@@ -84,8 +89,12 @@ impl ApexSolverError {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// match solver.optimize(&problem, &initial_values) {
+    /// ```no_run
+    /// # use apex_solver::error::ApexSolverError;
+    /// # use tracing::warn;
+    /// # fn solver_optimize() -> Result<(), ApexSolverError> { Ok(()) }
+    /// # fn example() {
+    /// match solver_optimize() {
     ///     Ok(result) => { /* ... */ }
     ///     Err(e) => {
     ///         warn!("Optimization failed!");
@@ -94,6 +103,7 @@ impl ApexSolverError {
     ///         //          Linear algebra error: Singular matrix detected"
     ///     }
     /// }
+    /// # }
     /// ```
     pub fn chain(&self) -> String {
         let mut chain = vec![self.to_string()];
@@ -113,9 +123,15 @@ impl ApexSolverError {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use apex_solver::error::ApexSolverError;
+    /// # use apex_solver::core::CoreError;
+    /// # use tracing::error;
+    /// # fn example() {
+    /// # let apex_err = ApexSolverError::Core(CoreError::InvalidInput("test".to_string()));
     /// error!("Operation failed: {}", apex_err.chain_compact());
     /// // Output: "Optimizer error → Linear algebra error → Singular matrix"
+    /// # }
     /// ```
     pub fn chain_compact(&self) -> String {
         let mut chain = vec![self.to_string()];
