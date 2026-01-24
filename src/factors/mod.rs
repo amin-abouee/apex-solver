@@ -89,9 +89,14 @@ impl FactorError {
     /// the factors module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn operation() -> Result<(), FactorError> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
     /// operation()
-    ///     .map_err(|e| FactorError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -109,12 +114,17 @@ impl FactorError {
     /// * `source_error` - The original error (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn compute_jacobian() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
     /// compute_jacobian()
     ///     .map_err(|e| {
     ///         FactorError::JacobianFailed("Matrix computation failed".to_string())
     ///             .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
