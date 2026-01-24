@@ -327,7 +327,6 @@ where
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::manifold::se2::{SE2, SE2Tangent};
@@ -378,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_se2_jacobian_numerical() {
+    fn test_between_factor_se2_jacobian_numerical() -> Result<(), Box<dyn std::error::Error>> {
         // Verify Jacobian using finite differences with manifold perturbations
         let relative = SE2::from_xy_angle(1.0, 0.0, 0.1);
         let factor = BetweenFactor::new(relative);
@@ -387,7 +386,7 @@ mod tests {
         let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.12]);
 
         let (residual, jacobian_opt) = factor.linearize(&[pose_i.clone(), pose_j.clone()], true);
-        let jacobian = jacobian_opt.unwrap();
+        let jacobian = jacobian_opt.ok_or("Jacobian should be Some when compute_jacobians=true")?;
 
         assert_eq!(jacobian.nrows(), 3);
         assert_eq!(jacobian.ncols(), 6);
@@ -435,10 +434,11 @@ mod tests {
 
         let diff_norm = (jacobian - jacobian_fd).norm();
         assert!(diff_norm < 1e-5, "Jacobian difference norm: {}", diff_norm);
+        Ok(())
     }
 
     #[test]
-    fn test_between_factor_se3_jacobian_numerical() {
+    fn test_between_factor_se3_jacobian_numerical() -> Result<(), Box<dyn std::error::Error>> {
         // Verify Jacobian using finite differences for SE3
         let relative = SE3::from_translation_quaternion(
             Vector3::new(1.0, 0.0, 0.0),
@@ -450,7 +450,7 @@ mod tests {
         let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0]);
 
         let (residual, jacobian_opt) = factor.linearize(&[pose_i.clone(), pose_j.clone()], true);
-        let jacobian = jacobian_opt.unwrap();
+        let jacobian = jacobian_opt.ok_or("Jacobian should be Some when compute_jacobians=true")?;
 
         assert_eq!(jacobian.nrows(), 6);
         assert_eq!(jacobian.ncols(), 12);
@@ -489,10 +489,11 @@ mod tests {
             "Jacobian difference norm (translation): {}",
             diff_norm_trans
         );
+        Ok(())
     }
 
     #[test]
-    fn test_between_factor_dimension_se2() {
+    fn test_between_factor_dimension_se2() -> Result<(), Box<dyn std::error::Error>> {
         let relative = SE2::from_xy_angle(1.0, 0.5, 0.1);
         let factor = BetweenFactor::new(relative);
 
@@ -504,13 +505,14 @@ mod tests {
         assert_eq!(residual.len(), 3);
         assert_eq!(factor.get_dimension(), 3);
 
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
         assert_eq!(jac.nrows(), 3);
         assert_eq!(jac.ncols(), 6);
+        Ok(())
     }
 
     #[test]
-    fn test_between_factor_dimension_se3() {
+    fn test_between_factor_dimension_se3() -> Result<(), Box<dyn std::error::Error>> {
         let relative = SE3::identity();
         let factor = BetweenFactor::new(relative);
 
@@ -522,13 +524,14 @@ mod tests {
         assert_eq!(residual.len(), 6);
         assert_eq!(factor.get_dimension(), 6);
 
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
         assert_eq!(jac.nrows(), 6);
         assert_eq!(jac.ncols(), 12);
+        Ok(())
     }
 
     #[test]
-    fn test_between_factor_so2_so3() {
+    fn test_between_factor_so2_so3() -> Result<(), Box<dyn std::error::Error>> {
         // Test SO2 (rotation-only in 2D)
         let so2_relative = SO2::from_angle(0.1);
         let so2_factor = BetweenFactor::new(so2_relative);
@@ -540,7 +543,7 @@ mod tests {
         assert_eq!(residual_so2.len(), 1);
         assert_eq!(so2_factor.get_dimension(), 1);
 
-        let jac_so2 = jacobian_so2.unwrap();
+        let jac_so2 = jacobian_so2.ok_or("Jacobian should be Some when compute_jacobians=true")?;
         assert_eq!(jac_so2.nrows(), 1);
         assert_eq!(jac_so2.ncols(), 2);
 
@@ -555,13 +558,14 @@ mod tests {
         assert_eq!(residual_so3.len(), 3);
         assert_eq!(so3_factor.get_dimension(), 3);
 
-        let jac_so3 = jacobian_so3.unwrap();
+        let jac_so3 = jacobian_so3.ok_or("Jacobian should be Some when compute_jacobians=true")?;
         assert_eq!(jac_so3.nrows(), 3);
         assert_eq!(jac_so3.ncols(), 6);
+        Ok(())
     }
 
     #[test]
-    fn test_between_factor_finiteness() {
+    fn test_between_factor_finiteness() -> Result<(), Box<dyn std::error::Error>> {
         // Test numerical stability with various inputs
         let relative = SE2::from_xy_angle(100.0, -200.0, std::f64::consts::PI);
         let factor = BetweenFactor::new(relative);
@@ -572,8 +576,9 @@ mod tests {
         let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
 
         assert!(residual.iter().all(|&x| x.is_finite()));
-        let jac = jacobian.unwrap();
+        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
         assert!(jac.iter().all(|&x| x.is_finite()));
+        Ok(())
     }
 
     #[test]

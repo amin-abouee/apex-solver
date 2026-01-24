@@ -249,12 +249,9 @@ fn update_se2_graph_from_factrs(
 
     let ids: Vec<_> = graph.vertices_se2.keys().copied().collect();
     for id in ids {
-        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE2>(X(id as u32)) {
-            #[allow(clippy::expect_used)]
-            let vertex = graph
-                .vertices_se2
-                .get_mut(&id)
-                .expect("Vertex should exist");
+        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE2>(X(id as u32))
+            && let Some(vertex) = graph.vertices_se2.get_mut(&id)
+        {
             // factrs SE2: x, y, theta
             vertex.pose = SE2::from_xy_angle(factrs_pose.x(), factrs_pose.y(), factrs_pose.theta());
         }
@@ -274,12 +271,9 @@ fn update_se3_graph_from_factrs(
 
     let ids: Vec<_> = graph.vertices_se3.keys().copied().collect();
     for id in ids {
-        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE3>(X(id as u32)) {
-            #[allow(clippy::expect_used)]
-            let vertex = graph
-                .vertices_se3
-                .get_mut(&id)
-                .expect("Vertex should exist");
+        if let Some(factrs_pose) = factrs_values.get::<_, FactrsSE3>(X(id as u32))
+            && let Some(vertex) = graph.vertices_se3.get_mut(&id)
+        {
             // Extract rotation and translation from factrs SE3
             let rot = factrs_pose.rot();
             let xyz = factrs_pose.xyz();
@@ -363,6 +357,11 @@ struct BenchmarkResult {
 }
 
 impl BenchmarkResult {
+    /// Create a successful benchmark result.
+    ///
+    /// # Design Note
+    /// This constructor accepts individual benchmark metrics for clear parameter naming in benchmark code.
+    /// The large parameter count reflects the comprehensive nature of pose graph benchmarking.
     #[allow(clippy::too_many_arguments)]
     fn success(
         dataset: &str,
@@ -510,14 +509,12 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
 
             // Update graph with optimized values
             for (var_name, var_enum) in &result.parameters {
-                #[allow(clippy::collapsible_if)]
-                if let Some(id_str) = var_name.strip_prefix("x") {
-                    if let Ok(id) = id_str.parse::<usize>() {
-                        if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
-                            let val = var_enum.to_vector();
-                            vertex.pose = SE2::from_xy_angle(val[0], val[1], val[2]);
-                        }
-                    }
+                if let Some(id_str) = var_name.strip_prefix("x")
+                    && let Ok(id) = id_str.parse::<usize>()
+                    && let Some(vertex) = graph.vertices_se2.get_mut(&id)
+                {
+                    let val = var_enum.to_vector();
+                    vertex.pose = SE2::from_xy_angle(val[0], val[1], val[2]);
                 }
             }
 
@@ -606,17 +603,15 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
 
             // Update graph with optimized values
             for (var_name, var_enum) in &result.parameters {
-                #[allow(clippy::collapsible_if)]
-                if let Some(id_str) = var_name.strip_prefix("x") {
-                    if let Ok(id) = id_str.parse::<usize>() {
-                        if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
-                            use nalgebra::{Quaternion, Vector3};
-                            let val = var_enum.to_vector();
-                            let translation = Vector3::new(val[0], val[1], val[2]);
-                            let rotation = Quaternion::new(val[3], val[4], val[5], val[6]);
-                            vertex.pose = SE3::from_translation_quaternion(translation, rotation);
-                        }
-                    }
+                if let Some(id_str) = var_name.strip_prefix("x")
+                    && let Ok(id) = id_str.parse::<usize>()
+                    && let Some(vertex) = graph.vertices_se3.get_mut(&id)
+                {
+                    use nalgebra::{Quaternion, Vector3};
+                    let val = var_enum.to_vector();
+                    let translation = Vector3::new(val[0], val[1], val[2]);
+                    let rotation = Quaternion::new(val[3], val[4], val[5], val[6]);
+                    vertex.pose = SE3::from_translation_quaternion(translation, rotation);
                 }
             }
 
