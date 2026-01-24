@@ -123,7 +123,7 @@ fn process_all_files(graph_files: &[PathBuf]) -> SummaryStatistics {
                 summary.successful_loads += 1;
             }
             Err(e) => {
-                display_load_error(file_path, &e);
+                display_load_error(file_path, e.as_ref());
             }
         }
         summary.files_processed += 1;
@@ -206,8 +206,7 @@ fn display_first_vertex_info(file_path: &Path) {
 }
 
 /// Display error message for failed file load
-#[allow(clippy::borrowed_box)]
-fn display_load_error(file_path: &Path, error: &Box<dyn std::error::Error>) {
+fn display_load_error(file_path: &Path, error: &dyn std::error::Error) {
     let filename = file_path
         .file_name()
         .map(|f| f.to_string_lossy())
