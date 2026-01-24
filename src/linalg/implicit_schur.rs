@@ -250,76 +250,6 @@ impl IterativeSchurSolver {
         Ok(())
     }
 
-    /// Legacy apply_schur_operator (allocates on each call)
-    #[allow(dead_code)]
-    fn apply_schur_operator(&self, x: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
-
-        let cam_dof = structure.camera_dof;
-        let lm_dof = structure.landmark_dof;
-
-        // Step 1: y = H_cc * x
-        let mut result = self.extract_camera_block_mvp(hessian, x)?;
-
-        // Step 2: temp = H_cp^T * x
-        let temp = self.extract_camera_landmark_transpose_mvp(hessian, x)?;
-
-        // Step 3: temp2 = H_pp^{-1} * temp
-        let mut temp2 = Mat::<f64>::zeros(lm_dof, 1);
-        self.apply_landmark_inverse(&temp, &mut temp2)?;
-
-        // Step 4: temp3 = H_cp * temp2
-        let temp3 = self.extract_camera_landmark_mvp(hessian, &temp2)?;
-
-        // Step 5: result = y - temp3 = H_cc*x - H_cp*H_pp^{-1}*H_cp^T*x
-        for i in 0..cam_dof {
-            result[(i, 0)] -= temp3[(i, 0)];
-        }
-
-        Ok(result)
-    }
-
-    /// Extract H_cc block and multiply with vector
-    fn extract_camera_block_mvp(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-        x: &Mat<f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let cam_dof = structure.camera_dof;
-
-        let mut result = Mat::<f64>::zeros(cam_dof, 1);
-        let symbolic = hessian.symbolic();
-
-        // Multiply H_cc submatrix with x
-        for col in cam_start..cam_end {
-            let local_col = col - cam_start;
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = hessian.val_of_col(col);
-
-            for (idx, &row) in row_indices.iter().enumerate() {
-                if row >= cam_start && row < cam_end {
-                    let local_row = row - cam_start;
-                    result[(local_row, 0)] += col_values[idx] * x[(local_col, 0)];
-                }
-            }
-        }
-
-        Ok(result)
-    }
-
     /// Extract H_cp^T and multiply with vector: (H_cp^T) * x
     fn extract_camera_landmark_transpose_mvp(
         &self,
@@ -640,47 +570,6 @@ impl IterativeSchurSolver {
             .collect();
 
         Ok(precond_blocks)
-    }
-
-    /// Legacy scalar diagonal preconditioner (kept for comparison)
-    #[allow(dead_code)]
-    fn compute_scalar_preconditioner(&self) -> LinAlgResult<Vec<f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
-
-        let cam_dof = structure.camera_dof;
-        let symbolic = hessian.symbolic();
-
-        // Extract diagonal of H_cc only
-        let mut precond = vec![1.0; cam_dof];
-        let (cam_start, cam_end) = structure.camera_col_range();
-
-        for col in cam_start..cam_end {
-            let local_col = col - cam_start;
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = hessian.val_of_col(col);
-
-            for (idx, &row) in row_indices.iter().enumerate() {
-                if row == col {
-                    precond[local_col] = col_values[idx];
-                    if precond[local_col].abs() < 1e-12 {
-                        precond[local_col] = 1.0;
-                    } else {
-                        precond[local_col] = 1.0 / precond[local_col];
-                    }
-                    break;
-                }
-            }
-        }
-
-        Ok(precond)
     }
 
     /// Solve S*x = b using Preconditioned Conjugate Gradients with block preconditioner
