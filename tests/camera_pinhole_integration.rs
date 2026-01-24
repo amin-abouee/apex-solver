@@ -1,22 +1,25 @@
-//! Integration test for Pinhole camera with SelfCalibration
+//! Integration test for Pinhole camera with multi-camera calibration
 //!
-//! This test verifies end-to-end optimization of:
-//! - Camera pose (SE3)
-//! - 3D landmarks (RN)
-//! - Camera intrinsics (fx, fy, cx, cy)
+//! Simulates a realistic camera calibration scenario:
+//! - 200 calibration points on planar wall
+//! - 5 cameras viewing the target from different positions
+//! - Simultaneous optimization of poses, landmarks, and intrinsics
+//! - Tests the simplest camera model with no distortion
 //!
-//! The pinhole model is the simplest camera model with no distortion,
-//! making it an ideal starting point for testing self-calibration.
+//! Pinhole Camera Model:
+//! - 4 intrinsic parameters: fx, fy, cx, cy
+//! - Linear projection model (no distortion)
+//! - Best parameter recovery expected among all camera models
 
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::camera::pinhole::PinholeCamera;
 use apex_solver::factors::camera::{CameraModel, SelfCalibration};
+use apex_solver::manifold::LieGroup;
 use apex_solver::manifold::ManifoldType;
-use apex_solver::manifold::se3::SE3;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
-use nalgebra::{DVector, Matrix2xX};
+use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 
 mod camera_test_utils;
@@ -24,160 +27,375 @@ use camera_test_utils::*;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Test Pinhole camera self-calibration with multi-camera setup.
+///
+/// Scenario: 5 cameras on a horizontal arc viewing 200 calibration points on
+/// a planar wall. All cameras share the same intrinsics.
+///
+/// Ground truth camera: 600x400 image, pinhole model (no distortion)
 #[test]
-fn test_pinhole_self_calibration_50_points() -> TestResult {
+fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     // ============================================================================
-    // 1. Ground Truth Setup
+    // 1. Ground Truth Setup - 600x400 Pinhole Camera
     // ============================================================================
 
-    // Pinhole camera with typical parameters (VGA resolution, ~60° FOV)
+    // Pinhole camera parameters (simplest model, no distortion)
+    // - Focal length 200px gives wide FOV to see entire wall
+    // - No distortion parameters
     let true_camera = PinholeCamera::new(
-        520.0, // fx
-        520.0, // fy
-        320.0, // cx
-        240.0, // cy
+        200.0, 200.0, // fx, fy
+        300.0, 200.0, // cx, cy (center of 600x400)
     );
 
-    // Camera at identity pose (world frame = camera frame)
-    let true_pose = SE3::identity();
-
-    // Generate 50 3D points in realistic scene (2-5m depth, ±2m XY spread)
-    let true_landmarks = generate_scene_points(50, 42);
+    // Image bounds for projection validation
+    let img_width = 600.0;
+    let img_height = 400.0;
 
     // ============================================================================
-    // 2. Generate Perfect Observations
+    // 2. Generate Calibration Target (200 Points on Wall at Z=3m)
     // ============================================================================
 
-    let mut observations = Vec::with_capacity(true_landmarks.len());
+    // Planar wall calibration target
+    let true_landmarks = generate_wall_calibration_points(20, 10, 0.1, 3.0);
+    assert_eq!(
+        true_landmarks.len(),
+        200,
+        "Should generate exactly 200 calibration points"
+    );
 
-    for landmark in &true_landmarks {
-        // Project to image (landmarks already in camera frame at identity pose)
-        let pixel = true_camera.project(landmark).ok_or("Projection failed")?;
-        observations.push(pixel);
+    // ============================================================================
+    // 3. Generate 5 Camera Poses with Wider Baseline
+    // ============================================================================
+
+    let true_poses = generate_arc_camera_poses(5, 0.8, 3.0);
+    assert_eq!(true_poses.len(), 5, "Should generate 5 camera poses");
+
+    // ============================================================================
+    // 4. Project Points and Verify ALL Points Visible
+    // ============================================================================
+
+    let mut all_observations: Vec<Vec<Vector2<f64>>> = Vec::new();
+
+    for (cam_idx, pose) in true_poses.iter().enumerate() {
+        let mut cam_observations = Vec::with_capacity(true_landmarks.len());
+
+        for (lm_idx, landmark) in true_landmarks.iter().enumerate() {
+            let p_cam = pose.act(landmark, None, None);
+
+            assert!(
+                true_camera.is_valid_point(&p_cam),
+                "Camera {} cannot see landmark {}: p_cam = {:?}",
+                cam_idx,
+                lm_idx,
+                p_cam
+            );
+
+            let uv = true_camera
+                .project(&p_cam)
+                .unwrap_or_else(|| panic!("Projection failed for camera {} landmark {}", cam_idx, lm_idx));
+
+            assert!(
+                uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,
+                "Camera {} landmark {} projects outside image: uv = ({:.1}, {:.1})",
+                cam_idx,
+                lm_idx,
+                uv.x,
+                uv.y
+            );
+
+            cam_observations.push(uv);
+        }
+
+        assert_eq!(
+            cam_observations.len(),
+            true_landmarks.len(),
+            "Camera {} should see all {} landmarks",
+            cam_idx,
+            true_landmarks.len()
+        );
+
+        all_observations.push(cam_observations);
     }
 
-    // Convert to Matrix2xX format (2 rows, N columns)
-    let observations_matrix = Matrix2xX::from_columns(&observations);
-
     // ============================================================================
-    // 3. Add Noise to Create Initial Estimates
+    // 5. Add Noise to Create Initial Estimates
     // ============================================================================
 
-    // Noise levels: 5cm landmarks, 2° rotation, 5% intrinsics
-    let noisy_pose = perturb_pose(&true_pose, 0.05, 2.0, 123);
-    let noisy_landmarks = perturb_landmarks(&true_landmarks, 0.05, 456);
-    let noisy_intrinsics = perturb_intrinsics(&[520.0, 520.0, 320.0, 240.0], 0.05, 789);
+    let noisy_landmarks = perturb_landmarks(&true_landmarks, 0.01, 100);
+
+    let noisy_poses: Vec<_> = true_poses
+        .iter()
+        .enumerate()
+        .map(|(i, p)| perturb_pose(p, 0.02, 1.0, 200 + i as u64 * 10))
+        .collect();
+
+    let true_intrinsics = [200.0, 200.0, 300.0, 200.0];
+    let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
 
     // ============================================================================
-    // 4. Build Optimization Problem
+    // 6. Build Optimization Problem
     // ============================================================================
 
     let mut problem = Problem::new();
 
-    // Create projection factor with SelfCalibration (optimizes all parameters)
-    let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
-        ProjectionFactor::new(observations_matrix, true_camera);
+    for (cam_idx, observations) in all_observations.iter().enumerate() {
+        let obs_matrix = Matrix2xX::from_columns(observations);
 
-    // Add residual block with three variables: [pose, landmarks, intrinsics]
-    problem.add_residual_block(
-        &["camera_0", "landmarks", "intrinsics"],
-        Box::new(factor),
-        None, // No robust loss function
-    );
+        let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
+            ProjectionFactor::new(obs_matrix, true_camera);
+
+        let pose_name = format!("pose_{}", cam_idx);
+
+        problem.add_residual_block(
+            &[&pose_name, "landmarks", "intrinsics"],
+            Box::new(factor),
+            None,
+        );
+    }
+
+    for dof in 0..6 {
+        problem.fix_variable("pose_0", dof);
+    }
 
     // ============================================================================
-    // 5. Initialize Variables
+    // 7. Initialize Variables with Noisy Values
     // ============================================================================
 
     let mut initial_values = HashMap::new();
 
-    // Camera pose (SE3 manifold)
-    initial_values.insert(
-        "camera_0".to_string(),
-        (ManifoldType::SE3, noisy_pose.into()),
-    );
+    for (i, pose) in noisy_poses.iter().enumerate() {
+        initial_values.insert(
+            format!("pose_{}", i),
+            (ManifoldType::SE3, pose.clone().into()),
+        );
+    }
 
-    // Landmarks (RN manifold, flattened [x0,y0,z0,x1,y1,z1,...])
     initial_values.insert(
         "landmarks".to_string(),
         (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
     );
 
-    // Intrinsics (RN manifold, [fx, fy, cx, cy])
     initial_values.insert(
         "intrinsics".to_string(),
-        (
-            ManifoldType::RN,
-            DVector::from_vec(noisy_intrinsics.clone()),
-        ),
+        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics.clone())),
     );
 
     // ============================================================================
-    // 6. Optimize with Levenberg-Marquardt
+    // 8. Configure and Run Optimization
     // ============================================================================
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(100)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-6)
+        .with_cost_tolerance(1e-8)
+        .with_parameter_tolerance(1e-8)
+        .with_gradient_tolerance(1e-10)
         .with_damping(1e-3);
 
     let mut solver = LevenbergMarquardt::with_config(config);
-
     let result = solver.optimize(&problem, &initial_values)?;
 
     // ============================================================================
-    // 7. Verify Convergence
+    // 9. Verify Convergence
     // ============================================================================
 
-    // Check convergence status
     assert!(
         matches!(
             result.status,
             OptimizationStatus::Converged
                 | OptimizationStatus::CostToleranceReached
                 | OptimizationStatus::ParameterToleranceReached
+                | OptimizationStatus::GradientToleranceReached
         ),
         "Optimization should converge, got: {:?}",
         result.status
     );
 
     // ============================================================================
-    // 8. Check Cost Reduction
+    // 10. Verify Cost Reduction
     // ============================================================================
 
     let cost_reduction = (result.initial_cost - result.final_cost) / result.initial_cost;
 
+    // Pinhole should achieve excellent cost reduction (no distortion)
     assert!(
-        cost_reduction > 0.90,
-        "Cost should reduce by >90%, got {:.4}",
-        cost_reduction
+        cost_reduction > 0.95,
+        "Cost should reduce by >95%, got {:.2}% reduction",
+        cost_reduction * 100.0
     );
 
     // ============================================================================
-    // 9. Verify Parameter Recovery (Optional)
+    // 11. Verify Reprojection RMSE
     // ============================================================================
 
-    // Extract optimized intrinsics
+    let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
+    let rmse = (result.final_cost / total_observations as f64).sqrt();
+
+    println!("\n=== Optimization Results ===");
+    println!("Status: {:?}", result.status);
+    println!("Iterations: {}", result.iterations);
+    println!("Initial cost: {:.4e}", result.initial_cost);
+    println!("Final cost: {:.4e}", result.final_cost);
+    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
+    println!("Total observations: {}", total_observations);
+    println!("Reprojection RMSE: {:.4} pixels", rmse);
+
+    // Pinhole should achieve excellent RMSE (tightest tolerance)
+    assert!(
+        rmse < 1.0,
+        "Reprojection RMSE should be < 1 pixel, got {:.4} pixels",
+        rmse
+    );
+
+    // ============================================================================
+    // 12. Verify Intrinsic Parameter Recovery
+    // ============================================================================
+
     let final_intrinsics = result
         .parameters
         .get("intrinsics")
-        .ok_or("Missing intrinsics parameter")?
+        .ok_or("Missing intrinsics in result")?
         .to_vector();
-    let true_intrinsics = [520.0, 520.0, 320.0, 240.0];
 
-    // Check intrinsic parameter recovery
+    let param_names = ["fx", "fy", "cx", "cy"];
+
+    // All parameters should be well-conditioned (no distortion)
+    let tolerances = [0.05, 0.05, 0.05, 0.05];
+
+    println!("\nIntrinsic Recovery:");
     for i in 0..4 {
-        let param_error = (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i];
+        let relative_error =
+            (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs();
 
-        // Pinhole should recover intrinsics very accurately (no distortion, well-conditioned)
+        println!(
+            "  {}: true={:.4}, final={:.4}, error={:.2}%",
+            param_names[i],
+            true_intrinsics[i],
+            final_intrinsics[i],
+            relative_error * 100.0
+        );
+
         assert!(
-            param_error < 0.10,
-            "Parameter {} should recover within 10%, got {:.4}%",
-            i,
-            param_error * 100.0
+            relative_error < tolerances[i],
+            "{} should recover within {:.0}% of ground truth, got {:.2}% error",
+            param_names[i],
+            tolerances[i] * 100.0,
+            relative_error * 100.0
         );
     }
+
+    println!("\n=== Pinhole Multi-Camera Calibration Results ===");
+    println!("Status: {:?}", result.status);
+    println!("Iterations: {}", result.iterations);
+    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
+    println!("Reprojection RMSE: {:.4} pixels", rmse);
+
+    Ok(())
+}
+
+/// Test with 3 cameras for faster execution (good for CI)
+#[test]
+fn test_pinhole_3_cameras_calibration() -> TestResult {
+    let true_camera = PinholeCamera::new(
+        200.0, 200.0, // fx, fy
+        300.0, 200.0, // cx, cy
+    );
+
+    let img_width = 600.0;
+    let img_height = 400.0;
+
+    let true_landmarks = generate_wall_calibration_points(20, 10, 0.1, 3.0);
+    let true_poses = generate_arc_camera_poses(3, 0.6, 3.0);
+
+    let mut all_observations: Vec<Vec<Vector2<f64>>> = Vec::new();
+
+    for pose in &true_poses {
+        let mut cam_obs = Vec::new();
+        for landmark in &true_landmarks {
+            let p_cam = pose.act(landmark, None, None);
+            if true_camera.is_valid_point(&p_cam) {
+                if let Some(uv) = true_camera.project(&p_cam) {
+                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
+                        cam_obs.push(uv);
+                    }
+                }
+            }
+        }
+        all_observations.push(cam_obs);
+    }
+
+    let noisy_landmarks = perturb_landmarks(&true_landmarks, 0.01, 100);
+    let noisy_poses: Vec<_> = true_poses
+        .iter()
+        .enumerate()
+        .map(|(i, p)| perturb_pose(p, 0.02, 1.0, 200 + i as u64 * 10))
+        .collect();
+    let true_intrinsics = [200.0, 200.0, 300.0, 200.0];
+    let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
+
+    let mut problem = Problem::new();
+
+    for (cam_idx, observations) in all_observations.iter().enumerate() {
+        let obs_matrix = Matrix2xX::from_columns(observations);
+        let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
+            ProjectionFactor::new(obs_matrix, true_camera);
+
+        problem.add_residual_block(
+            &[&format!("pose_{}", cam_idx), "landmarks", "intrinsics"],
+            Box::new(factor),
+            None,
+        );
+    }
+
+    for dof in 0..6 {
+        problem.fix_variable("pose_0", dof);
+    }
+
+    let mut initial_values = HashMap::new();
+
+    for (i, pose) in noisy_poses.iter().enumerate() {
+        initial_values.insert(
+            format!("pose_{}", i),
+            (ManifoldType::SE3, pose.clone().into()),
+        );
+    }
+
+    initial_values.insert(
+        "landmarks".to_string(),
+        (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
+    );
+
+    initial_values.insert(
+        "intrinsics".to_string(),
+        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics)),
+    );
+
+    let config = LevenbergMarquardtConfig::new()
+        .with_max_iterations(100)
+        .with_cost_tolerance(1e-8)
+        .with_parameter_tolerance(1e-8)
+        .with_damping(1e-3);
+
+    let mut solver = LevenbergMarquardt::with_config(config);
+    let result = solver.optimize(&problem, &initial_values)?;
+
+    assert!(
+        matches!(
+            result.status,
+            OptimizationStatus::Converged
+                | OptimizationStatus::CostToleranceReached
+                | OptimizationStatus::ParameterToleranceReached
+                | OptimizationStatus::GradientToleranceReached
+        ),
+        "3-camera calibration should converge, got: {:?}",
+        result.status
+    );
+
+    let cost_reduction = (result.initial_cost - result.final_cost) / result.initial_cost;
+    assert!(
+        cost_reduction > 0.70,
+        "Cost should reduce by >70%, got {:.2}%",
+        cost_reduction * 100.0
+    );
 
     Ok(())
 }
