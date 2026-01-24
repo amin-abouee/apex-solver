@@ -109,6 +109,11 @@ struct BABenchmarkResult {
 }
 
 impl BABenchmarkResult {
+    /// Create a successful benchmark result.
+    ///
+    /// # Design Note
+    /// This constructor accepts individual benchmark metrics for clear parameter naming in benchmark code.
+    /// The large parameter count reflects the comprehensive nature of bundle adjustment benchmarking.
     #[allow(clippy::too_many_arguments)]
     fn success(
         dataset_name: &str,
