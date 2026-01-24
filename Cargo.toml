@@ -12,6 +12,7 @@ readme = "README.md"
 keywords = ["optimization", "slam", "computer-vision", "robotics", "nonlinear"]
 categories = ["algorithms", "science", "mathematics"]
 exclude = [
+    "data/*",
     "data_bk/*",
     "doc/*.md",
     "!doc/CHANGELOG.md",
