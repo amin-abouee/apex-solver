@@ -66,9 +66,14 @@ impl LinAlgError {
     /// the linalg module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::linalg::LinAlgError;
+    /// # fn operation() -> Result<(), LinAlgError> { Ok(()) }
+    /// # fn example() -> Result<(), LinAlgError> {
     /// operation()
-    ///     .map_err(|e| LinAlgError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -86,14 +91,19 @@ impl LinAlgError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
-    /// SymbolicLlt::try_new(matrix.symbolic(), Side::Lower)
+    /// ```
+    /// # use apex_solver::linalg::LinAlgError;
+    /// # fn symbolic_llt_op() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), LinAlgError> {
+    /// symbolic_llt_op()
     ///     .map_err(|e| {
     ///         LinAlgError::FactorizationFailed(
     ///             "Symbolic Cholesky decomposition failed".to_string()
     ///         )
     ///         .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {

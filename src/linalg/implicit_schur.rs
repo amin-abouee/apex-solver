@@ -28,7 +28,12 @@
 //!
 //! ## Usage Example
 //!
-//! ```ignore
+//! ```no_run
+//! # use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! # use std::collections::HashMap;
+//! # fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! # let variables = HashMap::new();
+//! # let variable_index_map = HashMap::new();
 //! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
 //!
 //! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
@@ -37,6 +42,8 @@
 //!     SchurVariant::Iterative, // Implicit Schur with PCG
 //!     SchurPreconditioner::SchurJacobi, // Recommended for PCG
 //! )?;
+//! # Ok(())
+//! # }
 //! ```
 
 use super::explicit_schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
