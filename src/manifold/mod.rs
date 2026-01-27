@@ -143,7 +143,8 @@ pub trait LieGroup: Clone + PartialEq {
     type JacobianMatrix: Clone
         + PartialEq
         + Neg<Output = Self::JacobianMatrix>
-        + Mul<Output = Self::JacobianMatrix>;
+        + Mul<Output = Self::JacobianMatrix>
+        + std::ops::Index<(usize, usize), Output = f64>;
 
     /// Associated Lie algebra type
     type LieAlgebra: Clone + PartialEq;
@@ -216,6 +217,18 @@ pub trait LieGroup: Clone + PartialEq {
 
     /// Generate a random element (useful for testing and initialization).
     fn random() -> Self;
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    /// This is used to initialize Jacobian matrices in optimization algorithms.
+    fn jacobian_identity() -> Self::JacobianMatrix;
+
+    /// Get a zero Jacobian matrix.
+    ///
+    /// Returns a zero matrix in the appropriate dimension for Jacobian computations.
+    /// This is used to initialize Jacobian matrices before optimization computations.
+    fn zero_jacobian() -> Self::JacobianMatrix;
 
     /// Normalize/project the element to the manifold.
     ///
@@ -398,9 +411,7 @@ pub trait LieGroup: Clone + PartialEq {
         }
 
         if let Some(jac_other) = jacobian_other {
-            // Note: jacobian_identity() is now implemented in concrete types
-            // This will be handled by the concrete implementation
-            *jac_other = other.adjoint();
+            *jac_other = Self::jacobian_identity();
         }
 
         result

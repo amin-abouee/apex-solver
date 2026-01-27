@@ -33,7 +33,7 @@
 
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
+use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
@@ -44,13 +44,9 @@ use std::time::{Duration, Instant};
 
 /// Test result capturing all optimization metrics
 #[derive(Debug)]
-#[allow(dead_code)]
 struct TestResult {
-    dataset_name: String,
-    optimizer: String,
     vertices: usize,
     edges: usize,
-    initial_cost: f64,
     final_cost: f64,
     improvement_pct: f64,
     iterations: usize,
@@ -76,7 +72,7 @@ fn run_se3_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file
-    let dataset_path = format!("data/{}.g2o", dataset_name);
+    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se3.len();
@@ -127,7 +123,7 @@ fn run_se3_optimization(
         let id1 = format!("x{}", edge.to);
         let relative_pose = edge.measurement.clone();
 
-        let between_factor = BetweenFactorSE3::new(relative_pose);
+        let between_factor = BetweenFactor::new(relative_pose);
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 
@@ -160,11 +156,8 @@ fn run_se3_optimization(
     );
 
     let test_result = TestResult {
-        dataset_name: dataset_name.to_string(),
-        optimizer: "LevenbergMarquardt".to_string(),
         vertices: num_vertices,
         edges: num_edges,
-        initial_cost: result.initial_cost,
         final_cost: result.final_cost,
         improvement_pct,
         iterations: result.iterations,
@@ -193,7 +186,7 @@ fn run_se2_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file
-    let dataset_path = format!("data/{}.g2o", dataset_name);
+    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se2.len();
@@ -241,9 +234,7 @@ fn run_se2_optimization(
         let id0 = format!("x{}", edge.from);
         let id1 = format!("x{}", edge.to);
 
-        let measurement = &edge.measurement;
-        let between_factor =
-            BetweenFactorSE2::new(measurement.x(), measurement.y(), measurement.angle());
+        let between_factor = BetweenFactor::new(edge.measurement.clone());
         problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
     }
 
@@ -276,11 +267,8 @@ fn run_se2_optimization(
     );
 
     let test_result = TestResult {
-        dataset_name: dataset_name.to_string(),
-        optimizer: "LevenbergMarquardt".to_string(),
         vertices: num_vertices,
         edges: num_edges,
-        initial_cost: result.initial_cost,
         final_cost: result.final_cost,
         improvement_pct,
         iterations: result.iterations,

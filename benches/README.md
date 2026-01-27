@@ -1,341 +1,247 @@
-# Apex-Solver Benchmarks
+# Apex Solver Benchmarks
 
-This directory contains both Rust and C++ benchmarks for comprehensive performance evaluation of apex-solver against other optimization libraries.
+This directory contains two comprehensive benchmarks for evaluating Apex Solver performance:
 
-## Overview
+1. **Bundle Adjustment Benchmark** (`bundle_adjustment_benchmark.rs`) - BAL datasets, Apex vs C++ solvers
+2. **Pose Graph Optimization Benchmark** (`solver_comparison.rs`) - G2O datasets, Apex vs Rust/C++ solvers
 
-The benchmark suite is organized into two tiers following the [factrs-bench](https://github.com/rpl-cmu/fact-rs/tree/dev/factrs-bench) pattern:
+---
 
-1. **Rust Benchmarks**: Compare apex-solver with other Rust libraries (factrs, tiny-solver)
-2. **C++ Benchmarks**: Compare against industry-standard C++ libraries (Ceres, GTSAM, g2o)
+## Prerequisites
 
-## Directory Structure
+### Git LFS
 
-```
-benches/
-├── solver_comparison.rs          # Rust benchmark (Criterion-based)
-├── cpp_comparison/               # C++ benchmarks (standalone executables)
-│   ├── CMakeLists.txt           # C++ build configuration
-│   ├── README.md                # Detailed C++ benchmark docs
-│   ├── build/                   # Build directory (generated)
-│   ├── common/                  # Shared G2O parser and utilities
-│   ├── ceres_benchmark.cpp      # Ceres Solver benchmark
-│   ├── gtsam_benchmark.cpp      # GTSAM benchmark
-│   ├── g2o_benchmark.cpp        # g2o benchmark
-│   └── run_all_benchmarks.sh    # Legacy C++ benchmark runner
-├── run_all_benchmarks.sh        # Legacy unified runner for both Rust and C++
-└── README.md                    # This file
-```
+All benchmark datasets are stored using **Git LFS** to avoid bloating the repository:
 
-**Note:** Rust binaries (`run_benchmarks` and `run_cpp_benchmarks`) are defined in `../bin/` and provide a modern alternative to the bash scripts.
+- **Bundle adjustment datasets**: `data/bundle_adjustment/**/*.txt` (~1.9GB)
+- **Odometry datasets**: `data/odometry/**/*.g2o` (~11MB)
 
-## Quick Start
-
-### Run All Benchmarks
-
-#### Option 1: Bash Scripts (Legacy)
-```bash
-# From project root
-bash benches/run_all_benchmarks.sh
-```
-
-#### Option 2: Rust Binaries (Recommended)
-```bash
-# From project root
-cargo run --bin run_benchmarks
-```
-
-This will:
-1. Run Rust benchmarks with Criterion
-2. Build and run C++ benchmarks
-3. Generate reports for both
-
-### Run Rust Benchmarks Only
+#### Setup
 
 ```bash
-cargo bench --bench solver_comparison
+# Install Git LFS
+brew install git-lfs  # macOS
+# or
+sudo apt-get install git-lfs  # Ubuntu/Debian
+
+# Initialize and pull LFS files
+git lfs install
+git lfs pull
 ```
 
-**Results:** HTML reports in `target/criterion/report/index.html`
+#### Troubleshooting
 
-### Run C++ Benchmarks Only
+If benchmarks fail with "file not found" or data appears corrupted:
 
-```bash
-cd benches/cpp_comparison
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
+1. **Check if files are LFS pointers** (they'll be ~1KB instead of MB/GB):
+   ```bash
+   ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
+   ```
 
-# Run individual benchmarks
-./g2o_benchmark
-./ceres_benchmark
-./gtsam_benchmark
-```
+2. **Pull LFS files**:
+   ```bash
+   git lfs fetch --all
+   git lfs checkout
+   ```
 
-**Results:** CSV files: `*_benchmark_results.csv`
+3. **Verify LFS status**:
+   ```bash
+   git lfs ls-files  # Should list all .g2o and .txt files
+   ```
 
-## Rust Benchmarks (`solver_comparison.rs`)
+---
 
-### What It Tests
-- apex-solver (LM, GN, Dog Leg optimizers)
-- factrs (if available)
-- tiny-solver (if available)
+## 1. Bundle Adjustment Benchmark
 
-### Configuration
-- Uses Criterion for statistical benchmarking
-- Tests on multiple SE2/SE3 datasets
-- Measures optimization time and convergence
+Compares **Apex Solver (Iterative Schur)** against **Ceres**, **GTSAM**, and **g2o** on 4 large-scale BAL datasets.
 
-### Running
-```bash
-cargo bench --bench solver_comparison
+### Datasets Tested
 
-# Run specific benchmark
-cargo bench --bench solver_comparison -- sphere2500
+| Dataset | Cameras | Landmarks | Observations | Size |
+|---------|---------|-----------|--------------|------|
+| Ladybug | 1,723 | 156,502 | 678,718 | Large |
+| Trafalgar | 257 | 65,132 | 225,911 | Medium |
+| Dubrovnik | 356 | 226,730 | 1,255,268 | Large |
+| Venice | 1,778 | 993,923 | 5,001,946 | Very Large |
 
-# Save baseline for comparison
-cargo bench --bench solver_comparison -- --save-baseline my-baseline
-```
+### Apex Solver Configuration
 
-## C++ Benchmarks (`cpp_comparison/`)
+- **Mode**: SelfCalibration (optimizes pose + intrinsics + landmarks)
+- **Linear Solver**: Iterative Schur Complement (PCG with Schur-Jacobi preconditioner)
+- **Timeout**: 10 minutes per solver
+- **Parameters**: 
+  - Max iterations: 50
+  - Cost tolerance: 1e-6
+  - Parameter tolerance: 1e-8
+  - Damping: 1e-3
 
-### What It Tests
-- ✅ **Ceres Solver**: Google's C++ optimization library (uses Eigen 5.0.1)
-- ✅ **g2o**: General Graph Optimization framework (uses Eigen 5.0.1)
-- ✅ **GTSAM**: Georgia Tech's Smoothing and Mapping library (uses Eigen 3.4.1)
-
-### Configuration
-All solvers use consistent parameters:
-- Optimizer: Levenberg-Marquardt
-- Max iterations: 100
-- Cost tolerance: 1e-3
-- Parameter tolerance: 1e-3
-- Gauge fix: First pose fixed
-
-### Prerequisites
-
-Install C++ dependencies (macOS):
-```bash
-brew install eigen eigen@3 ceres-solver gtsam g2o cmake
-```
-
-**Note:** The benchmark suite uses multiple Eigen versions:
-- Eigen 5.0.1 (via `eigen`) for Ceres Solver and g2o
-- Eigen 3.4.1 (via `eigen@3`) for GTSAM
-- CMake automatically handles the version switching
-
-### Building
+### Usage
 
 ```bash
-cd benches/cpp_comparison
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j$(sysctl -n hw.ncpu)
-```
-
-### Running
-
-#### Option 1: Bash Script (Legacy)
-```bash
-# From benches/cpp_comparison/
-bash run_all_benchmarks.sh
-```
-
-#### Option 2: Rust Binary (Recommended)
-```bash
-# From project root
-cargo run --bin run_cpp_benchmarks
-```
-
-#### Manual Execution
-```bash
-# From benches/cpp_comparison/build/
-./ceres_benchmark     # Run Ceres benchmark (✅ working)
-./g2o_benchmark       # Run g2o benchmark (✅ working)
-./gtsam_benchmark     # Run GTSAM benchmark (✅ working)
+# Run all 4 datasets
+cargo bench --bench bundle_adjustment_benchmark
 ```
 
 ### Output
 
-Each benchmark generates:
-- **Console table**: Human-readable results
-- **CSV file**: Machine-readable for analysis
+Results are saved to **`output/ba_comparison_results.csv`** with:
+- Dataset name
+- Solver (Apex-Iterative, Ceres, GTSAM, g2o)
+- Language (Rust, C++)
+- Initial/Final RMSE (pixels)
+- Time (seconds)
+- Iterations
+- Status (CONVERGED / TIMEOUT)
 
-Example CSV:
-```csv
-dataset,manifold,solver,language,vertices,edges,init_cost,final_cost,improvement_pct,iterations,time_ms,status
-sphere2500,SE3,g2o-LM,C++,2500,4949,0.0,727.15,0.0,26,4176,CONVERGED
+### Example Output
+
+```
+Dataset: Ladybug: Cameras: 1723, Landmarks: 156502, Observations: 678718
+--------------------------------------------------------------------------------------
+Solver               Language   Initial RMSE    Final RMSE      Time (s)    Iters      Status
+--------------------------------------------------------------------------------------
+Apex-Iterative       Rust       49.234          14.675          70.14       12         CONVERGED
+Ceres                C++        49.234          1.892           45.32       40         CONVERGED
+GTSAM                C++        49.234          1.889           52.18       38         CONVERGED
+g2o                  C++        49.234          1.891           48.67       41         CONVERGED
+
+Dataset: Trafalgar: Cameras: 257, Landmarks: 65132, Observations: 225911
+...
 ```
 
-## Rust Benchmark Runners
+---
 
-As an alternative to bash scripts, this project provides Rust binaries for running benchmarks:
+## 2. Pose Graph Optimization Benchmark
 
-### `run_benchmarks` Binary
+Compares **apex-solver**, **factrs**, **tiny-solver** (Rust) and **g2o**, **GTSAM** (C++) on standard pose graph datasets.
 
-Unified runner that orchestrates both Rust and C++ benchmarks:
+### Datasets Tested
+
+**SE2 (2D Pose Graphs)**:
+- M3500 (3,500 poses)
+- mit (1,045 poses)
+- intel (943 poses)
+- ring (3,500 poses)
+
+**SE3 (3D Pose Graphs)**:
+- sphere2500 (2,500 poses)
+- parking-garage (1,661 poses)
+- torus3D (5,000 poses)
+- cubicle (5,750 poses)
+
+### Apex Solver Configuration
+
+#### SE2 (2D):
+- Max iterations: 150
+- Cost tolerance: 1e-4
+- Parameter tolerance: 1e-4
+- Gradient tolerance: 1e-10
+
+#### SE3 (3D):
+- Max iterations: 100
+- Cost tolerance: 1e-4
+- Parameter tolerance: 1e-4
+- Gradient tolerance: 1e-12
+
+### Usage
 
 ```bash
-cargo run --bin run_benchmarks
+# Run all datasets across all solvers
+cargo run --release --bin solver_comparison
 ```
 
-**Features:**
-- Colored output with progress indicators
-- Automatic directory management
-- Error handling and status reporting
-- Cross-platform compatibility
+### Output
 
-### `run_cpp_benchmarks` Binary
+CSV files with convergence metrics:
+- **Converged**: true/false
+- **Time**: Average milliseconds (5 runs)
+- **Iterations**: Number of iterations
+- **Initial/Final Cost**: Optimization cost
+- **Improvement**: Percentage cost reduction
 
-Specialized runner for C++ benchmarks that handles:
+---
 
-- CMake build configuration and compilation
-- Parallel building using all available CPU cores
-- Execution of individual C++ benchmark executables
-- Result collection and organization
-- Rust example execution for comparison
+## C++ Solver Integration
 
+Both benchmarks support C++ solvers (Ceres, GTSAM, g2o) if available.
+
+### Requirements
+
+- CMake 3.10+
+- Ceres Solver
+- GTSAM
+- g2o
+- Eigen3
+
+### Build Process
+
+C++ benchmarks are located in `benches/cpp_comparison/` and build automatically on first run.
+
+If C++ solvers are unavailable, benchmarks run with Rust solvers only (with warnings).
+
+### Troubleshooting
+
+**"C++ benchmarks unavailable"**:
+1. Install required libraries (Ceres, GTSAM, g2o)
+2. Ensure CMake is in PATH
+3. Check `benches/cpp_comparison/CMakeLists.txt` for build requirements
+
+**OR** ignore and run Rust-only benchmarks.
+
+---
+
+## Output Files
+
+All benchmark results are saved to the **`output/`** directory:
+
+- **`ba_comparison_results.csv`**: Bundle adjustment benchmark results
+- **`solver_comparison_*.csv`**: Pose graph benchmark results (multiple files)
+
+The `output/` directory is gitignored and created automatically.
+
+---
+
+## Quick Start
+
+### Run Bundle Adjustment Benchmark
 ```bash
-cargo run --bin run_cpp_benchmarks
+cargo bench --bench bundle_adjustment_benchmark
 ```
 
-**Advantages over bash scripts:**
-- Better error handling and recovery
-- Type safety and compile-time checks
-- Cross-platform path handling
-- Structured output and logging
-- Easier maintenance and testing
-
-## Datasets
-
-Both Rust and C++ benchmarks use datasets from `../data/`:
-
-### SE3 (3D Pose Graphs)
-| Dataset | Vertices | Edges | Description |
-|---------|----------|-------|-------------|
-| sphere2500 | 2,500 | 4,949 | Sphere surface |
-| parking-garage | 1,661 | 6,275 | Indoor parking |
-| torus3D | 5,000 | 9,048 | Torus shape |
-
-### SE2 (2D Pose Graphs)
-| Dataset | Vertices | Edges | Description |
-|---------|----------|-------|-------------|
-| intel | 1,228 | 1,483 | Intel Research Lab |
-| mit | 808 | 827 | MIT Killian Court |
-| manhattanOlson3500 | 3,500 | 5,598 | Manhattan grid |
-
-## Comparing Results
-
-### Rust Results
-View Criterion reports:
+### Run Pose Graph Benchmark
 ```bash
-open target/criterion/report/index.html
+cargo run --release --bin solver_comparison
 ```
 
-### C++ Results
-View CSV files:
+### View Results
 ```bash
-cat benches/cpp_comparison/build/*_benchmark_results.csv
+# Open CSV in spreadsheet software
+open output/ba_comparison_results.csv
+
+# Or view in terminal
+cat output/ba_comparison_results.csv
 ```
 
-### Combined Analysis
-Merge all results:
-```bash
-cd benches/cpp_comparison/build
-cat *_benchmark_results.csv | head -1 > combined.csv
-tail -n +2 -q *_benchmark_results.csv >> combined.csv
-```
+---
 
-## Architecture Notes
+## Performance Notes
 
-### Why Separate Rust and C++ Benchmarks?
+- **Bundle adjustment**: Iterative Schur scales well to large problems (1,000+ cameras)
+- **Pose graphs**: apex-solver matches or exceeds factrs/tiny-solver on most datasets
+- **Timeouts**: BA benchmark enforces 10-minute timeout per solver to handle very large datasets
+- **Averaging**: Pose graph benchmark runs 5 iterations per dataset for stable timing
 
-Following the factrs-bench pattern, we keep Rust and C++ benchmarks as separate executables rather than using FFI integration because:
+---
 
-1. **Simplicity**: No build.rs complexity, no bindgen, no linking issues
-2. **Independence**: Rust benchmarks work even if C++ libs aren't installed
-3. **Fairness**: External process timing is more realistic
-4. **Maintainability**: Each ecosystem evolves independently
-5. **Proven**: factrs-bench team chose this approach for good reasons
+## Dataset Sources
 
-### No FFI, No build.rs
+- **BAL datasets**: [Bundle Adjustment in the Large](https://grail.cs.washington.edu/projects/bal/)
+- **G2O datasets**: Standard SLAM benchmarks from g2o repository
 
-Unlike projects that call C++ from Rust, we:
-- ✅ Build C++ benchmarks with CMake (not cargo)
-- ✅ Run C++ benchmarks as separate processes
-- ✅ Compare results via CSV/JSON output files
-- ❌ No FFI bindings
-- ❌ No build.rs script
-- ❌ No runtime integration
+**Storage**: All datasets are managed via Git LFS to keep the repository lightweight:
+- Bundle adjustment: `.txt` files (~1.9GB total)
+- Odometry: `.g2o` files (~11MB total)
 
-This is the **factrs-bench pattern** and is intentional.
-
-## Troubleshooting
-
-### C++ Build Issues
-
-**Problem:** `Ceres not found`
-
-**Solution:**
-```bash
-brew install eigen ceres-solver
-```
-
-**Problem:** `GTSAM not found`
-
-**Solution:**
-```bash
-brew install eigen@3 gtsam
-```
-
-**Problem:** `g2o not found`
-
-**Solution:**
-```bash
-brew install g2o
-```
-
-### Rust Benchmark Issues
-
-**Problem:** `factrs` or `tiny-solver` not found
-
-**Solution:** These are optional dependencies. Benchmarks will run with apex-solver only.
-
-### Dataset Not Found
-
-**Problem:** `Cannot open file ../../../data/sphere2500.g2o`
-
-**Solution:** Ensure you're running from the correct directory:
-```bash
-cd benches/cpp_comparison/build
-./g2o_benchmark
-```
-
-## Performance Expectations
-
-### Rust Benchmarks
-- Typically run in seconds per dataset
-- Criterion provides statistical analysis with confidence intervals
-- HTML reports include comparison graphs
-
-### C++ Benchmarks
-- SE2: 30-100ms (small 2D problems)
-- SE3: 500ms-30s (larger 3D problems)
-- CSV output for easy comparison
-
-## Contributing
-
-When adding new benchmarks:
-
-1. **Rust**: Add to `solver_comparison.rs` using Criterion
-2. **C++**: Add new solver in `cpp_comparison/` following existing pattern
-3. **Datasets**: Place in `../data/` directory
-4. **Documentation**: Update this README
-
-## References
-
-- [factrs-bench](https://github.com/rpl-cmu/fact-rs/tree/dev/factrs-bench) - Inspiration for this architecture
-- [Criterion.rs](https://github.com/bheisler/criterion.rs) - Rust benchmarking framework
-- [Ceres Solver](http://ceres-solver.org/)
-- [GTSAM](https://gtsam.org/)
-- [g2o](https://github.com/RainerKuemmerle/g2o)
+Datasets are expected in:
+- `data/bundle_adjustment/[dataset]/problem-*.txt` (BAL format, LFS)
+- `data/odometry/*.g2o` (G2O format, LFS)

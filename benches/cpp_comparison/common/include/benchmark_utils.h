@@ -2,131 +2,111 @@
 
 #include <chrono>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <string>
-#include <vector>
 
 namespace benchmark_utils {
 
-// Result structure for a single benchmark run
-struct BenchmarkResult {
-    std::string dataset;
-    std::string manifold;
-    std::string solver;
-    std::string language;
-    int vertices;
-    int edges;
-    double initial_cost;
-    double final_cost;
-    double improvement_pct;
-    int iterations;
-    long time_ms;
-    std::string status;
-
-    BenchmarkResult()
-        : dataset(""),
-          manifold(""),
-          solver(""),
-          language("C++"),
-          vertices(0),
-          edges(0),
-          initial_cost(0.0),
-          final_cost(0.0),
-          improvement_pct(0.0),
-          iterations(0),
-          time_ms(0),
-          status("UNKNOWN") {}
-};
-
-// Simple timer class
+// Timer utility
 class Timer {
 public:
-    Timer() : start_time_(std::chrono::high_resolution_clock::now()) {}
+    Timer() : start_(std::chrono::high_resolution_clock::now()) {}
 
-    void reset() {
-        start_time_ = std::chrono::high_resolution_clock::now();
-    }
+    void reset() { start_ = std::chrono::high_resolution_clock::now(); }
 
-    long elapsed_ms() const {
-        auto end_time = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
-            end_time - start_time_);
-        return duration.count();
-    }
-
-    double elapsed_seconds() const {
-        return elapsed_ms() / 1000.0;
+    double elapsed_ms() const {
+        auto end = std::chrono::high_resolution_clock::now();
+        return std::chrono::duration<double, std::milli>(end - start_).count();
     }
 
 private:
-    std::chrono::high_resolution_clock::time_point start_time_;
+    std::chrono::time_point<std::chrono::high_resolution_clock> start_;
 };
 
-// Write results to CSV file
-inline bool WriteResultsToCSV(const std::string& filename,
-                              const std::vector<BenchmarkResult>& results,
-                              bool append = false) {
-    std::ofstream outfile;
-    if (append) {
-        outfile.open(filename, std::ios::app);
-    } else {
-        outfile.open(filename);
-        // Write header
-        outfile << "dataset,manifold,solver,language,vertices,edges,"
-                << "init_cost,final_cost,improvement_pct,iterations,time_ms,status\n";
-    }
+// Benchmark result for pose graph optimization
+struct BenchmarkResult {
+    std::string dataset;
+    std::string solver;
+    std::string language;
+    std::string manifold;
+    int vertices = 0;
+    int edges = 0;
+    
+    // Dual metrics: both chi-squared (information-weighted) and unweighted
+    double initial_chi2 = 0.0;    // Initial chi-squared cost (r^T * Omega * r)
+    double final_chi2 = 0.0;      // Final chi-squared cost
+    double initial_cost = 0.0;    // Initial unweighted cost (0.5 * ||r||^2)
+    double final_cost = 0.0;      // Final unweighted cost
+    double improvement_pct = 0.0; // Improvement based on unweighted cost
+    double chi2_improvement_pct = 0.0; // Improvement based on chi-squared
+    
+    double time_ms = 0.0;
+    int iterations = 0;
+    std::string status;
+};
 
-    if (!outfile.is_open()) {
-        std::cerr << "Error: Cannot open output file " << filename << std::endl;
+// Print benchmark result to console
+inline void print_result(const BenchmarkResult& result) {
+    std::cout << "\n=== Benchmark Result ===" << std::endl;
+    std::cout << "Dataset:          " << result.dataset << std::endl;
+    std::cout << "Solver:           " << result.solver << std::endl;
+    std::cout << "Language:         " << result.language << std::endl;
+    std::cout << "Manifold:         " << result.manifold << std::endl;
+    std::cout << "Vertices:         " << result.vertices << std::endl;
+    std::cout << "Edges:            " << result.edges << std::endl;
+    std::cout << std::fixed << std::setprecision(6);
+    std::cout << "Initial chi2:     " << result.initial_chi2 << std::endl;
+    std::cout << "Final chi2:       " << result.final_chi2 << std::endl;
+    std::cout << "Chi2 improvement: " << result.chi2_improvement_pct << "%" << std::endl;
+    std::cout << "Initial cost:     " << result.initial_cost << std::endl;
+    std::cout << "Final cost:       " << result.final_cost << std::endl;
+    std::cout << "Improvement:      " << result.improvement_pct << "%" << std::endl;
+    std::cout << "Time:             " << result.time_ms << " ms" << std::endl;
+    std::cout << "Iterations:       " << result.iterations << std::endl;
+    std::cout << "Status:           " << result.status << std::endl;
+    std::cout << "========================\n" << std::endl;
+}
+
+// Write multiple benchmark results to CSV with both metrics
+inline bool WriteResultsToCSV(const std::string& output_file, 
+                               const std::vector<BenchmarkResult>& results) {
+    std::ofstream ofs(output_file);
+    if (!ofs) {
+        std::cerr << "Failed to open output file: " << output_file << std::endl;
         return false;
     }
 
+    // Write header with both metrics
+    ofs << "dataset,manifold,solver,language,vertices,edges,"
+        << "initial_chi2,final_chi2,chi2_improvement_pct,"
+        << "initial_cost,final_cost,improvement_pct,"
+        << "iterations,time_ms,status\n";
+
+    // Write each result
     for (const auto& result : results) {
-        outfile << result.dataset << ","
-                << result.manifold << ","
-                << result.solver << ","
-                << result.language << ","
-                << result.vertices << ","
-                << result.edges << ","
-                << result.initial_cost << ","
-                << result.final_cost << ","
-                << result.improvement_pct << ","
-                << result.iterations << ","
-                << result.time_ms << ","
-                << result.status << "\n";
+        ofs << result.dataset << ","
+            << result.manifold << ","
+            << result.solver << ","
+            << result.language << ","
+            << result.vertices << ","
+            << result.edges << ","
+            << std::fixed << std::setprecision(6) 
+            << result.initial_chi2 << ","
+            << result.final_chi2 << ","
+            << result.chi2_improvement_pct << ","
+            << result.initial_cost << ","
+            << result.final_cost << ","
+            << result.improvement_pct << ","
+            << result.iterations << ","
+            << result.time_ms << ","
+            << result.status << "\n";
     }
 
-    outfile.close();
+    ofs.close();
+    std::cout << "Results written to: " << output_file << std::endl;
     return true;
-}
-
-// Print results to console in a formatted table
-inline void PrintResults(const std::vector<BenchmarkResult>& results) {
-    std::cout << "\n" << std::string(150, '=') << "\n";
-    std::cout << "=== BENCHMARK RESULTS ===\n\n";
-
-    // Header
-    printf("%-12s | %-8s | %-10s | %-8s | %-6s | %-12s | %-12s | %-11s | %-5s | %-9s | %-10s\n",
-           "Dataset", "Manifold", "Solver", "Vertices", "Edges", 
-           "Init Cost", "Final Cost", "Improvement", "Iters", "Time(ms)", "Status");
-    std::cout << std::string(150, '-') << "\n";
-
-    for (const auto& r : results) {
-        printf("%-12s | %-8s | %-10s | %-8d | %-6d | %-12.6e | %-12.6e | %10.2f%% | %-5d | %-9ld | %-10s\n",
-               r.dataset.c_str(),
-               r.manifold.c_str(),
-               r.solver.c_str(),
-               r.vertices,
-               r.edges,
-               r.initial_cost,
-               r.final_cost,
-               r.improvement_pct,
-               r.iterations,
-               r.time_ms,
-               r.status.c_str());
-    }
-
-    std::cout << std::string(150, '-') << "\n";
 }
 
 }  // namespace benchmark_utils

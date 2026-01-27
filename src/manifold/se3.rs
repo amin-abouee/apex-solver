@@ -373,6 +373,14 @@ impl LieGroup for SE3 {
         SE3::from_translation_so3(translation, rotation)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix6::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix6::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         // Normalize the rotation part
         self.rotation.normalize();

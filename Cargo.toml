@@ -1,6 +1,6 @@
 [package]
 name = "apex-solver"
-version = "0.1.6"
+version = "1.0.0"
 edition = "2024"
 authors = ["Amin Abouee <amin.abouee@gmail.com>"]
 description = "A high-performance Rust library for nonlinear least squares optimization with Lie group support, designed for SLAM, bundle adjustment, and pose graph optimization"
@@ -12,6 +12,7 @@ readme = "README.md"
 keywords = ["optimization", "slam", "computer-vision", "robotics", "nonlinear"]
 categories = ["algorithms", "science", "mathematics"]
 exclude = [
+    "data/*",
     "data_bk/*",
     "doc/*.md",
     "!doc/CHANGELOG.md",
@@ -24,13 +25,12 @@ exclude = [
 ]
 
 [[bin]]
-name = "optimize_3d_graph"
-path = "bin/optimize_3d_graph.rs"
+name = "pose_graph_g2o"
+path = "bin/pose_graph_g2o.rs"
 
 [[bin]]
-name = "optimize_2d_graph"
-path = "bin/optimize_2d_graph.rs"
-
+name = "bundle_adjustment"
+path = "bin/bundle_adjustment.rs"
 
 [[example]]
 name = "visualize_graph_file"
@@ -71,7 +71,11 @@ csv = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 
 [[bench]]
-name = "solver_comparison"
+name = "odometry_pose_benchmark"
+harness = false
+
+[[bench]]
+name = "bundle_adjustment_benchmark"
 harness = false
 
 [profile.dev]

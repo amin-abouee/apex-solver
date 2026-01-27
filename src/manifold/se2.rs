@@ -338,6 +338,14 @@ impl LieGroup for SE2 {
         SE2::new(translation, rotation)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix3::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         self.rotation.renormalize();
     }

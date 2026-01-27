@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactorSE2, BetweenFactorSE3};
+use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
 use apex_solver::io::{G2oLoader, GraphLoader};
 use apex_solver::manifold::ManifoldType;
@@ -269,7 +269,7 @@ fn benchmark_dataset_se3(
             for edge in &graph.edges_se3 {
                 let id0 = format!("x{}", edge.from);
                 let id1 = format!("x{}", edge.to);
-                let factor = BetweenFactorSE3::new(edge.measurement.clone());
+                let factor = BetweenFactor::new(edge.measurement.clone());
 
                 // Clone the loss function for this edge
                 let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
@@ -460,9 +460,7 @@ fn benchmark_dataset_se2(
             for edge in &graph.edges_se2 {
                 let id0 = format!("x{}", edge.from);
                 let id1 = format!("x{}", edge.to);
-                let trans = edge.measurement.translation();
-                let angle = edge.measurement.rotation_angle();
-                let factor = BetweenFactorSE2::new(trans.x, trans.y, angle);
+                let factor = BetweenFactor::new(edge.measurement.clone());
 
                 let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
                     "L2" => Some(Box::new(L2Loss)),

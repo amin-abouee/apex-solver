@@ -1,4 +1,6 @@
 pub mod cholesky;
+pub mod explicit_schur;
+pub mod implicit_schur;
 pub mod qr;
 
 use crate::core::problem::VariableEnum;
@@ -16,6 +18,7 @@ pub enum LinearSolverType {
     #[default]
     SparseCholesky,
     SparseQR,
+    SparseSchurComplement,
 }
 
 impl Display for LinearSolverType {
@@ -23,6 +26,7 @@ impl Display for LinearSolverType {
         match self {
             LinearSolverType::SparseCholesky => write!(f, "Sparse Cholesky"),
             LinearSolverType::SparseQR => write!(f, "Sparse QR"),
+            LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
         }
     }
 }
@@ -35,8 +39,8 @@ pub enum LinAlgError {
     FactorizationFailed(String),
 
     /// Singular or near-singular matrix detected
-    #[error("Singular matrix detected (matrix is not invertible)")]
-    SingularMatrix,
+    #[error("Singular matrix detected: {0}")]
+    SingularMatrix(String),
 
     /// Failed to create sparse matrix from triplets
     #[error("Failed to create sparse matrix: {0}")]
@@ -45,6 +49,14 @@ pub enum LinAlgError {
     /// Matrix format conversion failed
     #[error("Matrix conversion failed: {0}")]
     MatrixConversion(String),
+
+    /// Invalid input provided to linear solver
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
+    /// Solver in invalid state (e.g., initialized incorrectly)
+    #[error("Invalid solver state: {0}")]
+    InvalidState(String),
 }
 
 impl LinAlgError {
@@ -54,9 +66,14 @@ impl LinAlgError {
     /// the linalg module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::linalg::LinAlgError;
+    /// # fn operation() -> Result<(), LinAlgError> { Ok(()) }
+    /// # fn example() -> Result<(), LinAlgError> {
     /// operation()
-    ///     .map_err(|e| LinAlgError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -74,14 +91,19 @@ impl LinAlgError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
-    /// SymbolicLlt::try_new(matrix.symbolic(), Side::Lower)
+    /// ```
+    /// # use apex_solver::linalg::LinAlgError;
+    /// # fn symbolic_llt_op() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), LinAlgError> {
+    /// symbolic_llt_op()
     ///     .map_err(|e| {
     ///         LinAlgError::FactorizationFailed(
     ///             "Symbolic Cholesky decomposition failed".to_string()
     ///         )
     ///         .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
@@ -117,6 +139,47 @@ pub type LinAlgResult<T> = Result<T, LinAlgError>;
 //     /// of the covariance matrix.
 //     pub standard_errors: Option<Mat<f64>>,
 // }
+
+/// Trait for structured sparse linear solvers that require variable information.
+///
+/// This trait extends the basic sparse solver interface to support solvers that
+/// exploit problem structure (e.g., Schur complement for bundle adjustment).
+/// These solvers need access to variable information to partition the problem.
+pub trait StructuredSparseLinearSolver {
+    /// Initialize the solver's block structure from problem variables.
+    ///
+    /// This must be called before solving to set up the internal structure.
+    ///
+    /// # Arguments
+    /// * `variables` - Map of variable names to their typed instances
+    /// * `variable_index_map` - Map from variable names to starting column indices
+    fn initialize_structure(
+        &mut self,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+    ) -> LinAlgResult<()>;
+
+    /// Solve the normal equation: (J^T * J) * dx = -J^T * r
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Solve the augmented equation: (J^T * J + λI) * dx = -J^T * r
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Get the cached Hessian matrix
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
+
+    /// Get the cached gradient vector
+    fn get_gradient(&self) -> Option<&Mat<f64>>;
+}
 
 /// Trait for sparse linear solvers that can solve both normal and augmented equations
 pub trait SparseLinearSolver {
@@ -166,6 +229,11 @@ pub trait SparseLinearSolver {
 }
 
 pub use cholesky::SparseCholeskySolver;
+pub use explicit_schur::{
+    SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
+    SparseSchurComplementSolver,
+};
+pub use implicit_schur::IterativeSchurSolver;
 pub use qr::SparseQRSolver;
 
 /// Extract per-variable covariance blocks from the full covariance matrix.

@@ -2,113 +2,165 @@
 
 This document provides step-by-step instructions for setting up and running the C++ benchmarks for apex-solver.
 
+## Prerequisites
+
+### Git LFS (Required)
+
+The benchmark datasets are stored using Git LFS. You must have Git LFS installed and initialized:
+
+```bash
+# Install Git LFS (if not already installed)
+brew install git-lfs  # macOS
+# or
+sudo apt-get install git-lfs  # Ubuntu/Debian
+
+# Initialize Git LFS in your repository
+git lfs install
+
+# Pull LFS files (if cloning existing repo)
+git lfs pull
+```
+
+**Verify datasets are downloaded:**
+```bash
+# Check file sizes (should show actual MB, not KB pointers)
+ls -lh data/odometry/
+ls -lh data/bundle_adjustment/
+```
+
+If files show as ~1KB, they are LFS pointers and need to be pulled:
+```bash
+git lfs fetch --all
+git lfs checkout
+```
+
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
-cd cpp-bench
-bash install_dependencies.sh
+# 1. Install dependencies (if not already installed)
+brew install eigen ceres-solver gtsam g2o tbb
 
 # 2. Build benchmarks
+cd benches/cpp_comparison
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
 cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 
 # 3. Run benchmarks
-./g2o_benchmark       # Run g2o benchmark
-./gtsam_benchmark     # Run GTSAM benchmark (if installed)
-./ceres_benchmark     # Run Ceres benchmark (if installed)
+./ceres_odometry_benchmark     # Ceres odometry (pose graph)
+./gtsam_odometry_benchmark     # GTSAM odometry
+./g2o_odometry_benchmark       # g2o odometry
+
+./ceres_ba_benchmark           # Ceres bundle adjustment
+./gtsam_ba_benchmark           # GTSAM bundle adjustment
+./g2o_ba_benchmark             # g2o bundle adjustment
 ```
 
-## What Was Created
+## Directory Structure
 
-The C++ benchmark suite includes:
-
-### Directory Structure
 ```
-cpp-bench/
-├── CMakeLists.txt                    # Build configuration
-├── README.md                         # Detailed documentation
-├── SETUP.md                          # This file
-├── install_dependencies.sh           # Dependency installation script
-├── run_all_benchmarks.sh            # Automation script
+cpp_comparison/
+├── CMakeLists.txt                # Build configuration
+├── SETUP.md                      # This file
+├── bundle_adjustment/
+│   ├── include/                  # BA-specific headers (if any)
+│   └── src/
+│       ├── ceres.cpp             # Ceres BA benchmark
+│       ├── g2o.cpp               # g2o BA benchmark
+│       └── gtsam.cpp             # GTSAM BA benchmark
+├── odometry/
+│   ├── include/                  # Odometry-specific headers (if any)
+│   └── src/
+│       ├── ceres.cpp             # Ceres odometry benchmark
+│       ├── g2o.cpp               # g2o odometry benchmark
+│       └── gtsam.cpp             # GTSAM odometry benchmark
 ├── common/
-│   ├── read_g2o.h                   # G2O file parser header
-│   ├── read_g2o.cpp                 # G2O file parser implementation
-│   └── benchmark_utils.h            # Timing and CSV utilities
-├── ceres_benchmark.cpp              # Ceres Solver benchmark
-├── gtsam_benchmark.cpp              # GTSAM benchmark
-├── g2o_benchmark.cpp                # g2o benchmark
-└── main.cpp                         # Info executable
+│   ├── include/                  # Shared headers
+│   │   ├── ba_benchmark_utils.h  # BA benchmark utilities
+│   │   ├── ba_cost.h             # BA cost computation
+│   │   ├── benchmark_utils.h     # Common benchmark utilities
+│   │   ├── read_bal.h            # BAL file parser
+│   │   ├── read_g2o.h            # G2O file parser
+│   │   └── unified_cost.h        # Unified cost functions
+│   └── src/                      # Shared implementations
+│       ├── ba_cost.cpp
+│       ├── read_bal.cpp
+│       ├── read_g2o.cpp
+│       └── unified_cost.cpp
+└── build/                        # Build directory (generated)
 ```
 
-### Features
+## Executables
+
+After building, the following executables are available:
+
+| Executable | Description | Threading |
+|------------|-------------|-----------|
+| `ceres_odometry_benchmark` | Ceres pose graph optimization | Multi-threaded |
+| `gtsam_odometry_benchmark` | GTSAM pose graph optimization | Multi-threaded (TBB) |
+| `g2o_odometry_benchmark` | g2o pose graph optimization | Single-threaded |
+| `ceres_ba_benchmark` | Ceres bundle adjustment | Multi-threaded (OpenMP) |
+| `gtsam_ba_benchmark` | GTSAM bundle adjustment | Multi-threaded (TBB) |
+| `g2o_ba_benchmark` | g2o bundle adjustment | Single-threaded |
+
+## Features
 
 1. **Flexible Build System**: CMake automatically detects which libraries are installed and builds only the available benchmarks
 2. **Consistent Configuration**: All solvers use identical parameters (LM optimizer, 100 iterations, 1e-3 tolerances)
-3. **Common G2O Parser**: Shared parser for SE2 and SE3 pose graphs
+3. **Common Parsers**: Shared parsers for G2O and BAL file formats
 4. **CSV Output**: Results exported in standardized format for comparison
-5. **Multiple Datasets**: Tests on 6 datasets (3 SE3, 3 SE2)
+5. **Multiple Datasets**: Tests on multiple odometry and bundle adjustment datasets
 
-## Current Status
+## Eigen Version Requirements
 
-✅ **Working:**
-- g2o benchmark (successfully tested)
-- CMake build system with optional dependencies
-- G2O file parser for SE2 and SE3
-- CSV output generation
+The benchmark suite handles the Eigen version mismatch between solvers:
 
-⚠️ **Partially Working:**
-- Ceres benchmark (Eigen version conflict: Ceres needs 5.0.0, system has 5.0.1)
-- GTSAM benchmark (not installed on this system)
+| Library | Eigen Version Required |
+|---------|----------------------|
+| Ceres Solver | Eigen 5.0.x |
+| g2o | Eigen 5.0.x |
+| GTSAM | Eigen 3.4.x |
 
-## Installation Status
+The CMakeLists.txt automatically manages these dependencies by:
+- Using Eigen 5.0.x for Ceres and g2o benchmarks
+- Using Eigen@3 (3.4.x) for GTSAM benchmarks
+- Building separate common libraries for each Eigen version
 
-On your Mac, the following are installed:
-- ✅ Eigen 5.0.1
-- ✅ g2o (via Homebrew)
-- ✅ Ceres Solver 2.2.0 (with Eigen 5.0.0 dependency issue)
-- ❌ GTSAM (not installed)
+## Installation
 
-## Fixing Ceres-Eigen Version Conflict
-
-The Ceres Solver on your system was compiled with Eigen 5.0.0, but Eigen 5.0.1 is currently installed. This causes a CMake configuration error.
-
-**Solution Options:**
-
-### Option 1: Reinstall Ceres (Recommended)
-```bash
-brew reinstall ceres-solver
-```
-This rebuilds Ceres against the current Eigen version (5.0.1).
-
-### Option 2: Use Only g2o and GTSAM
-The CMakeLists.txt is configured to skip Ceres if it can't be found, so you can proceed with just g2o and GTSAM benchmarks.
-
-### Option 3: Downgrade Eigen
-```bash
-brew uninstall eigen
-brew install eigen@5.0.0  # if available
-```
-Not recommended as it may break other packages.
-
-## Installing GTSAM
-
-To add GTSAM benchmarks:
+### macOS (Homebrew)
 
 ```bash
+# Install Eigen (both versions)
+brew install eigen
+brew install eigen@3
+
+# Install optimization libraries
+brew install ceres-solver
 brew install gtsam
+brew install g2o
 
-# Rebuild
-cd cpp-bench/build
+# Install threading libraries
+brew install tbb       # For GTSAM
+brew install libomp    # For OpenMP (optional)
+```
+
+### Rebuild after installation
+
+```bash
+cd benches/cpp_comparison/build
 rm -rf *
 cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release
+cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 ```
 
-## Datasets Used
+## Datasets
 
-The benchmarks test on these datasets from `../data/`:
+**Note**: All datasets are stored via Git LFS. Ensure you have run `git lfs pull` before running benchmarks.
+
+### Odometry Datasets (Git LFS)
+
+Located in `data/odometry/` (all `.g2o` files tracked via LFS):
 
 **SE3 (3D Pose Graphs):**
 | Dataset | Vertices | Edges | Description |
@@ -116,85 +168,106 @@ The benchmarks test on these datasets from `../data/`:
 | sphere2500 | 2,500 | 4,949 | Sphere surface |
 | parking-garage | 1,661 | 6,275 | Indoor parking |
 | torus3D | 5,000 | 9,048 | Torus shape |
+| cubicle | 5,750 | 16,869 | Indoor environment |
 
 **SE2 (2D Pose Graphs):**
 | Dataset | Vertices | Edges | Description |
 |---------|----------|-------|-------------|
 | intel | 1,228 | 1,483 | Intel Research Lab |
 | mit | 808 | 827 | MIT Killian Court |
-| manhattanOlson3500 | 3,500 | 5,598 | Manhattan grid |
+| ring | 901 | 991 | Ring topology |
+| M3500 | 3,500 | 5,453 | Manhattan grid |
 
-## Example g2o Benchmark Results
+### Bundle Adjustment Datasets (Git LFS)
 
-From the successful test run:
+Located in `data/bundle_adjustment/` (all `.txt` files tracked via LFS):
 
+| Dataset | Cameras | Points | Observations |
+|---------|---------|--------|--------------|
+| problem-1723-156502-pre | 1,723 | 156,502 | 1,044,414 |
+
+## Running Benchmarks
+
+The executables run from the build directory and use relative paths to find data files:
+
+```bash
+cd benches/cpp_comparison/build
+
+# Run individual benchmarks
+./ceres_odometry_benchmark
+./g2o_odometry_benchmark
+./gtsam_odometry_benchmark
+
+./ceres_ba_benchmark
+./g2o_ba_benchmark
+./gtsam_ba_benchmark
+
+# Or with custom dataset paths
+./ceres_ba_benchmark /path/to/custom/bal_file.txt
 ```
-Dataset            | Manifold | Solver  | Vertices | Edges | Final Cost   | Iters | Time(ms) | Status
-sphere2500         | SE3      | g2o-LM  | 2500     | 4949  | 7.271497e+02 | 26    | 4176     | CONVERGED
-parking-garage     | SE3      | g2o-LM  | 1661     | 6275  | 1.238691e+00 | 41    | 532      | CONVERGED
-torus3D            | SE3      | g2o-LM  | 5000     | 9048  | 1.997223e+04 | 100   | 25823    | NOT_CONVERGED
-intel              | SE2      | g2o-LM  | 1228     | 1483  | 1.608737e+05 | 100   | 77       | NOT_CONVERGED
-mit                | SE2      | g2o-LM  | 808      | 827   | 5.263310e+02 | 100   | 34       | CONVERGED
-manhattanOlson3500 | SE2      | g2o-LM  | 3500     | 5598  | 1.460766e+02 | 28    | 96       | CONVERGED
-```
 
-Results saved to: `cpp-bench/build/g2o_benchmark_results.csv`
+Results are saved to CSV files in the build directory:
+- `ceres_odometry_benchmark_results.csv`
+- `gtsam_odometry_benchmark_results.csv`
+- `g2o_odometry_benchmark_results.csv`
+- `ceres_ba_benchmark_results.csv`
+- `gtsam_ba_benchmark_results.csv`
+- `g2o_ba_benchmark_results.csv`
 
 ## Comparing with Rust Benchmarks
 
-To compare C++ solvers with apex-solver:
-
 ```bash
 # Run C++ benchmarks
-cd cpp-bench/build
-./g2o_benchmark
+cd benches/cpp_comparison/build
+./ceres_odometry_benchmark
+./g2o_odometry_benchmark
 
-# Run Rust benchmarks
-cd ../..
-cargo run --release --example compare_optimizers
-
-# Results will be in:
-# - cpp-bench/build/g2o_benchmark_results.csv
-# - (Rust results printed to console)
+# Run Rust benchmark suite
+cd ../../..
+cargo bench solver_comparison
 ```
 
 ## Troubleshooting
 
+### "Cannot open file" or datasets appear corrupted
+**Cause:** Git LFS files not downloaded (files are LFS pointers instead of actual data)
+**Solution:** 
+```bash
+# Check if files are LFS pointers (they'll be ~1KB instead of MB/GB)
+ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
+
+# Pull LFS files
+git lfs fetch --all
+git lfs checkout
+
+# Verify LFS status
+git lfs ls-files  # Should list all .g2o and .txt files
+```
+
 ### "No C++ optimization libraries found"
 **Cause:** None of Ceres, GTSAM, or g2o are installed/detected.
-**Solution:** Run `bash install_dependencies.sh`
+**Solution:** Install at least one library using Homebrew.
 
-### "Failed to find Ceres - Missing required Ceres dependency: Eigen version 5.0.0"
+### "Failed to find Ceres - Missing required Ceres dependency: Eigen version X.X.X"
 **Cause:** Eigen version mismatch
 **Solution:** `brew reinstall ceres-solver`
 
-### "Cannot open file ../../data/sphere2500.g2o"
+### "Cannot open file ../../data/..."
 **Cause:** Running benchmark from wrong directory
-**Solution:** Always run from `cpp-bench/build/` directory
+**Solution:** Always run from `benches/cpp_comparison/build/` directory
 
-### Compilation errors with g2o
-**Cause:** g2o headers not found
-**Solution:** Check g2o installation: `brew info g2o`
+### Compilation errors with headers not found
+**Cause:** Library not properly installed or detected
+**Solution:** Check installation with `brew info <library>` and ensure paths are correct
 
-## Next Steps
-
-1. **Fix Ceres**: `brew reinstall ceres-solver`
-2. **Install GTSAM**: `brew install gtsam`
-3. **Rebuild benchmarks**: `cd build && rm -rf * && cmake .. && make`
-4. **Run all benchmarks**: `bash ../run_all_benchmarks.sh`
-5. **Compare results**: Analyze CSV outputs against apex-solver performance
-
-## Performance Notes
-
-From the g2o test run:
-- **Fast 2D optimization**: 34-96ms for SE2 datasets
-- **Slower 3D optimization**: 532-25,823ms for SE3 datasets
-- **Convergence**: 4/6 datasets converged within 100 iterations
-- **Large problems**: torus3D (5000 vertices) took 25 seconds
+### OpenMP not found warning
+**Cause:** OpenMP not installed on macOS
+**Solution:** `brew install libomp` (optional - benchmarks will run single-threaded)
 
 ## References
 
-- [g2o GitHub](https://github.com/RainerKuemmerle/g2o)
 - [Ceres Solver Documentation](http://ceres-solver.org/)
 - [GTSAM Documentation](https://gtsam.org/)
+- [g2o GitHub](https://github.com/RainerKuemmerle/g2o)
+- [BAL Dataset Format](https://grail.cs.washington.edu/projects/bal/)
 - [Homebrew](https://brew.sh/)
