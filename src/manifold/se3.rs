@@ -10,18 +10,23 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::so3::{SO3, SO3Tangent};
-use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{
-    DVector, Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion, Vector3,
-    Vector6,
+use crate::manifold::{
+    LieGroup, Tangent,
+    so3::{SO3, SO3Tangent},
 };
-use std::fmt;
+use nalgebra::{
+    DVector, Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion,
+    Vector3, Vector6,
+};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
 /// SE(3) group element representing rigid body transformations in 3D.
 ///
 /// Represented as a combination of SO(3) rotation and Vector3 translation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SE3 {
     /// Rotation part as SO(3) element
     rotation: SO3,
@@ -29,8 +34,8 @@ pub struct SE3 {
     translation: Vector3<f64>,
 }
 
-impl fmt::Display for SE3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SE3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let t = self.translation();
         let q = self.rotation_quaternion();
         write!(
@@ -41,30 +46,33 @@ impl fmt::Display for SE3 {
     }
 }
 
-/// SE(3) tangent space element representing elements in the Lie algebra se(3).
-///
-/// Following manif conventions, internally represented as [rho(3), theta(3)] where:
-/// - rho: translational component [rho_x, rho_y, rho_z]
-/// - theta: rotational component [theta_x, theta_y, theta_z]
-#[derive(Clone, Debug, PartialEq)]
-pub struct SE3Tangent {
-    /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
-    data: Vector6<f64>,
-}
-
-impl fmt::Display for SE3Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rho = self.rho();
-        let theta = self.theta();
-        write!(
-            f,
-            "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
-            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
-        )
-    }
-}
-
 impl SE3 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 3;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 6;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 7;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SE3 {
+            rotation: SO3::identity(),
+            translation: Vector3::zeros(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix6<f64> {
+        Matrix6::<f64>::identity()
+    }
+
     /// Create a new SE3 element from translation and rotation.
     ///
     /// # Arguments
@@ -151,6 +159,44 @@ impl SE3 {
     pub fn z(&self) -> f64 {
         self.translation.z
     }
+
+    /// Get coefficients as array [tx, ty, tz, qw, qx, qy, qz].
+    pub fn coeffs(&self) -> [f64; 7] {
+        let q = self.rotation.quaternion();
+        [
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+        ]
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SE3 {
+    fn from(data: DVector<f64>) -> Self {
+        let translation = Vector3::new(data[0], data[1], data[2]);
+        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]);
+        SE3::from_translation_quaternion(translation, quaternion)
+    }
+}
+
+impl From<SE3> for DVector<f64> {
+    fn from(se3: SE3) -> Self {
+        let q = se3.rotation.quaternion();
+        DVector::from_vec(vec![
+            se3.translation.x, // tx first
+            se3.translation.y, // ty second
+            se3.translation.z, // tz third
+            q.w,               // qw fourth
+            q.i,               // qx fifth
+            q.j,               // qy sixth
+            q.k,               // qz seventh
+        ])
+    }
 }
 
 // Implement basic trait requirements for LieGroup
@@ -158,23 +204,6 @@ impl LieGroup for SE3 {
     type TangentVector = SE3Tangent;
     type JacobianMatrix = Matrix6<f64>;
     type LieAlgebra = Matrix4<f64>;
-
-    // Dimension constants following manif conventions
-    const DIM: usize = 3; // Space dimension (3D space)
-    const DOF: usize = 6; // Degrees of freedom (6-DOF: 3 translation + 3 rotation)
-    const REP_SIZE: usize = 7; // Representation size (3 translation + 4 quaternion)
-
-    fn identity() -> Self {
-        SE3 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix6::<f64>::identity()
-    }
 
     /// Get the inverse.
     ///
@@ -344,6 +373,14 @@ impl LieGroup for SE3 {
         SE3::from_translation_so3(translation, rotation)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix6::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix6::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         // Normalize the rotation part
         self.rotation.normalize();
@@ -370,6 +407,57 @@ impl LieGroup for SE3 {
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
+    }
+}
+
+/// SE(3) tangent space element representing elements in the Lie algebra se(3).
+///
+/// Following manif conventions, internally represented as [rho(3), theta(3)] where:
+/// - rho: translational component [rho_x, rho_y, rho_z]
+/// - theta: rotational component [theta_x, theta_y, theta_z]
+#[derive(Clone, PartialEq)]
+pub struct SE3Tangent {
+    /// Internal data: [rho_x, rho_y, rho_z, theta_x, theta_y, theta_z]
+    data: Vector6<f64>,
+}
+
+impl fmt::Display for SE3Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rho = self.rho();
+        let theta = self.theta();
+        write!(
+            f,
+            "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
+            rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
+        )
+    }
+}
+
+impl From<DVector<f64>> for SE3Tangent {
+    fn from(data_vector: DVector<f64>) -> Self {
+        SE3Tangent {
+            data: Vector6::new(
+                data_vector[0],
+                data_vector[1],
+                data_vector[2],
+                data_vector[3],
+                data_vector[4],
+                data_vector[5],
+            ),
+        }
+    }
+}
+
+impl From<SE3Tangent> for DVector<f64> {
+    fn from(se3_tangent: SE3Tangent) -> Self {
+        DVector::from_vec(vec![
+            se3_tangent.data[0],
+            se3_tangent.data[1],
+            se3_tangent.data[2],
+            se3_tangent.data[3],
+            se3_tangent.data[4],
+            se3_tangent.data[5],
+        ])
     }
 }
 
@@ -408,24 +496,6 @@ impl SE3Tangent {
     /// Get the theta (rotational) part.
     pub fn theta(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(3).into_owned()
-    }
-
-    /// Create SE3Tangent from a 6-dimensional vector
-    pub fn from_vector(vector: DVector<f64>) -> Self {
-        if vector.len() != 6 {
-            panic!("SE3Tangent::from_vector expects 6-dimensional vector");
-        }
-        SE3Tangent {
-            data: Vector6::new(vector[0], vector[1], vector[2], vector[3], vector[4], vector[5]),
-        }
-    }
-
-    /// Convert SE3Tangent to a 6-dimensional vector
-    pub fn to_vector(&self) -> DVector<f64> {
-        DVector::from_vec(vec![
-            self.data[0], self.data[1], self.data[2],
-            self.data[3], self.data[4], self.data[5],
-        ])
     }
 
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians
@@ -477,6 +547,9 @@ impl SE3Tangent {
 
 // Implement LieAlgebra trait for SE3Tangent
 impl Tangent<SE3> for SE3Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 6;
+
     /// Get the SE3 element.
     ///
     /// # Arguments
@@ -787,8 +860,7 @@ impl Tangent<SE3> for SE3Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::Quaternion;
-    use nalgebra::Vector3;
+    use Quaternion;
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 1e-9;
@@ -908,6 +980,19 @@ mod tests {
 
         let diff = (identity_transformed - point).norm();
         assert!(diff < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se3_between() {
+        let se3a = SE3::from_translation_euler(1.0, 2.0, 3.0, 0.1, 0.2, 0.3);
+        let se3b = se3a.clone();
+        let se3_between_identity = se3a.between(&se3b, None, None);
+        assert!(se3_between_identity.is_approx(&SE3::identity(), TOLERANCE));
+
+        let se3c = SE3::from_translation_euler(4.0, 5.0, 6.0, 0.4, 0.5, 0.6);
+        let se3_between = se3a.between(&se3c, None, None);
+        let expected = se3a.inverse(None).compose(&se3c, None, None);
+        assert!(se3_between.is_approx(&expected, TOLERANCE));
     }
 
     #[test]
@@ -1055,7 +1140,7 @@ mod tests {
 
     #[test]
     fn test_se3_from_isometry() {
-        let translation = nalgebra::Translation3::new(1.0, 2.0, 3.0);
+        let translation = Translation3::new(1.0, 2.0, 3.0);
         let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
         let isometry = Isometry3::from_parts(translation, rotation);
 

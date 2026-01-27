@@ -33,9 +33,13 @@
 //!
 
 use nalgebra::{Matrix3, Vector3};
-use std::fmt::Debug;
 use std::ops::{Mul, Neg};
+use std::{
+    error, fmt,
+    fmt::{Display, Formatter},
+};
 
+pub mod rn;
 pub mod se2;
 pub mod se3;
 pub mod so2;
@@ -50,10 +54,25 @@ pub enum ManifoldError {
     NumericalInstability(String),
     /// Invalid manifold element
     InvalidElement(String),
+    /// Dimension validation failed during conversion
+    DimensionMismatch { expected: usize, actual: usize },
+    /// NaN or Inf detected in manifold element
+    InvalidNumber,
+    /// Normalization failed for manifold element
+    NormalizationFailed(String),
 }
 
-impl std::fmt::Display for ManifoldError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+#[derive(Debug, Clone, PartialEq)]
+pub enum ManifoldType {
+    RN,
+    SE2,
+    SE3,
+    SO2,
+    SO3,
+}
+
+impl Display for ManifoldError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             ManifoldError::InvalidTangentDimension { expected, actual } => {
                 write!(
@@ -67,11 +86,20 @@ impl std::fmt::Display for ManifoldError {
             ManifoldError::InvalidElement(msg) => {
                 write!(f, "Invalid manifold element: {msg}")
             }
+            ManifoldError::DimensionMismatch { expected, actual } => {
+                write!(f, "Dimension mismatch: expected {expected}, got {actual}")
+            }
+            ManifoldError::InvalidNumber => {
+                write!(f, "Invalid number: NaN or Inf detected")
+            }
+            ManifoldError::NormalizationFailed(msg) => {
+                write!(f, "Normalization failed: {msg}")
+            }
         }
     }
 }
 
-impl std::error::Error for ManifoldError {}
+impl error::Error for ManifoldError {}
 
 /// Result type for manifold operations.
 pub type ManifoldResult<T> = Result<T, ManifoldError>;
@@ -101,42 +129,21 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 /// - `DIM`: Space dimension - dimension of ambient space (e.g., 3 for SE(3))
 /// - `DOF`: Degrees of freedom - tangent space dimension (e.g., 6 for SE(3))
 /// - `REP_SIZE`: Representation size - underlying data size (e.g., 7 for SE(3))
-pub trait LieGroup: Clone + Debug + PartialEq {
+pub trait LieGroup: Clone + PartialEq {
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
 
     /// The Jacobian matrix type
     type JacobianMatrix: Clone
-        + Debug
         + PartialEq
         + Neg<Output = Self::JacobianMatrix>
-        + Mul<Output = Self::JacobianMatrix>;
+        + Mul<Output = Self::JacobianMatrix>
+        + std::ops::Index<(usize, usize), Output = f64>;
 
     /// Associated Lie algebra type
-    type LieAlgebra: Clone + Debug + PartialEq;
-
-    // Dimension constants (following manif conventions)
-
-    /// Space dimension - dimension of the ambient space that the group acts on
-    const DIM: usize;
-
-    /// Degrees of freedom - dimension of the tangent space
-    const DOF: usize;
-
-    /// Representation size - size of the underlying data representation
-    const REP_SIZE: usize;
+    type LieAlgebra: Clone + PartialEq;
 
     // Core group operations
-
-    /// Get the identity element of the group.
-    ///
-    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
-    fn identity() -> Self;
-
-    /// Get the identity matrix for Jacobians.
-    ///
-    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
-    fn jacobian_identity() -> Self::JacobianMatrix;
 
     /// Compute the inverse of this manifold element.
     ///
@@ -152,7 +159,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// # Arguments
     /// * `other` - The right operand for composition
-    /// * `jacobian_self` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₁  
+    /// * `jacobian_self` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₁
     /// * `jacobian_other` - Optional Jacobian ∂(g₁ ∘ g₂)/∂g₂
     fn compose(
         &self,
@@ -183,7 +190,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// # Arguments
     /// * `vector` - Vector to transform
-    /// * `jacobian_self` - Optional Jacobian ∂(g ⊙ v)/∂g  
+    /// * `jacobian_self` - Optional Jacobian ∂(g ⊙ v)/∂g
     /// * `jacobian_vector` - Optional Jacobian ∂(g ⊙ v)/∂v
     fn act(
         &self,
@@ -204,6 +211,18 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 
     /// Generate a random element (useful for testing and initialization).
     fn random() -> Self;
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    /// This is used to initialize Jacobian matrices in optimization algorithms.
+    fn jacobian_identity() -> Self::JacobianMatrix;
+
+    /// Get a zero Jacobian matrix.
+    ///
+    /// Returns a zero matrix in the appropriate dimension for Jacobian computations.
+    /// This is used to initialize Jacobian matrices before optimization computations.
+    fn zero_jacobian() -> Self::JacobianMatrix;
 
     /// Normalize/project the element to the manifold.
     ///
@@ -226,7 +245,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     ///
     /// Applies a tangent space perturbation to this manifold element.
     ///
-    /// # Arguments  
+    /// # Arguments
     /// * `tangent` - Tangent vector perturbation
     /// * `jacobian_self` - Optional Jacobian ∂(g ⊞ φ)/∂g
     /// * `jacobian_tangent` - Optional Jacobian ∂(g ⊞ φ)/∂φ
@@ -234,7 +253,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Notes
     /// # Equation 148:
     /// J_R⊕θ_R = R(θ)ᵀ
-    /// J_R⊕θ_θ = J_r(θ)  
+    /// J_R⊕θ_θ = J_r(θ)
     fn right_plus(
         &self,
         tangent: &Self::TangentVector,
@@ -262,7 +281,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Notes
     /// # Equation 149:
     /// J_Q⊖R_Q = J_r⁻¹(θ)
-    /// J_Q⊖R_R = -J_l⁻¹(θ)  
+    /// J_Q⊖R_R = -J_l⁻¹(θ)
     fn right_minus(
         &self,
         other: &Self,
@@ -287,7 +306,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// Left plus operation: φ ⊞ g = exp(φ^∧) ∘ g.
     ///
     /// # Arguments
-    /// * `tangent` - Tangent vector perturbation  
+    /// * `tangent` - Tangent vector perturbation
     /// * `jacobian_tangent` - Optional Jacobian ∂(φ ⊞ g)/∂φ
     /// * `jacobian_self` - Optional Jacobian ∂(φ ⊞ g)/∂g
     fn left_plus(
@@ -301,7 +320,9 @@ pub trait LieGroup: Clone + Debug + PartialEq {
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = Self::jacobian_identity();
+            // Note: jacobian_identity() is now implemented in concrete types
+            // This will be handled by the concrete implementation
+            *jac_self = self.adjoint();
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
@@ -316,7 +337,7 @@ pub trait LieGroup: Clone + Debug + PartialEq {
     /// # Arguments
     /// * `other` - The reference element g₂
     /// * `jacobian_self` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₁
-    /// * `jacobian_other` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₂  
+    /// * `jacobian_other` - Optional Jacobian ∂(g₁ ⊟ g₂)/∂g₂
     fn left_minus(
         &self,
         other: &Self,
@@ -389,6 +410,22 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 
         result
     }
+
+    /// Get the dimension of the tangent space for this manifold element.
+    ///
+    /// For most manifolds, this returns the compile-time constant from the TangentVector type.
+    /// For dynamically-sized manifolds like Rⁿ, this method should be overridden to return
+    /// the actual runtime dimension.
+    ///
+    /// # Returns
+    /// The dimension of the tangent space (degrees of freedom)
+    ///
+    /// # Default Implementation
+    /// Returns `Self::TangentVector::DIM` which works for fixed-size manifolds
+    /// (SE2=3, SE3=6, SO2=1, SO3=3).
+    fn tangent_dim(&self) -> usize {
+        Self::TangentVector::DIM
+    }
 }
 
 /// Trait for Lie algebra operations.
@@ -399,11 +436,11 @@ pub trait LieGroup: Clone + Debug + PartialEq {
 /// # Type Parameters
 ///
 /// - `G`: The associated Lie group type
-pub trait Tangent<Group: LieGroup>: Clone + Debug + PartialEq {
+pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     // Dimension constants
 
-    /// Dimension of the tangent space (same as Lie group DOF)
-    const DIM: usize = Group::DOF;
+    /// Dimension of the tangent space
+    const DIM: usize;
 
     // Exponential map and Jacobians
 
@@ -419,7 +456,7 @@ pub trait Tangent<Group: LieGroup>: Clone + Debug + PartialEq {
     /// exp((φ + δφ)^∧) ≈ exp(φ^∧) ∘ exp((Jr δφ)^∧)
     fn right_jacobian(&self) -> Group::JacobianMatrix;
 
-    /// Left Jacobian Jl.  
+    /// Left Jacobian Jl.
     ///
     /// Matrix Jl such that for small δφ:
     /// exp((φ + δφ)^∧) ≈ exp((Jl δφ)^∧) ∘ exp(φ^∧)

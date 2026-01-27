@@ -1,67 +1,231 @@
-//! Factor implementations for the factor graph
+//! Factor implementations for graph-based optimization problems.
 //!
-//! This module provides a comprehensive set of factor types for optimization problems,
-//! particularly focused on SLAM, bundle adjustment, and robotics applications.
-//! The module is organized into submodules for different categories of factors.
+//! Factors (also called constraints or error functions) represent measurements or relationships
+//! between variables in a factor graph. Each factor computes a residual (error) vector and its
+//! Jacobian with respect to the connected variables.
 //!
-//! # Module Structure
+//! # Factor Graph Formulation
 //!
-//! - `basic`: Basic factor types (unary, binary, prior)
-//! - `geometry`: Geometric factors (between, relative pose)
-//! - `vision`: Computer vision factors (projection, reprojection)
-//! - `motion`: Motion model factors (odometry, IMU)
-//! - `robust`: Robust kernels for outlier rejection
+//! In graph-based SLAM and bundle adjustment, the optimization problem is represented as:
+//!
+//! ```text
+//! minimize Σ_i ||r_i(x)||²
+//! ```
+//!
+//! where:
+//! - `x` is the set of variables (poses, landmarks, etc.)
+//! - `r_i(x)` is the residual function for factor i
+//! - Each factor connects one or more variables
+//!
+//! # Factor Types
+//!
+//! ## Pose Factors
+//! - **Between factors**: Relative pose constraints (SE2, SE3)
+//! - **Prior factors**: Unary constraints on single variables
+//!
+//! ## Camera Projection Factors
+//!
+//! Use [`ProjectionFactor`](camera::ProjectionFactor) with a specific [`CameraModel`](camera::CameraModel).
+//!
+//! Supported camera models:
+//! - [`PinholeCamera`](camera::PinholeCamera)
+//! - [`DoubleSphereCamera`](camera::DoubleSphereCamera)
+//! - [`EucmCamera`](camera::EucmCamera)
+//! - [`FovCamera`](camera::FovCamera)
+//! - [`KannalaBrandtCamera`](camera::KannalaBrandtCamera)
+//! - [`RadTanCamera`](camera::RadTanCamera)
+//! - [`UcmCamera`](camera::UcmCamera)
+//!
+//! # Linearization
+//!
+//! Each factor must provide a `linearize` method that computes:
+//! 1. **Residual** `r(x)`: The error at the current variable values
+//! 2. **Jacobian** `J = ∂r/∂x`: How the residual changes with each variable
+//!
+//! This information is used by the optimizer to compute parameter updates via Newton-type methods.
 
-use std::fmt;
-use nalgebra::{DVector, DMatrix};
-use crate::core::types::{ApexResult, ApexError};
+use nalgebra::{DMatrix, DVector};
+use thiserror::Error;
+use tracing::error;
 
-pub mod basic;
-pub mod geometry;
-pub mod vision;
-pub mod motion;
-pub mod robust;
+// Pose factors
+pub mod between_factor;
+pub mod camera;
+pub mod prior_factor;
+pub mod projection_factor;
 
-// Re-export commonly used types
-pub use basic::{UnaryFactor, BinaryFactor, PriorFactor};
-pub use geometry::{
-    BetweenFactor, RelativePoseFactor, SE2BetweenFactor, SE3BetweenFactor,
-    SE2RelativePoseFactor, SE3RelativePoseFactor, SO2BetweenFactor, SO3BetweenFactor,
-};
-pub use vision::{
-    ProjectionFactor, ReprojectionFactor, StereoFactor, CameraIntrinsics,
-};
-pub use motion::{
-    OdometryFactor, ConstantVelocityFactor, VelocityFactor,
-    SE2OdometryFactor, SE3OdometryFactor, SE2ConstantVelocityFactor, SE3ConstantVelocityFactor,
-};
-pub use robust::{
-    RobustKernel, L2Kernel, HuberKernel, CauchyKernel, TukeyKernel, GemanMcClureKernel,
-};
+pub use between_factor::BetweenFactor;
+pub use prior_factor::PriorFactor;
+pub use projection_factor::ProjectionFactor;
 
-// Tests module
-#[cfg(test)]
-mod tests;
+/// Factor-specific error types for apex-solver
+#[derive(Debug, Clone, Error)]
+pub enum FactorError {
+    /// Invalid dimension mismatch between expected and actual
+    #[error("Invalid dimension: expected {expected}, got {actual}")]
+    InvalidDimension { expected: usize, actual: usize },
 
-/// Simplified Factor trait for factor graph optimization
+    /// Invalid projection (point behind camera or outside valid range)
+    #[error("Invalid projection: {0}")]
+    InvalidProjection(String),
+
+    /// Jacobian computation failed
+    #[error("Jacobian computation failed: {0}")]
+    JacobianFailed(String),
+
+    /// Invalid parameter values
+    #[error("Invalid parameter values: {0}")]
+    InvalidParameters(String),
+
+    /// Numerical instability detected
+    #[error("Numerical instability: {0}")]
+    NumericalInstability(String),
+}
+
+impl FactorError {
+    /// Log the error with tracing::error and return self for chaining
+    ///
+    /// This method allows for a consistent error logging pattern throughout
+    /// the factors module, ensuring all errors are properly recorded.
+    ///
+    /// # Example
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn operation() -> Result<(), FactorError> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
+    /// operation()
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with the original source error for debugging context
+    ///
+    /// This method logs both the FactorError and the underlying error
+    /// from external libraries or internal operations, providing full
+    /// debugging context when errors occur.
+    ///
+    /// # Arguments
+    /// * `source_error` - The original error (must implement Debug)
+    ///
+    /// # Example
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn compute_jacobian() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
+    /// compute_jacobian()
+    ///     .map_err(|e| {
+    ///         FactorError::JacobianFailed("Matrix computation failed".to_string())
+    ///             .log_with_source(e)
+    ///     })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
+}
+
+/// Result type for factor operations
+pub type FactorResult<T> = Result<T, FactorError>;
+
+/// Trait for factor (constraint) implementations in factor graph optimization.
 ///
-/// This trait defines the essential interface for factors in the factor graph.
-/// It focuses on the core operations needed for optimization: identifying factors
-/// and variables, computing residuals, and computing linearizations.
-pub trait Factor: fmt::Debug + Send + Sync {
-    /// Returns a unique identifier for the factor
-    fn id(&self) -> usize;
+/// A factor represents a measurement or constraint connecting one or more variables.
+/// It computes the residual (error) and Jacobian for the current variable values,
+/// which are used by the optimizer to minimize the total cost.
+///
+/// # Implementing Custom Factors
+///
+/// To create a custom factor:
+/// 1. Implement this trait
+/// 2. Define the residual function `r(x)` (how to compute error from variable values)
+/// 3. Compute the Jacobian `J = ∂r/∂x` (analytically or numerically)
+/// 4. Return the residual dimension
+///
+/// # Thread Safety
+///
+/// Factors must be `Send + Sync` to enable parallel residual/Jacobian evaluation.
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::factors::Factor;
+/// use nalgebra::{DMatrix, DVector};
+///
+/// // Simple 1D range measurement factor
+/// struct RangeFactor {
+///     measurement: f64,  // Measured distance
+/// }
+///
+/// impl Factor for RangeFactor {
+///     fn linearize(&self, params: &[DVector<f64>], compute_jacobian: bool) -> (DVector<f64>, Option<DMatrix<f64>>) {
+///         // params[0] is a 2D point [x, y]
+///         let x = params[0][0];
+///         let y = params[0][1];
+///
+///         // Residual: measured distance - actual distance
+///         let predicted_distance = (x * x + y * y).sqrt();
+///         let residual = DVector::from_vec(vec![self.measurement - predicted_distance]);
+///
+///         // Jacobian: ∂(residual)/∂[x, y]
+///         let jacobian = if compute_jacobian {
+///             Some(DMatrix::from_row_slice(1, 2, &[
+///                 -x / predicted_distance,
+///                 -y / predicted_distance,
+///             ]))
+///         } else {
+///             None
+///         };
+///
+///         (residual, jacobian)
+///     }
+///
+///     fn get_dimension(&self) -> usize { 1 }
+/// }
+/// ```
+pub trait Factor: Send + Sync {
+    /// Compute the residual and Jacobian at the given parameter values.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Slice of variable values (one `DVector` per connected variable)
+    /// * `compute_jacobian` - Whether to compute the Jacobian matrix
+    ///
+    /// # Returns
+    ///
+    /// Tuple `(residual, jacobian)` where:
+    /// - `residual`: N-dimensional error vector
+    /// - `jacobian`: N × M matrix where M is the total DOF of all variables
+    ///
+    /// # Example
+    ///
+    /// For a between factor connecting two SE2 poses (3 DOF each):
+    /// - Input: `params = [pose1 (3×1), pose2 (3×1)]`
+    /// - Output: `(residual (3×1), jacobian (3×6))`
+    fn linearize(
+        &self,
+        params: &[DVector<f64>],
+        compute_jacobian: bool,
+    ) -> (DVector<f64>, Option<DMatrix<f64>>);
 
-    /// Returns the factor's key/identifier used in the graph
-    fn key(&self) -> usize;
-
-    /// Returns the keys/identifiers of all variables connected to this factor
-    fn variable_keys(&self) -> &[usize];
-
-    /// Evaluates both the error/residual vector and the Jacobian matrices
-    /// for each connected variable at the current linearization point
-    fn linearize(&self, variables: &[&dyn std::any::Any]) -> ApexResult<(DVector<f64>, DMatrix<f64>)>;
-
-    /// Evaluates only the error/residual vector (without Jacobian computation)
-    fn evaluate(&self, variables: &[&dyn std::any::Any]) -> ApexResult<DVector<f64>>;
+    /// Get the dimension of the residual vector.
+    ///
+    /// # Returns
+    ///
+    /// Number of elements in the residual vector (number of constraints)
+    ///
+    /// # Example
+    ///
+    /// - SE2 between factor: 3 (dx, dy, dtheta)
+    /// - SE3 between factor: 6 (translation + rotation)
+    /// - Prior factor: dimension of the variable
+    fn get_dimension(&self) -> usize;
 }

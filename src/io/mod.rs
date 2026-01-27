@@ -1,27 +1,39 @@
+use collections::HashMap;
 use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
-use std::collections::HashMap;
-use std::path::Path;
+
+#[cfg(feature = "visualization")]
+use rerun::external::glam::{Quat, Vec3};
+
+use std::{
+    collections, fmt,
+    fmt::{Display, Formatter},
+    io,
+    path::Path,
+};
 use thiserror::Error;
+use tracing::error;
 
 // Import manifold types
-use crate::manifold::se2::SE2;
-use crate::manifold::se3::SE3;
+use crate::{
+    core::problem::VariableEnum,
+    manifold::{se2::SE2, se3::SE3},
+};
 
 // Module declarations
+pub mod bal;
 pub mod g2o;
 pub mod toro;
-pub mod tum;
 
 // Re-exports
+pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
-pub use tum::TumLoader;
 
 /// Errors that can occur during graph file parsing
 #[derive(Error, Debug)]
-pub enum ApexSolverIoError {
+pub enum IoError {
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
 
     #[error("Parse error at line {line}: {message}")]
     Parse { line: usize, message: String },
@@ -41,22 +53,49 @@ pub enum ApexSolverIoError {
     #[error("Duplicate vertex ID: {id}")]
     DuplicateVertex { id: usize },
 
+    #[error("Invalid quaternion at line {line}: norm = {norm:.6}, expected ~1.0")]
+    InvalidQuaternion { line: usize, norm: f64 },
+
     #[error("Unsupported file format: {0}")]
     UnsupportedFormat(String),
+
+    #[error("Failed to create file '{path}': {reason}")]
+    FileCreationFailed { path: String, reason: String },
 }
 
-/// SE2 vertex with ID (x, y, theta)
-#[derive(Debug, Clone, PartialEq)]
+impl IoError {
+    /// Log the error using tracing::error and return self for chaining
+    #[must_use]
+    pub fn log(self) -> Self {
+        error!("{}", self);
+        self
+    }
+
+    /// Log the error with source error information using tracing::error and return self for chaining
+    #[must_use]
+    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        error!("{} | Source: {:?}", self, source_error);
+        self
+    }
+}
+
+#[derive(Clone, PartialEq)]
 pub struct VertexSE2 {
     pub id: usize,
     pub pose: SE2,
 }
-
 impl VertexSE2 {
     pub fn new(id: usize, x: f64, y: f64, theta: f64) -> Self {
         Self {
             id,
             pose: SE2::from_xy_angle(x, y, theta),
+        }
+    }
+
+    pub fn from_vector(id: usize, vector: Vector3<f64>) -> Self {
+        Self {
+            id,
+            pose: SE2::from_xy_angle(vector[0], vector[1], vector[2]),
         }
     }
 
@@ -77,8 +116,44 @@ impl VertexSE2 {
     }
 }
 
+impl Display for VertexSE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "VertexSE2 [ id: {}, pose: {} ]", self.id, self.pose)
+    }
+}
+
+impl VertexSE2 {
+    /// Convert to Rerun 2D position with scaling
+    ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to position
+    ///
+    /// # Returns
+    /// 2D position array [x, y] compatible with Rerun Points2D
+    pub fn to_rerun_position_2d(&self, scale: f32) -> [f32; 2] {
+        [(self.x() as f32) * scale, (self.y() as f32) * scale]
+    }
+
+    /// Convert to Rerun 3D position with scaling and specified height
+    ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to X and Y
+    /// * `height` - Z coordinate for the 2D point in 3D space
+    ///
+    /// # Returns
+    /// 3D position compatible with Rerun Transform3D or Points3D
+    #[cfg(feature = "visualization")]
+    pub fn to_rerun_position_3d(&self, scale: f32, height: f32) -> Vec3 {
+        Vec3::new((self.x() as f32) * scale, (self.y() as f32) * scale, height)
+    }
+}
+
 /// SE3 vertex with ID (x, y, z, qx, qy, qz, qw)
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct VertexSE3 {
     pub id: usize,
     pub pose: SE3,
@@ -90,6 +165,14 @@ impl VertexSE3 {
             id,
             pose: SE3::new(translation, rotation),
         }
+    }
+
+    pub fn from_vector(id: usize, vector: [f64; 7]) -> Self {
+        let translation = Vector3::from([vector[0], vector[1], vector[2]]);
+        let rotation = UnitQuaternion::from_quaternion(Quaternion::from([
+            vector[3], vector[4], vector[5], vector[6],
+        ]));
+        Self::new(id, translation, rotation)
     }
 
     pub fn from_translation_quaternion(
@@ -128,43 +211,39 @@ impl VertexSE3 {
     }
 }
 
-/// TUM trajectory vertex with timestamp
-#[derive(Debug, Clone, PartialEq)]
-pub struct VertexTUM {
-    pub timestamp: f64,
-    pub pose: SE3,
+impl Display for VertexSE3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "VertexSE3 [ id: {}, pose: {} ]", self.id, self.pose)
+    }
 }
 
-impl VertexTUM {
-    pub fn new(timestamp: f64, translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
-        Self {
-            timestamp,
-            pose: SE3::new(translation, rotation),
-        }
-    }
+impl VertexSE3 {
+    /// Convert to Rerun 3D transform components (position and rotation) with scaling
+    ///
+    /// **Note:** Requires the `visualization` feature to be enabled.
+    ///
+    /// # Arguments
+    /// * `scale` - Scale factor to apply to position
+    ///
+    /// # Returns
+    /// Tuple of (position, rotation) compatible with Rerun Transform3D
+    #[cfg(feature = "visualization")]
+    pub fn to_rerun_transform(&self, scale: f32) -> (Vec3, Quat) {
+        // Extract translation and convert to glam Vec3
+        let trans = self.translation();
+        let position = Vec3::new(trans.x as f32, trans.y as f32, trans.z as f32) * scale;
 
-    pub fn from_translation_quaternion(
-        timestamp: f64,
-        translation: Vector3<f64>,
-        quaternion: Quaternion<f64>,
-    ) -> Self {
-        Self {
-            timestamp,
-            pose: SE3::from_translation_quaternion(translation, quaternion),
-        }
-    }
+        // Extract rotation quaternion and convert to glam Quat
+        let rot = self.rotation();
+        let nq = rot.as_ref();
+        let rotation = Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
 
-    pub fn translation(&self) -> Vector3<f64> {
-        self.pose.translation()
-    }
-
-    pub fn rotation(&self) -> UnitQuaternion<f64> {
-        self.pose.rotation_quaternion()
+        (position, rotation)
     }
 }
 
 /// 2D edge constraint between two SE2 vertices
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EdgeSE2 {
     pub from: usize,
     pub to: usize,
@@ -190,8 +269,18 @@ impl EdgeSE2 {
     }
 }
 
+impl Display for EdgeSE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EdgeSE2 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            self.from, self.to, self.measurement, self.information
+        )
+    }
+}
+
 /// 3D edge constraint between two SE3 vertices
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct EdgeSE3 {
     pub from: usize,
     pub to: usize,
@@ -216,78 +305,183 @@ impl EdgeSE3 {
     }
 }
 
+impl Display for EdgeSE3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "EdgeSE3 [ from: {}, to: {}, measurement: {}, information: {} ]",
+            self.from, self.to, self.measurement, self.information
+        )
+    }
+}
+
 /// Main graph structure containing vertices and edges
-#[derive(Debug, Clone)]
-pub struct G2oGraph {
-    pub vertices_se2: HashMap<usize, VertexSE2>,
-    pub vertices_se3: HashMap<usize, VertexSE3>,
-    pub vertices_tum: Vec<VertexTUM>,
+#[derive(Clone)]
+pub struct Graph {
+    pub vertices_se2: collections::HashMap<usize, VertexSE2>,
+    pub vertices_se3: collections::HashMap<usize, VertexSE3>,
     pub edges_se2: Vec<EdgeSE2>,
     pub edges_se3: Vec<EdgeSE3>,
 }
 
-impl G2oGraph {
+impl Graph {
     pub fn new() -> Self {
         Self {
-            vertices_se2: HashMap::new(),
-            vertices_se3: HashMap::new(),
-            vertices_tum: Vec::new(),
+            vertices_se2: collections::HashMap::new(),
+            vertices_se3: collections::HashMap::new(),
             edges_se2: Vec::new(),
             edges_se3: Vec::new(),
         }
     }
 
     pub fn vertex_count(&self) -> usize {
-        self.vertices_se2.len() + self.vertices_se3.len() + self.vertices_tum.len()
+        self.vertices_se2.len() + self.vertices_se3.len()
     }
 
     pub fn edge_count(&self) -> usize {
         self.edges_se2.len() + self.edges_se3.len()
     }
+
+    /// Create a new graph from optimized variables, keeping the original edges
+    ///
+    /// This is useful for saving optimization results: vertices are updated with
+    /// optimized poses, while edges (constraints) remain the same.
+    ///
+    /// # Arguments
+    /// * `variables` - collections::HashMap of optimized variable values from solver
+    /// * `original_edges` - Reference to original graph to copy edges from
+    ///
+    /// # Returns
+    /// A new Graph with optimized vertices and original edges
+    pub fn from_optimized_variables(
+        variables: &HashMap<String, VariableEnum>,
+        original_edges: &Self,
+    ) -> Self {
+        use VariableEnum;
+
+        let mut graph = Graph::new();
+
+        // Copy edges from original (they don't change during optimization)
+        graph.edges_se2 = original_edges.edges_se2.clone();
+        graph.edges_se3 = original_edges.edges_se3.clone();
+
+        // Convert optimized variables back to vertices
+        for (var_name, var) in variables {
+            // Extract vertex ID from variable name (format: "x{id}")
+            if let Some(id_str) = var_name.strip_prefix('x')
+                && let Ok(id) = id_str.parse::<usize>()
+            {
+                match var {
+                    VariableEnum::SE2(v) => {
+                        let vertex = VertexSE2 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se2.insert(id, vertex);
+                    }
+                    VariableEnum::SE3(v) => {
+                        let vertex = VertexSE3 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se3.insert(id, vertex);
+                    }
+                    _ => {
+                        // Skip other manifold types (SO2, SO3, Rn)
+                        // These are not commonly used in SLAM graphs
+                    }
+                }
+            }
+        }
+
+        graph
+    }
 }
 
-impl Default for G2oGraph {
+impl Default for Graph {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Display for Graph {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Graph [[ vertices_se2: {} (count: {}), vertices_se3: {} (count: {}), edges_se2: {} (count: {}), edges_se3: {} (count: {}) ]]",
+            self.vertices_se2
+                .values()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.vertices_se2.len(),
+            self.vertices_se3
+                .values()
+                .map(|v| format!("{}", v))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.vertices_se3.len(),
+            self.edges_se2
+                .iter()
+                .map(|e| format!("{}", e))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.edges_se2.len(),
+            self.edges_se3
+                .iter()
+                .map(|e| format!("{}", e))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.edges_se3.len()
+        )
     }
 }
 
 /// Trait for graph file loaders and writers
 pub trait GraphLoader {
     /// Load a graph from a file
-    fn load<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError>;
+    fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError>;
 
     /// Write a graph to a file
-    fn write<P: AsRef<Path>>(graph: &G2oGraph, path: P) -> Result<(), ApexSolverIoError>;
+    fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError>;
 }
 
 /// Convenience function to load any supported format based on file extension
-pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<G2oGraph, ApexSolverIoError> {
+pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
     let path_ref = path.as_ref();
     let extension = path_ref
         .extension()
         .and_then(|ext| ext.to_str())
-        .ok_or_else(|| ApexSolverIoError::UnsupportedFormat("No file extension".to_string()))?;
+        .ok_or_else(|| {
+            IoError::UnsupportedFormat("No file extension".to_string())
+                .log_with_source(format!("File path: {:?}", path_ref))
+        })?;
 
     match extension.to_lowercase().as_str() {
         "g2o" => G2oLoader::load(path),
         "graph" => ToroLoader::load(path),
-        "txt" | "csv" => TumLoader::load(path),
-        _ => Err(ApexSolverIoError::UnsupportedFormat(format!(
-            "Unsupported extension: {extension}"
-        ))),
+        _ => Err(
+            IoError::UnsupportedFormat(format!("Unsupported extension: {extension}"))
+                .log_with_source(format!("File path: {:?}", path_ref)),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::{error, io::Write};
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_load_simple_graph() -> Result<(), ApexSolverIoError> {
-        let mut temp_file = NamedTempFile::new().unwrap();
+    fn test_load_simple_graph() -> Result<(), IoError> {
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 1 1.0 0.0 0.0")?;
         writeln!(temp_file, "# This is a comment")?;
@@ -306,77 +500,81 @@ mod tests {
     }
 
     #[test]
-    fn test_load_m3500() -> Result<(), Box<dyn std::error::Error>> {
-        let graph = G2oLoader::load("data/M3500.g2o")?;
-        println!(
-            "M3500 loaded: {} vertices, {} edges",
-            graph.vertex_count(),
-            graph.edge_count()
-        );
+    fn test_load_m3500() -> Result<(), Box<dyn error::Error>> {
+        let graph = G2oLoader::load("data/odometry/M3500.g2o")?;
         assert!(!graph.vertices_se2.is_empty());
         Ok(())
     }
 
     #[test]
-    fn test_load_parking_garage() -> Result<(), Box<dyn std::error::Error>> {
-        let graph = G2oLoader::load("data/parking-garage.g2o")?;
-        println!(
-            "Parking garage loaded: {} vertices, {} edges",
-            graph.vertex_count(),
-            graph.edge_count()
-        );
+    fn test_load_sphere2500() -> Result<(), Box<dyn error::Error>> {
+        let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
         assert!(!graph.vertices_se3.is_empty());
         Ok(())
     }
 
     #[test]
-    fn test_load_sphere2500() -> Result<(), Box<dyn std::error::Error>> {
-        let graph = G2oLoader::load("data/sphere2500.g2o")?;
-        println!(
-            "Sphere2500 loaded: {} vertices, {} edges",
-            graph.vertex_count(),
-            graph.edge_count()
-        );
-        assert!(!graph.vertices_se3.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn test_duplicate_vertex_error() -> Result<(), std::io::Error> {
+    fn test_duplicate_vertex_error() -> Result<(), io::Error> {
         let mut temp_file = NamedTempFile::new()?;
         writeln!(temp_file, "VERTEX_SE2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX_SE2 0 1.0 0.0 0.0")?; // Duplicate ID
 
         let result = G2oLoader::load(temp_file.path());
-        assert!(matches!(
-            result,
-            Err(ApexSolverIoError::DuplicateVertex { id: 0 })
-        ));
+        assert!(matches!(result, Err(IoError::DuplicateVertex { id: 0 })));
 
         Ok(())
     }
 
     #[test]
-    fn test_toro_loader() -> Result<(), std::io::Error> {
-        let mut temp_file = NamedTempFile::new()?;
+    fn test_toro_loader() -> Result<(), IoError> {
+        let mut temp_file = NamedTempFile::new().map_err(|e| {
+            IoError::FileCreationFailed {
+                path: "temp_file".to_string(),
+                reason: e.to_string(),
+            }
+            .log()
+        })?;
         writeln!(temp_file, "VERTEX2 0 0.0 0.0 0.0")?;
         writeln!(temp_file, "VERTEX2 1 1.0 0.0 0.0")?;
 
-        let graph = ToroLoader::load(temp_file.path()).unwrap();
+        let graph = ToroLoader::load(temp_file.path()).map_err(|e| e.log())?;
         assert_eq!(graph.vertices_se2.len(), 2);
 
         Ok(())
     }
 
     #[test]
-    fn test_tum_loader() -> Result<(), std::io::Error> {
-        let mut temp_file = NamedTempFile::new()?;
-        writeln!(temp_file, "1.0 0.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
-        writeln!(temp_file, "2.0 1.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
+    #[cfg(feature = "visualization")]
+    fn test_se3_to_rerun() {
+        let vertex = VertexSE3::new(0, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
 
-        let graph = TumLoader::load(temp_file.path()).unwrap();
-        assert_eq!(graph.vertices_tum.len(), 2);
+        let (pos, rot) = vertex.to_rerun_transform(0.1);
 
-        Ok(())
+        assert!((pos.x - 0.1).abs() < 1e-6);
+        assert!((pos.y - 0.2).abs() < 1e-6);
+        assert!((pos.z - 0.3).abs() < 1e-6);
+        assert!((rot.w - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_se2_to_rerun_2d() {
+        let vertex = VertexSE2::new(0, 10.0, 20.0, 0.5);
+
+        let pos = vertex.to_rerun_position_2d(0.1);
+
+        assert!((pos[0] - 1.0).abs() < 1e-6);
+        assert!((pos[1] - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    #[cfg(feature = "visualization")]
+    fn test_se2_to_rerun_3d() {
+        let vertex = VertexSE2::new(0, 10.0, 20.0, 0.5);
+
+        let pos = vertex.to_rerun_position_3d(0.1, 5.0);
+
+        assert!((pos.x - 1.0).abs() < 1e-6);
+        assert!((pos.y - 2.0).abs() < 1e-6);
+        assert!((pos.z - 5.0).abs() < 1e-6);
     }
 }

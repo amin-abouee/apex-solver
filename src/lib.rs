@@ -11,28 +11,6 @@
 //! - **High Performance**: Built on the faer linear algebra library for optimal performance
 //! - **Comprehensive Testing**: Extensive test suite ensuring correctness and reliability
 //!
-//! ## Quick Start
-//!
-//! ```rust
-//! use apex_solver::{
-//!     solvers::{SolverConfig, SolverType, AnySolver},
-//!     linalg::LinearSolverType,
-//!     core::Optimizable,
-//! };
-//!
-//! // Configure the solver
-//! let config = SolverConfig::new()
-//!     .with_solver_type(SolverType::LevenbergMarquardt)
-//!     .with_linear_solver_type(LinearSolverType::SparseCholesky)
-//!     .with_max_iterations(100)
-//!     .with_cost_tolerance(1e-8);
-//!
-//! // Create the solver
-//! let mut solver = AnySolver::new(config);
-//!
-//! // Solve your optimization problem
-//! // let result = solver.solve(&problem, initial_parameters)?;
-//! ```
 //!
 //! ## Solver Types
 //!
@@ -46,12 +24,37 @@
 //! - **Sparse QR**: More robust for rank-deficient or ill-conditioned systems
 
 pub mod core;
+pub mod error;
 pub mod factors;
 pub mod io;
 pub mod linalg;
+pub mod logger;
 pub mod manifold;
-pub mod solvers;
+pub mod observers;
+pub mod optimizer;
 
-pub use core::*;
+// Re-export core types
+pub use core::variable::Variable;
+pub use error::{ApexSolverError, ApexSolverResult};
+
+// Re-export factor types
+
+pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
+
+// Re-export new unified camera module types
+
+pub use factors::camera::{
+    BundleAdjustment, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
+    LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose, OptimizeParams, PinholeCamera,
+    PoseAndIntrinsics, RadTanCamera, SelfCalibration, UcmCamera,
+};
+
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
-pub use solvers::{SolverConfig, SolverType, AnySolver, SolverFactory};
+pub use logger::{init_logger, init_logger_with_level};
+pub use optimizer::{
+    LevenbergMarquardt, OptObserver, OptObserverVec, OptimizerType, Solver,
+    levenberg_marquardt::LevenbergMarquardtConfig,
+};
+
+#[cfg(feature = "visualization")]
+pub use observers::{RerunObserver, VisualizationConfig};

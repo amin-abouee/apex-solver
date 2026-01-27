@@ -11,20 +11,23 @@
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
-use std::fmt;
+use nalgebra::{DVector, Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
 /// SO(3) group element representing rotations in 3D.
 ///
 /// Internally represented using nalgebra's UnitQuaternion<f64> for efficient rotations.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SO3 {
     /// Internal representation as a unit quaternion
     quaternion: UnitQuaternion<f64>,
 }
 
-impl fmt::Display for SO3 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SO3 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let q = self.quaternion.quaternion();
         write!(
             f,
@@ -34,28 +37,32 @@ impl fmt::Display for SO3 {
     }
 }
 
-/// SO(3) tangent space element representing elements in the Lie algebra so(3).
-///
-/// Internally represented as axis-angle vectors in R³ where:
-/// - Direction: axis of rotation (unit vector)
-/// - Magnitude: angle of rotation (radians)
-#[derive(Clone, Debug, PartialEq)]
-pub struct SO3Tangent {
-    /// Internal data: axis-angle vector [θx, θy, θz]
-    data: Vector3<f64>,
-}
-
-impl fmt::Display for SO3Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "so3(axis-angle: [{:.4}, {:.4}, {:.4}])",
-            self.data.x, self.data.y, self.data.z
-        )
-    }
-}
-
 impl SO3 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 3;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 3;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 4;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SO3 {
+            quaternion: UnitQuaternion::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix3<f64> {
+        Matrix3::<f64>::identity()
+    }
+
     /// Create a new SO(3) element from a unit quaternion.
     ///
     /// # Arguments
@@ -68,7 +75,7 @@ impl SO3 {
     ///
     /// # Arguments
     /// * `x` - i component of quaternion
-    /// * `y` - j component of quaternion  
+    /// * `y` - j component of quaternion
     /// * `z` - k component of quaternion
     /// * `w` - w (real) component of quaternion
     pub fn from_quaternion_coeffs(x: f64, y: f64, z: f64, w: f64) -> Self {
@@ -166,27 +173,24 @@ impl SO3 {
     }
 }
 
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SO3 {
+    fn from(data: DVector<f64>) -> Self {
+        SO3::from_quaternion_coeffs(data[0], data[1], data[2], data[3])
+    }
+}
+
+impl From<SO3> for DVector<f64> {
+    fn from(so3: SO3) -> Self {
+        DVector::from_vec(so3.coeffs().to_vec())
+    }
+}
+
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SO3 {
     type TangentVector = SO3Tangent;
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
-
-    // Dimension constants following manif conventions
-    const DIM: usize = 3; // Space dimension (3D space)
-    const DOF: usize = 3; // Degrees of freedom (3 rotation parameters)
-    const REP_SIZE: usize = 4; // Representation size (4 quaternion components)
-
-    fn identity() -> Self {
-        SO3 {
-            quaternion: UnitQuaternion::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix3::<f64>::identity()
-    }
 
     /// SO3 inverse.
     ///
@@ -342,6 +346,14 @@ impl LieGroup for SO3 {
         }
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix3::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         // Normalize the quaternion
         let q = self.quaternion.into_inner().normalize();
@@ -373,6 +385,46 @@ impl LieGroup for SO3 {
     }
 }
 
+/// SO(3) tangent space element representing elements in the Lie algebra so(3).
+///
+/// Internally represented as axis-angle vectors in R³ where:
+/// - Direction: axis of rotation (unit vector)
+/// - Magnitude: angle of rotation (radians)
+#[derive(Clone, PartialEq)]
+pub struct SO3Tangent {
+    /// Internal data: axis-angle vector [θx, θy, θz]
+    data: Vector3<f64>,
+}
+
+impl fmt::Display for SO3Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "so3(axis-angle: [{:.4}, {:.4}, {:.4}])",
+            self.data.x, self.data.y, self.data.z
+        )
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SO3Tangent {
+    fn from(data_vector: DVector<f64>) -> Self {
+        SO3Tangent {
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
+        }
+    }
+}
+
+impl From<SO3Tangent> for DVector<f64> {
+    fn from(so3_tangent: SO3Tangent) -> Self {
+        DVector::from_vec(vec![
+            so3_tangent.data.x,
+            so3_tangent.data.y,
+            so3_tangent.data.z,
+        ])
+    }
+}
+
 impl SO3Tangent {
     /// Create a new SO3Tangent from axis-angle vector.
     ///
@@ -390,21 +442,6 @@ impl SO3Tangent {
     /// Get the axis-angle vector.
     pub fn axis_angle(&self) -> Vector3<f64> {
         self.data
-    }
-
-    /// Create SO3Tangent from a 3-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 3 {
-            panic!("SO3Tangent::from_vector expects 3-dimensional vector");
-        }
-        SO3Tangent {
-            data: Vector3::new(vector[0], vector[1], vector[2]),
-        }
-    }
-
-    /// Convert SO3Tangent to a 3-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
     }
 
     /// Get the angle of rotation.
@@ -450,6 +487,9 @@ impl SO3Tangent {
 
 // Implement LieAlgebra trait for SO3Tangent
 impl Tangent<SO3> for SO3Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 3;
+
     /// SO3 exponential map.
     ///
     /// # Arguments

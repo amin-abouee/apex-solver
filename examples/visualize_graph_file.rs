@@ -1,19 +1,29 @@
-use apex_solver::io::{G2oGraph, load_graph};
+//! Visualize a graph from a G2O/TORO file using Rerun
+//!
+//! This example requires the `visualization` feature to be enabled.
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example visualize_graph_file --features visualization
+//! ```
+
+use apex_solver::init_logger;
+use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,
     archetypes::{Pinhole, Points2D},
     components::Color,
-    external::glam,
 };
 use std::path::PathBuf;
+use tracing::info;
 
 /// Visualize a graph from a G2O/TORO file using Rerun
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the graph file to visualize
-    #[arg(default_value = "data/parking-garage.g2o")]
+    #[arg(short = 'f', long, default_value = "data/parking-garage.g2o")]
     file_path: PathBuf,
 
     /// Scale factor for visualization
@@ -36,17 +46,20 @@ struct Args {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
-    println!("Loading graph from: {}", args.file_path.display());
+    // Initialize logger with INFO level
+    init_logger();
+
+    info!("Loading graph from: {}", args.file_path.display());
     let graph = load_graph(&args.file_path)?;
 
     // Initialize Rerun
     let rec = RecordingStreamBuilder::new("apex-solver-graph-visualization").spawn()?;
 
     // Print statistics
-    println!("Graph loaded successfully:");
-    println!("  - SE2 vertices: {}", graph.vertices_se2.len());
-    println!("  - SE3 vertices: {}", graph.vertices_se3.len());
-    println!("  - Total vertices: {}", graph.vertex_count());
+    info!("Graph loaded successfully:");
+    info!("  - SE2 vertices: {}", graph.vertices_se2.len());
+    info!("  - SE3 vertices: {}", graph.vertices_se3.len());
+    info!("  - Total vertices: {}", graph.vertex_count());
 
     // Visualize SE3 vertices as camera frustums
     if !graph.vertices_se3.is_empty() {
@@ -65,52 +78,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if graph.vertices_se3.is_empty() && graph.vertices_se2.is_empty() {
-        println!("No poses found in the graph file.");
+        info!("No poses found in the graph file.");
         Ok(())
     } else {
         // Keep the program running until user interrupts
-        println!("Visualization ready! The Rerun viewer should open automatically.");
-        println!("Press Ctrl+C to exit.");
+        info!("Visualization ready! The Rerun viewer should open automatically.");
+        info!("Press Ctrl+C to exit.");
 
-        #[allow(unreachable_code)]
-        {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            Ok(())
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 }
 
 /// Visualize SE3 poses as camera frustums
 fn visualize_se3_poses(
-    graph: &G2oGraph,
+    graph: &Graph,
     rec: &rerun::RecordingStream,
     scale: f32,
     _frustum_size: f32,
     fov_degrees: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    info!(
         "Visualizing {} SE3 poses as camera frustums...",
         graph.vertices_se3.len()
     );
 
-    for (id, pose) in &graph.vertices_se3 {
-        // Extract position
-        let translation = pose.translation();
-        let position = glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
-        ) * scale;
-
-        // Convert quaternion
-        let rotation = pose.rotation();
-        let nq = rotation.as_ref();
-        let quaternion = glam::Quat::from_xyzw(nq.i as f32, nq.j as f32, nq.k as f32, nq.w as f32);
+    for (id, vertex) in &graph.vertices_se3 {
+        // Use conversion method for clean code
+        let (position, rotation) = vertex.to_rerun_transform(scale);
 
         // Create transform from position and rotation
-        let transform = Transform3D::from_translation_rotation(position, quaternion);
+        let transform = Transform3D::from_translation_rotation(position, rotation);
 
         // Create entity path for this pose
         let entity_path = format!("se3_poses/{id}");
@@ -130,28 +129,26 @@ fn visualize_se3_poses(
 
 /// Visualize SE2 poses as 2D points
 fn visualize_se2_poses(
-    graph: &G2oGraph,
+    graph: &Graph,
     rec: &rerun::RecordingStream,
     scale: f32,
     _height: f32,
     point_size: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!(
+    info!(
         "Visualizing {} SE2 poses as 2D points...",
         graph.vertices_se2.len()
     );
 
-    // Collect all positions for the points
-    let mut positions = Vec::new();
-    let mut colors = Vec::new();
+    // Collect all positions using conversion method
+    let positions: Vec<[f32; 2]> = graph
+        .vertices_se2
+        .values()
+        .map(|vertex| vertex.to_rerun_position_2d(scale))
+        .collect();
 
-    for pose in graph.vertices_se2.values() {
-        // Extract position (only X and Y for 2D)
-        let position = [(pose.x() as f32) * scale, (pose.y() as f32) * scale];
-
-        positions.push(position);
-        colors.push(Color::from_rgb(255, 170, 0));
-    }
+    // Create colors for all points
+    let colors = vec![Color::from_rgb(255, 170, 0); positions.len()];
 
     // Log all points as a batch
     if !positions.is_empty() {

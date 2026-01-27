@@ -10,15 +10,20 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::so2::SO2;
-use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{Complex, Isometry2, Matrix2, Matrix3, Translation2, UnitComplex, Vector2, Vector3};
-use std::fmt;
+use crate::manifold::{LieGroup, Tangent, so2::SO2};
+use nalgebra::{
+    Complex, DVector, Isometry2, Matrix2, Matrix3, Point2, Translation2, UnitComplex, Vector2,
+    Vector3,
+};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
 /// SE(2) group element representing rigid body transformations in 2D.
 ///
 /// Represented as a combination of 2D rotation and Vector2 translation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SE2 {
     /// Translation part as Vector2
     translation: Vector2<f64>,
@@ -26,8 +31,8 @@ pub struct SE2 {
     rotation: UnitComplex<f64>,
 }
 
-impl fmt::Display for SE2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SE2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let t = self.translation();
         write!(
             f,
@@ -39,30 +44,51 @@ impl fmt::Display for SE2 {
     }
 }
 
-/// SE(2) tangent space element representing elements in the Lie algebra se(2).
-///
-/// Following manif conventions, internally represented as [x, y, theta] where:
-/// - x, y: translational components
-/// - theta: rotational component
-#[derive(Clone, Debug, PartialEq)]
-pub struct SE2Tangent {
-    /// Internal data: [x, y, theta]
-    data: Vector3<f64>,
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SE2 {
+    fn from(data: DVector<f64>) -> Self {
+        // Input order is [x, y, theta] to match G2O format
+        SE2::from_xy_angle(data[0], data[1], data[2])
+    }
 }
 
-impl fmt::Display for SE2Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "se2(x: {:.4}, y: {:.4}, theta: {:.4})",
-            self.x(),
-            self.y(),
-            self.angle()
-        )
+impl From<SE2> for DVector<f64> {
+    fn from(se2: SE2) -> Self {
+        DVector::from_vec(vec![
+            se2.translation.x,    // x first
+            se2.translation.y,    // y second
+            se2.rotation.angle(), // theta third
+        ])
     }
 }
 
 impl SE2 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 2;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 3;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 4;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SE2 {
+            translation: Vector2::zeros(),
+            rotation: UnitComplex::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix3<f64> {
+        Matrix3::<f64>::identity()
+    }
+
     /// Create a new SE2 element from translation and rotation.
     ///
     /// # Arguments
@@ -173,23 +199,6 @@ impl LieGroup for SE2 {
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
 
-    // Dimension constants following manif conventions
-    const DIM: usize = 2; // Space dimension (2D space)
-    const DOF: usize = 3; // Degrees of freedom (3-DOF: 2 translation + 1 rotation)
-    const REP_SIZE: usize = 4; // Representation size (2 translation + 2 complex)
-
-    fn identity() -> Self {
-        SE2 {
-            translation: Vector2::zeros(),
-            rotation: UnitComplex::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        Matrix3::<f64>::identity()
-    }
-
     /// Get the inverse.
     ///
     /// # Arguments
@@ -219,7 +228,7 @@ impl LieGroup for SE2 {
         let composed_rotation = self.rotation * other.rotation;
         let composed_translation = self
             .rotation
-            .transform_point(&nalgebra::Point2::from(other.translation))
+            .transform_point(&Point2::from(other.translation))
             .coords
             + self.translation;
 
@@ -279,11 +288,8 @@ impl LieGroup for SE2 {
     ) -> Vector3<f64> {
         // For SE(2), we operate on 2D vectors but maintain 3D interface compatibility
         let point2d = Vector2::new(vector.x, vector.y);
-        let transformed_2d = self
-            .rotation
-            .transform_point(&nalgebra::Point2::from(point2d))
-            .coords
-            + self.translation;
+        let transformed_2d =
+            self.rotation.transform_point(&Point2::from(point2d)).coords + self.translation;
         let result = Vector3::new(transformed_2d.x, transformed_2d.y, vector.z);
 
         if let Some(jac_self) = jacobian_self {
@@ -332,6 +338,14 @@ impl LieGroup for SE2 {
         SE2::new(translation, rotation)
     }
 
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix3::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix3::<f64>::zeros()
+    }
+
     fn normalize(&mut self) {
         self.rotation.renormalize();
     }
@@ -356,6 +370,50 @@ impl LieGroup for SE2 {
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
+    }
+}
+
+/// SE(2) tangent space element representing elements in the Lie algebra se(2).
+///
+/// Following manif conventions, internally represented as [x, y, theta] where:
+/// - x, y: translational components
+/// - theta: rotational component
+#[derive(Clone, PartialEq)]
+pub struct SE2Tangent {
+    /// Internal data: [x, y, theta]
+    data: Vector3<f64>,
+}
+
+impl fmt::Display for SE2Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "SE2Tangent(x: {:.4}, y: {:.4}, theta: {:.4})",
+            self.x(),
+            self.y(),
+            self.angle()
+        )
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SE2Tangent {
+    fn from(data_vector: DVector<f64>) -> Self {
+        // Input order is [x, y, theta] to match G2O format
+        // Internal storage is [x, y, theta]
+        SE2Tangent {
+            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
+        }
+    }
+}
+
+impl From<SE2Tangent> for DVector<f64> {
+    fn from(se2_tangent: SE2Tangent) -> Self {
+        DVector::from_vec(vec![
+            se2_tangent.data[0], // x first
+            se2_tangent.data[1], // y second
+            se2_tangent.data[2], // theta third
+        ])
     }
 }
 
@@ -386,24 +444,12 @@ impl SE2Tangent {
     pub fn translation(&self) -> Vector2<f64> {
         Vector2::new(self.x(), self.y())
     }
-
-    /// Create SE2Tangent from a 3-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 3 {
-            panic!("SE2Tangent::from_vector expects 3-dimensional vector");
-        }
-        SE2Tangent {
-            data: Vector3::new(vector[0], vector[1], vector[2]),
-        }
-    }
-
-    /// Convert SE2Tangent to a 3-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_vec(vec![self.data[0], self.data[1], self.data[2]])
-    }
 }
 
 impl Tangent<SE2> for SE2Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 3;
+
     /// Get the SE2 element.
     fn exp(&self, jacobian: Option<&mut <SE2 as LieGroup>::JacobianMatrix>) -> SE2 {
         let theta = self.angle();
@@ -945,7 +991,7 @@ mod tests {
 
     #[test]
     fn test_se2_isometry() {
-        let translation = nalgebra::Translation2::new(1.0, 2.0);
+        let translation = Translation2::new(1.0, 2.0);
         let rotation = UnitComplex::from_angle(PI / 4.0);
         let isometry = Isometry2::from_parts(translation, rotation);
 
@@ -1344,7 +1390,7 @@ mod tests {
 
         // Test specific values for the generators
         let e1 = tangent.generator(0); // x translation
-        let e2 = tangent.generator(1); // y translation  
+        let e2 = tangent.generator(1); // y translation
         let e3 = tangent.generator(2); // rotation
 
         // Expected generators for SE(2)

@@ -10,40 +10,66 @@
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::manifold::{LieGroup, Tangent};
-use nalgebra::{Matrix2, UnitComplex};
-use std::fmt;
+use nalgebra::{DVector, Matrix1, Matrix2, Matrix3, UnitComplex, Vector2, Vector3};
+use std::{
+    fmt,
+    fmt::{Display, Formatter},
+};
 
 /// SO(2) group element representing rotations in 2D.
 ///
 /// Internally represented using nalgebra's UnitComplex<f64> for efficient rotations.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct SO2 {
     /// Internal representation as a unit complex number
     complex: UnitComplex<f64>,
 }
 
-impl fmt::Display for SO2 {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for SO2 {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "SO2(angle: {:.4})", self.complex.angle())
     }
 }
 
-/// SO(2) tangent space element representing elements in the Lie algebra so(2).
-///
-/// Internally represented as a single scalar (angle in radians).
-#[derive(Clone, Debug, PartialEq)]
-pub struct SO2Tangent {
-    /// Internal data: angle (radians)
-    data: f64,
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SO2 {
+    fn from(data: DVector<f64>) -> Self {
+        SO2::from_angle(data[0])
+    }
 }
 
-impl fmt::Display for SO2Tangent {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "so2(angle: {:.4})", self.data)
+impl From<SO2> for DVector<f64> {
+    fn from(so2: SO2) -> Self {
+        DVector::from_vec(vec![so2.complex.angle()])
     }
 }
 
 impl SO2 {
+    /// Space dimension - dimension of the ambient space that the group acts on
+    pub const DIM: usize = 2;
+
+    /// Degrees of freedom - dimension of the tangent space
+    pub const DOF: usize = 1;
+
+    /// Representation size - size of the underlying data representation
+    pub const REP_SIZE: usize = 2;
+
+    /// Get the identity element of the group.
+    ///
+    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
+    pub fn identity() -> Self {
+        SO2 {
+            complex: UnitComplex::identity(),
+        }
+    }
+
+    /// Get the identity matrix for Jacobians.
+    ///
+    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
+    pub fn jacobian_identity() -> Matrix1<f64> {
+        Matrix1::<f64>::identity()
+    }
+
     /// Create a new SO(2) element from a unit complex number.
     ///
     /// # Arguments
@@ -78,24 +104,8 @@ impl SO2 {
 
 impl LieGroup for SO2 {
     type TangentVector = SO2Tangent;
-    type JacobianMatrix = nalgebra::Matrix1<f64>;
+    type JacobianMatrix = Matrix1<f64>;
     type LieAlgebra = Matrix2<f64>;
-
-    // Dimension constants following manif conventions
-    const DIM: usize = 2; // Space dimension (2D space)
-    const DOF: usize = 1; // Degrees of freedom (1-DOF: rotation angle)
-    const REP_SIZE: usize = 2; // Representation size (2 complex components)
-
-    fn identity() -> Self {
-        SO2 {
-            complex: UnitComplex::identity(),
-        }
-    }
-
-    /// Get the identity matrix for Jacobians.
-    fn jacobian_identity() -> Self::JacobianMatrix {
-        nalgebra::Matrix1::<f64>::identity()
-    }
 
     /// SO2 inverse.
     ///
@@ -138,7 +148,7 @@ impl LieGroup for SO2 {
             *jac_self = other.inverse(None).adjoint();
         }
         if let Some(jac_other) = jacobian_other {
-            *jac_other = nalgebra::Matrix1::identity();
+            *jac_other = Matrix1::identity();
         }
         SO2 {
             complex: self.complex * other.complex,
@@ -158,7 +168,7 @@ impl LieGroup for SO2 {
     /// J_log_R = I
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         if let Some(jac) = jacobian {
-            *jac = nalgebra::Matrix1::identity();
+            *jac = Matrix1::identity();
         }
         SO2Tangent {
             data: self.complex.angle(),
@@ -179,13 +189,13 @@ impl LieGroup for SO2 {
     /// This is a convenience function that treats the 3D vector as a 2D vector and ignores the z component.
     fn act(
         &self,
-        vector: &nalgebra::Vector3<f64>,
+        vector: &Vector3<f64>,
         _jacobian_self: Option<&mut Self::JacobianMatrix>,
-        _jacobian_vector: Option<&mut nalgebra::Matrix3<f64>>,
-    ) -> nalgebra::Vector3<f64> {
-        let point2d = nalgebra::Vector2::new(vector.x, vector.y);
+        _jacobian_vector: Option<&mut Matrix3<f64>>,
+    ) -> Vector3<f64> {
+        let point2d = Vector2::new(vector.x, vector.y);
         let rotated_point = self.complex * point2d;
-        nalgebra::Vector3::new(rotated_point.x, rotated_point.y, vector.z)
+        Vector3::new(rotated_point.x, rotated_point.y, vector.z)
     }
 
     /// Get the adjoint matrix of SO2 at this.
@@ -193,12 +203,20 @@ impl LieGroup for SO2 {
     /// # Notes
     /// See Eq. (123).
     fn adjoint(&self) -> Self::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Matrix1::identity()
     }
 
     /// Generate a random element.
     fn random() -> Self {
         SO2::from_angle(rand::random::<f64>() * 2.0 * std::f64::consts::PI)
+    }
+
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix1::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix1::<f64>::zeros()
     }
 
     /// Normalize the underlying complex number.
@@ -231,6 +249,36 @@ impl LieGroup for SO2 {
     }
 }
 
+/// SO(2) tangent space element representing elements in the Lie algebra so(2).
+///
+/// Internally represented as a single scalar (angle in radians).
+#[derive(Clone, PartialEq)]
+pub struct SO2Tangent {
+    /// Internal data: angle (radians)
+    data: f64,
+}
+
+impl fmt::Display for SO2Tangent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "so2(angle: {:.4})", self.data)
+    }
+}
+
+// Conversion traits for integration with generic Problem
+impl From<DVector<f64>> for SO2Tangent {
+    fn from(data_vector: DVector<f64>) -> Self {
+        SO2Tangent {
+            data: data_vector[0],
+        }
+    }
+}
+
+impl From<SO2Tangent> for DVector<f64> {
+    fn from(so2_tangent: SO2Tangent) -> Self {
+        DVector::from_vec(vec![so2_tangent.data])
+    }
+}
+
 impl SO2Tangent {
     /// Create a new SO2Tangent from an angle.
     ///
@@ -244,22 +292,12 @@ impl SO2Tangent {
     pub fn angle(&self) -> f64 {
         self.data
     }
-
-    /// Create SO2Tangent from a 1-dimensional vector
-    pub fn from_vector(vector: nalgebra::DVector<f64>) -> Self {
-        if vector.len() != 1 {
-            panic!("SO2Tangent::from_vector expects 1-dimensional vector");
-        }
-        SO2Tangent { data: vector[0] }
-    }
-
-    /// Convert SO2Tangent to a 1-dimensional vector
-    pub fn to_vector(&self) -> nalgebra::DVector<f64> {
-        nalgebra::DVector::from_element(1, self.data)
-    }
 }
 
 impl Tangent<SO2> for SO2Tangent {
+    /// Dimension of the tangent space
+    const DIM: usize = 1;
+
     /// SO2 exponential map.
     ///
     /// # Arguments
@@ -270,7 +308,7 @@ impl Tangent<SO2> for SO2Tangent {
         let complex = UnitComplex::new(angle);
 
         if let Some(jac) = jacobian {
-            *jac = nalgebra::Matrix1::identity();
+            *jac = Matrix1::identity();
         }
 
         SO2::new(complex)
@@ -278,22 +316,22 @@ impl Tangent<SO2> for SO2Tangent {
 
     /// Right Jacobian for SO(2) is identity.
     fn right_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Matrix1::identity()
     }
 
     /// Left Jacobian for SO(2) is identity.
     fn left_jacobian(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Matrix1::identity()
     }
 
     /// Inverse of right Jacobian for SO(2) is identity.
     fn right_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Matrix1::identity()
     }
 
     /// Inverse of left Jacobian for SO(2) is identity.
     fn left_jacobian_inv(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::identity()
+        Matrix1::identity()
     }
 
     /// Hat operator: θ^∧ (scalar to skew-symmetric matrix).
@@ -338,7 +376,7 @@ impl Tangent<SO2> for SO2Tangent {
     ///
     /// For SO(2), the small adjoint is zero (since it's commutative).
     fn small_adj(&self) -> <SO2 as LieGroup>::JacobianMatrix {
-        nalgebra::Matrix1::zeros()
+        Matrix1::zeros()
     }
 
     /// Lie bracket for SO(2).
