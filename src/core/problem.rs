@@ -52,11 +52,12 @@
 //!
 //! ```
 //! use apex_solver::core::problem::Problem;
-//! use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
+//! use apex_solver::factors::{BetweenFactor, PriorFactor};
 //! use apex_solver::core::loss_functions::HuberLoss;
 //! use apex_solver::manifold::ManifoldType;
 //! use nalgebra::{DVector, dvector};
 //! use std::collections::HashMap;
+//! use apex_solver::manifold::se2::SE2;
 //! # use apex_solver::error::ApexSolverResult;
 //! # fn example() -> ApexSolverResult<()> {
 //!
@@ -69,7 +70,7 @@
 //! problem.add_residual_block(&["x0"], prior, None);
 //!
 //! // Add between factor with robust loss
-//! let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+//! let between = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
 //! let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
 //!     Some(Box::new(HuberLoss::new(1.0)?));
 //! problem.add_residual_block(&["x0", "x1"], between, loss);
@@ -137,6 +138,17 @@ pub enum VariableEnum {
 }
 
 impl VariableEnum {
+    /// Get the manifold type for this variable
+    pub fn manifold_type(&self) -> ManifoldType {
+        match self {
+            VariableEnum::Rn(_) => ManifoldType::RN,
+            VariableEnum::SE2(_) => ManifoldType::SE2,
+            VariableEnum::SE3(_) => ManifoldType::SE3,
+            VariableEnum::SO2(_) => ManifoldType::SO2,
+            VariableEnum::SO3(_) => ManifoldType::SO3,
+        }
+    }
+
     /// Get the tangent space size for this variable
     pub fn get_size(&self) -> usize {
         match self {
@@ -381,15 +393,16 @@ impl VariableEnum {
 ///
 /// ```
 /// use apex_solver::core::problem::Problem;
-/// use apex_solver::factors::BetweenFactorSE2;
+/// use apex_solver::factors::BetweenFactor;
 /// use apex_solver::manifold::ManifoldType;
+/// use apex_solver::manifold::se2::SE2;
 /// use nalgebra::dvector;
 /// use std::collections::HashMap;
 ///
 /// let mut problem = Problem::new();
 ///
 /// // Add a between factor
-/// let factor = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+/// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
 /// problem.add_residual_block(&["x0", "x1"], factor, None);
 ///
 /// // Initialize variables
@@ -469,9 +482,10 @@ impl Problem {
     ///
     /// ```
     /// use apex_solver::core::problem::Problem;
-    /// use apex_solver::factors::{BetweenFactorSE2, PriorFactor};
+    /// use apex_solver::factors::{BetweenFactor, PriorFactor};
     /// use apex_solver::core::loss_functions::HuberLoss;
     /// use nalgebra::dvector;
+    /// use apex_solver::manifold::se2::SE2;
     /// # use apex_solver::error::ApexSolverResult;
     /// # fn example() -> ApexSolverResult<()> {
     ///
@@ -482,7 +496,7 @@ impl Problem {
     /// let id1 = problem.add_residual_block(&["x0"], prior, None);
     ///
     /// // Add between factor with robust loss (binary constraint)
-    /// let between = Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1));
+    /// let between = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
     /// let loss: Option<Box<dyn apex_solver::core::loss_functions::LossFunction + Send>> =
     ///     Some(Box::new(HuberLoss::new(1.0)?));
     /// let id2 = problem.add_residual_block(&["x0", "x1"], between, loss);
@@ -825,10 +839,17 @@ impl Problem {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
+    /// ```no_run
+    /// # use apex_solver::core::problem::Problem;
+    /// # use std::collections::HashMap;
+    /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let problem = Problem::new();
+    /// # let variables = HashMap::new();
     /// // Initial cost evaluation (no Jacobian needed)
     /// let residual = problem.compute_residual_sparse(&variables)?;
     /// let initial_cost = residual.norm_l2() * residual.norm_l2();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn compute_residual_sparse(
         &self,
@@ -902,14 +923,16 @@ impl Problem {
     ///
     /// # Example
     ///
-    /// ```rust,ignore
-    /// // Inside optimizer loop:
-    /// let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
-    ///     &variables,
-    ///     &variable_index_map,
-    ///     &symbolic_structure,
-    /// )?;
-    ///
+    /// ```
+    /// # use apex_solver::core::problem::Problem;
+    /// # use std::collections::HashMap;
+    /// // Inside optimizer loop, compute both residual and Jacobian for linearization
+    /// // let (residual, jacobian) = problem.compute_residual_and_jacobian_sparse(
+    /// //     &variables,
+    /// //     &variable_index_map,
+    /// //     &symbolic_structure,
+    /// // )?;
+    /// //
     /// // Use for linear system: J^T J dx = -J^T r
     /// ```
     pub fn compute_residual_and_jacobian_sparse(
@@ -1211,8 +1234,8 @@ impl Problem {
 mod tests {
     use super::*;
     use crate::core::loss_functions::HuberLoss;
-    use crate::factors::{BetweenFactorSE2, BetweenFactorSE3, PriorFactor};
-    use crate::manifold::{ManifoldType, se3::SE3};
+    use crate::factors::{BetweenFactor, PriorFactor};
+    use crate::manifold::{ManifoldType, se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, Vector3, dvector};
     use std::collections::HashMap;
 
@@ -1261,7 +1284,7 @@ mod tests {
             let dy = to_pose.1 - from_pose.1;
             let dtheta = to_pose.2 - from_pose.2;
 
-            let between_factor = BetweenFactorSE2::new(dx, dy, dtheta);
+            let between_factor = BetweenFactor::new(SE2::from_xy_angle(dx, dy, dtheta));
             problem.add_residual_block(
                 &[&format!("x{}", i), &format!("x{}", i + 1)],
                 Box::new(between_factor),
@@ -1274,7 +1297,7 @@ mod tests {
         let dy = poses[0].1 - poses[9].1;
         let dtheta = poses[0].2 - poses[9].2;
 
-        let loop_closure = BetweenFactorSE2::new(dx, dy, dtheta);
+        let loop_closure = BetweenFactor::new(SE2::from_xy_angle(dx, dy, dtheta));
         problem.add_residual_block(
             &["x9", "x0"],
             Box::new(loop_closure),
@@ -1346,7 +1369,7 @@ mod tests {
                 Quaternion::new(1.0, 0.0, 0.0, 0.0), // identity quaternion
             );
 
-            let between_factor = BetweenFactorSE3::new(relative_se3);
+            let between_factor = BetweenFactor::new(relative_se3);
             problem.add_residual_block(
                 &[&format!("x{}", from_idx), &format!("x{}", to_idx)],
                 Box::new(between_factor),
@@ -1598,7 +1621,7 @@ mod tests {
         // Test adding residual blocks
         let block_id1 = problem.add_residual_block(
             &["x0", "x1"],
-            Box::new(BetweenFactorSE2::new(1.0, 0.0, 0.1)),
+            Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
             Some(Box::new(HuberLoss::new(1.0)?)),
         );
 

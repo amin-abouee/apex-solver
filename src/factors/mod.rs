@@ -25,33 +25,16 @@
 //!
 //! ## Camera Projection Factors
 //!
-//! Each camera model provides two factor types:
-//! 1. **CameraParamsFactor**: Optimizes camera intrinsic parameters (fx, fy, cx, cy, distortion)
-//! 2. **ProjectionFactor**: Optimizes 3D point positions with fixed camera parameters
+//! Use [`ProjectionFactor`](camera::ProjectionFactor) with a specific [`CameraModel`](camera::CameraModel).
 //!
-//! ### Double Sphere
-//! - [`DoubleSphereCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`DoubleSphereProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### EUCM (Extended Unified Camera Model)
-//! - [`EucmCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`EucmProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### FOV (Field of View)
-//! - [`FovCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`FovProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### Kannala-Brandt
-//! - [`KannalaBrandtCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`KannalaBrandtProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### Radial-Tangential (RadTan)
-//! - [`RadTanCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`RadTanProjectionFactor`]: Optimize 3D point positions
-//!
-//! ### UCM (Unified Camera Model)
-//! - [`UcmCameraParamsFactor`]: Optimize camera intrinsics
-//! - [`UcmProjectionFactor`]: Optimize 3D point positions
+//! Supported camera models:
+//! - [`PinholeCamera`](camera::PinholeCamera)
+//! - [`DoubleSphereCamera`](camera::DoubleSphereCamera)
+//! - [`EucmCamera`](camera::EucmCamera)
+//! - [`FovCamera`](camera::FovCamera)
+//! - [`KannalaBrandtCamera`](camera::KannalaBrandtCamera)
+//! - [`RadTanCamera`](camera::RadTanCamera)
+//! - [`UcmCamera`](camera::UcmCamera)
 //!
 //! # Linearization
 //!
@@ -64,6 +47,16 @@
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 use tracing::error;
+
+// Pose factors
+pub mod between_factor;
+pub mod camera;
+pub mod prior_factor;
+pub mod projection_factor;
+
+pub use between_factor::BetweenFactor;
+pub use prior_factor::PriorFactor;
+pub use projection_factor::ProjectionFactor;
 
 /// Factor-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
@@ -96,9 +89,14 @@ impl FactorError {
     /// the factors module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn operation() -> Result<(), FactorError> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
     /// operation()
-    ///     .map_err(|e| FactorError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -116,12 +114,17 @@ impl FactorError {
     /// * `source_error` - The original error (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::factors::FactorError;
+    /// # fn compute_jacobian() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), FactorError> {
     /// compute_jacobian()
     ///     .map_err(|e| {
     ///         FactorError::JacobianFailed("Matrix computation failed".to_string())
     ///             .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
@@ -226,41 +229,3 @@ pub trait Factor: Send + Sync {
     /// - Prior factor: dimension of the variable
     fn get_dimension(&self) -> usize;
 }
-
-// Pose factors
-pub mod prior_factor;
-pub mod se2_factor;
-pub mod se3_factor;
-
-// Camera projection factors
-pub mod double_sphere_factor;
-pub mod eucm_factor;
-pub mod fov_factor;
-pub mod kannala_brandt_factor;
-pub mod rad_tan_factor;
-pub mod ucm_factor;
-
-// Re-export all factor types
-
-// Pose factors
-pub use prior_factor::PriorFactor;
-pub use se2_factor::BetweenFactorSE2;
-pub use se3_factor::BetweenFactorSE3;
-
-// Camera projection factors - Double Sphere
-pub use double_sphere_factor::{DoubleSphereCameraParamsFactor, DoubleSphereProjectionFactor};
-
-// Camera projection factors - EUCM
-pub use eucm_factor::{EucmCameraParamsFactor, EucmProjectionFactor};
-
-// Camera projection factors - FOV
-pub use fov_factor::{FovCameraParamsFactor, FovProjectionFactor};
-
-// Camera projection factors - Kannala-Brandt
-pub use kannala_brandt_factor::{KannalaBrandtCameraParamsFactor, KannalaBrandtProjectionFactor};
-
-// Camera projection factors - RadTan
-pub use rad_tan_factor::{RadTanCameraParamsFactor, RadTanProjectionFactor};
-
-// Camera projection factors - UCM
-pub use ucm_factor::{UcmCameraParamsFactor, UcmProjectionFactor};

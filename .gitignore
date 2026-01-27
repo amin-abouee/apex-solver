@@ -25,17 +25,22 @@ Cargo.lock
 
 .cursor/
 .vscode/
+.claude/
 profiles/
 scripts/
 output/
+doc/*.md
 *.csv
 data_bk/
-doc/*.md
+CLAUDE.md
+cookbook
+deprecated
 
 # C++ benchmark build artifacts
 benches/cpp_comparison/build/
 benches/cpp_comparison/*.csv
 benches/cpp_comparison/.cache/*
 __cmake*
-CLAUDE.md
-cookbook
+
+# macOS system files
+**/.DS_Store

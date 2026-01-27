@@ -142,8 +142,12 @@ impl SparseLinearSolver for SparseQRSolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref())
-            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
+        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref()).map_err(|e| {
+            LinAlgError::SingularMatrix(
+                "QR factorization failed (matrix may be singular)".to_string(),
+            )
+            .log_with_source(e)
+        })?;
 
         // Solve H * dx = -g (negate gradient to get descent direction)
         let dx = qr.solve(-&gradient);
@@ -210,8 +214,12 @@ impl SparseLinearSolver for SparseQRSolver {
         };
 
         // Perform numeric factorization
-        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref())
-            .map_err(|e| LinAlgError::SingularMatrix.log_with_source(e))?;
+        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()).map_err(|e| {
+            LinAlgError::SingularMatrix(
+                "QR factorization failed (matrix may be singular)".to_string(),
+            )
+            .log_with_source(e)
+        })?;
 
         let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);

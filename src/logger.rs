@@ -23,7 +23,7 @@ use tracing::Level;
 /// # Environment Variables
 /// Override the default log level using `RUST_LOG`:
 /// ```bash
-/// RUST_LOG=debug cargo run --bin optimize_3d_graph
+/// RUST_LOG=debug cargo run --bin pose_graph_g2o
 /// RUST_LOG=apex_solver=trace cargo run
 /// ```
 pub fn init_logger() {

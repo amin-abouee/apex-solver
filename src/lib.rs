@@ -38,10 +38,15 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult};
 
 // Re-export factor types
-pub use factors::{
-    BetweenFactorSE2, BetweenFactorSE3, DoubleSphereProjectionFactor, EucmProjectionFactor, Factor,
-    FovProjectionFactor, KannalaBrandtProjectionFactor, PriorFactor, RadTanProjectionFactor,
-    UcmProjectionFactor,
+
+pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
+
+// Re-export new unified camera module types
+
+pub use factors::camera::{
+    BundleAdjustment, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
+    LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose, OptimizeParams, PinholeCamera,
+    PoseAndIntrinsics, RadTanCamera, SelfCalibration, UcmCamera,
 };
 
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
@@ -52,4 +57,4 @@ pub use optimizer::{
 };
 
 #[cfg(feature = "visualization")]
-pub use observers::RerunObserver;
+pub use observers::{RerunObserver, VisualizationConfig};

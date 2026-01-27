@@ -4,28 +4,32 @@
 
 namespace unified_cost {
 
-/// Compute SE2 cost from graph data using unified formula
+/// Struct to hold both cost metrics
+struct CostMetrics {
+    double chi2_cost;       ///< Information-weighted chi-squared: sum_i r_i^T * Omega_i * r_i
+    double unweighted_cost; ///< Unweighted squared norm: 0.5 * sum_i ||r_i||^2
+};
+
+/// Compute both SE2 cost metrics from graph data
 ///
-/// Formula: cost = 0.5 * sum_i ||r_i||²_Σ
-/// where ||r||²_Σ = r^T * Σ^(-1) * r (information-weighted squared norm)
-///
-/// This function computes cost directly from G2O graph data, independent of
-/// solver internals, for fair benchmarking across all solvers.
+/// Chi-squared formula: chi2 = sum_i r_i^T * Omega_i * r_i (information-weighted)
+/// Unweighted formula: cost = 0.5 * sum_i ||r_i||^2
 ///
 /// @param graph The SE2 graph containing poses and constraints
-/// @return Total cost value
-double ComputeSE2Cost(const g2o_reader::Graph2D& graph);
+/// @return CostMetrics struct with both metrics
+CostMetrics ComputeSE2CostMetrics(const g2o_reader::Graph2D& graph);
 
-/// Compute SE3 cost from graph data using unified formula
+/// Compute both SE3 cost metrics from graph data
 ///
-/// Formula: cost = 0.5 * sum_i ||r_i||²_Σ
-/// where ||r||²_Σ = r^T * Σ^(-1) * r (information-weighted squared norm)
-///
-/// This function computes cost directly from G2O graph data, independent of
-/// solver internals, for fair benchmarking across all solvers.
+/// Chi-squared formula: chi2 = sum_i r_i^T * Omega_i * r_i (information-weighted)
+/// Unweighted formula: cost = 0.5 * sum_i ||r_i||^2
 ///
 /// @param graph The SE3 graph containing poses and constraints
-/// @return Total cost value
+/// @return CostMetrics struct with both metrics
+CostMetrics ComputeSE3CostMetrics(const g2o_reader::Graph3D& graph);
+
+// Legacy functions (for backward compatibility, return unweighted cost)
+double ComputeSE2Cost(const g2o_reader::Graph2D& graph);
 double ComputeSE3Cost(const g2o_reader::Graph3D& graph);
 
 }  // namespace unified_cost

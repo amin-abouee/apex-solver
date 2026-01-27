@@ -85,12 +85,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Visualization ready! The Rerun viewer should open automatically.");
         info!("Press Ctrl+C to exit.");
 
-        #[allow(unreachable_code)]
-        {
-            loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-            Ok(())
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(1));
         }
     }
 }

@@ -655,6 +655,10 @@ impl GaussNewton {
                 Box::new(linalg::SparseCholeskySolver::new())
             }
             linalg::LinearSolverType::SparseQR => Box::new(linalg::SparseQRSolver::new()),
+            linalg::LinearSolverType::SparseSchurComplement => {
+                // Schur complement solver requires special handling - fallback to Cholesky
+                Box::new(linalg::SparseCholeskySolver::new())
+            }
         }
     }
 
@@ -688,6 +692,10 @@ impl GaussNewton {
     /// # Returns
     ///
     /// `Some(OptimizationStatus)` if any termination criterion is satisfied, `None` otherwise.
+    ///
+    /// # Design Note
+    /// This internal convergence checker requires multiple scalar metrics for comprehensive
+    /// termination criteria. Grouping into a struct would reduce clarity without performance benefit.
     #[allow(clippy::too_many_arguments)]
     fn check_convergence(
         &self,
@@ -953,6 +961,10 @@ impl GaussNewton {
     }
 
     /// Create optimization summary
+    ///
+    /// # Design Note
+    /// This internal summary builder accepts individual scalar results from the optimization loop.
+    /// A struct parameter would not improve readability for this private method.
     #[allow(clippy::too_many_arguments)]
     fn create_summary(
         &self,

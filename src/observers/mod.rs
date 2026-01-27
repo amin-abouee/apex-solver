@@ -127,7 +127,7 @@ pub mod visualization;
 
 // Re-export RerunObserver when visualization is enabled
 #[cfg(feature = "visualization")]
-pub use visualization::RerunObserver;
+pub use visualization::{RerunObserver, VisualizationConfig, VisualizationMode};
 
 use crate::core::problem::VariableEnum;
 use faer::Mat;
@@ -179,9 +179,14 @@ impl ObserverError {
     /// the observers module, ensuring all errors are properly recorded.
     ///
     /// # Example
-    /// ```ignore
+    /// ```
+    /// # use apex_solver::observers::ObserverError;
+    /// # fn operation() -> Result<(), ObserverError> { Ok(()) }
+    /// # fn example() -> Result<(), ObserverError> {
     /// operation()
-    ///     .map_err(|e| ObserverError::from(e).log())?;
+    ///     .map_err(|e| e.log())?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log(self) -> Self {
@@ -199,8 +204,11 @@ impl ObserverError {
     /// * `source_error` - The original error from the third-party library (must implement Debug)
     ///
     /// # Example
-    /// ```ignore
-    /// rec.log(entity_path, &data)
+    /// ```no_run
+    /// # use apex_solver::observers::ObserverError;
+    /// # fn rec_log() -> Result<(), std::io::Error> { Ok(()) }
+    /// # fn example() -> Result<(), ObserverError> {
+    /// rec_log()
     ///     .map_err(|e| {
     ///         ObserverError::LoggingFailed {
     ///             entity_path: "world/points".to_string(),
@@ -208,6 +216,8 @@ impl ObserverError {
     ///         }
     ///         .log_with_source(e)
     ///     })?;
+    /// # Ok(())
+    /// # }
     /// ```
     #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
@@ -315,6 +325,46 @@ pub trait OptObserver: Send {
         &self,
         _hessian: Option<sparse::SparseColMat<usize, f64>>,
         _gradient: Option<Mat<f64>>,
+    ) {
+        // Default implementation does nothing
+    }
+
+    /// Called when optimization completes.
+    ///
+    /// This method is called once at the end of optimization, after all iterations
+    /// are complete. Use this for final visualization, cleanup, or summary logging.
+    ///
+    /// # Arguments
+    ///
+    /// * `values` - Final optimized variable values
+    /// * `iterations` - Total number of iterations performed
+    ///
+    /// # Default Implementation
+    ///
+    /// The default implementation does nothing, allowing simple observers to ignore completion.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use apex_solver::observers::OptObserver;
+    /// use apex_solver::core::problem::VariableEnum;
+    /// use std::collections::HashMap;
+    ///
+    /// struct FinalStateLogger;
+    ///
+    /// impl OptObserver for FinalStateLogger {
+    ///     fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {}
+    ///
+    ///     fn on_optimization_complete(&self, values: &HashMap<String, VariableEnum>, iterations: usize) {
+    ///         println!("Optimization completed after {} iterations with {} variables",
+    ///                  iterations, values.len());
+    ///     }
+    /// }
+    /// ```
+    fn on_optimization_complete(
+        &self,
+        _values: &HashMap<String, VariableEnum>,
+        _iterations: usize,
     ) {
         // Default implementation does nothing
     }
@@ -465,6 +515,35 @@ impl OptObserverVec {
     pub fn notify(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
         for observer in &self.observers {
             observer.on_step(values, iteration);
+        }
+    }
+
+    /// Notify all observers that optimization is complete.
+    ///
+    /// Calls `on_optimization_complete()` on each registered observer. This should
+    /// be called once at the end of optimization, after all iterations are done.
+    ///
+    /// # Arguments
+    ///
+    /// * `values` - Final optimized variable values
+    /// * `iterations` - Total number of iterations performed
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use apex_solver::observers::OptObserverVec;
+    /// use std::collections::HashMap;
+    ///
+    /// let observers = OptObserverVec::new();
+    /// let values = HashMap::new();
+    ///
+    /// // Notify all observers that optimization is complete
+    /// observers.notify_complete(&values, 50);
+    /// ```
+    #[inline]
+    pub fn notify_complete(&self, values: &HashMap<String, VariableEnum>, iterations: usize) {
+        for observer in &self.observers {
+            observer.on_optimization_complete(values, iterations);
         }
     }
 
