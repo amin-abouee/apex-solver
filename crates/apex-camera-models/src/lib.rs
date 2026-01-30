@@ -1,71 +1,79 @@
-//! Camera projection models and factors for bundle adjustment.
+//! Camera projection models for bundle adjustment.
 //!
-//! This module provides a flexible framework for camera projection factors used in
-//! bundle adjustment, self-calibration, and Structure-from-Motion (SfM).
+//! This module provides camera models used in bundle adjustment, self-calibration,
+//! and Structure-from-Motion (SfM).
 //!
 //! # Key Components
 //!
-//! - **`CameraModel` trait**: Defines the interface for different camera models
-//! - **`ProjectionFactor`**: Generic factor for camera projection constraints
+//! - **`CameraModel` trait**: Interface for different camera models
 //! - **`OptimizeParams`**: Compile-time configuration for which parameters to optimize
 //! - **Type aliases**: Common optimization patterns (BundleAdjustment, SelfCalibration, etc.)
 //!
-//! # Optimization Configuration
+//! # Available Camera Models
 //!
-//! The `OptimizeParams<POSE, LANDMARK, INTRINSIC>` type uses const generics to specify
-//! which parameters to optimize at compile time:
-//!
-//! ```rust,ignore
-//! use apex_camera_models::{OptimizeParams, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
-//!
-//! // Bundle Adjustment: optimize pose + landmarks (intrinsics fixed)
-//! type BundleAdjustment = OptimizeParams<true, true, false>;
-//!
-//! // Self-Calibration: optimize everything
-//! type SelfCalibration = OptimizeParams<true, true, true>;
-//!
-//! // Only intrinsics (pose and landmarks fixed)
-//! type OnlyIntrinsics = OptimizeParams<false, false, true>;
-//! ```
-//!
-//! # Examples
-//!
-//! ## Bundle Adjustment
-//!
-//! ```rust,ignore
-//! use apex_camera_models::{BundleAdjustment, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
-//! use nalgebra::{Matrix2xX, Vector2};
-//!
-//! let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-//! let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
-//!
-//! let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
-//!     ProjectionFactor::new(observations, camera);
-//! ```
-//!
-//! ## Self-Calibration with Fixed Values
-//!
-//! ```rust,ignore
-//! use apex_camera_models::{OnlyIntrinsics, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
-//! use apex_manifolds::se3::SE3;
-//! use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
-//!
-//! let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-//! let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
-//! let fixed_pose = SE3::identity();
-//! let fixed_landmarks = Matrix3xX::from_columns(&[Vector3::new(0.0, 0.0, 1.0)]);
-//!
-//! let factor: ProjectionFactor<PinholeCamera, OnlyIntrinsics> =
-//!     ProjectionFactor::new(observations, camera)
-//!         .with_fixed_pose(fixed_pose)
-//!         .with_fixed_landmarks(fixed_landmarks);
-//! ```
+//! - **Pinhole**: Standard perspective projection
+//! - **Kannala-Brandt**: Fisheye model with polynomial distortion
+//! - **Double Sphere**: Two-parameter fisheye model
+//! - **Radial-Tangential**: OpenCV-compatible distortion model
+//! - **EUCM**: Extended Unified Camera Model
+//! - **FOV**: Field-of-view based fisheye model
+//! - **UCM**: Unified Camera Model
+//! - **BAL Pinhole**: Bundle Adjustment in the Large format
 
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
+
+// Camera parameter types (defined early for submodule access)
+
+/// Camera intrinsic parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Intrinsics {
+    pub fx: f64,
+    pub fy: f64,
+    pub cx: f64,
+    pub cy: f64,
+}
+
+/// Camera model errors.
+#[derive(thiserror::Error, Debug)]
+pub enum CameraModelError {
+    #[error("Projection is outside the image")]
+    ProjectionOutSideImage,
+    #[error("Input point is outside the image")]
+    PointIsOutSideImage,
+    #[error("z is close to zero, point is at camera center")]
+    PointAtCameraCenter,
+    #[error("Focal length must be positive")]
+    FocalLengthMustBePositive,
+    #[error("Principal point must be finite")]
+    PrincipalPointMustBeFinite,
+    #[error("Invalid camera parameters: {0}")]
+    InvalidParams(String),
+    #[error("Failed to load YAML: {0}")]
+    YamlError(String),
+    #[error("IO Error: {0}")]
+    IOError(String),
+    #[error("NumericalError: {0}")]
+    NumericalError(String),
+}
+
+impl From<std::io::Error> for CameraModelError {
+    fn from(err: std::io::Error) -> Self {
+        CameraModelError::IOError(err.to_string())
+    }
+}
+
+// Validation function
+
+/// Validates that a 3D point's z-coordinate is positive (in front of camera).
+pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
+    if z < f64::EPSILON.sqrt() {
+        return Err(CameraModelError::PointAtCameraCenter);
+    }
+    Ok(())
+}
+
+// Camera model modules
 
 pub mod bal_pinhole;
 pub mod double_sphere;
@@ -76,7 +84,7 @@ pub mod pinhole;
 pub mod rad_tan;
 pub mod ucm;
 
-// Re-export main types
+// Re-export camera types
 pub use bal_pinhole::{BALPinholeCamera, BALPinholeCameraStrict};
 pub use double_sphere::DoubleSphereCamera;
 pub use eucm::EucmCamera;
@@ -86,30 +94,17 @@ pub use pinhole::PinholeCamera;
 pub use rad_tan::RadTanCamera;
 pub use ucm::UcmCamera;
 
-// ============================================================================
-// OPTIMIZATION CONFIGURATION
-// ============================================================================
+// Optimization configuration
 
 /// Configuration for which parameters to optimize.
 ///
 /// Uses const generic booleans for compile-time optimization selection.
-/// This allows the compiler to eliminate unused code paths and provide
-/// type-safe configuration.
 ///
 /// # Type Parameters
 ///
 /// - `POSE`: Whether to optimize camera pose (SE3 transformation)
 /// - `LANDMARK`: Whether to optimize 3D landmark positions
 /// - `INTRINSIC`: Whether to optimize camera intrinsic parameters
-///
-/// # Examples
-///
-/// ```rust
-/// use apex_camera_models::OptimizeParams;
-///
-/// // Custom configuration: optimize pose + intrinsics only
-/// type PoseAndIntrinsics = OptimizeParams<true, false, true>;
-/// ```
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OptimizeParams<const POSE: bool, const LANDMARK: bool, const INTRINSIC: bool>;
 
@@ -123,91 +118,48 @@ impl<const P: bool, const L: bool, const I: bool> OptimizeParams<P, L, I> {
 }
 
 /// Bundle Adjustment: optimize pose + landmarks (intrinsics fixed).
-///
-/// Standard bundle adjustment where camera intrinsics are known and fixed.
-/// Optimizes N observations of N landmarks from ONE camera pose.
 pub type BundleAdjustment = OptimizeParams<true, true, false>;
 
 /// Self-Calibration: optimize pose + landmarks + intrinsics.
-///
-/// Full Structure-from-Motion where camera intrinsics are also unknown.
-/// Optimizes camera parameters along with structure and motion.
 pub type SelfCalibration = OptimizeParams<true, true, true>;
 
 /// Only Intrinsics: optimize intrinsics (pose and landmarks fixed).
-///
-/// Camera calibration scenario where 3D structure and camera pose are known.
-/// Only the camera intrinsic parameters are optimized.
 pub type OnlyIntrinsics = OptimizeParams<false, false, true>;
 
 /// Only Pose: optimize pose (landmarks and intrinsics fixed).
-///
-/// Visual Odometry or camera localization where 3D landmarks and intrinsics are known.
-/// Only the camera pose is optimized.
 pub type OnlyPose = OptimizeParams<true, false, false>;
 
 /// Only Landmarks: optimize landmarks (pose and intrinsics fixed).
-///
-/// Triangulation scenario where camera pose and intrinsics are known.
-/// Only 3D landmark positions are optimized.
 pub type OnlyLandmarks = OptimizeParams<false, true, false>;
 
 /// Pose and Intrinsics: optimize pose + intrinsics (landmarks fixed).
-///
-/// Calibration from known 3D structure.
 pub type PoseAndIntrinsics = OptimizeParams<true, false, true>;
 
 /// Landmarks and Intrinsics: optimize landmarks + intrinsics (pose fixed).
-///
-/// Rarely used configuration for specific calibration scenarios.
 pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
 
-// ============================================================================
-// CAMERA MODEL TRAIT
-// ============================================================================
+// Camera Model Trait
 
 /// Trait for camera projection models.
 ///
-/// This trait defines the interface for different camera models (pinhole, fisheye,
-/// double sphere, etc.) used in bundle adjustment and Structure-from-Motion.
+/// Defines the interface for camera models used in bundle adjustment and SfM.
 ///
 /// # Type Parameters
 ///
-/// - `INTRINSIC_DIM`: Number of intrinsic parameters (e.g., 4 for pinhole: fx, fy, cx, cy)
-/// - `IntrinsicJacobian`: Jacobian type for intrinsics (2 × INTRINSIC_DIM matrix)
-/// - `PointJacobian`: Jacobian type for 3D point (2 × 3 matrix)
-///
-/// # Implementation Requirements
-///
-/// All camera models must:
-/// - Be thread-safe (`Send + Sync`)
-/// - Be cloneable and debuggable
-/// - Provide projection and Jacobian methods
-/// - Handle invalid projections (e.g., points behind camera)
-///
-/// # Examples
-///
-/// See `PinholeCamera` for a complete implementation example.
+/// - `INTRINSIC_DIM`: Number of intrinsic parameters
+/// - `IntrinsicJacobian`: Jacobian type for intrinsics (2 × INTRINSIC_DIM)
+/// - `PointJacobian`: Jacobian type for 3D point (2 × 3)
 pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// Number of intrinsic parameters (compile-time constant).
-    ///
-    /// Examples:
-    /// - Pinhole: 4 (fx, fy, cx, cy)
-    /// - Pinhole with distortion: 8+ (fx, fy, cx, cy, k1, k2, p1, p2, ...)
-    /// - Double Sphere: 6 (fx, fy, cx, cy, xi, alpha)
     const INTRINSIC_DIM: usize;
 
     /// Jacobian type for intrinsics: 2 × INTRINSIC_DIM.
-    ///
-    /// Typically `SMatrix<f64, 2, INTRINSIC_DIM>`.
     type IntrinsicJacobian: Clone
         + std::fmt::Debug
         + Default
         + std::ops::Index<(usize, usize), Output = f64>;
 
     /// Jacobian type for 3D point: 2 × 3.
-    ///
-    /// Typically `SMatrix<f64, 2, 3>`.
     type PointJacobian: Clone
         + std::fmt::Debug
         + Default
@@ -215,7 +167,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         + std::ops::Mul<Matrix3<f64>, Output = SMatrix<f64, 2, 3>>
         + std::ops::Index<(usize, usize), Output = f64>;
 
-    /// Project a single 3D point in camera frame to 2D image coordinates.
+    /// Projects a 3D point to 2D image coordinates.
     ///
     /// # Arguments
     ///
@@ -223,25 +175,23 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates (u, v) if projection is valid
-    /// - `None` - If projection is invalid (e.g., point behind camera, z ≤ 0)
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use apex_camera_models::{CameraModel, PinholeCamera};
-    /// use nalgebra::Vector3;
-    ///
-    /// let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-    /// let point = Vector3::new(1.0, 0.5, 2.0); // Point 2m in front of camera
-    ///
-    /// if let Some(uv) = camera.project(&point) {
-    ///     println!("Projected to pixel: ({}, {})", uv.x, uv.y);
-    /// }
-    /// ```
+    /// - `Some(uv)` - 2D image coordinates if projection is valid
+    /// - `None` - If point cannot be projected (behind camera, etc.)
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>>;
 
-    /// Check if a 3D point is valid for projection.
+    /// Unprojects a 2D image point to a 3D ray in camera frame.
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - 2D point in image coordinates (u, v)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(ray)` - Normalized 3D ray direction
+    /// - `Err(CameraModelError)` - If unprojection fails
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
+
+    /// Checks if a 3D point can be validly projected.
     ///
     /// # Arguments
     ///
@@ -249,37 +199,18 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Returns
     ///
-    /// `true` if the point can be projected (e.g., z > 0 for pinhole cameras)
+    /// `true` if the point satisfies projection constraints
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool;
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// Returns ∂(u,v)/∂(x,y,z) where (x,y,z) is the point in camera frame.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame
-    ///
-    /// # Returns
-    ///
-    /// 2×3 Jacobian matrix
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian;
 
     /// Jacobian of projection w.r.t. camera pose (2×6).
     ///
-    /// Returns ∂(u,v)/∂(pose) for SE3 tangent space.
-    ///
-    /// This combines:
-    /// - Jacobian w.r.t. point position: ∂(u,v)/∂(p_cam)
-    /// - Jacobian of transformed point w.r.t. pose: ∂(p_cam)/∂(pose)
-    ///
-    /// For efficiency, returns both the projection Jacobian and the
-    /// transformed point Jacobian separately so the factor can apply the chain rule.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_world` - 3D point in world coordinate frame
-    /// * `pose` - Camera pose (world-to-camera transformation)
+    /// Returns both the projection Jacobian and the transformed point Jacobian
+    /// for efficient chain rule application.
     ///
     /// # Returns
     ///
@@ -295,27 +226,12 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// Jacobian of projection w.r.t. intrinsic parameters (2×N).
     ///
     /// Returns ∂(u,v)/∂(intrinsics) where intrinsics are camera-specific parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame
-    ///
-    /// # Returns
-    ///
-    /// 2×INTRINSIC_DIM Jacobian matrix
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian;
 
-    /// Batch projection (default impl calls single-point version).
+    /// Batch projection of multiple 3D points.
     ///
-    /// Projects multiple 3D points to 2D image coordinates.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_cam` - 3×N matrix of 3D points in camera frame
-    ///
-    /// # Returns
-    ///
-    /// 2×N matrix of projected 2D points. Invalid projections are set to (1e6, 1e6).
+    /// Default implementation calls single-point projection for each point.
+    /// Invalid projections are set to (1e6, 1e6).
     fn project_batch(&self, points_cam: &Matrix3xX<f64>) -> Matrix2xX<f64> {
         let n = points_cam.ncols();
         let mut result = Matrix2xX::zeros(n);
@@ -330,60 +246,44 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     }
 
     /// Get intrinsic parameters as dynamic vector.
-    ///
-    /// # Returns
-    ///
-    /// Vector of intrinsic parameters (length = INTRINSIC_DIM)
     fn intrinsics_vec(&self) -> DVector<f64>;
 
     /// Create camera from parameter slice.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - Slice of intrinsic parameters (length ≥ INTRINSIC_DIM)
+    fn from_params(params: &[f64]) -> Self;
+
+    /// Validates camera parameters.
     ///
     /// # Returns
     ///
-    /// New camera instance with the given intrinsics
-    fn from_params(params: &[f64]) -> Self;
+    /// - `Ok(())` - All parameters are valid
+    /// - `Err(CameraModelError)` - Invalid parameter detected
+    fn validate_params(&self) -> Result<(), CameraModelError>;
+
+    /// Get intrinsic parameters.
+    fn get_intrinsics(&self) -> Intrinsics;
+
+    /// Get distortion parameters (model-specific).
+    fn get_distortion(&self) -> Vec<f64>;
+
+    /// Get model name identifier.
+    fn get_model_name(&self) -> &'static str;
 }
 
 /// Compute skew-symmetric matrix from a 3D vector.
 ///
 /// Returns the cross-product matrix [v]× such that [v]× w = v × w.
 ///
-/// # Arguments
+/// # Mathematical Form
 ///
-/// * `v` - 3D vector
-///
-/// # Returns
-///
-/// 3×3 skew-symmetric matrix:
 /// ```text
 /// [  0  -vz   vy ]
 /// [ vz    0  -vx ]
 /// [-vy   vx    0 ]
 /// ```
-///
-/// # Examples
-///
-/// ```rust
-/// use apex_camera_models::skew_symmetric;
-/// use nalgebra::Vector3;
-///
-/// let v = Vector3::new(1.0, 2.0, 3.0);
-/// let skew = skew_symmetric(&v);
-/// assert_eq!(skew[(0, 1)], -3.0); // -vz
-/// assert_eq!(skew[(1, 0)],  3.0); //  vz
-/// ```
 #[inline]
 pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
-
-// ============================================================================
-// TESTS
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -391,7 +291,6 @@ mod tests {
 
     #[test]
     fn test_optimize_params_constants() {
-        // Use runtime variables to avoid clippy's constant assertion warnings
         let ba_pose: bool = BundleAdjustment::POSE;
         let ba_land: bool = BundleAdjustment::LANDMARK;
         let ba_intr: bool = BundleAdjustment::INTRINSIC;
@@ -433,17 +332,14 @@ mod tests {
         let v = Vector3::new(1.0, 2.0, 3.0);
         let skew = skew_symmetric(&v);
 
-        // Check structure
         assert_eq!(skew[(0, 0)], 0.0);
         assert_eq!(skew[(1, 1)], 0.0);
         assert_eq!(skew[(2, 2)], 0.0);
 
-        // Check anti-symmetry
         assert_eq!(skew[(0, 1)], -skew[(1, 0)]);
         assert_eq!(skew[(0, 2)], -skew[(2, 0)]);
         assert_eq!(skew[(1, 2)], -skew[(2, 1)]);
 
-        // Check specific values
         assert_eq!(skew[(0, 1)], -v.z);
         assert_eq!(skew[(0, 2)], v.y);
         assert_eq!(skew[(1, 0)], v.z);
@@ -451,7 +347,6 @@ mod tests {
         assert_eq!(skew[(2, 0)], -v.y);
         assert_eq!(skew[(2, 1)], v.x);
 
-        // Verify cross product property: skew * w = v × w
         let w = Vector3::new(4.0, 5.0, 6.0);
         let cross_via_skew = skew * w;
         let cross_direct = v.cross(&w);

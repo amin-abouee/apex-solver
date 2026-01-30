@@ -67,6 +67,104 @@
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
 
+// ============================================================================
+// CAMERA PARAMETER TYPES (defined early for submodule access)
+// ============================================================================
+
+/// Camera intrinsic parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Intrinsics {
+    pub fx: f64,
+    pub fy: f64,
+    pub cx: f64,
+    pub cy: f64,
+}
+
+/// Image resolution.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resolution {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Camera model errors.
+#[derive(thiserror::Error, Debug)]
+pub enum CameraModelError {
+    #[error("Projection is outside the image")]
+    ProjectionOutSideImage,
+    #[error("Input point is outside the image")]
+    PointIsOutSideImage,
+    #[error("z is close to zero, point is at camera center")]
+    PointAtCameraCenter,
+    #[error("Focal length must be positive")]
+    FocalLengthMustBePositive,
+    #[error("Principal point must be finite")]
+    PrincipalPointMustBeFinite,
+    #[error("Invalid camera parameters: {0}")]
+    InvalidParams(String),
+    #[error("Failed to load YAML: {0}")]
+    YamlError(String),
+    #[error("IO Error: {0}")]
+    IOError(String),
+    #[error("NumericalError: {0}")]
+    NumericalError(String),
+}
+
+impl From<std::io::Error> for CameraModelError {
+    fn from(err: std::io::Error) -> Self {
+        CameraModelError::IOError(err.to_string())
+    }
+}
+
+impl From<yaml_rust::ScanError> for CameraModelError {
+    fn from(err: yaml_rust::ScanError) -> Self {
+        CameraModelError::YamlError(err.to_string())
+    }
+}
+
+// ============================================================================
+// VALIDATION FUNCTIONS
+// ============================================================================
+
+/// Validates that a projected 2D point falls within the image boundaries.
+pub fn validate_projection_bounds(
+    u: f64,
+    v: f64,
+    resolution: &Resolution,
+) -> Result<(), CameraModelError> {
+    if u < 0.0 || u >= resolution.width as f64 || v < 0.0 || v >= resolution.height as f64 {
+        return Err(CameraModelError::ProjectionOutSideImage);
+    }
+    Ok(())
+}
+
+/// Validates that a 2D image point falls within the image boundaries for unprojection.
+pub fn validate_unprojection_bounds(
+    point_2d: &Vector2<f64>,
+    resolution: &Resolution,
+) -> Result<(), CameraModelError> {
+    if point_2d.x < 0.0
+        || point_2d.x >= resolution.width as f64
+        || point_2d.y < 0.0
+        || point_2d.y >= resolution.height as f64
+    {
+        return Err(CameraModelError::PointIsOutSideImage);
+    }
+    Ok(())
+}
+
+/// Validates that a 3D point's z-coordinate is positive (in front of camera).
+pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
+    if z < f64::EPSILON.sqrt() {
+        return Err(CameraModelError::PointAtCameraCenter);
+    }
+    Ok(())
+}
+
+// ============================================================================
+// CAMERA MODEL MODULES
+// ============================================================================
+
 pub mod bal_pinhole;
 pub mod double_sphere;
 pub mod eucm;
@@ -85,6 +183,10 @@ pub use kannala_brandt::KannalaBrandtCamera;
 pub use pinhole::PinholeCamera;
 pub use rad_tan::RadTanCamera;
 pub use ucm::UcmCamera;
+
+// Re-export new types for camera models
+pub use {CameraModelError, Intrinsics, Resolution};
+pub use {validate_point_in_front, validate_projection_bounds, validate_unprojection_bounds};
 
 // ============================================================================
 // OPTIMIZATION CONFIGURATION
@@ -346,6 +448,24 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// New camera instance with the given intrinsics
     fn from_params(params: &[f64]) -> Self;
+
+    /// Unproject 2D image point to 3D ray in camera frame.
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
+
+    /// Validate camera parameters.
+    fn validate_params(&self) -> Result<(), CameraModelError>;
+
+    /// Get image resolution.
+    fn get_resolution(&self) -> Resolution;
+
+    /// Get intrinsic parameters.
+    fn get_intrinsics(&self) -> Intrinsics;
+
+    /// Get distortion parameters (model-specific).
+    fn get_distortion(&self) -> Vec<f64>;
+
+    /// Get model name identifier.
+    fn get_model_name(&self) -> &'static str;
 }
 
 /// Compute skew-symmetric matrix from a 3D vector.
