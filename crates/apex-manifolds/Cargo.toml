@@ -1,0 +1,21 @@
+[package]
+name = "apex-manifolds"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians for optimization"
+readme = "README.md"
+keywords = ["lie-group", "manifold", "robotics", "computer-vision", "optimization"]
+categories = ["algorithms", "mathematics", "science"]
+
+[dependencies]
+nalgebra.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
