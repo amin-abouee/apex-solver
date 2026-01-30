@@ -27,9 +27,9 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader};
+use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
-use apex_solver::core::problem::Problem;
+use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::BetweenFactor;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -66,6 +66,51 @@ struct Args {
     /// The file can be viewed later with: rerun <filename>
     #[arg(long, default_value = "optimization.rrd")]
     save_visualization: Option<String>,
+}
+
+/// Helper function to create a graph from optimized variables.
+///
+/// This converts solver output back to Graph format for saving/visualization.
+/// The edges remain unchanged from the original graph.
+fn graph_from_optimized_variables(
+    variables: &HashMap<String, VariableEnum>,
+    original_graph: &Graph,
+) -> Graph {
+    let mut graph = Graph::new();
+
+    // Copy edges from original (unchanged during optimization)
+    graph.edges_se2 = original_graph.edges_se2.clone();
+    graph.edges_se3 = original_graph.edges_se3.clone();
+
+    // Convert optimized variables back to vertices
+    for (var_name, var) in variables {
+        // Extract vertex ID from variable name (format: "x{id}")
+        if let Some(id_str) = var_name.strip_prefix('x') {
+            if let Ok(id) = id_str.parse::<usize>() {
+                match var {
+                    VariableEnum::SE2(v) => {
+                        let vertex = VertexSE2 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se2.insert(id, vertex);
+                    }
+                    VariableEnum::SE3(v) => {
+                        let vertex = VertexSE3 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se3.insert(id, vertex);
+                    }
+                    _ => {
+                        // Skip other manifold types (SO2, SO3, Rn)
+                    }
+                }
+            }
+        }
+    }
+
+    graph
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -239,7 +284,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Save optimized graph if requested
     if let Some(output_path) = &args.save_output {
         info!("\n=== Saving Optimized Graph ===");
-        let optimized_graph = Graph::from_optimized_variables(&result.parameters, graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
         info!("Saved to: {}", output_path.display());
     }
@@ -320,7 +365,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
     // Save if requested
     if let Some(output_path) = &args.save_output {
-        let optimized_graph = Graph::from_optimized_variables(&result.parameters, graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
         info!("\nSaved to: {}", output_path.display());
     }
