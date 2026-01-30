@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader};
+use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
 use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::core::loss_functions::*;
-use apex_solver::core::problem::Problem;
+use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -633,7 +633,7 @@ fn test_se2_dataset(
 
         // Reconstruct graph from optimized variables
         let optimized_graph =
-            apex_solver::io_utils::graph_from_optimized_variables(&result.parameters, &graph);
+            graph_from_optimized_variables(&result.parameters, &graph);
 
         // Write to file (default: G2O format)
         use apex_solver::apex_io::GraphLoader;
@@ -964,7 +964,7 @@ fn test_se3_dataset(
 
         // Reconstruct graph from optimized variables
         let optimized_graph =
-            apex_solver::io_utils::graph_from_optimized_variables(&result.parameters, &graph);
+            graph_from_optimized_variables(&result.parameters, &graph);
 
         // Write to file (default: G2O format)
         use apex_solver::apex_io::GraphLoader;
@@ -1000,6 +1000,51 @@ fn test_se3_dataset(
         status,
     })
 }
+
+/// Helper function to create a graph from optimized variables.
+///
+/// This converts solver output back to Graph format for saving.
+fn graph_from_optimized_variables(
+    variables: &HashMap<String, VariableEnum>,
+    original_graph: &Graph,
+) -> Graph {
+    let mut graph = Graph::new();
+
+    // Copy edges from original (unchanged during optimization)
+    graph.edges_se2 = original_graph.edges_se2.clone();
+    graph.edges_se3 = original_graph.edges_se3.clone();
+
+    // Convert optimized variables back to vertices
+    for (var_name, var) in variables {
+        // Extract vertex ID from variable name (format: "x{id}")
+        if let Some(id_str) = var_name.strip_prefix('x') {
+            if let Ok(id) = id_str.parse::<usize>() {
+                match var {
+                    VariableEnum::SE2(v) => {
+                        let vertex = VertexSE2 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se2.insert(id, vertex);
+                    }
+                    VariableEnum::SE3(v) => {
+                        let vertex = VertexSE3 {
+                            id,
+                            pose: v.value.clone(),
+                        };
+                        graph.vertices_se3.insert(id, vertex);
+                    }
+                    _ => {
+                        // Skip other manifold types
+                    }
+                }
+            }
+        }
+    }
+
+    graph
+}
+
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
