@@ -1,69 +1,63 @@
-//! Pinhole camera model (no distortion).
+//! Pinhole Camera Model
+//!
+//! The simplest perspective camera model with no lens distortion.
+//!
+//! # Mathematical Model
+//!
+//! ## Projection (3D → 2D)
+//!
+//! For a 3D point p = (x, y, z) in camera coordinates:
+//!
+//! ```text
+//! u = fx · (x/z) + cx
+//! v = fy · (y/z) + cy
+//! ```
+//!
+//! where:
+//! - (fx, fy) are focal lengths in pixels
+//! - (cx, cy) is the principal point in pixels
+//! - z > 0 (point in front of camera)
+//!
+//! ## Unprojection (2D → 3D)
+//!
+//! For a 2D point (u, v) in image coordinates, the unprojected ray is:
+//!
+//! ```text
+//! mx = (u - cx) / fx
+//! my = (v - cy) / fy
+//! ray = normalize([mx, my, 1])
+//! ```
+//!
+//! # Parameters
+//!
+//! - **Intrinsics**: fx, fy, cx, cy (4 parameters)
+//! - **Distortion**: None
+//!
+//! # Use Cases
+//!
+//! - Standard narrow field-of-view cameras
+//! - Initial calibration estimates
+//! - Testing and validation
+//!
+//! # References
+//!
+//! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
-use super::{CameraModel, skew_symmetric};
+use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Pinhole camera model with 4 intrinsic parameters.
-///
-/// This is the simplest camera model with no lens distortion.
-///
-/// # Parameters
-///
-/// - `fx`, `fy`: Focal lengths in pixels
-/// - `cx`, `cy`: Principal point coordinates in pixels
-///
-/// # Projection Model
-///
-/// For a 3D point `p_cam = (x, y, z)` in camera frame:
-/// ```text
-/// u = fx * (x/z) + cx
-/// v = fy * (y/z) + cy
-/// ```
-///
-/// # Example
-///
-/// ```
-/// use apex_camera_models::{CameraModel, PinholeCamera};
-/// use nalgebra::Vector3;
-///
-/// let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-/// let p_cam = Vector3::new(0.1, 0.2, 1.0);
-/// let uv = camera.project(&p_cam).expect("Valid projection");
-///
-/// assert!((uv.x - 370.0).abs() < 1e-10);  // 500 * 0.1 + 320
-/// assert!((uv.y - 340.0).abs() < 1e-10);  // 500 * 0.2 + 240
-/// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeCamera {
-    /// Focal length in x direction (pixels)
     pub fx: f64,
-    /// Focal length in y direction (pixels)
     pub fy: f64,
-    /// Principal point x coordinate (pixels)
     pub cx: f64,
-    /// Principal point y coordinate (pixels)
     pub cy: f64,
 }
 
 impl PinholeCamera {
-    /// Create a new pinhole camera.
-    ///
-    /// # Arguments
-    ///
-    /// * `fx` - Focal length in x (pixels)
-    /// * `fy` - Focal length in y (pixels)
-    /// * `cx` - Principal point x (pixels)
-    /// * `cy` - Principal point y (pixels)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use apex_camera_models::PinholeCamera;
-    ///
-    /// let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
-    /// ```
     #[must_use]
     pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Self {
         Self { fx, fy, cx, cy }
@@ -75,6 +69,23 @@ impl CameraModel for PinholeCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 4>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
+    /// Projects a 3D point to 2D image coordinates.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// u = fx · (x/z) + cx
+    /// v = fy · (y/z) + cy
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z)
+    ///
+    /// # Returns
+    ///
+    /// - `Some(uv)` - 2D image coordinates if z > MIN_DEPTH
+    /// - `None` - If point is behind or at camera (z ≤ MIN_DEPTH)
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
         const MIN_DEPTH: f64 = 1e-6;
         if p_cam.z < MIN_DEPTH {
@@ -87,19 +98,67 @@ impl CameraModel for PinholeCamera {
         ))
     }
 
+    /// Unprojects a 2D image point to a 3D ray in camera frame.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// mx = (u - cx) / fx
+    /// my = (v - cy) / fy
+    /// ray = normalize([mx, my, 1])
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - 2D point in image coordinates (u, v)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(ray)` - Normalized 3D ray direction
+    /// - `Err` - Never fails for pinhole model
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+        let mx = (point_2d.x - self.cx) / self.fx;
+        let my = (point_2d.y - self.cy) / self.fy;
+
+        let r2 = mx * mx + my * my;
+        let norm = (1.0 + r2).sqrt();
+        let norm_inv = 1.0 / norm;
+
+        Ok(Vector3::new(mx * norm_inv, my * norm_inv, norm_inv))
+    }
+
+    /// Checks if a 3D point can be validly projected.
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame
+    ///
+    /// # Returns
+    ///
+    /// `true` if the point satisfies projection constraints.
+    ///
+    /// # Validity Conditions
+    ///
+    /// - z ≥ MIN_DEPTH (point in front of camera)
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         const MIN_DEPTH: f64 = 1e-6;
         p_cam.z >= MIN_DEPTH
     }
 
+    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    ///
+    /// # Mathematical Derivatives
+    ///
+    /// ```text
+    /// u = fx · x/z + cx  =>  ∂u/∂x = fx/z, ∂u/∂y = 0, ∂u/∂z = -fx·x/z²
+    /// v = fy · y/z + cy  =>  ∂v/∂x = 0, ∂v/∂y = fy/z, ∂v/∂z = -fy·y/z²
+    /// ```
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_norm = p_cam.x * inv_z;
         let y_norm = p_cam.y * inv_z;
 
         // Jacobian ∂(u,v)/∂(x,y,z) where (x,y,z) is point in camera frame
-        // u = fx * x/z + cx  =>  ∂u/∂x = fx/z, ∂u/∂y = 0, ∂u/∂z = -fx*x/z²
-        // v = fy * y/z + cy  =>  ∂v/∂x = 0, ∂v/∂y = fy/z, ∂v/∂z = -fy*y/z²
         SMatrix::<f64, 2, 3>::new(
             self.fx * inv_z,
             0.0,
@@ -110,39 +169,36 @@ impl CameraModel for PinholeCamera {
         )
     }
 
+    /// Jacobian of projection w.r.t. camera pose (SE3).
+    ///
+    /// Returns both the projection Jacobian and the pose Jacobian for chain rule.
+    ///
+    /// # SE3 Perturbation
+    ///
+    /// Using right perturbation δpose = [δt; δω]:
+    /// - Translation: ∂p_cam/∂δt = -R^T
+    /// - Rotation: ∂p_cam/∂δω = [p_cam]× (skew-symmetric matrix)
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
         pose: &SE3,
     ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        // Transform point from world to camera frame
         let pose_inv = pose.inverse(None);
         let p_cam = pose_inv.act(p_world, None, None);
 
-        // Jacobian of projection w.r.t. point in camera frame
         let d_uv_d_pcam = self.jacobian_point(&p_cam);
 
         // Jacobian of transformed point w.r.t. pose
         // p_cam = R^T * (p_world - t)
-        // Using right perturbation on SE3: δpose = [δt; δω]
-        //
-        // For translation perturbation: p_cam' = R^T * (p_world - (t + δt))
-        //   => ∂p_cam/∂δt = -R^T
-        //
-        // For rotation perturbation: p_cam' ≈ (I - [δω]×) * R^T * (p_world - t)
-        //   => ∂p_cam/∂δω = -[p_cam]× (using small angle approximation)
-        //
-        // Combined: ∂p_cam/∂[δt; δω] = [-R^T | [p_cam]×]
+        // ∂p_cam/∂[δt; δω] = [-R^T | [p_cam]×]
 
         let r_transpose = pose_inv.rotation_so3().rotation_matrix();
         let p_cam_skew = skew_symmetric(&p_cam);
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
-                // Translation part: -R^T
                 -r_transpose[(r, c)]
             } else {
-                // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]
             }
         });
@@ -150,14 +206,20 @@ impl CameraModel for PinholeCamera {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
+    /// Jacobian of projection w.r.t. intrinsic parameters (2×4).
+    ///
+    /// # Mathematical Derivatives
+    ///
+    /// ```text
+    /// u = fx · x/z + cx  =>  ∂u/∂fx = x/z, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
+    /// v = fy · y/z + cy  =>  ∂v/∂fx = 0, ∂v/∂fy = y/z, ∂v/∂cx = 0, ∂v/∂cy = 1
+    /// ```
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_norm = p_cam.x * inv_z;
         let y_norm = p_cam.y * inv_z;
 
         // Jacobian ∂(u,v)/∂(fx,fy,cx,cy)
-        // u = fx * x/z + cx  =>  ∂u/∂fx = x/z, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
-        // v = fy * y/z + cy  =>  ∂v/∂fx = 0, ∂v/∂fy = y/z, ∂v/∂cx = 0, ∂v/∂cy = 1
         SMatrix::<f64, 2, 4>::new(x_norm, 0.0, 1.0, 0.0, 0.0, y_norm, 0.0, 1.0)
     }
 
@@ -177,6 +239,44 @@ impl CameraModel for PinholeCamera {
             cx: params[2],
             cy: params[3],
         }
+    }
+
+    /// Validates camera parameters.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` - All parameters are valid
+    /// - `Err(CameraModelError)` - Invalid parameter detected
+    ///
+    /// # Validation Rules
+    ///
+    /// - fx, fy must be positive (> 0)
+    /// - cx, cy must be finite (not NaN or infinity)
+    fn validate_params(&self) -> Result<(), CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
+        }
+        Ok(())
+    }
+
+    fn get_intrinsics(&self) -> Intrinsics {
+        Intrinsics {
+            fx: self.fx,
+            fy: self.fy,
+            cx: self.cx,
+            cy: self.cy,
+        }
+    }
+
+    fn get_distortion(&self) -> Vec<f64> {
+        vec![]
+    }
+
+    fn get_model_name(&self) -> &'static str {
+        "pinhole"
     }
 }
 
@@ -220,7 +320,6 @@ mod tests {
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
-        // Point on optical axis should project to principal point
         assert_approx_eq(uv.x, 320.0, 1e-10);
         assert_approx_eq(uv.y, 240.0, 1e-10);
 
@@ -234,8 +333,6 @@ mod tests {
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
-        // u = 500 * 0.1 + 320 = 370
-        // v = 500 * 0.2 + 240 = 340
         assert_approx_eq(uv.x, 370.0, 1e-10);
         assert_approx_eq(uv.y, 340.0, 1e-10);
 
@@ -245,7 +342,7 @@ mod tests {
     #[test]
     fn test_projection_behind_camera() {
         let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
-        let p_cam = Vector3::new(0.0, 0.0, -1.0); // Behind camera
+        let p_cam = Vector3::new(0.0, 0.0, -1.0);
 
         let result = camera.project(&p_cam);
         assert!(result.is_none());
@@ -283,7 +380,6 @@ mod tests {
 
         let jac_analytical = camera.jacobian_point(&p_cam);
 
-        // Numerical differentiation
         let eps = 1e-7;
         for i in 0..3 {
             let mut p_plus = p_cam;
@@ -322,7 +418,6 @@ mod tests {
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
 
-        // Numerical differentiation
         let eps = 1e-7;
         let params = vec![camera.fx, camera.fy, camera.cx, camera.cy];
 
@@ -367,13 +462,11 @@ mod tests {
 
         let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, &pose);
 
-        // Check dimensions
         assert_eq!(d_uv_d_pcam.nrows(), 2);
         assert_eq!(d_uv_d_pcam.ncols(), 3);
         assert_eq!(d_pcam_d_pose.nrows(), 3);
         assert_eq!(d_pcam_d_pose.ncols(), 6);
 
-        // For identity pose, p_cam should equal p_world
         let pose_inv = pose.inverse(None);
         let p_cam = pose_inv.act(&p_world, None, None);
         assert_approx_eq((p_cam - p_world).norm(), 0.0, 1e-10);
