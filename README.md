@@ -10,7 +10,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 
 ## Key Features (v1.0.0)
 
-- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models: Pinhole, RadialTangential, FOV, UnifiedCamera, ExtendedUnified, DoubleSphere, KannalaBrandt, Orthographic)
+- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (11 camera models via apex-camera-models crate)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
 - **🛡️ 15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3) with analytic Jacobians
@@ -119,6 +119,11 @@ apex-solver/
 - **`linalg/`**: Linear algebra backends including sparse Cholesky decomposition, QR factorization, explicit Schur complement, and implicit Schur complement (matrix-free PCG)
 - **`manifold/`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
 - **`io/`**: File format parsers for G2O, TORO, and TUM trajectory formats
+
+**Core Dependencies**:
+- **`apex-manifolds`**: Lie group manifolds (SE2, SE3, SO2, SO3) with exponential/logarithmic maps
+- **`apex-camera-models`**: Camera projection models with analytic Jacobians (11 models: Pinhole, RadTan, Kannala-Brandt, Double Sphere, FOV, UCM, EUCM, Equidistant, Orthographic, BAL variants)
+- **`faer`** / **`nalgebra`**: High-performance linear algebra backends
 
 ---
 
@@ -356,91 +361,55 @@ problem.add_residual_block(
 
 ### Example 3: Self-Calibration Bundle Adjustment
 
-Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously using `ProjectionFactor<CameraModel, OptConfig>`:
+Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously. See the [apex-camera-models](crates/apex-camera-models) crate for detailed camera model documentation.
 
 ```rust
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::{BALPinholeCameraStrict, SelfCalibration};
-use apex_solver::linalg::LinearSolverType;
-use apex_solver::manifold::ManifoldType;
-use apex_solver::manifold::se3::SE3;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
-use nalgebra::{DVector, Matrix2xX, Vector2};
+use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
+// Use any camera model from apex-camera-models crate
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
-
-    // Add camera poses (SE3) and per-camera intrinsics
-    for (i, cam) in cameras.iter().enumerate() {
-        // SE3 pose: [tx, ty, tz, qw, qi, qj, qk]
-        let pose = SE3::from_translation_so3(cam.translation, cam.rotation);
-        initial_values.insert(
-            format!("pose_{:04}", i),
-            (ManifoldType::SE3, DVector::from(pose))
-        );
-        
-        // Per-camera intrinsics: [focal, k1, k2]
-        initial_values.insert(
-            format!("intr_{:04}", i),
-            (ManifoldType::RN, DVector::from_vec(vec![cam.focal, cam.k1, cam.k2]))
-        );
-    }
-
-    // Add 3D landmarks
-    for (j, point) in landmarks.iter().enumerate() {
-        initial_values.insert(
-            format!("pt_{:05}", j),
-            (ManifoldType::RN, DVector::from_vec(vec![point.x, point.y, point.z]))
-        );
-    }
-
-    // Add projection factors with SelfCalibration optimization type
-    for obs in &observations {
-        let camera = BALPinholeCameraStrict::new(obs.focal, obs.k1, obs.k2);
-        let measurements = Matrix2xX::from_columns(&[Vector2::new(obs.u, obs.v)]);
-        
-        // ProjectionFactor<CameraModel, OptConfig> with compile-time optimization config
-        let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
-            ProjectionFactor::new(measurements, camera);
-        
+    
+    // Add camera poses (SE3), 3D landmarks, and per-camera intrinsics
+    // See apex-camera-models documentation for camera model options
+    
+    // Add projection factors with compile-time optimization config
+    // ProjectionFactor<CameraModel, OptConfig> links poses + landmarks + intrinsics
+    for observation in &observations {
         problem.add_residual_block(
-            &[&format!("pose_{:04}", obs.cam_id), 
-              &format!("pt_{:05}", obs.pt_id),
-              &format!("intr_{:04}", obs.cam_id)],
-            Box::new(factor),
-            None,  // Or Some(Box::new(HuberLoss::new(1.0)?)) for robustness
+            &[&format!("pose_{}", obs.camera_id),
+              &format!("landmark_{}", obs.point_id),
+              &format!("intrinsics_{}", obs.camera_id)],
+            Box::new(projection_factor),
+            Some(Box::new(HuberLoss::new(1.0))),
         );
     }
-
+    
     // Fix first camera for gauge freedom
     for dof in 0..6 {
         problem.fix_variable("pose_0000", dof);
     }
-
-    // Configure with Schur complement solver (best for BA)
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment()
-        .with_max_iterations(50)
-        .with_cost_tolerance(1e-6);
-
-    let mut solver = LevenbergMarquardt::with_config(config);
+    
+    // Configure solver with Schur complement (best for BA)
+    let mut solver = LevenbergMarquardt::for_bundle_adjustment();
     let result = solver.optimize(&problem, &initial_values)?;
-
-    println!("Status: {:?}", result.status);
-    println!("Final RMSE: {:.3} pixels", (result.final_cost / observations.len() as f64).sqrt());
-
+    
     Ok(())
 }
 ```
 
 **Optimization Types** (compile-time configuration):
-- `SelfCalibration`: Optimize pose + landmarks + intrinsics (shown above)
+- `SelfCalibration`: Optimize pose + landmarks + intrinsics
 - `BundleAdjustment`: Optimize pose + landmarks (fixed intrinsics)
-- `OnlyPose`: Visual odometry with fixed landmarks and intrinsics
-- `OnlyLandmarks`: Triangulation with known poses
-- `OnlyIntrinsics`: Camera calibration with known structure
+- `OnlyPose`: Visual odometry (fixed landmarks and intrinsics)
+- `OnlyLandmarks`: Triangulation (known poses)
+- `OnlyIntrinsics`: Camera calibration (known structure)
+
+See [apex-camera-models documentation](crates/apex-camera-models/README.md) for complete camera model reference and advanced examples.
 
 ---
 
@@ -459,26 +428,6 @@ Apex Solver implements mathematically rigorous Lie group operations following th
 | **SE(2)** | 2D rigid transformations | 3 | 2D SLAM, mobile robots |
 | **SO(2)** | 2D rotations | 1 | 2D orientation |
 | **R^n** | Euclidean space | n | Landmarks, camera parameters |
-
-### Camera Projection Models
-
-Apex Solver supports 11 camera projection models for bundle adjustment with analytic Jacobians:
-
-| Model | Parameters | Description |
-|-------|-----------|-------------|
-| **Pinhole** | fx, fy, cx, cy | Standard pinhole camera (~60° FOV) |
-| **RadialTangential** | fx, fy, cx, cy, k1, k2, p1, p2 | Brown-Conrady model with distortion (OpenCV compatible) |
-| **Equidistant** | fx, fy, cx, cy, k1, k2, k3, k4 | Fisheye lens model (~180° FOV) |
-| **FOV** | fx, fy, cx, cy, omega | Field-of-view distortion model |
-| **UnifiedCamera** | fx, fy, cx, cy, xi, alpha | Unified model for wide FOV (>90°) |
-| **ExtendedUnified** | fx, fy, cx, cy, alpha, beta | Extended unified model (>180°) |
-| **DoubleSphere** | fx, fy, cx, cy, xi, alpha | Double sphere projection (>180°) |
-| **Orthographic** | fx, fy, cx, cy | Orthographic projection |
-| **KannalaBrandt** | fx, fy, cx, cy, k1, k2, k3, k4 | GoPro-style fisheye cameras |
-| **UCM** | fx, fy, cx, cy, alpha | Unified camera model |
-| **EUCM** | fx, fy, cx, cy, alpha, beta | Enhanced unified camera model |
-
-All models support compile-time optimization configuration (pose-only, landmark-only, intrinsics-only, or any combination).
 
 ### Robust Loss Functions
 
