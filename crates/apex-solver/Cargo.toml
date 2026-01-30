@@ -1,0 +1,87 @@
+[package]
+name = "apex-solver"
+version = "1.0.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation = "https://docs.rs/apex-solver"
+rust-version.workspace = true
+description = "High-performance nonlinear least squares optimization with Lie group support for SLAM and bundle adjustment"
+readme = "README.md"
+keywords = ["optimization", "slam", "computer-vision", "robotics", "nonlinear"]
+categories = ["algorithms", "science", "mathematics"]
+
+exclude = [
+    "data/*",
+    "doc/*.md",
+    "!doc/CHANGELOG.md",
+    "profiles/*",
+    "output/*",
+]
+
+[[bin]]
+name = "pose_graph_g2o"
+path = "bin/pose_graph_g2o.rs"
+
+[[bin]]
+name = "bundle_adjustment"
+path = "bin/bundle_adjustment.rs"
+
+[[example]]
+name = "visualize_graph_file"
+required-features = ["visualization"]
+
+[[example]]
+name = "visualize_optimization"
+required-features = ["visualization"]
+
+[features]
+default = []
+visualization = ["dep:rerun", "apex-io/visualization"]
+
+[dependencies]
+# Internal workspace crates (CRITICAL: use both path and version!)
+apex-manifolds.workspace = true
+apex-io.workspace = true
+apex-camera-models.workspace = true
+
+# External dependencies
+nalgebra.workspace = true
+faer.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+colored.workspace = true
+num_cpus.workspace = true
+chrono.workspace = true
+
+[dependencies.rerun]
+workspace = true
+optional = true
+
+[dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+factrs.workspace = true
+tiny-solver.workspace = true
+csv.workspace = true
+serde.workspace = true
+
+[[bench]]
+name = "odometry_pose_benchmark"
+harness = false
+
+[[bench]]
+name = "bundle_adjustment_benchmark"
+harness = false
+
+[lints]
+workspace = true
