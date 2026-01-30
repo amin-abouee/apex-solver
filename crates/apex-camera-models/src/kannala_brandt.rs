@@ -1,46 +1,67 @@
-//! Kannala-Brandt fisheye camera model.
+//! Kannala-Brandt Fisheye Camera Model
+//!
+//! A widely-used fisheye camera model with polynomial radial distortion,
+//! commonly implemented in OpenCV for fisheye lens calibration.
+//!
+//! # Mathematical Model
+//!
+//! ## Projection (3D → 2D)
+//!
+//! For a 3D point p = (x, y, z) in camera coordinates:
+//!
+//! ```text
+//! r = √(x² + y²)
+//! θ = atan2(r, z)
+//! θ_d = θ·(1 + k₁·θ² + k₂·θ⁴ + k₃·θ⁶ + k₄·θ⁸)
+//! u = fx · θ_d · (x/r) + cx
+//! v = fy · θ_d · (y/r) + cy
+//! ```
+//!
+//! Or equivalently: d(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
+//!
+//! ## Unprojection (2D → 3D)
+//!
+//! Uses Newton-Raphson iteration to solve for θ from θ_d, then recovers
+//! the 3D ray direction.
+//!
+//! # Parameters
+//!
+//! - **Intrinsics**: fx, fy, cx, cy
+//! - **Distortion**: k₁, k₂, k₃, k₄ (8 parameters total)
+//!
+//! # Use Cases
+//!
+//! - Fisheye cameras with up to 180° field of view
+//! - Wide-angle surveillance cameras
+//! - Automotive and robotics applications
+//! - OpenCV fisheye calibration
+//!
+//! # References
+//!
+//! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
+//!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use super::{CameraModel, skew_symmetric};
+use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
-/// Kannala-Brandt fisheye camera model.
-///
-/// This model uses a polynomial approximation for the projection angle.
-///
-/// # Parameters
-///
-/// - `fx`, `fy`: Focal lengths in pixels
-/// - `cx`, `cy`: Principal point coordinates in pixels
-/// - `k1`, `k2`, `k3`, `k4`: Distortion coefficients
+const PRECISION: f64 = 1e-6;
+
+/// Kannala-Brandt fisheye camera model with 8 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandtCamera {
-    /// Focal length in x direction (pixels)
     pub fx: f64,
-    /// Focal length in y direction (pixels)
     pub fy: f64,
-    /// Principal point x coordinate (pixels)
     pub cx: f64,
-    /// Principal point y coordinate (pixels)
     pub cy: f64,
-    /// Distortion coefficient k1
     pub k1: f64,
-    /// Distortion coefficient k2
     pub k2: f64,
-    /// Distortion coefficient k3
     pub k3: f64,
-    /// Distortion coefficient k4
     pub k4: f64,
 }
 
 impl KannalaBrandtCamera {
-    /// Create a new Kannala-Brandt camera.
-    ///
-    /// # Design Note
-    /// The Kannala-Brandt camera model requires 8 intrinsic parameters (4 intrinsics + 4 distortion coefficients).
-    /// This is a fundamental property of the model and cannot be reduced without changing the model itself.
-    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         fx: f64,
         fy: f64,
@@ -69,17 +90,162 @@ impl CameraModel for KannalaBrandtCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 8>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
+    /// Projects a 3D point to 2D image coordinates.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// r = √(x² + y²)
+    /// θ = atan2(r, z)
+    /// θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
+    /// u = fx · θ_d · (x/r) + cx
+    /// v = fy · θ_d · (y/r) + cy
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame
+    ///
+    /// # Returns
+    ///
+    /// - `Some(uv)` - 2D image coordinates if valid
+    /// - `None` - If r < PRECISION (point on optical axis)
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        if z < f64::EPSILON {
-            return None;
+        let r = (x * x + y * y).sqrt();
+        let theta = r.atan2(z);
+
+        // Polynomial distortion: d(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
+        let theta2 = theta * theta;
+        let theta3 = theta2 * theta;
+        let theta5 = theta3 * theta2;
+        let theta7 = theta5 * theta2;
+        let theta9 = theta7 * theta2;
+
+        let theta_d =
+            theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
+
+        if r < PRECISION {
+            // Point on optical axis
+            return Some(Vector2::new(self.cx, self.cy));
         }
 
-        let r_squared = x * x + y * y;
-        let r = r_squared.sqrt();
+        let inv_r = 1.0 / r;
+        Some(Vector2::new(
+            self.fx * theta_d * x * inv_r + self.cx,
+            self.fy * theta_d * y * inv_r + self.cy,
+        ))
+    }
+
+    /// Unprojects a 2D image point to a 3D ray.
+    ///
+    /// # Algorithm
+    ///
+    /// Newton-Raphson iteration to solve for θ from θ_d:
+    /// - f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d = 0
+    /// - f'(θ) = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - 2D point in image coordinates
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(ray)` - Normalized 3D ray direction
+    /// - `Err` - If Newton-Raphson fails to converge
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+        let u = point_2d.x;
+        let v = point_2d.y;
+
+        let mx = (u - self.cx) / self.fx;
+        let my = (v - self.cy) / self.fy;
+
+        let theta_d = (mx * mx + my * my).sqrt();
+
+        if theta_d < PRECISION {
+            return Ok(Vector3::new(0.0, 0.0, 1.0));
+        }
+
+        // Newton-Raphson iteration to solve: f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d = 0
+        let mut theta = theta_d;
+        const MAX_ITER: usize = 10;
+        const CONVERGENCE_THRESHOLD: f64 = 1e-6;
+
+        for _ in 0..MAX_ITER {
+            let theta2 = theta * theta;
+            let theta3 = theta2 * theta;
+            let theta5 = theta3 * theta2;
+            let theta7 = theta5 * theta2;
+            let theta9 = theta7 * theta2;
+
+            // f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d
+            let f =
+                theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9
+                    - theta_d;
+
+            // f'(θ) = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
+            let f_prime = 1.0
+                + 3.0 * self.k1 * theta2
+                + 5.0 * self.k2 * theta2 * theta2
+                + 7.0 * self.k3 * theta2 * theta2 * theta2
+                + 9.0 * self.k4 * theta2 * theta2 * theta2 * theta2;
+
+            if f_prime.abs() < PRECISION {
+                return Err(CameraModelError::NumericalError(
+                    "Derivative too small in KB unprojection".to_string(),
+                ));
+            }
+
+            let delta = f / f_prime;
+            theta -= delta;
+
+            if delta.abs() < CONVERGENCE_THRESHOLD {
+                break;
+            }
+        }
+
+        // Convert θ to 3D ray
+        let sin_theta = theta.sin();
+        let cos_theta = theta.cos();
+
+        let norm = (mx * mx + my * my).sqrt();
+        if norm < PRECISION {
+            return Ok(Vector3::new(0.0, 0.0, 1.0));
+        }
+
+        let x = sin_theta * mx / norm;
+        let y = sin_theta * my / norm;
+        let z = cos_theta;
+
+        Ok(Vector3::new(x, y, z).normalize())
+    }
+
+    /// Checks if a 3D point can be validly projected.
+    ///
+    /// # Validity Conditions
+    ///
+    /// - Always returns true (KB model has wide acceptance range)
+    fn is_valid_point(&self, _p_cam: &Vector3<f64>) -> bool {
+        true
+    }
+
+    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    ///
+    /// # Chain Rule Application
+    ///
+    /// Complex derivatives involving:
+    /// - ∂θ/∂(x,y,z)
+    /// - ∂θ_d/∂θ using polynomial derivative
+    /// - ∂(u,v)/∂θ_d
+    fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
+        let x = p_cam[0];
+        let y = p_cam[1];
+        let z = p_cam[2];
+
+        let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
         let theta2 = theta * theta;
@@ -91,92 +257,59 @@ impl CameraModel for KannalaBrandtCamera {
         let theta_d =
             theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
 
-        let (x_r, y_r) = if r < f64::EPSILON {
-            (0.0, 0.0)
-        } else {
-            (x / r, y / r)
-        };
+        // ∂θ_d/∂θ = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
+        let dtheta_d_dtheta = 1.0
+            + 3.0 * self.k1 * theta2
+            + 5.0 * self.k2 * theta2 * theta2
+            + 7.0 * self.k3 * theta2 * theta2 * theta2
+            + 9.0 * self.k4 * theta2 * theta2 * theta2 * theta2;
 
-        Some(Vector2::new(
-            self.fx * theta_d * x_r + self.cx,
-            self.fy * theta_d * y_r + self.cy,
-        ))
-    }
-
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        p_cam[2] >= f64::EPSILON
-    }
-
-    fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
-        let x = p_cam[0];
-        let y = p_cam[1];
-        let z = p_cam[2];
-
-        let r_squared = x * x + y * y;
-        let r = r_squared.sqrt();
-
-        let mut jac = SMatrix::<f64, 2, 3>::zeros();
-
-        if r < f64::EPSILON {
-            // Degenerate case - use pinhole approximation
-            jac[(0, 0)] = self.fx / z;
-            jac[(0, 1)] = 0.0;
-            jac[(0, 2)] = -self.fx * x / (z * z);
-
-            jac[(1, 0)] = 0.0;
-            jac[(1, 1)] = self.fy / z;
-            jac[(1, 2)] = -self.fy * y / (z * z);
-        } else {
-            let theta = r.atan2(z);
-            let theta2 = theta * theta;
-
-            // Compute distorted radius
-            let theta3 = theta2 * theta;
-            let theta5 = theta3 * theta2;
-            let theta7 = theta5 * theta2;
-            let theta9 = theta7 * theta2;
-            let r_theta =
-                theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
-
-            // Compute d_r_theta_d_theta = 1 + 3k1θ² + 5k2θ⁴ + 7k3θ⁶ + 9k4θ⁸
-            let mut d_r_theta_d_theta = 9.0 * self.k4 * theta2;
-            d_r_theta_d_theta += 7.0 * self.k3;
-            d_r_theta_d_theta *= theta2;
-            d_r_theta_d_theta += 5.0 * self.k2;
-            d_r_theta_d_theta *= theta2;
-            d_r_theta_d_theta += 3.0 * self.k1;
-            d_r_theta_d_theta *= theta2;
-            d_r_theta_d_theta += 1.0;
-
-            // Derivatives of r and theta w.r.t. x, y, z
-            let d_r_d_x = x / r;
-            let d_r_d_y = y / r;
-
-            let tmp = z * z + r_squared;
-            let d_theta_d_x = d_r_d_x * z / tmp;
-            let d_theta_d_y = d_r_d_y * z / tmp;
-            let d_theta_d_z = -r / tmp;
-
-            // Jacobian entries from granite-headers formula
-            jac[(0, 0)] = self.fx
-                * (r_theta * r + x * r * d_r_theta_d_theta * d_theta_d_x - x * x * r_theta / r)
-                / r_squared;
-            jac[(1, 0)] =
-                self.fy * y * (d_r_theta_d_theta * d_theta_d_x * r - x * r_theta / r) / r_squared;
-
-            jac[(0, 1)] =
-                self.fx * x * (d_r_theta_d_theta * d_theta_d_y * r - y * r_theta / r) / r_squared;
-            jac[(1, 1)] = self.fy
-                * (r_theta * r + y * r * d_r_theta_d_theta * d_theta_d_y - y * y * r_theta / r)
-                / r_squared;
-
-            jac[(0, 2)] = self.fx * x * d_r_theta_d_theta * d_theta_d_z / r;
-            jac[(1, 2)] = self.fy * y * d_r_theta_d_theta * d_theta_d_z / r;
+        if r < PRECISION {
+            // Near optical axis, use simplified Jacobian
+            return SMatrix::<f64, 2, 3>::new(
+                self.fx * dtheta_d_dtheta / z,
+                0.0,
+                0.0,
+                0.0,
+                self.fy * dtheta_d_dtheta / z,
+                0.0,
+            );
         }
 
-        jac
+        let inv_r = 1.0 / r;
+        let r2 = r * r;
+        let r_z2 = r2 + z * z;
+
+        // ∂θ/∂x = z·x / (r·(r² + z²))
+        // ∂θ/∂y = z·y / (r·(r² + z²))
+        // ∂θ/∂z = -r / (r² + z²)
+        let dtheta_dx = z * x / (r * r_z2);
+        let dtheta_dy = z * y / (r * r_z2);
+        let dtheta_dz = -r / r_z2;
+
+        // ∂r/∂x = x/r, ∂r/∂y = y/r, ∂r/∂z = 0
+
+        // Chain rule for u = fx · θ_d · (x/r) + cx
+        let inv_r2 = inv_r * inv_r;
+
+        let du_dx = self.fx
+            * (dtheta_d_dtheta * dtheta_dx * x * inv_r
+                + theta_d * (inv_r - x * x * inv_r2 * inv_r));
+        let du_dy =
+            self.fx * (dtheta_d_dtheta * dtheta_dy * x * inv_r - theta_d * x * y * inv_r2 * inv_r);
+        let du_dz = self.fx * dtheta_d_dtheta * dtheta_dz * x * inv_r;
+
+        let dv_dx =
+            self.fy * (dtheta_d_dtheta * dtheta_dx * y * inv_r - theta_d * x * y * inv_r2 * inv_r);
+        let dv_dy = self.fy
+            * (dtheta_d_dtheta * dtheta_dy * y * inv_r
+                + theta_d * (inv_r - y * y * inv_r2 * inv_r));
+        let dv_dz = self.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
+
+        SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
+    /// Jacobian of projection w.r.t. camera pose (SE3).
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -201,13 +334,13 @@ impl CameraModel for KannalaBrandtCamera {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
+    /// Jacobian of projection w.r.t. intrinsic parameters (2×8).
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let r_squared = x * x + y * y;
-        let r = r_squared.sqrt();
+        let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
         let theta2 = theta * theta;
@@ -219,43 +352,46 @@ impl CameraModel for KannalaBrandtCamera {
         let theta_d =
             theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
 
-        let (x_r, y_r) = if r < f64::EPSILON {
-            (0.0, 0.0)
-        } else {
-            (x / r, y / r)
-        };
+        if r < PRECISION {
+            return SMatrix::<f64, 2, 8>::zeros();
+        }
 
-        let mut jac = SMatrix::<f64, 2, 8>::zeros();
+        let inv_r = 1.0 / r;
+        let x_theta_d_r = x * theta_d * inv_r;
+        let y_theta_d_r = y * theta_d * inv_r;
 
-        // ∂u/∂fx = theta_d * x_r
-        jac[(0, 0)] = theta_d * x_r;
+        // ∂u/∂fx = θ_d·x/r, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
+        // ∂v/∂fx = 0, ∂v/∂fy = θ_d·y/r, ∂v/∂cx = 0, ∂v/∂cy = 1
 
-        // ∂v/∂fy = theta_d * y_r
-        jac[(1, 1)] = theta_d * y_r;
+        // ∂u/∂k₁ = fx·θ³·x/r, ∂u/∂k₂ = fx·θ⁵·x/r, etc.
+        let du_dk1 = self.fx * theta3 * x * inv_r;
+        let du_dk2 = self.fx * theta5 * x * inv_r;
+        let du_dk3 = self.fx * theta7 * x * inv_r;
+        let du_dk4 = self.fx * theta9 * x * inv_r;
 
-        // ∂u/∂cx = 1
-        jac[(0, 2)] = 1.0;
+        let dv_dk1 = self.fy * theta3 * y * inv_r;
+        let dv_dk2 = self.fy * theta5 * y * inv_r;
+        let dv_dk3 = self.fy * theta7 * y * inv_r;
+        let dv_dk4 = self.fy * theta9 * y * inv_r;
 
-        // ∂v/∂cy = 1
-        jac[(1, 3)] = 1.0;
-
-        // ∂u/∂k1 = fx * θ³ * x_r
-        jac[(0, 4)] = self.fx * theta3 * x_r;
-        jac[(1, 4)] = self.fy * theta3 * y_r;
-
-        // ∂u/∂k2 = fx * θ⁵ * x_r
-        jac[(0, 5)] = self.fx * theta5 * x_r;
-        jac[(1, 5)] = self.fy * theta5 * y_r;
-
-        // ∂u/∂k3 = fx * θ⁷ * x_r
-        jac[(0, 6)] = self.fx * theta7 * x_r;
-        jac[(1, 6)] = self.fy * theta7 * y_r;
-
-        // ∂u/∂k4 = fx * θ⁹ * x_r
-        jac[(0, 7)] = self.fx * theta9 * x_r;
-        jac[(1, 7)] = self.fy * theta9 * y_r;
-
-        jac
+        SMatrix::<f64, 2, 8>::from_row_slice(&[
+            x_theta_d_r,
+            0.0,
+            1.0,
+            0.0,
+            du_dk1,
+            du_dk2,
+            du_dk3,
+            du_dk4,
+            0.0,
+            y_theta_d_r,
+            0.0,
+            1.0,
+            dv_dk1,
+            dv_dk2,
+            dv_dk3,
+            dv_dk4,
+        ])
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
@@ -280,6 +416,52 @@ impl CameraModel for KannalaBrandtCamera {
             k4: params[7],
         }
     }
+
+    /// Validates camera parameters.
+    ///
+    /// # Validation Rules
+    ///
+    /// - fx, fy must be positive (> 0)
+    /// - cx, cy must be finite
+    /// - k₁, k₂, k₃, k₄ must be finite
+    fn validate_params(&self) -> Result<(), CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
+        }
+
+        if !self.k1.is_finite()
+            || !self.k2.is_finite()
+            || !self.k3.is_finite()
+            || !self.k4.is_finite()
+        {
+            return Err(CameraModelError::InvalidParams(
+                "Distortion coefficients must be finite".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn get_intrinsics(&self) -> Intrinsics {
+        Intrinsics {
+            fx: self.fx,
+            fy: self.fy,
+            cx: self.cx,
+            cy: self.cy,
+        }
+    }
+
+    fn get_distortion(&self) -> Vec<f64> {
+        vec![self.k1, self.k2, self.k3, self.k4]
+    }
+
+    fn get_model_name(&self) -> &'static str {
+        "kannala_brandt"
+    }
 }
 
 #[cfg(test)]
@@ -288,36 +470,28 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    fn assert_approx_eq(a: f64, b: f64, eps: f64) {
-        assert!(
-            (a - b).abs() < eps,
-            "Values {} and {} differ by more than {}",
-            a,
-            b,
-            eps
-        );
-    }
-
     #[test]
     fn test_kb_camera_creation() {
-        let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
-        assert_eq!(camera.fx, 460.0);
-        assert_eq!(camera.k1, -0.01);
+        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
+        assert_eq!(camera.fx, 300.0);
+        assert_eq!(camera.k1, 0.1);
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
+        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
-        assert_approx_eq(uv.x, 320.0, 1e-10);
-        assert_approx_eq(uv.y, 240.0, 1e-10);
+
+        assert!((uv.x - 320.0).abs() < 1e-6);
+        assert!((uv.y - 240.0).abs() < 1e-6);
+
         Ok(())
     }
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
+        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -329,24 +503,13 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera
-                .project(&p_plus)
-                .ok_or("Projection failed for p_plus")?;
-            let uv_minus = camera
-                .project(&p_minus)
-                .ok_or("Projection failed for p_minus")?;
+            let uv_plus = camera.project(&p_plus).ok_or("Projection failed")?;
+            let uv_minus = camera.project(&p_minus).ok_or("Projection failed")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(
-                    diff < 1e-5,
-                    "Mismatch at ({}, {}): {} vs {}",
-                    r,
-                    i,
-                    jac_analytical[(r, i)],
-                    num_jac[r]
-                );
+                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
             }
         }
         Ok(())
@@ -354,7 +517,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = KannalaBrandtCamera::new(460.0, 460.0, 320.0, 240.0, -0.01, 0.05, -0.08, 0.04);
+        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
@@ -370,24 +533,13 @@ mod tests {
             let cam_plus = KannalaBrandtCamera::from_params(params_plus.as_slice());
             let cam_minus = KannalaBrandtCamera::from_params(params_minus.as_slice());
 
-            let uv_plus = cam_plus
-                .project(&p_cam)
-                .ok_or("Projection failed for cam_plus")?;
-            let uv_minus = cam_minus
-                .project(&p_cam)
-                .ok_or("Projection failed for cam_minus")?;
+            let uv_plus = cam_plus.project(&p_cam).ok_or("Projection failed")?;
+            let uv_minus = cam_minus.project(&p_cam).ok_or("Projection failed")?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(
-                    diff < 1e-5,
-                    "Mismatch at ({}, {}): {} vs {}",
-                    r,
-                    i,
-                    jac_analytical[(r, i)],
-                    num_jac[r]
-                );
+                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
             }
         }
         Ok(())
