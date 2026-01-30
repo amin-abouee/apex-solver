@@ -22,7 +22,7 @@ apex-io = { path = "crates/apex-io", version = "0.1.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.1.0" }
 
 # External dependencies (shared versions)
-nalgebra = { version = "0.33", features = ["convert-glam029"] }
+nalgebra = { version = "0.33"}
 faer = { version = "0.22", features = ["sparse"] }
 rayon = "1.11"
 thiserror = "2.0.17"
