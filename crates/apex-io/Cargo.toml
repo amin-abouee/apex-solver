@@ -1,0 +1,38 @@
+[package]
+name = "apex-io"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "File I/O for pose graphs (G2O, TORO, BAL formats) with SE2/SE3 support"
+readme = "README.md"
+keywords = ["slam", "pose-graph", "g2o", "bundle-adjustment", "robotics"]
+categories = ["parsing", "data-structures"]
+
+[dependencies]
+apex-manifolds.workspace = true
+nalgebra.workspace = true
+memmap2.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+
+[dependencies.rerun]
+workspace = true
+optional = true
+
+[features]
+default = []
+visualization = ["dep:rerun"]
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
