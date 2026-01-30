@@ -52,7 +52,6 @@ pub use apex_manifolds::{
 pub mod core;
 pub mod error;
 pub mod factors;
-pub mod io_utils;
 pub mod linalg;
 pub mod logger;
 pub mod observers;
