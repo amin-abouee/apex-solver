@@ -75,19 +75,19 @@ fn get_datasets() -> Vec<DatasetConfig> {
     vec![
         DatasetConfig {
             name: "Ladybug".to_string(),
-            path: "data/bundle_adjustment/Ladybug/problem-1723-156502-pre.txt".to_string(),
+            path: "../../data/bundle_adjustment/Ladybug/problem-1723-156502-pre.txt".to_string(),
         },
         DatasetConfig {
             name: "Trafalgar".to_string(),
-            path: "data/bundle_adjustment/Trafalgar/problem-257-65132-pre.txt".to_string(),
+            path: "../../data/bundle_adjustment/Trafalgar/problem-257-65132-pre.txt".to_string(),
         },
         DatasetConfig {
             name: "Dubrovnik".to_string(),
-            path: "data/bundle_adjustment/Dubrovnik/problem-356-226730-pre.txt".to_string(),
+            path: "../../data/bundle_adjustment/Dubrovnik/problem-356-226730-pre.txt".to_string(),
         },
         DatasetConfig {
             name: "Venice".to_string(),
-            path: "data/bundle_adjustment/Venice/problem-1778-993923-pre.txt".to_string(),
+            path: "../../data/bundle_adjustment/Venice/problem-1778-993923-pre.txt".to_string(),
         },
     ]
 }
