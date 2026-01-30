@@ -275,6 +275,59 @@ impl CameraModel for BALPinholeCamera {
             k2: params[5],
         }
     }
+
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, super::CameraModelError> {
+        // Remove distortion and convert to ray
+        let x_d = (point_2d.x - self.cx) / self.fx;
+        let y_d = (point_2d.y - self.cy) / self.fy;
+
+        // Iterative undistortion (simple Newton's method)
+        let mut x_n = x_d;
+        let mut y_n = y_d;
+
+        for _ in 0..5 {
+            let r2 = x_n * x_n + y_n * y_n;
+            let distortion = 1.0 + self.k1 * r2 + self.k2 * r2 * r2;
+            x_n = x_d / distortion;
+            y_n = y_d / distortion;
+        }
+
+        // BAL convention: camera looks down -Z axis
+        let norm = (1.0 + x_n * x_n + y_n * y_n).sqrt();
+        Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
+    }
+
+    fn validate_params(&self) -> Result<(), super::CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(super::CameraModelError::FocalLengthMustBePositive);
+        }
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(super::CameraModelError::PrincipalPointMustBeFinite);
+        }
+        if !self.k1.is_finite() || !self.k2.is_finite() {
+            return Err(super::CameraModelError::InvalidParams(
+                "Distortion coefficients must be finite".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn get_intrinsics(&self) -> super::Intrinsics {
+        super::Intrinsics {
+            fx: self.fx,
+            fy: self.fy,
+            cx: self.cx,
+            cy: self.cy,
+        }
+    }
+
+    fn get_distortion(&self) -> Vec<f64> {
+        vec![self.k1, self.k2]
+    }
+
+    fn get_model_name(&self) -> &'static str {
+        "bal_pinhole"
+    }
 }
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
@@ -481,6 +534,57 @@ impl CameraModel for BALPinholeCameraStrict {
             k1: params[1],
             k2: params[2],
         }
+    }
+
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, super::CameraModelError> {
+        // Remove distortion and convert to ray
+        // Principal point is (0,0) for strict BAL
+        let x_d = point_2d.x / self.f;
+        let y_d = point_2d.y / self.f;
+
+        // Iterative undistortion
+        let mut x_n = x_d;
+        let mut y_n = y_d;
+
+        for _ in 0..5 {
+            let r2 = x_n * x_n + y_n * y_n;
+            let distortion = 1.0 + self.k1 * r2 + self.k2 * r2 * r2;
+            x_n = x_d / distortion;
+            y_n = y_d / distortion;
+        }
+
+        // BAL convention: camera looks down -Z axis
+        let norm = (1.0 + x_n * x_n + y_n * y_n).sqrt();
+        Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
+    }
+
+    fn validate_params(&self) -> Result<(), super::CameraModelError> {
+        if self.f <= 0.0 {
+            return Err(super::CameraModelError::FocalLengthMustBePositive);
+        }
+        if !self.k1.is_finite() || !self.k2.is_finite() {
+            return Err(super::CameraModelError::InvalidParams(
+                "Distortion coefficients must be finite".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn get_intrinsics(&self) -> super::Intrinsics {
+        super::Intrinsics {
+            fx: self.f,
+            fy: self.f,
+            cx: 0.0,
+            cy: 0.0,
+        }
+    }
+
+    fn get_distortion(&self) -> Vec<f64> {
+        vec![self.k1, self.k2]
+    }
+
+    fn get_model_name(&self) -> &'static str {
+        "bal_pinhole_strict"
     }
 }
 
