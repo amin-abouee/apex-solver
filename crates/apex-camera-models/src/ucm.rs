@@ -1,37 +1,60 @@
-//! Unified Camera Model (UCM).
+//! Unified Camera Model (UCM)
+//!
+//! A generic camera model for catadioptric and fisheye cameras using
+//! a single parameter α for projection onto a unit sphere.
+//!
+//! # Mathematical Model
+//!
+//! ## Projection (3D → 2D)
+//!
+//! For a 3D point p = (x, y, z) in camera coordinates:
+//!
+//! ```text
+//! d = √(x² + y² + z²)
+//! denom = α·d + (1-α)·z
+//! u = fx · (x/denom) + cx
+//! v = fy · (y/denom) + cy
+//! ```
+//!
+//! where α is the projection parameter (typically α ∈ [0, 1]).
+//!
+//! ## Unprojection (2D → 3D)
+//!
+//! Algebraic solution using the UCM inverse equations.
+//!
+//! # Parameters
+//!
+//! - **Intrinsics**: fx, fy, cx, cy
+//! - **Distortion**: α (projection parameter) (5 parameters total)
+//!
+//! # Use Cases
+//!
+//! - Catadioptric systems (mirror-based omnidirectional cameras)
+//! - Fisheye lenses
+//! - Wide-angle cameras
+//!
+//! # References
+//!
+//! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
 
-use super::{CameraModel, skew_symmetric};
+use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 const PRECISION: f64 = 1e-3;
 
-/// Unified Camera Model (UCM).
-///
-/// This model projects points onto a unit sphere and then to the image plane.
-///
-/// # Parameters
-///
-/// - `fx`, `fy`: Focal lengths in pixels
-/// - `cx`, `cy`: Principal point coordinates in pixels
-/// - `alpha`: Projection parameter (0 <= alpha <= 1)
+/// Unified Camera Model with 5 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UcmCamera {
-    /// Focal length in x direction (pixels)
     pub fx: f64,
-    /// Focal length in y direction (pixels)
     pub fy: f64,
-    /// Principal point x coordinate (pixels)
     pub cx: f64,
-    /// Principal point y coordinate (pixels)
     pub cy: f64,
-    /// Projection parameter
     pub alpha: f64,
 }
 
 impl UcmCamera {
-    /// Create a new UCM camera.
     pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, alpha: f64) -> Self {
         Self {
             fx,
@@ -48,6 +71,25 @@ impl CameraModel for UcmCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 5>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
+    /// Projects a 3D point to 2D image coordinates.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// d = √(x² + y² + z²)
+    /// denom = α·d + (1-α)·z
+    /// u = fx · (x/denom) + cx
+    /// v = fy · (y/denom) + cy
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame
+    ///
+    /// # Returns
+    ///
+    /// - `Some(uv)` - 2D image coordinates if valid
+    /// - `None` - If denom < PRECISION or projection condition fails
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -74,6 +116,58 @@ impl CameraModel for UcmCamera {
         ))
     }
 
+    /// Unprojects a 2D image point to a 3D ray.
+    ///
+    /// # Algorithm
+    ///
+    /// Algebraic solution for UCM inverse projection.
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - 2D point in image coordinates
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(ray)` - Normalized 3D ray direction
+    /// - `Err` - If unprojection condition fails
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+        let u = point_2d.x;
+        let v = point_2d.y;
+        let gamma = 1.0 - self.alpha;
+        let xi = self.alpha / gamma;
+        let mx = (u - self.cx) / self.fx * gamma;
+        let my = (v - self.cy) / self.fy * gamma;
+
+        let r_squared = mx * mx + my * my;
+
+        // Check unprojection condition
+        if self.alpha > 0.5 {
+            let gamma_sq = gamma * gamma;
+            if r_squared > gamma_sq / (2.0 * self.alpha - 1.0) {
+                return Err(CameraModelError::PointIsOutSideImage);
+            }
+        }
+
+        let num = xi + (1.0 + (1.0 - xi * xi) * r_squared).sqrt();
+        let denom = 1.0 - r_squared;
+
+        if denom < PRECISION {
+            return Err(CameraModelError::PointIsOutSideImage);
+        }
+
+        let coeff = num / denom;
+
+        let point3d = Vector3::new(coeff * mx, coeff * my, coeff) - Vector3::new(0.0, 0.0, xi);
+
+        Ok(point3d.normalize())
+    }
+
+    /// Checks if a 3D point can be validly projected.
+    ///
+    /// # Validity Conditions
+    ///
+    /// - denom = α·d + (1-α)·z must be ≥ PRECISION
+    /// - Projection condition: z > -w·d where w depends on α
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -92,6 +186,7 @@ impl CameraModel for UcmCamera {
         denom >= PRECISION && check_projection
     }
 
+    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -101,9 +196,9 @@ impl CameraModel for UcmCamera {
 
         // Denominator D = alpha * rho + (1 - alpha) * z
         // Partial derivatives of D:
-        // dD/dx = alpha * x / rho
-        // dD/dy = alpha * y / rho
-        // dD/dz = alpha * z / rho + (1 - alpha)
+        // ∂D/∂x = alpha * x / rho
+        // ∂D/∂y = alpha * y / rho
+        // ∂D/∂z = alpha * z / rho + (1 - alpha)
 
         let d_denom_dx = self.alpha * x / rho;
         let d_denom_dy = self.alpha * y / rho;
@@ -114,13 +209,13 @@ impl CameraModel for UcmCamera {
         // u = fx * x / denom + cx
         // v = fy * y / denom + cy
 
-        // du/dx = fx * (denom - x * dD/dx) / denom^2
-        // du/dy = fx * (-x * dD/dy) / denom^2
-        // du/dz = fx * (-x * dD/dz) / denom^2
+        // ∂u/∂x = fx * (denom - x * ∂D/∂x) / denom²
+        // ∂u/∂y = fx * (-x * ∂D/∂y) / denom²
+        // ∂u/∂z = fx * (-x * ∂D/∂z) / denom²
 
-        // dv/dx = fy * (-y * dD/dx) / denom^2
-        // dv/dy = fy * (denom - y * dD/dy) / denom^2
-        // dv/dz = fy * (-y * dD/dz) / denom^2
+        // ∂v/∂x = fy * (-y * ∂D/∂x) / denom²
+        // ∂v/∂y = fy * (denom - y * ∂D/∂y) / denom²
+        // ∂v/∂z = fy * (-y * ∂D/∂z) / denom²
 
         let denom2 = denom * denom;
 
@@ -137,6 +232,7 @@ impl CameraModel for UcmCamera {
         jac
     }
 
+    /// Jacobian of projection w.r.t. camera pose (SE3).
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -161,6 +257,7 @@ impl CameraModel for UcmCamera {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
+    /// Jacobian of projection w.r.t. intrinsic parameters (2×5).
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -192,7 +289,7 @@ impl CameraModel for UcmCamera {
         // ∂denom/∂alpha = rho - z
         let d_denom_d_alpha = rho - z;
 
-        // ∂u/∂alpha = -fx * x / denom^2 * (rho - z) = -u_cx * (rho - z) / denom
+        // ∂u/∂alpha = -fx * x / denom² * (rho - z) = -u_cx * (rho - z) / denom
         jac[(0, 4)] = -u_cx * d_denom_d_alpha / denom;
         jac[(1, 4)] = -v_cy * d_denom_d_alpha / denom;
 
@@ -216,6 +313,48 @@ impl CameraModel for UcmCamera {
             alpha: params[4],
         }
     }
+
+    /// Validates camera parameters.
+    ///
+    /// # Validation Rules
+    ///
+    /// - fx, fy must be positive (> 0)
+    /// - cx, cy must be finite
+    /// - α must be finite
+    fn validate_params(&self) -> Result<(), CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
+        }
+
+        if !self.alpha.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "alpha must be finite".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn get_intrinsics(&self) -> Intrinsics {
+        Intrinsics {
+            fx: self.fx,
+            fy: self.fy,
+            cx: self.cx,
+            cy: self.cy,
+        }
+    }
+
+    fn get_distortion(&self) -> Vec<f64> {
+        vec![self.alpha]
+    }
+
+    fn get_model_name(&self) -> &'static str {
+        "ucm"
+    }
 }
 
 #[cfg(test)]
@@ -223,16 +362,6 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
-
-    fn assert_approx_eq(a: f64, b: f64, eps: f64) {
-        assert!(
-            (a - b).abs() < eps,
-            "Values {} and {} differ by more than {}",
-            a,
-            b,
-            eps
-        );
-    }
 
     #[test]
     fn test_ucm_camera_creation() {
@@ -246,8 +375,8 @@ mod tests {
         let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5);
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
-        assert_approx_eq(uv.x, 320.0, 1e-10);
-        assert_approx_eq(uv.y, 240.0, 1e-10);
+        assert!((uv.x - 320.0).abs() < 1e-10);
+        assert!((uv.y - 240.0).abs() < 1e-10);
         Ok(())
     }
 
