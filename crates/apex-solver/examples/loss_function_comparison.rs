@@ -725,9 +725,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Benchmark SE3 datasets (all available 3D pose graphs)
     let se3_datasets = vec![
-        ("data/sphere2500.g2o", "sphere2500"),
-        ("data/parking-garage.g2o", "parking-garage"),
-        ("data/torus3D.g2o", "torus3D"),
+        ("data/odometry/sphere2500.g2o", "sphere2500"),
+        ("data/odometry/parking-garage.g2o", "parking-garage"),
+        ("data/odometry/torus3D.g2o", "torus3D"),
     ];
 
     for (path, name) in &se3_datasets {
@@ -743,13 +743,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Benchmark SE2 datasets (all available 2D pose graphs)
     let se2_datasets = vec![
-        ("data/intel.g2o", "intel"),
-        ("data/mit.g2o", "mit"),
-        ("data/M3500.g2o", "M3500"),
-        ("data/manhattanOlson3500.g2o", "manhattan"),
-        ("data/city10000.g2o", "city10000"),
-        ("data/ring.g2o", "ring"),
-        ("data/ringCity.g2o", "ringCity"),
+        ("data/odometry/intel.g2o", "intel"),
+        ("data/odometry/mit.g2o", "mit"),
+        ("data/odometry/M3500.g2o", "M3500"),
+        ("data/odometry/manhattanOlson3500.g2o", "manhattan"),
+        ("data/odometry/city10000.g2o", "city10000"),
+        ("data/odometry/ring.g2o", "ring"),
+        ("data/odometry/ringCity.g2o", "ringCity"),
     ];
 
     for (path, name) in &se2_datasets {

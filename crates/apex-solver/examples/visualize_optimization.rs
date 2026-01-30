@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Construct dataset path
-    let dataset_path = format!("data/{}.g2o", args.dataset);
+    let dataset_path = format!("data/odometry/{}.g2o", args.dataset);
     info!("Loading dataset: {}", dataset_path);
 
     // Load graph from G2O file

@@ -23,7 +23,7 @@ use tracing::info;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the graph file to visualize
-    #[arg(short = 'f', long, default_value = "data/parking-garage.g2o")]
+    #[arg(short = 'f', long, default_value = "data/odometry/parking-garage.g2o")]
     file_path: PathBuf,
 
     /// Scale factor for visualization
