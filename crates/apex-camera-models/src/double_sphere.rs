@@ -59,15 +59,46 @@ pub struct DoubleSphereCamera {
 }
 
 impl DoubleSphereCamera {
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, xi: f64, alpha: f64) -> Self {
-        Self {
+    pub fn new(
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        xi: f64,
+        alpha: f64,
+    ) -> Result<Self, CameraModelError> {
+        let model = Self {
             fx,
             fy,
             cx,
             cy,
             xi,
             alpha,
+        };
+        // Use validate_params to ensure consistency
+        model.validate_params()?;
+        Ok(model)
+    }
+
+    /// Checks the geometric condition for a valid projection.
+    fn check_projection_condition(&self, z: f64, d1: f64) -> bool {
+        let w1 = if self.alpha > 0.5 {
+            (1.0 - self.alpha) / self.alpha
+        } else {
+            self.alpha / (1.0 - self.alpha)
+        };
+        let w2 = (w1 + self.xi) / (2.0 * w1 * self.xi + self.xi * self.xi + 1.0).sqrt();
+        z > -w2 * d1
+    }
+
+    /// Checks the geometric condition for a valid unprojection.
+    fn check_unprojection_condition(&self, r_squared: f64) -> bool {
+        if self.alpha > 0.5 {
+            if r_squared > 1.0 / (2.0 * self.alpha - 1.0) {
+                return false;
+            }
         }
+        true
     }
 }
 
@@ -104,24 +135,12 @@ impl CameraModel for DoubleSphereCamera {
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
-        if d1 < PRECISION {
+        // Check projection condition using the helper
+        if !self.check_projection_condition(z, d1) {
             return None;
         }
 
         let xi_d1_z = self.xi * d1 + z;
-
-        // Check projection condition
-        let w1 = if self.alpha > 0.5 {
-            (1.0 - self.alpha) / self.alpha
-        } else {
-            self.alpha / (1.0 - self.alpha)
-        };
-        let w2 = (w1 + self.xi) / (2.0 * w1 * self.xi).sqrt();
-
-        if z <= -w2 * d1 {
-            return None;
-        }
-
         let d2 = (r2 + xi_d1_z * xi_d1_z).sqrt();
         let denom = self.alpha * d2 + (1.0 - self.alpha) * xi_d1_z;
 
@@ -155,39 +174,31 @@ impl CameraModel for DoubleSphereCamera {
 
         let mx = (u - self.cx) / self.fx;
         let my = (v - self.cy) / self.fy;
-
         let r2 = mx * mx + my * my;
 
-        let xi2_1 = self.xi * self.xi + 1.0;
-        let de = 2.0 * self.alpha - 1.0;
-
-        // Check unprojection condition
-        if de.abs() > PRECISION {
-            let k = r2 / de + 1.0;
-            if k < 0.0 {
-                return Err(CameraModelError::PointIsOutSideImage);
-            }
-        }
-
-        let mz_2 = (1.0 - (2.0 * self.alpha - 1.0) * r2)
-            / (self.alpha * self.alpha * r2 + (1.0 - self.alpha) * (1.0 - self.alpha));
-
-        if mz_2 < 0.0 {
+        if !self.check_unprojection_condition(r2) {
             return Err(CameraModelError::PointIsOutSideImage);
         }
 
-        let mz = mz_2.sqrt();
-        let k_value = (mz * mz * xi2_1 + r2) / (mz * mz + r2);
+        let xi = self.xi;
+        let alpha = self.alpha;
 
-        if k_value < 0.0 {
+        let mz_num = 1.0 - alpha * alpha * r2;
+        let mz_denom = alpha * (1.0 - (2.0 * alpha - 1.0) * r2).sqrt() + (1.0 - alpha);
+        let mz = mz_num / mz_denom;
+
+        let mz2 = mz * mz;
+
+        let num_term = mz * xi + (mz2 + (1.0 - xi * xi) * r2).sqrt();
+        let denom_term = mz2 + r2;
+
+        if denom_term < PRECISION {
             return Err(CameraModelError::PointIsOutSideImage);
         }
 
-        let k = k_value.sqrt();
-        let mz_k = mz * k;
+        let k = num_term / denom_term;
 
-        let point3d = Vector3::new(mx * k, my * k, mz_k - self.xi);
-
+        let point3d = Vector3::new(k * mx, k * my, k * mz - xi);
         Ok(point3d.normalize())
     }
 
@@ -417,16 +428,18 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_double_sphere_camera_creation() {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6);
+    fn test_double_sphere_camera_creation() -> TestResult {
+        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.xi, -0.2);
         assert_eq!(camera.alpha, 0.6);
+
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6);
+        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
@@ -438,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6);
+        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -464,7 +477,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6);
+        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
