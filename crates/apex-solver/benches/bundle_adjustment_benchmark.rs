@@ -286,7 +286,8 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     );
     for obs in &dataset.observations {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2);
+        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2)
+            .expect("Invalid camera parameters in dataset");
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);

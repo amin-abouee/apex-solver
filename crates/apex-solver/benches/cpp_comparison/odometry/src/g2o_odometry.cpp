@@ -242,16 +242,16 @@ int main(int argc, char** argv) {
     std::vector<benchmark_utils::BenchmarkResult> results;
 
     // SE3 datasets
-    results.push_back(BenchmarkSE3("sphere2500", "../../../data/odometry/sphere2500.g2o"));
-    results.push_back(BenchmarkSE3("parking-garage", "../../../data/odometry/parking-garage.g2o"));
-    results.push_back(BenchmarkSE3("torus3D", "../../../data/odometry/torus3D.g2o"));
-    results.push_back(BenchmarkSE3("cubicle", "../../../data/odometry/cubicle.g2o"));
+    results.push_back(BenchmarkSE3("sphere2500", "../../../../../data/odometry/sphere2500.g2o"));
+    results.push_back(BenchmarkSE3("parking-garage", "../../../../../data/odometry/parking-garage.g2o"));
+    results.push_back(BenchmarkSE3("torus3D", "../../../../../data/odometry/torus3D.g2o"));
+    results.push_back(BenchmarkSE3("cubicle", "../../../../../data/odometry/cubicle.g2o"));
 
     // SE2 datasets
-    results.push_back(BenchmarkSE2("city10000", "../../../data/odometry/city10000.g2o"));
-    results.push_back(BenchmarkSE2("mit", "../../../data/odometry/mit.g2o"));
-    results.push_back(BenchmarkSE2("ring", "../../../data/odometry/ring.g2o"));
-    results.push_back(BenchmarkSE2("M3500", "../../../data/odometry/M3500.g2o"));
+    results.push_back(BenchmarkSE2("city10000", "../../../../../data/odometry/city10000.g2o"));
+    results.push_back(BenchmarkSE2("mit", "../../../../../data/odometry/mit.g2o"));
+    results.push_back(BenchmarkSE2("ring", "../../../../../data/odometry/ring.g2o"));
+    results.push_back(BenchmarkSE2("M3500", "../../../../../data/odometry/M3500.g2o"));
 
     // Write to CSV
     std::string output_file = "g2o_odometry_benchmark_results.csv";
