@@ -44,7 +44,7 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     let true_camera = PinholeCamera::new(
         200.0, 200.0, // fx, fy
         300.0, 200.0, // cx, cy (center of 600x400)
-    );
+    )?;
 
     // Image bounds for projection validation
     let img_width = 600.0;
@@ -303,7 +303,7 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
     let true_camera = PinholeCamera::new(
         200.0, 200.0, // fx, fy
         300.0, 200.0, // cx, cy
-    );
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;

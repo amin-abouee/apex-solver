@@ -58,9 +58,15 @@ pub struct PinholeCamera {
 }
 
 impl PinholeCamera {
-    #[must_use]
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Self {
-        Self { fx, fy, cx, cy }
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
+        let camera = Self { fx, fy, cx, cy };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks the geometric condition for a valid projection.
+    pub fn check_projection_condition(&self, z: f64) -> bool {
+        z >= 1e-6
     }
 }
 
@@ -87,8 +93,7 @@ impl CameraModel for PinholeCamera {
     /// - `Some(uv)` - 2D image coordinates if z > MIN_DEPTH
     /// - `None` - If point is behind or at camera (z ≤ MIN_DEPTH)
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
-        const MIN_DEPTH: f64 = 1e-6;
-        if p_cam.z < MIN_DEPTH {
+        if !self.check_projection_condition(p_cam.z) {
             return None;
         }
         let inv_z = 1.0 / p_cam.z;
@@ -141,8 +146,7 @@ impl CameraModel for PinholeCamera {
     ///
     /// - z ≥ MIN_DEPTH (point in front of camera)
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        const MIN_DEPTH: f64 = 1e-6;
-        p_cam.z >= MIN_DEPTH
+        self.check_projection_condition(p_cam.z)
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -297,12 +301,13 @@ mod tests {
     }
 
     #[test]
-    fn test_pinhole_camera_creation() {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    fn test_pinhole_camera_creation() -> TestResult {
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         assert_eq!(camera.fx, 500.0);
         assert_eq!(camera.fy, 500.0);
         assert_eq!(camera.cx, 320.0);
         assert_eq!(camera.cy, 240.0);
+        Ok(())
     }
 
     #[test]
@@ -315,7 +320,7 @@ mod tests {
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
@@ -328,7 +333,7 @@ mod tests {
 
     #[test]
     fn test_projection_off_axis() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
@@ -340,18 +345,19 @@ mod tests {
     }
 
     #[test]
-    fn test_projection_behind_camera() {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    fn test_projection_behind_camera() -> TestResult {
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.0, 0.0, -1.0);
 
         let result = camera.project(&p_cam);
         assert!(result.is_none());
         assert!(!camera.is_valid_point(&p_cam));
+        Ok(())
     }
 
     #[test]
     fn test_jacobian_point_dimensions() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac = camera.jacobian_point(&p_cam);
@@ -363,19 +369,20 @@ mod tests {
     }
 
     #[test]
-    fn test_jacobian_intrinsics_dimensions() {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    fn test_jacobian_intrinsics_dimensions() -> TestResult {
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac = camera.jacobian_intrinsics(&p_cam);
 
         assert_eq!(jac.nrows(), 2);
         assert_eq!(jac.ncols(), 4);
+        Ok(())
     }
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -413,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
@@ -456,7 +463,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_pose() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 
