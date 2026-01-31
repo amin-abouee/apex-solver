@@ -46,7 +46,7 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy (center of 600x400)
         0.6, 1.2, // alpha, beta
-    );
+    )?;
 
     // Image bounds for projection validation
     let img_width = 600.0;
@@ -346,7 +346,7 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy
         0.6, 1.2, // alpha, beta
-    );
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;

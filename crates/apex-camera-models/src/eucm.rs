@@ -59,15 +59,44 @@ pub struct EucmCamera {
 }
 
 impl EucmCamera {
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, alpha: f64, beta: f64) -> Self {
-        Self {
+    pub fn new(
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        alpha: f64,
+        beta: f64,
+    ) -> Result<Self, CameraModelError> {
+        let camera = Self {
             fx,
             fy,
             cx,
             cy,
             alpha,
             beta,
+        };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks the geometric condition for a valid projection.
+    pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
+        let mut condition = true;
+        if self.alpha > 0.5 {
+            let c = (self.alpha - 1.0) / (2.0 * self.alpha - 1.0);
+            if z < denom * c {
+                condition = false;
+            }
         }
+        condition
+    }
+
+    fn check_unprojection_condition(&self, r_squared: f64) -> bool {
+        let mut condition = true;
+        if self.alpha > 0.5 && r_squared > (1.0 / self.beta * (2.0 * self.alpha - 1.0)) {
+            condition = false;
+        }
+        condition
     }
 }
 
@@ -104,7 +133,7 @@ impl CameraModel for EucmCamera {
         let d = (self.beta * r2 + z * z).sqrt();
         let denom = self.alpha * d + (1.0 - self.alpha) * z;
 
-        if denom < PRECISION {
+        if denom < PRECISION || !self.check_projection_condition(z, denom) {
             return None;
         }
 
@@ -142,7 +171,7 @@ impl CameraModel for EucmCamera {
         let gamma_sq = gamma * gamma;
 
         let discriminant = beta_r2 * gamma_sq + gamma_sq;
-        if discriminant < 0.0 {
+        if discriminant < 0.0 || !self.check_unprojection_condition(r2) {
             return Err(CameraModelError::PointIsOutSideImage);
         }
 
@@ -175,7 +204,7 @@ impl CameraModel for EucmCamera {
         let d = (self.beta * r2 + z * z).sqrt();
         let denom = self.alpha * d + (1.0 - self.alpha) * z;
 
-        denom >= PRECISION
+        denom >= PRECISION && self.check_projection_condition(z, denom)
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -348,16 +377,17 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_eucm_camera_creation() {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0);
+    fn test_eucm_camera_creation() -> TestResult {
+        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.alpha, 0.5);
         assert_eq!(camera.beta, 1.0);
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0);
+        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
@@ -369,7 +399,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2);
+        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -395,7 +425,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2);
+        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
