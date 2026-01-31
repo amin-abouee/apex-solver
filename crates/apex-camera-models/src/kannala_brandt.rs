@@ -62,7 +62,7 @@ pub struct KannalaBrandtCamera {
 }
 
 impl KannalaBrandtCamera {
-    pub const fn new(
+    pub fn new(
         fx: f64,
         fy: f64,
         cx: f64,
@@ -71,8 +71,8 @@ impl KannalaBrandtCamera {
         k2: f64,
         k3: f64,
         k4: f64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, CameraModelError> {
+        let model = Self {
             fx,
             fy,
             cx,
@@ -81,7 +81,14 @@ impl KannalaBrandtCamera {
             k2,
             k3,
             k4,
-        }
+        };
+        model.validate_params()?;
+        Ok(model)
+    }
+
+    /// Checks the geometric condition for a valid projection.
+    fn check_projection_condition(&self, z: f64) -> bool {
+        z > f64::EPSILON
     }
 }
 
@@ -115,7 +122,13 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let r = (x * x + y * y).sqrt();
+        // Check if point is valid for projection (in front of camera)
+        if !self.check_projection_condition(z) {
+            return None;
+        }
+
+        let r2 = x * x + y * y;
+        let r = r2.sqrt();
         let theta = r.atan2(z);
 
         // Polynomial distortion: d(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
@@ -129,8 +142,17 @@ impl CameraModel for KannalaBrandtCamera {
             theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
 
         if r < PRECISION {
-            // Point on optical axis
-            return Some(Vector2::new(self.cx, self.cy));
+            // Point near optical axis: x/r and y/r are unstable.
+            // Limit approaches (fx * (theta_d/r) * x + cx)
+            // theta ~ r/z (for small theta), theta_d ~ theta (for small theta)
+            // theta_d/r ~ 1/z.
+            // u = fx * x/z + cx, v = fy * y/z + cy.
+            // Effectively pinhole close to center.
+            let inv_z = 1.0 / z;
+            return Some(Vector2::new(
+                self.fx * x * inv_z + self.cx,
+                self.fy * y * inv_z + self.cy,
+            ));
         }
 
         let inv_r = 1.0 / r;
@@ -163,37 +185,39 @@ impl CameraModel for KannalaBrandtCamera {
         let mx = (u - self.cx) / self.fx;
         let my = (v - self.cy) / self.fy;
 
-        let theta_d = (mx * mx + my * my).sqrt();
+        let mut ru = (mx * mx + my * my).sqrt();
 
-        if theta_d < PRECISION {
+        // Clamp ru to avoid instability if extremely large (from C++ impl: min(ru, PI/2))
+        ru = ru.min(std::f64::consts::PI / 2.0);
+
+        if ru < PRECISION {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
         }
 
-        // Newton-Raphson iteration to solve: f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d = 0
-        let mut theta = theta_d;
+        // Newton-Raphson
+        let mut theta = ru; // Initial guess
         const MAX_ITER: usize = 10;
         const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 
         for _ in 0..MAX_ITER {
             let theta2 = theta * theta;
-            let theta3 = theta2 * theta;
-            let theta5 = theta3 * theta2;
-            let theta7 = theta5 * theta2;
-            let theta9 = theta7 * theta2;
+            let theta4 = theta2 * theta2;
+            let theta6 = theta4 * theta2;
+            let theta8 = theta4 * theta4;
 
-            // f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d
-            let f =
-                theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9
-                    - theta_d;
+            let k1_theta2 = self.k1 * theta2;
+            let k2_theta4 = self.k2 * theta4;
+            let k3_theta6 = self.k3 * theta6;
+            let k4_theta8 = self.k4 * theta8;
 
-            // f'(θ) = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
-            let f_prime = 1.0
-                + 3.0 * self.k1 * theta2
-                + 5.0 * self.k2 * theta2 * theta2
-                + 7.0 * self.k3 * theta2 * theta2 * theta2
-                + 9.0 * self.k4 * theta2 * theta2 * theta2 * theta2;
+            // f(θ)
+            let f = theta * (1.0 + k1_theta2 + k2_theta4 + k3_theta6 + k4_theta8) - ru;
 
-            if f_prime.abs() < PRECISION {
+            // f'(θ)
+            let f_prime =
+                1.0 + 3.0 * k1_theta2 + 5.0 * k2_theta4 + 7.0 * k3_theta6 + 9.0 * k4_theta8;
+
+            if f_prime.abs() < f64::EPSILON {
                 return Err(CameraModelError::NumericalError(
                     "Derivative too small in KB unprojection".to_string(),
                 ));
@@ -211,13 +235,13 @@ impl CameraModel for KannalaBrandtCamera {
         let sin_theta = theta.sin();
         let cos_theta = theta.cos();
 
-        let norm = (mx * mx + my * my).sqrt();
-        if norm < PRECISION {
-            return Ok(Vector3::new(0.0, 0.0, 1.0));
-        }
-
-        let x = sin_theta * mx / norm;
-        let y = sin_theta * my / norm;
+        // Direction in xy plane
+        // if ru is small we returned already.
+        // x = mx * sin(theta) / ru
+        // y = my * sin(theta) / ru
+        let scale = sin_theta / ru;
+        let x = mx * scale;
+        let y = my * scale;
         let z = cos_theta;
 
         Ok(Vector3::new(x, y, z).normalize())
@@ -471,15 +495,18 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_kb_camera_creation() {
-        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
+    fn test_kb_camera_creation() -> TestResult {
+        let camera =
+            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.k1, 0.1);
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
+        let camera =
+            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
@@ -491,7 +518,8 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
+        let camera =
+            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -517,7 +545,8 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001);
+        let camera =
+            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);

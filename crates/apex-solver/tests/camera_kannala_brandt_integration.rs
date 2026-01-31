@@ -49,7 +49,7 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy (center of 600x400)
         0.5, 0.1, 0.0, 0.0, // k1, k2, k3=0, k4=0
-    );
+    )?;
 
     // Image bounds for projection validation
     let img_width = 600.0;
@@ -377,7 +377,7 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
         200.0, 200.0, // fx, fy (wide FOV)
         300.0, 200.0, // cx, cy
         0.5, 0.1, 0.0, 0.0, // k1, k2, k3=0, k4=0
-    );
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
