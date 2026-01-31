@@ -41,7 +41,8 @@
 //! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
 
 use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution,
+    skew_symmetric,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -54,18 +55,40 @@ pub struct DoubleSphereCamera {
 }
 
 impl DoubleSphereCamera {
+    /// Creates a new Double Sphere camera model.
+    ///
+    /// # Arguments
+    ///
+    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy)
+    /// * `distortion` - Distortion model (must be DistortionModel::DoubleSphere)
+    /// * `resolution` - Image resolution (width, height)
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(DoubleSphereCamera)` - Successfully created camera
+    /// - `Err(CameraModelError)` - Invalid parameters or wrong distortion model
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{DoubleSphereCamera, PinholeParams, DistortionModel, Resolution};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::DoubleSphere { xi: -0.2, alpha: 0.6 };
+    /// let resolution = Resolution { width: 640, height: 480 };
+    /// let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
-        fx: f64,
-        fy: f64,
-        cx: f64,
-        cy: f64,
-        xi: f64,
-        alpha: f64,
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
         let model = Self {
             camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::DoubleSphere { xi, alpha },
+                pinhole,
+                distortion,
+                resolution,
             },
         };
         // Use validate_params to ensure consistency
@@ -74,32 +97,142 @@ impl DoubleSphereCamera {
     }
 
     /// Helper method to extract distortion parameters.
-    fn distortion_params(&self) -> (f64, f64) {
+    ///
+    /// # Returns
+    ///
+    /// - `Ok((xi, alpha))` - Double Sphere distortion parameters
+    /// - `Err(CameraModelError::InvalidParams)` - If distortion model is not DoubleSphere
+    fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
         match self.camera.distortion {
-            DistortionModel::DoubleSphere { xi, alpha } => (xi, alpha),
-            _ => panic!("Invalid distortion model for DoubleSphereCamera"),
+            DistortionModel::DoubleSphere { xi, alpha} => Ok((xi, alpha)),
+            _ => Err(CameraModelError::InvalidParams(
+                "Invalid distortion model for DoubleSphere camera - expected DistortionModel::DoubleSphere".to_string()
+            )),
         }
     }
 
     /// Checks the geometric condition for a valid projection.
-    fn check_projection_condition(&self, z: f64, d1: f64) -> bool {
-        let (xi, alpha) = self.distortion_params();
+    fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
+        let (xi, alpha) = self.distortion_params()?;
         let w1 = if alpha > 0.5 {
             (1.0 - alpha) / alpha
         } else {
             alpha / (1.0 - alpha)
         };
         let w2 = (w1 + xi) / (2.0 * w1 * xi + xi * xi + 1.0).sqrt();
-        z > -w2 * d1
+        Ok(z > -w2 * d1)
     }
 
     /// Checks the geometric condition for a valid unprojection.
-    fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let (_, alpha) = self.distortion_params();
+    fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
+        let (_, alpha) = self.distortion_params()?;
         if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
-            return false;
+            return Ok(false);
         }
-        true
+        Ok(true)
+    }
+}
+
+/// Convert DoubleSphereCamera to parameter vector.
+///
+/// Returns intrinsic parameters in the order: [fx, fy, cx, cy, xi, alpha]
+impl From<&DoubleSphereCamera> for DVector<f64> {
+    fn from(camera: &DoubleSphereCamera) -> Self {
+        let (xi, alpha) = camera
+            .distortion_params()
+            .expect("Invalid distortion model");
+        DVector::from_vec(vec![
+            camera.camera.pinhole.fx,
+            camera.camera.pinhole.fy,
+            camera.camera.pinhole.cx,
+            camera.camera.pinhole.cy,
+            xi,
+            alpha,
+        ])
+    }
+}
+
+/// Convert DoubleSphereCamera to fixed-size parameter array.
+///
+/// Returns intrinsic parameters as [fx, fy, cx, cy, xi, alpha]
+impl From<&DoubleSphereCamera> for [f64; 6] {
+    fn from(camera: &DoubleSphereCamera) -> Self {
+        let (xi, alpha) = camera
+            .distortion_params()
+            .expect("Invalid distortion model");
+        [
+            camera.camera.pinhole.fx,
+            camera.camera.pinhole.fy,
+            camera.camera.pinhole.cx,
+            camera.camera.pinhole.cy,
+            xi,
+            alpha,
+        ]
+    }
+}
+
+/// Create DoubleSphereCamera from parameter slice.
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 6 elements.
+///
+/// # Parameter Order
+///
+/// params = [fx, fy, cx, cy, xi, alpha]
+impl From<&[f64]> for DoubleSphereCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 6,
+            "DoubleSphereCamera requires at least 6 parameters, got {}",
+            params.len()
+        );
+        Self {
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::DoubleSphere {
+                    xi: params[4],
+                    alpha: params[5],
+                },
+                resolution: Resolution {
+                    width: 0,
+                    height: 0,
+                },
+            },
+        }
+    }
+}
+
+/// Create DoubleSphereCamera from fixed-size parameter array.
+///
+/// # Parameter Order
+///
+/// params = [fx, fy, cx, cy, xi, alpha]
+impl From<[f64; 6]> for DoubleSphereCamera {
+    fn from(params: [f64; 6]) -> Self {
+        Self {
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::DoubleSphere {
+                    xi: params[4],
+                    alpha: params[5],
+                },
+                resolution: Resolution {
+                    width: 0,
+                    height: 0,
+                },
+            },
+        }
     }
 }
 
@@ -126,20 +259,21 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates if valid
-    /// - `None` - If projection condition fails
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+    /// - `Ok(uv)` - 2D image coordinates if valid
+    /// - `Err(CameraModelError::ProjectionOutSideImage)` - If geometric projection condition fails
+    /// - `Err(CameraModelError::PointAtCameraCenter)` - If denominator is too small (point at camera center)
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = self.distortion_params()?;
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
         // Check projection condition using the helper
-        if !self.check_projection_condition(z, d1) {
-            return None;
+        if !self.check_projection_condition(z, d1)? {
+            return Err(CameraModelError::ProjectionOutSideImage);
         }
 
         let xi_d1_z = xi * d1 + z;
@@ -147,10 +281,10 @@ impl CameraModel for DoubleSphereCamera {
         let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
 
         if denom < crate::GEOMETRIC_PRECISION {
-            return None;
+            return Err(CameraModelError::PointAtCameraCenter);
         }
 
-        Some(Vector2::new(
+        Ok(Vector2::new(
             self.camera.pinhole.fx * x / denom + self.camera.pinhole.cx,
             self.camera.pinhole.fy * y / denom + self.camera.pinhole.cy,
         ))
@@ -174,12 +308,12 @@ impl CameraModel for DoubleSphereCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = self.distortion_params()?;
         let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
         let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
         let r2 = mx * mx + my * my;
 
-        if !self.check_unprojection_condition(r2) {
+        if !self.check_unprojection_condition(r2)? {
             return Err(CameraModelError::PointIsOutSideImage);
         }
 
@@ -214,7 +348,10 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = match self.distortion_params() {
+            Ok(params) => params,
+            Err(_) => return false,
+        };
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
@@ -242,15 +379,90 @@ impl CameraModel for DoubleSphereCamera {
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
-    /// # Mathematical Derivatives
+    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
     ///
-    /// Complex chain rule involving d₁ and d₂ derivatives.
+    /// # Mathematical Derivation
+    ///
+    /// Given the Double Sphere projection model:
+    /// ```text
+    /// d₁ = √(x² + y² + z²)              // Distance to origin
+    /// w = ξ·d₁ + z                      // Intermediate value
+    /// d₂ = √(x² + y² + w²)              // Second sphere distance
+    /// denom = α·d₂ + (1-α)·w            // Denominator
+    /// u = fx · (x/denom) + cx           // Pixel u-coordinate
+    /// v = fy · (y/denom) + cy           // Pixel v-coordinate
+    /// ```
+    ///
+    /// ## Step 1: Derivatives of intermediate quantities
+    ///
+    /// ```text
+    /// ∂d₁/∂x = x/d₁,  ∂d₁/∂y = y/d₁,  ∂d₁/∂z = z/d₁
+    ///
+    /// ∂w/∂x = ξ·(∂d₁/∂x) = ξx/d₁
+    /// ∂w/∂y = ξ·(∂d₁/∂y) = ξy/d₁
+    /// ∂w/∂z = ξ·(∂d₁/∂z) + 1 = ξz/d₁ + 1
+    /// ```
+    ///
+    /// ## Step 2: Derivative of d₂
+    ///
+    /// Since d₂ = √(x² + y² + w²), using chain rule:
+    /// ```text
+    /// ∂d₂/∂x = (x + w·∂w/∂x) / d₂ = (x + w·ξx/d₁) / d₂
+    /// ∂d₂/∂y = (y + w·∂w/∂y) / d₂ = (y + w·ξy/d₁) / d₂
+    /// ∂d₂/∂z = (w·∂w/∂z) / d₂ = w·(ξz/d₁ + 1) / d₂
+    /// ```
+    ///
+    /// ## Step 3: Derivative of denominator
+    ///
+    /// ```text
+    /// ∂denom/∂x = α·∂d₂/∂x + (1-α)·∂w/∂x
+    /// ∂denom/∂y = α·∂d₂/∂y + (1-α)·∂w/∂y
+    /// ∂denom/∂z = α·∂d₂/∂z + (1-α)·∂w/∂z
+    /// ```
+    ///
+    /// ## Step 4: Derivatives of pixel coordinates (quotient rule)
+    ///
+    /// For u = fx·(x/denom) + cx:
+    /// ```text
+    /// ∂u/∂x = fx · ∂(x/denom)/∂x
+    ///       = fx · (denom·1 - x·∂denom/∂x) / denom²
+    ///       = fx · (denom - x·∂denom/∂x) / denom²
+    ///
+    /// ∂u/∂y = fx · (0 - x·∂denom/∂y) / denom²
+    ///       = -fx·x·∂denom/∂y / denom²
+    ///
+    /// ∂u/∂z = -fx·x·∂denom/∂z / denom²
+    /// ```
+    ///
+    /// Similarly for v = fy·(y/denom) + cy:
+    /// ```text
+    /// ∂v/∂x = -fy·y·∂denom/∂x / denom²
+    /// ∂v/∂y = fy · (denom - y·∂denom/∂y) / denom²
+    /// ∂v/∂z = -fy·y·∂denom/∂z / denom²
+    /// ```
+    ///
+    /// ## Final Jacobian Matrix (2×3)
+    ///
+    /// ```text
+    /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
+    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Usenko et al., "The Double Sphere Camera Model", 3DV 2018 (Supplementary Material)
+    /// - Verified against numerical differentiation in tests
+    ///
+    /// # Implementation Note
+    ///
+    /// The implementation uses the chain rule systematically through intermediate quantities
+    /// d₁, w, d₂, and denom to ensure numerical stability and code clarity.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -292,6 +504,97 @@ impl CameraModel for DoubleSphereCamera {
     }
 
     /// Jacobian of projection w.r.t. camera pose (SE3).
+    ///
+    /// Computes the full chain: ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// ## Chain Rule Decomposition
+    ///
+    /// ```text
+    /// ∂π/∂ξ = ∂π/∂p_cam · ∂p_cam/∂ξ
+    /// ```
+    ///
+    /// where:
+    /// - `π` is the projection function (3D → 2D)
+    /// - `p_cam` is the point in camera coordinates
+    /// - `ξ ∈ se(3)` is the camera pose (Lie algebra representation)
+    ///
+    /// ## Part 1: Point Jacobian (∂π/∂p_cam)
+    ///
+    /// This is the standard point Jacobian (2×3) computed by `jacobian_point()`.
+    /// See that method's documentation for details.
+    ///
+    /// ## Part 2: Pose Transformation Jacobian (∂p_cam/∂ξ)
+    ///
+    /// The camera frame point is related to the world frame point by:
+    /// ```text
+    /// p_cam = T⁻¹ · p_world = (R, t)⁻¹ · p_world
+    /// p_cam = R^T · (p_world - t)
+    /// ```
+    ///
+    /// The SE(3) pose is parameterized as ξ = (ω, v) where:
+    /// - ω ∈ ℝ³ is the rotation (so(3) Lie algebra, axis-angle representation)
+    /// - v ∈ ℝ³ is the translation
+    ///
+    /// ### Translation Part (∂p_cam/∂v):
+    ///
+    /// ```text
+    /// ∂p_cam/∂v = ∂(R^T·(p_world - t))/∂v
+    ///           = -R^T · ∂t/∂v
+    ///           = -R^T · I
+    ///           = -R^T               (3×3 matrix)
+    /// ```
+    ///
+    /// ### Rotation Part (∂p_cam/∂ω):
+    ///
+    /// Using the Lie group adjoint relationship:
+    /// ```text
+    /// ∂p_cam/∂ω = [p_cam]×          (3×3 skew-symmetric matrix)
+    /// ```
+    ///
+    /// where `[p_cam]×` is the skew-symmetric cross-product matrix:
+    /// ```text
+    /// [p_cam]× = [  0    -pz    py ]
+    ///            [  pz     0   -px ]
+    ///            [ -py    px     0 ]
+    /// ```
+    ///
+    /// This comes from the derivative of the rotation action on a point.
+    ///
+    /// ### Combined Jacobian (3×6):
+    ///
+    /// ```text
+    /// ∂p_cam/∂ξ = [ -R^T | [p_cam]× ]     (3×6)
+    ///              ︸───︸   ︸──────︸
+    ///               ∂/∂v     ∂/∂ω
+    /// ```
+    ///
+    /// ## Final Result (2×6)
+    ///
+    /// ```text
+    /// ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
+    ///       = (2×3) · (3×6)
+    ///       = (2×6)
+    /// ```
+    ///
+    /// # Returns
+    ///
+    /// A tuple containing:
+    /// 1. Point Jacobian (∂π/∂p_cam): 2×3 matrix
+    /// 2. Pose Transformation Jacobian (∂p_cam/∂ξ): 3×6 matrix
+    ///
+    /// The caller can multiply these to get the full pose Jacobian.
+    ///
+    /// # References
+    ///
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie Groups)
+    /// - Sola et al., "A micro Lie theory for state estimation in robotics", 2021
+    ///
+    /// # Implementation Note
+    ///
+    /// The rotation Jacobian uses the skew-symmetric matrix `[p_cam]×` which
+    /// is provided by the `skew_symmetric()` helper function.
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -317,12 +620,112 @@ impl CameraModel for DoubleSphereCamera {
     }
 
     /// Jacobian of projection w.r.t. intrinsic parameters (2×6).
+    ///
+    /// Computes ∂π/∂K where K = [fx, fy, cx, cy, ξ, α] are the intrinsic parameters.
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The intrinsic parameters consist of:
+    /// 1. **Linear parameters**: fx, fy, cx, cy (pinhole projection)
+    /// 2. **Distortion parameters**: ξ (xi), α (alpha) (Double Sphere specific)
+    ///
+    /// ## Projection Model Recap
+    ///
+    /// ```text
+    /// d₁ = √(x² + y² + z²)
+    /// w = ξ·d₁ + z
+    /// d₂ = √(x² + y² + w²)
+    /// denom = α·d₂ + (1-α)·w
+    /// u = fx · (x/denom) + cx
+    /// v = fy · (y/denom) + cy
+    /// ```
+    ///
+    /// ## Part 1: Linear Parameters (fx, fy, cx, cy)
+    ///
+    /// These have direct, simple derivatives:
+    ///
+    /// ### Focal lengths (fx, fy):
+    /// ```text
+    /// ∂u/∂fx = x/denom    (coefficient of fx in u)
+    /// ∂u/∂fy = 0          (fy doesn't affect u)
+    /// ∂v/∂fx = 0          (fx doesn't affect v)
+    /// ∂v/∂fy = y/denom    (coefficient of fy in v)
+    /// ```
+    ///
+    /// ### Principal point (cx, cy):
+    /// ```text
+    /// ∂u/∂cx = 1          (additive constant)
+    /// ∂u/∂cy = 0          (cy doesn't affect u)
+    /// ∂v/∂cx = 0          (cx doesn't affect v)
+    /// ∂v/∂cy = 1          (additive constant)
+    /// ```
+    ///
+    /// ## Part 2: Distortion Parameters (ξ, α)
+    ///
+    /// These affect the projection through the denominator term.
+    ///
+    /// ### Derivative w.r.t. ξ (xi):
+    ///
+    /// Since w = ξ·d₁ + z and d₂ = √(x² + y² + w²), we have:
+    /// ```text
+    /// ∂w/∂ξ = d₁
+    ///
+    /// ∂d₂/∂ξ = ∂d₂/∂w · ∂w/∂ξ
+    ///        = (w/d₂) · d₁
+    ///        = w·d₁/d₂
+    ///
+    /// ∂denom/∂ξ = α·∂d₂/∂ξ + (1-α)·∂w/∂ξ
+    ///           = α·(w·d₁/d₂) + (1-α)·d₁
+    ///           = d₁·[α·w/d₂ + (1-α)]
+    /// ```
+    ///
+    /// Using the quotient rule on u = fx·(x/denom) + cx:
+    /// ```text
+    /// ∂u/∂ξ = fx · ∂(x/denom)/∂ξ
+    ///       = fx · (-x/denom²) · ∂denom/∂ξ
+    ///       = -fx·x·∂denom/∂ξ / denom²
+    /// ```
+    ///
+    /// Similarly:
+    /// ```text
+    /// ∂v/∂ξ = -fy·y·∂denom/∂ξ / denom²
+    /// ```
+    ///
+    /// ### Derivative w.r.t. α (alpha):
+    ///
+    /// Since denom = α·d₂ + (1-α)·w:
+    /// ```text
+    /// ∂denom/∂α = d₂ - w
+    ///
+    /// ∂u/∂α = -fx·x·(d₂ - w) / denom²
+    /// ∂v/∂α = -fy·y·(d₂ - w) / denom²
+    /// ```
+    ///
+    /// ## Final Jacobian Matrix (2×6)
+    ///
+    /// ```text
+    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂ξ  ∂u/∂α ]
+    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂ξ  ∂v/∂α ]
+    ///
+    ///   = [ x/denom    0       1       0      -fx·x·∂denom/∂ξ/denom²  -fx·x·(d₂-w)/denom² ]
+    ///     [   0     y/denom    0       1      -fy·y·∂denom/∂ξ/denom²  -fy·y·(d₂-w)/denom² ]
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
+    /// - Verified against numerical differentiation in tests
+    ///
+    /// # Implementation Note
+    ///
+    /// The implementation computes all intermediate values (d₁, w, d₂, denom)
+    /// first, then applies the chain rule derivatives systematically.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -353,39 +756,6 @@ impl CameraModel for DoubleSphereCamera {
         )
     }
 
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        let (xi, alpha) = self.distortion_params();
-        DVector::from_vec(vec![
-            self.camera.pinhole.fx,
-            self.camera.pinhole.fy,
-            self.camera.pinhole.cx,
-            self.camera.pinhole.cy,
-            xi,
-            alpha,
-        ])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "DoubleSphereCamera requires at least 6 parameters"
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::DoubleSphere {
-                    xi: params[4],
-                    alpha: params[5],
-                },
-            },
-        }
-    }
-
     /// Validates camera parameters.
     ///
     /// # Validation Rules
@@ -403,7 +773,7 @@ impl CameraModel for DoubleSphereCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (xi, alpha) = self.distortion_params();
+        let (xi, alpha) = self.distortion_params()?;
         if !xi.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "xi must be finite".to_string(),
@@ -428,15 +798,18 @@ impl CameraModel for DoubleSphereCamera {
         }
     }
 
-    fn get_distortion(&self) -> Vec<f64> {
-        let (xi, alpha) = self.distortion_params();
-        vec![xi, alpha]
+    fn get_distortion(&self) -> DistortionModel {
+        self.camera.distortion.clone()
     }
 
     fn get_model_name(&self) -> &'static str {
         "double_sphere"
     }
 }
+
+// ============================================================================
+// From/Into Trait Implementations
+// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -446,9 +819,18 @@ mod tests {
 
     #[test]
     fn test_double_sphere_camera_creation() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         assert_eq!(camera.camera.pinhole.fx, 300.0);
-        let (xi, alpha) = camera.distortion_params();
+        let (xi, alpha) = camera.distortion_params()?;
         assert_eq!(xi, -0.2);
         assert_eq!(alpha, 0.6);
 
@@ -457,9 +839,18 @@ mod tests {
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         assert!((uv.x - 320.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
         assert!((uv.y - 240.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
@@ -469,7 +860,16 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -481,8 +881,8 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).ok_or("Projection failed")?;
-            let uv_minus = camera.project(&p_minus).ok_or("Projection failed")?;
+            let uv_plus = camera.project(&p_plus)?;
+            let uv_minus = camera.project(&p_minus)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -500,11 +900,20 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = DoubleSphereCamera::new(300.0, 300.0, 320.0, 240.0, -0.2, 0.6)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
-        let params = camera.intrinsics_vec();
+        let params: DVector<f64> = (&camera).into();
         let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..6 {
@@ -513,11 +922,11 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = DoubleSphereCamera::from_params(params_plus.as_slice());
-            let cam_minus = DoubleSphereCamera::from_params(params_minus.as_slice());
+            let cam_plus = DoubleSphereCamera::from(params_plus.as_slice());
+            let cam_minus = DoubleSphereCamera::from(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).ok_or("Projection failed")?;
-            let uv_minus = cam_minus.project(&p_cam).ok_or("Projection failed")?;
+            let uv_plus = cam_plus.project(&p_cam)?;
+            let uv_minus = cam_minus.project(&p_cam)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
