@@ -62,6 +62,7 @@ pub struct KannalaBrandtCamera {
 }
 
 impl KannalaBrandtCamera {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         fx: f64,
         fy: f64,
