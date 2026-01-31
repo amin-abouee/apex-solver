@@ -93,10 +93,8 @@ impl DoubleSphereCamera {
 
     /// Checks the geometric condition for a valid unprojection.
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        if self.alpha > 0.5 {
-            if r_squared > 1.0 / (2.0 * self.alpha - 1.0) {
-                return false;
-            }
+        if self.alpha > 0.5 && r_squared > 1.0 / (2.0 * self.alpha - 1.0) {
+            return false;
         }
         true
     }
