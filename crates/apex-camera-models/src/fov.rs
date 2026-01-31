@@ -59,8 +59,29 @@ pub struct FovCamera {
 }
 
 impl FovCamera {
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, w: f64) -> Self {
-        Self { fx, fy, cx, cy, w }
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, w: f64) -> Result<Self, CameraModelError> {
+        let camera = Self { fx, fy, cx, cy, w };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Validates camera parameters.
+    pub fn validate_params(&self) -> Result<(), CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
+        }
+
+        if !self.w.is_finite() || self.w <= 0.0 || self.w > std::f64::consts::PI {
+            return Err(CameraModelError::InvalidParams(
+                "w must be in (0, π]".to_string(),
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -87,6 +108,11 @@ impl CameraModel for FovCamera {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
+
+        // Check if z is valid (too close to camera center)
+        if z < f64::EPSILON.sqrt() {
+            return None;
+        }
 
         let r = (x * x + y * y).sqrt();
         let tan_w_2 = (self.w / 2.0).tan();
@@ -151,8 +177,9 @@ impl CameraModel for FovCamera {
     /// # Validity Conditions
     ///
     /// - Always returns true for FOV model (wide acceptance range)
-    fn is_valid_point(&self, _p_cam: &Vector3<f64>) -> bool {
-        true
+    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
+        let z = p_cam[2];
+        z >= f64::EPSILON.sqrt()
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -345,15 +372,16 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_fov_camera_creation() {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5);
+    fn test_fov_camera_creation() -> TestResult {
+        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.w, 1.5);
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5);
+        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
@@ -365,7 +393,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5);
+        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -391,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5);
+        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
