@@ -21,7 +21,7 @@
 //! - **BAL Pinhole**: Bundle Adjustment in the Large format
 
 use apex_manifolds::se3::SE3;
-use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
+use nalgebra::{Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
 
 // ============================================================================
 // Precision Constants
@@ -145,6 +145,17 @@ pub enum DistortionModel {
     DoubleSphere { xi: f64, alpha: f64 },
 }
 
+/// Represents the resolution of a camera image.
+///
+/// This struct holds the width and height of the image sensor in pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Resolution {
+    /// The width of the image in pixels.
+    pub width: u32,
+    /// The height of the image in pixels.
+    pub height: u32,
+}
+
 /// Complete camera model combining linear projection and distortion.
 ///
 /// This structure separates the linear pinhole projection (K matrix)
@@ -156,14 +167,21 @@ pub struct Camera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl Camera {
     /// Create a new camera with given pinhole parameters and distortion model.
-    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> Self {
+    pub fn new(
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        resolution: Resolution,
+    ) -> Self {
         Self {
             pinhole,
             distortion,
+            resolution,
         }
     }
 
@@ -172,6 +190,10 @@ impl Camera {
         Ok(Self {
             pinhole: PinholeParams::new(fx, fy, cx, cy)?,
             distortion: DistortionModel::None,
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
         })
     }
 }
@@ -317,9 +339,9 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates if projection is valid
-    /// - `None` - If point cannot be projected (behind camera, etc.)
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>>;
+    /// - `Ok(uv)` - 2D image coordinates if projection is valid
+    /// - `Err(CameraModelError)` - If point cannot be projected with specific error reason
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError>;
 
     /// Unprojects a 2D image point to a 3D ray in camera frame.
     ///
@@ -380,18 +402,12 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         for i in 0..n {
             let p = Vector3::new(points_cam[(0, i)], points_cam[(1, i)], points_cam[(2, i)]);
             match self.project(&p) {
-                Some(uv) => result.set_column(i, &uv),
-                None => result.set_column(i, &Vector2::new(1e6, 1e6)),
+                Ok(uv) => result.set_column(i, &uv),
+                Err(_) => result.set_column(i, &Vector2::new(1e6, 1e6)),
             }
         }
         result
     }
-
-    /// Get intrinsic parameters as dynamic vector.
-    fn intrinsics_vec(&self) -> DVector<f64>;
-
-    /// Create camera from parameter slice.
-    fn from_params(params: &[f64]) -> Self;
 
     /// Validates camera parameters.
     ///
@@ -405,7 +421,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     fn get_pinhole_params(&self) -> PinholeParams;
 
     /// Get distortion parameters (model-specific).
-    fn get_distortion(&self) -> Vec<f64>;
+    fn get_distortion(&self) -> DistortionModel;
 
     /// Get model name identifier.
     fn get_model_name(&self) -> &'static str;
