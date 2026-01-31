@@ -23,15 +23,157 @@
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
 
-// Camera parameter types (defined early for submodule access)
+// ============================================================================
+// Precision Constants
+// ============================================================================
 
-/// Camera intrinsic parameters.
+/// Precision constant for geometric validity checks (e.g., point in front of camera).
+///
+/// Used to determine if a 3D point is geometrically valid for projection.
+/// Default: 1e-6 (micrometers at meter scale)
+pub const GEOMETRIC_PRECISION: f64 = 1e-6;
+
+/// Epsilon for numerical differentiation in Jacobian computation.
+///
+/// Used when computing numerical derivatives for validation and testing.
+/// Default: 1e-7 (provides good balance between truncation and round-off error)
+pub const NUMERICAL_DERIVATIVE_EPS: f64 = 1e-7;
+
+/// Tolerance for numerical Jacobian validation in tests.
+///
+/// Maximum allowed difference between analytical and numerical Jacobians.
+/// Default: 1e-5 (allows for small numerical errors in finite differences)
+pub const JACOBIAN_TEST_TOLERANCE: f64 = 1e-5;
+
+/// Tolerance for projection/unprojection test assertions.
+///
+/// Maximum allowed error in pixel coordinates for test assertions.
+/// Default: 1e-10 (essentially exact for double precision)
+pub const PROJECTION_TEST_TOLERANCE: f64 = 1e-10;
+
+/// Minimum depth for valid 3D points (meters).
+///
+/// Points closer than this to the camera are considered invalid.
+/// Default: 1e-6 meters (1 micrometer)
+pub const MIN_DEPTH: f64 = 1e-6;
+
+/// Convergence threshold for iterative unprojection algorithms.
+///
+/// Used in camera models that require iterative solving (e.g., Kannala-Brandt).
+/// Default: 1e-6
+pub const CONVERGENCE_THRESHOLD: f64 = 1e-6;
+
+// ============================================================================
+// Unified Camera Structure
+// ============================================================================
+
+/// The "Common 4" - Linear intrinsic parameters.
+///
+/// These define the projection matrix K for the pinhole camera model.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Intrinsics {
+pub struct PinholeParams {
+    /// Focal length in x direction (pixels)
     pub fx: f64,
+    /// Focal length in y direction (pixels)
     pub fy: f64,
+    /// Principal point x-coordinate (pixels)
     pub cx: f64,
+    /// Principal point y-coordinate (pixels)
     pub cy: f64,
+}
+
+impl PinholeParams {
+    /// Create new pinhole parameters with validation.
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
+        if fx <= 0.0 || fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+        if !cx.is_finite() || !cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
+        }
+        Ok(Self { fx, fy, cx, cy })
+    }
+}
+
+/// Lens distortion models.
+///
+/// This enum captures all supported distortion models with their parameters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DistortionModel {
+    /// Perfect pinhole (no distortion)
+    None,
+
+    /// BAL-style radial distortion (2 parameters: k1, k2)
+    ///
+    /// Used in Bundle Adjustment in the Large datasets.
+    Radial { k1: f64, k2: f64 },
+
+    /// Brown-Conrady / OpenCV model (5 parameters)
+    ///
+    /// Standard model used in OpenCV: k1, k2, k3 (radial), p1, p2 (tangential)
+    BrownConrady {
+        k1: f64,
+        k2: f64,
+        p1: f64,
+        p2: f64,
+        k3: f64,
+    },
+
+    /// Kannala-Brandt fisheye model (4 parameters)
+    ///
+    /// Polynomial distortion model for fisheye lenses.
+    KannalaBrandt { k1: f64, k2: f64, k3: f64, k4: f64 },
+
+    /// Field-of-View model (1 parameter)
+    ///
+    /// Single-parameter fisheye model based on field of view.
+    FOV { w: f64 },
+
+    /// Unified Camera Model (2 parameters)
+    ///
+    /// Single-viewpoint catadioptric camera model.
+    UCM { alpha: f64, beta: f64 },
+
+    /// Extended Unified Camera Model (2 parameters)
+    ///
+    /// Extension of UCM with improved accuracy.
+    EUCM { alpha: f64, beta: f64 },
+
+    /// Double Sphere model (2 parameters)
+    ///
+    /// Two-parameter fisheye model with improved wide-angle accuracy.
+    DoubleSphere { xi: f64, alpha: f64 },
+}
+
+/// Complete camera model combining linear projection and distortion.
+///
+/// This structure separates the linear pinhole projection (K matrix)
+/// from the nonlinear lens distortion, making it clear which parameters
+/// affect which part of the projection.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Camera {
+    /// Linear pinhole parameters (fx, fy, cx, cy)
+    pub pinhole: PinholeParams,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+}
+
+impl Camera {
+    /// Create a new camera with given pinhole parameters and distortion model.
+    pub fn new(pinhole: PinholeParams, distortion: DistortionModel) -> Self {
+        Self {
+            pinhole,
+            distortion,
+        }
+    }
+
+    /// Create a perfect pinhole camera (no distortion).
+    pub fn pinhole_only(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
+        Ok(Self {
+            pinhole: PinholeParams::new(fx, fy, cx, cy)?,
+            distortion: DistortionModel::None,
+        })
+    }
 }
 
 /// Camera model errors.
@@ -259,8 +401,8 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// - `Err(CameraModelError)` - Invalid parameter detected
     fn validate_params(&self) -> Result<(), CameraModelError>;
 
-    /// Get intrinsic parameters.
-    fn get_intrinsics(&self) -> Intrinsics;
+    /// Get pinhole parameters.
+    fn get_pinhole_params(&self) -> PinholeParams;
 
     /// Get distortion parameters (model-specific).
     fn get_distortion(&self) -> Vec<f64>;

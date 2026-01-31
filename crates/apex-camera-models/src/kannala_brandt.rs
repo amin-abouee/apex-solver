@@ -41,24 +41,17 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
+use crate::{
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
-const PRECISION: f64 = 1e-6;
-
 /// Kannala-Brandt fisheye camera model with 8 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandtCamera {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
-    pub k1: f64,
-    pub k2: f64,
-    pub k3: f64,
-    pub k4: f64,
+    pub camera: Camera,
 }
 
 impl KannalaBrandtCamera {
@@ -74,17 +67,21 @@ impl KannalaBrandtCamera {
         k4: f64,
     ) -> Result<Self, CameraModelError> {
         let model = Self {
-            fx,
-            fy,
-            cx,
-            cy,
-            k1,
-            k2,
-            k3,
-            k4,
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::KannalaBrandt { k1, k2, k3, k4 },
+            },
         };
         model.validate_params()?;
         Ok(model)
+    }
+
+    /// Helper method to extract distortion parameters.
+    fn distortion_params(&self) -> (f64, f64, f64, f64) {
+        match self.camera.distortion {
+            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => (k1, k2, k3, k4),
+            _ => panic!("Invalid distortion model for KannalaBrandtCamera"),
+        }
     }
 
     /// Checks the geometric condition for a valid projection.
@@ -117,7 +114,7 @@ impl CameraModel for KannalaBrandtCamera {
     /// # Returns
     ///
     /// - `Some(uv)` - 2D image coordinates if valid
-    /// - `None` - If r < PRECISION (point on optical axis)
+    /// - `None` - If r < crate::GEOMETRIC_PRECISION (point on optical axis)
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -128,6 +125,7 @@ impl CameraModel for KannalaBrandtCamera {
             return None;
         }
 
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r2 = x * x + y * y;
         let r = r2.sqrt();
         let theta = r.atan2(z);
@@ -139,10 +137,9 @@ impl CameraModel for KannalaBrandtCamera {
         let theta7 = theta5 * theta2;
         let theta9 = theta7 * theta2;
 
-        let theta_d =
-            theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
+        let theta_d = theta + k1 * theta3 + k2 * theta5 + k3 * theta7 + k4 * theta9;
 
-        if r < PRECISION {
+        if r < crate::GEOMETRIC_PRECISION {
             // Point near optical axis: x/r and y/r are unstable.
             // Limit approaches (fx * (theta_d/r) * x + cx)
             // theta ~ r/z (for small theta), theta_d ~ theta (for small theta)
@@ -151,15 +148,15 @@ impl CameraModel for KannalaBrandtCamera {
             // Effectively pinhole close to center.
             let inv_z = 1.0 / z;
             return Some(Vector2::new(
-                self.fx * x * inv_z + self.cx,
-                self.fy * y * inv_z + self.cy,
+                self.camera.pinhole.fx * x * inv_z + self.camera.pinhole.cx,
+                self.camera.pinhole.fy * y * inv_z + self.camera.pinhole.cy,
             ));
         }
 
         let inv_r = 1.0 / r;
         Some(Vector2::new(
-            self.fx * theta_d * x * inv_r + self.cx,
-            self.fy * theta_d * y * inv_r + self.cy,
+            self.camera.pinhole.fx * theta_d * x * inv_r + self.camera.pinhole.cx,
+            self.camera.pinhole.fy * theta_d * y * inv_r + self.camera.pinhole.cy,
         ))
     }
 
@@ -183,22 +180,23 @@ impl CameraModel for KannalaBrandtCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let mx = (u - self.cx) / self.fx;
-        let my = (v - self.cy) / self.fy;
+        let (k1, k2, k3, k4) = self.distortion_params();
+        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
+        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
 
         let mut ru = (mx * mx + my * my).sqrt();
 
         // Clamp ru to avoid instability if extremely large (from C++ impl: min(ru, PI/2))
         ru = ru.min(std::f64::consts::PI / 2.0);
 
-        if ru < PRECISION {
+        if ru < crate::GEOMETRIC_PRECISION {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
         }
 
         // Newton-Raphson
         let mut theta = ru; // Initial guess
         const MAX_ITER: usize = 10;
-        const CONVERGENCE_THRESHOLD: f64 = 1e-6;
+        const CONVERGENCE_THRESHOLD: f64 = crate::CONVERGENCE_THRESHOLD;
 
         for _ in 0..MAX_ITER {
             let theta2 = theta * theta;
@@ -206,10 +204,10 @@ impl CameraModel for KannalaBrandtCamera {
             let theta6 = theta4 * theta2;
             let theta8 = theta4 * theta4;
 
-            let k1_theta2 = self.k1 * theta2;
-            let k2_theta4 = self.k2 * theta4;
-            let k3_theta6 = self.k3 * theta6;
-            let k4_theta8 = self.k4 * theta8;
+            let k1_theta2 = k1 * theta2;
+            let k2_theta4 = k2 * theta4;
+            let k3_theta6 = k3 * theta6;
+            let k4_theta8 = k4 * theta8;
 
             // f(θ)
             let f = theta * (1.0 + k1_theta2 + k2_theta4 + k3_theta6 + k4_theta8) - ru;
@@ -270,6 +268,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -279,24 +278,23 @@ impl CameraModel for KannalaBrandtCamera {
         let theta7 = theta5 * theta2;
         let theta9 = theta7 * theta2;
 
-        let theta_d =
-            theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
+        let theta_d = theta + k1 * theta3 + k2 * theta5 + k3 * theta7 + k4 * theta9;
 
         // ∂θ_d/∂θ = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
         let dtheta_d_dtheta = 1.0
-            + 3.0 * self.k1 * theta2
-            + 5.0 * self.k2 * theta2 * theta2
-            + 7.0 * self.k3 * theta2 * theta2 * theta2
-            + 9.0 * self.k4 * theta2 * theta2 * theta2 * theta2;
+            + 3.0 * k1 * theta2
+            + 5.0 * k2 * theta2 * theta2
+            + 7.0 * k3 * theta2 * theta2 * theta2
+            + 9.0 * k4 * theta2 * theta2 * theta2 * theta2;
 
-        if r < PRECISION {
+        if r < crate::GEOMETRIC_PRECISION {
             // Near optical axis, use simplified Jacobian
             return SMatrix::<f64, 2, 3>::new(
-                self.fx * dtheta_d_dtheta / z,
+                self.camera.pinhole.fx * dtheta_d_dtheta / z,
                 0.0,
                 0.0,
                 0.0,
-                self.fy * dtheta_d_dtheta / z,
+                self.camera.pinhole.fy * dtheta_d_dtheta / z,
                 0.0,
             );
         }
@@ -317,19 +315,19 @@ impl CameraModel for KannalaBrandtCamera {
         // Chain rule for u = fx · θ_d · (x/r) + cx
         let inv_r2 = inv_r * inv_r;
 
-        let du_dx = self.fx
+        let du_dx = self.camera.pinhole.fx
             * (dtheta_d_dtheta * dtheta_dx * x * inv_r
                 + theta_d * (inv_r - x * x * inv_r2 * inv_r));
-        let du_dy =
-            self.fx * (dtheta_d_dtheta * dtheta_dy * x * inv_r - theta_d * x * y * inv_r2 * inv_r);
-        let du_dz = self.fx * dtheta_d_dtheta * dtheta_dz * x * inv_r;
+        let du_dy = self.camera.pinhole.fx
+            * (dtheta_d_dtheta * dtheta_dy * x * inv_r - theta_d * x * y * inv_r2 * inv_r);
+        let du_dz = self.camera.pinhole.fx * dtheta_d_dtheta * dtheta_dz * x * inv_r;
 
-        let dv_dx =
-            self.fy * (dtheta_d_dtheta * dtheta_dx * y * inv_r - theta_d * x * y * inv_r2 * inv_r);
-        let dv_dy = self.fy
+        let dv_dx = self.camera.pinhole.fy
+            * (dtheta_d_dtheta * dtheta_dx * y * inv_r - theta_d * x * y * inv_r2 * inv_r);
+        let dv_dy = self.camera.pinhole.fy
             * (dtheta_d_dtheta * dtheta_dy * y * inv_r
                 + theta_d * (inv_r - y * y * inv_r2 * inv_r));
-        let dv_dz = self.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
+        let dv_dz = self.camera.pinhole.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
@@ -365,6 +363,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -374,10 +373,9 @@ impl CameraModel for KannalaBrandtCamera {
         let theta7 = theta5 * theta2;
         let theta9 = theta7 * theta2;
 
-        let theta_d =
-            theta + self.k1 * theta3 + self.k2 * theta5 + self.k3 * theta7 + self.k4 * theta9;
+        let theta_d = theta + k1 * theta3 + k2 * theta5 + k3 * theta7 + k4 * theta9;
 
-        if r < PRECISION {
+        if r < crate::GEOMETRIC_PRECISION {
             return SMatrix::<f64, 2, 8>::zeros();
         }
 
@@ -389,15 +387,15 @@ impl CameraModel for KannalaBrandtCamera {
         // ∂v/∂fx = 0, ∂v/∂fy = θ_d·y/r, ∂v/∂cx = 0, ∂v/∂cy = 1
 
         // ∂u/∂k₁ = fx·θ³·x/r, ∂u/∂k₂ = fx·θ⁵·x/r, etc.
-        let du_dk1 = self.fx * theta3 * x * inv_r;
-        let du_dk2 = self.fx * theta5 * x * inv_r;
-        let du_dk3 = self.fx * theta7 * x * inv_r;
-        let du_dk4 = self.fx * theta9 * x * inv_r;
+        let du_dk1 = self.camera.pinhole.fx * theta3 * x * inv_r;
+        let du_dk2 = self.camera.pinhole.fx * theta5 * x * inv_r;
+        let du_dk3 = self.camera.pinhole.fx * theta7 * x * inv_r;
+        let du_dk4 = self.camera.pinhole.fx * theta9 * x * inv_r;
 
-        let dv_dk1 = self.fy * theta3 * y * inv_r;
-        let dv_dk2 = self.fy * theta5 * y * inv_r;
-        let dv_dk3 = self.fy * theta7 * y * inv_r;
-        let dv_dk4 = self.fy * theta9 * y * inv_r;
+        let dv_dk1 = self.camera.pinhole.fy * theta3 * y * inv_r;
+        let dv_dk2 = self.camera.pinhole.fy * theta5 * y * inv_r;
+        let dv_dk3 = self.camera.pinhole.fy * theta7 * y * inv_r;
+        let dv_dk4 = self.camera.pinhole.fy * theta9 * y * inv_r;
 
         SMatrix::<f64, 2, 8>::from_row_slice(&[
             x_theta_d_r,
@@ -420,8 +418,16 @@ impl CameraModel for KannalaBrandtCamera {
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
+        let (k1, k2, k3, k4) = self.distortion_params();
         DVector::from_vec(vec![
-            self.fx, self.fy, self.cx, self.cy, self.k1, self.k2, self.k3, self.k4,
+            self.camera.pinhole.fx,
+            self.camera.pinhole.fy,
+            self.camera.pinhole.cx,
+            self.camera.pinhole.cy,
+            k1,
+            k2,
+            k3,
+            k4,
         ])
     }
 
@@ -431,14 +437,20 @@ impl CameraModel for KannalaBrandtCamera {
             "KannalaBrandtCamera requires at least 8 parameters"
         );
         Self {
-            fx: params[0],
-            fy: params[1],
-            cx: params[2],
-            cy: params[3],
-            k1: params[4],
-            k2: params[5],
-            k3: params[6],
-            k4: params[7],
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::KannalaBrandt {
+                    k1: params[4],
+                    k2: params[5],
+                    k3: params[6],
+                    k4: params[7],
+                },
+            },
         }
     }
 
@@ -450,19 +462,16 @@ impl CameraModel for KannalaBrandtCamera {
     /// - cx, cy must be finite
     /// - k₁, k₂, k₃, k₄ must be finite
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.cx.is_finite() || !self.cy.is_finite() {
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        if !self.k1.is_finite()
-            || !self.k2.is_finite()
-            || !self.k3.is_finite()
-            || !self.k4.is_finite()
-        {
+        let (k1, k2, k3, k4) = self.distortion_params();
+        if !k1.is_finite() || !k2.is_finite() || !k3.is_finite() || !k4.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
             ));
@@ -471,17 +480,18 @@ impl CameraModel for KannalaBrandtCamera {
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> Intrinsics {
-        Intrinsics {
-            fx: self.fx,
-            fy: self.fy,
-            cx: self.cx,
-            cy: self.cy,
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
+            fx: self.camera.pinhole.fx,
+            fy: self.camera.pinhole.fy,
+            cx: self.camera.pinhole.cx,
+            cy: self.camera.pinhole.cy,
         }
     }
 
     fn get_distortion(&self) -> Vec<f64> {
-        vec![self.k1, self.k2, self.k3, self.k4]
+        let (k1, k2, k3, k4) = self.distortion_params();
+        vec![k1, k2, k3, k4]
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -499,8 +509,9 @@ mod tests {
     fn test_kb_camera_creation() -> TestResult {
         let camera =
             KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
-        assert_eq!(camera.fx, 300.0);
-        assert_eq!(camera.k1, 0.1);
+        assert_eq!(camera.camera.pinhole.fx, 300.0);
+        let (k1, _, _, _) = camera.distortion_params();
+        assert_eq!(k1, 0.1);
         Ok(())
     }
 
@@ -524,7 +535,7 @@ mod tests {
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..3 {
             let mut p_plus = p_cam;
@@ -538,7 +549,12 @@ mod tests {
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
+                assert!(
+                    diff < crate::JACOBIAN_TEST_TOLERANCE,
+                    "Mismatch at ({}, {})",
+                    r,
+                    i
+                );
             }
         }
         Ok(())
@@ -552,7 +568,7 @@ mod tests {
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
         let params = camera.intrinsics_vec();
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..8 {
             let mut params_plus = params.clone();
@@ -569,7 +585,12 @@ mod tests {
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
+                assert!(
+                    diff < crate::JACOBIAN_TEST_TOLERANCE,
+                    "Mismatch at ({}, {})",
+                    r,
+                    i
+                );
             }
         }
         Ok(())

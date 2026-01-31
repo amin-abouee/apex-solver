@@ -40,22 +40,17 @@
 //!
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
-use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
+use crate::{
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
-const PRECISION: f64 = 1e-3;
-
 /// Extended Unified Camera Model with 6 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EucmCamera {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
-    pub alpha: f64,
-    pub beta: f64,
+    pub camera: Camera,
 }
 
 impl EucmCamera {
@@ -68,22 +63,29 @@ impl EucmCamera {
         beta: f64,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
-            fx,
-            fy,
-            cx,
-            cy,
-            alpha,
-            beta,
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::EUCM { alpha, beta },
+            },
         };
         camera.validate_params()?;
         Ok(camera)
     }
 
+    /// Helper method to extract distortion parameters.
+    fn distortion_params(&self) -> (f64, f64) {
+        match self.camera.distortion {
+            DistortionModel::EUCM { alpha, beta } => (alpha, beta),
+            _ => panic!("Invalid distortion model for EucmCamera"),
+        }
+    }
+
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
+        let (alpha, _) = self.distortion_params();
         let mut condition = true;
-        if self.alpha > 0.5 {
-            let c = (self.alpha - 1.0) / (2.0 * self.alpha - 1.0);
+        if alpha > 0.5 {
+            let c = (alpha - 1.0) / (2.0 * alpha - 1.0);
             if z < denom * c {
                 condition = false;
             }
@@ -92,8 +94,9 @@ impl EucmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
+        let (alpha, beta) = self.distortion_params();
         let mut condition = true;
-        if self.alpha > 0.5 && r_squared > (1.0 / self.beta * (2.0 * self.alpha - 1.0)) {
+        if alpha > 0.5 && r_squared > (1.0 / beta * (2.0 * alpha - 1.0)) {
             condition = false;
         }
         condition
@@ -129,17 +132,18 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
-        let d = (self.beta * r2 + z * z).sqrt();
-        let denom = self.alpha * d + (1.0 - self.alpha) * z;
+        let d = (beta * r2 + z * z).sqrt();
+        let denom = alpha * d + (1.0 - alpha) * z;
 
-        if denom < PRECISION || !self.check_projection_condition(z, denom) {
+        if denom < crate::GEOMETRIC_PRECISION || !self.check_projection_condition(z, denom) {
             return None;
         }
 
         Some(Vector2::new(
-            self.fx * x / denom + self.cx,
-            self.fy * y / denom + self.cy,
+            self.camera.pinhole.fx * x / denom + self.camera.pinhole.cx,
+            self.camera.pinhole.fy * y / denom + self.camera.pinhole.cy,
         ))
     }
 
@@ -161,13 +165,14 @@ impl CameraModel for EucmCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let mx = (u - self.cx) / self.fx;
-        let my = (v - self.cy) / self.fy;
+        let (alpha, beta) = self.distortion_params();
+        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
+        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
 
         let r2 = mx * mx + my * my;
-        let beta_r2 = self.beta * r2;
+        let beta_r2 = beta * r2;
 
-        let gamma = 1.0 - self.alpha;
+        let gamma = 1.0 - alpha;
         let gamma_sq = gamma * gamma;
 
         let discriminant = beta_r2 * gamma_sq + gamma_sq;
@@ -178,7 +183,7 @@ impl CameraModel for EucmCamera {
         let sqrt_disc = discriminant.sqrt();
         let denom = beta_r2 + 1.0;
 
-        if denom.abs() < PRECISION {
+        if denom.abs() < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::NumericalError(
                 "Division by near-zero in EUCM unprojection".to_string(),
             ));
@@ -200,11 +205,12 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
-        let d = (self.beta * r2 + z * z).sqrt();
-        let denom = self.alpha * d + (1.0 - self.alpha) * z;
+        let d = (beta * r2 + z * z).sqrt();
+        let denom = alpha * d + (1.0 - alpha) * z;
 
-        denom >= PRECISION && self.check_projection_condition(z, denom)
+        denom >= crate::GEOMETRIC_PRECISION && self.check_projection_condition(z, denom)
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -213,30 +219,31 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
-        let d = (self.beta * r2 + z * z).sqrt();
-        let denom = self.alpha * d + (1.0 - self.alpha) * z;
+        let d = (beta * r2 + z * z).sqrt();
+        let denom = alpha * d + (1.0 - alpha) * z;
 
         // ∂d/∂x = β·x/d, ∂d/∂y = β·y/d, ∂d/∂z = z/d
-        let dd_dx = self.beta * x / d;
-        let dd_dy = self.beta * y / d;
+        let dd_dx = beta * x / d;
+        let dd_dy = beta * y / d;
         let dd_dz = z / d;
 
         // ∂denom/∂x = α·∂d/∂x
-        let ddenom_dx = self.alpha * dd_dx;
-        let ddenom_dy = self.alpha * dd_dy;
-        let ddenom_dz = self.alpha * dd_dz + (1.0 - self.alpha);
+        let ddenom_dx = alpha * dd_dx;
+        let ddenom_dy = alpha * dd_dy;
+        let ddenom_dz = alpha * dd_dz + (1.0 - alpha);
 
         let denom2 = denom * denom;
 
         // ∂(x/denom)/∂x = (denom - x·∂denom/∂x) / denom²
-        let du_dx = self.fx * (denom - x * ddenom_dx) / denom2;
-        let du_dy = self.fx * (-x * ddenom_dy) / denom2;
-        let du_dz = self.fx * (-x * ddenom_dz) / denom2;
+        let du_dx = self.camera.pinhole.fx * (denom - x * ddenom_dx) / denom2;
+        let du_dy = self.camera.pinhole.fx * (-x * ddenom_dy) / denom2;
+        let du_dz = self.camera.pinhole.fx * (-x * ddenom_dz) / denom2;
 
-        let dv_dx = self.fy * (-y * ddenom_dx) / denom2;
-        let dv_dy = self.fy * (denom - y * ddenom_dy) / denom2;
-        let dv_dz = self.fy * (-y * ddenom_dz) / denom2;
+        let dv_dx = self.camera.pinhole.fy * (-y * ddenom_dx) / denom2;
+        let dv_dy = self.camera.pinhole.fy * (denom - y * ddenom_dy) / denom2;
+        let dv_dz = self.camera.pinhole.fy * (-y * ddenom_dz) / denom2;
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
@@ -272,9 +279,10 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
-        let d = (self.beta * r2 + z * z).sqrt();
-        let denom = self.alpha * d + (1.0 - self.alpha) * z;
+        let d = (beta * r2 + z * z).sqrt();
+        let denom = alpha * d + (1.0 - alpha) * z;
 
         let x_norm = x / denom;
         let y_norm = y / denom;
@@ -286,13 +294,13 @@ impl CameraModel for EucmCamera {
         let ddenom_dalpha = d - z;
 
         let dd_dbeta = r2 / (2.0 * d);
-        let ddenom_dbeta = self.alpha * dd_dbeta;
+        let ddenom_dbeta = alpha * dd_dbeta;
 
-        let du_dalpha = -self.fx * x * ddenom_dalpha / (denom * denom);
-        let dv_dalpha = -self.fy * y * ddenom_dalpha / (denom * denom);
+        let du_dalpha = -self.camera.pinhole.fx * x * ddenom_dalpha / (denom * denom);
+        let dv_dalpha = -self.camera.pinhole.fy * y * ddenom_dalpha / (denom * denom);
 
-        let du_dbeta = -self.fx * x * ddenom_dbeta / (denom * denom);
-        let dv_dbeta = -self.fy * y * ddenom_dbeta / (denom * denom);
+        let du_dbeta = -self.camera.pinhole.fx * x * ddenom_dbeta / (denom * denom);
+        let dv_dbeta = -self.camera.pinhole.fy * y * ddenom_dbeta / (denom * denom);
 
         SMatrix::<f64, 2, 6>::new(
             x_norm, 0.0, 1.0, 0.0, du_dalpha, du_dbeta, 0.0, y_norm, 0.0, 1.0, dv_dalpha, dv_dbeta,
@@ -300,8 +308,14 @@ impl CameraModel for EucmCamera {
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
+        let (alpha, beta) = self.distortion_params();
         DVector::from_vec(vec![
-            self.fx, self.fy, self.cx, self.cy, self.alpha, self.beta,
+            self.camera.pinhole.fx,
+            self.camera.pinhole.fy,
+            self.camera.pinhole.cx,
+            self.camera.pinhole.cy,
+            alpha,
+            beta,
         ])
     }
 
@@ -311,12 +325,18 @@ impl CameraModel for EucmCamera {
             "EucmCamera requires at least 6 parameters"
         );
         Self {
-            fx: params[0],
-            fy: params[1],
-            cx: params[2],
-            cy: params[3],
-            alpha: params[4],
-            beta: params[5],
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::EUCM {
+                    alpha: params[4],
+                    beta: params[5],
+                },
+            },
         }
     }
 
@@ -329,21 +349,22 @@ impl CameraModel for EucmCamera {
     /// - α must be in [0, 1]
     /// - β must be positive (> 0)
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.cx.is_finite() || !self.cy.is_finite() {
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        if !self.alpha.is_finite() || self.alpha < 0.0 || self.alpha > 1.0 {
+        let (alpha, beta) = self.distortion_params();
+        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be in [0, 1]".to_string(),
             ));
         }
 
-        if !self.beta.is_finite() || self.beta <= 0.0 {
+        if !beta.is_finite() || beta <= 0.0 {
             return Err(CameraModelError::InvalidParams(
                 "beta must be positive".to_string(),
             ));
@@ -352,17 +373,18 @@ impl CameraModel for EucmCamera {
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> Intrinsics {
-        Intrinsics {
-            fx: self.fx,
-            fy: self.fy,
-            cx: self.cx,
-            cy: self.cy,
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
+            fx: self.camera.pinhole.fx,
+            fy: self.camera.pinhole.fy,
+            cx: self.camera.pinhole.cx,
+            cy: self.camera.pinhole.cy,
         }
     }
 
     fn get_distortion(&self) -> Vec<f64> {
-        vec![self.alpha, self.beta]
+        let (alpha, beta) = self.distortion_params();
+        vec![alpha, beta]
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -379,9 +401,10 @@ mod tests {
     #[test]
     fn test_eucm_camera_creation() -> TestResult {
         let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0)?;
-        assert_eq!(camera.fx, 300.0);
-        assert_eq!(camera.alpha, 0.5);
-        assert_eq!(camera.beta, 1.0);
+        assert_eq!(camera.camera.pinhole.fx, 300.0);
+        let (alpha, beta) = camera.distortion_params();
+        assert_eq!(alpha, 0.5);
+        assert_eq!(beta, 1.0);
         Ok(())
     }
 
@@ -391,8 +414,8 @@ mod tests {
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
-        assert!((uv.x - 320.0).abs() < 1e-6);
-        assert!((uv.y - 240.0).abs() < 1e-6);
+        assert!((uv.x - 320.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
+        assert!((uv.y - 240.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
 
         Ok(())
     }
@@ -403,7 +426,7 @@ mod tests {
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..3 {
             let mut p_plus = p_cam;
@@ -417,7 +440,12 @@ mod tests {
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
+                assert!(
+                    diff < crate::JACOBIAN_TEST_TOLERANCE,
+                    "Mismatch at ({}, {})",
+                    r,
+                    i
+                );
             }
         }
         Ok(())
@@ -430,7 +458,7 @@ mod tests {
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
         let params = camera.intrinsics_vec();
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..6 {
             let mut params_plus = params.clone();
@@ -447,7 +475,12 @@ mod tests {
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
+                assert!(
+                    diff < crate::JACOBIAN_TEST_TOLERANCE,
+                    "Mismatch at ({}, {})",
+                    r,
+                    i
+                );
             }
         }
         Ok(())

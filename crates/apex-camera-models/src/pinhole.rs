@@ -43,7 +43,9 @@
 //!
 //! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
-use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
+use crate::{
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -51,15 +53,17 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// Pinhole camera model with 4 intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeCamera {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
+    pub camera: Camera,
 }
 
 impl PinholeCamera {
     pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
-        let camera = Self { fx, fy, cx, cy };
+        let camera = Self {
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::None,
+            },
+        };
         camera.validate_params()?;
         Ok(camera)
     }
@@ -98,8 +102,8 @@ impl CameraModel for PinholeCamera {
         }
         let inv_z = 1.0 / p_cam.z;
         Some(Vector2::new(
-            self.fx * p_cam.x * inv_z + self.cx,
-            self.fy * p_cam.y * inv_z + self.cy,
+            self.camera.pinhole.fx * p_cam.x * inv_z + self.camera.pinhole.cx,
+            self.camera.pinhole.fy * p_cam.y * inv_z + self.camera.pinhole.cy,
         ))
     }
 
@@ -122,8 +126,8 @@ impl CameraModel for PinholeCamera {
     /// - `Ok(ray)` - Normalized 3D ray direction
     /// - `Err` - Never fails for pinhole model
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
-        let mx = (point_2d.x - self.cx) / self.fx;
-        let my = (point_2d.y - self.cy) / self.fy;
+        let mx = (point_2d.x - self.camera.pinhole.cx) / self.camera.pinhole.fx;
+        let my = (point_2d.y - self.camera.pinhole.cy) / self.camera.pinhole.fy;
 
         let r2 = mx * mx + my * my;
         let norm = (1.0 + r2).sqrt();
@@ -164,12 +168,12 @@ impl CameraModel for PinholeCamera {
 
         // Jacobian ∂(u,v)/∂(x,y,z) where (x,y,z) is point in camera frame
         SMatrix::<f64, 2, 3>::new(
-            self.fx * inv_z,
+            self.camera.pinhole.fx * inv_z,
             0.0,
-            -self.fx * x_norm * inv_z,
+            -self.camera.pinhole.fx * x_norm * inv_z,
             0.0,
-            self.fy * inv_z,
-            -self.fy * y_norm * inv_z,
+            self.camera.pinhole.fy * inv_z,
+            -self.camera.pinhole.fy * y_norm * inv_z,
         )
     }
 
@@ -228,7 +232,12 @@ impl CameraModel for PinholeCamera {
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
-        DVector::from_vec(vec![self.fx, self.fy, self.cx, self.cy])
+        DVector::from_vec(vec![
+            self.camera.pinhole.fx,
+            self.camera.pinhole.fy,
+            self.camera.pinhole.cx,
+            self.camera.pinhole.cy,
+        ])
     }
 
     fn from_params(params: &[f64]) -> Self {
@@ -238,10 +247,15 @@ impl CameraModel for PinholeCamera {
             params.len()
         );
         Self {
-            fx: params[0],
-            fy: params[1],
-            cx: params[2],
-            cy: params[3],
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::None,
+            },
         }
     }
 
@@ -257,21 +271,21 @@ impl CameraModel for PinholeCamera {
     /// - fx, fy must be positive (> 0)
     /// - cx, cy must be finite (not NaN or infinity)
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
-        if !self.cx.is_finite() || !self.cy.is_finite() {
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> Intrinsics {
-        Intrinsics {
-            fx: self.fx,
-            fy: self.fy,
-            cx: self.cx,
-            cy: self.cy,
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
+            fx: self.camera.pinhole.fx,
+            fy: self.camera.pinhole.fy,
+            cx: self.camera.pinhole.cx,
+            cy: self.camera.pinhole.cy,
         }
     }
 
@@ -303,10 +317,10 @@ mod tests {
     #[test]
     fn test_pinhole_camera_creation() -> TestResult {
         let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
-        assert_eq!(camera.fx, 500.0);
-        assert_eq!(camera.fy, 500.0);
-        assert_eq!(camera.cx, 320.0);
-        assert_eq!(camera.cy, 240.0);
+        assert_eq!(camera.camera.pinhole.fx, 500.0);
+        assert_eq!(camera.camera.pinhole.fy, 500.0);
+        assert_eq!(camera.camera.pinhole.cx, 320.0);
+        assert_eq!(camera.camera.pinhole.cy, 240.0);
         Ok(())
     }
 
@@ -314,7 +328,7 @@ mod tests {
     fn test_pinhole_from_params() {
         let params = vec![600.0, 600.0, 320.0, 240.0];
         let camera = PinholeCamera::from_params(&params);
-        assert_eq!(camera.fx, 600.0);
+        assert_eq!(camera.camera.pinhole.fx, 600.0);
         assert_eq!(camera.intrinsics_vec(), DVector::from_vec(params));
     }
 
@@ -387,7 +401,7 @@ mod tests {
 
         let jac_analytical = camera.jacobian_point(&p_cam);
 
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
         for i in 0..3 {
             let mut p_plus = p_cam;
             let mut p_minus = p_cam;
@@ -404,7 +418,7 @@ mod tests {
                 let numerical = numerical_jac[r];
                 let rel_error = (analytical - numerical).abs() / (1.0 + numerical.abs());
                 assert!(
-                    rel_error < 1e-5,
+                    rel_error < crate::JACOBIAN_TEST_TOLERANCE,
                     "Jacobian mismatch at ({}, {}): analytical={}, numerical={}, rel_error={}",
                     r,
                     i,
@@ -425,8 +439,13 @@ mod tests {
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
 
-        let eps = 1e-7;
-        let params = vec![camera.fx, camera.fy, camera.cx, camera.cy];
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
+        let params = vec![
+            camera.camera.pinhole.fx,
+            camera.camera.pinhole.fy,
+            camera.camera.pinhole.cx,
+            camera.camera.pinhole.cy,
+        ];
 
         for i in 0..4 {
             let mut params_plus = params.clone();
@@ -447,7 +466,7 @@ mod tests {
                 let numerical = numerical_jac[r];
                 let rel_error = (analytical - numerical).abs() / (1.0 + numerical.abs());
                 assert!(
-                    rel_error < 1e-5,
+                    rel_error < crate::JACOBIAN_TEST_TOLERANCE,
                     "Intrinsics Jacobian mismatch at ({}, {}): analytical={}, numerical={}, rel_error={}",
                     r,
                     i,

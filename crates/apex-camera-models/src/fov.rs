@@ -41,41 +41,51 @@
 //! - Zhang et al., "Simultaneous Localization and Mapping with Fisheye Cameras"
 //!   https://arxiv.org/pdf/1807.08957
 
-use super::{CameraModel, CameraModelError, Intrinsics, skew_symmetric};
+use crate::{
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
-const PRECISION: f64 = 1e-6;
-
 /// FOV camera model with 5 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FovCamera {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
-    pub w: f64,
+    pub camera: Camera,
 }
 
 impl FovCamera {
     pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, w: f64) -> Result<Self, CameraModelError> {
-        let camera = Self { fx, fy, cx, cy, w };
+        let camera = Self {
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::FOV { w },
+            },
+        };
         camera.validate_params()?;
         Ok(camera)
     }
 
+    /// Helper method to extract distortion parameter.
+    fn distortion_params(&self) -> f64 {
+        match self.camera.distortion {
+            DistortionModel::FOV { w } => w,
+            _ => panic!("Invalid distortion model for FovCamera"),
+        }
+    }
+
     /// Validates camera parameters.
     pub fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.cx.is_finite() || !self.cy.is_finite() {
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        if !self.w.is_finite() || self.w <= 0.0 || self.w > std::f64::consts::PI {
+        let w = self.distortion_params();
+        if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
             ));
@@ -115,20 +125,24 @@ impl CameraModel for FovCamera {
         }
 
         let r = (x * x + y * y).sqrt();
-        let tan_w_2 = (self.w / 2.0).tan();
+        let w = self.distortion_params();
+        let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
-        let rd = if r > PRECISION {
+        let rd = if r > crate::GEOMETRIC_PRECISION {
             let atan_wrd = (mul2tanwby2 * r / z).atan();
-            atan_wrd / (r * self.w)
+            atan_wrd / (r * w)
         } else {
-            mul2tanwby2 / self.w
+            mul2tanwby2 / w
         };
 
         let mx = x * rd;
         let my = y * rd;
 
-        Some(Vector2::new(self.fx * mx + self.cx, self.fy * my + self.cy))
+        Some(Vector2::new(
+            self.camera.pinhole.fx * mx + self.camera.pinhole.cx,
+            self.camera.pinhole.fy * my + self.camera.pinhole.cy,
+        ))
     }
 
     /// Unprojects a 2D image point to a 3D ray.
@@ -149,20 +163,21 @@ impl CameraModel for FovCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let tan_w_2 = (self.w / 2.0).tan();
+        let w = self.distortion_params();
+        let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
-        let mx = (u - self.cx) / self.fx;
-        let my = (v - self.cy) / self.fy;
+        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
+        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
 
         let r2 = mx * mx + my * my;
         let rd = r2.sqrt();
 
-        if rd < PRECISION {
+        if rd < crate::GEOMETRIC_PRECISION {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
         }
 
-        let ru = (rd * self.w).tan() / mul2tanwby2;
+        let ru = (rd * w).tan() / mul2tanwby2;
 
         let norm_factor = (1.0 + ru * ru).sqrt();
         let x = mx * ru / (rd * norm_factor);
@@ -189,23 +204,31 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let tan_w_2 = (self.w / 2.0).tan();
+        let w = self.distortion_params();
+        let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
-        if r < PRECISION {
-            let rd = mul2tanwby2 / self.w;
-            return SMatrix::<f64, 2, 3>::new(self.fx * rd, 0.0, 0.0, 0.0, self.fy * rd, 0.0);
+        if r < crate::GEOMETRIC_PRECISION {
+            let rd = mul2tanwby2 / w;
+            return SMatrix::<f64, 2, 3>::new(
+                self.camera.pinhole.fx * rd,
+                0.0,
+                0.0,
+                0.0,
+                self.camera.pinhole.fy * rd,
+                0.0,
+            );
         }
 
         let atan_wrd = (mul2tanwby2 * r / z).atan();
-        let rd = atan_wrd / (r * self.w);
+        let rd = atan_wrd / (r * w);
 
         // Derivatives
         let datan_dr = mul2tanwby2 * z / (z * z + mul2tanwby2 * mul2tanwby2 * r * r);
         let datan_dz = -mul2tanwby2 * r / (z * z + mul2tanwby2 * mul2tanwby2 * r * r);
 
-        let drd_dr = (datan_dr * r - atan_wrd) / (r * r * self.w);
-        let drd_dz = datan_dz / (r * self.w);
+        let drd_dr = (datan_dr * r - atan_wrd) / (r * r * w);
+        let drd_dz = datan_dz / (r * w);
 
         let dr_dx = x / r;
         let dr_dy = y / r;
@@ -219,12 +242,12 @@ impl CameraModel for FovCamera {
         let dmy_dz = y * drd_dz;
 
         SMatrix::<f64, 2, 3>::new(
-            self.fx * dmx_dx,
-            self.fx * dmx_dy,
-            self.fx * dmx_dz,
-            self.fy * dmy_dx,
-            self.fy * dmy_dy,
-            self.fy * dmy_dz,
+            self.camera.pinhole.fx * dmx_dx,
+            self.camera.pinhole.fx * dmx_dy,
+            self.camera.pinhole.fx * dmx_dz,
+            self.camera.pinhole.fy * dmy_dx,
+            self.camera.pinhole.fy * dmy_dy,
+            self.camera.pinhole.fy * dmy_dz,
         )
     }
 
@@ -260,14 +283,15 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let tan_w_2 = (self.w / 2.0).tan();
+        let w = self.distortion_params();
+        let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
-        let rd = if r > PRECISION {
+        let rd = if r > crate::GEOMETRIC_PRECISION {
             let atan_wrd = (mul2tanwby2 * r / z).atan();
-            atan_wrd / (r * self.w)
+            atan_wrd / (r * w)
         } else {
-            mul2tanwby2 / self.w
+            mul2tanwby2 / w
         };
 
         let mx = x * rd;
@@ -277,8 +301,8 @@ impl CameraModel for FovCamera {
         // ∂v/∂fx = 0, ∂v/∂fy = my, ∂v/∂cx = 0, ∂v/∂cy = 1
 
         // For w derivative: ∂rd/∂w
-        let drd_dw = if r > PRECISION {
-            let tan_w_2 = (self.w / 2.0).tan();
+        let drd_dw = if r > crate::GEOMETRIC_PRECISION {
+            let tan_w_2 = (w / 2.0).tan();
             let alpha = 2.0 * tan_w_2 * r / z;
             let atan_alpha = alpha.atan();
 
@@ -288,24 +312,31 @@ impl CameraModel for FovCamera {
 
             // ∂rd/∂w = [1/(1+α²) · ∂α/∂w · r·w - atan(α) · r] / (r·w)²
             let datan_dw = dalpha_dw / (1.0 + alpha * alpha);
-            (datan_dw * r * self.w - atan_alpha * r) / (r * r * self.w * self.w)
+            (datan_dw * r * w - atan_alpha * r) / (r * r * w * w)
         } else {
-            let tan_w_2 = (self.w / 2.0).tan();
+            let tan_w_2 = (w / 2.0).tan();
             let sec2_w_2 = 1.0 + tan_w_2 * tan_w_2;
             // rd = 2·tan(w/2) / w
             // ∂rd/∂w = [2·sec²(w/2)/2 · w - 2·tan(w/2)] / w²
             //        = [sec²(w/2) · w - 2·tan(w/2)] / w²
-            (sec2_w_2 * self.w - 2.0 * tan_w_2) / (self.w * self.w)
+            (sec2_w_2 * w - 2.0 * tan_w_2) / (w * w)
         };
 
-        let du_dw = self.fx * x * drd_dw;
-        let dv_dw = self.fy * y * drd_dw;
+        let du_dw = self.camera.pinhole.fx * x * drd_dw;
+        let dv_dw = self.camera.pinhole.fy * y * drd_dw;
 
         SMatrix::<f64, 2, 5>::new(mx, 0.0, 1.0, 0.0, du_dw, 0.0, my, 0.0, 1.0, dv_dw)
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
-        DVector::from_vec(vec![self.fx, self.fy, self.cx, self.cy, self.w])
+        let w = self.distortion_params();
+        DVector::from_vec(vec![
+            self.camera.pinhole.fx,
+            self.camera.pinhole.fy,
+            self.camera.pinhole.cx,
+            self.camera.pinhole.cy,
+            w,
+        ])
     }
 
     fn from_params(params: &[f64]) -> Self {
@@ -314,11 +345,15 @@ impl CameraModel for FovCamera {
             "FovCamera requires at least 5 parameters"
         );
         Self {
-            fx: params[0],
-            fy: params[1],
-            cx: params[2],
-            cy: params[3],
-            w: params[4],
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::FOV { w: params[4] },
+            },
         }
     }
 
@@ -330,15 +365,16 @@ impl CameraModel for FovCamera {
     /// - cx, cy must be finite
     /// - w must be in (0, π]
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.cx.is_finite() || !self.cy.is_finite() {
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        if !self.w.is_finite() || self.w <= 0.0 || self.w > std::f64::consts::PI {
+        let w = self.distortion_params();
+        if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
             ));
@@ -347,17 +383,17 @@ impl CameraModel for FovCamera {
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> Intrinsics {
-        Intrinsics {
-            fx: self.fx,
-            fy: self.fy,
-            cx: self.cx,
-            cy: self.cy,
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
+            fx: self.camera.pinhole.fx,
+            fy: self.camera.pinhole.fy,
+            cx: self.camera.pinhole.cx,
+            cy: self.camera.pinhole.cy,
         }
     }
 
     fn get_distortion(&self) -> Vec<f64> {
-        vec![self.w]
+        vec![self.distortion_params()]
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -374,8 +410,8 @@ mod tests {
     #[test]
     fn test_fov_camera_creation() -> TestResult {
         let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
-        assert_eq!(camera.fx, 300.0);
-        assert_eq!(camera.w, 1.5);
+        assert_eq!(camera.camera.pinhole.fx, 300.0);
+        assert_eq!(camera.distortion_params(), 1.5);
         Ok(())
     }
 
@@ -397,7 +433,7 @@ mod tests {
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..3 {
             let mut p_plus = p_cam;
@@ -411,7 +447,12 @@ mod tests {
 
             for r in 0..2 {
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
-                assert!(diff < 1e-5, "Mismatch at ({}, {})", r, i);
+                assert!(
+                    diff < crate::JACOBIAN_TEST_TOLERANCE,
+                    "Mismatch at ({}, {})",
+                    r,
+                    i
+                );
             }
         }
         Ok(())
@@ -424,7 +465,7 @@ mod tests {
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
         let params = camera.intrinsics_vec();
-        let eps = 1e-7;
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..5 {
             let mut params_plus = params.clone();

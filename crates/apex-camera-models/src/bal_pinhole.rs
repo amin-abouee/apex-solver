@@ -3,7 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use super::{CameraModel, skew_symmetric};
+use crate::{
+    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -38,18 +40,7 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// Note the negation of z in the denominator compared to standard pinhole.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BALPinholeCamera {
-    /// Focal length in x direction (pixels)
-    pub fx: f64,
-    /// Focal length in y direction (pixels)
-    pub fy: f64,
-    /// Principal point x coordinate (pixels)
-    pub cx: f64,
-    /// Principal point y coordinate (pixels)
-    pub cy: f64,
-    /// First radial distortion coefficient
-    pub k1: f64,
-    /// Second radial distortion coefficient
-    pub k2: f64,
+    pub camera: Camera,
 }
 
 impl BALPinholeCamera {
@@ -61,42 +52,40 @@ impl BALPinholeCamera {
         cy: f64,
         k1: f64,
         k2: f64,
-    ) -> Result<Self, super::CameraModelError> {
+    ) -> Result<Self, CameraModelError> {
         let camera = Self {
-            fx,
-            fy,
-            cx,
-            cy,
-            k1,
-            k2,
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::Radial { k1, k2 },
+            },
         };
         camera.validate_params()?;
         Ok(camera)
     }
 
     /// Create a BAL pinhole camera without distortion (k1=0, k2=0).
-    pub fn new_no_distortion(
-        fx: f64,
-        fy: f64,
-        cx: f64,
-        cy: f64,
-    ) -> Result<Self, super::CameraModelError> {
+    pub fn new_no_distortion(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
         let camera = Self {
-            fx,
-            fy,
-            cx,
-            cy,
-            k1: 0.0,
-            k2: 0.0,
+            camera: Camera {
+                pinhole: PinholeParams { fx, fy, cx, cy },
+                distortion: DistortionModel::Radial { k1: 0.0, k2: 0.0 },
+            },
         };
         camera.validate_params()?;
         Ok(camera)
     }
 
+    /// Helper to extract distortion parameters
+    fn distortion_params(&self) -> (f64, f64) {
+        match self.camera.distortion {
+            DistortionModel::Radial { k1, k2 } => (k1, k2),
+            _ => panic!("BALPinholeCamera must have Radial distortion model"),
+        }
+    }
+
     /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
     fn check_projection_condition(&self, z: f64) -> bool {
-        const MIN_DEPTH: f64 = 1e-6;
-        z < -MIN_DEPTH
+        z < -crate::MIN_DEPTH
     }
 }
 
@@ -119,15 +108,16 @@ impl CameraModel for BALPinholeCamera {
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let (k1, k2) = self.distortion_params();
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         // Apply distortion
         let x_d = x_n * distortion;
         let y_d = y_n * distortion;
 
         Some(Vector2::new(
-            self.fx * x_d + self.cx,
-            self.fy * y_d + self.cy,
+            self.camera.pinhole.fx * x_d + self.camera.pinhole.cx,
+            self.camera.pinhole.fy * y_d + self.camera.pinhole.cy,
         ))
     }
 
@@ -143,10 +133,11 @@ impl CameraModel for BALPinholeCamera {
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let (k1, k2) = self.distortion_params();
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         // Derivative of distortion w.r.t. r²
-        let d_dist_dr2 = self.k1 + 2.0 * self.k2 * r2;
+        let d_dist_dr2 = k1 + 2.0 * k2 * r2;
 
         // Jacobian of normalized coordinates w.r.t. camera point
         // x_n = x / (-z), y_n = y / (-z)
@@ -176,13 +167,13 @@ impl CameraModel for BALPinholeCamera {
         let dy_d_dyn = distortion + y_n * d_dist_dr2 * 2.0 * y_n;
 
         // Chain rule: ∂(u,v)/∂(x,y,z) = ∂(u,v)/∂(x_d,y_d) * ∂(x_d,y_d)/∂(x_n,y_n) * ∂(x_n,y_n)/∂(x,y,z)
-        let du_dx = self.fx * (dx_d_dxn * inv_neg_z);
-        let du_dy = self.fx * (dx_d_dyn * inv_neg_z);
-        let du_dz = self.fx * (dx_d_dxn * dxn_dz + dx_d_dyn * dyn_dz);
+        let du_dx = self.camera.pinhole.fx * (dx_d_dxn * inv_neg_z);
+        let du_dy = self.camera.pinhole.fx * (dx_d_dyn * inv_neg_z);
+        let du_dz = self.camera.pinhole.fx * (dx_d_dxn * dxn_dz + dx_d_dyn * dyn_dz);
 
-        let dv_dx = self.fy * (dy_d_dxn * inv_neg_z);
-        let dv_dy = self.fy * (dy_d_dyn * inv_neg_z);
-        let dv_dz = self.fy * (dy_d_dxn * dxn_dz + dy_d_dyn * dyn_dz);
+        let dv_dx = self.camera.pinhole.fy * (dy_d_dxn * inv_neg_z);
+        let dv_dy = self.camera.pinhole.fy * (dy_d_dyn * inv_neg_z);
+        let dv_dz = self.camera.pinhole.fy * (dy_d_dxn * dxn_dz + dy_d_dyn * dyn_dz);
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
@@ -245,7 +236,8 @@ impl CameraModel for BALPinholeCamera {
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let (k1, k2) = self.distortion_params();
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         let x_d = x_n * distortion;
         let y_d = y_n * distortion;
@@ -262,19 +254,27 @@ impl CameraModel for BALPinholeCamera {
             0.0,
             1.0,
             0.0,
-            self.fx * x_n * r2,
-            self.fx * x_n * r4,
+            self.camera.pinhole.fx * x_n * r2,
+            self.camera.pinhole.fx * x_n * r4,
             0.0,
             y_d,
             0.0,
             1.0,
-            self.fy * y_n * r2,
-            self.fy * y_n * r4,
+            self.camera.pinhole.fy * y_n * r2,
+            self.camera.pinhole.fy * y_n * r4,
         )
     }
 
     fn intrinsics_vec(&self) -> DVector<f64> {
-        DVector::from_vec(vec![self.fx, self.fy, self.cx, self.cy, self.k1, self.k2])
+        let (k1, k2) = self.distortion_params();
+        DVector::from_vec(vec![
+            self.camera.pinhole.fx,
+            self.camera.pinhole.fy,
+            self.camera.pinhole.cx,
+            self.camera.pinhole.cy,
+            k1,
+            k2,
+        ])
     }
 
     fn from_params(params: &[f64]) -> Self {
@@ -284,27 +284,34 @@ impl CameraModel for BALPinholeCamera {
             params.len()
         );
         Self {
-            fx: params[0],
-            fy: params[1],
-            cx: params[2],
-            cy: params[3],
-            k1: params[4],
-            k2: params[5],
+            camera: Camera {
+                pinhole: PinholeParams {
+                    fx: params[0],
+                    fy: params[1],
+                    cx: params[2],
+                    cy: params[3],
+                },
+                distortion: DistortionModel::Radial {
+                    k1: params[4],
+                    k2: params[5],
+                },
+            },
         }
     }
 
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, super::CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         // Remove distortion and convert to ray
-        let x_d = (point_2d.x - self.cx) / self.fx;
-        let y_d = (point_2d.y - self.cy) / self.fy;
+        let x_d = (point_2d.x - self.camera.pinhole.cx) / self.camera.pinhole.fx;
+        let y_d = (point_2d.y - self.camera.pinhole.cy) / self.camera.pinhole.fy;
 
         // Iterative undistortion (simple Newton's method)
         let mut x_n = x_d;
         let mut y_n = y_d;
 
+        let (k1, k2) = self.distortion_params();
         for _ in 0..5 {
             let r2 = x_n * x_n + y_n * y_n;
-            let distortion = 1.0 + self.k1 * r2 + self.k2 * r2 * r2;
+            let distortion = 1.0 + k1 * r2 + k2 * r2 * r2;
             x_n = x_d / distortion;
             y_n = y_d / distortion;
         }
@@ -314,32 +321,34 @@ impl CameraModel for BALPinholeCamera {
         Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
     }
 
-    fn validate_params(&self) -> Result<(), super::CameraModelError> {
-        if self.fx <= 0.0 || self.fy <= 0.0 {
-            return Err(super::CameraModelError::FocalLengthMustBePositive);
+    fn validate_params(&self) -> Result<(), CameraModelError> {
+        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthMustBePositive);
         }
-        if !self.cx.is_finite() || !self.cy.is_finite() {
-            return Err(super::CameraModelError::PrincipalPointMustBeFinite);
+        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
-        if !self.k1.is_finite() || !self.k2.is_finite() {
-            return Err(super::CameraModelError::InvalidParams(
+        let (k1, k2) = self.distortion_params();
+        if !k1.is_finite() || !k2.is_finite() {
+            return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
             ));
         }
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> super::Intrinsics {
-        super::Intrinsics {
-            fx: self.fx,
-            fy: self.fy,
-            cx: self.cx,
-            cy: self.cy,
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
+            fx: self.camera.pinhole.fx,
+            fy: self.camera.pinhole.fy,
+            cx: self.camera.pinhole.cx,
+            cy: self.camera.pinhole.cy,
         }
     }
 
     fn get_distortion(&self) -> Vec<f64> {
-        vec![self.k1, self.k2]
+        let (k1, k2) = self.distortion_params();
+        vec![k1, k2]
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -396,14 +405,14 @@ pub struct BALPinholeCameraStrict {
 
 impl BALPinholeCameraStrict {
     /// Create a new strict BAL pinhole camera with distortion.
-    pub fn new(f: f64, k1: f64, k2: f64) -> Result<Self, super::CameraModelError> {
+    pub fn new(f: f64, k1: f64, k2: f64) -> Result<Self, CameraModelError> {
         let camera = Self { f, k1, k2 };
         camera.validate_params()?;
         Ok(camera)
     }
 
     /// Create a strict BAL pinhole camera without distortion (k1=0, k2=0).
-    pub fn new_no_distortion(f: f64) -> Result<Self, super::CameraModelError> {
+    pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
         let camera = Self {
             f,
             k1: 0.0,
@@ -415,8 +424,7 @@ impl BALPinholeCameraStrict {
 
     /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
     fn check_projection_condition(&self, z: f64) -> bool {
-        const MIN_DEPTH: f64 = 1e-6;
-        z < -MIN_DEPTH
+        z < -crate::MIN_DEPTH
     }
 }
 
@@ -559,7 +567,7 @@ impl CameraModel for BALPinholeCameraStrict {
         }
     }
 
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, super::CameraModelError> {
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         // Remove distortion and convert to ray
         // Principal point is (0,0) for strict BAL
         let x_d = point_2d.x / self.f;
@@ -581,20 +589,20 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
     }
 
-    fn validate_params(&self) -> Result<(), super::CameraModelError> {
+    fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.f <= 0.0 {
-            return Err(super::CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthMustBePositive);
         }
         if !self.k1.is_finite() || !self.k2.is_finite() {
-            return Err(super::CameraModelError::InvalidParams(
+            return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
             ));
         }
         Ok(())
     }
 
-    fn get_intrinsics(&self) -> super::Intrinsics {
-        super::Intrinsics {
+    fn get_pinhole_params(&self) -> PinholeParams {
+        PinholeParams {
             fx: self.f,
             fy: self.f,
             cx: 0.0,
@@ -620,12 +628,13 @@ mod tests {
     #[test]
     fn test_bal_pinhole_camera_creation() -> TestResult {
         let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.0, 0.0)?;
-        assert_eq!(camera.fx, 500.0);
-        assert_eq!(camera.fy, 500.0);
-        assert_eq!(camera.cx, 320.0);
-        assert_eq!(camera.cy, 240.0);
-        assert_eq!(camera.k1, 0.0);
-        assert_eq!(camera.k2, 0.0);
+        assert_eq!(camera.camera.pinhole.fx, 500.0);
+        assert_eq!(camera.camera.pinhole.fy, 500.0);
+        assert_eq!(camera.camera.pinhole.cx, 320.0);
+        assert_eq!(camera.camera.pinhole.cy, 240.0);
+        let (k1, k2) = camera.distortion_params();
+        assert_eq!(k1, 0.0);
+        assert_eq!(k2, 0.0);
         Ok(())
     }
 
