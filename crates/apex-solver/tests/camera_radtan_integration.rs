@@ -49,7 +49,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         0.1, -0.05, // k1, k2 (moderate radial distortion)
         0.001, -0.001, // p1, p2 (small tangential distortion)
         0.0,    // k3 (set to zero - not observable from planar target)
-    );
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -280,7 +280,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         final_intrinsics[6],
         final_intrinsics[7],
         final_intrinsics[8],
-    );
+    )?;
 
     let final_landmarks_vec = result
         .parameters
@@ -416,7 +416,8 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_radtan_3_cameras_calibration() -> TestResult {
     // Same setup as main test but with 3 cameras
-    let true_camera = RadTanCamera::new(200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0);
+    let true_camera =
+        RadTanCamera::new(200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0)?;
 
     let img_width = 600.0;
     let img_height = 400.0;

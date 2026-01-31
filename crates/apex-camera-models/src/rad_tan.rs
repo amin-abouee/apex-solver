@@ -72,7 +72,8 @@ pub struct RadTanCamera {
 }
 
 impl RadTanCamera {
-    pub const fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
         fx: f64,
         fy: f64,
         cx: f64,
@@ -82,8 +83,8 @@ impl RadTanCamera {
         p1: f64,
         p2: f64,
         k3: f64,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, super::CameraModelError> {
+        let camera = Self {
             fx,
             fy,
             cx,
@@ -93,7 +94,14 @@ impl RadTanCamera {
             p1,
             p2,
             k3,
-        }
+        };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks if a 3D point satisfies the projection condition (z >= PRECISION).
+    fn check_projection_condition(&self, z: f64) -> bool {
+        z >= PRECISION
     }
 }
 
@@ -117,7 +125,7 @@ impl CameraModel for RadTanCamera {
     /// - `Some(uv)` - 2D image coordinates if z > PRECISION
     /// - `None` - If point is at or behind camera
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
-        if p_cam.z < PRECISION {
+        if !self.check_projection_condition(p_cam.z) {
             return None;
         }
 
@@ -166,6 +174,7 @@ impl CameraModel for RadTanCamera {
     /// - `Ok(ray)` - Normalized 3D ray direction
     /// - `Err` - If iteration fails to converge
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
+        // Validate unprojection condition if needed (always true for RadTan generally)
         let u = point_2d.x;
         let v = point_2d.y;
 
@@ -267,7 +276,7 @@ impl CameraModel for RadTanCamera {
     ///
     /// - z ≥ PRECISION (point in front of camera)
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        p_cam.z >= PRECISION
+        self.check_projection_condition(p_cam.z)
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -498,16 +507,17 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_radtan_camera_creation() {
-        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001);
+    fn test_radtan_camera_creation() -> TestResult {
+        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.k1, 0.1);
         assert_eq!(camera.p1, 0.001);
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.0, 0.0, 0.0, 0.0, 0.0)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
 
@@ -519,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001);
+        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -545,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001);
+        let camera = RadTanCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.002, 0.001)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
