@@ -632,8 +632,7 @@ fn test_se2_dataset(
         }
 
         // Reconstruct graph from optimized variables
-        let optimized_graph =
-            graph_from_optimized_variables(&result.parameters, &graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, &graph);
 
         // Write to file (default: G2O format)
         use apex_solver::apex_io::GraphLoader;
@@ -963,8 +962,7 @@ fn test_se3_dataset(
         }
 
         // Reconstruct graph from optimized variables
-        let optimized_graph =
-            graph_from_optimized_variables(&result.parameters, &graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, &graph);
 
         // Write to file (default: G2O format)
         use apex_solver::apex_io::GraphLoader;
@@ -1044,7 +1042,6 @@ fn graph_from_optimized_variables(
 
     graph
 }
-
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
