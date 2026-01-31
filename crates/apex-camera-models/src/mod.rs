@@ -1,91 +1,29 @@
-//! Camera projection models and factors for bundle adjustment.
+//! Camera Model Traits and Types
 //!
-//! This module provides a flexible framework for camera projection factors used in
-//! bundle adjustment, self-calibration, and Structure-from-Motion (SfM).
+//! This module defines the common interface for all camera models used in the
+//! Apex solver.
 //!
 //! # Key Components
 //!
 //! - **`CameraModel` trait**: Defines the interface for different camera models
 //! - **`ProjectionFactor`**: Generic factor for camera projection constraints
 //! - **`OptimizeParams`**: Compile-time configuration for which parameters to optimize
-//! - **Type aliases**: Common optimization patterns (BundleAdjustment, SelfCalibration, etc.)
 //!
-//! # Optimization Configuration
+//! # Use Cases
 //!
-//! The `OptimizeParams<POSE, LANDMARK, INTRINSIC>` type uses const generics to specify
-//! which parameters to optimize at compile time:
+//! - Bundle Adjustment
+//! - Visual Odometry
+//! - SLAM
+//! - Structure-from-Motion (SfM)
+//! - Camera Calibration
 //!
-//! ```rust
-//! use apex_solver::factors::camera::{OptimizeParams, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
+//! # References
 //!
-//! // Bundle Adjustment: optimize pose + landmarks (intrinsics fixed)
-//! type BundleAdjustment = OptimizeParams<true, true, false>;
-//!
-//! // Self-Calibration: optimize everything
-//! type SelfCalibration = OptimizeParams<true, true, true>;
-//!
-//! // Only intrinsics (pose and landmarks fixed)
-//! type OnlyIntrinsics = OptimizeParams<false, false, true>;
-//! ```
-//!
-//! # Examples
-//!
-//! ## Bundle Adjustment
-//!
-//! ```rust
-//! use apex_solver::factors::camera::{BundleAdjustment, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
-//! use nalgebra::{Matrix2xX, Vector2};
-//!
-//! let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-//! let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
-//!
-//! let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
-//!     ProjectionFactor::new(observations, camera);
-//! ```
-//!
-//! ## Self-Calibration with Fixed Values
-//!
-//! ```rust
-//! use apex_solver::factors::camera::{OnlyIntrinsics, PinholeCamera};
-//! use apex_solver::factors::ProjectionFactor;
-//! use apex_solver::manifold::se3::SE3;
-//! use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
-//!
-//! let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-//! let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
-//! let fixed_pose = SE3::identity();
-//! let fixed_landmarks = Matrix3xX::from_columns(&[Vector3::new(0.0, 0.0, 1.0)]);
-//!
-//! let factor: ProjectionFactor<PinholeCamera, OnlyIntrinsics> =
-//!     ProjectionFactor::new(observations, camera)
-//!         .with_fixed_pose(fixed_pose)
-//!         .with_fixed_landmarks(fixed_landmarks);
-//! ```
+//! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
+//! - Sola et al., "A micro-Lie theory for state estimation in robotics"
 
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
-
-// ============================================================================
-// CAMERA PARAMETER TYPES (defined early for submodule access)
-// ============================================================================
-
-/// Camera intrinsic parameters.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Intrinsics {
-    pub fx: f64,
-    pub fy: f64,
-    pub cx: f64,
-    pub cy: f64,
-}
-
-/// Image resolution.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Resolution {
-    pub width: u32,
-    pub height: u32,
-}
 
 /// Camera model errors.
 #[derive(thiserror::Error, Debug)]
@@ -110,23 +48,29 @@ pub enum CameraModelError {
     NumericalError(String),
 }
 
-impl From<std::io::Error> for CameraModelError {
-    fn from(err: std::io::Error) -> Self {
-        CameraModelError::IOError(err.to_string())
-    }
-}
-
-impl From<yaml_rust::ScanError> for CameraModelError {
-    fn from(err: yaml_rust::ScanError) -> Self {
-        CameraModelError::YamlError(err.to_string())
-    }
-}
-
-// ============================================================================
-// VALIDATION FUNCTIONS
-// ============================================================================
-
 /// Validates that a projected 2D point falls within the image boundaries.
+///
+/// # Arguments
+///
+/// * `u` - The x-coordinate (horizontal) of the projected point in pixels
+/// * `v` - The y-coordinate (vertical) of the projected point in pixels
+/// * `resolution` - The image resolution (width and height)
+///
+/// # Returns
+///
+/// * `Ok(())` if the point is within bounds
+/// * `Err(CameraModelError::ProjectionOutSideImage)` if the point is outside the image
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use apex_camera_models::{validate_projection_bounds, Resolution};
+///
+/// let resolution = Resolution { width: 640, height: 480 };
+/// assert!(validate_projection_bounds(320.0, 240.0, &resolution).is_ok());
+/// assert!(validate_projection_bounds(-10.0, 240.0, &resolution).is_err());
+/// assert!(validate_projection_bounds(320.0, 500.0, &resolution).is_err());
+/// ```
 pub fn validate_projection_bounds(
     u: f64,
     v: f64,
@@ -139,6 +83,30 @@ pub fn validate_projection_bounds(
 }
 
 /// Validates that a 2D image point falls within the image boundaries for unprojection.
+///
+/// # Arguments
+///
+/// * `point_2d` - The 2D point in pixel coordinates (u, v)
+/// * `resolution` - The image resolution (width and height)
+///
+/// # Returns
+///
+/// * `Ok(())` if the point is within bounds
+/// * `Err(CameraModelError::PointIsOutSideImage)` if the point is outside the image
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use apex_camera_models::{validate_unprojection_bounds, Resolution};
+/// use nalgebra::Vector2;
+///
+/// let resolution = Resolution { width: 640, height: 480 };
+/// let valid_point = Vector2::new(320.0, 240.0);
+/// let invalid_point = Vector2::new(-10.0, 240.0);
+///
+/// assert!(validate_unprojection_bounds(&valid_point, &resolution).is_ok());
+/// assert!(validate_unprojection_bounds(&invalid_point, &resolution).is_err());
+/// ```
 pub fn validate_unprojection_bounds(
     point_2d: &Vector2<f64>,
     resolution: &Resolution,
@@ -154,16 +122,32 @@ pub fn validate_unprojection_bounds(
 }
 
 /// Validates that a 3D point's z-coordinate is positive (in front of camera).
+///
+/// # Arguments
+///
+/// * `z` - The z-coordinate of the 3D point in camera space
+///
+/// # Returns
+///
+/// * `Ok(())` if z is sufficiently positive
+/// * `Err(CameraModelError::PointAtCameraCenter)` if z is too close to zero or negative
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use apex_camera_models::validate_point_in_front;
+///
+/// assert!(validate_point_in_front(1.0).is_ok());
+/// assert!(validate_point_in_front(0.001).is_ok());
+/// assert!(validate_point_in_front(0.0).is_err());
+/// assert!(validate_point_in_front(-1.0).is_err());
+/// ```
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
     if z < f64::EPSILON.sqrt() {
         return Err(CameraModelError::PointAtCameraCenter);
     }
     Ok(())
 }
-
-// ============================================================================
-// CAMERA MODEL MODULES
-// ============================================================================
 
 pub mod bal_pinhole;
 pub mod double_sphere;
@@ -187,10 +171,6 @@ pub use ucm::UcmCamera;
 // Re-export new types for camera models
 pub use {CameraModelError, Intrinsics, Resolution};
 pub use {validate_point_in_front, validate_projection_bounds, validate_unprojection_bounds};
-
-// ============================================================================
-// OPTIMIZATION CONFIGURATION
-// ============================================================================
 
 /// Configuration for which parameters to optimize.
 ///
@@ -264,10 +244,6 @@ pub type PoseAndIntrinsics = OptimizeParams<true, false, true>;
 /// Rarely used configuration for specific calibration scenarios.
 pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
 
-// ============================================================================
-// CAMERA MODEL TRAIT
-// ============================================================================
-
 /// Trait for camera projection models.
 ///
 /// This trait defines the interface for different camera models (pinhole, fisheye,
@@ -286,16 +262,12 @@ pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
 /// - Be cloneable and debuggable
 /// - Provide projection and Jacobian methods
 /// - Handle invalid projections (e.g., points behind camera)
-///
-/// # Examples
-///
-/// See `PinholeCamera` for a complete implementation example.
 pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// Number of intrinsic parameters (compile-time constant).
     ///
     /// Examples:
     /// - Pinhole: 4 (fx, fy, cx, cy)
-    /// - Pinhole with distortion: 8+ (fx, fy, cx, cy, k1, k2, p1, p2, ...)
+    /// - Kannala-Brandt: 8 (fx, fy, cx, cy, k1, k2, k3, k4)
     /// - Double Sphere: 6 (fx, fy, cx, cy, xi, alpha)
     const INTRINSIC_DIM: usize;
 
@@ -317,37 +289,40 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         + std::ops::Mul<Matrix3<f64>, Output = SMatrix<f64, 2, 3>>
         + std::ops::Index<(usize, usize), Output = f64>;
 
-    /// Project a single 3D point in camera frame to 2D image coordinates.
+    /// Projects a 3D point from the camera's coordinate system to 2D image coordinates.
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z)
+    /// * `p_cam` - A reference to a `Vector3<f64>` representing the 3D point (X, Y, Z) in camera coordinates.
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates (u, v) if projection is valid
+    /// - `Some(uv)` - 2D image coordinates (u, v) in pixel coordinates if projection is valid
     /// - `None` - If projection is invalid (e.g., point behind camera, z ≤ 0)
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use apex_solver::factors::camera::{CameraModel, PinholeCamera};
-    /// use nalgebra::Vector3;
-    ///
-    /// let camera = PinholeCamera { fx: 500.0, fy: 500.0, cx: 320.0, cy: 240.0 };
-    /// let point = Vector3::new(1.0, 0.5, 2.0); // Point 2m in front of camera
-    ///
-    /// if let Some(uv) = camera.project(&point) {
-    ///     println!("Projected to pixel: ({}, {})", uv.x, uv.y);
-    /// }
-    /// ```
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>>;
+
+    /// Unprojects a 2D point from image coordinates to a 3D ray in the camera's coordinate system.
+    ///
+    /// The resulting 3D vector is a direction ray originating from the camera center.
+    /// Its Z component is typically normalized to 1, but this can vary by model.
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - A reference to a `Vector2<f64>` representing the 2D point (u, v) in pixel coordinates.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing:
+    /// * `Ok(Vector3<f64>)`: The 3D ray (direction vector) corresponding to the 2D point.
+    /// * `Err(CameraModelError)`: An error if the unprojection fails (e.g., point is outside the image,
+    ///   or numerical issues).
+    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
 
     /// Check if a 3D point is valid for projection.
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - A reference to a `Vector3<f64>` representing the 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
@@ -360,7 +335,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - A reference to a `Vector3<f64>` representing the 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
@@ -374,9 +349,6 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// This combines:
     /// - Jacobian w.r.t. point position: ∂(u,v)/∂(p_cam)
     /// - Jacobian of transformed point w.r.t. pose: ∂(p_cam)/∂(pose)
-    ///
-    /// For efficiency, returns both the projection Jacobian and the
-    /// transformed point Jacobian separately so the factor can apply the chain rule.
     ///
     /// # Arguments
     ///
@@ -400,12 +372,60 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - A reference to a `Vector3<f64>` representing the 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
     /// 2×INTRINSIC_DIM Jacobian matrix
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian;
+
+    /// Get intrinsic parameters as dynamic vector.
+    ///
+    /// # Returns
+    ///
+    /// Vector of intrinsic parameters (length = INTRINSIC_DIM)
+    fn intrinsics_vec(&self) -> DVector<f64>;
+
+    /// Create camera from parameter slice.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - Slice of intrinsic parameters (length ≥ INTRINSIC_DIM)
+    ///
+    /// # Returns
+    ///
+    /// New camera instance with the given intrinsics
+    fn from_params(params: &[f64]) -> Self;
+
+    /// Validate camera parameters.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` containing:
+    /// * `Ok(())`: If all parameters are valid.
+    /// * `Err(CameraModelError)`: An error describing the validation failure.
+    fn validate_params(&self) -> Result<(), CameraModelError>;
+
+    /// Get intrinsic parameters.
+    ///
+    /// # Returns
+    ///
+    /// An `Intrinsics` struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    fn get_intrinsics(&self) -> Intrinsics;
+
+    /// Get distortion parameters (model-specific).
+    ///
+    /// # Returns
+    ///
+    /// A `Vec<f64>` containing the distortion coefficients.
+    fn get_distortion(&self) -> Vec<f64>;
+
+    /// Get model name identifier.
+    ///
+    /// # Returns
+    ///
+    /// A string identifier for the specific camera model type.
+    fn get_model_name(&self) -> &'static str;
 
     /// Batch projection (default impl calls single-point version).
     ///
@@ -430,42 +450,6 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         }
         result
     }
-
-    /// Get intrinsic parameters as dynamic vector.
-    ///
-    /// # Returns
-    ///
-    /// Vector of intrinsic parameters (length = INTRINSIC_DIM)
-    fn intrinsics_vec(&self) -> DVector<f64>;
-
-    /// Create camera from parameter slice.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - Slice of intrinsic parameters (length ≥ INTRINSIC_DIM)
-    ///
-    /// # Returns
-    ///
-    /// New camera instance with the given intrinsics
-    fn from_params(params: &[f64]) -> Self;
-
-    /// Unproject 2D image point to 3D ray in camera frame.
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
-
-    /// Validate camera parameters.
-    fn validate_params(&self) -> Result<(), CameraModelError>;
-
-    /// Get image resolution.
-    fn get_resolution(&self) -> Resolution;
-
-    /// Get intrinsic parameters.
-    fn get_intrinsics(&self) -> Intrinsics;
-
-    /// Get distortion parameters (model-specific).
-    fn get_distortion(&self) -> Vec<f64>;
-
-    /// Get model name identifier.
-    fn get_model_name(&self) -> &'static str;
 }
 
 /// Compute skew-symmetric matrix from a 3D vector.
