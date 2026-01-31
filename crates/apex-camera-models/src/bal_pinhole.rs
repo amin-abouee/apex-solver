@@ -54,29 +54,49 @@ pub struct BALPinholeCamera {
 
 impl BALPinholeCamera {
     /// Create a new BAL pinhole camera with distortion.
-    #[must_use]
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, k1: f64, k2: f64) -> Self {
-        Self {
+    pub fn new(
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+        k1: f64,
+        k2: f64,
+    ) -> Result<Self, super::CameraModelError> {
+        let camera = Self {
             fx,
             fy,
             cx,
             cy,
             k1,
             k2,
-        }
+        };
+        camera.validate_params()?;
+        Ok(camera)
     }
 
     /// Create a BAL pinhole camera without distortion (k1=0, k2=0).
-    #[must_use]
-    pub const fn new_no_distortion(fx: f64, fy: f64, cx: f64, cy: f64) -> Self {
-        Self {
+    pub fn new_no_distortion(
+        fx: f64,
+        fy: f64,
+        cx: f64,
+        cy: f64,
+    ) -> Result<Self, super::CameraModelError> {
+        let camera = Self {
             fx,
             fy,
             cx,
             cy,
             k1: 0.0,
             k2: 0.0,
-        }
+        };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
+    fn check_projection_condition(&self, z: f64) -> bool {
+        const MIN_DEPTH: f64 = 1e-6;
+        z < -MIN_DEPTH
     }
 }
 
@@ -86,9 +106,8 @@ impl CameraModel for BALPinholeCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
-        const MIN_DEPTH: f64 = 1e-6;
         // BAL convention: negative Z is in front
-        if p_cam.z > -MIN_DEPTH {
+        if !self.check_projection_condition(p_cam.z) {
             return None;
         }
         let inv_neg_z = -1.0 / p_cam.z; // Note: negation for BAL convention
@@ -113,9 +132,7 @@ impl CameraModel for BALPinholeCamera {
     }
 
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        const MIN_DEPTH: f64 = 1e-6;
-        // BAL convention: negative Z is in front
-        p_cam.z < -MIN_DEPTH
+        self.check_projection_condition(p_cam.z)
     }
 
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
@@ -379,19 +396,27 @@ pub struct BALPinholeCameraStrict {
 
 impl BALPinholeCameraStrict {
     /// Create a new strict BAL pinhole camera with distortion.
-    #[must_use]
-    pub const fn new(f: f64, k1: f64, k2: f64) -> Self {
-        Self { f, k1, k2 }
+    pub fn new(f: f64, k1: f64, k2: f64) -> Result<Self, super::CameraModelError> {
+        let camera = Self { f, k1, k2 };
+        camera.validate_params()?;
+        Ok(camera)
     }
 
     /// Create a strict BAL pinhole camera without distortion (k1=0, k2=0).
-    #[must_use]
-    pub const fn new_no_distortion(f: f64) -> Self {
-        Self {
+    pub fn new_no_distortion(f: f64) -> Result<Self, super::CameraModelError> {
+        let camera = Self {
             f,
             k1: 0.0,
             k2: 0.0,
-        }
+        };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
+    fn check_projection_condition(&self, z: f64) -> bool {
+        const MIN_DEPTH: f64 = 1e-6;
+        z < -MIN_DEPTH
     }
 }
 
@@ -401,9 +426,8 @@ impl CameraModel for BALPinholeCameraStrict {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
-        const MIN_DEPTH: f64 = 1e-6;
         // BAL convention: negative Z is in front
-        if p_cam.z > -MIN_DEPTH {
+        if !self.check_projection_condition(p_cam.z) {
             return None;
         }
         let inv_neg_z = -1.0 / p_cam.z;
@@ -425,8 +449,7 @@ impl CameraModel for BALPinholeCameraStrict {
     }
 
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        const MIN_DEPTH: f64 = 1e-6;
-        p_cam.z < -MIN_DEPTH
+        self.check_projection_condition(p_cam.z)
     }
 
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
@@ -595,19 +618,20 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_bal_pinhole_camera_creation() {
-        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.0, 0.0);
+    fn test_bal_pinhole_camera_creation() -> TestResult {
+        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.0, 0.0)?;
         assert_eq!(camera.fx, 500.0);
         assert_eq!(camera.fy, 500.0);
         assert_eq!(camera.cx, 320.0);
         assert_eq!(camera.cy, 240.0);
         assert_eq!(camera.k1, 0.0);
         assert_eq!(camera.k2, 0.0);
+        Ok(())
     }
 
     #[test]
-    fn test_bal_convention_negative_z() {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0);
+    fn test_bal_convention_negative_z() -> TestResult {
+        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
 
         // Point at negative Z should be valid (in front of camera)
         let p_cam = Vector3::new(0.0, 0.0, -1.0);
@@ -616,11 +640,12 @@ mod tests {
         // Point at positive Z should be invalid (behind camera)
         let p_cam_behind = Vector3::new(0.0, 0.0, 1.0);
         assert!(!camera.is_valid_point(&p_cam_behind));
+        Ok(())
     }
 
     #[test]
     fn test_bal_projection_at_optical_axis() -> TestResult {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0);
+        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.0, 0.0, -1.0); // Note: negative Z
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
@@ -634,7 +659,7 @@ mod tests {
 
     #[test]
     fn test_bal_projection_off_axis_no_distortion() -> TestResult {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0);
+        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
         let p_cam = Vector3::new(0.1, 0.2, -1.0); // Note: negative Z
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
@@ -649,7 +674,7 @@ mod tests {
 
     #[test]
     fn test_bal_projection_with_distortion() -> TestResult {
-        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, 0.01);
+        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, 0.01)?;
         let p_cam = Vector3::new(0.1, 0.2, -1.0);
 
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
