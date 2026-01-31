@@ -156,48 +156,6 @@ pub struct Resolution {
     pub height: u32,
 }
 
-/// Complete camera model combining linear projection and distortion.
-///
-/// This structure separates the linear pinhole projection (K matrix)
-/// from the nonlinear lens distortion, making it clear which parameters
-/// affect which part of the projection.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Camera {
-    /// Linear pinhole parameters (fx, fy, cx, cy)
-    pub pinhole: PinholeParams,
-    /// Lens distortion model and parameters
-    pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
-}
-
-impl Camera {
-    /// Create a new camera with given pinhole parameters and distortion model.
-    pub fn new(
-        pinhole: PinholeParams,
-        distortion: DistortionModel,
-        resolution: Resolution,
-    ) -> Self {
-        Self {
-            pinhole,
-            distortion,
-            resolution,
-        }
-    }
-
-    /// Create a perfect pinhole camera (no distortion).
-    pub fn pinhole_only(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
-        Ok(Self {
-            pinhole: PinholeParams::new(fx, fy, cx, cy)?,
-            distortion: DistortionModel::None,
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
-        })
-    }
-}
-
 /// Camera model errors.
 #[derive(thiserror::Error, Debug)]
 pub enum CameraModelError {
