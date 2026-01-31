@@ -55,13 +55,34 @@ pub struct UcmCamera {
 }
 
 impl UcmCamera {
-    pub const fn new(fx: f64, fy: f64, cx: f64, cy: f64, alpha: f64) -> Self {
-        Self {
+    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, alpha: f64) -> Result<Self, CameraModelError> {
+        let camera = Self {
             fx,
             fy,
             cx,
             cy,
             alpha,
+        };
+        camera.validate_params()?;
+        Ok(camera)
+    }
+
+    /// Checks the geometric condition for a valid projection.
+    pub fn check_projection_condition(&self, z: f64, d: f64) -> bool {
+        let w = if self.alpha <= 0.5 {
+            self.alpha / (1.0 - self.alpha)
+        } else {
+            (1.0 - self.alpha) / self.alpha
+        };
+        z > -w * d
+    }
+
+    fn check_unprojection_condition(&self, r_squared: f64) -> bool {
+        if self.alpha > 0.5 {
+            let gamma = 1.0 - self.alpha;
+            r_squared <= gamma * gamma / (2.0 * self.alpha - 1.0)
+        } else {
+            true
         }
     }
 }
@@ -99,14 +120,11 @@ impl CameraModel for UcmCamera {
         let denom = self.alpha * d + (1.0 - self.alpha) * z;
 
         // Check projection validity
-        let w = if self.alpha <= 0.5 {
-            self.alpha / (1.0 - self.alpha)
-        } else {
-            (1.0 - self.alpha) / self.alpha
-        };
-        let check_projection = z > -w * d;
+        if !self.check_projection_condition(z, d) {
+            return None;
+        }
 
-        if denom < PRECISION || !check_projection {
+        if denom < PRECISION {
             return None;
         }
 
@@ -141,11 +159,8 @@ impl CameraModel for UcmCamera {
         let r_squared = mx * mx + my * my;
 
         // Check unprojection condition
-        if self.alpha > 0.5 {
-            let gamma_sq = gamma * gamma;
-            if r_squared > gamma_sq / (2.0 * self.alpha - 1.0) {
-                return Err(CameraModelError::PointIsOutSideImage);
-            }
+        if !self.check_unprojection_condition(r_squared) {
+            return Err(CameraModelError::PointIsOutSideImage);
         }
 
         let num = xi + (1.0 + (1.0 - xi * xi) * r_squared).sqrt();
@@ -176,14 +191,7 @@ impl CameraModel for UcmCamera {
         let d = (x * x + y * y + z * z).sqrt();
         let denom = self.alpha * d + (1.0 - self.alpha) * z;
 
-        let w = if self.alpha <= 0.5 {
-            self.alpha / (1.0 - self.alpha)
-        } else {
-            (1.0 - self.alpha) / self.alpha
-        };
-        let check_projection = z > -w * d;
-
-        denom >= PRECISION && check_projection
+        denom >= PRECISION && self.check_projection_condition(z, d)
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -364,15 +372,16 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_ucm_camera_creation() {
-        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5);
+    fn test_ucm_camera_creation() -> TestResult {
+        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5)?;
         assert_eq!(camera.fx, 300.0);
         assert_eq!(camera.alpha, 0.5);
+        Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5);
+        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam).ok_or("Projection failed")?;
         assert!((uv.x - 320.0).abs() < 1e-10);
@@ -382,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6);
+        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -419,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6);
+        let camera = UcmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
