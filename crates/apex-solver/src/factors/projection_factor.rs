@@ -45,6 +45,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Examples
 ///
 /// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use apex_solver::factors::projection_factor::ProjectionFactor;
 /// use apex_camera_models::{PinholeCamera, BundleAdjustment};
 /// use nalgebra::{Matrix2xX, Vector2};
@@ -58,6 +59,8 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
 /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
 ///     ProjectionFactor::new(observations, camera);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct ProjectionFactor<CAM, OP>
@@ -99,6 +102,7 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use nalgebra::{Matrix2xX, Vector2};
@@ -106,6 +110,8 @@ where
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
     ///     ProjectionFactor::new(observations, camera);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(observations: Matrix2xX<f64>, camera: CAM) -> Self {
         Self {
@@ -123,6 +129,7 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use apex_solver::manifold::se3::SE3;
@@ -131,6 +138,8 @@ where
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// let factor = factor.with_fixed_pose(SE3::identity());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_fixed_pose(mut self, pose: SE3) -> Self {
         self.fixed_pose = Some(pose);
@@ -142,6 +151,7 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
@@ -150,6 +160,8 @@ where
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// # let landmarks = Matrix3xX::from_columns(&[Vector3::new(0.1, 0.2, 1.0)]);
     /// let factor = factor.with_fixed_landmarks(landmarks);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_fixed_landmarks(mut self, landmarks: Matrix3xX<f64>) -> Self {
         self.fixed_landmarks = Some(landmarks);
