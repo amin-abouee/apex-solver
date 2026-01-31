@@ -326,7 +326,7 @@ where
 {
     for obs in valid_obs {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2);
+        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2)?;
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
