@@ -117,9 +117,7 @@ impl KannalaBrandtCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
 impl From<&KannalaBrandtCamera> for DVector<f64> {
     fn from(camera: &KannalaBrandtCamera) -> Self {
-        let (k1, k2, k3, k4) = camera
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = camera.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -140,9 +138,7 @@ impl From<&KannalaBrandtCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
 impl From<&KannalaBrandtCamera> for [f64; 8] {
     fn from(camera: &KannalaBrandtCamera) -> Self {
-        let (k1, k2, k3, k4) = camera
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = camera.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -259,9 +255,7 @@ impl CameraModel for KannalaBrandtCamera {
             )));
         }
 
-        let (k1, k2, k3, k4) = self
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = self.distortion_params()?;
         let r2 = x * x + y * y;
         let r = r2.sqrt();
         let theta = r.atan2(z);
@@ -316,9 +310,7 @@ impl CameraModel for KannalaBrandtCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (k1, k2, k3, k4) = self
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = self.distortion_params()?;
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
@@ -406,9 +398,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = self.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -503,9 +493,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self
-            .distortion_params()
-            .expect("KannalaBrandtCamera validated at construction");
+        let (k1, k2, k3, k4) = self.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 

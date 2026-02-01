@@ -92,7 +92,7 @@ impl BALPinholeCameraStrict {
 
         let camera = Self {
             f: pinhole.fx, // Use fx as the single focal length
-            distortion: distortion,
+            distortion,
             resolution: _resolution,
         };
         camera.validate_params()?;
@@ -136,9 +136,7 @@ impl BALPinholeCameraStrict {
 /// The parameters are ordered as: [f, k1, k2]
 impl From<&BALPinholeCameraStrict> for DVector<f64> {
     fn from(camera: &BALPinholeCameraStrict) -> Self {
-        let (k1, k2) = camera
-            .distortion_params()
-            .expect("Invalid distortion model");
+        let (k1, k2) = camera.distortion_params().unwrap_or((0.0, 0.0));
         DVector::from_vec(vec![camera.f, k1, k2])
     }
 }
@@ -150,9 +148,7 @@ impl From<&BALPinholeCameraStrict> for DVector<f64> {
 /// The parameters are ordered as: [f, k1, k2]
 impl From<&BALPinholeCameraStrict> for [f64; 3] {
     fn from(camera: &BALPinholeCameraStrict) -> Self {
-        let (k1, k2) = camera
-            .distortion_params()
-            .expect("Invalid distortion model");
+        let (k1, k2) = camera.distortion_params().unwrap_or((0.0, 0.0));
         [camera.f, k1, k2]
     }
 }
@@ -359,7 +355,7 @@ impl CameraModel for BALPinholeCameraStrict {
         let x_n = p_cam.x * inv_neg_z;
         let y_n = p_cam.y * inv_neg_z;
 
-        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
+        let (k1, k2) = self.distortion_params().unwrap_or((0.0, 0.0));
 
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
@@ -587,7 +583,7 @@ impl CameraModel for BALPinholeCameraStrict {
         let y_n = p_cam.y * inv_neg_z;
 
         // Radial distortion
-        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
+        let (k1, k2) = self.distortion_params().unwrap_or((0.0, 0.0));
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
         let distortion = 1.0 + k1 * r2 + k2 * r4;
@@ -616,7 +612,7 @@ impl CameraModel for BALPinholeCameraStrict {
         let mut x_n = x_d;
         let mut y_n = y_d;
 
-        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
+        let (k1, k2) = self.distortion_params()?;
 
         for _ in 0..5 {
             let r2 = x_n * x_n + y_n * y_n;
@@ -675,7 +671,7 @@ impl CameraModel for BALPinholeCameraStrict {
     }
 
     fn get_distortion(&self) -> DistortionModel {
-        self.distortion.clone()
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {

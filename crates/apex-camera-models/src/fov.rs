@@ -124,9 +124,7 @@ impl FovCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, w]
 impl From<&FovCamera> for DVector<f64> {
     fn from(camera: &FovCamera) -> Self {
-        let w = camera
-            .distortion_params()
-            .expect("FovCamera validated at construction");
+        let w = camera.distortion_params().unwrap_or(0.0);
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -144,9 +142,7 @@ impl From<&FovCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, w]
 impl From<&FovCamera> for [f64; 5] {
     fn from(camera: &FovCamera) -> Self {
-        let w = camera
-            .distortion_params()
-            .expect("FovCamera validated at construction");
+        let w = camera.distortion_params().unwrap_or(0.0);
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -245,9 +241,7 @@ impl CameraModel for FovCamera {
         }
 
         let r = (x * x + y * y).sqrt();
-        let w = self
-            .distortion_params()
-            .expect("FovCamera validated at construction");
+        let w = self.distortion_params()?;
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -419,9 +413,7 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self
-            .distortion_params()
-            .expect("FovCamera validated at construction");
+        let w = self.distortion_params().unwrap_or(0.0);
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -716,9 +708,7 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self
-            .distortion_params()
-            .expect("FovCamera validated at construction");
+        let w = self.distortion_params().unwrap_or(0.0);
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 

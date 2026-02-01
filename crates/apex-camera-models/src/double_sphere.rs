@@ -138,7 +138,7 @@ impl DoubleSphereCamera {
 /// Provides a debug string representation for [`DoubleSphereModel`].
 impl fmt::Debug for DoubleSphereCamera {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
         write!(
             f,
             "DoubleSphere [fx: {} fy: {} cx: {} cy: {} alpha: {} xi: {}]",
@@ -152,9 +152,7 @@ impl fmt::Debug for DoubleSphereCamera {
 /// Returns intrinsic parameters in the order: [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for DVector<f64> {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (xi, alpha) = camera
-            .distortion_params()
-            .expect("Invalid distortion model");
+        let (xi, alpha) = camera.distortion_params().unwrap_or((0.0, 0.0));
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -171,9 +169,7 @@ impl From<&DoubleSphereCamera> for DVector<f64> {
 /// Returns intrinsic parameters as [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for [f64; 6] {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (xi, alpha) = camera
-            .distortion_params()
-            .expect("Invalid distortion model");
+        let (xi, alpha) = camera.distortion_params().unwrap_or((0.0, 0.0));
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -472,7 +468,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -735,7 +731,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -809,7 +805,7 @@ impl CameraModel for DoubleSphereCamera {
     }
 
     fn get_distortion(&self) -> DistortionModel {
-        self.distortion.clone()
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {

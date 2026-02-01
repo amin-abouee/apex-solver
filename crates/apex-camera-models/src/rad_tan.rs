@@ -155,9 +155,7 @@ impl CameraModel for RadTanCamera {
         let r4 = r2 * r2;
         let r6 = r4 * r2;
 
-        let (k1, k2, p1, p2, k3) = self
-            .distortion_params()
-            .expect("RadTanCamera validated at construction");
+        let (k1, k2, p1, p2, k3) = self.distortion_params()?;
 
         // Radial distortion: r' = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
@@ -210,9 +208,7 @@ impl CameraModel for RadTanCamera {
         const EPS: f64 = crate::GEOMETRIC_PRECISION;
         const MAX_ITERATIONS: u32 = 100;
 
-        let (k1, k2, p1, p2, k3) = self
-            .distortion_params()
-            .expect("RadTanCamera validated at construction");
+        let (k1, k2, p1, p2, k3) = self.distortion_params()?;
 
         for iteration in 0..MAX_ITERATIONS {
             let x = point.x;
@@ -446,7 +442,7 @@ impl CameraModel for RadTanCamera {
 
         let (k1, k2, p1, p2, k3) = self
             .distortion_params()
-            .expect("RadTanCamera validated at construction");
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
 
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
         let dradial_dr2 = k1 + 2.0 * k2 * r2 + 3.0 * k3 * r4;
@@ -689,7 +685,7 @@ impl CameraModel for RadTanCamera {
 
         let (k1, k2, p1, p2, k3) = self
             .distortion_params()
-            .expect("RadTanCamera validated at construction");
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
 
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
@@ -795,7 +791,7 @@ impl From<&RadTanCamera> for DVector<f64> {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera
             .distortion_params()
-            .expect("RadTanCamera validated at construction");
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -819,7 +815,7 @@ impl From<&RadTanCamera> for [f64; 9] {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera
             .distortion_params()
-            .expect("RadTanCamera validated at construction");
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
         [
             camera.pinhole.fx,
             camera.pinhole.fy,

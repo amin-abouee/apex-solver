@@ -97,9 +97,7 @@ impl EucmCamera {
 
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
-        let (alpha, _) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, _) = self.distortion_params().unwrap_or((0.0, 0.0));
         let mut condition = true;
         if alpha > 0.5 {
             let c = (alpha - 1.0) / (2.0 * alpha - 1.0);
@@ -111,9 +109,7 @@ impl EucmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
         let mut condition = true;
         if alpha > 0.5 && r_squared > (1.0 / beta * (2.0 * alpha - 1.0)) {
             condition = false;
@@ -129,9 +125,7 @@ impl EucmCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
 impl From<&EucmCamera> for DVector<f64> {
     fn from(camera: &EucmCamera) -> Self {
-        let (alpha, beta) = camera
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = camera.distortion_params().unwrap_or((0.0, 0.0));
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -150,9 +144,7 @@ impl From<&EucmCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
 impl From<&EucmCamera> for [f64; 6] {
     fn from(camera: &EucmCamera) -> Self {
-        let (alpha, beta) = camera
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = camera.distortion_params().unwrap_or((0.0, 0.0));
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -254,9 +246,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = self.distortion_params()?;
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -300,9 +290,7 @@ impl CameraModel for EucmCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = self.distortion_params()?;
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
@@ -342,9 +330,10 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = match self.distortion_params() {
+            Ok(params) => params,
+            Err(_) => return false,
+        };
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -442,9 +431,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -707,9 +694,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self
-            .distortion_params()
-            .expect("EucmCamera validated at construction");
+        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;

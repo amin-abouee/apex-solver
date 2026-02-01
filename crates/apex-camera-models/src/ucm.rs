@@ -94,9 +94,7 @@ impl UcmCamera {
 
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, d: f64) -> bool {
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = self.distortion_params().unwrap_or(0.0);
         let w = if alpha <= 0.5 {
             alpha / (1.0 - alpha)
         } else {
@@ -106,9 +104,7 @@ impl UcmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = self.distortion_params().unwrap_or(0.0);
         if alpha > 0.5 {
             let gamma = 1.0 - alpha;
             r_squared <= gamma * gamma / (2.0 * alpha - 1.0)
@@ -125,9 +121,7 @@ impl UcmCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha]
 impl From<&UcmCamera> for DVector<f64> {
     fn from(camera: &UcmCamera) -> Self {
-        let alpha = camera
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = camera.distortion_params().unwrap_or(0.0);
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -145,9 +139,7 @@ impl From<&UcmCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha]
 impl From<&UcmCamera> for [f64; 5] {
     fn from(camera: &UcmCamera) -> Self {
-        let alpha = camera
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = camera.distortion_params().unwrap_or(0.0);
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -243,9 +235,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let d = (x * x + y * y + z * z).sqrt();
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = self.distortion_params()?;
         let denom = alpha * d + (1.0 - alpha) * z;
 
         // Check projection validity
@@ -332,9 +322,10 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let d = (x * x + y * y + z * z).sqrt();
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = match self.distortion_params() {
+            Ok(a) => a,
+            Err(_) => return false,
+        };
         let denom = alpha * d + (1.0 - alpha) * z;
 
         denom >= crate::GEOMETRIC_PRECISION && self.check_projection_condition(z, d)
@@ -401,9 +392,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let rho = (x * x + y * y + z * z).sqrt();
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = self.distortion_params().unwrap_or(0.0);
 
         // Denominator D = alpha * rho + (1 - alpha) * z
         // Partial derivatives of D:
@@ -527,9 +516,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let rho = (x * x + y * y + z * z).sqrt();
-        let alpha = self
-            .distortion_params()
-            .expect("UcmCamera validated at construction");
+        let alpha = self.distortion_params().unwrap_or(0.0);
         let denom = alpha * rho + (1.0 - alpha) * z;
 
         let x_norm = x / denom;

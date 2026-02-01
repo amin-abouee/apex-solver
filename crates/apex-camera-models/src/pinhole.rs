@@ -590,7 +590,7 @@ impl CameraModel for PinholeCamera {
     }
 
     fn get_distortion(&self) -> DistortionModel {
-        self.distortion.clone()
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {
