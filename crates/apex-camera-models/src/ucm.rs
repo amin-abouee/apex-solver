@@ -84,7 +84,7 @@ impl UcmCamera {
     /// Helper method to extract distortion parameter, returning Result for consistency.
     fn distortion_params(&self) -> Result<f64, CameraModelError> {
         match self.distortion {
-            DistortionModel::UCM { alpha, .. } => Ok(alpha),
+            DistortionModel::UCM { alpha } => Ok(alpha),
             _ => Err(CameraModelError::InvalidParams(format!(
                 "UcmCamera requires UCM distortion model, got {:?}",
                 self.distortion
@@ -181,10 +181,7 @@ impl From<&[f64]> for UcmCamera {
                 cx: params[2],
                 cy: params[3],
             },
-            distortion: DistortionModel::UCM {
-                alpha: params[4],
-                beta: 1.0,
-            },
+            distortion: DistortionModel::UCM { alpha: params[4] },
             resolution: Resolution {
                 width: 0,
                 height: 0,
@@ -207,10 +204,7 @@ impl From<[f64; 5]> for UcmCamera {
                 cx: params[2],
                 cy: params[3],
             },
-            distortion: DistortionModel::UCM {
-                alpha: params[4],
-                beta: 1.0,
-            },
+            distortion: DistortionModel::UCM { alpha: params[4] },
             resolution: Resolution {
                 width: 0,
                 height: 0,
@@ -625,10 +619,7 @@ mod tests {
     #[test]
     fn test_ucm_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM {
-            alpha: 0.5,
-            beta: 1.0,
-        };
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
@@ -643,10 +634,7 @@ mod tests {
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM {
-            alpha: 0.5,
-            beta: 1.0,
-        };
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
@@ -663,10 +651,7 @@ mod tests {
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM {
-            alpha: 0.6,
-            beta: 1.0,
-        };
+        let distortion = DistortionModel::UCM { alpha: 0.6 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
@@ -706,10 +691,7 @@ mod tests {
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM {
-            alpha: 0.6,
-            beta: 1.0,
-        };
+        let distortion = DistortionModel::UCM { alpha: 0.6 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
@@ -753,10 +735,7 @@ mod tests {
     #[test]
     fn test_ucm_from_into_traits() -> TestResult {
         let pinhole = PinholeParams::new(400.0, 410.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM {
-            alpha: 0.7,
-            beta: 1.0,
-        };
+        let distortion = DistortionModel::UCM { alpha: 0.7 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
