@@ -157,7 +157,7 @@ pub enum DistortionModel {
     /// Double Sphere model (2 parameters)
     ///
     /// Two-parameter fisheye model with improved wide-angle accuracy.
-    DoubleSphere { alpha: f64, xi: f64 },
+    DoubleSphere { xi: f64, alpha: f64 },
 }
 
 /// Represents the resolution of a camera image.

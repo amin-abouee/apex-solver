@@ -106,7 +106,7 @@ impl DoubleSphereCamera {
     /// - `Err(CameraModelError::InvalidParams)` - If distortion model is not DoubleSphere
     fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
         match self.distortion {
-            DistortionModel::DoubleSphere { alpha, xi} => Ok((alpha, xi)),
+            DistortionModel::DoubleSphere { xi, alpha} => Ok((xi, alpha)),
             _ => Err(CameraModelError::InvalidParams(
                 "Invalid distortion model for DoubleSphere camera - expected DistortionModel::DoubleSphere".to_string()
             )),
@@ -115,7 +115,7 @@ impl DoubleSphereCamera {
 
     /// Checks the geometric condition for a valid projection.
     fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
-        let (alpha, xi) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params()?;
         let w1 = if alpha > 0.5 {
             (1.0 - alpha) / alpha
         } else {
@@ -138,7 +138,7 @@ impl DoubleSphereCamera {
 /// Provides a debug string representation for [`DoubleSphereModel`].
 impl fmt::Debug for DoubleSphereCamera {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (alpha, xi) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
         write!(
             f,
             "DoubleSphere [fx: {} fy: {} cx: {} cy: {} alpha: {} xi: {}]",
@@ -152,7 +152,7 @@ impl fmt::Debug for DoubleSphereCamera {
 /// Returns intrinsic parameters in the order: [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for DVector<f64> {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (alpha, xi) = camera
+        let (xi, alpha) = camera
             .distortion_params()
             .expect("Invalid distortion model");
         DVector::from_vec(vec![
@@ -160,8 +160,8 @@ impl From<&DoubleSphereCamera> for DVector<f64> {
             camera.pinhole.fy,
             camera.pinhole.cx,
             camera.pinhole.cy,
-            alpha,
             xi,
+            alpha,
         ])
     }
 }
@@ -171,7 +171,7 @@ impl From<&DoubleSphereCamera> for DVector<f64> {
 /// Returns intrinsic parameters as [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for [f64; 6] {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (alpha, xi) = camera
+        let (xi, alpha) = camera
             .distortion_params()
             .expect("Invalid distortion model");
         [
@@ -179,8 +179,8 @@ impl From<&DoubleSphereCamera> for [f64; 6] {
             camera.pinhole.fy,
             camera.pinhole.cx,
             camera.pinhole.cy,
-            alpha,
             xi,
+            alpha,
         ]
     }
 }
@@ -209,8 +209,8 @@ impl From<&[f64]> for DoubleSphereCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::DoubleSphere {
-                alpha: params[4],
-                xi: params[5],
+                xi: params[4],
+                alpha: params[5],
             },
             resolution: Resolution {
                 width: 0,
@@ -235,8 +235,8 @@ impl From<[f64; 6]> for DoubleSphereCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::DoubleSphere {
-                alpha: params[4],
-                xi: params[5],
+                xi: params[4],
+                alpha: params[5],
             },
             resolution: Resolution {
                 width: 0,
@@ -277,7 +277,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, xi) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params()?;
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
@@ -318,7 +318,7 @@ impl CameraModel for DoubleSphereCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (alpha, xi) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params()?;
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
         let r2 = mx * mx + my * my;
@@ -358,7 +358,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, xi) = match self.distortion_params() {
+        let (xi, alpha) = match self.distortion_params() {
             Ok(params) => params,
             Err(_) => return false,
         };
@@ -472,7 +472,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, xi) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -735,7 +735,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, xi) = self.distortion_params().expect("Invalid distortion model");
+        let (xi, alpha) = self.distortion_params().expect("Invalid distortion model");
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -755,14 +755,14 @@ impl CameraModel for DoubleSphereCamera {
 
         let ddenom_dalpha = d2 - xi_d1_z;
 
-        let du_dalpha = -self.pinhole.fx * x * ddenom_dalpha / (denom * denom);
-        let dv_dalpha = -self.pinhole.fy * y * ddenom_dalpha / (denom * denom);
-
         let du_dxi = -self.pinhole.fx * x * ddenom_dxi / (denom * denom);
         let dv_dxi = -self.pinhole.fy * y * ddenom_dxi / (denom * denom);
 
+        let du_dalpha = -self.pinhole.fx * x * ddenom_dalpha / (denom * denom);
+        let dv_dalpha = -self.pinhole.fy * y * ddenom_dalpha / (denom * denom);
+
         SMatrix::<f64, 2, 6>::new(
-            x_norm, 0.0, 1.0, 0.0, du_dxi, du_dalpha, 0.0, y_norm, 0.0, 1.0, dv_dalpha, dv_dxi,
+            x_norm, 0.0, 1.0, 0.0, du_dxi, du_dalpha, 0.0, y_norm, 0.0, 1.0, dv_dxi, dv_dalpha,
         )
     }
 
@@ -783,7 +783,7 @@ impl CameraModel for DoubleSphereCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (alpha, xi) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params()?;
         if !xi.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "xi must be finite".to_string(),
@@ -831,16 +831,16 @@ mod tests {
     fn test_double_sphere_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            alpha: 0.6,
             xi: -0.2,
+            alpha: 0.6,
         };
-        let resolution = crate::Resolution {
+        let resolution = Resolution {
             width: 640,
             height: 480,
         };
         let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         assert_eq!(camera.pinhole.fx, 300.0);
-        let (alpha, xi) = camera.distortion_params()?;
+        let (xi, alpha) = camera.distortion_params()?;
         assert_eq!(alpha, 0.6);
         assert_eq!(xi, -0.2);
 
@@ -851,10 +851,10 @@ mod tests {
     fn test_projection_at_optical_axis() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            alpha: 0.6,
             xi: -0.2,
+            alpha: 0.6,
         };
-        let resolution = crate::Resolution {
+        let resolution = Resolution {
             width: 640,
             height: 480,
         };
@@ -872,10 +872,10 @@ mod tests {
     fn test_jacobian_point_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            alpha: 0.6,
             xi: -0.2,
+            alpha: 0.6,
         };
-        let resolution = crate::Resolution {
+        let resolution = Resolution {
             width: 640,
             height: 480,
         };
@@ -912,10 +912,10 @@ mod tests {
     fn test_jacobian_intrinsics_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            alpha: 0.6,
             xi: -0.2,
+            alpha: 0.6,
         };
-        let resolution = crate::Resolution {
+        let resolution = Resolution {
             width: 640,
             height: 480,
         };
