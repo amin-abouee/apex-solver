@@ -13,7 +13,9 @@
 //!
 //! This is a more complex model than pinhole, suitable for wide-angle cameras.
 
-use apex_camera_models::{CameraModel, DoubleSphereCamera, SelfCalibration};
+use apex_camera_models::{
+    CameraModel, DistortionModel, DoubleSphereCamera, PinholeParams, Resolution, SelfCalibration,
+};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -48,9 +50,20 @@ fn test_double_sphere_multi_camera_calibration_200_points() -> TestResult {
     // Note: Using xi=0.5 instead of 0.6 because it's more numerically stable
     // and the double sphere model is symmetric around this point.
     let true_camera = DoubleSphereCamera::new(
-        200.0, 200.0, // fx, fy (square pixels, wider FOV)
-        300.0, 200.0, // cx, cy (center of 600x400 image)
-        0.5, 0.5, // xi, alpha (balanced values)
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::DoubleSphere {
+            alpha: 0.5,
+            xi: 0.5,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     // Image bounds for projection validation
@@ -96,22 +109,8 @@ fn test_double_sphere_multi_camera_calibration_200_points() -> TestResult {
             // Transform point from world to camera frame
             let p_cam = pose.act(landmark, None, None);
 
-            // Verify point is valid for projection
-            assert!(
-                true_camera.is_valid_point(&p_cam),
-                "Camera {} cannot see landmark {}: p_cam = {:?}",
-                cam_idx,
-                lm_idx,
-                p_cam
-            );
-
             // Project to image coordinates
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify within image bounds
             assert!(
@@ -212,7 +211,7 @@ fn test_double_sphere_multi_camera_calibration_200_points() -> TestResult {
         (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
     );
 
-    // Intrinsics (RN manifold, [fx, fy, cx, cy, xi, alpha])
+    // Intrinsics (RN manifold, [fx, fy, cx, cy, alpha, xi])
     initial_values.insert(
         "intrinsics".to_string(),
         (
@@ -354,9 +353,20 @@ fn test_double_sphere_3_cameras_calibration() -> TestResult {
     // Simpler setup: 3 cameras, 200 points
     // Uses same camera params as 5-camera test for consistency
     let true_camera = DoubleSphereCamera::new(
-        200.0, 200.0, // fx, fy (wider FOV)
-        300.0, 200.0, // cx, cy
-        0.5, 0.5, // xi, alpha (balanced)
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::DoubleSphere {
+            alpha: 0.5,
+            xi: 0.5,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let img_width = 600.0;
@@ -373,14 +383,12 @@ fn test_double_sphere_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
-                && uv.x >= 0.0
-                && uv.x < img_width
-                && uv.y >= 0.0
-                && uv.y < img_height
-            {
-                cam_obs.push(uv);
+            if true_camera.is_valid_point(&p_cam) {
+                if let Ok(uv) = true_camera.project(&p_cam) {
+                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
+                        cam_obs.push(uv);
+                    }
+                }
             }
         }
         all_observations.push(cam_obs);
