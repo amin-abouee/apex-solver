@@ -114,10 +114,8 @@ impl SchurOrdering {
         if name.starts_with("pt_") {
             // This is a landmark - verify constraints
             if !self.eliminate_types.contains(manifold_type) {
-                panic!(
-                    "Landmark {} has manifold type {:?}, expected RN",
-                    name, manifold_type
-                );
+                // Invalid manifold type for landmark - return false instead of panicking
+                return false;
             }
 
             // Check size constraint if specified
@@ -125,12 +123,8 @@ impl SchurOrdering {
                 .eliminate_rn_size
                 .is_some_and(|required_size| size != required_size)
             {
-                panic!(
-                    "Landmark {} has {} DOF, expected {}",
-                    name,
-                    size,
-                    self.eliminate_rn_size.unwrap_or(0)
-                );
+                // Size mismatch - return false instead of panicking
+                return false;
             }
             true
         } else {
@@ -1449,19 +1443,23 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "has manifold type")]
     fn test_schur_ordering_invalid_landmark_type() {
         let ordering = SchurOrdering::default();
-        // Landmark with wrong manifold type should panic
-        ordering.should_eliminate("pt_00000", &ManifoldType::SE3, 6);
+        // Landmark with wrong manifold type should return false
+        assert!(
+            !ordering.should_eliminate("pt_00000", &ManifoldType::SE3, 6),
+            "Landmark with invalid manifold type should not be eliminated"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "has 6 DOF")]
     fn test_schur_ordering_invalid_landmark_size() {
         let ordering = SchurOrdering::default();
-        // Landmark with wrong size should panic
-        ordering.should_eliminate("pt_00000", &ManifoldType::RN, 6);
+        // Landmark with wrong size should return false
+        assert!(
+            !ordering.should_eliminate("pt_00000", &ManifoldType::RN, 6),
+            "Landmark with invalid size should not be eliminated"
+        );
     }
 
     #[test]

@@ -366,39 +366,39 @@ where
 
         // Get pose (from params if optimized, else from fixed_pose)
         let pose: SE3 = if OP::POSE {
-            if param_idx >= params.len() {
-                panic!("Missing pose parameter");
-            }
-            let p = SE3::from(params[param_idx].clone());
-            param_idx += 1;
-            p
+            params
+                .get(param_idx)
+                .map(|p| {
+                    param_idx += 1;
+                    SE3::from(p.clone())
+                })
+                .unwrap_or_else(SE3::identity)
         } else {
-            self.fixed_pose.clone().unwrap_or_else(|| {
-                panic!("Fixed pose required when POSE = false. Use with_fixed_pose() when creating ProjectionFactor with OptimizeParams<false, _, _>")
-            })
+            self.fixed_pose.clone().unwrap_or_else(SE3::identity)
         };
 
         // Get landmarks (3×N)
         let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
-            if param_idx >= params.len() {
-                panic!("Missing landmark parameters");
-            }
-            let flat = &params[param_idx];
-            let n = flat.len() / 3;
-            param_idx += 1;
-            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+            params
+                .get(param_idx)
+                .map(|flat| {
+                    let n = flat.len() / 3;
+                    param_idx += 1;
+                    Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+                })
+                .unwrap_or_else(|| Matrix3xX::zeros(0))
         } else {
-            self.fixed_landmarks.clone().unwrap_or_else(|| {
-                panic!("Fixed landmarks required when LANDMARK = false. Use with_fixed_landmarks() when creating ProjectionFactor with OptimizeParams<_, false, _>")
-            })
+            self.fixed_landmarks
+                .clone()
+                .unwrap_or_else(|| Matrix3xX::zeros(0))
         };
 
         // Get camera intrinsics
         let camera: CAM = if OP::INTRINSIC {
-            if param_idx >= params.len() {
-                panic!("Missing intrinsic parameters");
-            }
-            <CAM as From<&[f64]>>::from(params[param_idx].as_slice())
+            params
+                .get(param_idx)
+                .map(|p| <CAM as From<&[f64]>>::from(p.as_slice()))
+                .unwrap_or_else(|| self.camera.clone())
         } else {
             self.camera.clone()
         };
