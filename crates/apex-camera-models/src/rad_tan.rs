@@ -108,13 +108,10 @@ impl RadTanCamera {
     }
 
     /// Helper to extract distortion parameters, returning Result for consistency.
-    fn distortion_params(&self) -> Result<(f64, f64, f64, f64, f64), CameraModelError> {
+    fn distortion_params(&self) -> (f64, f64, f64, f64, f64) {
         match self.distortion {
-            DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => Ok((k1, k2, p1, p2, k3)),
-            _ => Err(CameraModelError::InvalidParams(format!(
-                "RadTanCamera requires BrownConrady distortion model, got {:?}",
-                self.distortion
-            ))),
+            DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => (k1, k2, p1, p2, k3),
+            _ => (0.0, 0.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -155,7 +152,7 @@ impl CameraModel for RadTanCamera {
         let r4 = r2 * r2;
         let r6 = r4 * r2;
 
-        let (k1, k2, p1, p2, k3) = self.distortion_params()?;
+        let (k1, k2, p1, p2, k3) = self.distortion_params();
 
         // Radial distortion: r' = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
@@ -208,7 +205,7 @@ impl CameraModel for RadTanCamera {
         const EPS: f64 = crate::GEOMETRIC_PRECISION;
         const MAX_ITERATIONS: u32 = 100;
 
-        let (k1, k2, p1, p2, k3) = self.distortion_params()?;
+        let (k1, k2, p1, p2, k3) = self.distortion_params();
 
         for iteration in 0..MAX_ITERATIONS {
             let x = point.x;
@@ -440,9 +437,7 @@ impl CameraModel for RadTanCamera {
         let r4 = r2 * r2;
         let r6 = r4 * r2;
 
-        let (k1, k2, p1, p2, k3) = self
-            .distortion_params()
-            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, p1, p2, k3) = self.distortion_params();
 
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
         let dradial_dr2 = k1 + 2.0 * k2 * r2 + 3.0 * k3 * r4;
@@ -683,9 +678,7 @@ impl CameraModel for RadTanCamera {
         let r4 = r2 * r2;
         let r6 = r4 * r2;
 
-        let (k1, k2, p1, p2, k3) = self
-            .distortion_params()
-            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, p1, p2, k3) = self.distortion_params();
 
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
@@ -750,7 +743,7 @@ impl CameraModel for RadTanCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (k1, k2, p1, p2, k3) = self.distortion_params()?;
+        let (k1, k2, p1, p2, k3) = self.distortion_params();
         if !k1.is_finite()
             || !k2.is_finite()
             || !p1.is_finite()
@@ -789,9 +782,7 @@ impl CameraModel for RadTanCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
 impl From<&RadTanCamera> for DVector<f64> {
     fn from(camera: &RadTanCamera) -> Self {
-        let (k1, k2, p1, p2, k3) = camera
-            .distortion_params()
-            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, p1, p2, k3) = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -813,9 +804,7 @@ impl From<&RadTanCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
 impl From<&RadTanCamera> for [f64; 9] {
     fn from(camera: &RadTanCamera) -> Self {
-        let (k1, k2, p1, p2, k3) = camera
-            .distortion_params()
-            .unwrap_or((0.0, 0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, p1, p2, k3) = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -919,7 +908,7 @@ mod tests {
         };
         let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
         assert_eq!(camera.pinhole.fx, 300.0);
-        let (k1, _, p1, _, _) = camera.distortion_params()?;
+        let (k1, _, p1, _, _) = camera.distortion_params();
         assert_eq!(k1, 0.1);
         assert_eq!(p1, 0.001);
         Ok(())
@@ -1082,7 +1071,7 @@ mod tests {
         assert_eq!(camera2.pinhole.fy, 350.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
         assert_eq!(camera2.pinhole.cy, 250.0);
-        let (k1, k2, p1, p2, k3) = camera2.distortion_params()?;
+        let (k1, k2, p1, p2, k3) = camera2.distortion_params();
         assert_eq!(k1, 0.2);
         assert_eq!(k2, 0.02);
         assert_eq!(p1, 0.002);
@@ -1094,7 +1083,7 @@ mod tests {
             RadTanCamera::from([400.0, 400.0, 340.0, 260.0, 0.3, 0.03, 0.003, 0.004, 0.003]);
         assert_eq!(camera3.pinhole.fx, 400.0);
         assert_eq!(camera3.pinhole.fy, 400.0);
-        let (k1, k2, p1, p2, k3) = camera3.distortion_params()?;
+        let (k1, k2, p1, p2, k3) = camera3.distortion_params();
         assert_eq!(k1, 0.3);
         assert_eq!(k2, 0.03);
         assert_eq!(p1, 0.003);

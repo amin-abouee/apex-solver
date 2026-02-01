@@ -104,22 +104,6 @@ impl PinholeCamera {
     pub fn check_projection_condition(&self, z: f64) -> bool {
         z >= 1e-6
     }
-
-    /// Helper method to validate distortion model.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(())` - Distortion model is None (valid for Pinhole)
-    /// - `Err(CameraModelError::InvalidParams)` - If distortion model is not None
-    fn check_distortion_model(&self) -> Result<(), CameraModelError> {
-        match self.distortion {
-            DistortionModel::None => Ok(()),
-            _ => Err(CameraModelError::InvalidParams(
-                "Invalid distortion model for Pinhole camera - expected DistortionModel::None"
-                    .to_string(),
-            )),
-        }
-    }
 }
 
 /// Convert PinholeCamera to parameter vector.
@@ -576,7 +560,6 @@ impl CameraModel for PinholeCamera {
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
-        self.check_distortion_model()?;
         Ok(())
     }
 

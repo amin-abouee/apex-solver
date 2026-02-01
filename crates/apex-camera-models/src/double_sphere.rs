@@ -98,24 +98,24 @@ impl DoubleSphereCamera {
         Ok(model)
     }
 
-    /// Helper method to extract distortion parameters.
+    /// Helper method to extract Double Sphere distortion parameters.
+    ///
+    /// This method assumes the caller has already verified the camera model.
     ///
     /// # Returns
     ///
-    /// - `Ok((xi, alpha))` - Double Sphere distortion parameters
-    /// - `Err(CameraModelError::InvalidParams)` - If distortion model is not DoubleSphere
-    fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
+    /// * `(xi, alpha)` - The Double Sphere parameters.
+    ///
+    fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
-            DistortionModel::DoubleSphere { xi, alpha} => Ok((xi, alpha)),
-            _ => Err(CameraModelError::InvalidParams(
-                "Invalid distortion model for DoubleSphere camera - expected DistortionModel::DoubleSphere".to_string()
-            )),
+            DistortionModel::DoubleSphere { xi, alpha } => (xi, alpha),
+            _ => (0.0, 0.0),
         }
     }
 
     /// Checks the geometric condition for a valid projection.
     fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
-        let (xi, alpha) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params();
         let w1 = if alpha > 0.5 {
             (1.0 - alpha) / alpha
         } else {
@@ -127,7 +127,7 @@ impl DoubleSphereCamera {
 
     /// Checks the geometric condition for a valid unprojection.
     fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
-        let (alpha, _) = self.distortion_params()?;
+        let (alpha, _) = self.distortion_params();
         if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
             return Ok(false);
         }
@@ -138,7 +138,7 @@ impl DoubleSphereCamera {
 /// Provides a debug string representation for [`DoubleSphereModel`].
 impl fmt::Debug for DoubleSphereCamera {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (xi, alpha) = self.distortion_params();
         write!(
             f,
             "DoubleSphere [fx: {} fy: {} cx: {} cy: {} alpha: {} xi: {}]",
@@ -152,7 +152,7 @@ impl fmt::Debug for DoubleSphereCamera {
 /// Returns intrinsic parameters in the order: [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for DVector<f64> {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (xi, alpha) = camera.distortion_params().unwrap_or((0.0, 0.0));
+        let (xi, alpha) = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -169,7 +169,7 @@ impl From<&DoubleSphereCamera> for DVector<f64> {
 /// Returns intrinsic parameters as [fx, fy, cx, cy, xi, alpha]
 impl From<&DoubleSphereCamera> for [f64; 6] {
     fn from(camera: &DoubleSphereCamera) -> Self {
-        let (xi, alpha) = camera.distortion_params().unwrap_or((0.0, 0.0));
+        let (xi, alpha) = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -273,7 +273,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params();
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
@@ -314,7 +314,7 @@ impl CameraModel for DoubleSphereCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (xi, alpha) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params();
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
         let r2 = mx * mx + my * my;
@@ -354,10 +354,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = match self.distortion_params() {
-            Ok(params) => params,
-            Err(_) => return false,
-        };
+        let (xi, alpha) = self.distortion_params();
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
@@ -468,7 +465,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (xi, alpha) = self.distortion_params();
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -731,7 +728,7 @@ impl CameraModel for DoubleSphereCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (xi, alpha) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (xi, alpha) = self.distortion_params();
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
         let xi_d1_z = xi * d1 + z;
@@ -779,7 +776,7 @@ impl CameraModel for DoubleSphereCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (xi, alpha) = self.distortion_params()?;
+        let (xi, alpha) = self.distortion_params();
         if !xi.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "xi must be finite".to_string(),
@@ -836,7 +833,7 @@ mod tests {
         };
         let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
         assert_eq!(camera.pinhole.fx, 300.0);
-        let (xi, alpha) = camera.distortion_params()?;
+        let (xi, alpha) = camera.distortion_params();
         assert_eq!(alpha, 0.6);
         assert_eq!(xi, -0.2);
 

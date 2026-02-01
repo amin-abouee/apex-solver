@@ -82,19 +82,16 @@ impl UcmCamera {
     }
 
     /// Helper method to extract distortion parameter, returning Result for consistency.
-    fn distortion_params(&self) -> Result<f64, CameraModelError> {
+    fn distortion_params(&self) -> f64 {
         match self.distortion {
-            DistortionModel::UCM { alpha } => Ok(alpha),
-            _ => Err(CameraModelError::InvalidParams(format!(
-                "UcmCamera requires UCM distortion model, got {:?}",
-                self.distortion
-            ))),
+            DistortionModel::UCM { alpha } => alpha,
+            _ => 0.0,
         }
     }
 
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, d: f64) -> bool {
-        let alpha = self.distortion_params().unwrap_or(0.0);
+        let alpha = self.distortion_params();
         let w = if alpha <= 0.5 {
             alpha / (1.0 - alpha)
         } else {
@@ -104,7 +101,7 @@ impl UcmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let alpha = self.distortion_params().unwrap_or(0.0);
+        let alpha = self.distortion_params();
         if alpha > 0.5 {
             let gamma = 1.0 - alpha;
             r_squared <= gamma * gamma / (2.0 * alpha - 1.0)
@@ -121,7 +118,7 @@ impl UcmCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha]
 impl From<&UcmCamera> for DVector<f64> {
     fn from(camera: &UcmCamera) -> Self {
-        let alpha = camera.distortion_params().unwrap_or(0.0);
+        let alpha = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -139,7 +136,7 @@ impl From<&UcmCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha]
 impl From<&UcmCamera> for [f64; 5] {
     fn from(camera: &UcmCamera) -> Self {
-        let alpha = camera.distortion_params().unwrap_or(0.0);
+        let alpha = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -235,7 +232,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let d = (x * x + y * y + z * z).sqrt();
-        let alpha = self.distortion_params()?;
+        let alpha = self.distortion_params();
         let denom = alpha * d + (1.0 - alpha) * z;
 
         // Check projection validity
@@ -283,7 +280,7 @@ impl CameraModel for UcmCamera {
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
-        let alpha = self.distortion_params()?;
+        let alpha = self.distortion_params();
         let gamma = 1.0 - alpha;
         let xi = alpha / gamma;
         let mx = (u - self.pinhole.cx) / self.pinhole.fx * gamma;
@@ -322,10 +319,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let d = (x * x + y * y + z * z).sqrt();
-        let alpha = match self.distortion_params() {
-            Ok(a) => a,
-            Err(_) => return false,
-        };
+        let alpha = self.distortion_params();
         let denom = alpha * d + (1.0 - alpha) * z;
 
         denom >= crate::GEOMETRIC_PRECISION && self.check_projection_condition(z, d)
@@ -392,7 +386,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let rho = (x * x + y * y + z * z).sqrt();
-        let alpha = self.distortion_params().unwrap_or(0.0);
+        let alpha = self.distortion_params();
 
         // Denominator D = alpha * rho + (1 - alpha) * z
         // Partial derivatives of D:
@@ -516,7 +510,7 @@ impl CameraModel for UcmCamera {
         let z = p_cam[2];
 
         let rho = (x * x + y * y + z * z).sqrt();
-        let alpha = self.distortion_params().unwrap_or(0.0);
+        let alpha = self.distortion_params();
         let denom = alpha * rho + (1.0 - alpha) * z;
 
         let x_norm = x / denom;
@@ -565,7 +559,7 @@ impl CameraModel for UcmCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let alpha = self.distortion_params()?;
+        let alpha = self.distortion_params();
         if !alpha.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be finite".to_string(),
@@ -614,7 +608,7 @@ mod tests {
         let camera = UcmCamera::new(pinhole, distortion, resolution)?;
 
         assert_eq!(camera.pinhole.fx, 300.0);
-        assert_eq!(camera.distortion_params()?, 0.5);
+        assert_eq!(camera.distortion_params(), 0.5);
         Ok(())
     }
 
@@ -749,13 +743,13 @@ mod tests {
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
         assert_eq!(camera2.pinhole.cy, 250.0);
-        assert_eq!(camera2.distortion_params()?, 0.8);
+        assert_eq!(camera2.distortion_params(), 0.8);
 
         // Test conversion from array
         let camera3 = UcmCamera::from([500.0, 510.0, 340.0, 260.0, 0.9]);
         assert_eq!(camera3.pinhole.fx, 500.0);
         assert_eq!(camera3.pinhole.fy, 510.0);
-        assert_eq!(camera3.distortion_params()?, 0.9);
+        assert_eq!(camera3.distortion_params(), 0.9);
 
         Ok(())
     }

@@ -86,13 +86,10 @@ impl FovCamera {
     }
 
     /// Helper method to extract distortion parameter, returning Result for consistency.
-    fn distortion_params(&self) -> Result<f64, CameraModelError> {
+    fn distortion_params(&self) -> f64 {
         match self.distortion {
-            DistortionModel::FOV { w } => Ok(w),
-            _ => Err(CameraModelError::InvalidParams(format!(
-                "FovCamera requires FOV distortion model, got {:?}",
-                self.distortion
-            ))),
+            DistortionModel::FOV { w } => w,
+            _ => 0.0,
         }
     }
 
@@ -106,7 +103,7 @@ impl FovCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let w = self.distortion_params()?;
+        let w = self.distortion_params();
         if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
@@ -124,7 +121,7 @@ impl FovCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, w]
 impl From<&FovCamera> for DVector<f64> {
     fn from(camera: &FovCamera) -> Self {
-        let w = camera.distortion_params().unwrap_or(0.0);
+        let w = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -142,7 +139,7 @@ impl From<&FovCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, w]
 impl From<&FovCamera> for [f64; 5] {
     fn from(camera: &FovCamera) -> Self {
-        let w = camera.distortion_params().unwrap_or(0.0);
+        let w = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -241,7 +238,7 @@ impl CameraModel for FovCamera {
         }
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params()?;
+        let w = self.distortion_params();
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -279,7 +276,7 @@ impl CameraModel for FovCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let w = self.distortion_params()?;
+        let w = self.distortion_params();
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -413,7 +410,7 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params().unwrap_or(0.0);
+        let w = self.distortion_params();
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -708,7 +705,7 @@ impl CameraModel for FovCamera {
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params().unwrap_or(0.0);
+        let w = self.distortion_params();
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -769,7 +766,7 @@ impl CameraModel for FovCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let w = self.distortion_params()?;
+        let w = self.distortion_params();
         if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
@@ -814,7 +811,7 @@ mod tests {
         let camera = FovCamera::new(pinhole, distortion, resolution)?;
 
         assert_eq!(camera.pinhole.fx, 300.0);
-        assert_eq!(camera.distortion_params()?, 1.5);
+        assert_eq!(camera.distortion_params(), 1.5);
         Ok(())
     }
 
@@ -942,13 +939,13 @@ mod tests {
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
         assert_eq!(camera2.pinhole.cy, 250.0);
-        assert_eq!(camera2.distortion_params()?, 2.0);
+        assert_eq!(camera2.distortion_params(), 2.0);
 
         // Test conversion from array
         let camera3 = FovCamera::from([500.0, 510.0, 340.0, 260.0, 2.5]);
         assert_eq!(camera3.pinhole.fx, 500.0);
         assert_eq!(camera3.pinhole.fy, 510.0);
-        assert_eq!(camera3.distortion_params()?, 2.5);
+        assert_eq!(camera3.distortion_params(), 2.5);
 
         Ok(())
     }

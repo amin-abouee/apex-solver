@@ -85,19 +85,16 @@ impl EucmCamera {
     }
 
     /// Helper method to extract distortion parameters, returning Result for consistency.
-    fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
+    fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
-            DistortionModel::EUCM { alpha, beta } => Ok((alpha, beta)),
-            _ => Err(CameraModelError::InvalidParams(format!(
-                "EucmCamera requires EUCM distortion model, got {:?}",
-                self.distortion
-            ))),
+            DistortionModel::EUCM { alpha, beta } => (alpha, beta),
+            _ => (0.0, 0.0),
         }
     }
 
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
-        let (alpha, _) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, _) = self.distortion_params();
         let mut condition = true;
         if alpha > 0.5 {
             let c = (alpha - 1.0) / (2.0 * alpha - 1.0);
@@ -109,7 +106,7 @@ impl EucmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, beta) = self.distortion_params();
         let mut condition = true;
         if alpha > 0.5 && r_squared > (1.0 / beta * (2.0 * alpha - 1.0)) {
             condition = false;
@@ -125,7 +122,7 @@ impl EucmCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
 impl From<&EucmCamera> for DVector<f64> {
     fn from(camera: &EucmCamera) -> Self {
-        let (alpha, beta) = camera.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, beta) = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -144,7 +141,7 @@ impl From<&EucmCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
 impl From<&EucmCamera> for [f64; 6] {
     fn from(camera: &EucmCamera) -> Self {
-        let (alpha, beta) = camera.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, beta) = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -246,7 +243,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params()?;
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -290,7 +287,7 @@ impl CameraModel for EucmCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (alpha, beta) = self.distortion_params()?;
+        let (alpha, beta) = self.distortion_params();
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
@@ -330,10 +327,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = match self.distortion_params() {
-            Ok(params) => params,
-            Err(_) => return false,
-        };
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -431,7 +425,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -694,7 +688,7 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params().unwrap_or((0.0, 0.0));
+        let (alpha, beta) = self.distortion_params();
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -739,7 +733,7 @@ impl CameraModel for EucmCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (alpha, beta) = self.distortion_params()?;
+        let (alpha, beta) = self.distortion_params();
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be in [0, 1]".to_string(),
@@ -793,7 +787,7 @@ mod tests {
         let camera = EucmCamera::new(pinhole, distortion, resolution)?;
 
         assert_eq!(camera.pinhole.fx, 300.0);
-        assert_eq!(camera.distortion_params()?, (0.5, 1.0));
+        assert_eq!(camera.distortion_params(), (0.5, 1.0));
         Ok(())
     }
 
@@ -939,13 +933,13 @@ mod tests {
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
         assert_eq!(camera2.pinhole.cy, 250.0);
-        assert_eq!(camera2.distortion_params()?, (0.8, 1.8));
+        assert_eq!(camera2.distortion_params(), (0.8, 1.8));
 
         // Test conversion from array
         let camera3 = EucmCamera::from([500.0, 510.0, 340.0, 260.0, 0.9, 2.0]);
         assert_eq!(camera3.pinhole.fx, 500.0);
         assert_eq!(camera3.pinhole.fy, 510.0);
-        assert_eq!(camera3.distortion_params()?, (0.9, 2.0));
+        assert_eq!(camera3.distortion_params(), (0.9, 2.0));
 
         Ok(())
     }

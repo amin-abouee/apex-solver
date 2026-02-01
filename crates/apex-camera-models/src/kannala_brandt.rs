@@ -94,13 +94,10 @@ impl KannalaBrandtCamera {
     }
 
     /// Helper method to extract distortion parameters, returning Result for consistency.
-    fn distortion_params(&self) -> Result<(f64, f64, f64, f64), CameraModelError> {
+    fn distortion_params(&self) -> (f64, f64, f64, f64) {
         match self.distortion {
-            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => Ok((k1, k2, k3, k4)),
-            _ => Err(CameraModelError::InvalidParams(format!(
-                "KannalaBrandtCamera requires KannalaBrandt distortion model, got {:?}",
-                self.distortion
-            ))),
+            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => (k1, k2, k3, k4),
+            _ => (0.0, 0.0, 0.0, 0.0),
         }
     }
 
@@ -117,7 +114,7 @@ impl KannalaBrandtCamera {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
 impl From<&KannalaBrandtCamera> for DVector<f64> {
     fn from(camera: &KannalaBrandtCamera) -> Self {
-        let (k1, k2, k3, k4) = camera.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, k3, k4) = camera.distortion_params();
         DVector::from_vec(vec![
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -138,7 +135,7 @@ impl From<&KannalaBrandtCamera> for DVector<f64> {
 /// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
 impl From<&KannalaBrandtCamera> for [f64; 8] {
     fn from(camera: &KannalaBrandtCamera) -> Self {
-        let (k1, k2, k3, k4) = camera.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, k3, k4) = camera.distortion_params();
         [
             camera.pinhole.fx,
             camera.pinhole.fy,
@@ -255,7 +252,7 @@ impl CameraModel for KannalaBrandtCamera {
             )));
         }
 
-        let (k1, k2, k3, k4) = self.distortion_params()?;
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r2 = x * x + y * y;
         let r = r2.sqrt();
         let theta = r.atan2(z);
@@ -310,7 +307,7 @@ impl CameraModel for KannalaBrandtCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (k1, k2, k3, k4) = self.distortion_params()?;
+        let (k1, k2, k3, k4) = self.distortion_params();
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
@@ -398,7 +395,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -493,7 +490,7 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self.distortion_params().unwrap_or((0.0, 0.0, 0.0, 0.0));
+        let (k1, k2, k3, k4) = self.distortion_params();
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -563,7 +560,7 @@ impl CameraModel for KannalaBrandtCamera {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (k1, k2, k3, k4) = self.distortion_params()?;
+        let (k1, k2, k3, k4) = self.distortion_params();
         if !k1.is_finite() || !k2.is_finite() || !k3.is_finite() || !k4.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
@@ -612,7 +609,7 @@ mod tests {
         };
         let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
         assert_eq!(camera.pinhole.fx, 300.0);
-        let (k1, _, _, _) = camera.distortion_params()?;
+        let (k1, _, _, _) = camera.distortion_params();
         assert_eq!(k1, 0.1);
         Ok(())
     }
@@ -766,7 +763,7 @@ mod tests {
         assert_eq!(camera2.pinhole.fy, 350.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
         assert_eq!(camera2.pinhole.cy, 250.0);
-        let (k1, k2, k3, k4) = camera2.distortion_params()?;
+        let (k1, k2, k3, k4) = camera2.distortion_params();
         assert_eq!(k1, 0.2);
         assert_eq!(k2, 0.02);
         assert_eq!(k3, 0.002);
@@ -777,7 +774,7 @@ mod tests {
             KannalaBrandtCamera::from([400.0, 400.0, 340.0, 260.0, 0.3, 0.03, 0.003, 0.0003]);
         assert_eq!(camera3.pinhole.fx, 400.0);
         assert_eq!(camera3.pinhole.fy, 400.0);
-        let (k1, k2, k3, k4) = camera3.distortion_params()?;
+        let (k1, k2, k3, k4) = camera3.distortion_params();
         assert_eq!(k1, 0.3);
         assert_eq!(k2, 0.03);
         assert_eq!(k3, 0.003);
