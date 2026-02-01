@@ -50,7 +50,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// use apex_camera_models::{PinholeCamera, BundleAdjustment};
 /// use nalgebra::{Matrix2xX, Vector2};
 ///
-/// let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+/// let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
 /// let observations = Matrix2xX::from_columns(&[
 ///     Vector2::new(100.0, 150.0),
 ///     Vector2::new(200.0, 250.0),
@@ -106,7 +106,7 @@ where
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use nalgebra::{Matrix2xX, Vector2};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
     ///     ProjectionFactor::new(observations, camera);
@@ -134,7 +134,7 @@ where
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use apex_solver::manifold::se3::SE3;
     /// # use nalgebra::{Matrix2xX, Vector2};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// let factor = factor.with_fixed_pose(SE3::identity());
@@ -155,7 +155,7 @@ where
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
     /// # use apex_camera_models::{PinholeCamera, BundleAdjustment};
     /// # use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// # let landmarks = Matrix3xX::from_columns(&[Vector3::new(0.1, 0.2, 1.0)]);
@@ -241,8 +241,8 @@ where
 
             // Project point
             let uv = match camera.project(&p_cam) {
-                Some(proj) => proj,
-                None => {
+                Ok(proj) => proj,
+                Err(_) => {
                     if self.verbose_cheirality {
                         warn!("Projection failed for point {}", i);
                     }
@@ -354,6 +354,7 @@ where
 impl<CAM, OP> Factor for ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
+    for<'a> CAM: From<&'a [f64]>,
     OP: OptimizationConfig,
 {
     fn linearize(
@@ -397,7 +398,7 @@ where
             if param_idx >= params.len() {
                 panic!("Missing intrinsic parameters");
             }
-            CAM::from_params(params[param_idx].as_slice())
+            <CAM as From<&[f64]>>::from(params[param_idx].as_slice())
         } else {
             self.camera.clone()
         };
@@ -431,7 +432,7 @@ mod tests {
 
     #[test]
     fn test_projection_factor_creation() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
         // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
@@ -446,7 +447,7 @@ mod tests {
 
     #[test]
     fn test_bundle_adjustment_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
 
         // Create known landmark and observation
         // World-to-camera convention: p_cam = R * p_world + t
@@ -456,7 +457,7 @@ mod tests {
 
         // Project to get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
 
@@ -484,13 +485,13 @@ mod tests {
 
     #[test]
     fn test_self_calibration_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
         // Get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
         let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
@@ -516,13 +517,13 @@ mod tests {
 
     #[test]
     fn test_calibration_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 
         // World-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
         let landmarks = Matrix3xX::from_columns(&[p_world]);
@@ -550,7 +551,7 @@ mod tests {
 
     #[test]
     fn test_invalid_projection_handling() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
