@@ -19,7 +19,9 @@
 //! - k2, p1, p2: <15% error (secondary distortion terms)
 //! - k3: <0.3 absolute error (higher-order term, poorly constrained by planar target)
 
-use apex_camera_models::{CameraModel, RadTanCamera, SelfCalibration};
+use apex_camera_models::{
+    CameraModel, DistortionModel, PinholeParams, RadTanCamera, Resolution, SelfCalibration,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_solver::ManifoldType;
@@ -44,11 +46,23 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // RadTan camera with moderate distortion parameters
     // Use weaker distortion for better convergence with planar calibration
     let true_camera = RadTanCamera::new(
-        200.0, 200.0, // fx, fy (focal lengths - wide FOV)
-        300.0, 200.0, // cx, cy (principal point - centered for 600x400 image)
-        0.1, -0.05, // k1, k2 (moderate radial distortion)
-        0.001, -0.001, // p1, p2 (small tangential distortion)
-        0.0,    // k3 (set to zero - not observable from planar target)
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: -0.05,
+            p1: 0.001,
+            p2: -0.001,
+            k3: 0.0,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let img_width = 600.0;
@@ -93,12 +107,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}: p_cam = {:?}",
-                    cam_idx, lm_idx, p_cam
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify projection is inside image bounds
             assert!(
@@ -271,15 +280,23 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         .to_vector();
 
     let final_camera = RadTanCamera::new(
-        final_intrinsics[0],
-        final_intrinsics[1],
-        final_intrinsics[2],
-        final_intrinsics[3],
-        final_intrinsics[4],
-        final_intrinsics[5],
-        final_intrinsics[6],
-        final_intrinsics[7],
-        final_intrinsics[8],
+        PinholeParams {
+            fx: final_intrinsics[0],
+            fy: final_intrinsics[1],
+            cx: final_intrinsics[2],
+            cy: final_intrinsics[3],
+        },
+        DistortionModel::BrownConrady {
+            k1: final_intrinsics[4],
+            k2: final_intrinsics[5],
+            p1: final_intrinsics[6],
+            p2: final_intrinsics[7],
+            k3: final_intrinsics[8],
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let final_landmarks_vec = result
@@ -304,7 +321,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
         for (lm_idx, true_obs) in true_observations.iter().enumerate() {
             let p_cam = final_pose.act(&final_landmarks[lm_idx], None, None);
-            if let Some(pred_obs) = final_camera.project(&p_cam) {
+            if let Ok(pred_obs) = final_camera.project(&p_cam) {
                 let error = (pred_obs - true_obs).norm();
                 total_error_sq += error * error;
                 total_observations += 1;
@@ -416,8 +433,25 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_radtan_3_cameras_calibration() -> TestResult {
     // Same setup as main test but with 3 cameras
-    let true_camera =
-        RadTanCamera::new(200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0)?;
+    let true_camera = RadTanCamera::new(
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: -0.05,
+            p1: 0.001,
+            p2: -0.001,
+            k3: 0.0,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -446,12 +480,7 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
                 lm_idx
             );
 
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             assert!(
                 uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,

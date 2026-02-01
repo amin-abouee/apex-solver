@@ -11,7 +11,9 @@
 //! - Arctangent-based distortion model for fisheye cameras
 //! - Suitable for wide field-of-view lenses
 
-use apex_camera_models::{CameraModel, FovCamera, SelfCalibration};
+use apex_camera_models::{
+    CameraModel, DistortionModel, FovCamera, PinholeParams, Resolution, SelfCalibration,
+};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -42,9 +44,17 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
     // - Focal length (200px) gives wide FOV
     // - w=0.8: FOV distortion parameter
     let true_camera = FovCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy (center of 600x400)
-        0.8,   // w (FOV distortion param)
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::FOV { w: 0.8 },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     // Image bounds for projection validation
@@ -90,12 +100,7 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
                 p_cam
             );
 
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             assert!(
                 uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,
@@ -302,9 +307,17 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_fov_3_cameras_calibration() -> TestResult {
     let true_camera = FovCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy
-        0.8,   // w
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::FOV { w: 0.8 },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let img_width = 600.0;
@@ -320,7 +333,7 @@ fn test_fov_3_cameras_calibration() -> TestResult {
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
             if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
+                && let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0

@@ -11,7 +11,9 @@
 //! - Polynomial angle-based distortion model
 //! - Popular for wide-angle fisheye cameras (OpenCV fisheye model)
 
-use apex_camera_models::{CameraModel, KannalaBrandtCamera, SelfCalibration};
+use apex_camera_models::{
+    CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams, Resolution, SelfCalibration,
+};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -46,9 +48,22 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
     //
     // Note: Real calibration often finds k3, k4 close to zero or poorly constrained
     let true_camera = KannalaBrandtCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy (center of 600x400)
-        0.5, 0.1, 0.0, 0.0, // k1, k2, k3=0, k4=0
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::KannalaBrandt {
+            k1: 0.5,
+            k2: 0.1,
+            k3: 0.0,
+            k4: 0.0,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     // Image bounds for projection validation
@@ -102,12 +117,7 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify within image bounds
             assert!(
@@ -374,9 +384,22 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
     // Simpler setup: 3 cameras, 200 points
     // Uses same camera params as 5-camera test for consistency
     let true_camera = KannalaBrandtCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy
-        0.5, 0.1, 0.0, 0.0, // k1, k2, k3=0, k4=0
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::KannalaBrandt {
+            k1: 0.5,
+            k2: 0.1,
+            k3: 0.0,
+            k4: 0.0,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let img_width = 600.0;
@@ -394,7 +417,7 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
             if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
+                && let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0

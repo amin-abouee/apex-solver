@@ -11,7 +11,9 @@
 //! - Extension of UCM with additional beta parameter for distortion
 //! - Suitable for fisheye and wide-angle cameras
 
-use apex_camera_models::{CameraModel, EucmCamera, SelfCalibration};
+use apex_camera_models::{
+    CameraModel, DistortionModel, EucmCamera, PinholeParams, Resolution, SelfCalibration,
+};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -43,9 +45,20 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
     // - alpha=0.6: projection parameter
     // - beta=1.2: distortion parameter
     let true_camera = EucmCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy (center of 600x400)
-        0.6, 1.2, // alpha, beta
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     // Image bounds for projection validation
@@ -99,12 +112,7 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify within image bounds
             assert!(
@@ -343,9 +351,20 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
     // Simpler setup: 3 cameras, 200 points
     // Uses same camera params as 5-camera test for consistency
     let true_camera = EucmCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy
-        0.6, 1.2, // alpha, beta
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        },
+        Resolution {
+            width: 600,
+            height: 400,
+        },
     )?;
 
     let img_width = 600.0;
@@ -363,7 +382,7 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
             if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
+                && let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0
