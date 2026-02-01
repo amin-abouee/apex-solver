@@ -3,358 +3,10 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
-
-/// BAL Pinhole camera model with radial distortion.
-///
-/// This camera model follows the Bundle Adjustment in the Large (BAL) convention:
-/// - Camera looks down -Z axis (negative Z values are in front of camera)
-/// - This is also known as OpenGL convention
-/// - Includes radial distortion with two coefficients (k1, k2)
-///
-/// # Parameters
-///
-/// - `fx`, `fy`: Focal lengths in pixels
-/// - `cx`, `cy`: Principal point coordinates in pixels
-/// - `k1`, `k2`: Radial distortion coefficients
-///
-/// # Projection Model
-///
-/// For a 3D point `p_cam = (x, y, z)` in camera frame where z < 0:
-/// ```text
-/// x_n = x / (-z)
-/// y_n = y / (-z)
-/// r² = x_n² + y_n²
-/// distortion = 1 + k1*r² + k2*r⁴
-/// x_d = x_n * distortion
-/// y_d = y_n * distortion
-/// u = fx * x_d + cx
-/// v = fy * y_d + cy
-/// ```
-///
-/// Note the negation of z in the denominator compared to standard pinhole.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BALPinholeCamera {
-    pub camera: Camera,
-}
-
-impl BALPinholeCamera {
-    /// Create a new BAL pinhole camera with distortion.
-    pub fn new(
-        fx: f64,
-        fy: f64,
-        cx: f64,
-        cy: f64,
-        k1: f64,
-        k2: f64,
-    ) -> Result<Self, CameraModelError> {
-        let camera = Self {
-            camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::Radial { k1, k2 },
-            },
-        };
-        camera.validate_params()?;
-        Ok(camera)
-    }
-
-    /// Create a BAL pinhole camera without distortion (k1=0, k2=0).
-    pub fn new_no_distortion(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
-        let camera = Self {
-            camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::Radial { k1: 0.0, k2: 0.0 },
-            },
-        };
-        camera.validate_params()?;
-        Ok(camera)
-    }
-
-    /// Helper to extract distortion parameters
-    fn distortion_params(&self) -> (f64, f64) {
-        match self.camera.distortion {
-            DistortionModel::Radial { k1, k2 } => (k1, k2),
-            _ => panic!("BALPinholeCamera must have Radial distortion model"),
-        }
-    }
-
-    /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
-    fn check_projection_condition(&self, z: f64) -> bool {
-        z < -crate::MIN_DEPTH
-    }
-}
-
-impl CameraModel for BALPinholeCamera {
-    const INTRINSIC_DIM: usize = 6; // fx, fy, cx, cy, k1, k2
-    type IntrinsicJacobian = SMatrix<f64, 2, 6>;
-    type PointJacobian = SMatrix<f64, 2, 3>;
-
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
-        // BAL convention: negative Z is in front
-        if !self.check_projection_condition(p_cam.z) {
-            return None;
-        }
-        let inv_neg_z = -1.0 / p_cam.z; // Note: negation for BAL convention
-
-        // Normalized coordinates
-        let x_n = p_cam.x * inv_neg_z;
-        let y_n = p_cam.y * inv_neg_z;
-
-        // Radial distortion
-        let r2 = x_n * x_n + y_n * y_n;
-        let r4 = r2 * r2;
-        let (k1, k2) = self.distortion_params();
-        let distortion = 1.0 + k1 * r2 + k2 * r4;
-
-        // Apply distortion
-        let x_d = x_n * distortion;
-        let y_d = y_n * distortion;
-
-        Some(Vector2::new(
-            self.camera.pinhole.fx * x_d + self.camera.pinhole.cx,
-            self.camera.pinhole.fy * y_d + self.camera.pinhole.cy,
-        ))
-    }
-
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        self.check_projection_condition(p_cam.z)
-    }
-
-    fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
-        let inv_neg_z = -1.0 / p_cam.z;
-        let x_n = p_cam.x * inv_neg_z;
-        let y_n = p_cam.y * inv_neg_z;
-
-        // Radial distortion
-        let r2 = x_n * x_n + y_n * y_n;
-        let r4 = r2 * r2;
-        let (k1, k2) = self.distortion_params();
-        let distortion = 1.0 + k1 * r2 + k2 * r4;
-
-        // Derivative of distortion w.r.t. r²
-        let d_dist_dr2 = k1 + 2.0 * k2 * r2;
-
-        // Jacobian of normalized coordinates w.r.t. camera point
-        // x_n = x / (-z), y_n = y / (-z)
-        // ∂x_n/∂x = 1/(-z) = inv_neg_z
-        // ∂x_n/∂z = x * ∂(1/(-z))/∂z = x * (1/z²)
-        //
-        // With inv_neg_z = -1/z, we have:
-        //   x_n = x * inv_neg_z, so x = x_n / inv_neg_z
-        //   ∂x_n/∂z = x / z² = (x_n / inv_neg_z) / z²
-        //
-        // Since z² = 1/inv_neg_z² (because inv_neg_z = -1/z means z = -1/inv_neg_z):
-        //   z² = (-1/inv_neg_z)² = 1/inv_neg_z²
-        //   ∂x_n/∂z = (x_n / inv_neg_z) * inv_neg_z² = x_n * inv_neg_z
-        //
-        // Verified numerically: with z=-2, x=1: inv_neg_z=0.5, x_n=0.5
-        //   ∂x_n/∂z = 1/4 = 0.25 = x_n * inv_neg_z = 0.5 * 0.5 ✓
-        let dxn_dz = x_n * inv_neg_z;
-        let dyn_dz = y_n * inv_neg_z;
-
-        // Jacobian of distorted point w.r.t. normalized point
-        // x_d = x_n * (1 + k1*r² + k2*r⁴)
-        // ∂x_d/∂x_n = distortion + x_n * d_dist_dr2 * ∂r²/∂x_n
-        // ∂r²/∂x_n = 2*x_n, ∂r²/∂y_n = 2*y_n
-        let dx_d_dxn = distortion + x_n * d_dist_dr2 * 2.0 * x_n;
-        let dx_d_dyn = x_n * d_dist_dr2 * 2.0 * y_n;
-        let dy_d_dxn = y_n * d_dist_dr2 * 2.0 * x_n;
-        let dy_d_dyn = distortion + y_n * d_dist_dr2 * 2.0 * y_n;
-
-        // Chain rule: ∂(u,v)/∂(x,y,z) = ∂(u,v)/∂(x_d,y_d) * ∂(x_d,y_d)/∂(x_n,y_n) * ∂(x_n,y_n)/∂(x,y,z)
-        let du_dx = self.camera.pinhole.fx * (dx_d_dxn * inv_neg_z);
-        let du_dy = self.camera.pinhole.fx * (dx_d_dyn * inv_neg_z);
-        let du_dz = self.camera.pinhole.fx * (dx_d_dxn * dxn_dz + dx_d_dyn * dyn_dz);
-
-        let dv_dx = self.camera.pinhole.fy * (dy_d_dxn * inv_neg_z);
-        let dv_dy = self.camera.pinhole.fy * (dy_d_dyn * inv_neg_z);
-        let dv_dz = self.camera.pinhole.fy * (dy_d_dxn * dxn_dz + dy_d_dyn * dyn_dz);
-
-        SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
-    }
-
-    fn jacobian_pose(
-        &self,
-        p_world: &Vector3<f64>,
-        pose: &SE3,
-    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        // Transform point from world to camera frame
-        // pose is camera-to-world (R, t), so we need pose^{-1} for world-to-camera
-        // p_cam = R^T * (p_world - t) = R^T * p_world - R^T * t
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(p_world, None, None);
-
-        // Jacobian of projection w.r.t. point in camera frame
-        let d_uv_d_pcam = self.jacobian_point(&p_cam);
-
-        // Jacobian of transformed point w.r.t. pose
-        // pose is camera-to-world: (R, t)
-        // p_cam = R^T * (p_world - t)
-        //
-        // Using right perturbation on SE3: pose' = pose ∘ Exp([δρ; δθ])
-        // For small perturbations:
-        //   R' = R * Exp(δθ) ≈ R * (I + [δθ]×)
-        //   t' ≈ t + R * δρ  (V(δθ) ≈ I for small δθ)
-        //
-        // Then:
-        //   (R')^T = (I - [δθ]×) * R^T
-        //   p_cam' = (R')^T * (p_world - t')
-        //          = (I - [δθ]×) * R^T * (p_world - t - R * δρ)
-        //          = (I - [δθ]×) * R^T * (p_world - t) - (I - [δθ]×) * δρ
-        //          ≈ (I - [δθ]×) * p_cam - δρ
-        //          ≈ p_cam - [δθ]× * p_cam - δρ
-        //          = p_cam + p_cam × δθ - δρ
-        //          = p_cam + [p_cam]× * δθ - δρ
-        //
-        // So: ∂p_cam/∂[δρ; δθ] = [-I | [p_cam]×]
-
-        let p_cam_skew = skew_symmetric(&p_cam);
-
-        let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
-            if c < 3 {
-                // Translation part: -I
-                if r == c { -1.0 } else { 0.0 }
-            } else {
-                // Rotation part: [p_cam]×
-                p_cam_skew[(r, c - 3)]
-            }
-        });
-
-        (d_uv_d_pcam, d_pcam_d_pose)
-    }
-
-    fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
-        let inv_neg_z = -1.0 / p_cam.z;
-        let x_n = p_cam.x * inv_neg_z;
-        let y_n = p_cam.y * inv_neg_z;
-
-        // Radial distortion
-        let r2 = x_n * x_n + y_n * y_n;
-        let r4 = r2 * r2;
-        let (k1, k2) = self.distortion_params();
-        let distortion = 1.0 + k1 * r2 + k2 * r4;
-
-        let x_d = x_n * distortion;
-        let y_d = y_n * distortion;
-
-        // Jacobian ∂(u,v)/∂(fx,fy,cx,cy,k1,k2)
-        // u = fx * x_d + cx
-        // v = fy * y_d + cy
-        // ∂u/∂fx = x_d, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
-        // ∂u/∂k1 = fx * x_n * r², ∂u/∂k2 = fx * x_n * r⁴
-        // ∂v/∂fx = 0, ∂v/∂fy = y_d, ∂v/∂cx = 0, ∂v/∂cy = 1
-        // ∂v/∂k1 = fy * y_n * r², ∂v/∂k2 = fy * y_n * r⁴
-        SMatrix::<f64, 2, 6>::new(
-            x_d,
-            0.0,
-            1.0,
-            0.0,
-            self.camera.pinhole.fx * x_n * r2,
-            self.camera.pinhole.fx * x_n * r4,
-            0.0,
-            y_d,
-            0.0,
-            1.0,
-            self.camera.pinhole.fy * y_n * r2,
-            self.camera.pinhole.fy * y_n * r4,
-        )
-    }
-
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        let (k1, k2) = self.distortion_params();
-        DVector::from_vec(vec![
-            self.camera.pinhole.fx,
-            self.camera.pinhole.fy,
-            self.camera.pinhole.cx,
-            self.camera.pinhole.cy,
-            k1,
-            k2,
-        ])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "BALPinholeCamera requires at least 6 parameters, got {}",
-            params.len()
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::Radial {
-                    k1: params[4],
-                    k2: params[5],
-                },
-            },
-        }
-    }
-
-    fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
-        // Remove distortion and convert to ray
-        let x_d = (point_2d.x - self.camera.pinhole.cx) / self.camera.pinhole.fx;
-        let y_d = (point_2d.y - self.camera.pinhole.cy) / self.camera.pinhole.fy;
-
-        // Iterative undistortion (simple Newton's method)
-        let mut x_n = x_d;
-        let mut y_n = y_d;
-
-        let (k1, k2) = self.distortion_params();
-        for _ in 0..5 {
-            let r2 = x_n * x_n + y_n * y_n;
-            let distortion = 1.0 + k1 * r2 + k2 * r2 * r2;
-            x_n = x_d / distortion;
-            y_n = y_d / distortion;
-        }
-
-        // BAL convention: camera looks down -Z axis
-        let norm = (1.0 + x_n * x_n + y_n * y_n).sqrt();
-        Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
-    }
-
-    fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
-        }
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
-        }
-        let (k1, k2) = self.distortion_params();
-        if !k1.is_finite() || !k2.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Distortion coefficients must be finite".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn get_pinhole_params(&self) -> PinholeParams {
-        PinholeParams {
-            fx: self.camera.pinhole.fx,
-            fy: self.camera.pinhole.fy,
-            cx: self.camera.pinhole.cx,
-            cy: self.camera.pinhole.cy,
-        }
-    }
-
-    fn get_distortion(&self) -> Vec<f64> {
-        let (k1, k2) = self.distortion_params();
-        vec![k1, k2]
-    }
-
-    fn get_model_name(&self) -> &'static str {
-        "bal_pinhole"
-    }
-}
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
 ///
@@ -405,21 +57,67 @@ pub struct BALPinholeCameraStrict {
 
 impl BALPinholeCameraStrict {
     /// Create a new strict BAL pinhole camera with distortion.
-    pub fn new(f: f64, k1: f64, k2: f64) -> Result<Self, CameraModelError> {
-        let camera = Self { f, k1, k2 };
+    ///
+    /// # Arguments
+    ///
+    /// * `pinhole` - Pinhole parameters. MUST have fx=fy and cx=cy=0 for strict BAL format.
+    /// * `distortion` - MUST be DistortionModel::Radial { k1, k2 }
+    /// * `resolution` - Image resolution (currently unused but kept for API consistency)
+    ///
+    /// # Errors
+    ///
+    /// Returns `CameraModelError::InvalidParams` if:
+    /// - `pinhole.fx != pinhole.fy` (strict BAL requires single focal length)
+    /// - `pinhole.cx != 0.0 || pinhole.cy != 0.0` (strict BAL has no principal point offset)
+    /// - `distortion` is not `DistortionModel::Radial`
+    pub fn new(
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        _resolution: crate::Resolution,
+    ) -> Result<Self, CameraModelError> {
+        // Validate strict BAL constraints
+        if (pinhole.fx - pinhole.fy).abs() > 1e-10 {
+            return Err(CameraModelError::InvalidParams(
+                "BALPinholeCameraStrict requires fx = fy (single focal length)".to_string(),
+            ));
+        }
+        if pinhole.cx.abs() > 1e-10 || pinhole.cy.abs() > 1e-10 {
+            return Err(CameraModelError::InvalidParams(
+                "BALPinholeCameraStrict requires cx = cy = 0 (no principal point offset)"
+                    .to_string(),
+            ));
+        }
+
+        let (k1, k2) = match distortion {
+            DistortionModel::Radial { k1, k2 } => (k1, k2),
+            _ => {
+                return Err(CameraModelError::InvalidParams(format!(
+                    "BALPinholeCameraStrict requires Radial distortion model, got {:?}",
+                    distortion
+                )));
+            }
+        };
+
+        let camera = Self {
+            f: pinhole.fx, // Use fx as the single focal length
+            k1,
+            k2,
+        };
         camera.validate_params()?;
         Ok(camera)
     }
 
     /// Create a strict BAL pinhole camera without distortion (k1=0, k2=0).
+    ///
+    /// This is a convenience constructor for the common case of no distortion.
     pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
-        let camera = Self {
-            f,
-            k1: 0.0,
-            k2: 0.0,
-        };
-        camera.validate_params()?;
-        Ok(camera)
+        let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
+        let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        }; // Dummy resolution
+        Self::new(pinhole, distortion, resolution)
     }
 
     /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
@@ -433,10 +131,16 @@ impl CameraModel for BALPinholeCameraStrict {
     type IntrinsicJacobian = SMatrix<f64, 2, 3>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         // BAL convention: negative Z is in front
         if !self.check_projection_condition(p_cam.z) {
-            return None;
+            // return Err(CameraModelError::PointBehindCamera {
+            //     z: p_cam.z,
+            //     message: "BAL convention: point must have z < 0 (negative Z is in front of camera)"
+            //         .to_string(),
+            // });
+            return Err(CameraModelError::ProjectionOutSideImage);
+            //
         }
         let inv_neg_z = -1.0 / p_cam.z;
 
@@ -453,13 +157,119 @@ impl CameraModel for BALPinholeCameraStrict {
         let x_d = x_n * distortion;
         let y_d = y_n * distortion;
 
-        Some(Vector2::new(self.f * x_d, self.f * y_d))
+        Ok(Vector2::new(self.f * x_d, self.f * y_d))
     }
 
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
 
+    /// Computes the Jacobian of the projection function with respect to the 3D point in camera frame.
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The projection function maps a 3D point p_cam = (x, y, z) to 2D pixel coordinates (u, v).
+    ///
+    /// ## Step 1: Normalized Coordinates (BAL Convention)
+    ///
+    /// BAL uses negative Z in front of camera (OpenGL convention):
+    /// ```text
+    /// x_n = x / (-z)
+    /// y_n = y / (-z)
+    /// ```
+    ///
+    /// Let `inv_neg_z = -1/z`, then:
+    /// ```text
+    /// x_n = x * inv_neg_z
+    /// y_n = y * inv_neg_z
+    /// ```
+    ///
+    /// Jacobian of normalized coordinates:
+    /// ```text
+    /// ∂x_n/∂x = inv_neg_z = -1/z
+    /// ∂x_n/∂y = 0
+    /// ∂x_n/∂z = ∂(x * inv_neg_z)/∂z = x * ∂(-1/z)/∂z = x * (1/z²) = x_n * inv_neg_z
+    ///
+    /// ∂y_n/∂x = 0
+    /// ∂y_n/∂y = inv_neg_z = -1/z
+    /// ∂y_n/∂z = y_n * inv_neg_z
+    /// ```
+    ///
+    /// ## Step 2: Radial Distortion
+    ///
+    /// The radial distance squared and distortion factor:
+    /// ```text
+    /// r² = x_n² + y_n²
+    /// r⁴ = (r²)²
+    /// d(r²) = 1 + k1·r² + k2·r⁴
+    /// ```
+    ///
+    /// Distorted coordinates:
+    /// ```text
+    /// x_d = x_n · d(r²)
+    /// y_d = y_n · d(r²)
+    /// ```
+    ///
+    /// ### Derivatives of r² and d(r²):
+    /// ```text
+    /// ∂(r²)/∂x_n = 2·x_n
+    /// ∂(r²)/∂y_n = 2·y_n
+    ///
+    /// ∂d/∂(r²) = k1 + 2·k2·r²
+    /// ```
+    ///
+    /// ### Jacobian of distorted coordinates w.r.t. normalized:
+    /// ```text
+    /// ∂x_d/∂x_n = ∂(x_n · d)/∂x_n = d + x_n · (∂d/∂(r²)) · (∂(r²)/∂x_n)
+    ///           = d + x_n · (k1 + 2·k2·r²) · 2·x_n
+    ///
+    /// ∂x_d/∂y_n = x_n · (∂d/∂(r²)) · (∂(r²)/∂y_n)
+    ///           = x_n · (k1 + 2·k2·r²) · 2·y_n
+    ///
+    /// ∂y_d/∂x_n = y_n · (k1 + 2·k2·r²) · 2·x_n
+    ///
+    /// ∂y_d/∂y_n = d + y_n · (k1 + 2·k2·r²) · 2·y_n
+    /// ```
+    ///
+    /// ## Step 3: Pixel Coordinates (Strict BAL: no principal point)
+    ///
+    /// ```text
+    /// u = f · x_d   (no cx offset)
+    /// v = f · y_d   (no cy offset)
+    /// ```
+    ///
+    /// ## Step 4: Chain Rule
+    ///
+    /// The full Jacobian ∂(u,v)/∂(x,y,z) is computed by chaining:
+    /// ```text
+    /// J = ∂(u,v)/∂(x_d,y_d) · ∂(x_d,y_d)/∂(x_n,y_n) · ∂(x_n,y_n)/∂(x,y,z)
+    /// ```
+    ///
+    /// Final results:
+    /// ```text
+    /// ∂u/∂x = f · (∂x_d/∂x_n · ∂x_n/∂x + ∂x_d/∂y_n · ∂y_n/∂x)
+    ///       = f · (∂x_d/∂x_n · inv_neg_z)
+    ///
+    /// ∂u/∂y = f · (∂x_d/∂y_n · inv_neg_z)
+    ///
+    /// ∂u/∂z = f · (∂x_d/∂x_n · ∂x_n/∂z + ∂x_d/∂y_n · ∂y_n/∂z)
+    ///
+    /// ∂v/∂x = f · (∂y_d/∂x_n · inv_neg_z)
+    ///
+    /// ∂v/∂y = f · (∂y_d/∂y_n · inv_neg_z)
+    ///
+    /// ∂v/∂z = f · (∂y_d/∂x_n · ∂x_n/∂z + ∂y_d/∂y_n · ∂y_n/∂z)
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Snavely et al., "Photo Tourism: Exploring Photo Collections in 3D", SIGGRAPH 2006
+    /// - Agarwal et al., "Bundle Adjustment in the Large", ECCV 2010
+    /// - [Bundle Adjustment in the Large Dataset](https://grail.cs.washington.edu/projects/bal/)
+    ///
+    /// # Verification
+    ///
+    /// This Jacobian is verified against numerical differentiation in tests.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let inv_neg_z = -1.0 / p_cam.z;
         let x_n = p_cam.x * inv_neg_z;
@@ -473,10 +283,11 @@ impl CameraModel for BALPinholeCameraStrict {
         // Derivative of distortion w.r.t. r²
         let d_dist_dr2 = self.k1 + 2.0 * self.k2 * r2;
 
-        // Jacobian components (same derivation as BALPinholeCamera)
+        // Jacobian of normalized coordinates w.r.t. camera point
         let dxn_dz = x_n * inv_neg_z;
         let dyn_dz = y_n * inv_neg_z;
 
+        // Jacobian of distorted point w.r.t. normalized point
         let dx_d_dxn = distortion + x_n * d_dist_dr2 * 2.0 * x_n;
         let dx_d_dyn = x_n * d_dist_dr2 * 2.0 * y_n;
         let dy_d_dxn = y_n * d_dist_dr2 * 2.0 * x_n;
@@ -494,6 +305,89 @@ impl CameraModel for BALPinholeCameraStrict {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
+    /// Computes the Jacobian of the projection function with respect to the camera pose.
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// Given a 3D point in world frame `p_world` and camera pose `pose` (camera-to-world transformation),
+    /// we need the Jacobian ∂(u,v)/∂ξ where ξ ∈ se(3) is the Lie algebra perturbation.
+    ///
+    /// ## Camera Coordinate Transformation
+    ///
+    /// The pose is a camera-to-world SE(3) transformation: T_cw = (R, t) where:
+    /// - R ∈ SO(3): rotation from camera to world
+    /// - t ∈ ℝ³: translation of camera origin in world frame
+    ///
+    /// To transform from world to camera, we use the inverse:
+    /// ```text
+    /// p_cam = T_cw^{-1} · p_world = R^T · (p_world - t)
+    /// ```
+    ///
+    /// ## SE(3) Right Perturbation
+    ///
+    /// We use right perturbation on SE(3): for small δξ = [δρ; δθ] ∈ ℝ⁶:
+    /// ```text
+    /// T' = T ∘ Exp(δξ)
+    /// ```
+    ///
+    /// Where δξ = [δρ; δθ] with:
+    /// - δρ ∈ ℝ³: translation perturbation (in camera frame)
+    /// - δθ ∈ ℝ³: rotation perturbation (axis-angle in camera frame)
+    ///
+    /// ## Perturbation Effect on Transformed Point
+    ///
+    /// Under right perturbation T' = T ∘ Exp([δρ; δθ]):
+    /// ```text
+    /// R' = R · Exp(δθ) ≈ R · (I + [δθ]×)
+    /// t' ≈ t + R · δρ  (for small δθ, V(δθ) ≈ I)
+    /// ```
+    ///
+    /// Then the transformed point becomes:
+    /// ```text
+    /// p_cam' = (R')^T · (p_world - t')
+    ///        = (I - [δθ]×) · R^T · (p_world - t - R · δρ)
+    ///        ≈ (I - [δθ]×) · R^T · (p_world - t) - (I - [δθ]×) · δρ
+    ///        ≈ (I - [δθ]×) · p_cam - δρ
+    ///        = p_cam - [δθ]× · p_cam - δρ
+    ///        = p_cam + p_cam × δθ - δρ
+    ///        = p_cam + [p_cam]× · δθ - δρ
+    /// ```
+    ///
+    /// Where [v]× denotes the skew-symmetric matrix (cross-product matrix).
+    ///
+    /// ## Jacobian of p_cam w.r.t. Pose Perturbation
+    ///
+    /// From the above derivation:
+    /// ```text
+    /// ∂p_cam/∂[δρ; δθ] = [-I | [p_cam]×]
+    /// ```
+    ///
+    /// This is a 3×6 matrix where:
+    /// - First 3 columns (translation): -I (identity with negative sign)
+    /// - Last 3 columns (rotation): [p_cam]× (skew-symmetric matrix of p_cam)
+    ///
+    /// ## Chain Rule
+    ///
+    /// The final Jacobian is:
+    /// ```text
+    /// ∂(u,v)/∂ξ = ∂(u,v)/∂p_cam · ∂p_cam/∂ξ
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Barfoot & Furgale, "Associating Uncertainty with Three-Dimensional Poses for Use in Estimation Problems", IEEE Trans. Robotics 2014
+    /// - Solà et al., "A Micro Lie Theory for State Estimation in Robotics", arXiv:1812.01537, 2018
+    /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization", Technical Report 2010
+    ///
+    /// # Returns
+    ///
+    /// A tuple `(d_uv_d_pcam, d_pcam_d_pose)` where:
+    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
+    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
+    ///
+    /// # Verification
+    ///
+    /// This Jacobian is verified against numerical differentiation in tests.
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -507,8 +401,10 @@ impl CameraModel for BALPinholeCameraStrict {
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
+                // Translation part: -I
                 if r == c { -1.0 } else { 0.0 }
             } else {
+                // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]
             }
         });
@@ -516,6 +412,89 @@ impl CameraModel for BALPinholeCameraStrict {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
+    /// Computes the Jacobian of the projection function with respect to intrinsic parameters.
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The strict BAL camera has EXACTLY 3 intrinsic parameters:
+    /// ```text
+    /// θ = [f, k1, k2]
+    /// ```
+    ///
+    /// Where:
+    /// - f: Single focal length (fx = fy = f)
+    /// - k1, k2: Radial distortion coefficients
+    /// - NO principal point (cx = cy = 0 by convention)
+    ///
+    /// ## Projection Model
+    ///
+    /// Recall the projection equations:
+    /// ```text
+    /// x_n = x / (-z),  y_n = y / (-z)
+    /// r² = x_n² + y_n²
+    /// d(r²; k1, k2) = 1 + k1·r² + k2·r⁴
+    /// x_d = x_n · d(r²; k1, k2)
+    /// y_d = y_n · d(r²; k1, k2)
+    /// u = f · x_d
+    /// v = f · y_d
+    /// ```
+    ///
+    /// ## Jacobian w.r.t. Focal Length (f)
+    ///
+    /// The focal length appears only in the final step:
+    /// ```text
+    /// ∂u/∂f = ∂(f · x_d)/∂f = x_d
+    /// ∂v/∂f = ∂(f · y_d)/∂f = y_d
+    /// ```
+    ///
+    /// ## Jacobian w.r.t. Distortion Coefficients (k1, k2)
+    ///
+    /// The distortion coefficients affect the distortion function d(r²):
+    /// ```text
+    /// ∂d/∂k1 = r²
+    /// ∂d/∂k2 = r⁴
+    /// ```
+    ///
+    /// Using the chain rule:
+    /// ```text
+    /// ∂u/∂k1 = ∂(f · x_d)/∂k1 = f · ∂x_d/∂k1
+    ///        = f · ∂(x_n · d)/∂k1
+    ///        = f · x_n · (∂d/∂k1)
+    ///        = f · x_n · r²
+    ///
+    /// ∂u/∂k2 = f · x_n · (∂d/∂k2)
+    ///        = f · x_n · r⁴
+    /// ```
+    ///
+    /// Similarly for v:
+    /// ```text
+    /// ∂v/∂k1 = f · y_n · r²
+    /// ∂v/∂k2 = f · y_n · r⁴
+    /// ```
+    ///
+    /// ## Complete Jacobian Matrix (2×3)
+    ///
+    /// ```text
+    ///         ∂/∂f    ∂/∂k1        ∂/∂k2
+    /// ∂u/∂θ = [x_d,   f·x_n·r²,   f·x_n·r⁴]
+    /// ∂v/∂θ = [y_d,   f·y_n·r²,   f·y_n·r⁴]
+    /// ```
+    ///
+    /// # References
+    ///
+    /// - Agarwal et al., "Bundle Adjustment in the Large", ECCV 2010, Section 3
+    /// - [Ceres Solver: Bundle Adjustment Tutorial](http://ceres-solver.org/nnls_tutorial.html#bundle-adjustment)
+    /// - Triggs et al., "Bundle Adjustment - A Modern Synthesis", Vision Algorithms: Theory and Practice, 2000
+    ///
+    /// # Notes
+    ///
+    /// This differs from the general BALPinholeCamera which has 6 parameters (fx, fy, cx, cy, k1, k2).
+    /// The strict BAL format enforces fx=fy and cx=cy=0 to match the original Bundler software
+    /// and standard BAL dataset files, reducing the intrinsic dimensionality from 6 to 3.
+    ///
+    /// # Verification
+    ///
+    /// This Jacobian is verified against numerical differentiation in tests.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let inv_neg_z = -1.0 / p_cam.z;
         let x_n = p_cam.x * inv_neg_z;
@@ -530,41 +509,14 @@ impl CameraModel for BALPinholeCameraStrict {
         let y_d = y_n * distortion;
 
         // Jacobian ∂(u,v)/∂(f,k1,k2)
-        // u = f * x_d  (no cx)
-        // v = f * y_d  (no cy)
-        //
-        // ∂u/∂f = x_d
-        // ∂u/∂k1 = f * x_n * r²
-        // ∂u/∂k2 = f * x_n * r⁴
-        //
-        // ∂v/∂f = y_d
-        // ∂v/∂k1 = f * y_n * r²
-        // ∂v/∂k2 = f * y_n * r⁴
         SMatrix::<f64, 2, 3>::new(
-            x_d,
-            self.f * x_n * r2,
-            self.f * x_n * r4,
-            y_d,
-            self.f * y_n * r2,
-            self.f * y_n * r4,
+            x_d,               // ∂u/∂f
+            self.f * x_n * r2, // ∂u/∂k1
+            self.f * x_n * r4, // ∂u/∂k2
+            y_d,               // ∂v/∂f
+            self.f * y_n * r2, // ∂v/∂k1
+            self.f * y_n * r4, // ∂v/∂k2
         )
-    }
-
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        DVector::from_vec(vec![self.f, self.k1, self.k2])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 3,
-            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
-            params.len()
-        );
-        Self {
-            f: params[0],
-            k1: params[1],
-            k2: params[2],
-        }
     }
 
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
@@ -610,12 +562,80 @@ impl CameraModel for BALPinholeCameraStrict {
         }
     }
 
-    fn get_distortion(&self) -> Vec<f64> {
-        vec![self.k1, self.k2]
+    fn get_distortion(&self) -> DistortionModel {
+        DistortionModel::Radial {
+            k1: self.k1,
+            k2: self.k2,
+        }
     }
 
     fn get_model_name(&self) -> &'static str {
         "bal_pinhole_strict"
+    }
+}
+
+// ============================================================================
+// From/Into Trait Implementations for BALPinholeCameraStrict
+// ============================================================================
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [f, k1, k2]
+impl From<&BALPinholeCameraStrict> for DVector<f64> {
+    fn from(camera: &BALPinholeCameraStrict) -> Self {
+        DVector::from_vec(vec![camera.f, camera.k1, camera.k2])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [f, k1, k2]
+impl From<&BALPinholeCameraStrict> for [f64; 3] {
+    fn from(camera: &BALPinholeCameraStrict) -> Self {
+        [camera.f, camera.k1, camera.k2]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [f, k1, k2]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 3 elements or if validation fails.
+impl From<&[f64]> for BALPinholeCameraStrict {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 3,
+            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
+            params.len()
+        );
+        Self {
+            f: params[0],
+            k1: params[1],
+            k2: params[2],
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [f, k1, k2]
+impl From<[f64; 3]> for BALPinholeCameraStrict {
+    fn from(params: [f64; 3]) -> Self {
+        Self {
+            f: params[0],
+            k1: params[1],
+            k2: params[2],
+        }
     }
 }
 
@@ -626,78 +646,114 @@ mod tests {
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_bal_pinhole_camera_creation() -> TestResult {
-        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.0, 0.0)?;
-        assert_eq!(camera.camera.pinhole.fx, 500.0);
-        assert_eq!(camera.camera.pinhole.fy, 500.0);
-        assert_eq!(camera.camera.pinhole.cx, 320.0);
-        assert_eq!(camera.camera.pinhole.cy, 240.0);
-        let (k1, k2) = camera.distortion_params();
-        assert_eq!(k1, 0.0);
-        assert_eq!(k2, 0.0);
+    fn test_bal_strict_camera_creation() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 0.0, 0.0)?;
+        let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+
+        let camera = BALPinholeCameraStrict::new(pinhole, distortion, resolution)?;
+
+        assert_eq!(camera.f, 500.0);
+        assert_eq!(camera.k1, 0.0);
+        assert_eq!(camera.k2, 0.0);
         Ok(())
     }
 
     #[test]
-    fn test_bal_convention_negative_z() -> TestResult {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
+    fn test_bal_strict_rejects_different_focal_lengths() {
+        let pinhole = PinholeParams {
+            fx: 500.0,
+            fy: 505.0, // Different from fx
+            cx: 0.0,
+            cy: 0.0,
+        };
+        let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
 
-        // Point at negative Z should be valid (in front of camera)
+        let result = BALPinholeCameraStrict::new(pinhole, distortion, resolution);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bal_strict_rejects_non_zero_principal_point() {
+        let pinhole = PinholeParams {
+            fx: 500.0,
+            fy: 500.0,
+            cx: 320.0, // Non-zero
+            cy: 0.0,
+        };
+        let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+
+        let result = BALPinholeCameraStrict::new(pinhole, distortion, resolution);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_bal_strict_projection_at_optical_axis() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
         let p_cam = Vector3::new(0.0, 0.0, -1.0);
-        assert!(camera.is_valid_point(&p_cam));
 
-        // Point at positive Z should be invalid (behind camera)
-        let p_cam_behind = Vector3::new(0.0, 0.0, 1.0);
-        assert!(!camera.is_valid_point(&p_cam_behind));
-        Ok(())
-    }
+        let uv = camera.project(&p_cam)?;
 
-    #[test]
-    fn test_bal_projection_at_optical_axis() -> TestResult {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
-        let p_cam = Vector3::new(0.0, 0.0, -1.0); // Note: negative Z
-
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
-
-        // Point on optical axis should project to principal point (no distortion on axis)
-        assert!((uv.x - 320.0).abs() < 1e-10);
-        assert!((uv.y - 240.0).abs() < 1e-10);
+        // Point on optical axis projects to origin (no principal point offset)
+        assert!(uv.x.abs() < 1e-10);
+        assert!(uv.y.abs() < 1e-10);
 
         Ok(())
     }
 
     #[test]
-    fn test_bal_projection_off_axis_no_distortion() -> TestResult {
-        let camera = BALPinholeCamera::new_no_distortion(500.0, 500.0, 320.0, 240.0)?;
-        let p_cam = Vector3::new(0.1, 0.2, -1.0); // Note: negative Z
-
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
-
-        // u = 500 * 0.1/1.0 + 320 = 370
-        // v = 500 * 0.2/1.0 + 240 = 340
-        assert!((uv.x - 370.0).abs() < 1e-10);
-        assert!((uv.y - 340.0).abs() < 1e-10);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_bal_projection_with_distortion() -> TestResult {
-        let camera = BALPinholeCamera::new(500.0, 500.0, 320.0, 240.0, 0.1, 0.01)?;
+    fn test_bal_strict_projection_off_axis() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
         let p_cam = Vector3::new(0.1, 0.2, -1.0);
 
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
-        // Normalized: x_n = 0.1, y_n = 0.2
-        // r² = 0.01 + 0.04 = 0.05
-        // r⁴ = 0.0025
-        // distortion = 1 + 0.1*0.05 + 0.01*0.0025 = 1.005025
-        // x_d = 0.1 * 1.005025 = 0.1005025
-        // y_d = 0.2 * 1.005025 = 0.201005
-        // u = 500 * 0.1005025 + 320 ≈ 370.25125
-        // v = 500 * 0.201005 + 240 ≈ 340.5025
-        assert!((uv.x - 370.25125).abs() < 1e-4);
-        assert!((uv.y - 340.5025).abs() < 1e-4);
+        // u = 500 * 0.1 = 50 (no principal point offset)
+        // v = 500 * 0.2 = 100
+        assert!((uv.x - 50.0).abs() < 1e-10);
+        assert!((uv.y - 100.0).abs() < 1e-10);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_bal_strict_from_into_traits() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(400.0)?;
+
+        // Test conversion to DVector
+        let params: DVector<f64> = (&camera).into();
+        assert_eq!(params.len(), 3);
+        assert_eq!(params[0], 400.0);
+        assert_eq!(params[1], 0.0);
+        assert_eq!(params[2], 0.0);
+
+        // Test conversion to array
+        let arr: [f64; 3] = (&camera).into();
+        assert_eq!(arr, [400.0, 0.0, 0.0]);
+
+        // Test conversion from slice
+        let params_slice = [450.0, 0.1, 0.01];
+        let camera2 = BALPinholeCameraStrict::from(&params_slice[..]);
+        assert_eq!(camera2.f, 450.0);
+        assert_eq!(camera2.k1, 0.1);
+        assert_eq!(camera2.k2, 0.01);
+
+        // Test conversion from array
+        let camera3 = BALPinholeCameraStrict::from([500.0, 0.2, 0.02]);
+        assert_eq!(camera3.f, 500.0);
+        assert_eq!(camera3.k1, 0.2);
+        assert_eq!(camera3.k2, 0.02);
 
         Ok(())
     }

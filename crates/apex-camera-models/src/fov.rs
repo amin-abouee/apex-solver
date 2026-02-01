@@ -42,7 +42,7 @@
 //!   https://arxiv.org/pdf/1807.08957
 
 use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -51,40 +51,62 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// FOV camera model with 5 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FovCamera {
-    pub camera: Camera,
+    /// Linear pinhole parameters (fx, fy, cx, cy)
+    pub pinhole: PinholeParams,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl FovCamera {
-    pub fn new(fx: f64, fy: f64, cx: f64, cy: f64, w: f64) -> Result<Self, CameraModelError> {
+    /// Create a new Field-of-View (FOV) camera.
+    ///
+    /// # Arguments
+    ///
+    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
+    /// * `distortion` - MUST be DistortionModel::FOV { w }
+    /// * `resolution` - Image resolution
+    ///
+    /// # Errors
+    ///
+    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::FOV`.
+    pub fn new(
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        resolution: Resolution,
+    ) -> Result<Self, CameraModelError> {
         let camera = Self {
-            camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::FOV { w },
-            },
+            pinhole,
+            distortion,
+            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameter.
-    fn distortion_params(&self) -> f64 {
-        match self.camera.distortion {
-            DistortionModel::FOV { w } => w,
-            _ => panic!("Invalid distortion model for FovCamera"),
+    /// Helper method to extract distortion parameter, returning Result for consistency.
+    fn distortion_params(&self) -> Result<f64, CameraModelError> {
+        match self.distortion {
+            DistortionModel::FOV { w } => Ok(w),
+            _ => Err(CameraModelError::InvalidParams(format!(
+                "FovCamera requires FOV distortion model, got {:?}",
+                self.distortion
+            ))),
         }
     }
 
     /// Validates camera parameters.
     pub fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let w = self.distortion_params();
+        let w = self.distortion_params()?;
         if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
@@ -92,6 +114,101 @@ impl FovCamera {
         }
 
         Ok(())
+    }
+}
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, w]
+impl From<&FovCamera> for DVector<f64> {
+    fn from(camera: &FovCamera) -> Self {
+        let w = camera
+            .distortion_params()
+            .expect("FovCamera validated at construction");
+        DVector::from_vec(vec![
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            w,
+        ])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, w]
+impl From<&FovCamera> for [f64; 5] {
+    fn from(camera: &FovCamera) -> Self {
+        let w = camera
+            .distortion_params()
+            .expect("FovCamera validated at construction");
+        [
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            w,
+        ]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, w]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 5 elements.
+impl From<&[f64]> for FovCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 5,
+            "FovCamera requires at least 5 parameters, got {}",
+            params.len()
+        );
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::FOV { w: params[4] },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, w]
+impl From<[f64; 5]> for FovCamera {
+    fn from(params: [f64; 5]) -> Self {
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::FOV { w: params[4] },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
     }
 }
 
@@ -114,18 +231,23 @@ impl CameraModel for FovCamera {
     ///
     /// - `Some(uv)` - 2D image coordinates if valid
     /// - `None` - If projection fails
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         // Check if z is valid (too close to camera center)
         if z < f64::EPSILON.sqrt() {
-            return None;
+            // return Err(CameraModelError::InvalidProjection {
+            //     message: format!("FOV: z too small: z={z}"),
+            // });
+            return Err(CameraModelError::ProjectionOutSideImage);
         }
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params();
+        let w = self
+            .distortion_params()
+            .expect("FovCamera validated at construction");
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -139,9 +261,9 @@ impl CameraModel for FovCamera {
         let mx = x * rd;
         let my = y * rd;
 
-        Some(Vector2::new(
-            self.camera.pinhole.fx * mx + self.camera.pinhole.cx,
-            self.camera.pinhole.fy * my + self.camera.pinhole.cy,
+        Ok(Vector2::new(
+            self.pinhole.fx * mx + self.pinhole.cx,
+            self.pinhole.fy * my + self.pinhole.cy,
         ))
     }
 
@@ -163,12 +285,12 @@ impl CameraModel for FovCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let w = self.distortion_params();
+        let w = self.distortion_params()?;
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
-        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
-        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
+        let mx = (u - self.pinhole.cx) / self.pinhole.fx;
+        let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
         let r2 = mx * mx + my * my;
         let rd = r2.sqrt();
@@ -198,24 +320,119 @@ impl CameraModel for FovCamera {
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// For the FOV camera model, projection is defined as:
+    ///
+    /// ```text
+    /// r = √(x² + y²)
+    /// α = 2·tan(w/2)·r / z
+    /// atan_wrd = atan(α)
+    /// rd = atan_wrd / (r·w)    (if r > 0)
+    /// rd = 2·tan(w/2) / w       (if r ≈ 0)
+    ///
+    /// mx = x · rd
+    /// my = y · rd
+    /// u = fx · mx + cx
+    /// v = fy · my + cy
+    /// ```
+    ///
+    /// ## Jacobian Structure
+    ///
+    /// We need to compute ∂u/∂p and ∂v/∂p where p = (x, y, z):
+    ///
+    /// ```text
+    /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
+    ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
+    /// ```
+    ///
+    /// ## Chain Rule Application
+    ///
+    /// Starting from the projection equations:
+    /// - u = fx · mx + cx = fx · x · rd + cx
+    /// - v = fy · my + cy = fy · y · rd + cy
+    ///
+    /// We apply the chain rule:
+    ///
+    /// ```text
+    /// ∂u/∂x = fx · ∂(x·rd)/∂x = fx · (rd + x · ∂rd/∂x)
+    /// ∂u/∂y = fx · ∂(x·rd)/∂y = fx · x · ∂rd/∂y
+    /// ∂u/∂z = fx · ∂(x·rd)/∂z = fx · x · ∂rd/∂z
+    ///
+    /// ∂v/∂x = fy · ∂(y·rd)/∂x = fy · y · ∂rd/∂x
+    /// ∂v/∂y = fy · ∂(y·rd)/∂y = fy · (rd + y · ∂rd/∂y)
+    /// ∂v/∂z = fy · ∂(y·rd)/∂z = fy · y · ∂rd/∂z
+    /// ```
+    ///
+    /// ## Computing ∂rd/∂x, ∂rd/∂y, ∂rd/∂z
+    ///
+    /// For r > 0 case (non-optical axis):
+    ///
+    /// rd = atan(α) / (r·w) where α = 2·tan(w/2)·r / z
+    ///
+    /// Using chain rule through r and α:
+    ///
+    /// ```text
+    /// ∂rd/∂r = [∂atan/∂α · ∂α/∂r · r·w - atan(α) · w] / (r·w)²
+    ///        = [1/(1+α²) · 2·tan(w/2)/z · r·w - atan(α) · w] / (r·w)²
+    ///
+    /// ∂rd/∂z = ∂atan/∂α · ∂α/∂z / (r·w)
+    ///        = 1/(1+α²) · (-2·tan(w/2)·r/z²) / (r·w)
+    /// ```
+    ///
+    /// Then using ∂r/∂x = x/r and ∂r/∂y = y/r:
+    ///
+    /// ```text
+    /// ∂rd/∂x = ∂rd/∂r · ∂r/∂x = ∂rd/∂r · x/r
+    /// ∂rd/∂y = ∂rd/∂r · ∂r/∂y = ∂rd/∂r · y/r
+    /// ∂rd/∂z = (computed directly above)
+    /// ```
+    ///
+    /// ## Special Case: Near Optical Axis (r ≈ 0)
+    ///
+    /// When r < ε, we use rd = 2·tan(w/2) / w (constant), so:
+    ///
+    /// ```text
+    /// ∂rd/∂x = 0, ∂rd/∂y = 0, ∂rd/∂z = 0
+    /// ```
+    ///
+    /// Leading to simplified Jacobian:
+    ///
+    /// ```text
+    /// J_point = [ fx·rd    0       0   ]
+    ///           [   0    fy·rd     0   ]
+    /// ```
+    ///
+    /// ## References
+    ///
+    /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
+    /// - Zhang et al., "Fisheye Camera Calibration Using Principal Point Constraints", PAMI 2012
+    ///
+    /// ## Numerical Verification
+    ///
+    /// This analytical Jacobian is verified against numerical differentiation in
+    /// `test_jacobian_point_numerical()` with tolerance < 1e-6.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params();
+        let w = self
+            .distortion_params()
+            .expect("FovCamera validated at construction");
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
         if r < crate::GEOMETRIC_PRECISION {
             let rd = mul2tanwby2 / w;
             return SMatrix::<f64, 2, 3>::new(
-                self.camera.pinhole.fx * rd,
+                self.pinhole.fx * rd,
                 0.0,
                 0.0,
                 0.0,
-                self.camera.pinhole.fy * rd,
+                self.pinhole.fy * rd,
                 0.0,
             );
         }
@@ -242,16 +459,114 @@ impl CameraModel for FovCamera {
         let dmy_dz = y * drd_dz;
 
         SMatrix::<f64, 2, 3>::new(
-            self.camera.pinhole.fx * dmx_dx,
-            self.camera.pinhole.fx * dmx_dy,
-            self.camera.pinhole.fx * dmx_dz,
-            self.camera.pinhole.fy * dmy_dx,
-            self.camera.pinhole.fy * dmy_dy,
-            self.camera.pinhole.fy * dmy_dz,
+            self.pinhole.fx * dmx_dx,
+            self.pinhole.fx * dmx_dy,
+            self.pinhole.fx * dmx_dz,
+            self.pinhole.fy * dmy_dx,
+            self.pinhole.fy * dmy_dy,
+            self.pinhole.fy * dmy_dz,
         )
     }
 
     /// Jacobian of projection w.r.t. camera pose (SE3).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The camera pose transformation converts a world point to camera coordinates:
+    ///
+    /// ```text
+    /// p_cam = T⁻¹ · p_world = R^T · (p_world - t)
+    /// ```
+    ///
+    /// where T = (R, t) is the camera pose (world-to-camera transform).
+    ///
+    /// ## Perturbation Model (Right Jacobian)
+    ///
+    /// We perturb the pose in the tangent space of SE(3):
+    ///
+    /// ```text
+    /// T(δξ) = T · exp(δξ^)
+    /// ```
+    ///
+    /// where δξ = (δω, δv) ∈ ℝ⁶ with:
+    /// - δω ∈ ℝ³: rotation perturbation (so(3) algebra)
+    /// - δv ∈ ℝ³: translation perturbation
+    ///
+    /// The perturbed camera-frame point becomes:
+    ///
+    /// ```text
+    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
+    ///           = exp(-δξ^) · T⁻¹ · p_world
+    ///           ≈ (I - δξ^) · p_cam     (first-order approximation)
+    /// ```
+    ///
+    /// ## Jacobian w.r.t. Pose Perturbation
+    ///
+    /// For small perturbations δξ:
+    ///
+    /// ```text
+    /// p_cam(δξ) ≈ p_cam - [p_cam]× · δω - R^T · δv
+    /// ```
+    ///
+    /// where [p_cam]× is the skew-symmetric matrix of p_cam.
+    ///
+    /// Taking derivatives:
+    ///
+    /// ```text
+    /// ∂p_cam/∂δω = -[p_cam]×
+    /// ∂p_cam/∂δv = -R^T
+    /// ```
+    ///
+    /// Therefore, the Jacobian of p_cam w.r.t. pose perturbation δξ is:
+    ///
+    /// ```text
+    /// J_pose = ∂p_cam/∂δξ = [ -R^T | [p_cam]× ]  (3×6 matrix)
+    /// ```
+    ///
+    /// where:
+    /// - First 3 columns correspond to translation perturbation δv
+    /// - Last 3 columns correspond to rotation perturbation δω
+    ///
+    /// ## Chain Rule to Pixel Coordinates
+    ///
+    /// The full Jacobian chain is:
+    ///
+    /// ```text
+    /// J_pixel_pose = J_pixel_point · J_point_pose
+    ///              = (∂u/∂p_cam) · (∂p_cam/∂δξ)
+    /// ```
+    ///
+    /// where J_pixel_point is computed by `jacobian_point()`.
+    ///
+    /// ## Return Value
+    ///
+    /// Returns a tuple `(J_pixel_point, J_point_pose)`:
+    /// - `J_pixel_point`: 2×3 Jacobian ∂uv/∂p_cam (from jacobian_point)
+    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ
+    ///
+    /// The caller multiplies these to get the full 2×6 Jacobian ∂uv/∂δξ.
+    ///
+    /// ## SE(3) Conventions
+    ///
+    /// - **Parameterization**: δξ = [δv_x, δv_y, δv_z, δω_x, δω_y, δω_z]
+    /// - **Perturbation**: Right perturbation T(δξ) = T · exp(δξ^)
+    /// - **Coordinate frame**: Perturbations are in the camera frame
+    ///
+    /// ## References
+    ///
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie group optimization)
+    /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
+    /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization"
+    ///
+    /// ## Implementation Notes
+    ///
+    /// The skew-symmetric matrix [p_cam]× is computed as:
+    ///
+    /// ```text
+    /// [p_cam]× = [  0      -p_z    p_y  ]
+    ///            [  p_z     0     -p_x  ]
+    ///            [ -p_y    p_x     0   ]
+    /// ```
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -277,13 +592,133 @@ impl CameraModel for FovCamera {
     }
 
     /// Jacobian of projection w.r.t. intrinsic parameters (2×5).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The FOV camera has 5 intrinsic parameters: [fx, fy, cx, cy, w]
+    ///
+    /// ## Projection Equations
+    ///
+    /// ```text
+    /// u = fx · mx + cx
+    /// v = fy · my + cy
+    /// ```
+    ///
+    /// where mx = x · rd and my = y · rd, with:
+    ///
+    /// ```text
+    /// rd = atan(2·tan(w/2)·r/z) / (r·w)  (for r > 0)
+    /// rd = 2·tan(w/2) / w                 (for r ≈ 0)
+    /// ```
+    ///
+    /// ## Jacobian Structure
+    ///
+    /// We need to compute:
+    ///
+    /// ```text
+    /// J_intrinsics = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂w ]
+    ///                [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂w ]
+    /// ```
+    ///
+    /// ## Linear Parameters (fx, fy, cx, cy)
+    ///
+    /// These appear linearly in the projection equations:
+    ///
+    /// ```text
+    /// ∂u/∂fx = mx,     ∂u/∂fy = 0,      ∂u/∂cx = 1,      ∂u/∂cy = 0
+    /// ∂v/∂fx = 0,      ∂v/∂fy = my,     ∂v/∂cx = 0,      ∂v/∂cy = 1
+    /// ```
+    ///
+    /// ## Distortion Parameter (w)
+    ///
+    /// The parameter w affects the distortion factor rd. We need ∂rd/∂w.
+    ///
+    /// ### Case 1: r > 0 (Non-Optical Axis)
+    ///
+    /// Starting from:
+    ///
+    /// ```text
+    /// α = 2·tan(w/2)·r / z
+    /// rd = atan(α) / (r·w)
+    /// ```
+    ///
+    /// Taking derivatives:
+    ///
+    /// ```text
+    /// ∂α/∂w = 2·sec²(w/2)·(1/2)·r/z = sec²(w/2)·r/z
+    /// ```
+    ///
+    /// where sec²(w/2) = 1 + tan²(w/2).
+    ///
+    /// Using the quotient rule for rd = atan(α) / (r·w):
+    ///
+    /// ```text
+    /// ∂rd/∂w = [∂atan(α)/∂w · r·w - atan(α) · r] / (r·w)²
+    ///        = [1/(1+α²) · ∂α/∂w · r·w - atan(α) · r] / (r·w)²
+    ///        = [sec²(w/2)·r²·w/z·(1/(1+α²)) - atan(α)·r] / (r²·w²)
+    /// ```
+    ///
+    /// Simplifying:
+    ///
+    /// ```text
+    /// ∂rd/∂w = [∂atan(α)/∂α · ∂α/∂w · r·w - atan(α)·r] / (r·w)²
+    /// ```
+    ///
+    /// ### Case 2: r ≈ 0 (Near Optical Axis)
+    ///
+    /// When r ≈ 0, we use rd = 2·tan(w/2) / w.
+    ///
+    /// Using the quotient rule:
+    ///
+    /// ```text
+    /// ∂rd/∂w = [2·sec²(w/2)·(1/2)·w - 2·tan(w/2)] / w²
+    ///        = [sec²(w/2)·w - 2·tan(w/2)] / w²
+    /// ```
+    ///
+    /// ## Final Jacobian w.r.t. w
+    ///
+    /// Once we have ∂rd/∂w, we compute:
+    ///
+    /// ```text
+    /// ∂u/∂w = fx · ∂(x·rd)/∂w = fx · x · ∂rd/∂w
+    /// ∂v/∂w = fy · ∂(y·rd)/∂w = fy · y · ∂rd/∂w
+    /// ```
+    ///
+    /// ## Matrix Form
+    ///
+    /// The complete Jacobian matrix is:
+    ///
+    /// ```text
+    /// J = [ mx   0    1    0    fx·x·∂rd/∂w ]
+    ///     [  0  my    0    1    fy·y·∂rd/∂w ]
+    /// ```
+    ///
+    /// where mx = x·rd and my = y·rd.
+    ///
+    /// ## References
+    ///
+    /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
+    /// - Hughes et al., "Rolling Shutter Motion Deblurring", CVPR 2010 (uses FOV model)
+    ///
+    /// ## Numerical Verification
+    ///
+    /// This analytical Jacobian is verified against numerical differentiation in
+    /// `test_jacobian_intrinsics_numerical()` with tolerance < 1e-4.
+    ///
+    /// ## Notes
+    ///
+    /// The FOV parameter w controls the field of view angle. Typical values range from
+    /// 0.5 (narrow FOV) to π (hemispheric fisheye). The derivative ∂rd/∂w captures how
+    /// changes in the FOV parameter affect the radial distortion mapping.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         let r = (x * x + y * y).sqrt();
-        let w = self.distortion_params();
+        let w = self
+            .distortion_params()
+            .expect("FovCamera validated at construction");
         let tan_w_2 = (w / 2.0).tan();
         let mul2tanwby2 = tan_w_2 * 2.0;
 
@@ -322,39 +757,10 @@ impl CameraModel for FovCamera {
             (sec2_w_2 * w - 2.0 * tan_w_2) / (w * w)
         };
 
-        let du_dw = self.camera.pinhole.fx * x * drd_dw;
-        let dv_dw = self.camera.pinhole.fy * y * drd_dw;
+        let du_dw = self.pinhole.fx * x * drd_dw;
+        let dv_dw = self.pinhole.fy * y * drd_dw;
 
         SMatrix::<f64, 2, 5>::new(mx, 0.0, 1.0, 0.0, du_dw, 0.0, my, 0.0, 1.0, dv_dw)
-    }
-
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        let w = self.distortion_params();
-        DVector::from_vec(vec![
-            self.camera.pinhole.fx,
-            self.camera.pinhole.fy,
-            self.camera.pinhole.cx,
-            self.camera.pinhole.cy,
-            w,
-        ])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 5,
-            "FovCamera requires at least 5 parameters"
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::FOV { w: params[4] },
-            },
-        }
     }
 
     /// Validates camera parameters.
@@ -365,15 +771,15 @@ impl CameraModel for FovCamera {
     /// - cx, cy must be finite
     /// - w must be in (0, π]
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let w = self.distortion_params();
+        let w = self.distortion_params()?;
         if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
             return Err(CameraModelError::InvalidParams(
                 "w must be in (0, π]".to_string(),
@@ -385,15 +791,15 @@ impl CameraModel for FovCamera {
 
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
-            fx: self.camera.pinhole.fx,
-            fy: self.camera.pinhole.fy,
-            cx: self.camera.pinhole.cx,
-            cy: self.camera.pinhole.cy,
+            fx: self.pinhole.fx,
+            fy: self.pinhole.fy,
+            cx: self.pinhole.cx,
+            cy: self.pinhole.cy,
         }
     }
 
-    fn get_distortion(&self) -> Vec<f64> {
-        vec![self.distortion_params()]
+    fn get_distortion(&self) -> DistortionModel {
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -409,17 +815,31 @@ mod tests {
 
     #[test]
     fn test_fov_camera_creation() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
-        assert_eq!(camera.camera.pinhole.fx, 300.0);
-        assert_eq!(camera.distortion_params(), 1.5);
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = FovCamera::new(pinhole, distortion, resolution)?;
+
+        assert_eq!(camera.pinhole.fx, 300.0);
+        assert_eq!(camera.distortion_params()?, 1.5);
         Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = FovCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         assert!((uv.x - 320.0).abs() < 1e-4);
         assert!((uv.y - 240.0).abs() < 1e-4);
@@ -429,7 +849,14 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = FovCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -441,8 +868,8 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).ok_or("Projection failed")?;
-            let uv_minus = camera.project(&p_minus).ok_or("Projection failed")?;
+            let uv_plus = camera.project(&p_plus)?;
+            let uv_minus = camera.project(&p_minus)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -460,11 +887,18 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = FovCamera::new(300.0, 300.0, 320.0, 240.0, 1.5)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = FovCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
-        let params = camera.intrinsics_vec();
+        let params: DVector<f64> = (&camera).into();
         let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..5 {
@@ -473,11 +907,11 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = FovCamera::from_params(params_plus.as_slice());
-            let cam_minus = FovCamera::from_params(params_minus.as_slice());
+            let cam_plus = FovCamera::from(params_plus.as_slice());
+            let cam_minus = FovCamera::from(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).ok_or("Projection failed")?;
-            let uv_minus = cam_minus.project(&p_cam).ok_or("Projection failed")?;
+            let uv_plus = cam_plus.project(&p_cam)?;
+            let uv_minus = cam_minus.project(&p_cam)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -485,6 +919,47 @@ mod tests {
                 assert!(diff < 1e-4, "Mismatch at ({}, {})", r, i);
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_fov_from_into_traits() -> TestResult {
+        let pinhole = PinholeParams::new(400.0, 410.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.8 };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = FovCamera::new(pinhole, distortion, resolution)?;
+
+        // Test conversion to DVector
+        let params: DVector<f64> = (&camera).into();
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[0], 400.0);
+        assert_eq!(params[1], 410.0);
+        assert_eq!(params[2], 320.0);
+        assert_eq!(params[3], 240.0);
+        assert_eq!(params[4], 1.8);
+
+        // Test conversion to array
+        let arr: [f64; 5] = (&camera).into();
+        assert_eq!(arr, [400.0, 410.0, 320.0, 240.0, 1.8]);
+
+        // Test conversion from slice
+        let params_slice = [450.0, 460.0, 330.0, 250.0, 2.0];
+        let camera2 = FovCamera::from(&params_slice[..]);
+        assert_eq!(camera2.pinhole.fx, 450.0);
+        assert_eq!(camera2.pinhole.fy, 460.0);
+        assert_eq!(camera2.pinhole.cx, 330.0);
+        assert_eq!(camera2.pinhole.cy, 250.0);
+        assert_eq!(camera2.distortion_params()?, 2.0);
+
+        // Test conversion from array
+        let camera3 = FovCamera::from([500.0, 510.0, 340.0, 260.0, 2.5]);
+        assert_eq!(camera3.pinhole.fx, 500.0);
+        assert_eq!(camera3.pinhole.fy, 510.0);
+        assert_eq!(camera3.distortion_params()?, 2.5);
+
         Ok(())
     }
 }

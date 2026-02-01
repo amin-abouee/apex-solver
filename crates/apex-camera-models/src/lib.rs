@@ -63,9 +63,24 @@ pub const MIN_DEPTH: f64 = 1e-6;
 /// Default: 1e-6
 pub const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 
-// ============================================================================
-// Unified Camera Structure
-// ============================================================================
+/// Camera model errors.
+#[derive(thiserror::Error, Debug)]
+pub enum CameraModelError {
+    #[error("Projection is outside the image")]
+    ProjectionOutSideImage,
+    #[error("Input point is outside the image")]
+    PointIsOutSideImage,
+    #[error("z is close to zero, point is at camera center")]
+    PointAtCameraCenter,
+    #[error("Focal length must be positive")]
+    FocalLengthMustBePositive,
+    #[error("Principal point must be finite")]
+    PrincipalPointMustBeFinite,
+    #[error("Invalid camera parameters: {0}")]
+    InvalidParams(String),
+    #[error("NumericalError: {0}")]
+    NumericalError(String),
+}
 
 /// The "Common 4" - Linear intrinsic parameters.
 ///
@@ -156,37 +171,6 @@ pub struct Resolution {
     pub height: u32,
 }
 
-/// Camera model errors.
-#[derive(thiserror::Error, Debug)]
-pub enum CameraModelError {
-    #[error("Projection is outside the image")]
-    ProjectionOutSideImage,
-    #[error("Input point is outside the image")]
-    PointIsOutSideImage,
-    #[error("z is close to zero, point is at camera center")]
-    PointAtCameraCenter,
-    #[error("Focal length must be positive")]
-    FocalLengthMustBePositive,
-    #[error("Principal point must be finite")]
-    PrincipalPointMustBeFinite,
-    #[error("Invalid camera parameters: {0}")]
-    InvalidParams(String),
-    #[error("Failed to load YAML: {0}")]
-    YamlError(String),
-    #[error("IO Error: {0}")]
-    IOError(String),
-    #[error("NumericalError: {0}")]
-    NumericalError(String),
-}
-
-impl From<std::io::Error> for CameraModelError {
-    fn from(err: std::io::Error) -> Self {
-        CameraModelError::IOError(err.to_string())
-    }
-}
-
-// Validation function
-
 /// Validates that a 3D point's z-coordinate is positive (in front of camera).
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
     if z < f64::EPSILON.sqrt() {
@@ -207,7 +191,7 @@ pub mod rad_tan;
 pub mod ucm;
 
 // Re-export camera types
-pub use bal_pinhole::{BALPinholeCamera, BALPinholeCameraStrict};
+pub use bal_pinhole::BALPinholeCameraStrict;
 pub use double_sphere::DoubleSphereCamera;
 pub use eucm::EucmCamera;
 pub use fov::FovCamera;

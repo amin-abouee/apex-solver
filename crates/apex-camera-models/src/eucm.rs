@@ -41,7 +41,7 @@
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
 use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -50,39 +50,56 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// Extended Unified Camera Model with 6 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EucmCamera {
-    pub camera: Camera,
+    /// Linear pinhole parameters (fx, fy, cx, cy)
+    pub pinhole: PinholeParams,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl EucmCamera {
+    /// Create a new Extended Unified Camera Model (EUCM) camera.
+    ///
+    /// # Arguments
+    ///
+    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
+    /// * `distortion` - MUST be DistortionModel::EUCM { alpha, beta }
+    /// * `resolution` - Image resolution
+    ///
+    /// # Errors
+    ///
+    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::EUCM`.
     pub fn new(
-        fx: f64,
-        fy: f64,
-        cx: f64,
-        cy: f64,
-        alpha: f64,
-        beta: f64,
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
-            camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::EUCM { alpha, beta },
-            },
+            pinhole,
+            distortion,
+            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameters.
-    fn distortion_params(&self) -> (f64, f64) {
-        match self.camera.distortion {
-            DistortionModel::EUCM { alpha, beta } => (alpha, beta),
-            _ => panic!("Invalid distortion model for EucmCamera"),
+    /// Helper method to extract distortion parameters, returning Result for consistency.
+    fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
+        match self.distortion {
+            DistortionModel::EUCM { alpha, beta } => Ok((alpha, beta)),
+            _ => Err(CameraModelError::InvalidParams(format!(
+                "EucmCamera requires EUCM distortion model, got {:?}",
+                self.distortion
+            ))),
         }
     }
 
     /// Checks the geometric condition for a valid projection.
     pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
-        let (alpha, _) = self.distortion_params();
+        let (alpha, _) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let mut condition = true;
         if alpha > 0.5 {
             let c = (alpha - 1.0) / (2.0 * alpha - 1.0);
@@ -94,12 +111,117 @@ impl EucmCamera {
     }
 
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let mut condition = true;
         if alpha > 0.5 && r_squared > (1.0 / beta * (2.0 * alpha - 1.0)) {
             condition = false;
         }
         condition
+    }
+}
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
+impl From<&EucmCamera> for DVector<f64> {
+    fn from(camera: &EucmCamera) -> Self {
+        let (alpha, beta) = camera
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
+        DVector::from_vec(vec![
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            alpha,
+            beta,
+        ])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
+impl From<&EucmCamera> for [f64; 6] {
+    fn from(camera: &EucmCamera) -> Self {
+        let (alpha, beta) = camera
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
+        [
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            alpha,
+            beta,
+        ]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, alpha, beta]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 6 elements.
+impl From<&[f64]> for EucmCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 6,
+            "EucmCamera requires at least 6 parameters, got {}",
+            params.len()
+        );
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::EUCM {
+                alpha: params[4],
+                beta: params[5],
+            },
+            resolution: crate::Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, alpha, beta]
+impl From<[f64; 6]> for EucmCamera {
+    fn from(params: [f64; 6]) -> Self {
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::EUCM {
+                alpha: params[4],
+                beta: params[5],
+            },
+            resolution: crate::Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
     }
 }
 
@@ -125,25 +247,38 @@ impl CameraModel for EucmCamera {
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates if valid
-    /// - `None` - If denom < PRECISION
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+    /// - `Ok(uv)` - 2D image coordinates if valid
+    /// - `Err` - If denom < PRECISION or geometric condition fails
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
 
-        if denom < crate::GEOMETRIC_PRECISION || !self.check_projection_condition(z, denom) {
-            return None;
+        if denom < crate::GEOMETRIC_PRECISION {
+            return Err(CameraModelError::InvalidParams(format!(
+                "EUCM: denominator too small: denom={} < {}",
+                denom,
+                crate::GEOMETRIC_PRECISION
+            )));
         }
 
-        Some(Vector2::new(
-            self.camera.pinhole.fx * x / denom + self.camera.pinhole.cx,
-            self.camera.pinhole.fy * y / denom + self.camera.pinhole.cy,
+        if !self.check_projection_condition(z, denom) {
+            return Err(CameraModelError::InvalidParams(format!(
+                "EUCM: geometric projection condition failed for z={}, denom={}",
+                z, denom
+            )));
+        }
+
+        Ok(Vector2::new(
+            self.pinhole.fx * x / denom + self.pinhole.cx,
+            self.pinhole.fy * y / denom + self.pinhole.cy,
         ))
     }
 
@@ -165,9 +300,11 @@ impl CameraModel for EucmCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (alpha, beta) = self.distortion_params();
-        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
-        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
+        let mx = (u - self.pinhole.cx) / self.pinhole.fx;
+        let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
         let r2 = mx * mx + my * my;
         let beta_r2 = beta * r2;
@@ -205,7 +342,9 @@ impl CameraModel for EucmCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -214,12 +353,98 @@ impl CameraModel for EucmCamera {
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// For the EUCM camera model, projection is defined as:
+    ///
+    /// ```text
+    /// r² = x² + y²
+    /// d = √(β·r² + z²)
+    /// denom = α·d + (1-α)·z
+    /// u = fx · (x/denom) + cx
+    /// v = fy · (y/denom) + cy
+    /// ```
+    ///
+    /// ## Jacobian Structure
+    ///
+    /// We need to compute ∂u/∂p and ∂v/∂p where p = (x, y, z):
+    ///
+    /// ```text
+    /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
+    ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
+    /// ```
+    ///
+    /// ## Chain Rule Application
+    ///
+    /// Starting from the projection equations:
+    /// - u = fx · (x/denom) + cx
+    /// - v = fy · (y/denom) + cy
+    ///
+    /// We apply the quotient rule:
+    ///
+    /// ```text
+    /// ∂(x/denom)/∂x = (denom - x·∂denom/∂x) / denom²
+    /// ∂(x/denom)/∂y = -x·∂denom/∂y / denom²
+    /// ∂(x/denom)/∂z = -x·∂denom/∂z / denom²
+    ///
+    /// ∂(y/denom)/∂x = -y·∂denom/∂x / denom²
+    /// ∂(y/denom)/∂y = (denom - y·∂denom/∂y) / denom²
+    /// ∂(y/denom)/∂z = -y·∂denom/∂z / denom²
+    /// ```
+    ///
+    /// ## Computing Intermediate Derivatives
+    ///
+    /// First, compute ∂d/∂p where d = √(β·r² + z²):
+    ///
+    /// ```text
+    /// ∂d/∂x = ∂/∂x √(β·(x²+y²) + z²)
+    ///       = (1/2) · (β·r² + z²)^(-1/2) · 2β·x
+    ///       = β·x / d
+    ///
+    /// ∂d/∂y = β·y / d
+    /// ∂d/∂z = z / d
+    /// ```
+    ///
+    /// Then, compute ∂denom/∂p where denom = α·d + (1-α)·z:
+    ///
+    /// ```text
+    /// ∂denom/∂x = α · ∂d/∂x = α·β·x/d
+    /// ∂denom/∂y = α · ∂d/∂y = α·β·y/d
+    /// ∂denom/∂z = α · ∂d/∂z + (1-α) = α·z/d + (1-α)
+    /// ```
+    ///
+    /// ## Final Jacobian
+    ///
+    /// Substituting into the quotient rule expressions:
+    ///
+    /// ```text
+    /// ∂u/∂x = fx · (denom - x·α·β·x/d) / denom²
+    /// ∂u/∂y = fx · (-x·α·β·y/d) / denom²
+    /// ∂u/∂z = fx · (-x·(α·z/d + 1-α)) / denom²
+    ///
+    /// ∂v/∂x = fy · (-y·α·β·x/d) / denom²
+    /// ∂v/∂y = fy · (denom - y·α·β·y/d) / denom²
+    /// ∂v/∂z = fy · (-y·(α·z/d + 1-α)) / denom²
+    /// ```
+    ///
+    /// ## References
+    ///
+    /// - Khomutenko et al., "An Enhanced Unified Camera Model", RAL 2016
+    /// - Mei & Rives, "Single View Point Omnidirectional Camera Calibration from Planar Grids", ICRA 2007
+    ///
+    /// ## Numerical Verification
+    ///
+    /// This analytical Jacobian is verified against numerical differentiation in
+    /// `test_jacobian_point_numerical()` with tolerance < 1e-5.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -237,18 +462,116 @@ impl CameraModel for EucmCamera {
         let denom2 = denom * denom;
 
         // ∂(x/denom)/∂x = (denom - x·∂denom/∂x) / denom²
-        let du_dx = self.camera.pinhole.fx * (denom - x * ddenom_dx) / denom2;
-        let du_dy = self.camera.pinhole.fx * (-x * ddenom_dy) / denom2;
-        let du_dz = self.camera.pinhole.fx * (-x * ddenom_dz) / denom2;
+        let du_dx = self.pinhole.fx * (denom - x * ddenom_dx) / denom2;
+        let du_dy = self.pinhole.fx * (-x * ddenom_dy) / denom2;
+        let du_dz = self.pinhole.fx * (-x * ddenom_dz) / denom2;
 
-        let dv_dx = self.camera.pinhole.fy * (-y * ddenom_dx) / denom2;
-        let dv_dy = self.camera.pinhole.fy * (denom - y * ddenom_dy) / denom2;
-        let dv_dz = self.camera.pinhole.fy * (-y * ddenom_dz) / denom2;
+        let dv_dx = self.pinhole.fy * (-y * ddenom_dx) / denom2;
+        let dv_dy = self.pinhole.fy * (denom - y * ddenom_dy) / denom2;
+        let dv_dz = self.pinhole.fy * (-y * ddenom_dz) / denom2;
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
     /// Jacobian of projection w.r.t. camera pose (SE3).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The camera pose transformation converts a world point to camera coordinates:
+    ///
+    /// ```text
+    /// p_cam = T⁻¹ · p_world = R^T · (p_world - t)
+    /// ```
+    ///
+    /// where T = (R, t) is the camera pose (world-to-camera transform).
+    ///
+    /// ## Perturbation Model (Right Jacobian)
+    ///
+    /// We perturb the pose in the tangent space of SE(3):
+    ///
+    /// ```text
+    /// T(δξ) = T · exp(δξ^)
+    /// ```
+    ///
+    /// where δξ = (δω, δv) ∈ ℝ⁶ with:
+    /// - δω ∈ ℝ³: rotation perturbation (so(3) algebra)
+    /// - δv ∈ ℝ³: translation perturbation
+    ///
+    /// The perturbed camera-frame point becomes:
+    ///
+    /// ```text
+    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
+    ///           = exp(-δξ^) · T⁻¹ · p_world
+    ///           ≈ (I - δξ^) · p_cam     (first-order approximation)
+    /// ```
+    ///
+    /// ## Jacobian w.r.t. Pose Perturbation
+    ///
+    /// For small perturbations δξ:
+    ///
+    /// ```text
+    /// p_cam(δξ) ≈ p_cam - [p_cam]× · δω - R^T · δv
+    /// ```
+    ///
+    /// where [p_cam]× is the skew-symmetric matrix of p_cam.
+    ///
+    /// Taking derivatives:
+    ///
+    /// ```text
+    /// ∂p_cam/∂δω = -[p_cam]×
+    /// ∂p_cam/∂δv = -R^T
+    /// ```
+    ///
+    /// Therefore, the Jacobian of p_cam w.r.t. pose perturbation δξ is:
+    ///
+    /// ```text
+    /// J_pose = ∂p_cam/∂δξ = [ -R^T | [p_cam]× ]  (3×6 matrix)
+    /// ```
+    ///
+    /// where:
+    /// - First 3 columns correspond to translation perturbation δv
+    /// - Last 3 columns correspond to rotation perturbation δω
+    ///
+    /// ## Chain Rule to Pixel Coordinates
+    ///
+    /// The full Jacobian chain is:
+    ///
+    /// ```text
+    /// J_pixel_pose = J_pixel_point · J_point_pose
+    ///              = (∂u/∂p_cam) · (∂p_cam/∂δξ)
+    /// ```
+    ///
+    /// where J_pixel_point is computed by `jacobian_point()`.
+    ///
+    /// ## Return Value
+    ///
+    /// Returns a tuple `(J_pixel_point, J_point_pose)`:
+    /// - `J_pixel_point`: 2×3 Jacobian ∂uv/∂p_cam (from jacobian_point)
+    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ
+    ///
+    /// The caller multiplies these to get the full 2×6 Jacobian ∂uv/∂δξ.
+    ///
+    /// ## SE(3) Conventions
+    ///
+    /// - **Parameterization**: δξ = [δv_x, δv_y, δv_z, δω_x, δω_y, δω_z]
+    /// - **Perturbation**: Right perturbation T(δξ) = T · exp(δξ^)
+    /// - **Coordinate frame**: Perturbations are in the camera frame
+    ///
+    /// ## References
+    ///
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie group optimization)
+    /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
+    /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization"
+    ///
+    /// ## Implementation Notes
+    ///
+    /// The skew-symmetric matrix [p_cam]× is computed as:
+    ///
+    /// ```text
+    /// [p_cam]× = [  0      -p_z    p_y  ]
+    ///            [  p_z     0     -p_x  ]
+    ///            [ -p_y    p_x     0   ]
+    /// ```
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -274,12 +597,119 @@ impl CameraModel for EucmCamera {
     }
 
     /// Jacobian of projection w.r.t. intrinsic parameters (2×6).
+    ///
+    /// # Mathematical Derivation
+    ///
+    /// The EUCM camera has 6 intrinsic parameters: [fx, fy, cx, cy, α, β]
+    ///
+    /// ## Projection Equations
+    ///
+    /// ```text
+    /// u = fx · (x/denom) + cx
+    /// v = fy · (y/denom) + cy
+    /// ```
+    ///
+    /// where denom = α·d + (1-α)·z and d = √(β·r² + z²).
+    ///
+    /// ## Jacobian Structure
+    ///
+    /// We need to compute:
+    ///
+    /// ```text
+    /// J_intrinsics = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂α  ∂u/∂β ]
+    ///                [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂α  ∂v/∂β ]
+    /// ```
+    ///
+    /// ## Linear Parameters (fx, fy, cx, cy)
+    ///
+    /// These appear linearly in the projection equations:
+    ///
+    /// ```text
+    /// ∂u/∂fx = x/denom,   ∂u/∂fy = 0,         ∂u/∂cx = 1,   ∂u/∂cy = 0
+    /// ∂v/∂fx = 0,         ∂v/∂fy = y/denom,   ∂v/∂cx = 0,   ∂v/∂cy = 1
+    /// ```
+    ///
+    /// ## Distortion Parameter α
+    ///
+    /// The parameter α affects denom = α·d + (1-α)·z. Taking derivative:
+    ///
+    /// ```text
+    /// ∂denom/∂α = d - z
+    /// ```
+    ///
+    /// Using the quotient rule for u = fx·(x/denom) + cx:
+    ///
+    /// ```text
+    /// ∂u/∂α = fx · ∂(x/denom)/∂α
+    ///       = fx · (-x · ∂denom/∂α) / denom²
+    ///       = -fx · x · (d - z) / denom²
+    ///
+    /// ∂v/∂α = -fy · y · (d - z) / denom²
+    /// ```
+    ///
+    /// ## Distortion Parameter β
+    ///
+    /// The parameter β affects d = √(β·r² + z²). Taking derivative:
+    ///
+    /// ```text
+    /// ∂d/∂β = ∂/∂β √(β·r² + z²)
+    ///       = (1/2) · (β·r² + z²)^(-1/2) · r²
+    ///       = r² / (2d)
+    /// ```
+    ///
+    /// Then, using chain rule through denom = α·d + (1-α)·z:
+    ///
+    /// ```text
+    /// ∂denom/∂β = α · ∂d/∂β = α · r² / (2d)
+    /// ```
+    ///
+    /// Finally, using the quotient rule:
+    ///
+    /// ```text
+    /// ∂u/∂β = fx · (-x · ∂denom/∂β) / denom²
+    ///       = -fx · x · α · r² / (2d · denom²)
+    ///
+    /// ∂v/∂β = -fy · y · α · r² / (2d · denom²)
+    /// ```
+    ///
+    /// ## Matrix Form
+    ///
+    /// The complete Jacobian matrix is:
+    ///
+    /// ```text
+    /// J = [ x/denom    0        1    0    ∂u/∂α    ∂u/∂β ]
+    ///     [   0     y/denom    0    1    ∂v/∂α    ∂v/∂β ]
+    /// ```
+    ///
+    /// where:
+    /// - ∂u/∂α = -fx · x · (d - z) / denom²
+    /// - ∂u/∂β = -fx · x · α · r² / (2d · denom²)
+    /// - ∂v/∂α = -fy · y · (d - z) / denom²
+    /// - ∂v/∂β = -fy · y · α · r² / (2d · denom²)
+    ///
+    /// ## References
+    ///
+    /// - Khomutenko et al., "An Enhanced Unified Camera Model", RAL 2016
+    /// - Scaramuzza et al., "A Toolbox for Easily Calibrating Omnidirectional Cameras", IROS 2006
+    ///
+    /// ## Numerical Verification
+    ///
+    /// This analytical Jacobian is verified against numerical differentiation in
+    /// `test_jacobian_intrinsics_numerical()` with tolerance < 1e-5.
+    ///
+    /// ## Notes
+    ///
+    /// The EUCM model parameters have physical interpretation:
+    /// - α ∈ [0, 1]: Projection model parameter (α=0 is perspective, α=1 is parabolic)
+    /// - β > 0: Mirror parameter controlling field of view
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self
+            .distortion_params()
+            .expect("EucmCamera validated at construction");
         let r2 = x * x + y * y;
         let d = (beta * r2 + z * z).sqrt();
         let denom = alpha * d + (1.0 - alpha) * z;
@@ -296,48 +726,15 @@ impl CameraModel for EucmCamera {
         let dd_dbeta = r2 / (2.0 * d);
         let ddenom_dbeta = alpha * dd_dbeta;
 
-        let du_dalpha = -self.camera.pinhole.fx * x * ddenom_dalpha / (denom * denom);
-        let dv_dalpha = -self.camera.pinhole.fy * y * ddenom_dalpha / (denom * denom);
+        let du_dalpha = -self.pinhole.fx * x * ddenom_dalpha / (denom * denom);
+        let dv_dalpha = -self.pinhole.fy * y * ddenom_dalpha / (denom * denom);
 
-        let du_dbeta = -self.camera.pinhole.fx * x * ddenom_dbeta / (denom * denom);
-        let dv_dbeta = -self.camera.pinhole.fy * y * ddenom_dbeta / (denom * denom);
+        let du_dbeta = -self.pinhole.fx * x * ddenom_dbeta / (denom * denom);
+        let dv_dbeta = -self.pinhole.fy * y * ddenom_dbeta / (denom * denom);
 
         SMatrix::<f64, 2, 6>::new(
             x_norm, 0.0, 1.0, 0.0, du_dalpha, du_dbeta, 0.0, y_norm, 0.0, 1.0, dv_dalpha, dv_dbeta,
         )
-    }
-
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        let (alpha, beta) = self.distortion_params();
-        DVector::from_vec(vec![
-            self.camera.pinhole.fx,
-            self.camera.pinhole.fy,
-            self.camera.pinhole.cx,
-            self.camera.pinhole.cy,
-            alpha,
-            beta,
-        ])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "EucmCamera requires at least 6 parameters"
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::EUCM {
-                    alpha: params[4],
-                    beta: params[5],
-                },
-            },
-        }
     }
 
     /// Validates camera parameters.
@@ -349,15 +746,15 @@ impl CameraModel for EucmCamera {
     /// - α must be in [0, 1]
     /// - β must be positive (> 0)
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (alpha, beta) = self.distortion_params();
+        let (alpha, beta) = self.distortion_params()?;
         if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be in [0, 1]".to_string(),
@@ -375,16 +772,15 @@ impl CameraModel for EucmCamera {
 
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
-            fx: self.camera.pinhole.fx,
-            fy: self.camera.pinhole.fy,
-            cx: self.camera.pinhole.cx,
-            cy: self.camera.pinhole.cy,
+            fx: self.pinhole.fx,
+            fy: self.pinhole.fy,
+            cx: self.pinhole.cx,
+            cy: self.pinhole.cy,
         }
     }
 
-    fn get_distortion(&self) -> Vec<f64> {
-        let (alpha, beta) = self.distortion_params();
-        vec![alpha, beta]
+    fn get_distortion(&self) -> DistortionModel {
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -400,19 +796,37 @@ mod tests {
 
     #[test]
     fn test_eucm_camera_creation() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0)?;
-        assert_eq!(camera.camera.pinhole.fx, 300.0);
-        let (alpha, beta) = camera.distortion_params();
-        assert_eq!(alpha, 0.5);
-        assert_eq!(beta, 1.0);
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::EUCM {
+            alpha: 0.5,
+            beta: 1.0,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+
+        assert_eq!(camera.pinhole.fx, 300.0);
+        assert_eq!(camera.distortion_params()?, (0.5, 1.0));
         Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.5, 1.0)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::EUCM {
+            alpha: 0.5,
+            beta: 1.0,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         assert!((uv.x - 320.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
         assert!((uv.y - 240.0).abs() < crate::PROJECTION_TEST_TOLERANCE);
@@ -422,7 +836,17 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -434,8 +858,8 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).ok_or("Projection failed")?;
-            let uv_minus = camera.project(&p_minus).ok_or("Projection failed")?;
+            let uv_plus = camera.project(&p_plus)?;
+            let uv_minus = camera.project(&p_minus)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -453,11 +877,21 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera = EucmCamera::new(300.0, 300.0, 320.0, 240.0, 0.6, 1.2)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
-        let params = camera.intrinsics_vec();
+        let params: DVector<f64> = (&camera).into();
         let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..6 {
@@ -466,11 +900,11 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = EucmCamera::from_params(params_plus.as_slice());
-            let cam_minus = EucmCamera::from_params(params_minus.as_slice());
+            let cam_plus = EucmCamera::from(params_plus.as_slice());
+            let cam_minus = EucmCamera::from(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).ok_or("Projection failed")?;
-            let uv_minus = cam_minus.project(&p_cam).ok_or("Projection failed")?;
+            let uv_plus = cam_plus.project(&p_cam)?;
+            let uv_minus = cam_minus.project(&p_cam)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -483,6 +917,51 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_eucm_from_into_traits() -> TestResult {
+        let pinhole = PinholeParams::new(400.0, 410.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::EUCM {
+            alpha: 0.7,
+            beta: 1.5,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+
+        // Test conversion to DVector
+        let params: DVector<f64> = (&camera).into();
+        assert_eq!(params.len(), 6);
+        assert_eq!(params[0], 400.0);
+        assert_eq!(params[1], 410.0);
+        assert_eq!(params[2], 320.0);
+        assert_eq!(params[3], 240.0);
+        assert_eq!(params[4], 0.7);
+        assert_eq!(params[5], 1.5);
+
+        // Test conversion to array
+        let arr: [f64; 6] = (&camera).into();
+        assert_eq!(arr, [400.0, 410.0, 320.0, 240.0, 0.7, 1.5]);
+
+        // Test conversion from slice
+        let params_slice = [450.0, 460.0, 330.0, 250.0, 0.8, 1.8];
+        let camera2 = EucmCamera::from(&params_slice[..]);
+        assert_eq!(camera2.pinhole.fx, 450.0);
+        assert_eq!(camera2.pinhole.fy, 460.0);
+        assert_eq!(camera2.pinhole.cx, 330.0);
+        assert_eq!(camera2.pinhole.cy, 250.0);
+        assert_eq!(camera2.distortion_params()?, (0.8, 1.8));
+
+        // Test conversion from array
+        let camera3 = EucmCamera::from([500.0, 510.0, 340.0, 260.0, 0.9, 2.0]);
+        assert_eq!(camera3.pinhole.fx, 500.0);
+        assert_eq!(camera3.pinhole.fy, 510.0);
+        assert_eq!(camera3.distortion_params()?, (0.9, 2.0));
+
         Ok(())
     }
 }

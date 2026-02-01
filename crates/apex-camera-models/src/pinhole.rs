@@ -44,7 +44,7 @@
 //! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
 use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -53,7 +53,12 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// Pinhole camera model with 4 intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeCamera {
-    pub camera: Camera,
+    /// Linear pinhole parameters (fx, fy, cx, cy)
+    pub pinhole: PinholeParams,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl PinholeCamera {
@@ -87,11 +92,9 @@ impl PinholeCamera {
         resolution: crate::Resolution,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
-            camera: Camera {
-                pinhole,
-                distortion,
-                resolution,
-            },
+            pinhole,
+            distortion,
+            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -109,12 +112,95 @@ impl PinholeCamera {
     /// - `Ok(())` - Distortion model is None (valid for Pinhole)
     /// - `Err(CameraModelError::InvalidParams)` - If distortion model is not None
     fn check_distortion_model(&self) -> Result<(), CameraModelError> {
-        match self.camera.distortion {
+        match self.distortion {
             DistortionModel::None => Ok(()),
             _ => Err(CameraModelError::InvalidParams(
                 "Invalid distortion model for Pinhole camera - expected DistortionModel::None"
                     .to_string(),
             )),
+        }
+    }
+}
+
+/// Convert PinholeCamera to parameter vector.
+///
+/// Returns intrinsic parameters in the order: [fx, fy, cx, cy]
+impl From<&PinholeCamera> for DVector<f64> {
+    fn from(camera: &PinholeCamera) -> Self {
+        DVector::from_vec(vec![
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+        ])
+    }
+}
+
+/// Convert PinholeCamera to fixed-size parameter array.
+///
+/// Returns intrinsic parameters as [fx, fy, cx, cy]
+impl From<&PinholeCamera> for [f64; 4] {
+    fn from(camera: &PinholeCamera) -> Self {
+        [
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+        ]
+    }
+}
+
+/// Create PinholeCamera from parameter slice.
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 4 elements.
+///
+/// # Parameter Order
+///
+/// params = [fx, fy, cx, cy]
+impl From<&[f64]> for PinholeCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 4,
+            "PinholeCamera requires at least 4 parameters, got {}",
+            params.len()
+        );
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::None,
+            resolution: crate::Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+}
+
+/// Create PinholeCamera from fixed-size parameter array.
+///
+/// # Parameter Order
+///
+/// params = [fx, fy, cx, cy]
+impl From<[f64; 4]> for PinholeCamera {
+    fn from(params: [f64; 4]) -> Self {
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::None,
+            resolution: crate::Resolution {
+                width: 0,
+                height: 0,
+            },
         }
     }
 }
@@ -147,8 +233,8 @@ impl CameraModel for PinholeCamera {
         }
         let inv_z = 1.0 / p_cam.z;
         Ok(Vector2::new(
-            self.camera.pinhole.fx * p_cam.x * inv_z + self.camera.pinhole.cx,
-            self.camera.pinhole.fy * p_cam.y * inv_z + self.camera.pinhole.cy,
+            self.pinhole.fx * p_cam.x * inv_z + self.pinhole.cx,
+            self.pinhole.fy * p_cam.y * inv_z + self.pinhole.cy,
         ))
     }
 
@@ -171,8 +257,8 @@ impl CameraModel for PinholeCamera {
     /// - `Ok(ray)` - Normalized 3D ray direction
     /// - `Err` - Never fails for pinhole model
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
-        let mx = (point_2d.x - self.camera.pinhole.cx) / self.camera.pinhole.fx;
-        let my = (point_2d.y - self.camera.pinhole.cy) / self.camera.pinhole.fy;
+        let mx = (point_2d.x - self.pinhole.cx) / self.pinhole.fx;
+        let my = (point_2d.y - self.pinhole.cy) / self.pinhole.fy;
 
         let r2 = mx * mx + my * my;
         let norm = (1.0 + r2).sqrt();
@@ -258,12 +344,12 @@ impl CameraModel for PinholeCamera {
 
         // Jacobian ∂(u,v)/∂(x,y,z) where (x,y,z) is point in camera frame
         SMatrix::<f64, 2, 3>::new(
-            self.camera.pinhole.fx * inv_z,
+            self.pinhole.fx * inv_z,
             0.0,
-            -self.camera.pinhole.fx * x_norm * inv_z,
+            -self.pinhole.fx * x_norm * inv_z,
             0.0,
-            self.camera.pinhole.fy * inv_z,
-            -self.camera.pinhole.fy * y_norm * inv_z,
+            self.pinhole.fy * inv_z,
+            -self.pinhole.fy * y_norm * inv_z,
         )
     }
 
@@ -484,10 +570,10 @@ impl CameraModel for PinholeCamera {
     /// - fx, fy must be positive (> 0)
     /// - cx, cy must be finite (not NaN or infinity)
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
         self.check_distortion_model()?;
@@ -496,15 +582,15 @@ impl CameraModel for PinholeCamera {
 
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
-            fx: self.camera.pinhole.fx,
-            fy: self.camera.pinhole.fy,
-            cx: self.camera.pinhole.cx,
-            cy: self.camera.pinhole.cy,
+            fx: self.pinhole.fx,
+            fy: self.pinhole.fy,
+            cx: self.pinhole.cx,
+            cy: self.pinhole.cy,
         }
     }
 
     fn get_distortion(&self) -> DistortionModel {
-        self.camera.distortion.clone()
+        self.distortion.clone()
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -515,93 +601,6 @@ impl CameraModel for PinholeCamera {
 // ============================================================================
 // From/Into Trait Implementations
 // ============================================================================
-
-/// Convert PinholeCamera to parameter vector.
-///
-/// Returns intrinsic parameters in the order: [fx, fy, cx, cy]
-impl From<&PinholeCamera> for DVector<f64> {
-    fn from(camera: &PinholeCamera) -> Self {
-        DVector::from_vec(vec![
-            camera.camera.pinhole.fx,
-            camera.camera.pinhole.fy,
-            camera.camera.pinhole.cx,
-            camera.camera.pinhole.cy,
-        ])
-    }
-}
-
-/// Convert PinholeCamera to fixed-size parameter array.
-///
-/// Returns intrinsic parameters as [fx, fy, cx, cy]
-impl From<&PinholeCamera> for [f64; 4] {
-    fn from(camera: &PinholeCamera) -> Self {
-        [
-            camera.camera.pinhole.fx,
-            camera.camera.pinhole.fy,
-            camera.camera.pinhole.cx,
-            camera.camera.pinhole.cy,
-        ]
-    }
-}
-
-/// Create PinholeCamera from parameter slice.
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 4 elements.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy]
-impl From<&[f64]> for PinholeCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 4,
-            "PinholeCamera requires at least 4 parameters, got {}",
-            params.len()
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::None,
-                resolution: crate::Resolution {
-                    width: 0,
-                    height: 0,
-                },
-            },
-        }
-    }
-}
-
-/// Create PinholeCamera from fixed-size parameter array.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy]
-impl From<[f64; 4]> for PinholeCamera {
-    fn from(params: [f64; 4]) -> Self {
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::None,
-                resolution: crate::Resolution {
-                    width: 0,
-                    height: 0,
-                },
-            },
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -628,10 +627,10 @@ mod tests {
             height: 480,
         };
         let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
-        assert_eq!(camera.camera.pinhole.fx, 500.0);
-        assert_eq!(camera.camera.pinhole.fy, 500.0);
-        assert_eq!(camera.camera.pinhole.cx, 320.0);
-        assert_eq!(camera.camera.pinhole.cy, 240.0);
+        assert_eq!(camera.pinhole.fx, 500.0);
+        assert_eq!(camera.pinhole.fy, 500.0);
+        assert_eq!(camera.pinhole.cx, 320.0);
+        assert_eq!(camera.pinhole.cy, 240.0);
         Ok(())
     }
 
@@ -639,7 +638,7 @@ mod tests {
     fn test_pinhole_from_params() {
         let params = vec![600.0, 600.0, 320.0, 240.0];
         let camera = PinholeCamera::from(params.as_slice());
-        assert_eq!(camera.camera.pinhole.fx, 600.0);
+        assert_eq!(camera.pinhole.fx, 600.0);
         let params_vec: DVector<f64> = (&camera).into();
         assert_eq!(params_vec, DVector::from_vec(params));
     }

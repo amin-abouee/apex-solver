@@ -42,7 +42,7 @@
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
 use crate::{
-    Camera, CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric,
+    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -51,42 +51,173 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 /// Kannala-Brandt fisheye camera model with 8 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandtCamera {
-    pub camera: Camera,
+    /// Linear pinhole parameters (fx, fy, cx, cy)
+    pub pinhole: PinholeParams,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl KannalaBrandtCamera {
-    #[allow(clippy::too_many_arguments)]
+    /// Create a new Kannala-Brandt fisheye camera.
+    ///
+    /// # Arguments
+    ///
+    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
+    /// * `distortion` - MUST be DistortionModel::KannalaBrandt { k1, k2, k3, k4 }
+    /// * `resolution` - Image resolution
+    ///
+    /// # Errors
+    ///
+    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::KannalaBrandt`.
     pub fn new(
-        fx: f64,
-        fy: f64,
-        cx: f64,
-        cy: f64,
-        k1: f64,
-        k2: f64,
-        k3: f64,
-        k4: f64,
+        pinhole: PinholeParams,
+        distortion: DistortionModel,
+        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
+        // Validate distortion model
+        if !matches!(distortion, DistortionModel::KannalaBrandt { .. }) {
+            return Err(CameraModelError::InvalidParams(format!(
+                "KannalaBrandtCamera requires KannalaBrandt distortion model, got {:?}",
+                distortion
+            )));
+        }
+
         let model = Self {
-            camera: Camera {
-                pinhole: PinholeParams { fx, fy, cx, cy },
-                distortion: DistortionModel::KannalaBrandt { k1, k2, k3, k4 },
-            },
+            pinhole,
+            distortion,
+            resolution,
         };
         model.validate_params()?;
         Ok(model)
     }
 
-    /// Helper method to extract distortion parameters.
-    fn distortion_params(&self) -> (f64, f64, f64, f64) {
-        match self.camera.distortion {
-            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => (k1, k2, k3, k4),
-            _ => panic!("Invalid distortion model for KannalaBrandtCamera"),
+    /// Helper method to extract distortion parameters, returning Result for consistency.
+    fn distortion_params(&self) -> Result<(f64, f64, f64, f64), CameraModelError> {
+        match self.distortion {
+            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => Ok((k1, k2, k3, k4)),
+            _ => Err(CameraModelError::InvalidParams(format!(
+                "KannalaBrandtCamera requires KannalaBrandt distortion model, got {:?}",
+                self.distortion
+            ))),
         }
     }
 
     /// Checks the geometric condition for a valid projection.
     fn check_projection_condition(&self, z: f64) -> bool {
         z > f64::EPSILON
+    }
+}
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
+impl From<&KannalaBrandtCamera> for DVector<f64> {
+    fn from(camera: &KannalaBrandtCamera) -> Self {
+        let (k1, k2, k3, k4) = camera
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
+        DVector::from_vec(vec![
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            k1,
+            k2,
+            k3,
+            k4,
+        ])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
+impl From<&KannalaBrandtCamera> for [f64; 8] {
+    fn from(camera: &KannalaBrandtCamera) -> Self {
+        let (k1, k2, k3, k4) = camera
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
+        [
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            k1,
+            k2,
+            k3,
+            k4,
+        ]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, k1, k2, k3, k4]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 8 elements.
+impl From<&[f64]> for KannalaBrandtCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 8,
+            "KannalaBrandtCamera requires at least 8 parameters, got {}",
+            params.len()
+        );
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::KannalaBrandt {
+                k1: params[4],
+                k2: params[5],
+                k3: params[6],
+                k4: params[7],
+            },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, k1, k2, k3, k4]
+impl From<[f64; 8]> for KannalaBrandtCamera {
+    fn from(params: [f64; 8]) -> Self {
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::KannalaBrandt {
+                k1: params[4],
+                k2: params[5],
+                k3: params[6],
+                k4: params[7],
+            },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
     }
 }
 
@@ -113,19 +244,24 @@ impl CameraModel for KannalaBrandtCamera {
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates if valid
-    /// - `None` - If r < crate::GEOMETRIC_PRECISION (point on optical axis)
-    fn project(&self, p_cam: &Vector3<f64>) -> Option<Vector2<f64>> {
+    /// - `Ok(uv)` - 2D image coordinates if valid
+    /// - `Err` - If point is behind camera or invalid
+    fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
         // Check if point is valid for projection (in front of camera)
         if !self.check_projection_condition(z) {
-            return None;
+            return Err(CameraModelError::InvalidParams(format!(
+                "KannalaBrandt: z must be positive, got z={}",
+                z
+            )));
         }
 
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
         let r2 = x * x + y * y;
         let r = r2.sqrt();
         let theta = r.atan2(z);
@@ -147,16 +283,16 @@ impl CameraModel for KannalaBrandtCamera {
             // u = fx * x/z + cx, v = fy * y/z + cy.
             // Effectively pinhole close to center.
             let inv_z = 1.0 / z;
-            return Some(Vector2::new(
-                self.camera.pinhole.fx * x * inv_z + self.camera.pinhole.cx,
-                self.camera.pinhole.fy * y * inv_z + self.camera.pinhole.cy,
+            return Ok(Vector2::new(
+                self.pinhole.fx * x * inv_z + self.pinhole.cx,
+                self.pinhole.fy * y * inv_z + self.pinhole.cy,
             ));
         }
 
         let inv_r = 1.0 / r;
-        Some(Vector2::new(
-            self.camera.pinhole.fx * theta_d * x * inv_r + self.camera.pinhole.cx,
-            self.camera.pinhole.fy * theta_d * y * inv_r + self.camera.pinhole.cy,
+        Ok(Vector2::new(
+            self.pinhole.fx * theta_d * x * inv_r + self.pinhole.cx,
+            self.pinhole.fy * theta_d * y * inv_r + self.pinhole.cy,
         ))
     }
 
@@ -180,9 +316,11 @@ impl CameraModel for KannalaBrandtCamera {
         let u = point_2d.x;
         let v = point_2d.y;
 
-        let (k1, k2, k3, k4) = self.distortion_params();
-        let mx = (u - self.camera.pinhole.cx) / self.camera.pinhole.fx;
-        let my = (v - self.camera.pinhole.cy) / self.camera.pinhole.fy;
+        let (k1, k2, k3, k4) = self
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
+        let mx = (u - self.pinhole.cx) / self.pinhole.fx;
+        let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
         let mut ru = (mx * mx + my * my).sqrt();
 
@@ -268,7 +406,9 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -290,11 +430,11 @@ impl CameraModel for KannalaBrandtCamera {
         if r < crate::GEOMETRIC_PRECISION {
             // Near optical axis, use simplified Jacobian
             return SMatrix::<f64, 2, 3>::new(
-                self.camera.pinhole.fx * dtheta_d_dtheta / z,
+                self.pinhole.fx * dtheta_d_dtheta / z,
                 0.0,
                 0.0,
                 0.0,
-                self.camera.pinhole.fy * dtheta_d_dtheta / z,
+                self.pinhole.fy * dtheta_d_dtheta / z,
                 0.0,
             );
         }
@@ -315,19 +455,19 @@ impl CameraModel for KannalaBrandtCamera {
         // Chain rule for u = fx · θ_d · (x/r) + cx
         let inv_r2 = inv_r * inv_r;
 
-        let du_dx = self.camera.pinhole.fx
+        let du_dx = self.pinhole.fx
             * (dtheta_d_dtheta * dtheta_dx * x * inv_r
                 + theta_d * (inv_r - x * x * inv_r2 * inv_r));
-        let du_dy = self.camera.pinhole.fx
+        let du_dy = self.pinhole.fx
             * (dtheta_d_dtheta * dtheta_dy * x * inv_r - theta_d * x * y * inv_r2 * inv_r);
-        let du_dz = self.camera.pinhole.fx * dtheta_d_dtheta * dtheta_dz * x * inv_r;
+        let du_dz = self.pinhole.fx * dtheta_d_dtheta * dtheta_dz * x * inv_r;
 
-        let dv_dx = self.camera.pinhole.fy
+        let dv_dx = self.pinhole.fy
             * (dtheta_d_dtheta * dtheta_dx * y * inv_r - theta_d * x * y * inv_r2 * inv_r);
-        let dv_dy = self.camera.pinhole.fy
+        let dv_dy = self.pinhole.fy
             * (dtheta_d_dtheta * dtheta_dy * y * inv_r
                 + theta_d * (inv_r - y * y * inv_r2 * inv_r));
-        let dv_dz = self.camera.pinhole.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
+        let dv_dz = self.pinhole.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
@@ -363,7 +503,9 @@ impl CameraModel for KannalaBrandtCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self
+            .distortion_params()
+            .expect("KannalaBrandtCamera validated at construction");
         let r = (x * x + y * y).sqrt();
         let theta = r.atan2(z);
 
@@ -387,15 +529,15 @@ impl CameraModel for KannalaBrandtCamera {
         // ∂v/∂fx = 0, ∂v/∂fy = θ_d·y/r, ∂v/∂cx = 0, ∂v/∂cy = 1
 
         // ∂u/∂k₁ = fx·θ³·x/r, ∂u/∂k₂ = fx·θ⁵·x/r, etc.
-        let du_dk1 = self.camera.pinhole.fx * theta3 * x * inv_r;
-        let du_dk2 = self.camera.pinhole.fx * theta5 * x * inv_r;
-        let du_dk3 = self.camera.pinhole.fx * theta7 * x * inv_r;
-        let du_dk4 = self.camera.pinhole.fx * theta9 * x * inv_r;
+        let du_dk1 = self.pinhole.fx * theta3 * x * inv_r;
+        let du_dk2 = self.pinhole.fx * theta5 * x * inv_r;
+        let du_dk3 = self.pinhole.fx * theta7 * x * inv_r;
+        let du_dk4 = self.pinhole.fx * theta9 * x * inv_r;
 
-        let dv_dk1 = self.camera.pinhole.fy * theta3 * y * inv_r;
-        let dv_dk2 = self.camera.pinhole.fy * theta5 * y * inv_r;
-        let dv_dk3 = self.camera.pinhole.fy * theta7 * y * inv_r;
-        let dv_dk4 = self.camera.pinhole.fy * theta9 * y * inv_r;
+        let dv_dk1 = self.pinhole.fy * theta3 * y * inv_r;
+        let dv_dk2 = self.pinhole.fy * theta5 * y * inv_r;
+        let dv_dk3 = self.pinhole.fy * theta7 * y * inv_r;
+        let dv_dk4 = self.pinhole.fy * theta9 * y * inv_r;
 
         SMatrix::<f64, 2, 8>::from_row_slice(&[
             x_theta_d_r,
@@ -417,43 +559,6 @@ impl CameraModel for KannalaBrandtCamera {
         ])
     }
 
-    fn intrinsics_vec(&self) -> DVector<f64> {
-        let (k1, k2, k3, k4) = self.distortion_params();
-        DVector::from_vec(vec![
-            self.camera.pinhole.fx,
-            self.camera.pinhole.fy,
-            self.camera.pinhole.cx,
-            self.camera.pinhole.cy,
-            k1,
-            k2,
-            k3,
-            k4,
-        ])
-    }
-
-    fn from_params(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 8,
-            "KannalaBrandtCamera requires at least 8 parameters"
-        );
-        Self {
-            camera: Camera {
-                pinhole: PinholeParams {
-                    fx: params[0],
-                    fy: params[1],
-                    cx: params[2],
-                    cy: params[3],
-                },
-                distortion: DistortionModel::KannalaBrandt {
-                    k1: params[4],
-                    k2: params[5],
-                    k3: params[6],
-                    k4: params[7],
-                },
-            },
-        }
-    }
-
     /// Validates camera parameters.
     ///
     /// # Validation Rules
@@ -462,15 +567,15 @@ impl CameraModel for KannalaBrandtCamera {
     /// - cx, cy must be finite
     /// - k₁, k₂, k₃, k₄ must be finite
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.camera.pinhole.fx <= 0.0 || self.camera.pinhole.fy <= 0.0 {
+        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
-        if !self.camera.pinhole.cx.is_finite() || !self.camera.pinhole.cy.is_finite() {
+        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
-        let (k1, k2, k3, k4) = self.distortion_params();
+        let (k1, k2, k3, k4) = self.distortion_params()?;
         if !k1.is_finite() || !k2.is_finite() || !k3.is_finite() || !k4.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
@@ -482,16 +587,15 @@ impl CameraModel for KannalaBrandtCamera {
 
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
-            fx: self.camera.pinhole.fx,
-            fy: self.camera.pinhole.fy,
-            cx: self.camera.pinhole.cx,
-            cy: self.camera.pinhole.cy,
+            fx: self.pinhole.fx,
+            fy: self.pinhole.fy,
+            cx: self.pinhole.cx,
+            cy: self.pinhole.cy,
         }
     }
 
-    fn get_distortion(&self) -> Vec<f64> {
-        let (k1, k2, k3, k4) = self.distortion_params();
-        vec![k1, k2, k3, k4]
+    fn get_distortion(&self) -> DistortionModel {
+        self.distortion
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -507,20 +611,40 @@ mod tests {
 
     #[test]
     fn test_kb_camera_creation() -> TestResult {
-        let camera =
-            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
-        assert_eq!(camera.camera.pinhole.fx, 300.0);
-        let (k1, _, _, _) = camera.distortion_params();
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        assert_eq!(camera.pinhole.fx, 300.0);
+        let (k1, _, _, _) = camera.distortion_params()?;
         assert_eq!(k1, 0.1);
         Ok(())
     }
 
     #[test]
     fn test_projection_at_optical_axis() -> TestResult {
-        let camera =
-            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         assert!((uv.x - 320.0).abs() < 1e-6);
         assert!((uv.y - 240.0).abs() < 1e-6);
@@ -530,8 +654,18 @@ mod tests {
 
     #[test]
     fn test_jacobian_point_numerical() -> TestResult {
-        let camera =
-            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -543,8 +677,8 @@ mod tests {
             p_plus[i] += eps;
             p_minus[i] -= eps;
 
-            let uv_plus = camera.project(&p_plus).ok_or("Projection failed")?;
-            let uv_minus = camera.project(&p_minus).ok_or("Projection failed")?;
+            let uv_plus = camera.project(&p_plus)?;
+            let uv_minus = camera.project(&p_minus)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -562,12 +696,22 @@ mod tests {
 
     #[test]
     fn test_jacobian_intrinsics_numerical() -> TestResult {
-        let camera =
-            KannalaBrandtCamera::new(300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001)?;
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
-        let params = camera.intrinsics_vec();
+        let params: DVector<f64> = (&camera).into();
         let eps = crate::NUMERICAL_DERIVATIVE_EPS;
 
         for i in 0..8 {
@@ -576,11 +720,11 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = KannalaBrandtCamera::from_params(params_plus.as_slice());
-            let cam_minus = KannalaBrandtCamera::from_params(params_minus.as_slice());
+            let cam_plus = KannalaBrandtCamera::from(params_plus.as_slice());
+            let cam_minus = KannalaBrandtCamera::from(params_minus.as_slice());
 
-            let uv_plus = cam_plus.project(&p_cam).ok_or("Projection failed")?;
-            let uv_minus = cam_minus.project(&p_cam).ok_or("Projection failed")?;
+            let uv_plus = cam_plus.project(&p_cam)?;
+            let uv_minus = cam_minus.project(&p_cam)?;
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
@@ -593,6 +737,64 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_kb_from_into_traits() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let resolution = crate::Resolution {
+            width: 640,
+            height: 480,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+
+        // Test conversion to DVector
+        let params: DVector<f64> = (&camera).into();
+        assert_eq!(params.len(), 8);
+        assert_eq!(params[0], 300.0);
+        assert_eq!(params[1], 300.0);
+        assert_eq!(params[2], 320.0);
+        assert_eq!(params[3], 240.0);
+        assert_eq!(params[4], 0.1);
+        assert_eq!(params[5], 0.01);
+        assert_eq!(params[6], 0.001);
+        assert_eq!(params[7], 0.0001);
+
+        // Test conversion to array
+        let arr: [f64; 8] = (&camera).into();
+        assert_eq!(arr, [300.0, 300.0, 320.0, 240.0, 0.1, 0.01, 0.001, 0.0001]);
+
+        // Test conversion from slice
+        let params_slice = [350.0, 350.0, 330.0, 250.0, 0.2, 0.02, 0.002, 0.0002];
+        let camera2 = KannalaBrandtCamera::from(&params_slice[..]);
+        assert_eq!(camera2.pinhole.fx, 350.0);
+        assert_eq!(camera2.pinhole.fy, 350.0);
+        assert_eq!(camera2.pinhole.cx, 330.0);
+        assert_eq!(camera2.pinhole.cy, 250.0);
+        let (k1, k2, k3, k4) = camera2.distortion_params()?;
+        assert_eq!(k1, 0.2);
+        assert_eq!(k2, 0.02);
+        assert_eq!(k3, 0.002);
+        assert_eq!(k4, 0.0002);
+
+        // Test conversion from array
+        let camera3 =
+            KannalaBrandtCamera::from([400.0, 400.0, 340.0, 260.0, 0.3, 0.03, 0.003, 0.0003]);
+        assert_eq!(camera3.pinhole.fx, 400.0);
+        assert_eq!(camera3.pinhole.fy, 400.0);
+        let (k1, k2, k3, k4) = camera3.distortion_params()?;
+        assert_eq!(k1, 0.3);
+        assert_eq!(k2, 0.03);
+        assert_eq!(k3, 0.003);
+        assert_eq!(k4, 0.0003);
+
         Ok(())
     }
 }
