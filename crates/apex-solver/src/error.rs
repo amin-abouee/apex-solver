@@ -203,9 +203,9 @@ mod tests {
         };
 
         let apex_error: ApexSolverError = manifold_error.into();
-        match apex_error {
-            ApexSolverError::Manifold(_) => { /* Expected */ }
-            _ => panic!("Expected Manifold variant"),
-        }
+        assert!(
+            matches!(apex_error, ApexSolverError::Manifold(_)),
+            "Expected Manifold variant"
+        );
     }
 }
