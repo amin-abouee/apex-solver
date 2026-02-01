@@ -3,7 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
+use crate::{
+    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
+};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -49,10 +51,10 @@ use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 pub struct BALPinholeCameraStrict {
     /// Single focal length (fx = fy = f)
     pub f: f64,
-    /// First radial distortion coefficient
-    pub k1: f64,
-    /// Second radial distortion coefficient
-    pub k2: f64,
+    /// Lens distortion model and parameters
+    pub distortion: DistortionModel,
+    /// Image resolution
+    pub resolution: Resolution,
 }
 
 impl BALPinholeCameraStrict {
@@ -75,7 +77,7 @@ impl BALPinholeCameraStrict {
         distortion: DistortionModel,
         _resolution: crate::Resolution,
     ) -> Result<Self, CameraModelError> {
-        // Validate strict BAL constraints
+        // Validate strict BAL constraints on input
         if (pinhole.fx - pinhole.fy).abs() > 1e-10 {
             return Err(CameraModelError::InvalidParams(
                 "BALPinholeCameraStrict requires fx = fy (single focal length)".to_string(),
@@ -88,20 +90,10 @@ impl BALPinholeCameraStrict {
             ));
         }
 
-        let (k1, k2) = match distortion {
-            DistortionModel::Radial { k1, k2 } => (k1, k2),
-            _ => {
-                return Err(CameraModelError::InvalidParams(format!(
-                    "BALPinholeCameraStrict requires Radial distortion model, got {:?}",
-                    distortion
-                )));
-            }
-        };
-
         let camera = Self {
             f: pinhole.fx, // Use fx as the single focal length
-            k1,
-            k2,
+            distortion: distortion,
+            resolution: _resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -120,9 +112,99 @@ impl BALPinholeCameraStrict {
         Self::new(pinhole, distortion, resolution)
     }
 
+    /// Helper method to extract distortion parameter, returning Result for consistency.
+    fn distortion_params(&self) -> Result<(f64, f64), CameraModelError> {
+        match self.distortion {
+            DistortionModel::Radial { k1, k2 } => Ok((k1, k2)),
+            _ => Err(CameraModelError::InvalidParams(format!(
+                "BalCamera requires Radial distortion model, got {:?}",
+                self.distortion
+            ))),
+        }
+    }
+
     /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
     fn check_projection_condition(&self, z: f64) -> bool {
         z < -crate::MIN_DEPTH
+    }
+}
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [f, k1, k2]
+impl From<&BALPinholeCameraStrict> for DVector<f64> {
+    fn from(camera: &BALPinholeCameraStrict) -> Self {
+        let (k1, k2) = camera
+            .distortion_params()
+            .expect("Invalid distortion model");
+        DVector::from_vec(vec![camera.f, k1, k2])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [f, k1, k2]
+impl From<&BALPinholeCameraStrict> for [f64; 3] {
+    fn from(camera: &BALPinholeCameraStrict) -> Self {
+        let (k1, k2) = camera
+            .distortion_params()
+            .expect("Invalid distortion model");
+        [camera.f, k1, k2]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [f, k1, k2]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 3 elements or if validation fails.
+impl From<&[f64]> for BALPinholeCameraStrict {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 3,
+            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
+            params.len()
+        );
+        Self {
+            f: params[0],
+            distortion: DistortionModel::Radial {
+                k1: params[1],
+                k2: params[2],
+            },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [f, k1, k2]
+impl From<[f64; 3]> for BALPinholeCameraStrict {
+    fn from(params: [f64; 3]) -> Self {
+        Self {
+            f: params[0],
+            distortion: DistortionModel::Radial {
+                k1: params[1],
+                k2: params[2],
+            },
+            resolution: Resolution {
+                width: 0,
+                height: 0,
+            },
+        }
     }
 }
 
@@ -148,10 +230,12 @@ impl CameraModel for BALPinholeCameraStrict {
         let x_n = p_cam.x * inv_neg_z;
         let y_n = p_cam.y * inv_neg_z;
 
+        let (k1, k2) = self.distortion_params()?;
+
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         // Apply distortion and focal length (no principal point offset)
         let x_d = x_n * distortion;
@@ -275,13 +359,15 @@ impl CameraModel for BALPinholeCameraStrict {
         let x_n = p_cam.x * inv_neg_z;
         let y_n = p_cam.y * inv_neg_z;
 
+        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
+
         // Radial distortion
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         // Derivative of distortion w.r.t. r²
-        let d_dist_dr2 = self.k1 + 2.0 * self.k2 * r2;
+        let d_dist_dr2 = k1 + 2.0 * k2 * r2;
 
         // Jacobian of normalized coordinates w.r.t. camera point
         let dxn_dz = x_n * inv_neg_z;
@@ -501,9 +587,10 @@ impl CameraModel for BALPinholeCameraStrict {
         let y_n = p_cam.y * inv_neg_z;
 
         // Radial distortion
+        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
         let r2 = x_n * x_n + y_n * y_n;
         let r4 = r2 * r2;
-        let distortion = 1.0 + self.k1 * r2 + self.k2 * r4;
+        let distortion = 1.0 + k1 * r2 + k2 * r4;
 
         let x_d = x_n * distortion;
         let y_d = y_n * distortion;
@@ -529,9 +616,11 @@ impl CameraModel for BALPinholeCameraStrict {
         let mut x_n = x_d;
         let mut y_n = y_d;
 
+        let (k1, k2) = self.distortion_params().expect("Invalid distortion model");
+
         for _ in 0..5 {
             let r2 = x_n * x_n + y_n * y_n;
-            let distortion = 1.0 + self.k1 * r2 + self.k2 * r2 * r2;
+            let distortion = 1.0 + k1 * r2 + k2 * r2 * r2;
             x_n = x_d / distortion;
             y_n = y_d / distortion;
         }
@@ -545,11 +634,34 @@ impl CameraModel for BALPinholeCameraStrict {
         if self.f <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
-        if !self.k1.is_finite() || !self.k2.is_finite() {
+        let (k1, k2) = self.distortion_params()?;
+        if !k1.is_finite() || !k2.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "Distortion coefficients must be finite".to_string(),
             ));
         }
+        // // Validate strict BAL constraints
+        // if (self.pinhole.fx - self.pinhole.fy).abs() > 1e-10 {
+        //     return Err(CameraModelError::InvalidParams(
+        //         "BALPinholeCameraStrict requires fx = fy (single focal length)".to_string(),
+        //     ));
+        // }
+        // if self.pinhole.cx.abs() > 1e-10 || self.pinhole.cy.abs() > 1e-10 {
+        //     return Err(CameraModelError::InvalidParams(
+        //         "BALPinholeCameraStrict requires cx = cy = 0 (no principal point offset)"
+        //             .to_string(),
+        //     ));
+        // }
+
+        // let (k1, k2) = match self.distortion {
+        //     DistortionModel::Radial { k1, k2 } => (k1, k2),
+        //     _ => {
+        //         return Err(CameraModelError::InvalidParams(format!(
+        //             "BALPinholeCameraStrict requires Radial distortion model, got {:?}",
+        //             self.distortion
+        //         )));
+        //     }
+        // };
         Ok(())
     }
 
@@ -563,10 +675,7 @@ impl CameraModel for BALPinholeCameraStrict {
     }
 
     fn get_distortion(&self) -> DistortionModel {
-        DistortionModel::Radial {
-            k1: self.k1,
-            k2: self.k2,
-        }
+        self.distortion.clone()
     }
 
     fn get_model_name(&self) -> &'static str {
@@ -578,67 +687,6 @@ impl CameraModel for BALPinholeCameraStrict {
 // From/Into Trait Implementations for BALPinholeCameraStrict
 // ============================================================================
 
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [f, k1, k2]
-impl From<&BALPinholeCameraStrict> for DVector<f64> {
-    fn from(camera: &BALPinholeCameraStrict) -> Self {
-        DVector::from_vec(vec![camera.f, camera.k1, camera.k2])
-    }
-}
-
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [f, k1, k2]
-impl From<&BALPinholeCameraStrict> for [f64; 3] {
-    fn from(camera: &BALPinholeCameraStrict) -> Self {
-        [camera.f, camera.k1, camera.k2]
-    }
-}
-
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [f, k1, k2]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 3 elements or if validation fails.
-impl From<&[f64]> for BALPinholeCameraStrict {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 3,
-            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
-            params.len()
-        );
-        Self {
-            f: params[0],
-            k1: params[1],
-            k2: params[2],
-        }
-    }
-}
-
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [f, k1, k2]
-impl From<[f64; 3]> for BALPinholeCameraStrict {
-    fn from(params: [f64; 3]) -> Self {
-        Self {
-            f: params[0],
-            k1: params[1],
-            k2: params[2],
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -648,7 +696,7 @@ mod tests {
     #[test]
     fn test_bal_strict_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 0.0, 0.0)?;
-        let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
+        let distortion = DistortionModel::Radial { k1: 0.4, k2: -0.3 };
         let resolution = crate::Resolution {
             width: 640,
             height: 480,
@@ -656,9 +704,11 @@ mod tests {
 
         let camera = BALPinholeCameraStrict::new(pinhole, distortion, resolution)?;
 
+        let (k1, k2) = camera.distortion_params()?;
+
         assert_eq!(camera.f, 500.0);
-        assert_eq!(camera.k1, 0.0);
-        assert_eq!(camera.k2, 0.0);
+        assert_eq!(k1, 0.4);
+        assert_eq!(k2, -0.3);
         Ok(())
     }
 
@@ -745,15 +795,17 @@ mod tests {
         // Test conversion from slice
         let params_slice = [450.0, 0.1, 0.01];
         let camera2 = BALPinholeCameraStrict::from(&params_slice[..]);
+        let (cam2_k1, cam2_k2) = camera2.distortion_params()?;
         assert_eq!(camera2.f, 450.0);
-        assert_eq!(camera2.k1, 0.1);
-        assert_eq!(camera2.k2, 0.01);
+        assert_eq!(cam2_k1, 0.1);
+        assert_eq!(cam2_k2, 0.01);
 
         // Test conversion from array
         let camera3 = BALPinholeCameraStrict::from([500.0, 0.2, 0.02]);
+        let (cam3_k1, cam3_k2) = camera3.distortion_params()?;
         assert_eq!(camera3.f, 500.0);
-        assert_eq!(camera3.k1, 0.2);
-        assert_eq!(camera3.k2, 0.02);
+        assert_eq!(cam3_k1, 0.2);
+        assert_eq!(cam3_k2, 0.02);
 
         Ok(())
     }
