@@ -144,10 +144,10 @@ pub enum DistortionModel {
     /// Single-parameter fisheye model based on field of view.
     FOV { w: f64 },
 
-    /// Unified Camera Model (2 parameters)
+    /// Unified Camera Model (1 parameter)
     ///
     /// Single-viewpoint catadioptric camera model.
-    UCM { alpha: f64, beta: f64 },
+    UCM { alpha: f64 },
 
     /// Extended Unified Camera Model (2 parameters)
     ///
@@ -157,7 +157,7 @@ pub enum DistortionModel {
     /// Double Sphere model (2 parameters)
     ///
     /// Two-parameter fisheye model with improved wide-angle accuracy.
-    DoubleSphere { xi: f64, alpha: f64 },
+    DoubleSphere { alpha: f64, xi: f64 },
 }
 
 /// Represents the resolution of a camera image.
