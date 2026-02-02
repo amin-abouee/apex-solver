@@ -316,7 +316,7 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Mathematical Formula
     ///
-    /// Combines radial distortion ($k_1, k_2, k_3$) and tangential distortion ($p_1, p_2$).
+    /// Combines radial distortion (k₁, k₂, k₃) and tangential distortion (p₁, p₂).
     ///
     /// # Arguments
     ///
@@ -370,7 +370,7 @@ impl CameraModel for RadTanCamera {
     /// Iterative Newton-Raphson with Jacobian matrix:
     /// 1. Start with the undistorted estimate.
     /// 2. Compute distortion and Jacobian.
-    /// 3. Update estimate: $p' = p' - J^{-1} \cdot f(p')$.
+    /// 3. Update estimate: p′ = p′ − J⁻¹ · f(p′).
     /// 4. Repeat until convergence.
     ///
     /// # Arguments
@@ -482,12 +482,12 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Validity Conditions
     ///
-    /// - $z \ge \text{PRECISION}$ (point in front of camera)
+    /// - z ≥ GEOMETRIC_PRECISION (point in front of camera)
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
 
-    /// Computes the Jacobian of the projection with respect to the 3D point coordinates ($2 \times 3$).
+    /// Computes the Jacobian of the projection with respect to the 3D point coordinates (2×3).
     ///
     /// # Mathematical Derivation
     ///
@@ -685,41 +685,119 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Mathematical Derivation
     ///
-    /// See FovCamera::jacobian_pose() and KannalaBrandtCamera::jacobian_pose() for detailed SE(3) Lie theory derivation.
+    /// ## Chain Rule Decomposition
     ///
-    /// ## Summary
+    /// The full Jacobian is computed via chain rule:
     ///
-    /// Returns `(J_pixel_point, J_point_pose)` where:
-    /// - $J_{pixel\_point}$: $2 \times 3$ Jacobian $\frac{\partial uv}{\partial p_{cam}}$ (from `jacobian_point()`)
-    /// - $J_{point\_pose}$: $3 \times 6$ Jacobian $\frac{\partial p_{cam}}{\partial \delta \xi} = [ -R^T | [p_{cam}]_\times ]$
+    /// ```text
+    /// ∂π/∂ξ = ∂π/∂p_cam · ∂p_cam/∂ξ
+    /// ```
     ///
-    /// The full chain is: $J_{pixel\_pose} = J_{pixel\_point} \cdot J_{point\_pose}$
+    /// where:
+    /// - π is the projection function (3D → 2D)
+    /// - p_cam is the point in camera coordinates
+    /// - ξ ∈ se(3) is the camera pose perturbation in tangent space
     ///
     /// ## SE(3) Parameterization
     ///
-    /// The SE(3) tangent space has 6 DOF:
-    /// - δξ = [δv, δω]^T where δv ∈ ℝ³ (translation), δω ∈ ℝ³ (rotation)
-    ///
-    /// ## Transformation
-    ///
-    /// For a world point p_world transformed to camera frame:
+    /// The camera pose T ∈ SE(3) transforms world points to camera frame:
     ///
     /// ```text
-    /// p_cam = T^{-1} · p_world = R^T · (p_world - t)
+    /// p_cam = T⁻¹ · p_world = R^T · (p_world − t)
     /// ```
     ///
-    /// The Jacobian w.r.t. pose perturbation is:
+    /// where T = (R, t) with R ∈ SO(3) and t ∈ ℝ³.
+    ///
+    /// ### Tangent Space Perturbation
+    ///
+    /// We parameterize pose perturbations using the right Jacobian convention:
     ///
     /// ```text
-    /// J_point_pose = [ -R^T | [p_cam]× ]
+    /// T(δξ) = T · exp(δξ^)
     /// ```
     ///
-    /// where [p_cam]× is the skew-symmetric matrix of p_cam.
+    /// where δξ = [δv; δω] ∈ ℝ⁶ with:
+    /// - δv ∈ ℝ³: translation perturbation (first 3 components)
+    /// - δω ∈ ℝ³: rotation perturbation (last 3 components, so(3) Lie algebra)
+    /// - exp(·) is the matrix exponential (SE(3) retraction)
+    /// - ^ is the wedge operator converting vector to matrix representation
     ///
-    /// ## References
+    /// ## Computing ∂p_cam/∂ξ (3×6)
     ///
-    /// - Barfoot, "State Estimation for Robotics", Chapter 7
+    /// For first-order analysis, the perturbed camera point becomes:
+    ///
+    /// ```text
+    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
+    ///           = exp(−δξ^) · T⁻¹ · p_world
+    ///           ≈ (I − δξ^) · p_cam       (first-order approximation)
+    /// ```
+    ///
+    /// ## Translation Component (First 3 columns)
+    ///
+    /// ```text
+    /// p_cam(δv) ≈ p_cam − R^T · δv
+    /// ∂p_cam/∂δv = −R^T                     (3×3 matrix)
+    /// ```
+    ///
+    /// ## Rotation Component (Last 3 columns)
+    ///
+    /// Using the skew-symmetric matrix property:
+    ///
+    /// ```text
+    /// p_cam(δω) ≈ p_cam − [p_cam]× · δω
+    /// ∂p_cam/∂δω = [p_cam]×                 (3×3 skew-symmetric matrix)
+    /// ```
+    ///
+    /// where the skew-symmetric matrix [p_cam]× is:
+    ///
+    /// ```text
+    /// [p_cam]× = [  0      −p_z    p_y  ]
+    ///            [  p_z     0     −p_x  ]
+    ///            [ −p_y    p_x     0   ]
+    /// ```
+    ///
+    /// ## Combined Pose Jacobian (3×6)
+    ///
+    /// ```text
+    /// ∂p_cam/∂ξ = [ −R^T  |  [p_cam]× ]     (3×6)
+    ///               ↓          ↓
+    ///            ∂/∂δv      ∂/∂δω
+    /// ```
+    ///
+    /// ## Final Pixel Jacobian (2×6)
+    ///
+    /// The complete pose Jacobian is obtained by chaining with the point Jacobian:
+    ///
+    /// ```text
+    /// J_pose = ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
+    ///                = (2×3) · (3×6)
+    ///                = (2×6)
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_world` - 3D point in world coordinate frame.
+    /// * `pose` - The camera pose in SE(3).
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
+    /// - `d_uv_d_pcam`: 2×3 Jacobian ∂π/∂p_cam (from `jacobian_point()`)
+    /// - `d_pcam_d_pose`: 3×6 Jacobian ∂p_cam/∂ξ = [−R^T | [p_cam]×]
+    ///
+    /// The caller can compute the full pose Jacobian: J_pixel_pose = d_uv_d_pcam · d_pcam_d_pose
+    ///
+    /// # Implementation Notes
+    ///
+    /// - Uses the right perturbation model (T(δξ) = T·exp(δξ^)) consistent with most SLAM libraries
+    /// - The skew-symmetric matrix is computed via the `skew_symmetric()` helper
+    /// - R^T is obtained from pose.inverse() for numerical stability
+    ///
+    /// # References
+    ///
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (SE(3) Optimization)
     /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
+    /// - Blanco-Claraco, "A tutorial on SE(3) transformation parameterizations"
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
@@ -744,7 +822,7 @@ impl CameraModel for RadTanCamera {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
-    /// Computes the Jacobian of the projection with respect to intrinsic parameters ($2 \times 9$).
+    /// Computes the Jacobian of the projection with respect to intrinsic parameters (2×9).
     ///
     /// # Mathematical Derivation
     ///
@@ -922,9 +1000,9 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Validation Rules
     ///
-    /// - $f_x, f_y$ must be positive ($> 0$)
-    /// - $c_x, c_y$ must be finite
-    /// - $k_1, k_2, p_1, p_2, k_3$ must be finite
+    /// - fx, fy must be positive (> 0)
+    /// - cx, cy must be finite
+    /// - k₁, k₂, p₁, p₂, k₃ must be finite
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);

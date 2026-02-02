@@ -404,12 +404,14 @@ impl CameraModel for BALPinholeCameraStrict {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Computes the Jacobian of the projection function with respect to the camera pose.
+    /// Jacobian of projection w.r.t. camera pose (2×6).
+    ///
+    /// Computes ∂π/∂δξ where π is the projection and δξ ∈ se(3) is the pose perturbation.
     ///
     /// # Mathematical Derivation
     ///
     /// Given a 3D point in world frame `p_world` and camera pose `pose` (camera-to-world transformation),
-    /// we need the Jacobian ∂(u,v)/∂ξ where ξ ∈ se(3) is the Lie algebra perturbation.
+    /// we need the Jacobian ∂π/∂δξ.
     ///
     /// ## Camera Coordinate Transformation
     ///

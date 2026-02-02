@@ -348,79 +348,89 @@ impl CameraModel for PinholeCamera {
         )
     }
 
-    /// Jacobian of projection w.r.t. camera pose (SE3).
+    /// Jacobian of projection w.r.t. camera pose (2×6).
     ///
-    /// Computes the full chain: ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
+    /// Computes ∂π/∂δξ where π is the projection and δξ ∈ se(3) is the pose perturbation.
     ///
     /// # Mathematical Derivation
     ///
-    /// ## Chain Rule Decomposition
+    /// ## Chain Rule
     ///
     /// ```text
-    /// ∂π/∂ξ = ∂π/∂p_cam · ∂p_cam/∂ξ
+    /// ∂π/∂δξ = (∂π/∂p_cam) · (∂p_cam/∂δξ)
     /// ```
     ///
-    /// where:
-    /// - `π` is the projection function (3D → 2D)
-    /// - `p_cam` is the point in camera coordinates
-    /// - `ξ ∈ se(3)` is the camera pose (Lie algebra representation)
+    /// ## SE(3) Parameterization
     ///
-    /// ## Part 1: Point Jacobian (∂π/∂p_cam)
-    ///
-    /// This is the standard point Jacobian (2×3) computed by `jacobian_point()`.
-    /// See that method's documentation for details.
-    ///
-    /// ## Part 2: Pose Transformation Jacobian (∂p_cam/∂ξ)
-    ///
-    /// The camera frame point is related to the world frame point by:
+    /// Camera pose T ∈ SE(3) transforms world to camera frame:
     /// ```text
-    /// p_cam = T⁻¹ · p_world = (R, t)⁻¹ · p_world
-    /// p_cam = R^T · (p_world - t)
+    /// p_cam = T⁻¹ · p_world = R^T · (p_world − t)
     /// ```
     ///
-    /// The SE(3) pose is parameterized as ξ = (ω, v) where:
-    /// - ω ∈ ℝ³ is the rotation (so(3) Lie algebra, axis-angle representation)
-    /// - v ∈ ℝ³ is the translation
+    /// where T = (R, t) with R ∈ SO(3) and t ∈ ℝ³.
     ///
-    /// ### Translation Part (∂p_cam/∂v):
+    /// ### Tangent Space Perturbation (Right Jacobian)
     ///
     /// ```text
-    /// ∂p_cam/∂v = ∂(R^T·(p_world - t))/∂v
-    ///           = -R^T · ∂t/∂v
-    ///           = -R^T · I
-    ///           = -R^T               (3×3 matrix)
+    /// T(δξ) = T · exp(δξ^)
     /// ```
     ///
-    /// ### Rotation Part (∂p_cam/∂ω):
+    /// where δξ = [δv; δω] ∈ ℝ⁶ with:
+    /// - δv ∈ ℝ³: translation perturbation (components 0-2)
+    /// - δω ∈ ℝ³: rotation perturbation (components 3-5, so(3) Lie algebra)
+    /// - exp(·) is the matrix exponential (SE(3) retraction)
+    /// - ^ is the wedge operator converting vector to matrix representation
     ///
-    /// Using the Lie group adjoint relationship:
+    /// ## Computing ∂p_cam/∂δξ (3×6)
+    ///
+    /// For first-order analysis, the perturbed camera point becomes:
+    ///
     /// ```text
-    /// ∂p_cam/∂ω = [p_cam]×          (3×3 skew-symmetric matrix)
+    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
+    ///           = exp(−δξ^) · T⁻¹ · p_world
+    ///           ≈ (I − δξ^) · p_cam       (first-order approximation)
     /// ```
     ///
-    /// where `[p_cam]×` is the skew-symmetric cross-product matrix:
+    /// ## Translation Component (First 3 columns)
+    ///
     /// ```text
-    /// [p_cam]× = [  0    -pz    py ]
-    ///            [  pz     0   -px ]
-    ///            [ -py    px     0 ]
+    /// p_cam(δv) ≈ p_cam − R^T · δv
+    /// ∂p_cam/∂δv = −R^T                     (3×3 matrix)
     /// ```
     ///
-    /// This comes from the derivative of the rotation action on a point.
+    /// ## Rotation Component (Last 3 columns)
     ///
-    /// ### Combined Jacobian (3×6):
+    /// Using the skew-symmetric matrix property:
     ///
     /// ```text
-    /// ∂p_cam/∂ξ = [ -R^T | [p_cam]× ]     (3×6)
-    ///              ︸───︸   ︸──────︸
-    ///               ∂/∂v     ∂/∂ω
+    /// p_cam(δω) ≈ p_cam − [p_cam]× · δω
+    /// ∂p_cam/∂δω = [p_cam]×                 (3×3 skew-symmetric matrix)
     /// ```
     ///
-    /// ## Final Result (2×6)
+    /// where the skew-symmetric matrix [p_cam]× is:
     ///
     /// ```text
-    /// ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
-    ///       = (2×3) · (3×6)
-    ///       = (2×6)
+    /// [p_cam]× = [  0      −p_z    p_y  ]
+    ///            [  p_z     0     −p_x  ]
+    ///            [ −p_y    p_x     0   ]
+    /// ```
+    ///
+    /// ## Combined Pose Jacobian (3×6)
+    ///
+    /// ```text
+    /// ∂p_cam/∂δξ = [ −R^T  |  [p_cam]× ]     (3×6)
+    ///               ↓          ↓
+    ///            ∂/∂δv      ∂/∂δω
+    /// ```
+    ///
+    /// ## Final Pixel Jacobian (2×6)
+    ///
+    /// The complete pose Jacobian is obtained by chaining with the point Jacobian:
+    ///
+    /// ```text
+    /// J_pose = ∂π/∂δξ = (∂π/∂p_cam) · (∂p_cam/∂δξ)
+    ///                = (2×3) · (3×6)
+    ///                = (2×6)
     /// ```
     ///
     /// # Arguments
@@ -431,20 +441,22 @@ impl CameraModel for PinholeCamera {
     /// # Returns
     ///
     /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
-    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
-    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
+    /// - `d_uv_d_pcam`: 2×3 Jacobian ∂π/∂p_cam (from `jacobian_point()`)
+    /// - `d_pcam_d_pose`: 3×6 Jacobian ∂p_cam/∂δξ = [−R^T | [p_cam]×]
     ///
-    /// The caller can multiply these to get the full pose Jacobian.
+    /// The caller can compute the full pose Jacobian: J_pixel_pose = d_uv_d_pcam · d_pcam_d_pose
+    ///
+    /// # Implementation Notes
+    ///
+    /// - Uses the right perturbation model (T(δξ) = T·exp(δξ^)) consistent with most SLAM libraries
+    /// - The skew-symmetric matrix is computed via the `skew_symmetric()` helper
+    /// - R^T is obtained from pose.inverse() for numerical stability
     ///
     /// # References
     ///
-    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie Groups)
-    /// - Sola et al., "A micro Lie theory for state estimation in robotics", 2021
-    ///
-    /// # Implementation Note
-    ///
-    /// The rotation Jacobian uses the skew-symmetric matrix `[p_cam]×` which
-    /// is provided by the `skew_symmetric()` helper function.
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (SE(3) Optimization)
+    /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
+    /// - Blanco-Claraco, "A tutorial on SE(3) transformation parameterizations"
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
