@@ -161,7 +161,7 @@ fn run_bundle_adjustment(
     opt_type: OptimizationType,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
-    use apex_solver::apex_camera_models::{
+    use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
     };
 
