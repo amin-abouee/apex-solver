@@ -40,9 +40,9 @@
 //!
 //! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 use std::fmt;
 

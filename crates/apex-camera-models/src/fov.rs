@@ -41,9 +41,9 @@
 //! - Zhang et al., "Simultaneous Localization and Mapping with Fisheye Cameras"
 //!   https://arxiv.org/pdf/1807.08957
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// FOV camera model with 5 parameters.

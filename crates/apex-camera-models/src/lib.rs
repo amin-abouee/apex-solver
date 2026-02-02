@@ -27,16 +27,6 @@
 //! - Projection errors: `PointBehindCamera`, `ProjectionOutOfBounds`, `DenominatorTooSmall`
 //! - Numerical errors: `NumericalError` with operation context
 //!
-//! ## Optimization Configuration
-//!
-//! The [`OptimizeParams`] type uses const generics to configure which parameters to optimize
-//! at compile time:
-//!
-//! - `BundleAdjustment`: Optimize pose + landmarks (fixed intrinsics)
-//! - `SelfCalibration`: Optimize pose + landmarks + intrinsics
-//! - `OnlyPose`: Visual odometry (fixed landmarks and intrinsics)
-//! - `OnlyIntrinsics`: Camera calibration (known structure)
-//!
 //! # Available Camera Models
 //!
 //! ## Standard Models (FOV < 90°)
@@ -57,10 +47,6 @@
 
 use apex_manifolds::se3::SE3;
 use nalgebra::{Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
-
-// ============================================================================
-// Precision Constants
-// ============================================================================
 
 /// Precision constant for geometric validity checks (e.g., point in front of camera).
 ///
@@ -284,50 +270,6 @@ pub use kannala_brandt::KannalaBrandtCamera;
 pub use pinhole::PinholeCamera;
 pub use rad_tan::RadTanCamera;
 pub use ucm::UcmCamera;
-
-// Optimization configuration
-
-/// Configuration for which parameters to optimize.
-///
-/// Uses const generic booleans for compile-time optimization selection.
-///
-/// # Type Parameters
-///
-/// - `POSE`: Whether to optimize camera pose (SE3 transformation)
-/// - `LANDMARK`: Whether to optimize 3D landmark positions
-/// - `INTRINSIC`: Whether to optimize camera intrinsic parameters
-#[derive(Debug, Clone, Copy, Default)]
-pub struct OptimizeParams<const POSE: bool, const LANDMARK: bool, const INTRINSIC: bool>;
-
-impl<const P: bool, const L: bool, const I: bool> OptimizeParams<P, L, I> {
-    /// Whether to optimize camera pose
-    pub const POSE: bool = P;
-    /// Whether to optimize 3D landmarks
-    pub const LANDMARK: bool = L;
-    /// Whether to optimize camera intrinsics
-    pub const INTRINSIC: bool = I;
-}
-
-/// Bundle Adjustment: optimize pose + landmarks (intrinsics fixed).
-pub type BundleAdjustment = OptimizeParams<true, true, false>;
-
-/// Self-Calibration: optimize pose + landmarks + intrinsics.
-pub type SelfCalibration = OptimizeParams<true, true, true>;
-
-/// Only Intrinsics: optimize intrinsics (pose and landmarks fixed).
-pub type OnlyIntrinsics = OptimizeParams<false, false, true>;
-
-/// Only Pose: optimize pose (landmarks and intrinsics fixed).
-pub type OnlyPose = OptimizeParams<true, false, false>;
-
-/// Only Landmarks: optimize landmarks (pose and intrinsics fixed).
-pub type OnlyLandmarks = OptimizeParams<false, true, false>;
-
-/// Pose and Intrinsics: optimize pose + intrinsics (landmarks fixed).
-pub type PoseAndIntrinsics = OptimizeParams<true, false, true>;
-
-/// Landmarks and Intrinsics: optimize landmarks + intrinsics (pose fixed).
-pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
 
 // Camera Model Trait
 
@@ -606,44 +548,6 @@ pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_optimize_params_constants() {
-        let ba_pose: bool = BundleAdjustment::POSE;
-        let ba_land: bool = BundleAdjustment::LANDMARK;
-        let ba_intr: bool = BundleAdjustment::INTRINSIC;
-        assert!(ba_pose);
-        assert!(ba_land);
-        assert!(!ba_intr);
-
-        let sc_pose: bool = SelfCalibration::POSE;
-        let sc_land: bool = SelfCalibration::LANDMARK;
-        let sc_intr: bool = SelfCalibration::INTRINSIC;
-        assert!(sc_pose);
-        assert!(sc_land);
-        assert!(sc_intr);
-
-        let oi_pose: bool = OnlyIntrinsics::POSE;
-        let oi_land: bool = OnlyIntrinsics::LANDMARK;
-        let oi_intr: bool = OnlyIntrinsics::INTRINSIC;
-        assert!(!oi_pose);
-        assert!(!oi_land);
-        assert!(oi_intr);
-
-        let op_pose: bool = OnlyPose::POSE;
-        let op_land: bool = OnlyPose::LANDMARK;
-        let op_intr: bool = OnlyPose::INTRINSIC;
-        assert!(op_pose);
-        assert!(!op_land);
-        assert!(!op_intr);
-
-        let ol_pose: bool = OnlyLandmarks::POSE;
-        let ol_land: bool = OnlyLandmarks::LANDMARK;
-        let ol_intr: bool = OnlyLandmarks::INTRINSIC;
-        assert!(!ol_pose);
-        assert!(ol_land);
-        assert!(!ol_intr);
-    }
 
     #[test]
     fn test_skew_symmetric() {

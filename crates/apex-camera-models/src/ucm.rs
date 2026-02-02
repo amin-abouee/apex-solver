@@ -37,9 +37,9 @@
 //!
 //! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Unified Camera Model with 5 parameters.

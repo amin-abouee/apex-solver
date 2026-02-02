@@ -50,9 +50,9 @@
 //! - Brown, "Decentering Distortion of Lenses", 1966
 //! - OpenCV Camera Calibration Documentation
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
 /// A Radial-Tangential camera model with 9 intrinsic parameters.
