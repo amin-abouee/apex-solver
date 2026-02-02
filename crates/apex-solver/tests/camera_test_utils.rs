@@ -3,9 +3,9 @@
 //! This module provides common functionality for testing camera projection factors
 //! with self-calibration (optimizing pose, landmarks, and intrinsics simultaneously).
 
-use apex_manifolds::se3::{SE3Tangent, SE3};
-use apex_manifolds::so3::SO3;
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::{SE3, SE3Tangent};
+use apex_manifolds::so3::SO3;
 use nalgebra::{DVector, Vector3};
 
 /// Generate N 3D points in a realistic scene (hemisphere in front of camera)

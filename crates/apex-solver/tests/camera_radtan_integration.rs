@@ -19,16 +19,15 @@
 //! - k2, p1, p2: <15% error (secondary distortion terms)
 //! - k3: <0.3 absolute error (higher-order term, poorly constrained by planar target)
 
-use apex_camera_models::{
-    CameraModel, DistortionModel, PinholeParams, RadTanCamera, SelfCalibration,
-};
-use apex_manifolds::se3::SE3;
+use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, RadTanCamera};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
-use apex_solver::ManifoldType;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 

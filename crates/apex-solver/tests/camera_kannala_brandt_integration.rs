@@ -11,13 +11,12 @@
 //! - Polynomial angle-based distortion model
 //! - Popular for wide-angle fisheye cameras (OpenCV fisheye model)
 
-use apex_camera_models::{
-    CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams, SelfCalibration,
-};
+use apex_camera_models::{CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};

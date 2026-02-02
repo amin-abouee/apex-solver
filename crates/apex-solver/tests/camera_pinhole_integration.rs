@@ -11,13 +11,12 @@
 //! - Linear projection model (no distortion)
 //! - Best parameter recovery expected among all camera models
 
-use apex_camera_models::{
-    CameraModel, DistortionModel, PinholeCamera, PinholeParams, SelfCalibration,
-};
+use apex_camera_models::{CameraModel, DistortionModel, PinholeCamera, PinholeParams};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
