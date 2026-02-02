@@ -6,8 +6,8 @@ use tracing::warn;
 
 use crate::factors::Factor;
 use apex_camera_models::{CameraModel, OptimizeParams};
-use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 
 /// Compute skew-symmetric matrix from vector.
 /// [v]× such that [v]× * w = v × w (cross product)
@@ -224,30 +224,20 @@ where
             // pose.act() computes exactly: R * p_world + t = p_cam
             let p_cam = pose.act(&p_world, None, None);
 
-            // Check validity and project
-            if !camera.is_valid_point(&p_cam) {
-                if self.verbose_cheirality {
-                    warn!(
-                        "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
-                        i, p_cam.x, p_cam.y, p_cam.z
-                    );
-                }
-                // Invalid projection: use zero residual (matches Ceres convention)
-                residuals[i * 2] = 0.0;
-                residuals[i * 2 + 1] = 0.0;
-                // Jacobian rows remain zero
-                continue;
-            }
-
-            // Project point
+            // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
                 Ok(proj) => proj,
                 Err(_) => {
                     if self.verbose_cheirality {
-                        warn!("Projection failed for point {}", i);
+                        warn!(
+                            "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
+                            i, p_cam.x, p_cam.y, p_cam.z
+                        );
                     }
+                    // Invalid projection: use zero residual (matches Ceres convention)
                     residuals[i * 2] = 0.0;
                     residuals[i * 2 + 1] = 0.0;
+                    // Jacobian rows remain zero
                     continue;
                 }
             };

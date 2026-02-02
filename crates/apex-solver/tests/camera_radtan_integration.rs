@@ -22,13 +22,13 @@
 use apex_camera_models::{
     CameraModel, DistortionModel, PinholeParams, RadTanCamera, SelfCalibration,
 };
-use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-use apex_solver::ManifoldType;
+use apex_manifolds::LieGroup;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::optimizer::OptimizationStatus;
+use apex_solver::ManifoldType;
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 
@@ -95,7 +95,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
             // Verify point is in front of camera
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
@@ -462,7 +462,7 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
             let p_cam = pose.act(landmark, None, None);
 
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}",
                 cam_idx,
                 lm_idx

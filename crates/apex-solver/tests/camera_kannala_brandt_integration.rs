@@ -105,7 +105,7 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
 
             // Verify point is valid for projection
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
@@ -408,8 +408,7 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam)
-                && let Ok(uv) = true_camera.project(&p_cam)
+            if let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0

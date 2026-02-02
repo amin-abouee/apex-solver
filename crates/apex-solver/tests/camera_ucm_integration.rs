@@ -13,11 +13,11 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, SelfCalibration, UcmCamera};
 use apex_manifolds::LieGroup;
-use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::optimizer::OptimizationStatus;
+use apex_solver::ManifoldType;
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 
@@ -100,7 +100,7 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
 
             // Verify point is valid for projection
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
@@ -369,11 +369,9 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam) {
-                if let Ok(uv) = true_camera.project(&p_cam) {
-                    if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
-                        cam_obs.push(uv);
-                    }
+            if let Ok(uv) = true_camera.project(&p_cam) {
+                if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
+                    cam_obs.push(uv);
                 }
             }
         }
