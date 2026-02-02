@@ -188,14 +188,16 @@ impl KannalaBrandtCamera {
             };
 
             if (self.pinhole.fx * x_r).abs() < f64::EPSILON && x_r.abs() > f64::EPSILON {
-                return Err(CameraModelError::NumericalError(
-                    "fx * x_r is zero in linear estimation".to_string(),
-                ));
+                return Err(CameraModelError::NumericalError {
+                    operation: "linear_estimation".to_string(),
+                    details: "fx * x_r is zero in linear estimation".to_string(),
+                });
             }
             if (self.pinhole.fy * y_r).abs() < f64::EPSILON && y_r.abs() > f64::EPSILON {
-                return Err(CameraModelError::NumericalError(
-                    "fy * y_r is zero in linear estimation".to_string(),
-                ));
+                return Err(CameraModelError::NumericalError {
+                    operation: "linear_estimation".to_string(),
+                    details: "fy * y_r is zero in linear estimation".to_string(),
+                });
             }
 
             if x_r.abs() > f64::EPSILON {
@@ -220,11 +222,12 @@ impl KannalaBrandtCamera {
         }
 
         let svd = a_mat.svd(true, true);
-        let x_coeffs = svd.solve(&b_vec, f64::EPSILON).map_err(|e_str| {
-            CameraModelError::NumericalError(format!(
-                "SVD solve failed in linear estimation: {e_str}"
-            ))
-        })?;
+        let x_coeffs =
+            svd.solve(&b_vec, f64::EPSILON)
+                .map_err(|e_str| CameraModelError::NumericalError {
+                    operation: "svd_solve".to_string(),
+                    details: format!("SVD solve failed in linear estimation: {e_str}"),
+                })?;
 
         self.distortion = DistortionModel::KannalaBrandt {
             k1: x_coeffs[0],
@@ -372,10 +375,10 @@ impl CameraModel for KannalaBrandtCamera {
 
         // Check if point is valid for projection (in front of camera)
         if !self.check_projection_condition(z) {
-            return Err(CameraModelError::InvalidParams(format!(
-                "KannalaBrandt: z must be positive, got z={}",
-                z
-            )));
+            return Err(CameraModelError::PointBehindCamera {
+                z,
+                min_z: f64::EPSILON,
+            });
         }
 
         let (k1, k2, k3, k4) = self.distortion_params();
@@ -473,9 +476,10 @@ impl CameraModel for KannalaBrandtCamera {
                 1.0 + 3.0 * k1_theta2 + 5.0 * k2_theta4 + 7.0 * k3_theta6 + 9.0 * k4_theta8;
 
             if f_prime.abs() < f64::EPSILON {
-                return Err(CameraModelError::NumericalError(
-                    "Derivative too small in KB unprojection".to_string(),
-                ));
+                return Err(CameraModelError::NumericalError {
+                    operation: "unprojection".to_string(),
+                    details: "Derivative too small in KB unprojection".to_string(),
+                });
             }
 
             let delta = f / f_prime;
@@ -994,24 +998,50 @@ impl CameraModel for KannalaBrandtCamera {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
 
         let (k1, k2, k3, k4) = self.distortion_params();
-        if !k1.is_finite() || !k2.is_finite() || !k3.is_finite() || !k4.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Distortion coefficients must be finite".to_string(),
-            ));
+        if !k1.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k1".to_string(),
+                value: k1,
+            });
+        }
+        if !k2.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k2".to_string(),
+                value: k2,
+            });
+        }
+        if !k3.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k3".to_string(),
+                value: k3,
+            });
+        }
+        if !k4.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k4".to_string(),
+                value: k4,
+            });
         }
 
         Ok(())

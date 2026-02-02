@@ -3,9 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
@@ -255,17 +255,11 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::ProjectionOutSideImage`] if point is not in front of camera (z ≥ 0).
+    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if point is not in front of camera (z ≥ 0).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         // BAL convention: negative Z is in front
         if !self.check_projection_condition(p_cam.z) {
-            // return Err(CameraModelError::PointBehindCamera {
-            //     z: p_cam.z,
-            //     message: "BAL convention: point must have z < 0 (negative Z is in front of camera)"
-            //         .to_string(),
-            // });
-            return Err(CameraModelError::ProjectionOutSideImage);
-            //
+            return Err(CameraModelError::ProjectionOutOfBounds);
         }
         let inv_neg_z = -1.0 / p_cam.z;
 
@@ -561,11 +555,7 @@ impl CameraModel for BALPinholeCameraStrict {
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
                 // Translation part: -I
-                if r == c {
-                    -1.0
-                } else {
-                    0.0
-                }
+                if r == c { -1.0 } else { 0.0 }
             } else {
                 // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]
@@ -751,41 +741,30 @@ impl CameraModel for BALPinholeCameraStrict {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.f <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.f,
+                fy: self.f,
+            });
         }
         if !self.f.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal length must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.f,
+                fy: self.f,
+            });
         }
         let (k1, k2) = self.distortion_params();
-        if !k1.is_finite() || !k2.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Distortion coefficients must be finite".to_string(),
-            ));
+        if !k1.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k1".to_string(),
+                value: k1,
+            });
         }
-        // // Validate strict BAL constraints
-        // if (self.pinhole.fx - self.pinhole.fy).abs() > 1e-10 {
-        //     return Err(CameraModelError::InvalidParams(
-        //         "BALPinholeCameraStrict requires fx = fy (single focal length)".to_string(),
-        //     ));
-        // }
-        // if self.pinhole.cx.abs() > 1e-10 || self.pinhole.cy.abs() > 1e-10 {
-        //     return Err(CameraModelError::InvalidParams(
-        //         "BALPinholeCameraStrict requires cx = cy = 0 (no principal point offset)"
-        //             .to_string(),
-        //     ));
-        // }
-
-        // let (k1, k2) = match self.distortion {
-        //     DistortionModel::Radial { k1, k2 } => (k1, k2),
-        //     _ => {
-        //         return Err(CameraModelError::InvalidParams(format!(
-        //             "BALPinholeCameraStrict requires Radial distortion model, got {:?}",
-        //             self.distortion
-        //         )));
-        //     }
-        // };
+        if !k2.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k2".to_string(),
+                value: k2,
+            });
+        }
         Ok(())
     }
 

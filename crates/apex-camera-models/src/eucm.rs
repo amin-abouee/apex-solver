@@ -193,7 +193,10 @@ impl EucmCamera {
         let solution = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError(err_msg.to_string()));
+                return Err(CameraModelError::NumericalError {
+                    operation: "svd_solve".to_string(),
+                    details: err_msg.to_string(),
+                });
             }
         };
 
@@ -339,18 +342,17 @@ impl CameraModel for EucmCamera {
         let denom = alpha * d + (1.0 - alpha) * z;
 
         if denom < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::InvalidParams(format!(
-                "EUCM: denominator too small: denom={} < {}",
+            return Err(CameraModelError::DenominatorTooSmall {
                 denom,
-                crate::GEOMETRIC_PRECISION
-            )));
+                threshold: crate::GEOMETRIC_PRECISION,
+            });
         }
 
         if !self.check_projection_condition(z, denom) {
-            return Err(CameraModelError::InvalidParams(format!(
-                "EUCM: geometric projection condition failed for z={}, denom={}",
-                z, denom
-            )));
+            return Err(CameraModelError::PointBehindCamera {
+                z,
+                min_z: crate::GEOMETRIC_PRECISION,
+            });
         }
 
         Ok(Vector2::new(
@@ -375,7 +377,7 @@ impl CameraModel for EucmCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::PointIsOutSideImage`] if the unprojection condition fails.
+    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection condition fails.
     /// Returns [`CameraModelError::NumericalError`] if a division by zero occurs during calculation.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
@@ -393,16 +395,17 @@ impl CameraModel for EucmCamera {
 
         let discriminant = beta_r2 * gamma_sq + gamma_sq;
         if discriminant < 0.0 || !self.check_unprojection_condition(r2) {
-            return Err(CameraModelError::PointIsOutSideImage);
+            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
         let sqrt_disc = discriminant.sqrt();
         let denom = beta_r2 + 1.0;
 
         if denom.abs() < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::NumericalError(
-                "Division by near-zero in EUCM unprojection".to_string(),
-            ));
+            return Err(CameraModelError::NumericalError {
+                operation: "unprojection".to_string(),
+                details: "Division by near-zero in EUCM unprojection".to_string(),
+            });
         }
 
         let mz = (gamma * sqrt_disc) / denom;
@@ -844,30 +847,43 @@ impl CameraModel for EucmCamera {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
 
         let (alpha, beta) = self.distortion_params();
-        if !alpha.is_finite() || !(alpha >= 0.0 && alpha <= 1.0) {
-            return Err(CameraModelError::InvalidParams(
-                "alpha must be in [0, 1]".to_string(),
-            ));
+        if !(alpha.is_finite() && (0.0..=1.0).contains(&alpha)) {
+            return Err(CameraModelError::ParameterOutOfRange {
+                param: "alpha".to_string(),
+                value: alpha,
+                min: 0.0,
+                max: 1.0,
+            });
         }
 
         if !beta.is_finite() || beta <= 0.0 {
-            return Err(CameraModelError::InvalidParams(
-                "beta must be positive".to_string(),
-            ));
+            return Err(CameraModelError::ParameterOutOfRange {
+                param: "beta".to_string(),
+                value: beta,
+                min: 0.0,
+                max: f64::INFINITY,
+            });
         }
 
         Ok(())

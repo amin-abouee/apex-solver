@@ -41,9 +41,9 @@
 //! - Zhang et al., "Simultaneous Localization and Mapping with Fisheye Cameras"
 //!   https://arxiv.org/pdf/1807.08957
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// FOV camera model with 5 parameters.
@@ -300,7 +300,7 @@ impl CameraModel for FovCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::ProjectionOutSideImage`] if `z` is too small.
+    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if `z` is too small.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -308,7 +308,7 @@ impl CameraModel for FovCamera {
 
         // Check if z is valid (too close to camera center)
         if z < f64::EPSILON.sqrt() {
-            return Err(CameraModelError::ProjectionOutSideImage);
+            return Err(CameraModelError::ProjectionOutOfBounds);
         }
 
         let r = (x * x + y * y).sqrt();
@@ -862,24 +862,34 @@ impl CameraModel for FovCamera {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
 
         let w = self.distortion_params();
         if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
-            return Err(CameraModelError::InvalidParams(
-                "w must be in (0, π]".to_string(),
-            ));
+            return Err(CameraModelError::ParameterOutOfRange {
+                param: "w".to_string(),
+                value: w,
+                min: 0.0,
+                max: std::f64::consts::PI,
+            });
         }
 
         Ok(())

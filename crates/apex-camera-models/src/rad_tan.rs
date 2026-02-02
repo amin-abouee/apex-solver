@@ -50,9 +50,9 @@
 //! - Brown, "Decentering Distortion of Lenses", 1966
 //! - OpenCV Camera Calibration Documentation
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
 /// A Radial-Tangential camera model with 9 intrinsic parameters.
@@ -79,14 +79,6 @@ impl RadTanCamera {
         pinhole: PinholeParams,
         distortion: DistortionModel,
     ) -> Result<Self, CameraModelError> {
-        // Validate distortion model
-        // if !matches!(distortion, DistortionModel::BrownConrady { .. }) {
-        //     return Err(CameraModelError::InvalidParams(format!(
-        //         "RadTanCamera requires BrownConrady distortion model, got {:?}",
-        //         distortion
-        //     )));
-        // }
-
         let camera = Self {
             pinhole,
             distortion,
@@ -199,7 +191,10 @@ impl RadTanCamera {
         let distortion_coeffs = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError(err_msg.to_string()));
+                return Err(CameraModelError::NumericalError {
+                    operation: "svd_solve".to_string(),
+                    details: err_msg.to_string(),
+                });
             }
         };
 
@@ -341,11 +336,10 @@ impl CameraModel for RadTanCamera {
     /// - `Err` - If the point is at or behind the camera.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
-            return Err(CameraModelError::InvalidParams(format!(
-                "RadTan: z must be >= {}, got z={}",
-                crate::GEOMETRIC_PRECISION,
-                p_cam.z
-            )));
+            return Err(CameraModelError::PointBehindCamera {
+                z: p_cam.z,
+                min_z: crate::GEOMETRIC_PRECISION,
+            });
         }
 
         let inv_z = 1.0 / p_cam.z;
@@ -460,9 +454,10 @@ impl CameraModel for RadTanCamera {
             let det = jacobian[(0, 0)] * jacobian[(1, 1)] - jacobian[(0, 1)] * jacobian[(1, 0)];
 
             if det.abs() < crate::GEOMETRIC_PRECISION {
-                return Err(CameraModelError::NumericalError(
-                    "Singular Jacobian in RadTan unprojection".to_string(),
-                ));
+                return Err(CameraModelError::NumericalError {
+                    operation: "unprojection".to_string(),
+                    details: "Singular Jacobian in RadTan unprojection".to_string(),
+                });
             }
 
             let inv_det = 1.0 / det;
@@ -473,9 +468,10 @@ impl CameraModel for RadTanCamera {
             point.y += delta_y;
 
             if iteration == MAX_ITERATIONS - 1 {
-                return Err(CameraModelError::NumericalError(
-                    "RadTan unprojection did not converge".to_string(),
-                ));
+                return Err(CameraModelError::NumericalError {
+                    operation: "unprojection".to_string(),
+                    details: "RadTan unprojection did not converge".to_string(),
+                });
             }
         }
 
@@ -1031,29 +1027,56 @@ impl CameraModel for RadTanCamera {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
 
         let (k1, k2, p1, p2, k3) = self.distortion_params();
-        if !k1.is_finite()
-            || !k2.is_finite()
-            || !p1.is_finite()
-            || !p2.is_finite()
-            || !k3.is_finite()
-        {
-            return Err(CameraModelError::InvalidParams(
-                "Distortion coefficients must be finite".to_string(),
-            ));
+        if !k1.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k1".to_string(),
+                value: k1,
+            });
+        }
+        if !k2.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k2".to_string(),
+                value: k2,
+            });
+        }
+        if !p1.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "p1".to_string(),
+                value: p1,
+            });
+        }
+        if !p2.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "p2".to_string(),
+                value: p2,
+            });
+        }
+        if !k3.is_finite() {
+            return Err(CameraModelError::DistortionNotFinite {
+                name: "k3".to_string(),
+                value: k3,
+            });
         }
 
         Ok(())

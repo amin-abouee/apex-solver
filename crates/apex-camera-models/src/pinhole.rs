@@ -43,9 +43,9 @@
 //!
 //! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Pinhole camera model with 4 intrinsic parameters.
@@ -213,7 +213,10 @@ impl CameraModel for PinholeCamera {
     /// Returns [`CameraModelError::PointAtCameraCenter`] if the point is behind or at the camera center (`z <= MIN_DEPTH`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
-            return Err(CameraModelError::PointAtCameraCenter);
+            return Err(CameraModelError::PointBehindCamera {
+                z: p_cam.z,
+                min_z: crate::GEOMETRIC_PRECISION,
+            });
         }
         let inv_z = 1.0 / p_cam.z;
         Ok(Vector2::new(
@@ -591,15 +594,22 @@ impl CameraModel for PinholeCamera {
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
         Ok(())
     }

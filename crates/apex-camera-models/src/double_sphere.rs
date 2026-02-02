@@ -201,7 +201,10 @@ impl DoubleSphereCamera {
         let alpha = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol[0],
             Err(err_msg) => {
-                return Err(CameraModelError::NumericalError(err_msg.to_string()));
+                return Err(CameraModelError::NumericalError {
+                    operation: "svd_solve".to_string(),
+                    details: err_msg.to_string(),
+                });
             }
         };
 
@@ -342,7 +345,7 @@ impl CameraModel for DoubleSphereCamera {
     /// # Errors
     ///
     /// Returns [`CameraModelError`] if:
-    /// - The point fails the geometric projection condition (`ProjectionOutSideImage`).
+    /// - The point fails the geometric projection condition (`ProjectionOutOfBounds`).
     /// - The denominator is too small, indicating the point is at the camera center (`PointAtCameraCenter`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
@@ -355,7 +358,7 @@ impl CameraModel for DoubleSphereCamera {
 
         // Check projection condition using the helper
         if !self.check_projection_condition(z, d1)? {
-            return Err(CameraModelError::ProjectionOutSideImage);
+            return Err(CameraModelError::ProjectionOutOfBounds);
         }
 
         let xi_d1_z = xi * d1 + z;
@@ -363,7 +366,10 @@ impl CameraModel for DoubleSphereCamera {
         let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
 
         if denom < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::PointAtCameraCenter);
+            return Err(CameraModelError::DenominatorTooSmall {
+                denom,
+                threshold: crate::GEOMETRIC_PRECISION,
+            });
         }
 
         Ok(Vector2::new(
@@ -388,7 +394,7 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::PointIsOutSideImage`] if the unprojection condition fails.
+    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection condition fails.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -399,7 +405,7 @@ impl CameraModel for DoubleSphereCamera {
         let r2 = mx * mx + my * my;
 
         if !self.check_unprojection_condition(r2)? {
-            return Err(CameraModelError::PointIsOutSideImage);
+            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
         let mz_num = 1.0 - alpha * alpha * r2;
@@ -412,7 +418,7 @@ impl CameraModel for DoubleSphereCamera {
         let denom_term = mz2 + r2;
 
         if denom_term < crate::GEOMETRIC_PRECISION {
-            return Err(CameraModelError::PointIsOutSideImage);
+            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
         let k = num_term / denom_term;
@@ -882,30 +888,43 @@ impl CameraModel for DoubleSphereCamera {
     /// Returns [`CameraModelError`] if any parameter violates the validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "Focal lengths must be finite".to_string(),
-            ));
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.pinhole.fx,
+                fy: self.pinhole.fy,
+            });
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.pinhole.cx,
+                cy: self.pinhole.cy,
+            });
         }
 
         let (xi, alpha) = self.distortion_params();
-        if !xi.is_finite() {
-            return Err(CameraModelError::InvalidParams(
-                "xi must be finite".to_string(),
-            ));
+        if !xi.is_finite() || !(-1.0..=1.0).contains(&xi) {
+            return Err(CameraModelError::ParameterOutOfRange {
+                param: "xi".to_string(),
+                value: xi,
+                min: -1.0,
+                max: 1.0,
+            });
         }
 
         if !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0 {
-            return Err(CameraModelError::InvalidParams(
-                "alpha must be in (0, 1]".to_string(),
-            ));
+            return Err(CameraModelError::ParameterOutOfRange {
+                param: "alpha".to_string(),
+                value: alpha,
+                min: 0.0,
+                max: 1.0,
+            });
         }
 
         Ok(())

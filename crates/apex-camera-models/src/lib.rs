@@ -66,20 +66,58 @@ pub const CONVERGENCE_THRESHOLD: f64 = 1e-6;
 /// Camera model errors.
 #[derive(thiserror::Error, Debug)]
 pub enum CameraModelError {
-    #[error("Projection is outside the image")]
-    ProjectionOutSideImage,
-    #[error("Input point is outside the image")]
-    PointIsOutSideImage,
-    #[error("z is close to zero, point is at camera center")]
+    /// Focal length must be positive: fx={fx}, fy={fy}
+    #[error("Focal length must be positive: fx={fx}, fy={fy}")]
+    FocalLengthNotPositive { fx: f64, fy: f64 },
+
+    /// Focal length must be finite: fx={fx}, fy={fy}
+    #[error("Focal length must be finite: fx={fx}, fy={fy}")]
+    FocalLengthNotFinite { fx: f64, fy: f64 },
+
+    /// Principal point must be finite: cx={cx}, cy={cy}
+    #[error("Principal point must be finite: cx={cx}, cy={cy}")]
+    PrincipalPointNotFinite { cx: f64, cy: f64 },
+
+    /// Distortion coefficient must be finite
+    #[error("Distortion coefficient '{name}' must be finite, got {value}")]
+    DistortionNotFinite { name: String, value: f64 },
+
+    /// Parameter out of range
+    #[error("Parameter '{param}' must be in range [{min}, {max}], got {value}")]
+    ParameterOutOfRange {
+        param: String,
+        value: f64,
+        min: f64,
+        max: f64,
+    },
+
+    /// Point behind camera
+    #[error("Point behind camera: z={z} (must be > {min_z})")]
+    PointBehindCamera { z: f64, min_z: f64 },
+
+    /// Point at camera center
+    #[error("Point at camera center: 3D point too close to optical axis")]
     PointAtCameraCenter,
-    #[error("Focal length must be positive")]
-    FocalLengthMustBePositive,
-    #[error("Principal point must be finite")]
-    PrincipalPointMustBeFinite,
+
+    /// Projection denominator too small
+    #[error("Projection denominator too small: denom={denom} (threshold={threshold})")]
+    DenominatorTooSmall { denom: f64, threshold: f64 },
+
+    /// Projection outside valid image region
+    #[error("Projection outside valid image region")]
+    ProjectionOutOfBounds,
+
+    /// Point outside image bounds
+    #[error("Point outside image bounds: ({x}, {y}) not in valid region")]
+    PointOutsideImage { x: f64, y: f64 },
+
+    /// Numerical error
+    #[error("Numerical error in {operation}: {details}")]
+    NumericalError { operation: String, details: String },
+
+    /// Generic invalid parameters
     #[error("Invalid camera parameters: {0}")]
     InvalidParams(String),
-    #[error("NumericalError: {0}")]
-    NumericalError(String),
 }
 
 /// The "Common 4" - Linear intrinsic parameters.
@@ -101,10 +139,13 @@ impl PinholeParams {
     /// Create new pinhole parameters with validation.
     pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
         if fx <= 0.0 || fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
+            return Err(CameraModelError::FocalLengthNotPositive { fx, fy });
+        }
+        if !fx.is_finite() || !fy.is_finite() {
+            return Err(CameraModelError::FocalLengthNotFinite { fx, fy });
         }
         if !cx.is_finite() || !cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
+            return Err(CameraModelError::PrincipalPointNotFinite { cx, cy });
         }
         Ok(Self { fx, fy, cx, cy })
     }
