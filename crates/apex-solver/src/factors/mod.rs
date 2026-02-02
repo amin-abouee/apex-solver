@@ -57,6 +57,50 @@ pub use between_factor::BetweenFactor;
 pub use prior_factor::PriorFactor;
 pub use projection_factor::ProjectionFactor;
 
+// Optimization configuration types
+
+/// Configuration for which parameters to optimize.
+///
+/// Uses const generic booleans for compile-time optimization selection.
+///
+/// # Type Parameters
+///
+/// - `POSE`: Whether to optimize camera pose (SE3 transformation)
+/// - `LANDMARK`: Whether to optimize 3D landmark positions
+/// - `INTRINSIC`: Whether to optimize camera intrinsic parameters
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OptimizeParams<const POSE: bool, const LANDMARK: bool, const INTRINSIC: bool>;
+
+impl<const P: bool, const L: bool, const I: bool> OptimizeParams<P, L, I> {
+    /// Whether to optimize camera pose
+    pub const POSE: bool = P;
+    /// Whether to optimize 3D landmarks
+    pub const LANDMARK: bool = L;
+    /// Whether to optimize camera intrinsics
+    pub const INTRINSIC: bool = I;
+}
+
+/// Bundle Adjustment: optimize pose + landmarks (intrinsics fixed).
+pub type BundleAdjustment = OptimizeParams<true, true, false>;
+
+/// Self-Calibration: optimize pose + landmarks + intrinsics.
+pub type SelfCalibration = OptimizeParams<true, true, true>;
+
+/// Only Intrinsics: optimize intrinsics (pose and landmarks fixed).
+pub type OnlyIntrinsics = OptimizeParams<false, false, true>;
+
+/// Only Pose: optimize pose (landmarks and intrinsics fixed).
+pub type OnlyPose = OptimizeParams<true, false, false>;
+
+/// Only Landmarks: optimize landmarks (pose and intrinsics fixed).
+pub type OnlyLandmarks = OptimizeParams<false, true, false>;
+
+/// Pose and Intrinsics: optimize pose + intrinsics (landmarks fixed).
+pub type PoseAndIntrinsics = OptimizeParams<true, false, true>;
+
+/// Landmarks and Intrinsics: optimize landmarks + intrinsics (pose fixed).
+pub type LandmarksAndIntrinsics = OptimizeParams<false, true, true>;
+
 // Camera module alias for backward compatibility
 // Re-exports the apex-camera-models crate as `camera` module
 pub mod camera {

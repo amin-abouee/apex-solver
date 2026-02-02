@@ -39,13 +39,18 @@ pub mod camera_models {
 
 // Re-export commonly used types from workspace crates
 pub use apex_camera_models::{
-    BundleAdjustment, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
-    LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose, OptimizeParams, PinholeCamera,
-    PoseAndIntrinsics, RadTanCamera, SelfCalibration, UcmCamera,
+    CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera, PinholeCamera,
+    RadTanCamera, UcmCamera,
 };
+
+// Re-export optimization configuration types from factors module
 pub use apex_io::{BalLoader, G2oLoader, Graph, ToroLoader};
 pub use apex_manifolds::{
     Interpolatable, LieGroup, ManifoldType, Tangent, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3,
+};
+pub use factors::{
+    BundleAdjustment, LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose,
+    OptimizeParams, PoseAndIntrinsics, SelfCalibration,
 };
 
 // Local modules

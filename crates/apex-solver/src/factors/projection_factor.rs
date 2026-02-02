@@ -4,10 +4,10 @@ use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3, Matrix3xX, Vector3};
 use std::marker::PhantomData;
 use tracing::warn;
 
-use crate::factors::Factor;
-use apex_camera_models::{CameraModel, OptimizeParams};
-use apex_manifolds::se3::SE3;
+use crate::factors::{Factor, OptimizeParams};
+use apex_camera_models::CameraModel;
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 
 /// Compute skew-symmetric matrix from vector.
 /// [v]× such that [v]× * w = v × w (cross product)
@@ -415,7 +415,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_camera_models::{BundleAdjustment, OnlyIntrinsics, PinholeCamera, SelfCalibration};
+    use crate::factors::{BundleAdjustment, OnlyIntrinsics, SelfCalibration};
+    use apex_camera_models::PinholeCamera;
     use nalgebra::{Vector2, Vector3};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
