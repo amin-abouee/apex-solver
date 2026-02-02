@@ -412,33 +412,6 @@ impl CameraModel for EucmCamera {
         Ok(point3d.normalize())
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - `denom = α·d + (1-α)·z` must be ≥ PRECISION.
-    /// - Point must satisfy the specific EUCM projection condition.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point projects to a valid image coordinates, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        let x = p_cam[0];
-        let y = p_cam[1];
-        let z = p_cam[2];
-
-        let (alpha, beta) = self.distortion_params();
-        let r2 = x * x + y * y;
-        let d = (beta * r2 + z * z).sqrt();
-        let denom = alpha * d + (1.0 - alpha) * z;
-
-        denom >= crate::GEOMETRIC_PRECISION && self.check_projection_condition(z, denom)
-    }
-
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.

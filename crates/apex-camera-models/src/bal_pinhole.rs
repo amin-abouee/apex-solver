@@ -280,24 +280,6 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector2::new(self.f * x_d, self.f * y_d))
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - Returns `true` if z < −MIN_DEPTH (point is in front of camera for BAL convention).
-    /// - Returns `false` otherwise.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point is in front of the camera (z < −MIN_DEPTH), `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        self.check_projection_condition(p_cam.z)
-    }
-
     /// Computes the Jacobian of the projection function with respect to the 3D point in camera frame.
     ///
     /// # Mathematical Derivation

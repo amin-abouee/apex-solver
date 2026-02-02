@@ -504,23 +504,6 @@ impl CameraModel for KannalaBrandtCamera {
         Ok(Vector3::new(x, y, z).normalize())
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - Always returns true (KB model has wide acceptance range)
-    ///
-    /// # Arguments
-    ///
-    /// * `_p_cam` - 3D point in camera coordinate frame (unused in this implementation).
-    ///
-    /// # Returns
-    ///
-    /// Always returns `true` for the Kannala-Brandt model.
-    fn is_valid_point(&self, _p_cam: &Vector3<f64>) -> bool {
-        true
-    }
-
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.

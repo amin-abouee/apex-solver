@@ -375,24 +375,6 @@ impl CameraModel for FovCamera {
         Ok(Vector3::new(x, y, z))
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - Always returns true for FOV model (wide acceptance range)
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        let z = p_cam[2];
-        z >= f64::EPSILON.sqrt()
-    }
-
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// # Mathematical Derivation

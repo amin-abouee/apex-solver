@@ -426,51 +426,6 @@ impl CameraModel for DoubleSphereCamera {
     }
 
     /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - d₁ > PRECISION
-    /// - Projection condition: z > -w₂·d₁ where w₂ depends on α and ξ
-    /// - denom = α·d₂ + (1-α)·(ξ·d₁ + z) must be ≥ PRECISION
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point is valid for projection, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        let x = p_cam[0];
-        let y = p_cam[1];
-        let z = p_cam[2];
-
-        let (xi, alpha) = self.distortion_params();
-        let r2 = x * x + y * y;
-        let d1 = (r2 + z * z).sqrt();
-
-        if d1 < crate::GEOMETRIC_PRECISION {
-            return false;
-        }
-
-        let w1 = if alpha > 0.5 {
-            (1.0 - alpha) / alpha
-        } else {
-            alpha / (1.0 - alpha)
-        };
-        let w2 = (w1 + xi) / (2.0 * w1 * xi).sqrt();
-
-        if z <= -w2 * d1 {
-            return false;
-        }
-
-        let xi_d1_z = xi * d1 + z;
-        let d2 = (r2 + xi_d1_z * xi_d1_z).sqrt();
-        let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
-
-        denom >= crate::GEOMETRIC_PRECISION
-    }
-
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.

@@ -386,30 +386,6 @@ impl CameraModel for UcmCamera {
 
     /// Checks if a 3D point can be validly projected.
     ///
-    /// # Validity Conditions
-    ///
-    /// - `denom = α·d + (1-α)·z` must be ≥ PRECISION.
-    /// - Point must satisfy the specific UCM projection condition.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        let x = p_cam[0];
-        let y = p_cam[1];
-        let z = p_cam[2];
-
-        let d = (x * x + y * y + z * z).sqrt();
-        let alpha = self.distortion_params();
-        let denom = alpha * d + (1.0 - alpha) * z;
-
-        denom >= crate::GEOMETRIC_PRECISION && self.check_projection_condition(z, d)
-    }
-
     /// Computes the Jacobian of the projection function with respect to the 3D point in camera frame.
     ///
     /// # Mathematical Derivation

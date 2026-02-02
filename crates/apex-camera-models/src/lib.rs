@@ -415,25 +415,6 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// - `NumericalError` - If iterative solver fails to converge
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// Validates geometric constraints without performing full projection.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - Point must be in front of camera: z > GEOMETRIC_PRECISION
-    /// - Point must not be too close to optical axis (model-dependent)
-    /// - Point must not cause numerical instability in projection
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z) in meters
-    ///
-    /// # Returns
-    ///
-    /// `true` if the point satisfies all projection constraints, `false` otherwise
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool;
-
     /// Jacobian of projection with respect to 3D point coordinates.
     ///
     /// Returns the 2×3 matrix J where J[i,j] = ∂(u,v)[i] / ∂(x,y,z)[j].

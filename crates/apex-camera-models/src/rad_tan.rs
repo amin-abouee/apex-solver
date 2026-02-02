@@ -485,23 +485,6 @@ impl CameraModel for RadTanCamera {
         ))
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - z ≥ GEOMETRIC_PRECISION (point in front of camera)
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        self.check_projection_condition(p_cam.z)
-    }
-
     /// Computes the Jacobian of the projection with respect to the 3D point coordinates (2×3).
     ///
     /// # Mathematical Derivation

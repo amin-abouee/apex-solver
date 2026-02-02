@@ -255,23 +255,6 @@ impl CameraModel for PinholeCamera {
         Ok(Vector3::new(mx * norm_inv, my * norm_inv, norm_inv))
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - z ≥ 1e-6 (point must be strictly in front of the camera).
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
-    fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
-        self.check_projection_condition(p_cam.z)
-    }
-
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
     ///
     /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
@@ -721,7 +704,6 @@ mod tests {
 
         let result = camera.project(&p_cam);
         assert!(result.is_err());
-        assert!(!camera.is_valid_point(&p_cam));
         Ok(())
     }
 
