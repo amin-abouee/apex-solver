@@ -40,17 +40,15 @@
 //!
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Extended Unified Camera Model with 6 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EucmCamera {
-    /// Linear pinhole parameters (fx, fy, cx, cy)
     pub pinhole: PinholeParams,
-    /// Lens distortion model and parameters
     pub distortion: DistortionModel,
 }
 

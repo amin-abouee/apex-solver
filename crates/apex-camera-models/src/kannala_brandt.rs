@@ -41,17 +41,15 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct KannalaBrandtCamera {
-    /// Linear pinhole parameters (fx, fy, cx, cy)
     pub pinhole: PinholeParams,
-    /// Lens distortion model and parameters
     pub distortion: DistortionModel,
 }
 

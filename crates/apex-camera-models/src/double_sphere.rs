@@ -40,18 +40,16 @@
 //!
 //! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 use std::fmt;
 
 /// Double Sphere camera model with 6 parameters.
 #[derive(Clone, Copy, PartialEq)]
 pub struct DoubleSphereCamera {
-    /// Linear pinhole parameters (fx, fy, cx, cy)
     pub pinhole: PinholeParams,
-    /// Lens distortion model and parameters
     pub distortion: DistortionModel,
 }
 

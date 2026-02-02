@@ -1,24 +1,59 @@
-//! Camera projection models for bundle adjustment.
+//! Camera projection models for computer vision applications.
 //!
-//! This module provides camera models used in bundle adjustment, self-calibration,
-//! and Structure-from-Motion (SfM).
+//! This crate provides a comprehensive collection of camera projection models commonly used in
+//! bundle adjustment, SLAM, visual odometry, and Structure-from-Motion (SfM). All models implement
+//! the [`CameraModel`] trait providing a unified interface for projection, unprojection, and
+//! analytic Jacobian computation.
 //!
-//! # Key Components
+//! # Core Architecture
 //!
-//! - **`CameraModel` trait**: Interface for different camera models
-//! - **`OptimizeParams`**: Compile-time configuration for which parameters to optimize
-//! - **Type aliases**: Common optimization patterns (BundleAdjustment, SelfCalibration, etc.)
+//! ## CameraModel Trait
+//!
+//! The [`CameraModel`] trait defines the interface that all camera models must implement:
+//!
+//! - **Projection**: 3D point (x,y,z) → 2D pixel (u,v)
+//! - **Unprojection**: 2D pixel (u,v) → 3D unit ray
+//! - **Jacobians**: Analytic derivatives for optimization
+//!   - Point Jacobian: ∂(u,v)/∂(x,y,z) — 2×3 matrix
+//!   - Pose Jacobian: ∂(u,v)/∂(pose) — 2×6 matrix (SE3 tangent space)
+//!   - Intrinsic Jacobian: ∂(u,v)/∂(params) — 2×N matrix (N = parameter count)
+//!
+//! ## Error Handling
+//!
+//! All operations return [`Result`] with [`CameraModelError`] providing structured error variants
+//! that include actual parameter values for debugging:
+//!
+//! - Parameter validation: `FocalLengthNotPositive`, `FocalLengthNotFinite`, `ParameterOutOfRange`
+//! - Projection errors: `PointBehindCamera`, `ProjectionOutOfBounds`, `DenominatorTooSmall`
+//! - Numerical errors: `NumericalError` with operation context
+//!
+//! ## Optimization Configuration
+//!
+//! The [`OptimizeParams`] type uses const generics to configure which parameters to optimize
+//! at compile time:
+//!
+//! - `BundleAdjustment`: Optimize pose + landmarks (fixed intrinsics)
+//! - `SelfCalibration`: Optimize pose + landmarks + intrinsics
+//! - `OnlyPose`: Visual odometry (fixed landmarks and intrinsics)
+//! - `OnlyIntrinsics`: Camera calibration (known structure)
 //!
 //! # Available Camera Models
 //!
-//! - **Pinhole**: Standard perspective projection
-//! - **Kannala-Brandt**: Fisheye model with polynomial distortion
-//! - **Double Sphere**: Two-parameter fisheye model
-//! - **Radial-Tangential**: OpenCV-compatible distortion model
-//! - **EUCM**: Extended Unified Camera Model
-//! - **FOV**: Field-of-view based fisheye model
-//! - **UCM**: Unified Camera Model
-//! - **BAL Pinhole**: Bundle Adjustment in the Large format
+//! ## Standard Models (FOV < 90°)
+//! - **Pinhole**: Standard perspective projection (4 params: fx, fy, cx, cy)
+//! - **Radial-Tangential**: OpenCV Brown-Conrady model (9 params with k1,k2,k3,p1,p2)
+//!
+//! ## Wide-Angle Models (FOV 90°-180°)
+//! - **Kannala-Brandt**: Polynomial fisheye model (8 params, θ-based distortion)
+//! - **FOV**: Field-of-view model (5 params, atan-based)
+//!
+//! ## Omnidirectional Models (FOV > 180°)
+//! - **UCM**: Unified Camera Model (5 params, α parameter)
+//! - **EUCM**: Extended Unified Camera Model (6 params, α, β parameters)
+//! - **Double Sphere**: Two-sphere projection (6 params, ξ, α parameters)
+//!
+//! ## Specialized Models
+//! - **BAL Pinhole**: Bundle Adjustment in the Large format (6 params, -Z convention)
 
 use apex_manifolds::se3::SE3;
 use nalgebra::{Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
@@ -201,7 +236,27 @@ pub enum DistortionModel {
     DoubleSphere { xi: f64, alpha: f64 },
 }
 
-/// Validates that a 3D point's z-coordinate is positive (in front of camera).
+/// Validates that a 3D point is in front of the camera.
+///
+/// A point must have positive z-coordinate (in camera frame) to be valid for projection.
+/// Points too close to the camera center (z ≈ 0) are rejected to avoid numerical instability.
+///
+/// # Arguments
+///
+/// * `z` - Z-coordinate of the point in camera frame (meters)
+///
+/// # Returns
+///
+/// - `Ok(())` if z > √ε (approximately 1.5e-8)
+/// - `Err(CameraModelError::PointAtCameraCenter)` if z is too small
+///
+/// # Mathematical Condition
+///
+/// The validation ensures the point is geometrically in front of the camera:
+/// ```text
+/// z > √ε ≈ 1.49 × 10^-8
+/// ```
+/// where ε is machine epsilon for f64 (≈ 2.22 × 10^-16).
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
     if z < f64::EPSILON.sqrt() {
         return Err(CameraModelError::PointAtCameraCenter);
@@ -303,71 +358,190 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         + std::ops::Mul<Matrix3<f64>, Output = SMatrix<f64, 2, 3>>
         + std::ops::Index<(usize, usize), Output = f64>;
 
-    /// Projects a 3D point to 2D image coordinates.
+    /// Projects a 3D point in camera coordinates to 2D image coordinates.
+    ///
+    /// The projection pipeline is: 3D point → normalized coordinates → distortion → pixel coordinates.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// For a 3D point p = (x, y, z) in camera frame:
+    /// ```text
+    /// (u, v) = K · distort(x/z, y/z)
+    /// ```
+    /// where K is the intrinsic matrix [fx 0 cx; 0 fy cy; 0 0 1].
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z)
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z) in meters
     ///
     /// # Returns
     ///
-    /// - `Ok(uv)` - 2D image coordinates if projection is valid
-    /// - `Err(CameraModelError)` - If point cannot be projected with specific error reason
+    /// - `Ok(Vector2)` - 2D image coordinates (u, v) in pixels if projection is valid
+    /// - `Err(CameraModelError)` - If point is behind camera, at center, or causes numerical issues
+    ///
+    /// # Errors
+    ///
+    /// - `PointBehindCamera` - If z ≤ GEOMETRIC_PRECISION (point behind or too close)
+    /// - `PointAtCameraCenter` - If point is too close to optical axis
+    /// - `DenominatorTooSmall` - If projection causes numerical instability
+    /// - `ProjectionOutOfBounds` - If projection falls outside valid image region
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError>;
 
-    /// Unprojects a 2D image point to a 3D ray in camera frame.
+    /// Unprojects a 2D image point to a normalized 3D ray in camera frame.
+    ///
+    /// The inverse of projection: 2D pixel → undistortion → normalized 3D ray.
+    /// Some models use iterative methods (e.g., Newton-Raphson) for undistortion.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// For a 2D point (u, v) in image coordinates:
+    /// ```text
+    /// (mx, my) = ((u - cx)/fx, (v - cy)/fy)
+    /// ray = normalize(undistort(mx, my))
+    /// ```
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates (u, v)
+    /// * `point_2d` - 2D point in image coordinates (u, v) in pixels
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err(CameraModelError)` - If unprojection fails
+    /// - `Ok(Vector3)` - Normalized 3D ray direction (unit vector)
+    /// - `Err(CameraModelError)` - If point is outside valid image region or numerical issues occur
+    ///
+    /// # Errors
+    ///
+    /// - `PointOutsideImage` - If 2D point is outside valid unprojection region
+    /// - `NumericalError` - If iterative solver fails to converge
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError>;
 
     /// Checks if a 3D point can be validly projected.
     ///
+    /// Validates geometric constraints without performing full projection.
+    ///
+    /// # Validity Conditions
+    ///
+    /// - Point must be in front of camera: z > GEOMETRIC_PRECISION
+    /// - Point must not be too close to optical axis (model-dependent)
+    /// - Point must not cause numerical instability in projection
+    ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z) in meters
     ///
     /// # Returns
     ///
-    /// `true` if the point satisfies projection constraints
+    /// `true` if the point satisfies all projection constraints, `false` otherwise
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool;
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    /// Jacobian of projection with respect to 3D point coordinates.
     ///
-    /// Returns ∂(u,v)/∂(x,y,z) where (x,y,z) is the point in camera frame.
+    /// Returns the 2×3 matrix J where J[i,j] = ∂(u,v)[i] / ∂(x,y,z)[j].
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// J = ∂(u,v)/∂(x,y,z) = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
+    ///                       [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
+    /// ```
+    ///
+    /// This Jacobian is used for:
+    /// - Structure optimization (adjusting 3D landmark positions)
+    /// - Triangulation refinement
+    /// - Bundle adjustment with landmark optimization
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z) in meters
+    ///
+    /// # Returns
+    ///
+    /// 2×3 Jacobian matrix of projection w.r.t. point coordinates
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian;
 
-    /// Jacobian of projection w.r.t. camera pose (2×6).
+    /// Jacobian of projection with respect to camera pose (SE3).
     ///
-    /// Returns both the projection Jacobian and the transformed point Jacobian
-    /// for efficient chain rule application.
+    /// Uses chain rule: ∂(u,v)/∂(pose) = ∂(u,v)/∂(p_cam) · ∂(p_cam)/∂(pose)
+    ///
+    /// # Mathematical Formula
+    ///
+    /// For pose in SE3 (6-DOF: translation + rotation):
+    /// ```text
+    /// ∂(u,v)/∂(pose) = J_point · J_transform
+    /// ```
+    /// where:
+    /// - J_point (2×3): ∂(u,v)/∂(p_cam) — projection Jacobian
+    /// - J_transform (3×6): ∂(p_cam)/∂(pose) — point transformation w.r.t. pose
+    ///
+    /// The pose Jacobian uses the SE3 tangent space (ωx, ωy, ωz, vx, vy, vz).
+    ///
+    /// # Arguments
+    ///
+    /// * `p_world` - 3D point in world coordinates (x, y, z) in meters
+    /// * `pose` - Camera pose as SE3 transformation (world → camera)
     ///
     /// # Returns
     ///
     /// Tuple of:
-    /// - Projection Jacobian (2×3): ∂(u,v)/∂(p_cam)
-    /// - Pose Jacobian (3×6): ∂(p_cam)/∂(pose)
+    /// - `PointJacobian` (2×3): Projection Jacobian ∂(u,v)/∂(p_cam)
+    /// - `SMatrix<f64, 3, 6>` (3×6): Point transformation Jacobian ∂(p_cam)/∂(pose)
+    ///
+    /// # Usage
+    ///
+    /// Used in pose estimation, visual odometry, and SLAM for optimizing camera poses.
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
         pose: &SE3,
     ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>);
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×N).
+    /// Jacobian of projection with respect to intrinsic parameters.
     ///
-    /// Returns ∂(u,v)/∂(intrinsics) where intrinsics are camera-specific parameters.
+    /// Returns the 2×N matrix where N = INTRINSIC_DIM (model-dependent).
+    ///
+    /// # Mathematical Formula
+    ///
+    /// ```text
+    /// J = ∂(u,v)/∂(params) = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂k1  ... ]
+    ///                       [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂k1  ... ]
+    /// ```
+    ///
+    /// Intrinsic parameters vary by model:
+    /// - Pinhole: [fx, fy, cx, cy] (4 params)
+    /// - RadTan: [fx, fy, cx, cy, k1, k2, p1, p2, k3] (9 params)
+    /// - Kannala-Brandt: [fx, fy, cx, cy, k1, k2, k3, k4] (8 params)
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z) in meters
+    ///
+    /// # Returns
+    ///
+    /// 2×N Jacobian matrix of projection w.r.t. intrinsic parameters
+    ///
+    /// # Usage
+    ///
+    /// Used in camera calibration and self-calibration bundle adjustment.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian;
 
-    /// Batch projection of multiple 3D points.
+    /// Batch projection of multiple 3D points to 2D image coordinates.
     ///
-    /// Default implementation calls single-point projection for each point.
+    /// Projects N 3D points efficiently. Invalid projections are marked with a sentinel
+    /// value (1e6, 1e6) rather than returning an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `points_cam` - 3×N matrix where each column is a 3D point (x, y, z) in camera frame
+    ///
+    /// # Returns
+    ///
+    /// 2×N matrix where each column is the projected 2D point (u, v) in pixels.
     /// Invalid projections are set to (1e6, 1e6).
+    ///
+    /// # Performance
+    ///
+    /// Default implementation iterates over points. Camera models may override
+    /// with vectorized implementations for better performance.
     fn project_batch(&self, points_cam: &Matrix3xX<f64>) -> Matrix2xX<f64> {
         let n = points_cam.ncols();
         let mut result = Matrix2xX::zeros(n);
@@ -381,21 +555,54 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         result
     }
 
-    /// Validates camera parameters.
+    /// Validates camera intrinsic and distortion parameters.
+    ///
+    /// Performs comprehensive validation including:
+    /// - Focal lengths: must be positive and finite
+    /// - Principal point: must be finite
+    /// - Distortion coefficients: must be finite
+    /// - Model-specific constraints (e.g., UCM α ∈ [0,1], Double Sphere ξ ∈ [-1,1])
+    ///
+    /// # Validation Rules
+    ///
+    /// Common validations across all models:
+    /// - `fx > 0`, `fy > 0` (focal lengths must be positive)
+    /// - `fx`, `fy` finite (no NaN or Inf)
+    /// - `cx`, `cy` finite (principal point must be valid)
+    ///
+    /// Model-specific validations:
+    /// - **UCM**: α ∈ [0, 1]
+    /// - **EUCM**: α ∈ [0, 1], β > 0
+    /// - **Double Sphere**: ξ ∈ [-1, 1], α ∈ (0, 1]
+    /// - **FOV**: w ∈ (0, π]
     ///
     /// # Returns
     ///
-    /// - `Ok(())` - All parameters are valid
-    /// - `Err(CameraModelError)` - Invalid parameter detected
+    /// - `Ok(())` - All parameters satisfy validation rules
+    /// - `Err(CameraModelError)` - Specific error indicating which parameter is invalid
     fn validate_params(&self) -> Result<(), CameraModelError>;
 
-    /// Get pinhole parameters.
+    /// Returns the pinhole parameters (fx, fy, cx, cy).
+    ///
+    /// # Returns
+    ///
+    /// [`PinholeParams`] struct containing focal lengths and principal point.
     fn get_pinhole_params(&self) -> PinholeParams;
 
-    /// Get distortion parameters (model-specific).
+    /// Returns the distortion model and parameters.
+    ///
+    /// # Returns
+    ///
+    /// [`DistortionModel`] enum variant with model-specific parameters.
+    /// Returns `DistortionModel::None` for pinhole cameras without distortion.
     fn get_distortion(&self) -> DistortionModel;
 
-    /// Get model name identifier.
+    /// Returns the camera model name identifier.
+    ///
+    /// # Returns
+    ///
+    /// Static string identifier for the camera model type:
+    /// - `"pinhole"`, `"rad_tan"`, `"kannala_brandt"`, etc.
     fn get_model_name(&self) -> &'static str;
 }
 
