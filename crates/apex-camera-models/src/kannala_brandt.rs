@@ -41,9 +41,7 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -55,8 +53,6 @@ pub struct KannalaBrandtCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl KannalaBrandtCamera {
@@ -74,20 +70,10 @@ impl KannalaBrandtCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
-        // Validate distortion model
-        if !matches!(distortion, DistortionModel::KannalaBrandt { .. }) {
-            return Err(CameraModelError::InvalidParams(format!(
-                "KannalaBrandtCamera requires KannalaBrandt distortion model, got {:?}",
-                distortion
-            )));
-        }
-
         let model = Self {
             pinhole,
             distortion,
-            resolution,
         };
         model.validate_params()?;
         Ok(model)
@@ -178,10 +164,6 @@ impl From<&[f64]> for KannalaBrandtCamera {
                 k3: params[6],
                 k4: params[7],
             },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -205,10 +187,6 @@ impl From<[f64; 8]> for KannalaBrandtCamera {
                 k2: params[5],
                 k3: params[6],
                 k4: params[7],
-            },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
             },
         }
     }
@@ -603,11 +581,7 @@ mod tests {
             k3: 0.001,
             k4: 0.0001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
         assert_eq!(camera.pinhole.fx, 300.0);
         let (k1, _, _, _) = camera.distortion_params();
         assert_eq!(k1, 0.1);
@@ -623,11 +597,7 @@ mod tests {
             k3: 0.001,
             k4: 0.0001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
 
@@ -646,11 +616,7 @@ mod tests {
             k3: 0.001,
             k4: 0.0001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -688,11 +654,7 @@ mod tests {
             k3: 0.001,
             k4: 0.0001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
@@ -734,11 +696,7 @@ mod tests {
             k3: 0.001,
             k4: 0.0001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = KannalaBrandtCamera::new(pinhole, distortion, resolution)?;
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
 
         // Test conversion to DVector
         let params: DVector<f64> = (&camera).into();

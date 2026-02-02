@@ -3,9 +3,7 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -53,8 +51,6 @@ pub struct BALPinholeCameraStrict {
     pub f: f64,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl BALPinholeCameraStrict {
@@ -75,7 +71,6 @@ impl BALPinholeCameraStrict {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        _resolution: crate::Resolution,
     ) -> Result<Self, CameraModelError> {
         // Validate strict BAL constraints on input
         if (pinhole.fx - pinhole.fy).abs() > 1e-10 {
@@ -93,7 +88,6 @@ impl BALPinholeCameraStrict {
         let camera = Self {
             f: pinhole.fx, // Use fx as the single focal length
             distortion,
-            resolution: _resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -105,11 +99,7 @@ impl BALPinholeCameraStrict {
     pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        }; // Dummy resolution
-        Self::new(pinhole, distortion, resolution)
+        Self::new(pinhole, distortion)
     }
 
     /// Helper method to extract distortion parameter, returning Result for consistency.
@@ -172,10 +162,6 @@ impl From<&[f64]> for BALPinholeCameraStrict {
                 k1: params[1],
                 k2: params[2],
             },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -192,10 +178,6 @@ impl From<[f64; 3]> for BALPinholeCameraStrict {
             distortion: DistortionModel::Radial {
                 k1: params[1],
                 k2: params[2],
-            },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
             },
         }
     }
@@ -690,13 +672,7 @@ mod tests {
     fn test_bal_strict_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.4, k2: -0.3 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-
-        let camera = BALPinholeCameraStrict::new(pinhole, distortion, resolution)?;
-
+        let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
         let (k1, k2) = camera.distortion_params();
 
         assert_eq!(camera.f, 500.0);
@@ -714,12 +690,7 @@ mod tests {
             cy: 0.0,
         };
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-
-        let result = BALPinholeCameraStrict::new(pinhole, distortion, resolution);
+        let result = BALPinholeCameraStrict::new(pinhole, distortion);
         assert!(result.is_err());
     }
 
@@ -732,12 +703,7 @@ mod tests {
             cy: 0.0,
         };
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-
-        let result = BALPinholeCameraStrict::new(pinhole, distortion, resolution);
+        let result = BALPinholeCameraStrict::new(pinhole, distortion);
         assert!(result.is_err());
     }
 

@@ -50,9 +50,7 @@
 //! - Brown, "Decentering Distortion of Lenses", 1966
 //! - OpenCV Camera Calibration Documentation
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
@@ -64,8 +62,6 @@ pub struct RadTanCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl RadTanCamera {
@@ -83,7 +79,6 @@ impl RadTanCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
         // Validate distortion model
         // if !matches!(distortion, DistortionModel::BrownConrady { .. }) {
@@ -96,7 +91,6 @@ impl RadTanCamera {
         let camera = Self {
             pinhole,
             distortion,
-            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -112,6 +106,109 @@ impl RadTanCamera {
         match self.distortion {
             DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => (k1, k2, p1, p2, k3),
             _ => (0.0, 0.0, 0.0, 0.0, 0.0),
+        }
+    }
+}
+
+/// Convert camera to dynamic vector of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+impl From<&RadTanCamera> for DVector<f64> {
+    fn from(camera: &RadTanCamera) -> Self {
+        let (k1, k2, p1, p2, k3) = camera.distortion_params();
+        DVector::from_vec(vec![
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            k1,
+            k2,
+            p1,
+            p2,
+            k3,
+        ])
+    }
+}
+
+/// Convert camera to fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+impl From<&RadTanCamera> for [f64; 9] {
+    fn from(camera: &RadTanCamera) -> Self {
+        let (k1, k2, p1, p2, k3) = camera.distortion_params();
+        [
+            camera.pinhole.fx,
+            camera.pinhole.fy,
+            camera.pinhole.cx,
+            camera.pinhole.cy,
+            k1,
+            k2,
+            p1,
+            p2,
+            k3,
+        ]
+    }
+}
+
+/// Create camera from slice of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+///
+/// # Panics
+///
+/// Panics if the slice has fewer than 9 elements.
+impl From<&[f64]> for RadTanCamera {
+    fn from(params: &[f64]) -> Self {
+        assert!(
+            params.len() >= 9,
+            "RadTanCamera requires at least 9 parameters, got {}",
+            params.len()
+        );
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::BrownConrady {
+                k1: params[4],
+                k2: params[5],
+                p1: params[6],
+                p2: params[7],
+                k3: params[8],
+            },
+        }
+    }
+}
+
+/// Create camera from fixed-size array of intrinsic parameters.
+///
+/// # Layout
+///
+/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+impl From<[f64; 9]> for RadTanCamera {
+    fn from(params: [f64; 9]) -> Self {
+        Self {
+            pinhole: PinholeParams {
+                fx: params[0],
+                fy: params[1],
+                cx: params[2],
+                cy: params[3],
+            },
+            distortion: DistortionModel::BrownConrady {
+                k1: params[4],
+                k2: params[5],
+                p1: params[6],
+                p2: params[7],
+                k3: params[8],
+            },
         }
     }
 }
@@ -771,121 +868,6 @@ impl CameraModel for RadTanCamera {
     }
 }
 
-// ============================================================================
-// From/Into Trait Implementations for RadTanCamera
-// ============================================================================
-
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
-impl From<&RadTanCamera> for DVector<f64> {
-    fn from(camera: &RadTanCamera) -> Self {
-        let (k1, k2, p1, p2, k3) = camera.distortion_params();
-        DVector::from_vec(vec![
-            camera.pinhole.fx,
-            camera.pinhole.fy,
-            camera.pinhole.cx,
-            camera.pinhole.cy,
-            k1,
-            k2,
-            p1,
-            p2,
-            k3,
-        ])
-    }
-}
-
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
-impl From<&RadTanCamera> for [f64; 9] {
-    fn from(camera: &RadTanCamera) -> Self {
-        let (k1, k2, p1, p2, k3) = camera.distortion_params();
-        [
-            camera.pinhole.fx,
-            camera.pinhole.fy,
-            camera.pinhole.cx,
-            camera.pinhole.cy,
-            k1,
-            k2,
-            p1,
-            p2,
-            k3,
-        ]
-    }
-}
-
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 9 elements.
-impl From<&[f64]> for RadTanCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 9,
-            "RadTanCamera requires at least 9 parameters, got {}",
-            params.len()
-        );
-        Self {
-            pinhole: PinholeParams {
-                fx: params[0],
-                fy: params[1],
-                cx: params[2],
-                cy: params[3],
-            },
-            distortion: DistortionModel::BrownConrady {
-                k1: params[4],
-                k2: params[5],
-                p1: params[6],
-                p2: params[7],
-                k3: params[8],
-            },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
-        }
-    }
-}
-
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
-impl From<[f64; 9]> for RadTanCamera {
-    fn from(params: [f64; 9]) -> Self {
-        Self {
-            pinhole: PinholeParams {
-                fx: params[0],
-                fy: params[1],
-                cx: params[2],
-                cy: params[3],
-            },
-            distortion: DistortionModel::BrownConrady {
-                k1: params[4],
-                k2: params[5],
-                p1: params[6],
-                p2: params[7],
-                k3: params[8],
-            },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -902,11 +884,7 @@ mod tests {
             p2: 0.002,
             k3: 0.001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
+        let camera = RadTanCamera::new(pinhole, distortion)?;
         assert_eq!(camera.pinhole.fx, 300.0);
         let (k1, _, p1, _, _) = camera.distortion_params();
         assert_eq!(k1, 0.1);
@@ -924,11 +902,7 @@ mod tests {
             p2: 0.0,
             k3: 0.0,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
+        let camera = RadTanCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
 
@@ -948,11 +922,7 @@ mod tests {
             p2: 0.002,
             k3: 0.001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
+        let camera = RadTanCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -991,11 +961,7 @@ mod tests {
             p2: 0.002,
             k3: 0.001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
+        let camera = RadTanCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
@@ -1038,11 +1004,7 @@ mod tests {
             p2: 0.002,
             k3: 0.001,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = RadTanCamera::new(pinhole, distortion, resolution)?;
+        let camera = RadTanCamera::new(pinhole, distortion)?;
 
         // Test conversion to DVector
         let params: DVector<f64> = (&camera).into();

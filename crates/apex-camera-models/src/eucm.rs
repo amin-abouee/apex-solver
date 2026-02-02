@@ -40,9 +40,7 @@
 //!
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -54,8 +52,6 @@ pub struct EucmCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl EucmCamera {
@@ -73,12 +69,10 @@ impl EucmCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
             pinhole,
             distortion,
-            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -180,10 +174,6 @@ impl From<&[f64]> for EucmCamera {
                 alpha: params[4],
                 beta: params[5],
             },
-            resolution: crate::Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -205,10 +195,6 @@ impl From<[f64; 6]> for EucmCamera {
             distortion: DistortionModel::EUCM {
                 alpha: params[4],
                 beta: params[5],
-            },
-            resolution: crate::Resolution {
-                width: 0,
-                height: 0,
             },
         }
     }
@@ -780,11 +766,7 @@ mod tests {
             alpha: 0.5,
             beta: 1.0,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+        let camera = EucmCamera::new(pinhole, distortion)?;
 
         assert_eq!(camera.pinhole.fx, 300.0);
         assert_eq!(camera.distortion_params(), (0.5, 1.0));
@@ -798,11 +780,7 @@ mod tests {
             alpha: 0.5,
             beta: 1.0,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+        let camera = EucmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
@@ -820,11 +798,7 @@ mod tests {
             alpha: 0.6,
             beta: 1.2,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+        let camera = EucmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -861,11 +835,7 @@ mod tests {
             alpha: 0.6,
             beta: 1.2,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+        let camera = EucmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -906,11 +876,7 @@ mod tests {
             alpha: 0.7,
             beta: 1.5,
         };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = EucmCamera::new(pinhole, distortion, resolution)?;
+        let camera = EucmCamera::new(pinhole, distortion)?;
 
         // Test conversion to DVector
         let params: DVector<f64> = (&camera).into();

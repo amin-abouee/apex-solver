@@ -43,9 +43,7 @@
 //!
 //! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -57,8 +55,6 @@ pub struct PinholeCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl PinholeCamera {
@@ -89,12 +85,10 @@ impl PinholeCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: crate::Resolution,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
             pinhole,
             distortion,
-            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -158,10 +152,6 @@ impl From<&[f64]> for PinholeCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::None,
-            resolution: crate::Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -181,10 +171,6 @@ impl From<[f64; 4]> for PinholeCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::None,
-            resolution: crate::Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -605,11 +591,7 @@ mod tests {
     fn test_pinhole_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         assert_eq!(camera.pinhole.fx, 500.0);
         assert_eq!(camera.pinhole.fy, 500.0);
         assert_eq!(camera.pinhole.cx, 320.0);
@@ -630,11 +612,7 @@ mod tests {
     fn test_projection_at_optical_axis() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
 
         let uv = camera.project(&p_cam)?;
@@ -649,11 +627,7 @@ mod tests {
     fn test_projection_off_axis() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let uv = camera.project(&p_cam)?;
@@ -668,11 +642,7 @@ mod tests {
     fn test_projection_behind_camera() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.0, 0.0, -1.0);
 
         let result = camera.project(&p_cam);
@@ -685,11 +655,7 @@ mod tests {
     fn test_jacobian_point_dimensions() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac = camera.jacobian_point(&p_cam);
@@ -704,11 +670,7 @@ mod tests {
     fn test_jacobian_intrinsics_dimensions() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac = camera.jacobian_intrinsics(&p_cam);
@@ -722,11 +684,7 @@ mod tests {
     fn test_jacobian_point_numerical() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -766,11 +724,7 @@ mod tests {
     fn test_jacobian_intrinsics_numerical() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);
@@ -815,11 +769,7 @@ mod tests {
     fn test_jacobian_pose() -> TestResult {
         let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
         let distortion = DistortionModel::None;
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+        let camera = PinholeCamera::new(pinhole, distortion)?;
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 

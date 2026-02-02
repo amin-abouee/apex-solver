@@ -40,9 +40,7 @@
 //!
 //! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -55,8 +53,6 @@ pub struct DoubleSphereCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl DoubleSphereCamera {
@@ -87,12 +83,10 @@ impl DoubleSphereCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: Resolution,
     ) -> Result<Self, CameraModelError> {
         let model = Self {
             pinhole,
             distortion,
-            resolution,
         };
         model.validate_params()?;
         Ok(model)
@@ -208,10 +202,6 @@ impl From<&[f64]> for DoubleSphereCamera {
                 xi: params[4],
                 alpha: params[5],
             },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -233,10 +223,6 @@ impl From<[f64; 6]> for DoubleSphereCamera {
             distortion: DistortionModel::DoubleSphere {
                 xi: params[4],
                 alpha: params[5],
-            },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
             },
         }
     }
@@ -827,11 +813,7 @@ mod tests {
             xi: -0.2,
             alpha: 0.6,
         };
-        let resolution = Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
         assert_eq!(camera.pinhole.fx, 300.0);
         let (xi, alpha) = camera.distortion_params();
         assert_eq!(alpha, 0.6);
@@ -847,11 +829,7 @@ mod tests {
             xi: -0.2,
             alpha: 0.6,
         };
-        let resolution = Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
 
@@ -868,11 +846,7 @@ mod tests {
             xi: -0.2,
             alpha: 0.6,
         };
-        let resolution = Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_point(&p_cam);
@@ -908,11 +882,7 @@ mod tests {
             xi: -0.2,
             alpha: 0.6,
         };
-        let resolution = Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
         let jac_analytical = camera.jacobian_intrinsics(&p_cam);

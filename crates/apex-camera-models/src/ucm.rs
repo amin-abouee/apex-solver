@@ -37,9 +37,7 @@
 //!
 //! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
 
-use crate::{
-    CameraModel, CameraModelError, DistortionModel, PinholeParams, Resolution, skew_symmetric,
-};
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -51,8 +49,6 @@ pub struct UcmCamera {
     pub pinhole: PinholeParams,
     /// Lens distortion model and parameters
     pub distortion: DistortionModel,
-    /// Image resolution
-    pub resolution: Resolution,
 }
 
 impl UcmCamera {
@@ -70,12 +66,10 @@ impl UcmCamera {
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
-        resolution: crate::Resolution,
     ) -> Result<Self, CameraModelError> {
         let camera = Self {
             pinhole,
             distortion,
-            resolution,
         };
         camera.validate_params()?;
         Ok(camera)
@@ -171,10 +165,6 @@ impl From<&[f64]> for UcmCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::UCM { alpha: params[4] },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -194,10 +184,6 @@ impl From<[f64; 5]> for UcmCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::UCM { alpha: params[4] },
-            resolution: Resolution {
-                width: 0,
-                height: 0,
-            },
         }
     }
 }
@@ -601,11 +587,7 @@ mod tests {
     fn test_ucm_camera_creation() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::UCM { alpha: 0.5 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = UcmCamera::new(pinhole, distortion, resolution)?;
+        let camera = UcmCamera::new(pinhole, distortion)?;
 
         assert_eq!(camera.pinhole.fx, 300.0);
         assert_eq!(camera.distortion_params(), 0.5);
@@ -616,11 +598,7 @@ mod tests {
     fn test_projection_at_optical_axis() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::UCM { alpha: 0.5 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = UcmCamera::new(pinhole, distortion, resolution)?;
+        let camera = UcmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.0, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
@@ -633,11 +611,7 @@ mod tests {
     fn test_jacobian_point_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::UCM { alpha: 0.6 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = UcmCamera::new(pinhole, distortion, resolution)?;
+        let camera = UcmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -673,11 +647,7 @@ mod tests {
     fn test_jacobian_intrinsics_numerical() -> TestResult {
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::UCM { alpha: 0.6 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = UcmCamera::new(pinhole, distortion, resolution)?;
+        let camera = UcmCamera::new(pinhole, distortion)?;
 
         let p_cam = Vector3::new(0.1, 0.2, 1.0);
 
@@ -717,11 +687,7 @@ mod tests {
     fn test_ucm_from_into_traits() -> TestResult {
         let pinhole = PinholeParams::new(400.0, 410.0, 320.0, 240.0)?;
         let distortion = DistortionModel::UCM { alpha: 0.7 };
-        let resolution = crate::Resolution {
-            width: 640,
-            height: 480,
-        };
-        let camera = UcmCamera::new(pinhole, distortion, resolution)?;
+        let camera = UcmCamera::new(pinhole, distortion)?;
 
         // Test conversion to DVector
         let params: DVector<f64> = (&camera).into();

@@ -160,17 +160,6 @@ pub enum DistortionModel {
     DoubleSphere { xi: f64, alpha: f64 },
 }
 
-/// Represents the resolution of a camera image.
-///
-/// This struct holds the width and height of the image sensor in pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Resolution {
-    /// The width of the image in pixels.
-    pub width: u32,
-    /// The height of the image in pixels.
-    pub height: u32,
-}
-
 /// Validates that a 3D point's z-coordinate is positive (in front of camera).
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
     if z < f64::EPSILON.sqrt() {
