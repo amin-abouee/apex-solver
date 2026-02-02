@@ -45,7 +45,7 @@ use tracing::{error, info, warn};
 const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
-use apex_camera_models::{BALPinholeCameraStrict, SelfCalibration};
+use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams, SelfCalibration};
 use apex_io::BalLoader;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
@@ -286,8 +286,20 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     );
     for obs in &dataset.observations {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2)
-            .expect("Invalid camera parameters in dataset");
+        #[allow(clippy::expect_used)]
+        let camera = BALPinholeCameraStrict::new(
+            PinholeParams {
+                fx: cam.focal_length,
+                fy: cam.focal_length,
+                cx: 0.0,
+                cy: 0.0,
+            },
+            DistortionModel::Radial {
+                k1: cam.k1,
+                k2: cam.k2,
+            },
+        )
+        .expect("Invalid camera parameters in dataset");
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);

@@ -21,7 +21,7 @@
 //!
 //! Uses ProjectionFactor with SE3 poses and BALPinholeCameraStrict camera model.
 
-use apex_solver::apex_camera_models::BALPinholeCameraStrict;
+use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::{BalDataset, BalLoader};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se3::SE3;
@@ -326,7 +326,18 @@ where
 {
     for obs in valid_obs {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2)?;
+        let camera = BALPinholeCameraStrict::new(
+            PinholeParams {
+                fx: cam.focal_length,
+                fy: cam.focal_length,
+                cx: 0.0,
+                cy: 0.0,
+            },
+            DistortionModel::Radial {
+                k1: cam.k1,
+                k2: cam.k2,
+            },
+        )?;
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
