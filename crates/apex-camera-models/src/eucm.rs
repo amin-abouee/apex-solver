@@ -59,13 +59,16 @@ impl EucmCamera {
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
-    /// * `distortion` - MUST be DistortionModel::EUCM { alpha, beta }
-    /// * `resolution` - Image resolution
+    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
+    /// * `distortion` - MUST be [`DistortionModel::EUCM`] with `alpha` and `beta`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `EucmCamera` instance if the distortion model matches.
     ///
     /// # Errors
     ///
-    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::EUCM`.
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::EUCM`].
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -78,7 +81,12 @@ impl EucmCamera {
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameters, returning Result for consistency.
+    /// Helper method to extract distortion parameters.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(alpha, beta)` containing the EUCM parameters.
+    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns `(0.0, 0.0)`.
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::EUCM { alpha, beta } => (alpha, beta),
@@ -87,6 +95,15 @@ impl EucmCamera {
     }
 
     /// Checks the geometric condition for a valid projection.
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point.
+    /// * `denom` - The projection denominator `α·d + (1-α)·z`.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point satisfies the projection condition, `false` otherwise.
     pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
         let (alpha, _) = self.distortion_params();
         let mut condition = true;
@@ -99,6 +116,15 @@ impl EucmCamera {
         condition
     }
 
+    /// Checks the geometric condition for a valid unprojection.
+    ///
+    /// # Arguments
+    ///
+    /// * `r_squared` - The squared radius in normalized image coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point satisfies the unprojection condition, `false` otherwise.
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
         let (alpha, beta) = self.distortion_params();
         let mut condition = true;
@@ -218,12 +244,15 @@ impl CameraModel for EucmCamera {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
-    /// - `Ok(uv)` - 2D image coordinates if valid
-    /// - `Err` - If denom < PRECISION or geometric condition fails
+    /// - `Ok(uv)` - 2D image coordinates if valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::InvalidParams`] if the geometric projection condition fails or the denominator is too small.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -263,12 +292,16 @@ impl CameraModel for EucmCamera {
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates
+    /// * `point_2d` - 2D point in image coordinates.
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err` - If unprojection condition fails
+    /// - `Ok(ray)` - Normalized 3D ray direction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::PointIsOutSideImage`] if the unprojection condition fails.
+    /// Returns [`CameraModelError::NumericalError`] if a division by zero occurs during calculation.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -307,7 +340,16 @@ impl CameraModel for EucmCamera {
     ///
     /// # Validity Conditions
     ///
-    /// - denom = α·d + (1-α)·z must be ≥ PRECISION
+    /// - `denom = α·d + (1-α)·z` must be ≥ PRECISION.
+    /// - Point must satisfy the specific EUCM projection condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point projects to a valid image coordinates, `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -322,6 +364,8 @@ impl CameraModel for EucmCamera {
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    ///
+    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
     ///
     /// # Mathematical Derivation
     ///
@@ -397,12 +441,20 @@ impl CameraModel for EucmCamera {
     /// ∂v/∂z = fy · (-y·(α·z/d + 1-α)) / denom²
     /// ```
     ///
-    /// ## References
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Jacobian matrix.
+    ///
+    /// # References
     ///
     /// - Khomutenko et al., "An Enhanced Unified Camera Model", RAL 2016
     /// - Mei & Rives, "Single View Point Omnidirectional Camera Calibration from Planar Grids", ICRA 2007
     ///
-    /// ## Numerical Verification
+    /// # Numerical Verification
     ///
     /// This analytical Jacobian is verified against numerical differentiation in
     /// `test_jacobian_point_numerical()` with tolerance < 1e-5.
@@ -706,10 +758,14 @@ impl CameraModel for EucmCamera {
     ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - cx, cy must be finite
-    /// - α must be in [0, 1]
-    /// - β must be positive (> 0)
+    /// - `fx`, `fy` must be positive.
+    /// - `cx`, `cy` must be finite.
+    /// - `α` must be in [0, 1].
+    /// - `β` must be positive (> 0).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -735,6 +791,7 @@ impl CameraModel for EucmCamera {
         Ok(())
     }
 
+    /// Returns the pinhole parameters of the camera.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -744,10 +801,12 @@ impl CameraModel for EucmCamera {
         }
     }
 
+    /// Returns the distortion model and parameters of the camera.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the string identifier for the camera model.
     fn get_model_name(&self) -> &'static str {
         "eucm"
     }

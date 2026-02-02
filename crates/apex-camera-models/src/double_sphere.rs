@@ -60,24 +60,27 @@ impl DoubleSphereCamera {
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy)
-    /// * `distortion` - Distortion model (must be DistortionModel::DoubleSphere)
-    /// * `resolution` - Image resolution (width, height)
+    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy).
+    /// * `distortion` - Distortion model (must be [`DistortionModel::DoubleSphere`]).
     ///
     /// # Returns
     ///
-    /// - `Ok(DoubleSphereCamera)` - Successfully created camera
-    /// - `Err(CameraModelError)` - Invalid parameters or wrong distortion model
+    /// Returns a new `DoubleSphereCamera` instance if the parameters are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if:
+    /// - The distortion model is not `DoubleSphere`.
+    /// - Parameters are invalid (e.g., negative focal length, invalid alpha).
     ///
     /// # Example
     ///
     /// ```
-    /// use apex_camera_models::{DoubleSphereCamera, PinholeParams, DistortionModel, Resolution};
+    /// use apex_camera_models::{DoubleSphereCamera, PinholeParams, DistortionModel};
     ///
     /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
     /// let distortion = DistortionModel::DoubleSphere { xi: -0.2, alpha: 0.6 };
-    /// let resolution = Resolution { width: 640, height: 480 };
-    /// let camera = DoubleSphereCamera::new(pinhole, distortion, resolution)?;
+    /// let camera = DoubleSphereCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
     pub fn new(
@@ -98,8 +101,7 @@ impl DoubleSphereCamera {
     ///
     /// # Returns
     ///
-    /// * `(xi, alpha)` - The Double Sphere parameters.
-    ///
+    /// Returns a tuple `(xi, alpha)` containing the Double Sphere parameters.
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::DoubleSphere { xi, alpha } => (xi, alpha),
@@ -108,6 +110,15 @@ impl DoubleSphereCamera {
     }
 
     /// Checks the geometric condition for a valid projection.
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point in the camera frame.
+    /// * `d1` - The Euclidean distance to the point.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if the point satisfies the projection condition, or `Ok(false)` otherwise.
     fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
         let (xi, alpha) = self.distortion_params();
         let w1 = if alpha > 0.5 {
@@ -120,6 +131,14 @@ impl DoubleSphereCamera {
     }
 
     /// Checks the geometric condition for a valid unprojection.
+    ///
+    /// # Arguments
+    ///
+    /// * `r_squared` - The squared radius of the point in normalized image coordinates.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(true)` if the point satisfies the unprojection condition, or `Ok(false)` otherwise.
     fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
         let (alpha, _) = self.distortion_params();
         if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
@@ -247,13 +266,17 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
-    /// - `Ok(uv)` - 2D image coordinates if valid
-    /// - `Err(CameraModelError::ProjectionOutSideImage)` - If geometric projection condition fails
-    /// - `Err(CameraModelError::PointAtCameraCenter)` - If denominator is too small (point at camera center)
+    /// Returns the 2D image coordinates if valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if:
+    /// - The point fails the geometric projection condition (`ProjectionOutSideImage`).
+    /// - The denominator is too small, indicating the point is at the camera center (`PointAtCameraCenter`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -290,12 +313,15 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates
+    /// * `point_2d` - 2D point in image coordinates.
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err` - If unprojection condition fails
+    /// Returns the normalized 3D ray direction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::PointIsOutSideImage`] if the unprojection condition fails.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -335,6 +361,14 @@ impl CameraModel for DoubleSphereCamera {
     /// - d₁ > PRECISION
     /// - Projection condition: z > -w₂·d₁ where w₂ depends on α and ξ
     /// - denom = α·d₂ + (1-α)·(ξ·d₁ + z) must be ≥ PRECISION
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point is valid for projection, `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -436,6 +470,14 @@ impl CameraModel for DoubleSphereCamera {
     /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
     ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
     /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Jacobian matrix.
     ///
     /// # References
     ///
@@ -567,11 +609,16 @@ impl CameraModel for DoubleSphereCamera {
     ///       = (2×6)
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_world` - 3D point in world coordinate frame.
+    /// * `pose` - The camera pose in SE(3).
+    ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// 1. Point Jacobian (∂π/∂p_cam): 2×3 matrix
-    /// 2. Pose Transformation Jacobian (∂p_cam/∂ξ): 3×6 matrix
+    /// Returns a tuple containing:
+    /// 1. Point Jacobian (∂π/∂p_cam): 2×3 matrix.
+    /// 2. Pose Transformation Jacobian (∂p_cam/∂ξ): 3×6 matrix.
     ///
     /// The caller can multiply these to get the full pose Jacobian.
     ///
@@ -693,12 +740,20 @@ impl CameraModel for DoubleSphereCamera {
     /// ## Final Jacobian Matrix (2×6)
     ///
     /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂ξ  ∂u/∂α ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂ξ  ∂v/∂α ]
+    /// J = [ ∂u/∂fx  ∂u/∂y  ∂u/∂cx  ∂u/∂cy  ∂u/∂ξ  ∂u/∂α ]
+    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂cx  ∂v/∂cy  ∂v/∂ξ  ∂v/∂α ]
     ///
     ///   = [ x/denom    0       1       0      -fx·x·∂denom/∂ξ/denom²  -fx·x·(d₂-w)/denom² ]
     ///     [   0     y/denom    0       1      -fy·y·∂denom/∂ξ/denom²  -fy·y·(d₂-w)/denom² ]
     /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x6 Intrinsic Jacobian matrix.
     ///
     /// # References
     ///
@@ -753,6 +808,10 @@ impl CameraModel for DoubleSphereCamera {
     /// - cx, cy must be finite
     /// - ξ must be finite
     /// - α must be in (0, 1]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates the validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -778,6 +837,7 @@ impl CameraModel for DoubleSphereCamera {
         Ok(())
     }
 
+    /// Returns the pinhole parameters of the camera.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -787,18 +847,16 @@ impl CameraModel for DoubleSphereCamera {
         }
     }
 
+    /// Returns the distortion model and parameters of the camera.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the string identifier for the camera model.
     fn get_model_name(&self) -> &'static str {
         "double_sphere"
     }
 }
-
-// ============================================================================
-// From/Into Trait Implementations
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

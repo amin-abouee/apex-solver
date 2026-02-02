@@ -62,24 +62,27 @@ impl PinholeCamera {
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy)
-    /// * `distortion` - Distortion model (must be DistortionModel::None)
-    /// * `resolution` - Image resolution (width, height)
+    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy).
+    /// * `distortion` - Distortion model (must be [`DistortionModel::None`]).
     ///
     /// # Returns
     ///
-    /// - `Ok(PinholeCamera)` - Successfully created camera
-    /// - `Err(CameraModelError)` - Invalid parameters or wrong distortion model
+    /// Returns a new `PinholeCamera` instance if the parameters are valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if:
+    /// - The distortion model is not `None`.
+    /// - Parameters are invalid (e.g., negative focal length, infinite principal point).
     ///
     /// # Example
     ///
     /// ```
-    /// use apex_camera_models::{PinholeCamera, PinholeParams, DistortionModel, Resolution};
+    /// use apex_camera_models::{PinholeCamera, PinholeParams, DistortionModel};
     ///
     /// let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
     /// let distortion = DistortionModel::None;
-    /// let resolution = Resolution { width: 640, height: 480 };
-    /// let camera = PinholeCamera::new(pinhole, distortion, resolution)?;
+    /// let camera = PinholeCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
     pub fn new(
@@ -95,6 +98,14 @@ impl PinholeCamera {
     }
 
     /// Checks the geometric condition for a valid projection.
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point in the camera frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `z >= 1e-6`, `false` otherwise.
     pub fn check_projection_condition(&self, z: f64) -> bool {
         z >= 1e-6
     }
@@ -191,12 +202,15 @@ impl CameraModel for PinholeCamera {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z)
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z).
     ///
     /// # Returns
     ///
-    /// - `Ok(uv)` - 2D image coordinates if z > MIN_DEPTH
-    /// - `Err(CameraModelError::PointAtCameraCenter)` - If point is behind or at camera (z ≤ MIN_DEPTH)
+    /// Returns the 2D image coordinates if valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::PointAtCameraCenter`] if the point is behind or at the camera center (`z <= MIN_DEPTH`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
             return Err(CameraModelError::PointAtCameraCenter);
@@ -220,12 +234,15 @@ impl CameraModel for PinholeCamera {
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates (u, v)
+    /// * `point_2d` - 2D point in image coordinates (u, v).
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err` - Never fails for pinhole model
+    /// Returns the normalized 3D ray direction.
+    ///
+    /// # Errors
+    ///
+    /// This function never fails for the simple pinhole model, but returns a `Result` for trait consistency.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let mx = (point_2d.x - self.pinhole.cx) / self.pinhole.fx;
         let my = (point_2d.y - self.pinhole.cy) / self.pinhole.fy;
@@ -239,17 +256,17 @@ impl CameraModel for PinholeCamera {
 
     /// Checks if a 3D point can be validly projected.
     ///
+    /// # Validity Conditions
+    ///
+    /// - z ≥ 1e-6 (point must be strictly in front of the camera).
+    ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
-    /// `true` if the point satisfies projection constraints.
-    ///
-    /// # Validity Conditions
-    ///
-    /// - z ≥ MIN_DEPTH (point in front of camera)
+    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
@@ -296,6 +313,14 @@ impl CameraModel for PinholeCamera {
     /// J = [ ∂u/∂x   ∂u/∂y   ∂u/∂z  ]   [ fx/z    0      -fx·x/z² ]
     ///     [ ∂v/∂x   ∂v/∂y   ∂v/∂z  ] = [  0     fy/z    -fy·y/z² ]
     /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Jacobian matrix.
     ///
     /// # Implementation Note
     ///
@@ -398,11 +423,16 @@ impl CameraModel for PinholeCamera {
     ///       = (2×6)
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_world` - 3D point in world coordinate frame.
+    /// * `pose` - The camera pose in SE(3).
+    ///
     /// # Returns
     ///
-    /// A tuple containing:
-    /// 1. Point Jacobian (∂π/∂p_cam): 2×3 matrix
-    /// 2. Pose Transformation Jacobian (∂p_cam/∂ξ): 3×6 matrix
+    /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
+    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
+    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
     ///
     /// The caller can multiply these to get the full pose Jacobian.
     ///
@@ -506,6 +536,14 @@ impl CameraModel for PinholeCamera {
     ///     [  0      y/z      0       1    ]
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x4 Intrinsic Jacobian matrix.
+    ///
     /// # Implementation Note
     ///
     /// The implementation uses precomputed normalized coordinates:
@@ -530,15 +568,14 @@ impl CameraModel for PinholeCamera {
 
     /// Validates camera parameters.
     ///
-    /// # Returns
-    ///
-    /// - `Ok(())` - All parameters are valid
-    /// - `Err(CameraModelError)` - Invalid parameter detected
-    ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - cx, cy must be finite (not NaN or infinity)
+    /// - `fx` and `fy` must be positive.
+    /// - `cx` and `cy` must be finite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -549,6 +586,7 @@ impl CameraModel for PinholeCamera {
         Ok(())
     }
 
+    /// Returns the pinhole parameters of the camera.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -558,18 +596,16 @@ impl CameraModel for PinholeCamera {
         }
     }
 
+    /// Returns the distortion model and parameters of the camera.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the string identifier for the camera model.
     fn get_model_name(&self) -> &'static str {
         "pinhole"
     }
 }
-
-// ============================================================================
-// From/Into Trait Implementations
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,7 @@
-//! Radial-Tangential Distortion Camera Model
+//! Radial-Tangential Distortion Camera Model.
 //!
 //! The standard OpenCV camera model combining radial and tangential distortion.
-//! Widely used for narrow to moderate field-of-view cameras.
+//! This model is widely used for narrow to moderate field-of-view cameras.
 //!
 //! # Mathematical Model
 //!
@@ -55,27 +55,26 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
-/// Radial-Tangential camera model with 9 parameters.
+/// A Radial-Tangential camera model with 9 intrinsic parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RadTanCamera {
-    /// Linear pinhole parameters (fx, fy, cx, cy)
+    /// The linear pinhole parameters (fx, fy, cx, cy).
     pub pinhole: PinholeParams,
-    /// Lens distortion model and parameters
+    /// The lens distortion model and parameters.
     pub distortion: DistortionModel,
 }
 
 impl RadTanCamera {
-    /// Create a new Radial-Tangential (Brown-Conrady) camera.
+    /// Creates a new Radial-Tangential (Brown-Conrady) camera.
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
-    /// * `distortion` - MUST be DistortionModel::BrownConrady { k1, k2, p1, p2, k3 }
-    /// * `resolution` - Image resolution
+    /// * `pinhole` - The pinhole parameters (fx, fy, cx, cy).
+    /// * `distortion` - The distortion model. This must be `DistortionModel::BrownConrady` with parameters { k1, k2, p1, p2, k3 }.
     ///
     /// # Errors
     ///
-    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::BrownConrady`.
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::BrownConrady`].
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -110,11 +109,11 @@ impl RadTanCamera {
     }
 }
 
-/// Convert camera to dynamic vector of intrinsic parameters.
+/// Converts the camera parameters to a dynamic vector.
 ///
 /// # Layout
 ///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+/// The parameters are ordered as: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
 impl From<&RadTanCamera> for DVector<f64> {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera.distortion_params();
@@ -132,11 +131,11 @@ impl From<&RadTanCamera> for DVector<f64> {
     }
 }
 
-/// Convert camera to fixed-size array of intrinsic parameters.
+/// Converts the camera parameters to a fixed-size array.
 ///
 /// # Layout
 ///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+/// The parameters are ordered as: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
 impl From<&RadTanCamera> for [f64; 9] {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera.distortion_params();
@@ -154,11 +153,11 @@ impl From<&RadTanCamera> for [f64; 9] {
     }
 }
 
-/// Create camera from slice of intrinsic parameters.
+/// Creates a camera from a slice of intrinsic parameters.
 ///
 /// # Layout
 ///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+/// Expected parameter order: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
 ///
 /// # Panics
 ///
@@ -188,11 +187,11 @@ impl From<&[f64]> for RadTanCamera {
     }
 }
 
-/// Create camera from fixed-size array of intrinsic parameters.
+/// Creates a camera from a fixed-size array of intrinsic parameters.
 ///
 /// # Layout
 ///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, p1, p2, k3]
+/// Expected parameter order: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
 impl From<[f64; 9]> for RadTanCamera {
     fn from(params: [f64; 9]) -> Self {
         Self {
@@ -218,20 +217,20 @@ impl CameraModel for RadTanCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 9>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
     ///
     /// # Mathematical Formula
     ///
-    /// Combines radial distortion (k₁, k₂, k₃) and tangential distortion (p₁, p₂).
+    /// Combines radial distortion ($k_1, k_2, k_3$) and tangential distortion ($p_1, p_2$).
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - The 3D point in the camera coordinate frame.
     ///
     /// # Returns
     ///
-    /// - `Ok(uv)` - 2D image coordinates if valid
-    /// - `Err` - If point is at or behind camera
+    /// - `Ok(uv)` - The 2D image coordinates if valid.
+    /// - `Err` - If the point is at or behind the camera.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
             return Err(CameraModelError::InvalidParams(format!(
@@ -274,19 +273,19 @@ impl CameraModel for RadTanCamera {
     /// # Algorithm
     ///
     /// Iterative Newton-Raphson with Jacobian matrix:
-    /// 1. Start with undistorted estimate
-    /// 2. Compute distortion and Jacobian
-    /// 3. Update estimate: p' = p' - J⁻¹·f(p')
-    /// 4. Repeat until convergence
+    /// 1. Start with the undistorted estimate.
+    /// 2. Compute distortion and Jacobian.
+    /// 3. Update estimate: $p' = p' - J^{-1} \cdot f(p')$.
+    /// 4. Repeat until convergence.
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates
+    /// * `point_2d` - The 2D point in image coordinates.
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err` - If iteration fails to converge
+    /// - `Ok(ray)` - The normalized 3D ray direction.
+    /// - `Err` - If the iteration fails to converge.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         // Validate unprojection condition if needed (always true for RadTan generally)
         let u = point_2d.x;
@@ -388,12 +387,12 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Validity Conditions
     ///
-    /// - z ≥ PRECISION (point in front of camera)
+    /// - $z \ge \text{PRECISION}$ (point in front of camera)
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
+    /// Computes the Jacobian of the projection with respect to the 3D point coordinates ($2 \times 3$).
     ///
     /// # Mathematical Derivation
     ///
@@ -587,7 +586,7 @@ impl CameraModel for RadTanCamera {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Jacobian of projection w.r.t. camera pose (SE3).
+    /// Computes the Jacobian of the projection with respect to the camera pose (SE3).
     ///
     /// # Mathematical Derivation
     ///
@@ -596,10 +595,10 @@ impl CameraModel for RadTanCamera {
     /// ## Summary
     ///
     /// Returns `(J_pixel_point, J_point_pose)` where:
-    /// - J_pixel_point: 2×3 Jacobian ∂uv/∂p_cam (from `jacobian_point()`)
-    /// - J_point_pose: 3×6 Jacobian ∂p_cam/∂δξ = [ -R^T | [p_cam]× ]
+    /// - $J_{pixel\_point}$: $2 \times 3$ Jacobian $\frac{\partial uv}{\partial p_{cam}}$ (from `jacobian_point()`)
+    /// - $J_{point\_pose}$: $3 \times 6$ Jacobian $\frac{\partial p_{cam}}{\partial \delta \xi} = [ -R^T | [p_{cam}]_\times ]$
     ///
-    /// The full chain is: J_pixel_pose = J_pixel_point · J_point_pose
+    /// The full chain is: $J_{pixel\_pose} = J_{pixel\_point} \cdot J_{point\_pose}$
     ///
     /// ## SE(3) Parameterization
     ///
@@ -650,7 +649,7 @@ impl CameraModel for RadTanCamera {
         (d_uv_d_pcam, d_pcam_d_pose)
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×9).
+    /// Computes the Jacobian of the projection with respect to intrinsic parameters ($2 \times 9$).
     ///
     /// # Mathematical Derivation
     ///
@@ -824,13 +823,13 @@ impl CameraModel for RadTanCamera {
         ])
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - cx, cy must be finite
-    /// - k₁, k₂, p₁, p₂, k₃ must be finite
+    /// - $f_x, f_y$ must be positive ($> 0$)
+    /// - $c_x, c_y$ must be finite
+    /// - $k_1, k_2, p_1, p_2, k_3$ must be finite
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -855,14 +854,17 @@ impl CameraModel for RadTanCamera {
         Ok(())
     }
 
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         self.pinhole
     }
 
+    /// Returns the distortion model parameters.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the name of the camera model ("rad_tan").
     fn get_model_name(&self) -> &'static str {
         "rad_tan"
     }

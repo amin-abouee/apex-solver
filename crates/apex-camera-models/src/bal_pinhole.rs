@@ -54,20 +54,23 @@ pub struct BALPinholeCameraStrict {
 }
 
 impl BALPinholeCameraStrict {
-    /// Create a new strict BAL pinhole camera with distortion.
+    /// Creates a new strict BAL pinhole camera with distortion.
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole parameters. MUST have fx=fy and cx=cy=0 for strict BAL format.
-    /// * `distortion` - MUST be DistortionModel::Radial { k1, k2 }
-    /// * `resolution` - Image resolution (currently unused but kept for API consistency)
+    /// * `pinhole` - Pinhole parameters. MUST have `fx == fy` and `cx == cy == 0` for strict BAL format.
+    /// * `distortion` - MUST be [`DistortionModel::Radial`] with `k1` and `k2`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `BALPinholeCameraStrict` instance if parameters satisfy the strict BAL constraints.
     ///
     /// # Errors
     ///
-    /// Returns `CameraModelError::InvalidParams` if:
-    /// - `pinhole.fx != pinhole.fy` (strict BAL requires single focal length)
-    /// - `pinhole.cx != 0.0 || pinhole.cy != 0.0` (strict BAL has no principal point offset)
-    /// - `distortion` is not `DistortionModel::Radial`
+    /// Returns [`CameraModelError::InvalidParams`] if:
+    /// - `pinhole.fx != pinhole.fy` (strict BAL requires single focal length).
+    /// - `pinhole.cx != 0.0` or `pinhole.cy != 0.0` (strict BAL has no principal point offset).
+    /// - `distortion` is not [`DistortionModel::Radial`].
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -93,16 +96,33 @@ impl BALPinholeCameraStrict {
         Ok(camera)
     }
 
-    /// Create a strict BAL pinhole camera without distortion (k1=0, k2=0).
+    /// Creates a strict BAL pinhole camera without distortion (k1=0, k2=0).
     ///
     /// This is a convenience constructor for the common case of no distortion.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The single focal length in pixels.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `BALPinholeCameraStrict` instance with zero distortion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if the focal length is invalid (e.g., negative).
     pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
         Self::new(pinhole, distortion)
     }
 
-    /// Helper method to extract distortion parameter, returning Result for consistency.
+    /// Helper method to extract distortion parameters.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(k1, k2)` containing the radial distortion coefficients.
+    /// If the distortion model is not radial (which shouldn't happen for valid instances), returns `(0.0, 0.0)`.
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::Radial { k1, k2 } => (k1, k2),
@@ -110,7 +130,17 @@ impl BALPinholeCameraStrict {
         }
     }
 
-    /// Checks if a 3D point satisfies the projection condition (z < -epsilon for BAL).
+    /// Checks if a 3D point satisfies the projection condition.
+    ///
+    /// For BAL, the condition is `z < -epsilon` (negative Z is in front of camera).
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point in the camera frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point is safely in front of the camera, `false` otherwise.
     fn check_projection_condition(&self, z: f64) -> bool {
         z < -crate::MIN_DEPTH
     }
@@ -320,6 +350,14 @@ impl CameraModel for BALPinholeCameraStrict {
     /// ∂v/∂z = f · (∂y_d/∂x_n · ∂x_n/∂z + ∂y_d/∂y_n · ∂y_n/∂z)
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Jacobian matrix.
+    ///
     /// # References
     ///
     /// - Snavely et al., "Photo Tourism: Exploring Photo Collections in 3D", SIGGRAPH 2006
@@ -412,6 +450,7 @@ impl CameraModel for BALPinholeCameraStrict {
     ///        = p_cam - [δθ]× · p_cam - δρ
     ///        = p_cam + p_cam × δθ - δρ
     ///        = p_cam + [p_cam]× · δθ - δρ
+    ///        = p_cam + [p_cam]× · δθ - δρ
     /// ```
     ///
     /// Where [v]× denotes the skew-symmetric matrix (cross-product matrix).
@@ -434,17 +473,22 @@ impl CameraModel for BALPinholeCameraStrict {
     /// ∂(u,v)/∂ξ = ∂(u,v)/∂p_cam · ∂p_cam/∂ξ
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_world` - 3D point in world coordinate frame.
+    /// * `pose` - The camera pose in SE(3).
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
+    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
+    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
+    ///
     /// # References
     ///
     /// - Barfoot & Furgale, "Associating Uncertainty with Three-Dimensional Poses for Use in Estimation Problems", IEEE Trans. Robotics 2014
     /// - Solà et al., "A Micro Lie Theory for State Estimation in Robotics", arXiv:1812.01537, 2018
     /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization", Technical Report 2010
-    ///
-    /// # Returns
-    ///
-    /// A tuple `(d_uv_d_pcam, d_pcam_d_pose)` where:
-    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
-    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
     ///
     /// # Verification
     ///
@@ -541,6 +585,14 @@ impl CameraModel for BALPinholeCameraStrict {
     /// ∂v/∂θ = [y_d,   f·y_n·r²,   f·y_n·r⁴]
     /// ```
     ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Intrinsic Jacobian matrix (w.r.t `[f, k1, k2]`).
+    ///
     /// # References
     ///
     /// - Agarwal et al., "Bundle Adjustment in the Large", ECCV 2010, Section 3
@@ -549,8 +601,8 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// # Notes
     ///
-    /// This differs from the general BALPinholeCamera which has 6 parameters (fx, fy, cx, cy, k1, k2).
-    /// The strict BAL format enforces fx=fy and cx=cy=0 to match the original Bundler software
+    /// This differs from the general `BALPinholeCamera` which has 6 parameters (fx, fy, cx, cy, k1, k2).
+    /// The strict BAL format enforces `fx=fy` and `cx=cy=0` to match the original Bundler software
     /// and standard BAL dataset files, reducing the intrinsic dimensionality from 6 to 3.
     ///
     /// # Verification
@@ -605,6 +657,16 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector3::new(x_n / norm, y_n / norm, -1.0 / norm))
     }
 
+    /// Validates camera parameters.
+    ///
+    /// # Validation Rules
+    ///
+    /// - Focal length `f` must be positive.
+    /// - Distortion coefficients `k1`, `k2` must be finite.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.f <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -640,6 +702,9 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(())
     }
 
+    /// Returns the pinhole parameters of the camera.
+    ///
+    /// Note: For strict BAL cameras, `fx = fy = f` and `cx = cy = 0`.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.f,
@@ -649,18 +714,16 @@ impl CameraModel for BALPinholeCameraStrict {
         }
     }
 
+    /// Returns the distortion model and parameters of the camera.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the string identifier for the camera model.
     fn get_model_name(&self) -> &'static str {
-        "bal_pinhole_strict"
+        "bal_pinhole"
     }
 }
-
-// ============================================================================
-// From/Into Trait Implementations for BALPinholeCameraStrict
-// ============================================================================
 
 #[cfg(test)]
 mod tests {

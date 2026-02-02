@@ -60,13 +60,16 @@ impl FovCamera {
     ///
     /// # Arguments
     ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy)
-    /// * `distortion` - MUST be DistortionModel::FOV { w }
-    /// * `resolution` - Image resolution
+    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
+    /// * `distortion` - MUST be [`DistortionModel::FOV`] with parameter `w`.
+    ///
+    /// # Returns
+    ///
+    /// Returns a new `FovCamera` instance if the distortion model matches.
     ///
     /// # Errors
     ///
-    /// Returns `CameraModelError::InvalidParams` if `distortion` is not `DistortionModel::FOV`.
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::FOV`].
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -79,7 +82,12 @@ impl FovCamera {
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameter, returning Result for consistency.
+    /// Helper method to extract distortion parameter.
+    ///
+    /// # Returns
+    ///
+    /// Returns the `w` parameter for FOV.
+    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns `0.0`.
     fn distortion_params(&self) -> f64 {
         match self.distortion {
             DistortionModel::FOV { w } => w,
@@ -88,6 +96,16 @@ impl FovCamera {
     }
 
     /// Validates camera parameters.
+    ///
+    /// # Validation Rules
+    ///
+    /// - `fx`, `fy` must be positive.
+    /// - `cx`, `cy` must be finite.
+    /// - `w` must be in `(0, π]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     pub fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -204,12 +222,15 @@ impl CameraModel for FovCamera {
     ///
     /// # Arguments
     ///
-    /// * `p_cam` - 3D point in camera coordinate frame
+    /// * `p_cam` - 3D point in camera coordinate frame.
     ///
     /// # Returns
     ///
-    /// - `Some(uv)` - 2D image coordinates if valid
-    /// - `None` - If projection fails
+    /// - `Ok(uv)` - 2D image coordinates if valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::ProjectionOutSideImage`] if `z` is too small.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -217,9 +238,6 @@ impl CameraModel for FovCamera {
 
         // Check if z is valid (too close to camera center)
         if z < f64::EPSILON.sqrt() {
-            // return Err(CameraModelError::InvalidProjection {
-            //     message: format!("FOV: z too small: z={z}"),
-            // });
             return Err(CameraModelError::ProjectionOutSideImage);
         }
 
@@ -252,12 +270,15 @@ impl CameraModel for FovCamera {
     ///
     /// # Arguments
     ///
-    /// * `point_2d` - 2D point in image coordinates
+    /// * `point_2d` - 2D point in image coordinates.
     ///
     /// # Returns
     ///
-    /// - `Ok(ray)` - Normalized 3D ray direction
-    /// - `Err` - If unprojection fails
+    /// - `Ok(ray)` - Normalized 3D ray direction.
+    ///
+    /// # Errors
+    ///
+    /// This model does not explicitly fail unprojection unless internal math errors occur, in which case it propagates them.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -381,12 +402,20 @@ impl CameraModel for FovCamera {
     ///           [   0    fy·rd     0   ]
     /// ```
     ///
-    /// ## References
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x3 Jacobian matrix.
+    ///
+    /// # References
     ///
     /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
     /// - Zhang et al., "Fisheye Camera Calibration Using Principal Point Constraints", PAMI 2012
     ///
-    /// ## Numerical Verification
+    /// # Numerical Verification
     ///
     /// This analytical Jacobian is verified against numerical differentiation in
     /// `test_jacobian_point_numerical()` with tolerance < 1e-6.
@@ -513,27 +542,24 @@ impl CameraModel for FovCamera {
     ///
     /// where J_pixel_point is computed by `jacobian_point()`.
     ///
-    /// ## Return Value
+    /// # Arguments
     ///
-    /// Returns a tuple `(J_pixel_point, J_point_pose)`:
-    /// - `J_pixel_point`: 2×3 Jacobian ∂uv/∂p_cam (from jacobian_point)
-    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ
+    /// * `p_world` - 3D point in world coordinate frame.
+    /// * `pose` - The camera pose in SE(3).
     ///
-    /// The caller multiplies these to get the full 2×6 Jacobian ∂uv/∂δξ.
+    /// # Returns
     ///
-    /// ## SE(3) Conventions
+    /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
+    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
+    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
     ///
-    /// - **Parameterization**: δξ = [δv_x, δv_y, δv_z, δω_x, δω_y, δω_z]
-    /// - **Perturbation**: Right perturbation T(δξ) = T · exp(δξ^)
-    /// - **Coordinate frame**: Perturbations are in the camera frame
-    ///
-    /// ## References
+    /// # References
     ///
     /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie group optimization)
     /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
     /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization"
     ///
-    /// ## Implementation Notes
+    /// # Implementation Notes
     ///
     /// The skew-symmetric matrix [p_cam]× is computed as:
     ///
@@ -670,17 +696,25 @@ impl CameraModel for FovCamera {
     ///
     /// where mx = x·rd and my = y·rd.
     ///
-    /// ## References
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2x5 Intrinsic Jacobian matrix.
+    ///
+    /// # References
     ///
     /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
     /// - Hughes et al., "Rolling Shutter Motion Deblurring", CVPR 2010 (uses FOV model)
     ///
-    /// ## Numerical Verification
+    /// # Numerical Verification
     ///
     /// This analytical Jacobian is verified against numerical differentiation in
     /// `test_jacobian_intrinsics_numerical()` with tolerance < 1e-4.
     ///
-    /// ## Notes
+    /// # Notes
     ///
     /// The FOV parameter w controls the field of view angle. Typical values range from
     /// 0.5 (narrow FOV) to π (hemispheric fisheye). The derivative ∂rd/∂w captures how
@@ -762,6 +796,7 @@ impl CameraModel for FovCamera {
         Ok(())
     }
 
+    /// Returns the pinhole parameters of the camera.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -771,10 +806,12 @@ impl CameraModel for FovCamera {
         }
     }
 
+    /// Returns the distortion model and parameters of the camera.
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
+    /// Returns the string identifier for the camera model.
     fn get_model_name(&self) -> &'static str {
         "fov"
     }
