@@ -3,9 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
@@ -71,6 +71,17 @@ impl BALPinholeCameraStrict {
     /// - `pinhole.fx != pinhole.fy` (strict BAL requires single focal length).
     /// - `pinhole.cx != 0.0` or `pinhole.cy != 0.0` (strict BAL has no principal point offset).
     /// - `distortion` is not [`DistortionModel::Radial`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{BALPinholeCameraStrict, PinholeParams, DistortionModel};
+    ///
+    /// let pinhole = PinholeParams::new(500.0, 500.0, 0.0, 0.0)?;
+    /// let distortion = DistortionModel::Radial { k1: -0.1, k2: 0.01 };
+    /// let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -218,6 +229,33 @@ impl CameraModel for BALPinholeCameraStrict {
     type IntrinsicJacobian = SMatrix<f64, 2, 3>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
+    /// Projects a 3D point to 2D image coordinates.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// BAL/Bundler convention (camera looks down negative Z axis):
+    ///
+    /// ```text
+    /// x_n = x / (−z)
+    /// y_n = y / (−z)
+    /// r² = x_n² + y_n²
+    /// r⁴ = (r²)²
+    /// d = 1 + k₁·r² + k₂·r⁴
+    /// u = f · x_n · d
+    /// v = f · y_n · d
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z).
+    ///
+    /// # Returns
+    ///
+    /// Returns the 2D image coordinates (u, v) if valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError::ProjectionOutSideImage`] if point is not in front of camera (z ≥ 0).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         // BAL convention: negative Z is in front
         if !self.check_projection_condition(p_cam.z) {
@@ -249,6 +287,20 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector2::new(self.f * x_d, self.f * y_d))
     }
 
+    /// Checks if a 3D point can be validly projected.
+    ///
+    /// # Validity Conditions
+    ///
+    /// - Returns `true` if z < −MIN_DEPTH (point is in front of camera for BAL convention).
+    /// - Returns `false` otherwise.
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point is in front of the camera (z < −MIN_DEPTH), `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
@@ -509,7 +561,11 @@ impl CameraModel for BALPinholeCameraStrict {
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
                 // Translation part: -I
-                if r == c { -1.0 } else { 0.0 }
+                if r == c {
+                    -1.0
+                } else {
+                    0.0
+                }
             } else {
                 // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]
@@ -635,6 +691,29 @@ impl CameraModel for BALPinholeCameraStrict {
         )
     }
 
+    /// Unprojects a 2D image point to a 3D ray.
+    ///
+    /// # Mathematical Formula
+    ///
+    /// Iterative undistortion followed by back-projection:
+    ///
+    /// ```text
+    /// x_d = u / f
+    /// y_d = v / f
+    /// // iterative undistortion to recover x_n, y_n
+    /// ray = normalize([x_n, y_n, −1])
+    /// ```
+    ///
+    /// Uses Newton-Raphson iteration to solve the radial distortion polynomial
+    /// for undistorted normalized coordinates, then converts to a unit ray.
+    ///
+    /// # Arguments
+    ///
+    /// * `point_2d` - 2D point in image coordinates (u, v).
+    ///
+    /// # Returns
+    ///
+    /// Returns the normalized 3D ray direction.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         // Remove distortion and convert to ray
         // Principal point is (0,0) for strict BAL
@@ -707,6 +786,10 @@ impl CameraModel for BALPinholeCameraStrict {
     /// Returns the pinhole parameters of the camera.
     ///
     /// Note: For strict BAL cameras, `fx = fy = f` and `cx = cy = 0`.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct where `fx = fy = f` and `cx = cy = 0`.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.f,
@@ -717,11 +800,19 @@ impl CameraModel for BALPinholeCameraStrict {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::Radial`] with k1, k2).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"bal_pinhole"`.
     fn get_model_name(&self) -> &'static str {
         "bal_pinhole"
     }

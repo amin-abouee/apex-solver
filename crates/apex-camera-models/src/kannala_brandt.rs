@@ -41,9 +41,9 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.
@@ -96,6 +96,14 @@ impl KannalaBrandtCamera {
     }
 
     /// Checks the geometric condition for a valid projection.
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point in the camera frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `z > f64::EPSILON`, `false` otherwise.
     fn check_projection_condition(&self, z: f64) -> bool {
         z > f64::EPSILON
     }
@@ -499,6 +507,14 @@ impl CameraModel for KannalaBrandtCamera {
     /// # Validity Conditions
     ///
     /// - Always returns true (KB model has wide acceptance range)
+    ///
+    /// # Arguments
+    ///
+    /// * `_p_cam` - 3D point in camera coordinate frame (unused in this implementation).
+    ///
+    /// # Returns
+    ///
+    /// Always returns `true` for the Kannala-Brandt model.
     fn is_valid_point(&self, _p_cam: &Vector3<f64>) -> bool {
         true
     }
@@ -995,6 +1011,10 @@ impl CameraModel for KannalaBrandtCamera {
     }
 
     /// Returns the pinhole parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -1005,11 +1025,19 @@ impl CameraModel for KannalaBrandtCamera {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::KannalaBrandt`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"kannala_brandt"`.
     fn get_model_name(&self) -> &'static str {
         "kannala_brandt"
     }

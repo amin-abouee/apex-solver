@@ -50,9 +50,9 @@
 //! - Brown, "Decentering Distortion of Lenses", 1966
 //! - OpenCV Camera Calibration Documentation
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
 
 /// A Radial-Tangential camera model with 9 intrinsic parameters.
@@ -95,12 +95,25 @@ impl RadTanCamera {
         Ok(camera)
     }
 
-    /// Checks if a 3D point satisfies the projection condition (z >= crate::GEOMETRIC_PRECISION).
+    /// Checks if a 3D point satisfies the projection condition.
+    ///
+    /// # Arguments
+    ///
+    /// * `z` - The z-coordinate of the point in the camera frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if `z >= crate::GEOMETRIC_PRECISION`, `false` otherwise.
     fn check_projection_condition(&self, z: f64) -> bool {
         z >= crate::GEOMETRIC_PRECISION
     }
 
-    /// Helper to extract distortion parameters, returning Result for consistency.
+    /// Helper method to extract distortion parameters.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple `(k1, k2, p1, p2, k3)` containing the Brown-Conrady distortion parameters.
+    /// If the distortion model is not Brown-Conrady, returns `(0.0, 0.0, 0.0, 0.0, 0.0)`.
     fn distortion_params(&self) -> (f64, f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => (k1, k2, p1, p2, k3),
@@ -483,6 +496,14 @@ impl CameraModel for RadTanCamera {
     /// # Validity Conditions
     ///
     /// - z ≥ GEOMETRIC_PRECISION (point in front of camera)
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         self.check_projection_condition(p_cam.z)
     }
@@ -1003,6 +1024,10 @@ impl CameraModel for RadTanCamera {
     /// - fx, fy must be positive (> 0)
     /// - cx, cy must be finite
     /// - k₁, k₂, p₁, p₂, k₃ must be finite
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -1028,16 +1053,28 @@ impl CameraModel for RadTanCamera {
     }
 
     /// Returns the pinhole parameters.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         self.pinhole
     }
 
     /// Returns the distortion model parameters.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::BrownConrady`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the name of the camera model ("rad_tan").
+    /// Returns the name of the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"rad_tan"`.
     fn get_model_name(&self) -> &'static str {
         "rad_tan"
     }

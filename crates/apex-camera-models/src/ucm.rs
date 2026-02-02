@@ -101,7 +101,7 @@ impl UcmCamera {
     /// # Returns
     ///
     /// Returns `true` if `z > -w * d`, where `w` depends on `alpha`.
-    pub fn check_projection_condition(&self, z: f64, d: f64) -> bool {
+    fn check_projection_condition(&self, z: f64, d: f64) -> bool {
         let alpha = self.distortion_params();
         let w = if alpha <= 0.5 {
             alpha / (1.0 - alpha)
@@ -679,6 +679,10 @@ impl CameraModel for UcmCamera {
     }
 
     /// Returns the pinhole parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -689,11 +693,19 @@ impl CameraModel for UcmCamera {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::UCM`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"ucm"`.
     fn get_model_name(&self) -> &'static str {
         "ucm"
     }

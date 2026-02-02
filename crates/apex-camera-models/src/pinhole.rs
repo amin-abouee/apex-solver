@@ -43,9 +43,9 @@
 //!
 //! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Pinhole camera model with 4 intrinsic parameters.
@@ -106,7 +106,7 @@ impl PinholeCamera {
     /// # Returns
     ///
     /// Returns `true` if `z >= 1e-6`, `false` otherwise.
-    pub fn check_projection_condition(&self, z: f64) -> bool {
+    fn check_projection_condition(&self, z: f64) -> bool {
         z >= 1e-6
     }
 }
@@ -599,6 +599,10 @@ impl CameraModel for PinholeCamera {
     }
 
     /// Returns the pinhole parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -609,11 +613,19 @@ impl CameraModel for PinholeCamera {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::None`] for pinhole).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"pinhole"`.
     fn get_model_name(&self) -> &'static str {
         "pinhole"
     }

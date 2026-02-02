@@ -40,9 +40,9 @@
 //!
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Extended Unified Camera Model with 6 parameters.
@@ -104,7 +104,7 @@ impl EucmCamera {
     /// # Returns
     ///
     /// Returns `true` if the point satisfies the projection condition, `false` otherwise.
-    pub fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
+    fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
         let (alpha, _) = self.distortion_params();
         let mut condition = true;
         if alpha > 0.5 {
@@ -867,6 +867,10 @@ impl CameraModel for EucmCamera {
     }
 
     /// Returns the pinhole parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -877,11 +881,19 @@ impl CameraModel for EucmCamera {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::EUCM`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"eucm"`.
     fn get_model_name(&self) -> &'static str {
         "eucm"
     }

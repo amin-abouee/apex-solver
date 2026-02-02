@@ -41,9 +41,9 @@
 //! - Zhang et al., "Simultaneous Localization and Mapping with Fisheye Cameras"
 //!   https://arxiv.org/pdf/1807.08957
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// FOV camera model with 5 parameters.
@@ -93,36 +93,6 @@ impl FovCamera {
             DistortionModel::FOV { w } => w,
             _ => 0.0,
         }
-    }
-
-    /// Validates camera parameters.
-    ///
-    /// # Validation Rules
-    ///
-    /// - `fx`, `fy` must be positive.
-    /// - `cx`, `cy` must be finite.
-    /// - `w` must be in `(0, π]`.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
-    pub fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthMustBePositive);
-        }
-
-        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointMustBeFinite);
-        }
-
-        let w = self.distortion_params();
-        if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
-            return Err(CameraModelError::InvalidParams(
-                "w must be in (0, π]".to_string(),
-            ));
-        }
-
-        Ok(())
     }
 
     /// Performs linear estimation to initialize the w parameter from point correspondences.
@@ -412,6 +382,14 @@ impl CameraModel for FovCamera {
     /// # Validity Conditions
     ///
     /// - Always returns true for FOV model (wide acceptance range)
+    ///
+    /// # Arguments
+    ///
+    /// * `p_cam` - 3D point in camera coordinate frame.
+    ///
+    /// # Returns
+    ///
+    /// Returns `true` if the point projects to a valid image coordinate, `false` otherwise.
     fn is_valid_point(&self, p_cam: &Vector3<f64>) -> bool {
         let z = p_cam[2];
         z >= f64::EPSILON.sqrt()
@@ -877,6 +855,10 @@ impl CameraModel for FovCamera {
     /// - fx, fy must be positive (> 0)
     /// - cx, cy must be finite
     /// - w must be in (0, π]
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
@@ -897,6 +879,10 @@ impl CameraModel for FovCamera {
     }
 
     /// Returns the pinhole parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -907,11 +893,19 @@ impl CameraModel for FovCamera {
     }
 
     /// Returns the distortion model and parameters of the camera.
+    ///
+    /// # Returns
+    ///
+    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::FOV`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
     /// Returns the string identifier for the camera model.
+    ///
+    /// # Returns
+    ///
+    /// The string `"fov"`.
     fn get_model_name(&self) -> &'static str {
         "fov"
     }
