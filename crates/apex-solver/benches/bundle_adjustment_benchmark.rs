@@ -45,7 +45,7 @@ use tracing::{error, info, warn};
 const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
-use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams, SelfCalibration};
+use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_io::BalLoader;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
@@ -53,6 +53,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::init_logger;
 use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
 use apex_solver::optimizer::OptimizationStatus;
