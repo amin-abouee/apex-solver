@@ -221,9 +221,31 @@ All models provide three Jacobian matrices for optimization:
 
 - **Type-Safe Parameter Management**
 - **Unified CameraModel Trait**
-- **Projection Validation**: Checks for valid point positions
-- **Parameter Validation**: Runtime checks for valid camera parameters
+- **Structured Error Handling**: Unified `CameraModelError` enum with typed variants containing actual parameter values (e.g., `FocalLengthNotPositive { fx, fy }`, `PointBehindCamera { z, min_z }`)
+- **Comprehensive Validation**: Runtime checks for focal length finiteness, principal point validity, and model-specific parameter ranges (UCM α∈[0,1], Double Sphere α∈[0,1], EUCM β>0, etc.)
 - **Zero-cost abstractions**
+
+## Error Handling
+
+All camera models use a unified `CameraModelError` enum with structured variants that include actual parameter values for debugging:
+
+### Parameter Validation Errors
+- `FocalLengthNotPositive { fx, fy }` - Focal lengths must be > 0
+- `FocalLengthNotFinite { fx, fy }` - Focal lengths must be finite (no NaN/Inf)
+- `PrincipalPointNotFinite { cx, cy }` - Principal point must be finite
+- `DistortionNotFinite { name, value }` - Distortion coefficient must be finite
+- `ParameterOutOfRange { param, value, min, max }` - Parameter outside valid range
+
+### Projection Errors
+- `PointBehindCamera { z, min_z }` - Point behind camera (z too small)
+- `PointAtCameraCenter` - Point too close to optical axis
+- `DenominatorTooSmall { denom, threshold }` - Numerical instability in projection
+- `ProjectionOutOfBounds` - Projection outside valid image region
+
+### Other Errors
+- `PointOutsideImage { x, y }` - 2D point outside valid unprojection region
+- `NumericalError { operation, details }` - Numerical computation failure
+- `InvalidParams(String)` - Generic parameter error (fallback)
 
 ## Installation
 
@@ -243,8 +265,24 @@ use nalgebra::Vector3;
 let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
 
 let point_3d = Vector3::new(1.0, 0.5, 2.0); // Point in camera frame
-if let Some(pixel) = camera.project(&point_3d) {
-    println!("Projected to pixel: ({}, {})", pixel.x, pixel.y);
+match camera.project(&point_3d) {
+    Ok(pixel) => println!("Projected to pixel: ({}, {})", pixel.x, pixel.y),
+    Err(e) => println!("Projection failed: {}", e), // Shows actual values in error
+}
+```
+
+### Parameter Validation
+
+```rust
+use apex_camera_models::{PinholeParams, CameraModelError};
+
+// Creating pinhole parameters with validation
+match PinholeParams::new(500.0, 500.0, 320.0, 240.0) {
+    Ok(params) => println!("Valid parameters: fx={}, fy={}", params.fx, params.fy),
+    Err(CameraModelError::FocalLengthNotPositive { fx, fy }) => {
+        println!("Invalid focal lengths: fx={}, fy={}", fx, fy)
+    }
+    Err(e) => println!("Validation error: {}", e),
 }
 ```
 
