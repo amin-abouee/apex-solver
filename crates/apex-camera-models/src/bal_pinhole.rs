@@ -743,6 +743,7 @@ impl CameraModel for BALPinholeCameraStrict {
     /// # Validation Rules
     ///
     /// - Focal length `f` must be positive.
+    /// - Focal length `f` must be finite.
     /// - Distortion coefficients `k1`, `k2` must be finite.
     ///
     /// # Errors
@@ -751,6 +752,11 @@ impl CameraModel for BALPinholeCameraStrict {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.f <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+        if !self.f.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal length must be finite".to_string(),
+            ));
         }
         let (k1, k2) = self.distortion_params();
         if !k1.is_finite() || !k2.is_finite() {

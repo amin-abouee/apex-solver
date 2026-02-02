@@ -37,9 +37,9 @@
 //!
 //! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Unified Camera Model with 5 parameters.
@@ -653,8 +653,9 @@ impl CameraModel for UcmCamera {
     /// # Validation Rules
     ///
     /// - `fx`, `fy` must be positive.
+    /// - `fx`, `fy` must be finite.
     /// - `cx`, `cy` must be finite.
-    /// - `α` must be finite.
+    /// - `α` must be in [0, 1].
     ///
     /// # Errors
     ///
@@ -662,6 +663,12 @@ impl CameraModel for UcmCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
@@ -672,6 +679,12 @@ impl CameraModel for UcmCamera {
         if !alpha.is_finite() {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be finite".to_string(),
+            ));
+        }
+
+        if !(0.0 <= alpha && alpha <= 1.0) {
+            return Err(CameraModelError::InvalidParams(
+                "alpha must be in [0, 1]".to_string(),
             ));
         }
 

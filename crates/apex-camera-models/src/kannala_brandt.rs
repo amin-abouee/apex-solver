@@ -41,9 +41,9 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.
@@ -985,6 +985,7 @@ impl CameraModel for KannalaBrandtCamera {
     /// # Validation Rules
     ///
     /// - `fx`, `fy` must be positive.
+    /// - `fx`, `fy` must be finite.
     /// - `cx`, `cy` must be finite.
     /// - `k1`..`k4` must be finite.
     ///
@@ -994,6 +995,12 @@ impl CameraModel for KannalaBrandtCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {

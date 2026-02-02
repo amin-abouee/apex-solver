@@ -1022,6 +1022,7 @@ impl CameraModel for RadTanCamera {
     /// # Validation Rules
     ///
     /// - fx, fy must be positive (> 0)
+    /// - fx, fy must be finite
     /// - cx, cy must be finite
     /// - k₁, k₂, p₁, p₂, k₃ must be finite
     ///
@@ -1031,6 +1032,12 @@ impl CameraModel for RadTanCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {

@@ -40,9 +40,9 @@
 //!
 //! - Khomutenko et al., "An Enhanced Unified Camera Model"
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Extended Unified Camera Model with 6 parameters.
@@ -834,6 +834,7 @@ impl CameraModel for EucmCamera {
     /// # Validation Rules
     ///
     /// - `fx`, `fy` must be positive.
+    /// - `fx`, `fy` must be finite.
     /// - `cx`, `cy` must be finite.
     /// - `α` must be in [0, 1].
     /// - `β` must be positive (> 0).
@@ -846,12 +847,18 @@ impl CameraModel for EucmCamera {
             return Err(CameraModelError::FocalLengthMustBePositive);
         }
 
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
+        }
+
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
         }
 
         let (alpha, beta) = self.distortion_params();
-        if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+        if !alpha.is_finite() || !(alpha >= 0.0 && alpha <= 1.0) {
             return Err(CameraModelError::InvalidParams(
                 "alpha must be in [0, 1]".to_string(),
             ));

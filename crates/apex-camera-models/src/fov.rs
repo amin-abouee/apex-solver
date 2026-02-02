@@ -853,6 +853,7 @@ impl CameraModel for FovCamera {
     /// # Validation Rules
     ///
     /// - fx, fy must be positive (> 0)
+    /// - fx, fy must be finite
     /// - cx, cy must be finite
     /// - w must be in (0, π]
     ///
@@ -862,6 +863,12 @@ impl CameraModel for FovCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {

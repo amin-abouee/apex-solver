@@ -40,9 +40,9 @@
 //!
 //! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 use std::fmt;
 
@@ -872,6 +872,7 @@ impl CameraModel for DoubleSphereCamera {
     /// # Validation Rules
     ///
     /// - fx, fy must be positive (> 0)
+    /// - fx, fy must be finite
     /// - cx, cy must be finite
     /// - ξ must be finite
     /// - α must be in (0, 1]
@@ -882,6 +883,12 @@ impl CameraModel for DoubleSphereCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
 
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {

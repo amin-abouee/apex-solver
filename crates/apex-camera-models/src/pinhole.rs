@@ -583,6 +583,7 @@ impl CameraModel for PinholeCamera {
     /// # Validation Rules
     ///
     /// - `fx` and `fy` must be positive.
+    /// - `fx` and `fy` must be finite.
     /// - `cx` and `cy` must be finite.
     ///
     /// # Errors
@@ -591,6 +592,11 @@ impl CameraModel for PinholeCamera {
     fn validate_params(&self) -> Result<(), CameraModelError> {
         if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthMustBePositive);
+        }
+        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
+            return Err(CameraModelError::InvalidParams(
+                "Focal lengths must be finite".to_string(),
+            ));
         }
         if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
             return Err(CameraModelError::PrincipalPointMustBeFinite);
