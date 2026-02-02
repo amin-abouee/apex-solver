@@ -99,6 +99,135 @@ impl KannalaBrandtCamera {
     fn check_projection_condition(&self, z: f64) -> bool {
         z > f64::EPSILON
     }
+
+    /// Performs linear estimation to initialize distortion parameters from point correspondences.
+    ///
+    /// This method estimates the distortion coefficients [k1, k2, k3, k4] using a linear
+    /// least squares approach given 3D-2D point correspondences. It assumes the intrinsic
+    /// parameters (fx, fy, cx, cy) are already set.
+    ///
+    /// # Arguments
+    ///
+    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
+    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    pub fn linear_estimation(
+        &mut self,
+        points_3d: &nalgebra::Matrix3xX<f64>,
+        points_2d: &nalgebra::Matrix2xX<f64>,
+    ) -> Result<(), CameraModelError> {
+        if points_3d.ncols() != points_2d.ncols() {
+            return Err(CameraModelError::InvalidParams(
+                "Number of 2D and 3D points must match".to_string(),
+            ));
+        }
+        if points_3d.ncols() < 4 {
+            return Err(CameraModelError::InvalidParams(
+                "Not enough points for linear estimation (need at least 4)".to_string(),
+            ));
+        }
+
+        let num_points = points_3d.ncols();
+        let mut a_mat = nalgebra::DMatrix::zeros(num_points * 2, 4);
+        let mut b_vec = nalgebra::DVector::zeros(num_points * 2);
+
+        for i in 0..num_points {
+            let p3d = points_3d.column(i);
+            let p2d = points_2d.column(i);
+
+            let x_world = p3d.x;
+            let y_world = p3d.y;
+            let z_world = p3d.z;
+
+            let u_img = p2d.x;
+            let v_img = p2d.y;
+
+            if z_world <= f64::EPSILON {
+                continue;
+            }
+
+            let r_world = (x_world * x_world + y_world * y_world).sqrt();
+            let theta = r_world.atan2(z_world);
+
+            let theta2 = theta * theta;
+            let theta3 = theta2 * theta;
+            let theta5 = theta3 * theta2;
+            let theta7 = theta5 * theta2;
+            let theta9 = theta7 * theta2;
+
+            a_mat[(i * 2, 0)] = theta3;
+            a_mat[(i * 2, 1)] = theta5;
+            a_mat[(i * 2, 2)] = theta7;
+            a_mat[(i * 2, 3)] = theta9;
+
+            a_mat[(i * 2 + 1, 0)] = theta3;
+            a_mat[(i * 2 + 1, 1)] = theta5;
+            a_mat[(i * 2 + 1, 2)] = theta7;
+            a_mat[(i * 2 + 1, 3)] = theta9;
+
+            let x_r = if r_world < f64::EPSILON {
+                0.0
+            } else {
+                x_world / r_world
+            };
+            let y_r = if r_world < f64::EPSILON {
+                0.0
+            } else {
+                y_world / r_world
+            };
+
+            if (self.pinhole.fx * x_r).abs() < f64::EPSILON && x_r.abs() > f64::EPSILON {
+                return Err(CameraModelError::NumericalError(
+                    "fx * x_r is zero in linear estimation".to_string(),
+                ));
+            }
+            if (self.pinhole.fy * y_r).abs() < f64::EPSILON && y_r.abs() > f64::EPSILON {
+                return Err(CameraModelError::NumericalError(
+                    "fy * y_r is zero in linear estimation".to_string(),
+                ));
+            }
+
+            if x_r.abs() > f64::EPSILON {
+                b_vec[i * 2] = (u_img - self.pinhole.cx) / (self.pinhole.fx * x_r) - theta;
+            } else {
+                b_vec[i * 2] = if (u_img - self.pinhole.cx).abs() < f64::EPSILON {
+                    -theta
+                } else {
+                    0.0
+                };
+            }
+
+            if y_r.abs() > f64::EPSILON {
+                b_vec[i * 2 + 1] = (v_img - self.pinhole.cy) / (self.pinhole.fy * y_r) - theta;
+            } else {
+                b_vec[i * 2 + 1] = if (v_img - self.pinhole.cy).abs() < f64::EPSILON {
+                    -theta
+                } else {
+                    0.0
+                };
+            }
+        }
+
+        let svd = a_mat.svd(true, true);
+        let x_coeffs = svd.solve(&b_vec, f64::EPSILON).map_err(|e_str| {
+            CameraModelError::NumericalError(format!(
+                "SVD solve failed in linear estimation: {e_str}"
+            ))
+        })?;
+
+        self.distortion = DistortionModel::KannalaBrandt {
+            k1: x_coeffs[0],
+            k2: x_coeffs[1],
+            k3: x_coeffs[2],
+            k4: x_coeffs[3],
+        };
+
+        self.validate_params()?;
+        Ok(())
+    }
 }
 
 /// Convert camera to dynamic vector of intrinsic parameters.

@@ -124,6 +124,106 @@ impl FovCamera {
 
         Ok(())
     }
+
+    /// Performs linear estimation to initialize the w parameter from point correspondences.
+    ///
+    /// This method estimates the `w` parameter using a linear least squares approach
+    /// given 3D-2D point correspondences. It assumes the intrinsic parameters (fx, fy, cx, cy)
+    /// are already set.
+    ///
+    /// # Arguments
+    ///
+    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
+    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    pub fn linear_estimation(
+        &mut self,
+        points_3d: &nalgebra::Matrix3xX<f64>,
+        points_2d: &nalgebra::Matrix2xX<f64>,
+    ) -> Result<(), CameraModelError> {
+        // Check if the number of 2D and 3D points match
+        if points_2d.ncols() != points_3d.ncols() {
+            return Err(CameraModelError::InvalidParams(
+                "Number of 2D and 3D points must match".to_string(),
+            ));
+        }
+
+        let num_points = points_2d.ncols();
+
+        // Need at least 2 points for linear estimation
+        if num_points < 2 {
+            return Err(CameraModelError::InvalidParams(
+                "Need at least 2 point correspondences for linear estimation".to_string(),
+            ));
+        }
+
+        // Set up the linear system to solve for w
+        // We'll use a simplified approach: estimate w that minimizes reprojection error
+        // Start with a reasonable initial value
+        let mut best_w = 1.0;
+        let mut best_error = f64::INFINITY;
+
+        // Grid search over reasonable w values
+        for w_test in (10..300).map(|i| i as f64 / 100.0) {
+            let mut error_sum = 0.0;
+            let mut valid_count = 0;
+
+            for i in 0..num_points {
+                let x = points_3d[(0, i)];
+                let y = points_3d[(1, i)];
+                let z = points_3d[(2, i)];
+                let u_observed = points_2d[(0, i)];
+                let v_observed = points_2d[(1, i)];
+
+                // Try projection with this w value
+                let r2 = x * x + y * y;
+                let r = r2.sqrt();
+
+                let tan_w_half = (w_test / 2.0).tan();
+                let atan_wrd = (2.0 * tan_w_half * r).atan2(z);
+
+                let eps_sqrt = f64::EPSILON.sqrt();
+                let rd = if r2 < eps_sqrt {
+                    2.0 * tan_w_half / w_test
+                } else {
+                    atan_wrd / (r * w_test)
+                };
+
+                let mx = x * rd;
+                let my = y * rd;
+
+                let u_predicted = self.pinhole.fx * mx + self.pinhole.cx;
+                let v_predicted = self.pinhole.fy * my + self.pinhole.cy;
+
+                let error = ((u_predicted - u_observed).powi(2)
+                    + (v_predicted - v_observed).powi(2))
+                .sqrt();
+
+                if error.is_finite() {
+                    error_sum += error;
+                    valid_count += 1;
+                }
+            }
+
+            if valid_count > 0 {
+                let avg_error = error_sum / valid_count as f64;
+                if avg_error < best_error {
+                    best_error = avg_error;
+                    best_w = w_test;
+                }
+            }
+        }
+
+        self.distortion = DistortionModel::FOV { w: best_w };
+
+        // Validate parameters
+        self.validate_params()?;
+
+        Ok(())
+    }
 }
 
 /// Convert camera to dynamic vector of intrinsic parameters.
