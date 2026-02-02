@@ -20,7 +20,7 @@
 //! - k3: <0.3 absolute error (higher-order term, poorly constrained by planar target)
 
 use apex_camera_models::{
-    CameraModel, DistortionModel, PinholeParams, RadTanCamera, Resolution, SelfCalibration,
+    CameraModel, DistortionModel, PinholeParams, RadTanCamera, SelfCalibration,
 };
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -58,10 +58,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             p1: 0.001,
             p2: -0.001,
             k3: 0.0,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 
@@ -293,10 +289,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             p2: final_intrinsics[7],
             k3: final_intrinsics[8],
         },
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     let final_landmarks_vec = result
@@ -446,10 +438,6 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
             p1: 0.001,
             p2: -0.001,
             k3: 0.0,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 

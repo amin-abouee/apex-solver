@@ -12,7 +12,7 @@
 //! - Popular for wide-angle fisheye cameras (OpenCV fisheye model)
 
 use apex_camera_models::{
-    CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams, Resolution, SelfCalibration,
+    CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams, SelfCalibration,
 };
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
@@ -59,10 +59,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             k2: 0.1,
             k3: 0.0,
             k4: 0.0,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 
@@ -395,10 +391,6 @@ fn test_kannala_brandt_3_cameras_calibration() -> TestResult {
             k2: 0.1,
             k3: 0.0,
             k4: 0.0,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 

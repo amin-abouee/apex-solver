@@ -11,9 +11,7 @@
 //! - Arctangent-based distortion model for fisheye cameras
 //! - Suitable for wide field-of-view lenses
 
-use apex_camera_models::{
-    CameraModel, DistortionModel, FovCamera, PinholeParams, Resolution, SelfCalibration,
-};
+use apex_camera_models::{CameraModel, DistortionModel, FovCamera, PinholeParams, SelfCalibration};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -51,10 +49,6 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::FOV { w: 0.8 },
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     // Image bounds for projection validation
@@ -314,10 +308,6 @@ fn test_fov_3_cameras_calibration() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::FOV { w: 0.8 },
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     let img_width = 600.0;

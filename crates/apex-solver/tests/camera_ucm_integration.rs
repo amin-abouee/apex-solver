@@ -11,9 +11,7 @@
 //! - Projects points onto unit sphere then to image plane
 //! - Good for moderate wide-angle lenses
 
-use apex_camera_models::{
-    CameraModel, DistortionModel, PinholeParams, Resolution, SelfCalibration, UcmCamera,
-};
+use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, SelfCalibration, UcmCamera};
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
@@ -57,10 +55,6 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::UCM { alpha: 0.7 },
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     // Image bounds for projection validation
@@ -359,10 +353,6 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::UCM { alpha: 0.7 },
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     let img_width = 600.0;

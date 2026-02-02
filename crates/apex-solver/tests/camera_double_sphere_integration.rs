@@ -14,7 +14,7 @@
 //! This is a more complex model than pinhole, suitable for wide-angle cameras.
 
 use apex_camera_models::{
-    CameraModel, DistortionModel, DoubleSphereCamera, PinholeParams, Resolution, SelfCalibration,
+    CameraModel, DistortionModel, DoubleSphereCamera, PinholeParams, SelfCalibration,
 };
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
@@ -59,10 +59,6 @@ fn test_double_sphere_multi_camera_calibration_200_points() -> TestResult {
         DistortionModel::DoubleSphere {
             alpha: 0.5,
             xi: 0.5,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 
@@ -362,10 +358,6 @@ fn test_double_sphere_3_cameras_calibration() -> TestResult {
         DistortionModel::DoubleSphere {
             alpha: 0.5,
             xi: 0.5,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 

@@ -12,7 +12,7 @@
 //! - Suitable for fisheye and wide-angle cameras
 
 use apex_camera_models::{
-    CameraModel, DistortionModel, EucmCamera, PinholeParams, Resolution, SelfCalibration,
+    CameraModel, DistortionModel, EucmCamera, PinholeParams, SelfCalibration,
 };
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
@@ -54,10 +54,6 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
         DistortionModel::EUCM {
             alpha: 0.6,
             beta: 1.2,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 
@@ -360,10 +356,6 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         DistortionModel::EUCM {
             alpha: 0.6,
             beta: 1.2,
-        },
-        Resolution {
-            width: 600,
-            height: 400,
         },
     )?;
 

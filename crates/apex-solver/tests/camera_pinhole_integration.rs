@@ -12,7 +12,7 @@
 //! - Best parameter recovery expected among all camera models
 
 use apex_camera_models::{
-    CameraModel, DistortionModel, PinholeCamera, PinholeParams, Resolution, SelfCalibration,
+    CameraModel, DistortionModel, PinholeCamera, PinholeParams, SelfCalibration,
 };
 use apex_manifolds::LieGroup;
 use apex_solver::ManifoldType;
@@ -51,10 +51,6 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::None,
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     // Image bounds for projection validation
@@ -314,10 +310,6 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
             cy: 200.0,
         },
         DistortionModel::None,
-        Resolution {
-            width: 600,
-            height: 400,
-        },
     )?;
 
     let img_width = 600.0;
