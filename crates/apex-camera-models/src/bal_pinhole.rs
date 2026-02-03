@@ -3,9 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
+use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::LieGroup;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
@@ -536,7 +536,11 @@ impl CameraModel for BALPinholeCameraStrict {
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
                 // Translation part: -I
-                if r == c { -1.0 } else { 0.0 }
+                if r == c {
+                    -1.0
+                } else {
+                    0.0
+                }
             } else {
                 // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]
