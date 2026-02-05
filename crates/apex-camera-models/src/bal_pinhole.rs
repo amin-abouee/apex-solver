@@ -3,9 +3,9 @@
 //! This module implements a pinhole camera model that follows the BAL dataset convention
 //! where cameras look down the -Z axis (negative Z in front of camera).
 
-use crate::{skew_symmetric, CameraModel, CameraModelError, DistortionModel, PinholeParams};
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Strict BAL camera model matching Snavely's Bundler convention.
@@ -125,6 +125,40 @@ impl BALPinholeCameraStrict {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
         Self::new(pinhole, distortion)
+    }
+
+    /// Creates a strict BAL pinhole camera without validation.
+    ///
+    /// This constructor bypasses all parameter validation and is intended for
+    /// bundle adjustment use cases where initial camera parameters may be
+    /// uninitialized or have extreme values that will be optimized.
+    ///
+    /// # Safety
+    ///
+    /// This is not unsafe in the Rust sense, but using invalid parameters
+    /// (negative focal length, NaN, etc.) may cause projection to fail or
+    /// produce incorrect results until parameters are optimized to valid values.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The single focal length in pixels (can be any finite value).
+    /// * `k1` - First radial distortion coefficient.
+    /// * `k2` - Second radial distortion coefficient.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::BALPinholeCameraStrict;
+    ///
+    /// // Create camera with potentially invalid initial parameters for optimization
+    /// let camera = BALPinholeCameraStrict::new_unchecked(-1000.0, 0.0, 0.0);
+    /// ```
+    #[must_use]
+    pub const fn new_unchecked(f: f64, k1: f64, k2: f64) -> Self {
+        Self {
+            f,
+            distortion: DistortionModel::Radial { k1, k2 },
+        }
     }
 
     /// Helper method to extract distortion parameters.
@@ -536,11 +570,7 @@ impl CameraModel for BALPinholeCameraStrict {
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
                 // Translation part: -I
-                if r == c {
-                    -1.0
-                } else {
-                    0.0
-                }
+                if r == c { -1.0 } else { 0.0 }
             } else {
                 // Rotation part: [p_cam]×
                 p_cam_skew[(r, c - 3)]

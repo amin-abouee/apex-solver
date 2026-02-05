@@ -36,10 +36,8 @@
 
 use super::IoError;
 use nalgebra::Vector3;
-use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
-use tracing::warn;
 
 /// Represents a camera using Snavely's 9-parameter camera model.
 ///
@@ -149,38 +147,27 @@ impl BalLoader {
         // Parse header
         let (num_cameras, num_points, num_observations) = Self::parse_header(&mut lines)?;
 
-        // Parse observations first (BAL format order: header -> observations -> cameras -> points)
+        // Parse observations
         let observations = Self::parse_observations(&mut lines, num_observations)?;
 
-        // Parse cameras to get valid indices
-        let (cameras, valid_indices) = Self::parse_cameras(&mut lines, num_cameras)?;
-
-        // Create mapping from old camera indices to new (filtered) indices
-        let mut camera_index_map: HashMap<usize, usize> = HashMap::new();
-        for (new_index, &old_index) in valid_indices.iter().enumerate() {
-            camera_index_map.insert(old_index, new_index);
-        }
-
-        // Filter and remap observations based on valid cameras
-        let filtered_observations: Vec<BalObservation> = observations
-            .into_iter()
-            .filter_map(|mut obs| {
-                // Check if this observation references a valid camera
-                if let Some(&new_index) = camera_index_map.get(&obs.camera_index) {
-                    // Remap camera index to new filtered index
-                    obs.camera_index = new_index;
-                    Some(obs)
-                } else {
-                    // Camera was filtered out, drop this observation
-                    None
-                }
-            })
-            .collect();
+        // Parse cameras
+        let cameras = Self::parse_cameras(&mut lines, num_cameras)?;
 
         // Parse points
         let points = Self::parse_points(&mut lines, num_points)?;
 
-        // Validate counts (observations may be less due to filtering)
+        // Validate counts match header
+        if cameras.len() != num_cameras {
+            return Err(IoError::Parse {
+                line: 0,
+                message: format!(
+                    "Camera count mismatch: header says {}, got {}",
+                    num_cameras,
+                    cameras.len()
+                ),
+            });
+        }
+
         if points.len() != num_points {
             return Err(IoError::Parse {
                 line: 0,
@@ -192,13 +179,13 @@ impl BalLoader {
             });
         }
 
-        if filtered_observations.len() > num_observations {
+        if observations.len() != num_observations {
             return Err(IoError::Parse {
                 line: 0,
                 message: format!(
-                    "Observation count exceeds header: header says {}, got {}",
+                    "Observation count mismatch: header says {}, got {}",
                     num_observations,
-                    filtered_observations.len()
+                    observations.len()
                 ),
             });
         }
@@ -206,7 +193,7 @@ impl BalLoader {
         Ok(BalDataset {
             cameras,
             points,
-            observations: filtered_observations,
+            observations,
         })
     }
 
@@ -315,14 +302,8 @@ impl BalLoader {
     fn parse_cameras<'a>(
         lines: &mut impl Iterator<Item = (usize, &'a str)>,
         num_cameras: usize,
-    ) -> Result<(Vec<BalCamera>, Vec<usize>), IoError> {
+    ) -> Result<Vec<BalCamera>, IoError> {
         let mut cameras = Vec::with_capacity(num_cameras);
-        let mut valid_indices = Vec::with_capacity(num_cameras);
-        let mut skipped_count = 0;
-
-        // Reasonable focal length bounds for typical cameras (in pixels)
-        const MIN_FOCAL_LENGTH: f64 = 100.0;
-        const MAX_FOCAL_LENGTH: f64 = 50000.0;
 
         for camera_idx in 0..num_cameras {
             let mut params = Vec::with_capacity(9);
@@ -348,38 +329,16 @@ impl BalLoader {
                 params.push(value);
             }
 
-            let focal_length = params[6];
-
-            // Filter out cameras with invalid focal lengths
-            if focal_length < MIN_FOCAL_LENGTH || focal_length > MAX_FOCAL_LENGTH {
-                warn!(
-                    "Skipping camera {}: focal length {} is outside valid range [{}, {}]",
-                    camera_idx, focal_length, MIN_FOCAL_LENGTH, MAX_FOCAL_LENGTH
-                );
-                skipped_count += 1;
-                continue;
-            }
-
-            valid_indices.push(camera_idx);
             cameras.push(BalCamera {
                 rotation: Vector3::new(params[0], params[1], params[2]),
                 translation: Vector3::new(params[3], params[4], params[5]),
-                focal_length,
+                focal_length: params[6],
                 k1: params[7],
                 k2: params[8],
             });
         }
 
-        if skipped_count > 0 {
-            warn!(
-                "Filtered out {} cameras with invalid focal lengths (kept {} of {})",
-                skipped_count,
-                cameras.len(),
-                num_cameras
-            );
-        }
-
-        Ok((cameras, valid_indices))
+        Ok(cameras)
     }
 
     /// Parses the points block.
