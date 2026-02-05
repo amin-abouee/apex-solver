@@ -15,7 +15,7 @@ categories = ["computer-vision", "algorithms", "mathematics"]
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
-thiserror = "1.0"
+thiserror.workspace = true
 
 [lints]
 workspace = true

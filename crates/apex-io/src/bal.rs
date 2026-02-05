@@ -96,6 +96,24 @@ pub struct BalDataset {
 /// Loader for BAL (Bundle Adjustment in the Large) dataset files.
 pub struct BalLoader;
 
+/// Default focal length used for cameras with negative or non-finite values.
+/// This value is used during BAL dataset loading to normalize invalid focal lengths.
+pub const DEFAULT_FOCAL_LENGTH: f64 = 500.0;
+
+impl BalCamera {
+    /// Normalizes the focal length to ensure it's valid for optimization.
+    ///
+    /// Replaces negative or non-finite focal lengths with DEFAULT_FOCAL_LENGTH,
+    /// while preserving all positive values regardless of magnitude.
+    fn normalize_focal_length(focal_length: f64) -> f64 {
+        if focal_length > 0.0 && focal_length.is_finite() {
+            focal_length
+        } else {
+            DEFAULT_FOCAL_LENGTH
+        }
+    }
+}
+
 impl BalLoader {
     /// Loads a BAL dataset from a file.
     ///
@@ -332,7 +350,7 @@ impl BalLoader {
             cameras.push(BalCamera {
                 rotation: Vector3::new(params[0], params[1], params[2]),
                 translation: Vector3::new(params[3], params[4], params[5]),
-                focal_length: params[6],
+                focal_length: BalCamera::normalize_focal_length(params[6]),
                 k1: params[7],
                 k2: params[8],
             });
