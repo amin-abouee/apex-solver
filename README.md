@@ -127,6 +127,34 @@ apex-solver/
 
 ---
 
+## 📦 Workspace Crates
+
+Apex Solver is organized as a Cargo workspace with specialized sub-crates that can be used independently:
+
+| Crate | Description | Docs |
+|-------|-------------|------|
+| **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) |
+| **[apex-camera-models](crates/apex-camera-models)** | 11 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) |
+| **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) |
+
+**Using sub-crates independently:**
+
+```toml
+# Use only manifolds
+[dependencies]
+apex-manifolds = "0.1.0"
+
+# Use only camera models
+[dependencies]
+apex-camera-models = "0.1.0"
+
+# Use only file I/O
+[dependencies]
+apex-io = "0.1.0"
+```
+
+---
+
 ## 📊 Performance Benchmarks
 
 **Hardware**: Apple Mac Mini M4, 64GB RAM  
@@ -428,6 +456,8 @@ Apex Solver implements mathematically rigorous Lie group operations following th
 | **SE(2)** | 2D rigid transformations | 3 | 2D SLAM, mobile robots |
 | **SO(2)** | 2D rotations | 1 | 2D orientation |
 | **R^n** | Euclidean space | n | Landmarks, camera parameters |
+
+See [apex-manifolds documentation](crates/apex-manifolds/README.md) for detailed API reference, mathematical background, and usage examples.
 
 ### Robust Loss Functions
 
