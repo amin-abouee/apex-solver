@@ -184,6 +184,27 @@ impl From<[f64; 4]> for PinholeCamera {
     }
 }
 
+/// Creates a `PinholeCamera` from a parameter slice with validation.
+///
+/// Unlike `From<&[f64]>`, this constructor validates all parameters
+/// and returns a `Result` instead of panicking on invalid input.
+///
+/// # Errors
+///
+/// Returns `CameraModelError::InvalidParams` if fewer than 4 parameters are provided.
+/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+pub fn try_from_params(params: &[f64]) -> Result<PinholeCamera, CameraModelError> {
+    if params.len() < 4 {
+        return Err(CameraModelError::InvalidParams(format!(
+            "PinholeCamera requires at least 4 parameters, got {}",
+            params.len()
+        )));
+    }
+    let camera = PinholeCamera::from(params);
+    camera.validate_params()?;
+    Ok(camera)
+}
+
 impl CameraModel for PinholeCamera {
     const INTRINSIC_DIM: usize = 4;
     type IntrinsicJacobian = SMatrix<f64, 2, 4>;

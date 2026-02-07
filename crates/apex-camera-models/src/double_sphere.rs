@@ -315,6 +315,27 @@ impl From<[f64; 6]> for DoubleSphereCamera {
     }
 }
 
+/// Creates a `DoubleSphereCamera` from a parameter slice with validation.
+///
+/// Unlike `From<&[f64]>`, this constructor validates all parameters
+/// and returns a `Result` instead of panicking on invalid input.
+///
+/// # Errors
+///
+/// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
+/// Returns validation errors if focal lengths are non-positive or xi/alpha are out of range.
+pub fn try_from_params(params: &[f64]) -> Result<DoubleSphereCamera, CameraModelError> {
+    if params.len() < 6 {
+        return Err(CameraModelError::InvalidParams(format!(
+            "DoubleSphereCamera requires at least 6 parameters, got {}",
+            params.len()
+        )));
+    }
+    let camera = DoubleSphereCamera::from(params);
+    camera.validate_params()?;
+    Ok(camera)
+}
+
 impl CameraModel for DoubleSphereCamera {
     const INTRINSIC_DIM: usize = 6;
     type IntrinsicJacobian = SMatrix<f64, 2, 6>;
@@ -421,8 +442,13 @@ impl CameraModel for DoubleSphereCamera {
 
         let k = num_term / denom_term;
 
-        let point3d = Vector3::new(k * mx, k * my, k * mz - xi);
-        Ok(point3d.normalize())
+        let x = k * mx;
+        let y = k * my;
+        let z = k * mz - xi;
+
+        // Manual normalization to reuse computed norm
+        let norm = (x * x + y * y + z * z).sqrt();
+        Ok(Vector3::new(x / norm, y / norm, z / norm))
     }
 
     /// Checks if a 3D point can be validly projected.
@@ -526,10 +552,14 @@ impl CameraModel for DoubleSphereCamera {
         let d2 = (r2 + xi_d1_z * xi_d1_z).sqrt();
         let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
 
+        // Cache reciprocals to avoid repeated divisions
+        let inv_d1 = 1.0 / d1;
+        let inv_d2 = 1.0 / d2;
+
         // ∂d₁/∂x = x/d₁, ∂d₁/∂y = y/d₁, ∂d₁/∂z = z/d₁
-        let dd1_dx = x / d1;
-        let dd1_dy = y / d1;
-        let dd1_dz = z / d1;
+        let dd1_dx = x * inv_d1;
+        let dd1_dy = y * inv_d1;
+        let dd1_dz = z * inv_d1;
 
         // ∂(ξ·d₁+z)/∂x = ξ·∂d₁/∂x
         let d_xi_d1_z_dx = xi * dd1_dx;
@@ -537,9 +567,9 @@ impl CameraModel for DoubleSphereCamera {
         let d_xi_d1_z_dz = xi * dd1_dz + 1.0;
 
         // ∂d₂/∂x = (x + (ξ·d₁+z)·∂(ξ·d₁+z)/∂x) / d₂
-        let dd2_dx = (x + xi_d1_z * d_xi_d1_z_dx) / d2;
-        let dd2_dy = (y + xi_d1_z * d_xi_d1_z_dy) / d2;
-        let dd2_dz = (xi_d1_z * d_xi_d1_z_dz) / d2;
+        let dd2_dx = (x + xi_d1_z * d_xi_d1_z_dx) * inv_d2;
+        let dd2_dy = (y + xi_d1_z * d_xi_d1_z_dy) * inv_d2;
+        let dd2_dz = (xi_d1_z * d_xi_d1_z_dz) * inv_d2;
 
         // ∂denom/∂x = α·∂d₂/∂x + (1-α)·∂(ξ·d₁+z)/∂x
         let ddenom_dx = alpha * dd2_dx + (1.0 - alpha) * d_xi_d1_z_dx;
@@ -802,24 +832,30 @@ impl CameraModel for DoubleSphereCamera {
         let d2 = (r2 + xi_d1_z * xi_d1_z).sqrt();
         let denom = alpha * d2 + (1.0 - alpha) * xi_d1_z;
 
-        let x_norm = x / denom;
-        let y_norm = y / denom;
+        // Cache reciprocals to avoid repeated divisions
+        let inv_denom = 1.0 / denom;
+        let inv_d2 = 1.0 / d2;
+
+        let x_norm = x * inv_denom;
+        let y_norm = y * inv_denom;
 
         // ∂u/∂fx = x/denom, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
         // ∂v/∂fx = 0, ∂v/∂fy = y/denom, ∂v/∂cx = 0, ∂v/∂cy = 1
 
         // For ξ and α derivatives
         let d_xi_d1_z_dxi = d1;
-        let dd2_dxi = (xi_d1_z * d_xi_d1_z_dxi) / d2;
+        let dd2_dxi = (xi_d1_z * d_xi_d1_z_dxi) * inv_d2;
         let ddenom_dxi = alpha * dd2_dxi + (1.0 - alpha) * d_xi_d1_z_dxi;
 
         let ddenom_dalpha = d2 - xi_d1_z;
 
-        let du_dxi = -self.pinhole.fx * x * ddenom_dxi / (denom * denom);
-        let dv_dxi = -self.pinhole.fy * y * ddenom_dxi / (denom * denom);
+        let inv_denom2 = inv_denom * inv_denom;
 
-        let du_dalpha = -self.pinhole.fx * x * ddenom_dalpha / (denom * denom);
-        let dv_dalpha = -self.pinhole.fy * y * ddenom_dalpha / (denom * denom);
+        let du_dxi = -self.pinhole.fx * x * ddenom_dxi * inv_denom2;
+        let dv_dxi = -self.pinhole.fy * y * ddenom_dxi * inv_denom2;
+
+        let du_dalpha = -self.pinhole.fx * x * ddenom_dalpha * inv_denom2;
+        let dv_dalpha = -self.pinhole.fy * y * ddenom_dalpha * inv_denom2;
 
         SMatrix::<f64, 2, 6>::new(
             x_norm, 0.0, 1.0, 0.0, du_dxi, du_dalpha, 0.0, y_norm, 0.0, 1.0, dv_dxi, dv_dalpha,
@@ -919,6 +955,7 @@ impl CameraModel for DoubleSphereCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Matrix2xX, Matrix3xX};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -1028,6 +1065,59 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_estimation() -> TestResult {
+        // Ground truth DoubleSphere camera with xi=0.0 (linear_estimation fixes xi=0.0)
+        let gt_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let gt_distortion = DistortionModel::DoubleSphere {
+            xi: 0.0,
+            alpha: 0.6,
+        };
+        let gt_camera = DoubleSphereCamera::new(gt_pinhole, gt_distortion)?;
+
+        // Generate synthetic 3D points in camera frame
+        let n_points = 50;
+        let mut pts_3d = Matrix3xX::zeros(n_points);
+        let mut pts_2d = Matrix2xX::zeros(n_points);
+        let mut valid = 0;
+
+        for i in 0..n_points {
+            let angle = i as f64 * 2.0 * std::f64::consts::PI / n_points as f64;
+            let r = 0.1 + 0.3 * (i as f64 / n_points as f64);
+            let p3d = Vector3::new(r * angle.cos(), r * angle.sin(), 1.0);
+
+            if let Ok(p2d) = gt_camera.project(&p3d) {
+                pts_3d.set_column(valid, &p3d);
+                pts_2d.set_column(valid, &p2d);
+                valid += 1;
+            }
+        }
+        let pts_3d = pts_3d.columns(0, valid).into_owned();
+        let pts_2d = pts_2d.columns(0, valid).into_owned();
+
+        // Initial camera with small alpha (alpha must be > 0 for validation)
+        let init_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let init_distortion = DistortionModel::DoubleSphere {
+            xi: 0.0,
+            alpha: 0.1,
+        };
+        let mut camera = DoubleSphereCamera::new(init_pinhole, init_distortion)?;
+
+        camera.linear_estimation(&pts_3d, &pts_2d)?;
+
+        // Verify reprojection error
+        for i in 0..valid {
+            let p3d = pts_3d.column(i).into_owned();
+            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let err = ((projected.x - pts_2d[(0, i)]).powi(2)
+                + (projected.y - pts_2d[(1, i)]).powi(2))
+            .sqrt();
+            assert!(err < 1.0, "Reprojection error too large: {err}");
+        }
+
         Ok(())
     }
 }

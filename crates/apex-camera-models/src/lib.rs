@@ -45,6 +45,7 @@
 //! ## Specialized Models
 //! - **BAL Pinhole**: Bundle Adjustment in the Large format (6 params, -Z convention)
 
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use nalgebra::{Matrix2xX, Matrix3, Matrix3xX, SMatrix, Vector2, Vector3};
 
@@ -382,41 +383,134 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// 2×3 Jacobian matrix of projection w.r.t. point coordinates
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian;
 
-    /// Jacobian of projection with respect to camera pose (SE3).
+    /// Jacobian of projection w.r.t. camera pose (SE3).
     ///
-    /// Uses chain rule: ∂(u,v)/∂(pose) = ∂(u,v)/∂(p_cam) · ∂(p_cam)/∂(pose)
+    /// # Mathematical Derivation
     ///
-    /// # Mathematical Formula
+    /// The camera pose transformation converts a world point to camera coordinates:
     ///
-    /// For pose in SE3 (6-DOF: translation + rotation):
     /// ```text
-    /// ∂(u,v)/∂(pose) = J_point · J_transform
+    /// p_cam = T⁻¹ · p_world = R^T · (p_world - t)
     /// ```
+    ///
+    /// where T = (R, t) is the camera pose (world-to-camera transform).
+    ///
+    /// ## Perturbation Model (Right Jacobian)
+    ///
+    /// We perturb the pose in the tangent space of SE(3):
+    ///
+    /// ```text
+    /// T(δξ) = T · exp(δξ^)
+    /// ```
+    ///
+    /// where δξ = (δω, δv) ∈ ℝ⁶ with:
+    /// - δω ∈ ℝ³: rotation perturbation (so(3) algebra)
+    /// - δv ∈ ℝ³: translation perturbation
+    ///
+    /// The perturbed camera-frame point becomes:
+    ///
+    /// ```text
+    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
+    ///           = exp(-δξ^) · T⁻¹ · p_world
+    ///           ≈ (I - δξ^) · p_cam     (first-order approximation)
+    /// ```
+    ///
+    /// ## Jacobian w.r.t. Pose Perturbation
+    ///
+    /// For small perturbations δξ:
+    ///
+    /// ```text
+    /// p_cam(δξ) ≈ p_cam - [p_cam]× · δω - R^T · δv
+    /// ```
+    ///
+    /// where [p_cam]× is the skew-symmetric matrix of p_cam.
+    ///
+    /// Taking derivatives:
+    ///
+    /// ```text
+    /// ∂p_cam/∂δω = -[p_cam]×
+    /// ∂p_cam/∂δv = -R^T
+    /// ```
+    ///
+    /// Therefore, the Jacobian of p_cam w.r.t. pose perturbation δξ is:
+    ///
+    /// ```text
+    /// J_pose = ∂p_cam/∂δξ = [ -R^T | [p_cam]× ]  (3×6 matrix)
+    /// ```
+    ///
     /// where:
-    /// - J_point (2×3): ∂(u,v)/∂(p_cam) — projection Jacobian
-    /// - J_transform (3×6): ∂(p_cam)/∂(pose) — point transformation w.r.t. pose
+    /// - First 3 columns correspond to translation perturbation δv
+    /// - Last 3 columns correspond to rotation perturbation δω
     ///
-    /// The pose Jacobian uses the SE3 tangent space (ωx, ωy, ωz, vx, vy, vz).
+    /// ## Chain Rule to Pixel Coordinates
     ///
-    /// # Arguments
+    /// The full Jacobian chain is:
     ///
-    /// * `p_world` - 3D point in world coordinates (x, y, z) in meters
-    /// * `pose` - Camera pose as SE3 transformation (world → camera)
+    /// ```text
+    /// J_pixel_pose = J_pixel_point · J_point_pose
+    ///              = (∂u/∂p_cam) · (∂p_cam/∂δξ)
+    /// ```
     ///
-    /// # Returns
+    /// where J_pixel_point is computed by `jacobian_point()`.
     ///
-    /// Tuple of:
-    /// - `PointJacobian` (2×3): Projection Jacobian ∂(u,v)/∂(p_cam)
-    /// - `SMatrix<f64, 3, 6>` (3×6): Point transformation Jacobian ∂(p_cam)/∂(pose)
+    /// ## Return Value
     ///
-    /// # Usage
+    /// Returns a tuple `(J_pixel_point, J_point_pose)`:
+    /// - `J_pixel_point`: 2×3 Jacobian ∂uv/∂p_cam (from jacobian_point)
+    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ
     ///
-    /// Used in pose estimation, visual odometry, and SLAM for optimizing camera poses.
+    /// The caller multiplies these to get the full 2×6 Jacobian ∂uv/∂δξ.
+    ///
+    /// ## SE(3) Conventions
+    ///
+    /// - **Parameterization**: δξ = [δv_x, δv_y, δv_z, δω_x, δω_y, δω_z]
+    /// - **Perturbation**: Right perturbation T(δξ) = T · exp(δξ^)
+    /// - **Coordinate frame**: Perturbations are in the camera frame
+    ///
+    /// ## References
+    ///
+    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie group optimization)
+    /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
+    /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization"
+    ///
+    /// ## Implementation Notes
+    ///
+    /// The skew-symmetric matrix [p_cam]× is computed as:
+    ///
+    /// ```text
+    /// [p_cam]× = [  0      -p_z    p_y  ]
+    ///            [  p_z     0     -p_x  ]
+    ///            [ -p_y    p_x     0   ]
+    /// ```
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
         pose: &SE3,
-    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>);
+    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
+        // Transform world point to camera frame via inverse pose
+        let pose_inv = pose.inverse(None);
+        let p_cam = pose_inv.act(p_world, None, None);
+
+        // 2×3 projection Jacobian ∂(u,v)/∂(p_cam)
+        let d_uv_d_pcam = self.jacobian_point(&p_cam);
+
+        // 3×6 transformation Jacobian ∂(p_cam)/∂(pose)
+        // p_cam = R^T · (p_world - t)
+        // Translation part: -R^T  (columns 0-2)
+        // Rotation part: [p_cam]× (columns 3-5)
+        let r_transpose = pose_inv.rotation_so3().rotation_matrix();
+        let p_cam_skew = skew_symmetric(&p_cam);
+
+        let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
+            if c < 3 {
+                -r_transpose[(r, c)]
+            } else {
+                p_cam_skew[(r, c - 3)]
+            }
+        });
+
+        (d_uv_d_pcam, d_pcam_d_pose)
+    }
 
     /// Jacobian of projection with respect to intrinsic parameters.
     ///

@@ -338,6 +338,27 @@ impl From<[f64; 8]> for KannalaBrandtCamera {
     }
 }
 
+/// Creates a `KannalaBrandtCamera` from a parameter slice with validation.
+///
+/// Unlike `From<&[f64]>`, this constructor validates all parameters
+/// and returns a `Result` instead of panicking on invalid input.
+///
+/// # Errors
+///
+/// Returns `CameraModelError::InvalidParams` if fewer than 8 parameters are provided.
+/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+pub fn try_from_params(params: &[f64]) -> Result<KannalaBrandtCamera, CameraModelError> {
+    if params.len() < 8 {
+        return Err(CameraModelError::InvalidParams(format!(
+            "KannalaBrandtCamera requires at least 8 parameters, got {}",
+            params.len()
+        )));
+    }
+    let camera = KannalaBrandtCamera::from(params);
+    camera.validate_params()?;
+    Ok(camera)
+}
+
 impl CameraModel for KannalaBrandtCamera {
     const INTRINSIC_DIM: usize = 8;
     type IntrinsicJacobian = SMatrix<f64, 2, 8>;
@@ -443,7 +464,12 @@ impl CameraModel for KannalaBrandtCamera {
 
         let mut ru = (mx * mx + my * my).sqrt();
 
-        // Clamp ru to avoid instability if extremely large (from C++ impl: min(ru, PI/2))
+        // Clamp undistorted radius to π/2 to ensure Newton-Raphson stability.
+        // For the Kannala-Brandt model, θ ∈ [0, π/2] maps the maximum valid
+        // field of view (180° full angle). Values beyond this produce physically
+        // meaningless results and can cause the iterative solver to diverge.
+        // Reference: Kannala & Brandt, "A Generic Camera Model and Calibration
+        // Method for Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006.
         ru = ru.min(std::f64::consts::PI / 2.0);
 
         if ru < crate::GEOMETRIC_PRECISION {
@@ -1064,6 +1090,7 @@ impl CameraModel for KannalaBrandtCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Matrix2xX, Matrix3xX};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -1232,6 +1259,63 @@ mod tests {
         assert_eq!(k2, 0.03);
         assert_eq!(k3, 0.003);
         assert_eq!(k4, 0.0003);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_estimation() -> TestResult {
+        // Ground truth fisheye camera
+        let gt_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let gt_distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let gt_camera = KannalaBrandtCamera::new(gt_pinhole, gt_distortion)?;
+
+        // Generate synthetic 3D points in camera frame
+        let n_points = 50;
+        let mut pts_3d = Matrix3xX::zeros(n_points);
+        let mut pts_2d = Matrix2xX::zeros(n_points);
+        let mut valid = 0;
+
+        for i in 0..n_points {
+            let angle = i as f64 * 2.0 * std::f64::consts::PI / n_points as f64;
+            let r = 0.1 + 0.4 * (i as f64 / n_points as f64);
+            let p3d = Vector3::new(r * angle.cos(), r * angle.sin(), 1.0);
+
+            if let Ok(p2d) = gt_camera.project(&p3d) {
+                pts_3d.set_column(valid, &p3d);
+                pts_2d.set_column(valid, &p2d);
+                valid += 1;
+            }
+        }
+        let pts_3d = pts_3d.columns(0, valid).into_owned();
+        let pts_2d = pts_2d.columns(0, valid).into_owned();
+
+        // Initial camera with zero distortion
+        let init_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let init_distortion = DistortionModel::KannalaBrandt {
+            k1: 0.0,
+            k2: 0.0,
+            k3: 0.0,
+            k4: 0.0,
+        };
+        let mut camera = KannalaBrandtCamera::new(init_pinhole, init_distortion)?;
+
+        camera.linear_estimation(&pts_3d, &pts_2d)?;
+
+        // Verify reprojection error
+        for i in 0..valid {
+            let p3d = pts_3d.column(i).into_owned();
+            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let err = ((projected.x - pts_2d[(0, i)]).powi(2)
+                + (projected.y - pts_2d[(1, i)]).powi(2))
+            .sqrt();
+            assert!(err < 3.0, "Reprojection error too large: {err}");
+        }
 
         Ok(())
     }

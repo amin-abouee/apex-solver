@@ -313,6 +313,27 @@ impl From<[f64; 9]> for RadTanCamera {
     }
 }
 
+/// Creates a `RadTanCamera` from a parameter slice with validation.
+///
+/// Unlike `From<&[f64]>`, this constructor validates all parameters
+/// and returns a `Result` instead of panicking on invalid input.
+///
+/// # Errors
+///
+/// Returns `CameraModelError::InvalidParams` if fewer than 9 parameters are provided.
+/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+pub fn try_from_params(params: &[f64]) -> Result<RadTanCamera, CameraModelError> {
+    if params.len() < 9 {
+        return Err(CameraModelError::InvalidParams(format!(
+            "RadTanCamera requires at least 9 parameters, got {}",
+            params.len()
+        )));
+    }
+    let camera = RadTanCamera::from(params);
+    camera.validate_params()?;
+    Ok(camera)
+}
+
 impl CameraModel for RadTanCamera {
     const INTRINSIC_DIM: usize = 9;
     type IntrinsicJacobian = SMatrix<f64, 2, 9>;
@@ -398,7 +419,7 @@ impl CameraModel for RadTanCamera {
 
         let mut point = target_distorted_point;
 
-        const EPS: f64 = crate::GEOMETRIC_PRECISION;
+        const CONVERGENCE_EPS: f64 = crate::CONVERGENCE_THRESHOLD;
         const MAX_ITERATIONS: u32 = 100;
 
         let (k1, k2, p1, p2, k3) = self.distortion_params();
@@ -427,7 +448,7 @@ impl CameraModel for RadTanCamera {
             let fx = x_dist - target_distorted_point.x;
             let fy = y_dist - target_distorted_point.y;
 
-            if fx.abs() < EPS && fy.abs() < EPS {
+            if fx.abs() < CONVERGENCE_EPS && fy.abs() < CONVERGENCE_EPS {
                 break;
             }
 
@@ -1094,6 +1115,7 @@ impl CameraModel for RadTanCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Matrix2xX, Matrix3xX};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -1274,6 +1296,65 @@ mod tests {
         assert_eq!(p1, 0.003);
         assert_eq!(p2, 0.004);
         assert_eq!(k3, 0.003);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_linear_estimation() -> TestResult {
+        // Ground truth camera with radial distortion only (p1=p2=0)
+        let gt_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let gt_distortion = DistortionModel::BrownConrady {
+            k1: 0.05,
+            k2: 0.01,
+            p1: 0.0,
+            p2: 0.0,
+            k3: 0.001,
+        };
+        let gt_camera = RadTanCamera::new(gt_pinhole, gt_distortion)?;
+
+        // Generate synthetic 3D points in camera frame
+        let n_points = 50;
+        let mut pts_3d = Matrix3xX::zeros(n_points);
+        let mut pts_2d = Matrix2xX::zeros(n_points);
+        let mut valid = 0;
+
+        for i in 0..n_points {
+            let angle = i as f64 * 2.0 * std::f64::consts::PI / n_points as f64;
+            let r = 0.1 + 0.3 * (i as f64 / n_points as f64);
+            let p3d = Vector3::new(r * angle.cos(), r * angle.sin(), 1.0);
+
+            if let Ok(p2d) = gt_camera.project(&p3d) {
+                pts_3d.set_column(valid, &p3d);
+                pts_2d.set_column(valid, &p2d);
+                valid += 1;
+            }
+        }
+        let pts_3d = pts_3d.columns(0, valid).into_owned();
+        let pts_2d = pts_2d.columns(0, valid).into_owned();
+
+        // Initial camera with zero distortion
+        let init_pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let init_distortion = DistortionModel::BrownConrady {
+            k1: 0.0,
+            k2: 0.0,
+            p1: 0.0,
+            p2: 0.0,
+            k3: 0.0,
+        };
+        let mut camera = RadTanCamera::new(init_pinhole, init_distortion)?;
+
+        camera.linear_estimation(&pts_3d, &pts_2d)?;
+
+        // Verify reprojection error
+        for i in 0..valid {
+            let p3d = pts_3d.column(i).into_owned();
+            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let err = ((projected.x - pts_2d[(0, i)]).powi(2)
+                + (projected.y - pts_2d[(1, i)]).powi(2))
+            .sqrt();
+            assert!(err < 1.0, "Reprojection error too large: {err}");
+        }
 
         Ok(())
     }

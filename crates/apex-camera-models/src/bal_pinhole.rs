@@ -223,6 +223,27 @@ impl From<[f64; 3]> for BALPinholeCameraStrict {
     }
 }
 
+/// Creates a `BALPinholeCameraStrict` from a parameter slice with validation.
+///
+/// Unlike `From<&[f64]>`, this constructor validates all parameters
+/// and returns a `Result` instead of panicking on invalid input.
+///
+/// # Errors
+///
+/// Returns `CameraModelError::InvalidParams` if fewer than 3 parameters are provided.
+/// Returns validation errors if focal length is non-positive or parameters are non-finite.
+pub fn try_from_params(params: &[f64]) -> Result<BALPinholeCameraStrict, CameraModelError> {
+    if params.len() < 3 {
+        return Err(CameraModelError::InvalidParams(format!(
+            "BALPinholeCameraStrict requires at least 3 parameters, got {}",
+            params.len()
+        )));
+    }
+    let camera = BALPinholeCameraStrict::from(params);
+    camera.validate_params()?;
+    Ok(camera)
+}
+
 impl CameraModel for BALPinholeCameraStrict {
     const INTRINSIC_DIM: usize = 3; // f, k1, k2
     type IntrinsicJacobian = SMatrix<f64, 2, 3>;
