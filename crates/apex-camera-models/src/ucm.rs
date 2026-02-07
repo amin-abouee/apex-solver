@@ -37,9 +37,7 @@
 //!
 //! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Unified Camera Model with 5 parameters.
@@ -514,58 +512,6 @@ impl CameraModel for UcmCamera {
         jac[(1, 2)] = self.pinhole.fy * (-y * d_denom_dz) / denom2;
 
         jac
-    }
-
-    /// Computes the Jacobian of the projection function with respect to the camera pose.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The pose Jacobian derivation is identical across camera models. We use SE(3) right perturbation
-    /// and compute ∂p_cam/∂ξ = [-I | [p_cam]×], then chain with the point Jacobian.
-    ///
-    /// See BALPinholeCameraStrict::jacobian_pose() or DoubleSphereCamera::jacobian_pose()
-    /// for the complete derivation.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_world` - 3D point in world coordinate frame.
-    /// * `pose` - The camera pose in SE(3).
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(d_uv_d_pcam, d_pcam_d_pose)`:
-    /// - `d_uv_d_pcam`: 2×3 Jacobian of projection w.r.t. point in camera frame
-    /// - `d_pcam_d_pose`: 3×6 Jacobian of camera point w.r.t. pose perturbation
-    ///
-    /// # References
-    ///
-    /// - Solà et al., "A Micro Lie Theory for State Estimation in Robotics", arXiv:1812.01537, 2018
-    ///
-    /// # Verification
-    ///
-    /// This Jacobian is verified against numerical differentiation in tests.
-    fn jacobian_pose(
-        &self,
-        p_world: &Vector3<f64>,
-        pose: &SE3,
-    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(p_world, None, None);
-
-        let d_uv_d_pcam = self.jacobian_point(&p_cam);
-
-        let r_transpose = pose_inv.rotation_so3().rotation_matrix();
-        let p_cam_skew = skew_symmetric(&p_cam);
-
-        let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
-            if c < 3 {
-                -r_transpose[(r, c)]
-            } else {
-                p_cam_skew[(r, c - 3)]
-            }
-        });
-
-        (d_uv_d_pcam, d_pcam_d_pose)
     }
 
     /// Computes the Jacobian of the projection function with respect to intrinsic parameters.

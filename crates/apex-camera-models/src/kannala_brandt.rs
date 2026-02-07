@@ -41,9 +41,7 @@
 //! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
 //!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
 
-use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams, skew_symmetric};
-use apex_manifolds::LieGroup;
-use apex_manifolds::se3::SE3;
+use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
 
 /// Kannala-Brandt fisheye camera model with 8 parameters.
@@ -705,128 +703,6 @@ impl CameraModel for KannalaBrandtCamera {
         let dv_dz = self.pinhole.fy * dtheta_d_dtheta * dtheta_dz * y * inv_r;
 
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
-    }
-
-    /// Jacobian of projection w.r.t. camera pose (SE3).
-    ///
-    /// Computes ∂π/∂ξ where π is the projection function and ξ ∈ se(3) is the camera pose.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// ## Chain Rule Decomposition
-    ///
-    /// ```text
-    /// ∂π/∂ξ = ∂π/∂p_cam · ∂p_cam/∂ξ
-    /// ```
-    ///
-    /// where:
-    /// - `π` is the projection function (3D → 2D)
-    /// - `p_cam` is the point in camera coordinates
-    /// - `ξ ∈ se(3)` is the camera pose (Lie algebra representation)
-    ///
-    /// ## Part 1: Point Jacobian (∂π/∂p_cam)
-    ///
-    /// This is the standard point Jacobian (2×3) computed by `jacobian_point()`.
-    /// See that method's documentation for the complete derivation of Kannala-Brandt
-    /// projection derivatives.
-    ///
-    /// ## Part 2: Pose Transformation Jacobian (∂p_cam/∂ξ)
-    ///
-    /// The camera frame point is related to the world frame point by:
-    /// ```text
-    /// p_cam = T⁻¹ · p_world = (R, t)⁻¹ · p_world
-    /// p_cam = R^T · (p_world - t)
-    /// ```
-    ///
-    /// The SE(3) pose is parameterized as ξ = (ω, v) where:
-    /// - ω ∈ ℝ³ is the rotation (so(3) Lie algebra, axis-angle representation)
-    /// - v ∈ ℝ³ is the translation
-    ///
-    /// ### Translation Part (∂p_cam/∂v):
-    ///
-    /// ```text
-    /// ∂p_cam/∂v = ∂(R^T·(p_world - t))/∂v
-    ///           = -R^T · ∂t/∂v
-    ///           = -R^T · I
-    ///           = -R^T               (3×3 matrix)
-    /// ```
-    ///
-    /// ### Rotation Part (∂p_cam/∂ω):
-    ///
-    /// Using the Lie group adjoint relationship:
-    /// ```text
-    /// ∂p_cam/∂ω = [p_cam]×          (3×3 skew-symmetric matrix)
-    /// ```
-    ///
-    /// where `[p_cam]×` is the skew-symmetric cross-product matrix:
-    /// ```text
-    /// [p_cam]× = [  0    -pz    py ]
-    ///            [  pz     0   -px ]
-    ///            [ -py    px     0 ]
-    /// ```
-    ///
-    /// This comes from the derivative of the rotation action on a point.
-    ///
-    /// ### Combined Jacobian (3×6):
-    ///
-    /// ```text
-    /// ∂p_cam/∂ξ = [ -R^T | [p_cam]× ]     (3×6)
-    ///              ︸───︸   ︸──────︸
-    ///               ∂/∂v     ∂/∂ω
-    /// ```
-    ///
-    /// ## Final Result (2×6)
-    ///
-    /// ```text
-    /// ∂π/∂ξ = (∂π/∂p_cam) · (∂p_cam/∂ξ)
-    ///       = (2×3) · (3×6)
-    ///       = (2×6)
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_world` - 3D point in world coordinate frame.
-    /// * `pose` - The camera pose in SE(3).
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple containing:
-    /// 1. Point Jacobian (∂π/∂p_cam): 2×3 matrix.
-    /// 2. Pose Transformation Jacobian (∂p_cam/∂ξ): 3×6 matrix.
-    ///
-    /// The caller can multiply these to get the full pose Jacobian.
-    ///
-    /// # References
-    ///
-    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie Groups)
-    /// - Sola et al., "A micro Lie theory for state estimation in robotics", 2021
-    ///
-    /// # Implementation Note
-    ///
-    /// The rotation Jacobian uses the skew-symmetric matrix `[p_cam]×` which
-    /// is provided by the `skew_symmetric()` helper function.
-    fn jacobian_pose(
-        &self,
-        p_world: &Vector3<f64>,
-        pose: &SE3,
-    ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(p_world, None, None);
-
-        let d_uv_d_pcam = self.jacobian_point(&p_cam);
-
-        let r_transpose = pose_inv.rotation_so3().rotation_matrix();
-        let p_cam_skew = skew_symmetric(&p_cam);
-
-        let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
-            if c < 3 {
-                -r_transpose[(r, c)]
-            } else {
-                p_cam_skew[(r, c - 3)]
-            }
-        });
-
-        (d_uv_d_pcam, d_pcam_d_pose)
     }
 
     /// Jacobian of projection w.r.t. intrinsic parameters (2×8).
