@@ -1,6 +1,6 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
-use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3, Matrix3xX, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
 use std::marker::PhantomData;
 use tracing::warn;
 
@@ -8,12 +8,6 @@ use crate::factors::{Factor, OptimizeParams};
 use apex_camera_models::CameraModel;
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-
-/// Compute skew-symmetric matrix from vector.
-/// [v]× such that [v]× * w = v × w (cross product)
-fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
-}
 
 /// Trait for optimization configuration.
 ///
@@ -255,49 +249,9 @@ where
                 let mut col_offset = 0;
 
                 // Jacobian w.r.t. pose (world-to-camera convention)
-                // This matches ReprojectionFactor exactly
                 if OP::POSE {
-                    // Jacobian of projection w.r.t. point in camera frame
-                    let d_uv_d_pcam = camera.jacobian_point(&p_cam);
-
-                    // Jacobian of p_cam w.r.t. pose for world-to-camera convention
-                    // p_cam = R * p_world + t
-                    //
-                    // Using right perturbation: pose' = pose ∘ Exp([δρ; δθ])
-                    // For small perturbations:
-                    //   R' = R * Exp(δθ) ≈ R * (I + [δθ]×)
-                    //   t' = t + R * δρ
-                    //
-                    // So:
-                    //   p_cam' = R' * p_world + t' = R*(I+[δθ]×)*p_world + t + R*δρ
-                    //          = R*p_world + t + R*[δθ]×*p_world + R*δρ
-                    //          = p_cam + R*(δρ + [δθ]× * p_world)
-                    //          = p_cam + R*(δρ - [p_world]× * δθ)
-                    //          = p_cam + R*δρ - R*[p_world]×*δθ
-                    //
-                    // ∂p_cam/∂δρ = R
-                    // ∂p_cam/∂δθ = -R * [p_world]×
-                    let rotation = pose.rotation_so3().rotation_matrix();
-                    let p_world_skew = skew_symmetric(&p_world);
-
-                    let d_pcam_d_pose = nalgebra::SMatrix::<f64, 3, 6>::from_fn(|r, c| {
-                        if c < 3 {
-                            // Translation part: R
-                            rotation[(r, c)]
-                        } else {
-                            // Rotation part: -R * [p_world]×
-                            let col = c - 3;
-                            let mut sum = 0.0;
-                            for k in 0..3 {
-                                sum += rotation[(r, k)] * p_world_skew[(k, col)];
-                            }
-                            -sum
-                        }
-                    });
-
-                    // Chain rule: ∂uv/∂pose = ∂uv/∂p_cam * ∂p_cam/∂pose
+                    let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, pose);
                     let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
-
                     for r in 0..2 {
                         for c in 0..6 {
                             jac[(i * 2 + r, col_offset + c)] = d_uv_d_pose[(r, c)];

@@ -499,126 +499,73 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// # Mathematical Derivation
     ///
-    /// The camera pose transformation converts a world point to camera coordinates:
+    /// The pose is treated as a **world-to-camera** transform T_wc so that:
     ///
     /// ```text
-    /// p_cam = T⁻¹ · p_world = R^T · (p_world - t)
+    /// p_cam = T_wc · p_world = R · p_world + t
     /// ```
-    ///
-    /// where T = (R, t) is the camera pose (world-to-camera transform).
     ///
     /// ## Perturbation Model (Right Jacobian)
     ///
-    /// We perturb the pose in the tangent space of SE(3):
+    /// We perturb the pose with a right perturbation:
     ///
     /// ```text
-    /// T(δξ) = T · exp(δξ^)
+    /// T'(δξ) = T · Exp(δξ),  δξ = [δρ; δθ] ∈ ℝ⁶
     /// ```
-    ///
-    /// where δξ = (δω, δv) ∈ ℝ⁶ with:
-    /// - δω ∈ ℝ³: rotation perturbation (so(3) algebra)
-    /// - δv ∈ ℝ³: translation perturbation
     ///
     /// The perturbed camera-frame point becomes:
     ///
     /// ```text
-    /// p_cam(δξ) = [T · exp(δξ^)]⁻¹ · p_world
-    ///           = exp(-δξ^) · T⁻¹ · p_world
-    ///           ≈ (I - δξ^) · p_cam     (first-order approximation)
+    /// p_cam' = R·(I + [δθ]×)·p_world + (t + R·δρ)
+    ///        = p_cam + R·δρ - R·[p_world]×·δθ
     /// ```
-    ///
-    /// ## Jacobian w.r.t. Pose Perturbation
-    ///
-    /// For small perturbations δξ:
-    ///
-    /// ```text
-    /// p_cam(δξ) ≈ p_cam - [p_cam]× · δω - R^T · δv
-    /// ```
-    ///
-    /// where [p_cam]× is the skew-symmetric matrix of p_cam.
     ///
     /// Taking derivatives:
     ///
     /// ```text
-    /// ∂p_cam/∂δω = -[p_cam]×
-    /// ∂p_cam/∂δv = -R^T
+    /// ∂p_cam/∂δρ = R
+    /// ∂p_cam/∂δθ = -R · [p_world]×
     /// ```
-    ///
-    /// Therefore, the Jacobian of p_cam w.r.t. pose perturbation δξ is:
-    ///
-    /// ```text
-    /// J_pose = ∂p_cam/∂δξ = [ -R^T | [p_cam]× ]  (3×6 matrix)
-    /// ```
-    ///
-    /// where:
-    /// - First 3 columns correspond to translation perturbation δv
-    /// - Last 3 columns correspond to rotation perturbation δω
-    ///
-    /// ## Chain Rule to Pixel Coordinates
-    ///
-    /// The full Jacobian chain is:
-    ///
-    /// ```text
-    /// J_pixel_pose = J_pixel_point · J_point_pose
-    ///              = (∂u/∂p_cam) · (∂p_cam/∂δξ)
-    /// ```
-    ///
-    /// where J_pixel_point is computed by `jacobian_point()`.
     ///
     /// ## Return Value
     ///
     /// Returns a tuple `(J_pixel_point, J_point_pose)`:
     /// - `J_pixel_point`: 2×3 Jacobian ∂uv/∂p_cam (from jacobian_point)
-    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ
+    /// - `J_point_pose`: 3×6 Jacobian ∂p_cam/∂δξ = [R | -R·[p_world]×]
     ///
     /// The caller multiplies these to get the full 2×6 Jacobian ∂uv/∂δξ.
     ///
     /// ## SE(3) Conventions
     ///
+    /// - **Pose meaning**: world-to-camera T_wc (p_cam = R·p_world + t)
     /// - **Parameterization**: δξ = [δρ_x, δρ_y, δρ_z, δθ_x, δθ_y, δθ_z]
     /// - **Perturbation**: Right perturbation T' = T · Exp(δξ)
-    /// - **Result**: ∂p_cam/∂δρ = -I, ∂p_cam/∂δθ = [p_cam]×
-    ///
-    /// ## References
-    ///
-    /// - Barfoot, "State Estimation for Robotics", Chapter 7 (Lie group optimization)
-    /// - Sola et al., "A micro Lie theory for state estimation in robotics", arXiv:1812.01537
-    /// - Blanco, "A tutorial on SE(3) transformation parameterizations and on-manifold optimization"
-    ///
-    /// ## Implementation Notes
-    ///
-    /// The skew-symmetric matrix [p_cam]× is computed as:
-    ///
-    /// ```text
-    /// [p_cam]× = [  0      -p_z    p_y  ]
-    ///            [  p_z     0     -p_x  ]
-    ///            [ -p_y    p_x     0   ]
-    /// ```
+    /// - **Result**: ∂p_cam/∂δρ = R, ∂p_cam/∂δθ = -R·[p_world]×
     fn jacobian_pose(
         &self,
         p_world: &Vector3<f64>,
         pose: &SE3,
     ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        // Transform world point to camera frame via inverse pose
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(p_world, None, None);
+        // Transform world point to camera frame (world-to-camera convention)
+        let p_cam = pose.act(p_world, None, None);
 
         // 2×3 projection Jacobian ∂(u,v)/∂(p_cam)
         let d_uv_d_pcam = self.jacobian_point(&p_cam);
 
-        // 3×6 transformation Jacobian ∂(p_cam)/∂(pose) for right perturbation
-        // pose' = pose · Exp(δ), δ = [ρ, θ] in SE3 tangent space
-        // p_cam' = (pose · Exp(δ))^{-1} · p_world = Exp(-δ) · p_cam
-        //
-        // Translation (ρ): p_cam' ≈ p_cam - ρ  →  ∂p_cam/∂ρ = -I  (cols 0-2)
-        // Rotation (θ):    p_cam' ≈ p_cam + [p_cam]× · θ  →  ∂p_cam/∂θ = [p_cam]×  (cols 3-5)
-        let p_cam_skew = skew_symmetric(&p_cam);
+        // 3×6 transformation Jacobian ∂(p_cam)/∂(pose) for right perturbation on T_wc:
+        //   ∂p_cam/∂δρ = R        (cols 0-2)
+        //   ∂p_cam/∂δθ = -R·[p_world]×  (cols 3-5)
+        let rotation = pose.rotation_so3().rotation_matrix();
+        let p_world_skew = skew_symmetric(p_world);
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
-                if r == c { -1.0 } else { 0.0 }
+                rotation[(r, c)]
             } else {
-                p_cam_skew[(r, c - 3)]
+                let col = c - 3;
+                -(0..3)
+                    .map(|k| rotation[(r, k)] * p_world_skew[(k, col)])
+                    .sum::<f64>()
             }
         });
 
@@ -784,14 +731,10 @@ mod tests {
             d[i] = -eps;
             let delta_minus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
 
-            // Right perturbation: pose' = pose · Exp(δ)
-            let p_cam_plus = pose
-                .plus(&delta_plus, None, None)
-                .inverse(None)
-                .act(&p_world, None, None);
+            // Right perturbation on T_wc: pose' = pose · Exp(δ)
+            let p_cam_plus = pose.plus(&delta_plus, None, None).act(&p_world, None, None);
             let p_cam_minus = pose
                 .plus(&delta_minus, None, None)
-                .inverse(None)
                 .act(&p_world, None, None);
 
             let uv_plus = camera.project(&p_cam_plus)?;

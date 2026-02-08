@@ -548,19 +548,25 @@ impl CameraModel for BALPinholeCameraStrict {
         p_world: &Vector3<f64>,
         pose: &SE3,
     ) -> (Self::PointJacobian, SMatrix<f64, 3, 6>) {
-        let pose_inv = pose.inverse(None);
-        let p_cam = pose_inv.act(p_world, None, None);
+        // World-to-camera convention: p_cam = R · p_world + t
+        let p_cam = pose.act(p_world, None, None);
 
         let d_uv_d_pcam = self.jacobian_point(&p_cam);
-        let p_cam_skew = skew_symmetric(&p_cam);
+
+        // Right perturbation on T_wc:
+        //   ∂p_cam/∂δρ = R        (cols 0-2)
+        //   ∂p_cam/∂δθ = -R·[p_world]×  (cols 3-5)
+        let rotation = pose.rotation_so3().rotation_matrix();
+        let p_world_skew = skew_symmetric(p_world);
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
-                // Translation part: -I
-                if r == c { -1.0 } else { 0.0 }
+                rotation[(r, c)]
             } else {
-                // Rotation part: [p_cam]×
-                p_cam_skew[(r, c - 3)]
+                let col = c - 3;
+                -(0..3)
+                    .map(|k| rotation[(r, k)] * p_world_skew[(k, col)])
+                    .sum::<f64>()
             }
         });
 
@@ -936,14 +942,10 @@ mod tests {
             d[i] = -eps;
             let delta_minus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
 
-            // Right perturbation: pose' = pose · Exp(δ)
-            let p_cam_plus = pose
-                .plus(&delta_plus, None, None)
-                .inverse(None)
-                .act(&p_world, None, None);
+            // Right perturbation on T_wc: pose' = pose · Exp(δ)
+            let p_cam_plus = pose.plus(&delta_plus, None, None).act(&p_world, None, None);
             let p_cam_minus = pose
                 .plus(&delta_minus, None, None)
-                .inverse(None)
                 .act(&p_world, None, None);
 
             let uv_plus = camera.project(&p_cam_plus)?;
