@@ -753,47 +753,8 @@ impl CameraModel for DoubleSphereCamera {
     ///
     /// Returns [`CameraModelError`] if any parameter violates the validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
-                cx: self.pinhole.cx,
-                cy: self.pinhole.cy,
-            });
-        }
-
-        let (xi, alpha) = self.distortion_params();
-        if !xi.is_finite() || !(-1.0..=1.0).contains(&xi) {
-            return Err(CameraModelError::ParameterOutOfRange {
-                param: "xi".to_string(),
-                value: xi,
-                min: -1.0,
-                max: 1.0,
-            });
-        }
-
-        if !alpha.is_finite() || alpha <= 0.0 || alpha > 1.0 {
-            return Err(CameraModelError::ParameterOutOfRange {
-                param: "alpha".to_string(),
-                value: alpha,
-                min: 0.0,
-                max: 1.0,
-            });
-        }
-
-        Ok(())
+        self.pinhole.validate()?;
+        self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters of the camera.

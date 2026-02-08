@@ -713,47 +713,8 @@ impl CameraModel for EucmCamera {
     ///
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
-                cx: self.pinhole.cx,
-                cy: self.pinhole.cy,
-            });
-        }
-
-        let (alpha, beta) = self.distortion_params();
-        if !(alpha.is_finite() && (0.0..=1.0).contains(&alpha)) {
-            return Err(CameraModelError::ParameterOutOfRange {
-                param: "alpha".to_string(),
-                value: alpha,
-                min: 0.0,
-                max: 1.0,
-            });
-        }
-
-        if !beta.is_finite() || beta <= 0.0 {
-            return Err(CameraModelError::ParameterOutOfRange {
-                param: "beta".to_string(),
-                value: beta,
-                min: 0.0,
-                max: f64::INFINITY,
-            });
-        }
-
-        Ok(())
+        self.pinhole.validate()?;
+        self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters of the camera.

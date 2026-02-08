@@ -885,60 +885,8 @@ impl CameraModel for RadTanCamera {
     ///
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
-                cx: self.pinhole.cx,
-                cy: self.pinhole.cy,
-            });
-        }
-
-        let (k1, k2, p1, p2, k3) = self.distortion_params();
-        if !k1.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "k1".to_string(),
-                value: k1,
-            });
-        }
-        if !k2.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "k2".to_string(),
-                value: k2,
-            });
-        }
-        if !p1.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "p1".to_string(),
-                value: p1,
-            });
-        }
-        if !p2.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "p2".to_string(),
-                value: p2,
-            });
-        }
-        if !k3.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "k3".to_string(),
-                value: k3,
-            });
-        }
-
-        Ok(())
+        self.pinhole.validate()?;
+        self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters.

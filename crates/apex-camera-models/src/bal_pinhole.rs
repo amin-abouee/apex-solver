@@ -742,32 +742,8 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.f <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
-                fx: self.f,
-                fy: self.f,
-            });
-        }
-        if !self.f.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
-                fx: self.f,
-                fy: self.f,
-            });
-        }
-        let (k1, k2) = self.distortion_params();
-        if !k1.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "k1".to_string(),
-                value: k1,
-            });
-        }
-        if !k2.is_finite() {
-            return Err(CameraModelError::DistortionNotFinite {
-                name: "k2".to_string(),
-                value: k2,
-            });
-        }
-        Ok(())
+        self.get_pinhole_params().validate()?;
+        self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters of the camera.

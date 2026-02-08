@@ -740,38 +740,8 @@ impl CameraModel for FovCamera {
     ///
     /// Returns [`CameraModelError`] if any parameter violates validation rules.
     fn validate_params(&self) -> Result<(), CameraModelError> {
-        if self.pinhole.fx <= 0.0 || self.pinhole.fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.fx.is_finite() || !self.pinhole.fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite {
-                fx: self.pinhole.fx,
-                fy: self.pinhole.fy,
-            });
-        }
-
-        if !self.pinhole.cx.is_finite() || !self.pinhole.cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite {
-                cx: self.pinhole.cx,
-                cy: self.pinhole.cy,
-            });
-        }
-
-        let w = self.distortion_params();
-        if !w.is_finite() || w <= 0.0 || w > std::f64::consts::PI {
-            return Err(CameraModelError::ParameterOutOfRange {
-                param: "w".to_string(),
-                value: w,
-                min: 0.0,
-                max: std::f64::consts::PI,
-            });
-        }
-
-        Ok(())
+        self.pinhole.validate()?;
+        self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters of the camera.

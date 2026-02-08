@@ -160,16 +160,32 @@ pub struct PinholeParams {
 impl PinholeParams {
     /// Create new pinhole parameters with validation.
     pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
-        if fx <= 0.0 || fy <= 0.0 {
-            return Err(CameraModelError::FocalLengthNotPositive { fx, fy });
+        let params = Self { fx, fy, cx, cy };
+        params.validate()?;
+        Ok(params)
+    }
+
+    /// Validate pinhole parameters.
+    pub fn validate(&self) -> Result<(), CameraModelError> {
+        if self.fx <= 0.0 || self.fy <= 0.0 {
+            return Err(CameraModelError::FocalLengthNotPositive {
+                fx: self.fx,
+                fy: self.fy,
+            });
         }
-        if !fx.is_finite() || !fy.is_finite() {
-            return Err(CameraModelError::FocalLengthNotFinite { fx, fy });
+        if !self.fx.is_finite() || !self.fy.is_finite() {
+            return Err(CameraModelError::FocalLengthNotFinite {
+                fx: self.fx,
+                fy: self.fy,
+            });
         }
-        if !cx.is_finite() || !cy.is_finite() {
-            return Err(CameraModelError::PrincipalPointNotFinite { cx, cy });
+        if !self.cx.is_finite() || !self.cy.is_finite() {
+            return Err(CameraModelError::PrincipalPointNotFinite {
+                cx: self.cx,
+                cy: self.cy,
+            });
         }
-        Ok(Self { fx, fy, cx, cy })
+        Ok(())
     }
 }
 
@@ -221,6 +237,102 @@ pub enum DistortionModel {
     ///
     /// Two-parameter fisheye model with improved wide-angle accuracy.
     DoubleSphere { xi: f64, alpha: f64 },
+}
+
+fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
+    if !value.is_finite() {
+        return Err(CameraModelError::DistortionNotFinite {
+            name: name.to_string(),
+            value,
+        });
+    }
+    Ok(())
+}
+
+impl DistortionModel {
+    /// Validate distortion parameters for the given model variant.
+    pub fn validate(&self) -> Result<(), CameraModelError> {
+        match self {
+            DistortionModel::None => Ok(()),
+            DistortionModel::Radial { k1, k2 } => {
+                check_finite("k1", *k1)?;
+                check_finite("k2", *k2)
+            }
+            DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => {
+                check_finite("k1", *k1)?;
+                check_finite("k2", *k2)?;
+                check_finite("p1", *p1)?;
+                check_finite("p2", *p2)?;
+                check_finite("k3", *k3)
+            }
+            DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => {
+                check_finite("k1", *k1)?;
+                check_finite("k2", *k2)?;
+                check_finite("k3", *k3)?;
+                check_finite("k4", *k4)
+            }
+            DistortionModel::FOV { w } => {
+                if !w.is_finite() || *w <= 0.0 || *w > std::f64::consts::PI {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "w".to_string(),
+                        value: *w,
+                        min: 0.0,
+                        max: std::f64::consts::PI,
+                    });
+                }
+                Ok(())
+            }
+            DistortionModel::UCM { alpha } => {
+                if !alpha.is_finite() || !(0.0..=1.0).contains(alpha) {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "alpha".to_string(),
+                        value: *alpha,
+                        min: 0.0,
+                        max: 1.0,
+                    });
+                }
+                Ok(())
+            }
+            DistortionModel::EUCM { alpha, beta } => {
+                if !alpha.is_finite() || !(0.0..=1.0).contains(alpha) {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "alpha".to_string(),
+                        value: *alpha,
+                        min: 0.0,
+                        max: 1.0,
+                    });
+                }
+                if !beta.is_finite() || *beta <= 0.0 {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "beta".to_string(),
+                        value: *beta,
+                        min: 0.0,
+                        max: f64::INFINITY,
+                    });
+                }
+                Ok(())
+            }
+            DistortionModel::DoubleSphere { xi, alpha } => {
+                if !xi.is_finite() || !(-1.0..=1.0).contains(xi) {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "xi".to_string(),
+                        value: *xi,
+                        min: -1.0,
+                        max: 1.0,
+                    });
+                }
+                if !alpha.is_finite() || *alpha <= 0.0 || *alpha > 1.0 {
+                    return Err(CameraModelError::ParameterOutOfRange {
+                        param: "alpha".to_string(),
+                        value: *alpha,
+                        min: 0.0,
+                        max: 1.0,
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 /// Validates that a 3D point is in front of the camera.
@@ -647,14 +759,16 @@ mod tests {
     use apex_manifolds::LieGroup;
     use apex_manifolds::se3::{SE3, SE3Tangent};
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Canonical test for the default `jacobian_pose` implementation (right perturbation).
     ///
     /// Since `jacobian_pose` has a single default implementation shared by all models
     /// except BAL, we test it once here using `PinholeCamera` as a representative model.
     #[test]
-    fn test_jacobian_pose_numerical() {
-        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0).unwrap();
-        let camera = PinholeCamera::new(pinhole, DistortionModel::None).unwrap();
+    fn test_jacobian_pose_numerical() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
         let pose = SE3::from_translation_euler(0.1, -0.2, 0.3, 0.05, -0.1, 0.15);
         let p_world = Vector3::new(1.0, 0.5, 3.0);
 
@@ -680,8 +794,8 @@ mod tests {
                 .inverse(None)
                 .act(&p_world, None, None);
 
-            let uv_plus = camera.project(&p_cam_plus).unwrap();
-            let uv_minus = camera.project(&p_cam_minus).unwrap();
+            let uv_plus = camera.project(&p_cam_plus)?;
+            let uv_minus = camera.project(&p_cam_minus)?;
 
             let num_deriv = (uv_plus - uv_minus) / (2.0 * eps);
 
@@ -695,6 +809,7 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
