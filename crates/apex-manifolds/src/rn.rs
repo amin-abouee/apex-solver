@@ -108,6 +108,7 @@ impl Rn {
     ///
     /// # Arguments
     /// * `data` - Vector data
+    #[inline]
     pub fn new(data: DVector<f64>) -> Self {
         Rn { data }
     }
@@ -126,16 +127,19 @@ impl Rn {
     }
 
     /// Get the underlying vector.
+    #[inline]
     pub fn data(&self) -> &DVector<f64> {
         &self.data
     }
 
     /// Get the dimension of the space.
+    #[inline]
     pub fn dim(&self) -> usize {
         self.data.len()
     }
 
     /// Get a specific component.
+    #[inline]
     pub fn component(&self, index: usize) -> f64 {
         self.data[index]
     }
@@ -146,16 +150,19 @@ impl Rn {
     }
 
     /// Get the norm (Euclidean length) of the vector.
+    #[inline]
     pub fn norm(&self) -> f64 {
         self.data.norm()
     }
 
     /// Get the squared norm of the vector.
+    #[inline]
     pub fn norm_squared(&self) -> f64 {
         self.data.norm_squared()
     }
 
     /// Convert Rn to a DVector
+    #[inline]
     pub fn to_vector(&self) -> DVector<f64> {
         self.data.clone()
     }
@@ -479,6 +486,7 @@ impl RnTangent {
     ///
     /// # Arguments
     /// * `data` - Vector data
+    #[inline]
     pub fn new(data: DVector<f64>) -> Self {
         RnTangent { data }
     }
@@ -497,16 +505,19 @@ impl RnTangent {
     }
 
     /// Get the underlying vector.
+    #[inline]
     pub fn data(&self) -> &DVector<f64> {
         &self.data
     }
 
     /// Get the dimension of the tangent space.
+    #[inline]
     pub fn dim(&self) -> usize {
         self.data.len()
     }
 
     /// Get a specific component.
+    #[inline]
     pub fn component(&self, index: usize) -> f64 {
         self.data[index]
     }
@@ -517,16 +528,19 @@ impl RnTangent {
     }
 
     /// Get the norm (Euclidean length) of the tangent vector.
+    #[inline]
     pub fn norm(&self) -> f64 {
         self.data.norm()
     }
 
     /// Get the squared norm of the tangent vector.
+    #[inline]
     pub fn norm_squared(&self) -> f64 {
         self.data.norm_squared()
     }
 
     /// Convert RnTangent to a DVector
+    #[inline]
     pub fn to_vector(&self) -> DVector<f64> {
         self.data.clone()
     }

@@ -74,6 +74,7 @@ impl SO2 {
     ///
     /// # Arguments
     /// * `complex` - Unit complex number representing rotation
+    #[inline]
     pub fn new(complex: UnitComplex<f64>) -> Self {
         SO2 { complex }
     }
@@ -92,6 +93,7 @@ impl SO2 {
     }
 
     /// Get the rotation angle in radians.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.complex.angle()
     }
@@ -284,11 +286,13 @@ impl SO2Tangent {
     ///
     /// # Arguments
     /// * `angle` - Angle in radians
+    #[inline]
     pub fn new(angle: f64) -> Self {
         SO2Tangent { data: angle }
     }
 
     /// Get the angle.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.data
     }

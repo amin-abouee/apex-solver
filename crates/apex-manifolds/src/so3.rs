@@ -67,6 +67,7 @@ impl SO3 {
     ///
     /// # Arguments
     /// * `quaternion` - Unit quaternion representing rotation
+    #[inline]
     pub fn new(quaternion: UnitQuaternion<f64>) -> Self {
         SO3 { quaternion }
     }
@@ -123,21 +124,25 @@ impl SO3 {
     }
 
     /// Get the x component of the quaternion.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.quaternion.i
     }
 
     /// Get the y component of the quaternion.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.quaternion.j
     }
 
     /// Get the z component of the quaternion.
+    #[inline]
     pub fn z(&self) -> f64 {
         self.quaternion.k
     }
 
     /// Get the w component of the quaternion.
+    #[inline]
     pub fn w(&self) -> f64 {
         self.quaternion.w
     }
@@ -159,6 +164,7 @@ impl SO3 {
     }
 
     /// Get coefficients as array [w, x, y, z].
+    #[inline]
     pub fn coeffs(&self) -> [f64; 4] {
         let q = self.quaternion.quaternion();
         [q.w, q.i, q.j, q.k]
@@ -430,6 +436,7 @@ impl SO3Tangent {
     ///
     /// # Arguments
     /// * `axis_angle` - Axis-angle vector [θx, θy, θz]
+    #[inline]
     pub fn new(axis_angle: Vector3<f64>) -> Self {
         SO3Tangent { data: axis_angle }
     }
@@ -440,16 +447,19 @@ impl SO3Tangent {
     }
 
     /// Get the axis-angle vector.
+    #[inline]
     pub fn axis_angle(&self) -> Vector3<f64> {
         self.data
     }
 
     /// Get the angle of rotation.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.data.norm()
     }
 
     /// Get the axis of rotation (normalized).
+    #[inline]
     pub fn axis(&self) -> Vector3<f64> {
         let norm = self.data.norm();
         if norm < f64::EPSILON {
@@ -460,21 +470,25 @@ impl SO3Tangent {
     }
 
     /// Get the x component.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.data.x
     }
 
     /// Get the y component.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.data.y
     }
 
     /// Get the z component.
+    #[inline]
     pub fn z(&self) -> f64 {
         self.data.z
     }
 
     /// Get the coefficients as a vector.
+    #[inline]
     pub fn coeffs(&self) -> Vector3<f64> {
         self.data
     }

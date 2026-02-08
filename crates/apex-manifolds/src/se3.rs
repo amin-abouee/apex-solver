@@ -78,6 +78,7 @@ impl SE3 {
     /// # Arguments
     /// * `translation` - Translation vector [x, y, z]
     /// * `rotation` - Unit quaternion representing rotation
+    #[inline]
     pub fn new(translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
         SE3 {
             rotation: SO3::new(rotation),
@@ -146,16 +147,19 @@ impl SE3 {
     }
 
     /// Get the x component of translation.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.translation.x
     }
 
     /// Get the y component of translation.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.translation.y
     }
 
     /// Get the z component of translation.
+    #[inline]
     pub fn z(&self) -> f64 {
         self.translation.z
     }
@@ -467,6 +471,7 @@ impl SE3Tangent {
     /// # Arguments
     /// * `rho` - Translational component [rho_x, rho_y, rho_z]
     /// * `theta` - Rotational component [theta_x, theta_y, theta_z]
+    #[inline]
     pub fn new(rho: Vector3<f64>, theta: Vector3<f64>) -> Self {
         let mut data = Vector6::zeros();
         data.fixed_rows_mut::<3>(0).copy_from(&rho);
@@ -489,11 +494,13 @@ impl SE3Tangent {
     }
 
     /// Get the rho (translational) part.
+    #[inline]
     pub fn rho(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(0).into_owned()
     }
 
     /// Get the theta (rotational) part.
+    #[inline]
     pub fn theta(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(3).into_owned()
     }
@@ -527,21 +534,15 @@ impl SE3Tangent {
             d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
         }
 
-        let rho_skew_theta_skew = rho_skew * theta_skew;
-        let theta_skew_rho_skew = theta_skew * rho_skew;
-        let theta_skew_rho_skew_theta_skew = theta_skew * rho_skew * theta_skew;
-        let rho_skew_theta_skew_sq2 = rho_skew * theta_skew * theta_skew;
-
-        // Calculate matrix terms
-        let m1 = rho_skew;
-        let m2 = theta_skew_rho_skew + rho_skew_theta_skew + theta_skew_rho_skew_theta_skew;
-        let m3 = rho_skew_theta_skew_sq2
-            - rho_skew_theta_skew_sq2.transpose()
-            - 3.0 * theta_skew_rho_skew_theta_skew;
-        let m4 = theta_skew_rho_skew_theta_skew * theta_skew;
+        let tr = theta_skew * rho_skew;
+        let rt = rho_skew * theta_skew;
+        let trt = tr * theta_skew;
+        let rt_t2 = rt * theta_skew;
 
         // Assemble the final matrix
-        m1 * a + m2 * b - m3 * c - m4 * d
+        rho_skew * a + (tr + rt + trt) * b
+            - (rt_t2 - rt_t2.transpose() - trt * 3.0) * c
+            - (trt * theta_skew) * d
     }
 }
 

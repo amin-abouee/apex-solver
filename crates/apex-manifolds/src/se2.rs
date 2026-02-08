@@ -94,6 +94,7 @@ impl SE2 {
     /// # Arguments
     /// * `translation` - Translation vector [x, y]
     /// * `rotation` - Unit complex number representing rotation
+    #[inline]
     pub fn new(translation: Vector2<f64>, rotation: UnitComplex<f64>) -> Self {
         SE2 {
             translation,
@@ -168,11 +169,13 @@ impl SE2 {
     }
 
     /// Get the x component of translation.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.translation.x
     }
 
     /// Get the y component of translation.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.translation.y
     }
@@ -188,6 +191,7 @@ impl SE2 {
     }
 
     /// Get the rotation angle in radians.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.rotation.angle()
     }
@@ -419,6 +423,7 @@ impl From<SE2Tangent> for DVector<f64> {
 
 impl SE2Tangent {
     /// Create a new SE2Tangent from x, y, and theta components.
+    #[inline]
     pub fn new(x: f64, y: f64, theta: f64) -> Self {
         SE2Tangent {
             data: Vector3::new(x, y, theta),
@@ -426,21 +431,25 @@ impl SE2Tangent {
     }
 
     /// Get the x (translational) component.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.data[0]
     }
 
     /// Get the y (translational) component.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.data[1]
     }
 
     /// Get the theta (rotational) component.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.data[2]
     }
 
     /// Get the translation part as Vector2.
+    #[inline]
     pub fn translation(&self) -> Vector2<f64> {
         Vector2::new(self.x(), self.y())
     }
