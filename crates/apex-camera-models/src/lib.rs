@@ -463,9 +463,9 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     ///
     /// ## SE(3) Conventions
     ///
-    /// - **Parameterization**: δξ = [δv_x, δv_y, δv_z, δω_x, δω_y, δω_z]
-    /// - **Perturbation**: Right perturbation T(δξ) = T · exp(δξ^)
-    /// - **Coordinate frame**: Perturbations are in the camera frame
+    /// - **Parameterization**: δξ = [δρ_x, δρ_y, δρ_z, δθ_x, δθ_y, δθ_z]
+    /// - **Perturbation**: Right perturbation T' = T · Exp(δξ)
+    /// - **Result**: ∂p_cam/∂δρ = -I, ∂p_cam/∂δθ = [p_cam]×
     ///
     /// ## References
     ///
@@ -494,16 +494,17 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
         // 2×3 projection Jacobian ∂(u,v)/∂(p_cam)
         let d_uv_d_pcam = self.jacobian_point(&p_cam);
 
-        // 3×6 transformation Jacobian ∂(p_cam)/∂(pose)
-        // p_cam = R^T · (p_world - t)
-        // Translation part: -R^T  (columns 0-2)
-        // Rotation part: [p_cam]× (columns 3-5)
-        let r_transpose = pose_inv.rotation_so3().rotation_matrix();
+        // 3×6 transformation Jacobian ∂(p_cam)/∂(pose) for right perturbation
+        // pose' = pose · Exp(δ), δ = [ρ, θ] in SE3 tangent space
+        // p_cam' = (pose · Exp(δ))^{-1} · p_world = Exp(-δ) · p_cam
+        //
+        // Translation (ρ): p_cam' ≈ p_cam - ρ  →  ∂p_cam/∂ρ = -I  (cols 0-2)
+        // Rotation (θ):    p_cam' ≈ p_cam + [p_cam]× · θ  →  ∂p_cam/∂θ = [p_cam]×  (cols 3-5)
         let p_cam_skew = skew_symmetric(&p_cam);
 
         let d_pcam_d_pose = SMatrix::<f64, 3, 6>::from_fn(|r, c| {
             if c < 3 {
-                -r_transpose[(r, c)]
+                if r == c { -1.0 } else { 0.0 }
             } else {
                 p_cam_skew[(r, c - 3)]
             }
@@ -642,6 +643,59 @@ pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pinhole::PinholeCamera;
+    use apex_manifolds::LieGroup;
+    use apex_manifolds::se3::{SE3, SE3Tangent};
+
+    /// Canonical test for the default `jacobian_pose` implementation (right perturbation).
+    ///
+    /// Since `jacobian_pose` has a single default implementation shared by all models
+    /// except BAL, we test it once here using `PinholeCamera` as a representative model.
+    #[test]
+    fn test_jacobian_pose_numerical() {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0).unwrap();
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None).unwrap();
+        let pose = SE3::from_translation_euler(0.1, -0.2, 0.3, 0.05, -0.1, 0.15);
+        let p_world = Vector3::new(1.0, 0.5, 3.0);
+
+        let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, &pose);
+        let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
+
+        let eps = NUMERICAL_DERIVATIVE_EPS;
+
+        for i in 0..6 {
+            let mut d = [0.0f64; 6];
+            d[i] = eps;
+            let delta_plus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
+            d[i] = -eps;
+            let delta_minus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
+
+            // Right perturbation: pose' = pose · Exp(δ)
+            let p_cam_plus = pose
+                .plus(&delta_plus, None, None)
+                .inverse(None)
+                .act(&p_world, None, None);
+            let p_cam_minus = pose
+                .plus(&delta_minus, None, None)
+                .inverse(None)
+                .act(&p_world, None, None);
+
+            let uv_plus = camera.project(&p_cam_plus).unwrap();
+            let uv_minus = camera.project(&p_cam_minus).unwrap();
+
+            let num_deriv = (uv_plus - uv_minus) / (2.0 * eps);
+
+            for r in 0..2 {
+                let analytical = d_uv_d_pose[(r, i)];
+                let numerical = num_deriv[r];
+                let rel_err = (analytical - numerical).abs() / (1.0 + numerical.abs());
+                assert!(
+                    rel_err < JACOBIAN_TEST_TOLERANCE,
+                    "jacobian_pose mismatch at ({r},{i}): analytical={analytical}, numerical={numerical}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_skew_symmetric() {

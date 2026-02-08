@@ -911,4 +911,104 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_project_unproject_round_trip() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
+
+        // BAL uses -Z convention: points in front of camera have z < 0
+        let test_points = [
+            Vector3::new(0.1, 0.2, -1.0),
+            Vector3::new(-0.3, 0.1, -2.0),
+            Vector3::new(0.05, -0.1, -0.5),
+        ];
+
+        for p_cam in &test_points {
+            let uv = camera.project(p_cam)?;
+            let ray = camera.unproject(&uv)?;
+            let dot = ray.dot(&p_cam.normalize());
+            assert!(
+                (dot - 1.0).abs() < 1e-6,
+                "Round-trip failed: dot={dot}, expected ~1.0"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_jacobian_pose_numerical() -> TestResult {
+        use apex_manifolds::LieGroup;
+        use apex_manifolds::se3::{SE3, SE3Tangent};
+
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
+
+        // BAL uses -Z convention. Use a pose and world point such that
+        // pose_inv.act(p_world) has z < 0.
+        let pose = SE3::from_translation_euler(0.1, -0.05, 0.2, 0.0, 0.0, 0.0);
+        let p_world = Vector3::new(0.1, 0.05, -3.0);
+
+        let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, &pose);
+        let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
+
+        let eps = crate::NUMERICAL_DERIVATIVE_EPS;
+
+        for i in 0..6 {
+            let mut d = [0.0f64; 6];
+            d[i] = eps;
+            let delta_plus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
+            d[i] = -eps;
+            let delta_minus = SE3Tangent::from_components(d[0], d[1], d[2], d[3], d[4], d[5]);
+
+            // Right perturbation: pose' = pose · Exp(δ)
+            let p_cam_plus = pose
+                .plus(&delta_plus, None, None)
+                .inverse(None)
+                .act(&p_world, None, None);
+            let p_cam_minus = pose
+                .plus(&delta_minus, None, None)
+                .inverse(None)
+                .act(&p_world, None, None);
+
+            let uv_plus = camera.project(&p_cam_plus)?;
+            let uv_minus = camera.project(&p_cam_minus)?;
+
+            let num_deriv = (uv_plus - uv_minus) / (2.0 * eps);
+
+            for r in 0..2 {
+                let analytical = d_uv_d_pose[(r, i)];
+                let numerical = num_deriv[r];
+                assert!(
+                    analytical.is_finite(),
+                    "jacobian_pose[{r},{i}] is not finite"
+                );
+                let rel_err = (analytical - numerical).abs() / (1.0 + numerical.abs());
+                assert!(
+                    rel_err < crate::JACOBIAN_TEST_TOLERANCE,
+                    "jacobian_pose mismatch at ({r},{i}): analytical={analytical}, numerical={numerical}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_returns_error_behind_camera() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
+        // BAL: z > 0 is behind camera
+        assert!(camera.project(&Vector3::new(0.0, 0.0, 1.0)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_at_min_depth_boundary() -> TestResult {
+        let camera = BALPinholeCameraStrict::new_no_distortion(500.0)?;
+        // BAL: min depth is in negative-z direction
+        let p_min = Vector3::new(0.0, 0.0, -crate::MIN_DEPTH);
+        if let Ok(uv) = camera.project(&p_min) {
+            assert!(uv.x.is_finite() && uv.y.is_finite());
+        }
+        Ok(())
+    }
 }

@@ -862,6 +862,10 @@ mod tests {
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
+                assert!(
+                    jac_analytical[(r, i)].is_finite(),
+                    "Jacobian [{r},{i}] is not finite"
+                );
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
                 assert!(
                     diff < crate::JACOBIAN_TEST_TOLERANCE,
@@ -900,6 +904,10 @@ mod tests {
             let num_jac = (uv_plus - uv_minus) / (2.0 * eps);
 
             for r in 0..2 {
+                assert!(
+                    jac_analytical[(r, i)].is_finite(),
+                    "Jacobian [{r},{i}] is not finite"
+                );
                 let diff = (jac_analytical[(r, i)] - num_jac[r]).abs();
                 assert!(diff < 1e-4, "Mismatch at ({}, {})", r, i);
             }
@@ -988,6 +996,52 @@ mod tests {
             assert!(err < 5.0, "Reprojection error too large: {err}");
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_unproject_round_trip() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let camera = FovCamera::new(pinhole, distortion)?;
+
+        let test_points = [
+            Vector3::new(0.1, 0.2, 1.0),
+            Vector3::new(-0.3, 0.1, 2.0),
+            Vector3::new(0.05, -0.1, 0.5),
+        ];
+
+        for p_cam in &test_points {
+            let uv = camera.project(p_cam)?;
+            let ray = camera.unproject(&uv)?;
+            let dot = ray.dot(&p_cam.normalize());
+            assert!(
+                (dot - 1.0).abs() < 1e-6,
+                "Round-trip failed: dot={dot}, expected ~1.0"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_returns_error_behind_camera() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let camera = FovCamera::new(pinhole, distortion)?;
+        assert!(camera.project(&Vector3::new(0.0, 0.0, -1.0)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_at_min_depth_boundary() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::FOV { w: 1.5 };
+        let camera = FovCamera::new(pinhole, distortion)?;
+        let p_min = Vector3::new(0.0, 0.0, crate::MIN_DEPTH);
+        if let Ok(uv) = camera.project(&p_min) {
+            assert!(uv.x.is_finite() && uv.y.is_finite());
+        }
         Ok(())
     }
 }

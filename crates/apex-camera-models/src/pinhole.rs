@@ -642,6 +642,10 @@ mod tests {
             for r in 0..2 {
                 let analytical = jac_analytical[(r, i)];
                 let numerical = numerical_jac[r];
+                assert!(
+                    analytical.is_finite(),
+                    "Jacobian point [{r},{i}] is not finite"
+                );
                 let rel_error = (analytical - numerical).abs() / (1.0 + numerical.abs());
                 assert!(
                     rel_error < crate::JACOBIAN_TEST_TOLERANCE,
@@ -687,6 +691,10 @@ mod tests {
             for r in 0..2 {
                 let analytical = jac_analytical[(r, i)];
                 let numerical = numerical_jac[r];
+                assert!(
+                    analytical.is_finite(),
+                    "Jacobian intrinsics [{r},{i}] is not finite"
+                );
                 let rel_error = (analytical - numerical).abs() / (1.0 + numerical.abs());
                 assert!(
                     rel_error < crate::JACOBIAN_TEST_TOLERANCE,
@@ -700,6 +708,49 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_unproject_round_trip() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
+
+        let test_points = [
+            Vector3::new(0.1, 0.2, 1.0),
+            Vector3::new(-0.3, 0.1, 2.0),
+            Vector3::new(0.05, -0.1, 0.5),
+        ];
+
+        for p_cam in &test_points {
+            let uv = camera.project(p_cam)?;
+            let ray = camera.unproject(&uv)?;
+            let dot = ray.dot(&p_cam.normalize());
+            assert!(
+                (dot - 1.0).abs() < 1e-6,
+                "Round-trip failed: dot={dot}, expected ~1.0"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_returns_error_behind_camera() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
+        assert!(camera.project(&Vector3::new(0.0, 0.0, -1.0)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_project_at_min_depth_boundary() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
+        let p_min = Vector3::new(0.0, 0.0, crate::MIN_DEPTH);
+        if let Ok(uv) = camera.project(&p_min) {
+            assert!(uv.x.is_finite() && uv.y.is_finite());
+        }
         Ok(())
     }
 }
