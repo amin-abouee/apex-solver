@@ -703,6 +703,15 @@ impl Interpolatable for Rn {
 
 // Additional convenience implementations
 impl Rn {
+    /// Create identity element with specific dimension.
+    ///
+    /// For Euclidean space, the identity (additive neutral element) is the zero vector.
+    /// The default `identity()` returns a 3D zero vector for compatibility.
+    /// Use this method when you need a specific dimension.
+    pub fn identity_with_dim(dim: usize) -> Self {
+        Rn::new(DVector::zeros(dim))
+    }
+
     /// Create Rn with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
         Rn::new(DVector::zeros(dim))
@@ -726,6 +735,14 @@ impl Rn {
 }
 
 impl RnTangent {
+    /// Create zero tangent vector with specific dimension.
+    ///
+    /// The default `zero()` returns a 3D zero vector for compatibility.
+    /// Use this method when you need a specific dimension.
+    pub fn zero_with_dim(dim: usize) -> Self {
+        RnTangent::new(DVector::zeros(dim))
+    }
+
     /// Create RnTangent with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
         RnTangent::new(DVector::zeros(dim))
@@ -1073,5 +1090,33 @@ mod tests {
         let identity = Rn::new(DVector::zeros(0));
         let composed = rn_0d.compose(&identity, None, None);
         assert_eq!(composed.dim(), 0);
+    }
+
+    #[test]
+    fn test_rn_identity_with_dim() {
+        for dim in [1, 2, 3, 5, 10] {
+            let id = Rn::identity_with_dim(dim);
+            assert_eq!(id.dim(), dim);
+            assert!(id.norm() < 1e-15);
+
+            // Composing with identity should be no-op
+            let v = Rn::random_with_dim(dim);
+            let result = v.compose(&id, None, None);
+            assert!(v.is_approx(&result, 1e-10));
+        }
+    }
+
+    #[test]
+    fn test_rn_tangent_zero_with_dim() {
+        for dim in [1, 2, 3, 5, 10] {
+            let z = RnTangent::zero_with_dim(dim);
+            assert_eq!(z.dim(), dim);
+            assert!(z.is_zero(1e-15));
+        }
+    }
+
+    #[test]
+    fn test_rn_tangent_is_dynamic() {
+        assert!(RnTangent::is_dynamic());
     }
 }

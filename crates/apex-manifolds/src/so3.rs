@@ -111,7 +111,11 @@ impl SO3 {
         SO3 { quaternion }
     }
 
-    /// Create SO(3) from quaternion coefficients [x, y, z, w].
+    /// Create SO(3) from quaternion coefficients in G2O convention `[x, y, z, w]`.
+    ///
+    /// This parameter order matches the G2O file format where quaternion components
+    /// are stored as `(qx, qy, qz, qw)`. For nalgebra's `(w, x, y, z)` convention,
+    /// use [`from_quaternion_wxyz()`](Self::from_quaternion_wxyz).
     ///
     /// # Arguments
     /// * `x` - i component of quaternion
@@ -119,6 +123,22 @@ impl SO3 {
     /// * `z` - k component of quaternion
     /// * `w` - w (real) component of quaternion
     pub fn from_quaternion_coeffs(x: f64, y: f64, z: f64, w: f64) -> Self {
+        let q = Quaternion::new(w, x, y, z);
+        SO3::new(UnitQuaternion::from_quaternion(q))
+    }
+
+    /// Create SO(3) from quaternion coefficients in nalgebra convention `[w, x, y, z]`.
+    ///
+    /// This parameter order matches nalgebra's `Quaternion::new(w, x, y, z)`.
+    /// For G2O file format order `(qx, qy, qz, qw)`, use
+    /// [`from_quaternion_coeffs()`](Self::from_quaternion_coeffs).
+    ///
+    /// # Arguments
+    /// * `w` - w (real) component of quaternion
+    /// * `x` - i component of quaternion
+    /// * `y` - j component of quaternion
+    /// * `z` - k component of quaternion
+    pub fn from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> Self {
         let q = Quaternion::new(w, x, y, z);
         SO3::new(UnitQuaternion::from_quaternion(q))
     }
@@ -312,18 +332,27 @@ impl LieGroup for SO3 {
     /// J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        // let mut log_coeff;
+        debug_assert!(
+            (self.quaternion.norm() - 1.0).abs() < 1e-6,
+            "SO3::log() requires normalized quaternion, norm = {}",
+            self.quaternion.norm()
+        );
 
         // Extract quaternion components
         let q = self.quaternion.quaternion();
         let sin_angle_squared = q.i * q.i + q.j * q.j + q.k * q.k;
 
-        let log_coeff = if sin_angle_squared > f64::EPSILON {
+        let log_coeff = if sin_angle_squared > crate::SMALL_ANGLE_THRESHOLD {
             let sin_angle = sin_angle_squared.sqrt();
             let cos_angle = q.w;
 
-            // Handle the case where cos_angle < 0, which means angle >= pi/2
-            // In that case, we need to adjust the computation to get a normalized angle_axis vector
+            // When cos_angle < 0, the rotation angle θ > π/2.
+            // Using atan2(sin, cos) directly would give θ/2 in (π/4, π/2].
+            // By negating both arguments: atan2(-sin, -cos), we get θ/2 in
+            // (-3π/4, -π/2], which when doubled gives the rotation angle in the
+            // correct range [-π, π]. This avoids discontinuities and matches the
+            // manif C++ library convention. The key insight is that atan2(-y, -x)
+            // = atan2(y, x) - π (or + π), shifting the result by π.
             let two_angle = 2.0
                 * if cos_angle < 0.0 {
                     f64::atan2(-sin_angle, -cos_angle)
@@ -559,7 +588,7 @@ impl Tangent<SO3> for SO3Tangent {
     fn exp(&self, jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>) -> SO3 {
         let theta_squared = self.data.norm_squared();
 
-        let quaternion = if theta_squared > f64::EPSILON {
+        let quaternion = if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             UnitQuaternion::from_scaled_axis(self.data)
         } else {
             UnitQuaternion::from_quaternion(Quaternion::new(
@@ -598,7 +627,7 @@ impl Tangent<SO3> for SO3Tangent {
         let angle = self.data.norm_squared();
         let tangent_skew = self.hat();
 
-        if angle <= f64::EPSILON {
+        if angle <= crate::SMALL_ANGLE_THRESHOLD {
             Matrix3::identity() + 0.5 * tangent_skew
         } else {
             let theta = angle.sqrt(); // rotation angle
@@ -666,7 +695,7 @@ impl Tangent<SO3> for SO3Tangent {
         let angle = self.data.norm_squared();
         let tangent_skew = self.hat();
 
-        if angle <= f64::EPSILON {
+        if angle <= crate::SMALL_ANGLE_THRESHOLD {
             Matrix3::identity() - 0.5 * tangent_skew
         } else {
             let theta = angle.sqrt(); // rotation angle
@@ -811,39 +840,9 @@ impl Tangent<SO3> for SO3Tangent {
 mod tests {
     use super::*;
     use core::f64;
-    use nalgebra::{DMatrix, DVector};
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 1e-12;
-
-    /// Numerically compute Jacobian using central difference
-    fn numerical_jacobian<F>(
-        func: F,
-        point: &DVector<f64>,
-        output_dim: usize,
-        epsilon: f64,
-    ) -> DMatrix<f64>
-    where
-        F: Fn(&DVector<f64>) -> DVector<f64>,
-    {
-        let input_dim = point.len();
-        let mut jacobian = DMatrix::zeros(output_dim, input_dim);
-
-        for i in 0..input_dim {
-            let mut point_plus = point.clone();
-            let mut point_minus = point.clone();
-            point_plus[i] += epsilon;
-            point_minus[i] -= epsilon;
-
-            let output_plus = func(&point_plus);
-            let output_minus = func(&point_minus);
-            let derivative = (output_plus - output_minus) / (2.0 * epsilon);
-
-            jacobian.set_column(i, &derivative);
-        }
-
-        jacobian
-    }
 
     #[test]
     fn test_so3_constructor_datatype() {
@@ -1633,5 +1632,41 @@ mod tests {
 
         // Tolerance of 0.01 reflects inherent mathematical conditioning, not implementation bug
         assert!((product - identity).norm() < 0.01);
+    }
+
+    #[test]
+    fn test_so3_from_quaternion_wxyz() {
+        // Identity quaternion: w=1, x=y=z=0
+        let so3_wxyz = SO3::from_quaternion_wxyz(1.0, 0.0, 0.0, 0.0);
+        let so3_xyzw = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
+        assert!(so3_wxyz.is_approx(&so3_xyzw, 1e-12));
+
+        // Non-trivial quaternion: verify swapped argument order gives same result
+        let so3_wxyz = SO3::from_quaternion_wxyz(0.4, 0.1, 0.2, 0.3);
+        let so3_xyzw = SO3::from_quaternion_coeffs(0.1, 0.2, 0.3, 0.4);
+        assert!(so3_wxyz.is_approx(&so3_xyzw, 1e-12));
+    }
+
+    #[test]
+    fn test_so3_tangent_is_not_dynamic() {
+        assert!(!SO3Tangent::is_dynamic());
+        assert_eq!(SO3Tangent::DIM, 3);
+    }
+
+    #[test]
+    fn test_so3_small_angle_threshold_exp_log() {
+        // Test angles near the SMALL_ANGLE_THRESHOLD boundary round-trip correctly
+        // sqrt(1e-10) ≈ 1e-5 is the effective angle threshold
+        let near_threshold_angles = [1e-6, 1e-5, 1e-4, 1e-3];
+
+        for &angle in &near_threshold_angles {
+            let tangent = SO3Tangent::new(Vector3::new(angle, 0.0, 0.0));
+            let so3 = tangent.exp(None);
+            let recovered = so3.log(None);
+            assert!(
+                (tangent.data - recovered.data).norm() < 1e-10,
+                "SO3 exp-log round-trip failed for angle = {angle}"
+            );
+        }
     }
 }

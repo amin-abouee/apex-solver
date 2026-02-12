@@ -256,7 +256,7 @@ impl LieGroup for SE2 {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -430,6 +430,15 @@ impl SE2Tangent {
         }
     }
 
+    /// Create SE2Tangent from individual components.
+    ///
+    /// This is an alias for `new()` that provides API consistency with
+    /// `SO3Tangent::from_components()` and `SE3Tangent::from_components()`.
+    #[inline]
+    pub fn from_components(x: f64, y: f64, theta: f64) -> Self {
+        SE2Tangent::new(x, y, theta)
+    }
+
     /// Get the x (translational) component.
     #[inline]
     pub fn x(&self) -> f64 {
@@ -466,7 +475,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -495,7 +504,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -513,7 +522,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac[(1, 0)] = -b;
         jac[(1, 1)] = a;
 
-        if theta_sq < f64::EPSILON {
+        if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             jac[(0, 2)] = -self.y() / 2.0 + theta * self.x() / 6.0;
             jac[(1, 2)] = self.x() / 2.0 + theta * self.y() / 6.0;
         } else {
@@ -535,7 +544,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -553,7 +562,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac[(1, 0)] = b;
         jac[(1, 1)] = a;
 
-        if theta_sq < f64::EPSILON {
+        if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             jac[(0, 2)] = self.y() / 2.0 + theta * self.x() / 6.0;
             jac[(1, 2)] = -self.x() / 2.0 + theta * self.y() / 6.0;
         } else {
@@ -580,7 +589,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
 
-        if theta_sq > f64::EPSILON {
+        if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
 
@@ -619,7 +628,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
 
-        if theta_sq > f64::EPSILON {
+        if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
 
@@ -1521,5 +1530,34 @@ mod tests {
         let product = jl * jl_inv;
 
         assert!((product - Matrix3::identity()).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_tangent_from_components() {
+        let t1 = SE2Tangent::new(1.0, 2.0, 0.5);
+        let t2 = SE2Tangent::from_components(1.0, 2.0, 0.5);
+        assert!(t1.is_approx(&t2, 1e-15));
+        assert_eq!(t2.x(), 1.0);
+        assert_eq!(t2.y(), 2.0);
+        assert_eq!(t2.angle(), 0.5);
+    }
+
+    #[test]
+    fn test_se2_small_angle_threshold_exp_log() {
+        // Test angles near the SMALL_ANGLE_THRESHOLD boundary round-trip correctly
+        // sqrt(1e-10) ≈ 1e-5 is the effective angle threshold
+        let near_threshold_angles = [1e-6, 1e-5, 1e-4, 1e-3];
+
+        for &angle in &near_threshold_angles {
+            let tangent = SE2Tangent::new(1.0, 2.0, angle);
+            let se2 = tangent.exp(None);
+            let recovered = se2.log(None);
+            assert!(
+                (tangent.x() - recovered.x()).abs() < 1e-10
+                    && (tangent.y() - recovered.y()).abs() < 1e-10
+                    && (tangent.angle() - recovered.angle()).abs() < 1e-10,
+                "SE2 exp-log round-trip failed for angle = {angle}"
+            );
+        }
     }
 }

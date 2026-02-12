@@ -558,7 +558,7 @@ impl SE3Tangent {
         let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
         let mut d = -1.0 / 60.0;
 
-        if theta_squared > f64::EPSILON {
+        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             // --- Large Angle Path: Direct computation ---
             let theta_norm = theta_squared.sqrt();
             let theta_norm_3 = theta_norm * theta_squared;

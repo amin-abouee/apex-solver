@@ -39,6 +39,22 @@ use std::{
     fmt::{Display, Formatter},
 };
 
+/// Threshold for switching between exact formulas and Taylor approximations
+/// in small-angle computations.
+///
+/// `f64::EPSILON` (~2.2e-16) is too tight for small-angle detection — angles of ~1e-8 radians
+/// are well within Taylor approximation validity but would fall through to the exact formula
+/// path, where division by near-zero values causes numerical issues.
+///
+/// `1e-10` is chosen because:
+/// - Taylor expansions for sin(θ)/θ, (1-cos(θ))/θ² are accurate to ~1e-20 at this scale
+/// - Avoids catastrophic cancellation in exact formulas near zero
+/// - Consistent with production SLAM libraries (Sophus, GTSAM)
+///
+/// **Note:** This threshold is compared against `θ²` (not `θ`), so the effective angle
+/// threshold is `√(1e-10) ≈ 1e-5` radians (~0.00057°).
+pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
+
 pub mod rn;
 pub mod se2;
 pub mod se3;
@@ -439,8 +455,21 @@ pub trait LieGroup: Clone + PartialEq {
 pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     // Dimension constants
 
-    /// Dimension of the tangent space
+    /// Dimension of the tangent space.
+    ///
+    /// For fixed-size manifolds (SE2, SE3, SO2, SO3), this is the compile-time constant.
+    /// For dynamic-size manifolds (Rn), this is `0` as a sentinel value — use the
+    /// `is_dynamic()` method to check, and the `LieGroup::tangent_dim()` instance method
+    /// to get the actual runtime dimension.
     const DIM: usize;
+
+    /// Whether this tangent type has dynamic (runtime-determined) dimension.
+    ///
+    /// Returns `true` for `RnTangent` where `DIM == 0` is used as a sentinel.
+    /// Returns `false` for all fixed-size tangent types (SE2, SE3, SO2, SO3).
+    fn is_dynamic() -> bool {
+        Self::DIM == 0
+    }
 
     // Exponential map and Jacobians
 
