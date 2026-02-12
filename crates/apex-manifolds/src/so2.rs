@@ -418,9 +418,39 @@ impl Tangent<SO2> for SO2Tangent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{DMatrix, DVector};
     use std::f64::consts::PI;
 
     const TOLERANCE: f64 = 1e-12;
+
+    /// Numerically compute Jacobian using central difference
+    fn numerical_jacobian<F>(
+        func: F,
+        point: &DVector<f64>,
+        output_dim: usize,
+        epsilon: f64,
+    ) -> DMatrix<f64>
+    where
+        F: Fn(&DVector<f64>) -> DVector<f64>,
+    {
+        let input_dim = point.len();
+        let mut jacobian = DMatrix::zeros(output_dim, input_dim);
+
+        for i in 0..input_dim {
+            let mut point_plus = point.clone();
+            let mut point_minus = point.clone();
+            point_plus[i] += epsilon;
+            point_minus[i] -= epsilon;
+
+            let output_plus = func(&point_plus);
+            let output_minus = func(&point_minus);
+            let derivative = (output_plus - output_minus) / (2.0 * epsilon);
+
+            jacobian.set_column(i, &derivative);
+        }
+
+        jacobian
+    }
 
     #[test]
     fn test_so2_identity() {
@@ -542,5 +572,81 @@ mod tests {
 
         assert!((bracket_hat - expected).norm() < 1e-10);
         assert!(expected.norm() < 1e-10); // Should be zero for SO(2)
+    }
+
+    // T1: Numerical Jacobian Verification Tests
+
+    #[test]
+    fn test_so2_right_jacobian_numerical() {
+        let epsilon = 1e-7;
+        let tolerance = 1e-4;
+
+        let tangent = SO2Tangent::new(0.5);
+        let jr_analytical = tangent.right_jacobian();
+
+        // Numerical Jacobian through exp-log round trip
+        let angle_vec = DVector::from_vec(vec![tangent.angle()]);
+        let jr_numerical = numerical_jacobian(
+            |theta| {
+                let tang = SO2Tangent::new(theta[0]);
+                let so2 = tang.exp(None);
+                let log_result = so2.log(None);
+                DVector::from_vec(vec![log_result.angle()])
+            },
+            &angle_vec,
+            1,
+            epsilon,
+        );
+
+        assert!(
+            (jr_analytical - &jr_numerical).norm() < tolerance,
+            "Right Jacobian mismatch: analytical = {}, numerical = {}",
+            jr_analytical,
+            jr_numerical
+        );
+    }
+
+    #[test]
+    fn test_so2_left_jacobian_numerical() {
+        let epsilon = 1e-7;
+        let tolerance = 1e-4;
+
+        let tangent = SO2Tangent::new(0.5);
+        let jl_analytical = tangent.left_jacobian();
+
+        let angle_vec = DVector::from_vec(vec![tangent.angle()]);
+        let jl_numerical = numerical_jacobian(
+            |theta| {
+                let tang = SO2Tangent::new(theta[0]);
+                let so2 = tang.exp(None);
+                let log_result = so2.log(None);
+                DVector::from_vec(vec![log_result.angle()])
+            },
+            &angle_vec,
+            1,
+            epsilon,
+        );
+
+        assert!((jl_analytical - jl_numerical).norm() < tolerance);
+    }
+
+    // T4: Jacobian Inverse Identity Tests
+
+    #[test]
+    fn test_so2_jacobian_inverse_identity() {
+        // SO2 Jacobians are scalars (1x1 matrices)
+        let tangent = SO2Tangent::new(0.5);
+        let jr = tangent.right_jacobian();
+        let jr_inv = tangent.right_jacobian_inv();
+        let product = jr * jr_inv;
+
+        assert!((product[(0, 0)] - 1.0).abs() < 1e-10);
+
+        // Also test left Jacobian
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product_left = jl * jl_inv;
+
+        assert!((product_left[(0, 0)] - 1.0).abs() < 1e-10);
     }
 }

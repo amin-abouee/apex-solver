@@ -1451,4 +1451,75 @@ mod tests {
         assert_eq!(hat_matrix[(2, 1)], 0.0);
         assert_eq!(hat_matrix[(2, 2)], 0.0);
     }
+
+    // T3: Accumulated Error Tests
+
+    #[test]
+    fn test_se2_circular_path_accumulation() {
+        // Robot driving in a circle: 360 steps of 1° turn + 1cm forward
+        let step = SE2::from_xy_angle(0.01, 0.0, (std::f64::consts::PI * 2.0) / 360.0);
+
+        let mut pose = SE2::identity();
+        for _ in 0..360 {
+            pose = pose.compose(&step, None, None);
+        }
+
+        // Should return near identity (full circle)
+        assert!(pose.is_approx(&SE2::identity(), 1e-2));
+    }
+
+    // T2: Edge Case Tests
+
+    #[test]
+    fn test_se2_angle_wrap_around() {
+        // Angles > 2π should wrap correctly
+        let se2_wrapped = SE2::from_xy_angle(1.0, 2.0, 3.0 * std::f64::consts::PI);
+        let se2_canonical = SE2::from_xy_angle(1.0, 2.0, std::f64::consts::PI);
+
+        // Log and exp should handle wrapping
+        let tangent_wrapped = se2_wrapped.log(None);
+        let tangent_canonical = se2_canonical.log(None);
+
+        // Angles should be equivalent modulo 2π
+        let angle_diff = (tangent_wrapped.angle() - tangent_canonical.angle()).abs();
+        assert!(angle_diff < 1e-10 || (angle_diff - 2.0 * std::f64::consts::PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_negative_angles() {
+        let se2_neg = SE2::from_xy_angle(0.5, -0.3, -std::f64::consts::PI / 4.0);
+        let tangent = se2_neg.log(None);
+        let recovered = tangent.exp(None);
+        assert!(se2_neg.is_approx(&recovered, 1e-10));
+    }
+
+    // T4: Jacobian Inverse Identity Tests
+
+    #[test]
+    fn test_se2_right_jacobian_inverse_identity() {
+        let test_tangents = vec![
+            SE2Tangent::new(0.1, 0.2, 0.3),
+            SE2Tangent::new(0.5, -0.3, 1.5),
+        ];
+
+        for tangent in test_tangents {
+            let jr = tangent.right_jacobian();
+            let jr_inv = tangent.right_jacobian_inv();
+            let product = jr * jr_inv;
+            let identity = Matrix3::identity();
+
+            assert!((product - identity).norm() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_se2_left_jacobian_inverse_identity() {
+        // Same pattern for left Jacobian
+        let tangent = SE2Tangent::new(0.2, 0.3, 0.8);
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product = jl * jl_inv;
+
+        assert!((product - Matrix3::identity()).norm() < 1e-10);
+    }
 }

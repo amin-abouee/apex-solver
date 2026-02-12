@@ -1037,4 +1037,41 @@ mod tests {
         assert!((jac1d - DMatrix::identity(1, 1)).norm() < 1e-10);
         assert!((jac4d - DMatrix::identity(4, 4)).norm() < 1e-10);
     }
+
+    // T3: Accumulated Error Tests
+
+    #[test]
+    fn test_rn_addition_chain() {
+        // Add same vector 1000 times
+        let increment = Rn::new(DVector::from_vec(vec![0.001, -0.002, 0.003]));
+        let mut accumulated = Rn::new(DVector::zeros(3));
+
+        for _ in 0..1000 {
+            accumulated = accumulated.compose(&increment, None, None);
+        }
+
+        let expected = Rn::new(DVector::from_vec(vec![1.0, -2.0, 3.0]));
+        assert!((accumulated.to_vector() - expected.to_vector()).norm() < 1e-10);
+    }
+
+    // T2: Edge Case Tests
+
+    #[test]
+    #[should_panic(expected = "Rn elements must have the same dimension")]
+    fn test_rn_dimension_mismatch_compose() {
+        let rn_2d = Rn::new(DVector::from_vec(vec![1.0, 2.0]));
+        let rn_3d = Rn::new(DVector::from_vec(vec![3.0, 4.0, 5.0]));
+
+        let _ = rn_2d.compose(&rn_3d, None, None); // Should panic
+    }
+
+    #[test]
+    fn test_rn_zero_dimension() {
+        let rn_0d = Rn::new(DVector::zeros(0));
+        assert_eq!(rn_0d.dim(), 0);
+
+        let identity = Rn::new(DVector::zeros(0));
+        let composed = rn_0d.compose(&identity, None, None);
+        assert_eq!(composed.dim(), 0);
+    }
 }
