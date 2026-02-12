@@ -215,7 +215,6 @@ impl LieGroup for SE2 {
         let trans_inv = -(rot_inv * self.translation);
 
         if let Some(jac) = jacobian {
-            // Jacobian of inverse operation: -Ad(g)
             *jac = -self.adjoint();
         }
 
@@ -430,10 +429,7 @@ impl SE2Tangent {
         }
     }
 
-    /// Create SE2Tangent from individual components.
-    ///
-    /// This is an alias for `new()` that provides API consistency with
-    /// `SO3Tangent::from_components()` and `SE3Tangent::from_components()`.
+    /// Alias for `new()`, for API consistency with SO3Tangent/SE3Tangent.
     #[inline]
     pub fn from_components(x: f64, y: f64, theta: f64) -> Self {
         SE2Tangent::new(x, y, theta)
@@ -680,9 +676,9 @@ impl Tangent<SE2> for SE2Tangent {
         use rand::Rng;
         let mut rng = rand::rng();
         SE2Tangent::new(
-            rng.random_range(-1.0..1.0),                                   // x
-            rng.random_range(-1.0..1.0),                                   // y
-            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI), // theta
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI),
         )
     }
 
@@ -715,17 +711,10 @@ impl Tangent<SE2> for SE2Tangent {
     ///
     /// For SE(2), the small adjoint involves the angular component.
     fn small_adj(&self) -> <SE2 as LieGroup>::JacobianMatrix {
-        let _theta = self.angle();
         let x = self.x();
         let y = self.y();
 
         let mut small_adj = Matrix3::zeros();
-
-        // Following the C++ manif implementation structure:
-        // smallAdj(0,1) = -angle();
-        // smallAdj(1,0) =  angle();
-        // smallAdj(0,2) =  y();
-        // smallAdj(1,2) = -x();
         small_adj[(0, 1)] = -self.angle();
         small_adj[(1, 0)] = self.angle();
         small_adj[(0, 2)] = y;

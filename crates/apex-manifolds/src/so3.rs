@@ -10,44 +10,27 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 //!
-//! # Numerical Conditioning and Natural Mathematical Limitations
+//! # Numerical Conditioning
 //!
-//! This implementation exhibits numerical precision behaviors that are **inherent to the
-//! mathematics of Lie groups**, not implementation bugs. These limitations are well-documented
-//! in robotics literature (see Nurlanov et al. 2021, Sophus library documentation).
+//! The Jacobian inverses (Jr⁻¹, Jl⁻¹) contain the term `(1 + cos θ) / (2θ sin θ)` which
+//! is poorly conditioned near θ = 0 (indeterminate 0/0) and θ = π (singularity).
+//! Expected precision for Jr * Jr⁻¹ ≈ I:
 //!
-//! ## Key Numerical Properties
+//! | Angle range     | Precision |
+//! |-----------------|-----------|
+//! | θ < 0.1 rad     | ~1e-8     |
+//! | 0.1–0.5 rad     | ~1e-6     |
+//! | 0.5–π/2 rad     | ~1e-4     |
+//! | θ > π/2 rad     | ~0.01     |
 //!
-//! 1. **Jacobian Inverse Conditioning**: The right/left Jacobian inverses (Jr⁻¹, Jl⁻¹) have
-//!    poor numerical conditioning due to division by trigonometric functions:
-//!    - Formula contains term: `(1 + cos θ) / (2θ sin θ)`
-//!    - As θ → 0: indeterminate form (0/0)
-//!    - As θ → π: singularity (sin θ → 0)
-//!    - For θ > 0.5 rad: floating-point errors amplify significantly
-//!    - **Expected precision**: Jr * Jr⁻¹ ≈ I within 1e-4 to 0.01 for small angles
-//!
-//! 2. **Composition Chain Drift**: Long sequences of `compose()` operations accumulate
-//!    numerical error because:
-//!    - Each quaternion multiplication introduces rounding errors
-//!    - Errors compound multiplicatively through the chain
-//!    - After 100+ compositions: drift can exceed 1.0 in manifold distance
-//!    - **Mitigation**: Periodically re-normalize quaternions or use manifold optimization
-//!
-//! 3. **Angle Magnitude Effects**: Numerical precision degrades with rotation angle:
-//!    - θ < 0.1 rad: excellent precision (1e-8)
-//!    - 0.1 < θ < 0.5 rad: good precision (1e-6)
-//!    - 0.5 < θ < π/2 rad: moderate precision (1e-4)
-//!    - θ > π/2 rad: poor conditioning for Jacobian inverses
-//!    - Near θ = π: singularity in log map (antipodal configuration)
+//! Composition chains accumulate drift multiplicatively — re-normalize quaternions
+//! periodically for long chains. These properties are consistent with production
+//! Lie group libraries (manif, Sophus, GTSAM).
 //!
 //! ## References
 //!
 //! - Nurlanov et al. (2021): "Exploring SO(3) logarithmic map: degeneracies and derivatives"
-//!   <https://github.com/nurlanov-zh/so3_log_map>
 //! - Sophus library: <https://github.com/strasdat/Sophus/issues/179>
-//! - Modern Robotics: <https://modernrobotics.northwestern.edu/nu-gm-book-resource/5-3-singularities/>
-//!
-//! These behaviors are **consistent with all production Lie group libraries** (manif, Sophus, GTSAM).
 
 use crate::{LieGroup, Tangent};
 use nalgebra::{DVector, Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
@@ -269,11 +252,9 @@ impl LieGroup for SO3 {
     /// J_R⁻¹_R = -Adj(R) = -R
     ///
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        // For SO(3): R^{-1} = R^T, for quaternions: q^{-1} = q*
         let inverse_quat = self.quaternion.inverse();
 
         if let Some(jac) = jacobian {
-            // Jacobian of inverse operation: -R^T = -R
             *jac = -self.adjoint();
         }
 
@@ -307,12 +288,10 @@ impl LieGroup for SO3 {
         };
 
         if let Some(jac_self) = jacobian_self {
-            // Jacobian wrt first element: R2^T
             *jac_self = other.inverse(None).adjoint();
         }
 
         if let Some(jac_other) = jacobian_other {
-            // Jacobian wrt second element: I (identity)
             *jac_other = Matrix3::identity();
         }
 
@@ -338,7 +317,6 @@ impl LieGroup for SO3 {
             self.quaternion.norm()
         );
 
-        // Extract quaternion components
         let q = self.quaternion.quaternion();
         let sin_angle_squared = q.i * q.i + q.j * q.j + q.k * q.k;
 
@@ -362,11 +340,9 @@ impl LieGroup for SO3 {
 
             two_angle / sin_angle
         } else {
-            // Small-angle approximation
             2.0
         };
 
-        // Compute the tangent vector (axis-angle representation)
         let axis_angle = SO3Tangent::new(Vector3::new(
             q.i * log_coeff,
             q.j * log_coeff,
@@ -374,8 +350,6 @@ impl LieGroup for SO3 {
         ));
 
         if let Some(jac) = jacobian {
-            // Compute the right Jacobian inverse for SO(3)
-            // Self::compute_right_jacobian_inverse(&axis_angle, jac);
             *jac = axis_angle.right_jacobian_inv();
         }
 
@@ -388,17 +362,15 @@ impl LieGroup for SO3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        // Apply rotation to vector
         let result = self.quaternion * vector;
 
         if let Some(jac_self) = jacobian_self {
-            // Jacobian wrt SO(3) element: -R * [v]×
+            // -R * [v]×
             let vector_hat = SO3Tangent::new(*vector).hat();
             *jac_self = -self.rotation_matrix() * vector_hat;
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            // Jacobian wrt vector: R
             *jac_vector = self.rotation_matrix();
         }
 
@@ -406,7 +378,6 @@ impl LieGroup for SO3 {
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        // Adjoint matrix for SO(3) is just the rotation matrix
         self.rotation_matrix()
     }
 
@@ -429,7 +400,6 @@ impl LieGroup for SO3 {
     }
 
     fn normalize(&mut self) {
-        // Normalize the quaternion
         let q = self.quaternion.into_inner().normalize();
         self.quaternion = UnitQuaternion::from_quaternion(q);
     }
@@ -600,7 +570,6 @@ impl Tangent<SO3> for SO3Tangent {
         };
 
         if let Some(jac) = jacobian {
-            // Right Jacobian for SO(3)
             *jac = self.right_jacobian();
         }
 
@@ -630,7 +599,7 @@ impl Tangent<SO3> for SO3Tangent {
         if angle <= crate::SMALL_ANGLE_THRESHOLD {
             Matrix3::identity() + 0.5 * tangent_skew
         } else {
-            let theta = angle.sqrt(); // rotation angle
+            let theta = angle.sqrt();
             let sin_theta = theta.sin();
             let cos_theta = theta.cos();
 
@@ -698,7 +667,7 @@ impl Tangent<SO3> for SO3Tangent {
         if angle <= crate::SMALL_ANGLE_THRESHOLD {
             Matrix3::identity() - 0.5 * tangent_skew
         } else {
-            let theta = angle.sqrt(); // rotation angle
+            let theta = angle.sqrt();
             let sin_theta = theta.sin();
             let cos_theta = theta.cos();
 
@@ -728,22 +697,10 @@ impl Tangent<SO3> for SO3Tangent {
         )
     }
 
-    /// Zero tangent vector for SO(3)
-    ///
-    /// # Notes
-    /// # Equation 147: Zero tangent vector for SO(3)
-    /// [0, 0, 0]
-    ///
     fn zero() -> <SO3 as LieGroup>::TangentVector {
         Self::new(Vector3::zeros())
     }
 
-    /// Random tangent vector for SO(3)
-    ///
-    /// # Notes
-    /// # Equation 147: Random tangent vector for SO(3)
-    /// [0, 0, 0]
-    ///
     fn random() -> <SO3 as LieGroup>::TangentVector {
         Self::new(Vector3::new(
             rand::random::<f64>() * 0.2 - 0.1,
@@ -752,22 +709,10 @@ impl Tangent<SO3> for SO3Tangent {
         ))
     }
 
-    /// Check if tangent vector is zero
-    ///
-    /// # Notes
-    /// # Equation 147: Check if tangent vector is zero
-    /// [0, 0, 0]
-    ///
     fn is_zero(&self, tolerance: f64) -> bool {
         self.data.norm() < tolerance
     }
 
-    /// Normalize tangent vector
-    ///
-    /// # Notes
-    /// # Equation 147: Normalize tangent vector
-    /// [0, 0, 0]
-    ///
     fn normalize(&mut self) {
         let norm = self.data.norm();
         if norm > f64::EPSILON {

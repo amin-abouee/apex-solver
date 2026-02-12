@@ -10,44 +10,22 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 //!
-//! # Numerical Conditioning and Natural Mathematical Limitations
+//! # Numerical Conditioning
 //!
-//! SE(3) inherits all numerical conditioning issues from SO(3) and adds scale-dependent
-//! precision challenges. These are **inherent mathematical properties**, not bugs.
+//! SE(3) inherits SO(3) conditioning issues and adds scale-dependent precision challenges.
 //!
-//! ## Key Numerical Properties
+//! **Jacobian inverse precision** (Jr * Jr⁻¹ ≈ I):
 //!
-//! 1. **Jacobian Inverse Conditioning**: The 6×6 Jacobian inverses have poor conditioning
-//!    due to the embedded SO(3) rotation component. Expected precision:
-//!    - Small rotations (θ < 0.01 rad): Jr * Jr⁻¹ ≈ I within ~1e-6
-//!    - Moderate rotations (0.01 < θ < 0.1 rad): Jr * Jr⁻¹ ≈ I within ~1e-4
-//!    - Larger rotations (θ > 0.1 rad): Jr * Jr⁻¹ ≈ I within ~0.01
+//! | Rotation       | Precision |
+//! |----------------|-----------|
+//! | θ < 0.01 rad   | ~1e-6     |
+//! | 0.01–0.1 rad   | ~1e-4     |
+//! | θ > 0.1 rad    | ~0.01     |
 //!
-//! 2. **Scale-Dependent Precision**: Large translations require looser absolute tolerances:
-//!    - Translations ~1m: exp-log round-trip within ~1e-8
-//!    - Translations ~100m: exp-log round-trip within ~1e-6
-//!    - Translations ~1000m: exp-log round-trip within ~1e-3
-//!    - **Reason**: Absolute error grows with scale, but relative error stays constant
-//!
-//! 3. **Mixed Rotation-Translation Coupling**: The Q-block Jacobian couples rotation and
-//!    translation, amplifying numerical errors when:
-//!    - Large translations combined with large rotations
-//!    - Rotation angles near π (antipodal configuration)
-//!
-//! 4. **Composition Chain Accumulation**: Similar to SO(3), composition chains accumulate
-//!    drift multiplicatively:
-//!    - 10 compositions: drift ~0.1 in manifold distance
-//!    - 100 compositions: drift can exceed 1.0
-//!    - **Mitigation**: Use manifold optimization or periodic re-projection
-//!
-//! ## Practical Implications
-//!
-//! - **GPS-scale problems (1000m)**: Use tolerances ≥ 1e-3
-//! - **SLAM/Odometry (1-100m)**: Use tolerances ≥ 1e-6
-//! - **Robotic manipulation (0.01-1m)**: Use tolerances ≥ 1e-8
-//! - **Long pose chains**: Re-optimize periodically rather than pure composition
-//!
-//! These behaviors are **consistent with production SLAM libraries** (ORB-SLAM3, GTSAM, Cartographer).
+//! **Scale effects**: Absolute error in exp-log round-trips grows with translation magnitude
+//! (~1e-8 at 1m, ~1e-3 at 1000m). The Q-block Jacobian couples rotation and translation,
+//! amplifying errors at large rotations. Composition chains drift multiplicatively —
+//! re-project periodically for long chains.
 
 use crate::{
     LieGroup, Tangent,
@@ -231,13 +209,13 @@ impl From<SE3> for DVector<f64> {
     fn from(se3: SE3) -> Self {
         let q = se3.rotation.quaternion();
         DVector::from_vec(vec![
-            se3.translation.x, // tx first
-            se3.translation.y, // ty second
-            se3.translation.z, // tz third
-            q.w,               // qw fourth
-            q.i,               // qx fifth
-            q.j,               // qy sixth
-            q.k,               // qz seventh
+            se3.translation.x,
+            se3.translation.y,
+            se3.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
         ])
     }
 }
@@ -262,11 +240,9 @@ impl LieGroup for SE3 {
     /// J_M⁻¹_M = - [ R [t]ₓ R ]
     ///             [ 0    R   ]
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        // For SE(3): g^{-1} = [R^T, -R^T * t; 0, 1]
         let rot_inv = self.rotation.inverse(None);
         let trans_inv = -rot_inv.act(&self.translation, None, None);
 
-        // Eqs. 176
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
@@ -299,7 +275,6 @@ impl LieGroup for SE3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        // Eqs. 171
         let composed_rotation = self.rotation.compose(&other.rotation, None, None);
         let composed_translation =
             self.rotation.act(&other.translation, None, None) + self.translation;
@@ -307,12 +282,10 @@ impl LieGroup for SE3 {
         let result = SE3::from_translation_so3(composed_translation, composed_rotation);
 
         if let Some(jac_self) = jacobian_self {
-            // Jacobian wrt first element: Ad(g2^{-1})
             *jac_self = other.inverse(None).adjoint();
         }
 
         if let Some(jac_other) = jacobian_other {
-            // Jacobian wrt second element: I (identity)
             *jac_other = Matrix6::identity();
         }
 
@@ -333,7 +306,6 @@ impl LieGroup for SE3 {
     /// V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        // Log of rotation (axis-angle representation)
         let theta = self.rotation.log(None);
         let mut data = Vector6::zeros();
         let translation_vector = theta.left_jacobian_inv() * self.translation;
@@ -353,7 +325,6 @@ impl LieGroup for SE3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        // Apply SE(3) transformation: R * v + t
         let result = self.rotation.act(vector, None, None) + self.translation;
 
         if let Some(jac_self) = jacobian_self {
@@ -366,7 +337,6 @@ impl LieGroup for SE3 {
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            // Jacobian wrt vector
             let rotation_matrix = self.rotation.rotation_matrix();
             jac_vector.copy_from(&rotation_matrix);
         }
@@ -375,7 +345,6 @@ impl LieGroup for SE3 {
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        // Adjoint matrix for SE(3)
         let rotation_matrix = self.rotation.rotation_matrix();
         let translation = self.translation;
         let mut adjoint_matrix = Matrix6::zeros();
@@ -559,7 +528,6 @@ impl SE3Tangent {
         let mut d = -1.0 / 60.0;
 
         if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
-            // --- Large Angle Path: Direct computation ---
             let theta_norm = theta_squared.sqrt();
             let theta_norm_3 = theta_norm * theta_squared;
             let theta_norm_4 = theta_squared * theta_squared;
@@ -567,7 +535,6 @@ impl SE3Tangent {
             let sin_theta = theta_norm.sin();
             let cos_theta = theta_norm.cos();
 
-            // Calculate coefficients directly from the formula
             b = (theta_norm - sin_theta) / theta_norm_3;
             c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
             d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
@@ -578,7 +545,6 @@ impl SE3Tangent {
         let trt = tr * theta_skew;
         let rt_t2 = rt * theta_skew;
 
-        // Assemble the final matrix
         rho_skew * a + (tr + rt + trt) * b
             - (rt_t2 - rt_t2.transpose() - trt * 3.0) * c
             - (trt * theta_skew) * d
@@ -693,9 +659,8 @@ impl Tangent<SE3> for SE3Tangent {
             .copy_from(&theta_left_inv_jac);
         jac.fixed_view_mut::<3, 3>(3, 3)
             .copy_from(&theta_left_inv_jac);
-        // Bottom-right block: J_r^{-1}(theta)
-        let bottom_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&bottom_right);
+        let top_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
+        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
         jac
     }
 

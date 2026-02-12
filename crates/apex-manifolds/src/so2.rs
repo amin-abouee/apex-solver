@@ -408,9 +408,6 @@ impl Tangent<SO2> for SO2Tangent {
     /// The generator matrix
     fn generator(&self, i: usize) -> <SO2 as LieGroup>::LieAlgebra {
         assert_eq!(i, 0, "SO(2) only has one generator (index 0)");
-        // The generator for SO(2) is the skew-symmetric matrix:
-        // E = | 0 -1 |
-        //     | 1  0 |
         Matrix2::new(0.0, -1.0, 1.0, 0.0)
     }
 }

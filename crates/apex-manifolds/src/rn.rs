@@ -304,18 +304,14 @@ impl LieGroup for Rn {
         DMatrix::zeros(3, 3)
     }
 
-    /// Normalize the vector (no-op for Euclidean space, but could normalize to unit length).
     fn normalize(&mut self) {
-        // For Euclidean space, we could normalize to unit length
         let norm = self.data.norm();
         if norm > 1e-12 {
             self.data /= norm;
         }
     }
 
-    /// Check if the element is valid (always true for Euclidean space).
     fn is_valid(&self, _tolerance: f64) -> bool {
-        // All finite vectors are valid in Euclidean space
         self.data.iter().all(|x| x.is_finite())
     }
 
@@ -572,25 +568,21 @@ impl Tangent<Rn> for RnTangent {
         Rn::new(self.data.clone())
     }
 
-    /// Right Jacobian for Euclidean space (identity).
     fn right_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Left Jacobian for Euclidean space (identity).
     fn left_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Inverse of right Jacobian for Euclidean space (identity).
     fn right_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Inverse of left Jacobian for Euclidean space (identity).
     fn left_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
@@ -604,9 +596,7 @@ impl Tangent<Rn> for RnTangent {
         DMatrix::from_diagonal(&self.data)
     }
 
-    /// Small adjugate operator for Euclidean space.
-    ///
-    /// For abelian groups, this is zero matrix.
+    /// Small adjoint (zero for abelian group).
     fn small_adj(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::zeros(dim, dim)
@@ -736,9 +726,6 @@ impl Rn {
 
 impl RnTangent {
     /// Create zero tangent vector with specific dimension.
-    ///
-    /// The default `zero()` returns a 3D zero vector for compatibility.
-    /// Use this method when you need a specific dimension.
     pub fn zero_with_dim(dim: usize) -> Self {
         RnTangent::new(DVector::zeros(dim))
     }

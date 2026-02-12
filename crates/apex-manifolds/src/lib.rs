@@ -122,29 +122,14 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 
 /// Core trait for Lie group operations.
 ///
-/// This trait provides the fundamental operations for Lie groups, including:
-/// - Group operations (composition, inverse, identity)
-/// - Exponential and logarithmic maps
-/// - Lie group plus/minus operations with Jacobians
-/// - Adjoint operations
-/// - Random sampling and normalization
+/// Provides group operations, exponential/logarithmic maps, plus/minus with Jacobians,
+/// and adjoint representations.
 ///
-/// The design closely follows the [manif](https://github.com/artivis/manif) C++ library.
+/// # Associated Types
 ///
-/// # Type Parameters
-///
-/// Associated types define the mathematical structure:
-/// - `Element`: The Lie group element type (e.g., `Isometry3<f64>` for SE(3))
-/// - `TangentVector`: The tangent space vector type (e.g., `Vector6<f64>` for SE(3))
-/// - `JacobianMatrix`: The Jacobian matrix type for this Lie group
-/// - `LieAlgebra`: Associated Lie algebra type
-///
-/// # Dimensions
-///
-/// Three key dimensions characterize each Lie group:
-/// - `DIM`: Space dimension - dimension of ambient space (e.g., 3 for SE(3))
-/// - `DOF`: Degrees of freedom - tangent space dimension (e.g., 6 for SE(3))
-/// - `REP_SIZE`: Representation size - underlying data size (e.g., 7 for SE(3))
+/// - `TangentVector`: Tangent space (Lie algebra) vector type
+/// - `JacobianMatrix`: Jacobian matrix type for this group
+/// - `LieAlgebra`: Matrix representation of the Lie algebra
 pub trait LieGroup: Clone + PartialEq {
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
@@ -331,13 +316,10 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        // Left plus: τ ⊕ g = exp(τ) * g
         let exp_tangent = tangent.exp(None);
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            // Note: jacobian_identity() is now implemented in concrete types
-            // This will be handled by the concrete implementation
             *jac_self = self.adjoint();
         }
 
@@ -360,7 +342,6 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self::TangentVector {
-        // Left minus: g1 ⊖ g2 = log(g1 * g2^{-1})
         let other_inverse = other.inverse(None);
         let result_group = self.compose(&other_inverse, None, None);
         let result = result_group.log(None);
@@ -412,7 +393,6 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        // Between: g1.between(g2) = g1^{-1} * g2
         let self_inverse = self.inverse(None);
         let result = self_inverse.compose(other, None, None);
 
