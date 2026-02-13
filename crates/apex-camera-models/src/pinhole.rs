@@ -286,31 +286,13 @@ impl CameraModel for PinholeCamera {
     /// v = fy · (y/z) + cy
     /// ```
     ///
-    /// ## Derivatives of u-coordinate
-    ///
-    /// Using the quotient rule for u = fx · (x/z) + cx:
+    /// Derivatives:
     /// ```text
-    /// ∂u/∂x = fx · ∂(x/z)/∂x = fx · (1/z) = fx/z
-    ///
-    /// ∂u/∂y = fx · ∂(x/z)/∂y = 0          (x/z doesn't depend on y)
-    ///
-    /// ∂u/∂z = fx · ∂(x/z)/∂z
-    ///       = fx · (-x/z²)                 (quotient rule: d(x/z)/dz = -x/z²)
-    ///       = -fx·x/z²
+    /// ∂u/∂x = fx/z,        ∂u/∂y = 0,     ∂u/∂z = -fx·x/z²
+    /// ∂v/∂x = 0,           ∂v/∂y = fy/z,  ∂v/∂z = -fy·y/z²
     /// ```
     ///
-    /// ## Derivatives of v-coordinate
-    ///
-    /// Similarly for v = fy · (y/z) + cy:
-    /// ```text
-    /// ∂v/∂x = 0                            (y/z doesn't depend on x)
-    ///
-    /// ∂v/∂y = fy · ∂(y/z)/∂y = fy · (1/z) = fy/z
-    ///
-    /// ∂v/∂z = fy · ∂(y/z)/∂z = fy · (-y/z²) = -fy·y/z²
-    /// ```
-    ///
-    /// ## Final Jacobian Matrix (2×3)
+    /// Final Jacobian matrix (2×3):
     ///
     /// ```text
     /// J = [ ∂u/∂x   ∂u/∂y   ∂u/∂z  ]   [ fx/z    0      -fx·x/z² ]
@@ -368,43 +350,13 @@ impl CameraModel for PinholeCamera {
     /// v = fy · (y/z) + cy
     /// ```
     ///
-    /// ## Derivatives w.r.t. Focal Lengths
-    ///
-    /// ### For fx:
+    /// Derivatives:
     /// ```text
-    /// ∂u/∂fx = ∂(fx · x/z + cx)/∂fx
-    ///        = x/z                    (coefficient of fx in u)
-    ///
-    /// ∂v/∂fx = 0                      (fx doesn't appear in v)
+    /// ∂u/∂fx = x/z,  ∂u/∂fy = 0,     ∂u/∂cx = 1,  ∂u/∂cy = 0
+    /// ∂v/∂fx = 0,    ∂v/∂fy = y/z,   ∂v/∂cx = 0,  ∂v/∂cy = 1
     /// ```
     ///
-    /// ### For fy:
-    /// ```text
-    /// ∂u/∂fy = 0                      (fy doesn't appear in u)
-    ///
-    /// ∂v/∂fy = ∂(fy · y/z + cy)/∂fy
-    ///        = y/z                    (coefficient of fy in v)
-    /// ```
-    ///
-    /// ## Derivatives w.r.t. Principal Point
-    ///
-    /// ### For cx:
-    /// ```text
-    /// ∂u/∂cx = ∂(fx · x/z + cx)/∂cx
-    ///        = 1                      (additive constant)
-    ///
-    /// ∂v/∂cx = 0                      (cx doesn't appear in v)
-    /// ```
-    ///
-    /// ### For cy:
-    /// ```text
-    /// ∂u/∂cy = 0                      (cy doesn't appear in u)
-    ///
-    /// ∂v/∂cy = ∂(fy · y/z + cy)/∂cy
-    ///        = 1                      (additive constant)
-    /// ```
-    ///
-    /// ## Final Jacobian Matrix (2×4)
+    /// Final Jacobian matrix (2×4):
     ///
     /// ```text
     /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy ]

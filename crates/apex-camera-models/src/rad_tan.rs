@@ -531,16 +531,13 @@ impl CameraModel for RadTanCamera {
     /// 2. ∂(x'',y'')/∂(x',y'): Distortion derivatives (radial + tangential)
     /// 3. ∂(u,v)/∂(x'',y''): Final projection derivatives
     ///
-    /// ### Step 1: Normalized Coordinate Derivatives
-    ///
-    /// For x' = x/z and y' = y/z:
-    ///
+    /// Normalized coordinate derivatives (x' = x/z, y' = y/z):
     /// ```text
     /// ∂x'/∂x = 1/z,   ∂x'/∂y = 0,     ∂x'/∂z = -x/z²
     /// ∂y'/∂x = 0,     ∂y'/∂y = 1/z,   ∂y'/∂z = -y/z²
     /// ```
     ///
-    /// ### Step 2: Distortion Derivatives (Most Complex)
+    /// Distortion derivatives:
     ///
     /// The distorted coordinates are: x'' = radial·x' + dx, y'' = radial·y' + dy
     ///
@@ -594,16 +591,13 @@ impl CameraModel for RadTanCamera {
     ///          = radial + 2y'²·dradial_dr2 + 6p₁y' + 2p₂x'
     /// ```
     ///
-    /// ### Step 3: Final Projection Derivatives
-    ///
-    /// For u = fx·x'' + cx and v = fy·y'' + cy:
-    ///
+    /// Final projection derivatives (u = fx·x'' + cx, v = fy·y'' + cy):
     /// ```text
     /// ∂u/∂x'' = fx,  ∂u/∂y'' = 0
     /// ∂v/∂x'' = 0,   ∂v/∂y'' = fy
     /// ```
     ///
-    /// ### Full Chain Rule
+    /// Chain rule:
     ///
     /// ```text
     /// ∂u/∂x = fx·(∂x''/∂x'·∂x'/∂x + ∂x''/∂y'·∂y'/∂x)
@@ -725,16 +719,13 @@ impl CameraModel for RadTanCamera {
     ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂k₁  ∂v/∂k₂  ∂v/∂p₁  ∂v/∂p₂  ∂v/∂k₃ ]
     /// ```
     ///
-    /// ## Linear Parameters (fx, fy, cx, cy)
-    ///
-    /// These appear linearly in the projection:
-    ///
+    /// Linear parameters (fx, fy, cx, cy):
     /// ```text
     /// ∂u/∂fx = x'',  ∂u/∂fy = 0,   ∂u/∂cx = 1,  ∂u/∂cy = 0
     /// ∂v/∂fx = 0,    ∂v/∂fy = y'', ∂v/∂cx = 0,  ∂v/∂cy = 1
     /// ```
     ///
-    /// ## Radial Distortion Coefficients (k₁, k₂, k₃)
+    /// Radial distortion coefficients (k₁, k₂, k₃):
     ///
     /// Each k_i affects the radial distortion component:
     ///
@@ -768,37 +759,15 @@ impl CameraModel for RadTanCamera {
     /// ∂v/∂k₃ = fy·y'·r⁶
     /// ```
     ///
-    /// ## Tangential Distortion Coefficients (p₁, p₂)
-    ///
-    /// For p₁ (affects dx through 2p₁x'y' and dy through p₁(r² + 2y'²)):
-    ///
+    /// Tangential distortion coefficients (p₁, p₂):
     /// ```text
-    /// ∂dx/∂p₁ = 2x'y'
-    /// ∂dy/∂p₁ = r² + 2y'²
+    /// ∂dx/∂p₁ = 2x'y',  ∂dy/∂p₁ = r² + 2y'²
+    /// ∂u/∂p₁ = fx·2x'y',  ∂v/∂p₁ = fy·(r² + 2y'²)
+    /// ∂dx/∂p₂ = r² + 2x'²,  ∂dy/∂p₂ = 2x'y'
+    /// ∂u/∂p₂ = fx·(r² + 2x'²),  ∂v/∂p₂ = fy·2x'y'
     /// ```
     ///
-    /// Then:
-    ///
-    /// ```text
-    /// ∂u/∂p₁ = fx·∂x''/∂p₁ = fx·2x'y'
-    /// ∂v/∂p₁ = fy·∂y''/∂p₁ = fy·(r² + 2y'²)
-    /// ```
-    ///
-    /// For p₂ (affects dx through p₂(r² + 2x'²) and dy through 2p₂x'y'):
-    ///
-    /// ```text
-    /// ∂dx/∂p₂ = r² + 2x'²
-    /// ∂dy/∂p₂ = 2x'y'
-    /// ```
-    ///
-    /// Then:
-    ///
-    /// ```text
-    /// ∂u/∂p₂ = fx·∂x''/∂p₂ = fx·(r² + 2x'²)
-    /// ∂v/∂p₂ = fy·∂y''/∂p₂ = fy·2x'y'
-    /// ```
-    ///
-    /// ## Matrix Form
+    /// Matrix form:
     ///
     /// ```text
     /// J = [ x''  0   1  0  fx·x'·r²  fx·x'·r⁴  fx·2x'y'    fx·(r²+2x'²)  fx·x'·r⁶ ]

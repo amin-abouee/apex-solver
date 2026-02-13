@@ -162,7 +162,6 @@ impl EucmCamera {
             ));
         }
 
-        // Set up the linear system to solve for alpha only
         let mut a = nalgebra::DMatrix::zeros(num_points * 2, 1);
         let mut b = nalgebra::DVector::zeros(num_points * 2);
 
@@ -184,7 +183,6 @@ impl EucmCamera {
             b[i * 2 + 1] = self.pinhole.fy * y - v_cy * z;
         }
 
-        // Solve the linear system using SVD
         let svd = a.svd(true, true);
         let solution = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
@@ -449,20 +447,14 @@ impl CameraModel for EucmCamera {
     ///
     /// ## Jacobian Structure
     ///
-    /// We need to compute ∂u/∂p and ∂v/∂p where p = (x, y, z):
+    /// Computing ∂u/∂p and ∂v/∂p where p = (x, y, z):
     ///
     /// ```text
     /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
     ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
     /// ```
     ///
-    /// ## Chain Rule Application
-    ///
-    /// Starting from the projection equations:
-    /// - u = fx · (x/denom) + cx
-    /// - v = fy · (y/denom) + cy
-    ///
-    /// We apply the quotient rule:
+    /// Chain rule application for u = fx · (x/denom) + cx and v = fy · (y/denom) + cy:
     ///
     /// ```text
     /// ∂(x/denom)/∂x = (denom - x·∂denom/∂x) / denom²
@@ -474,9 +466,7 @@ impl CameraModel for EucmCamera {
     /// ∂(y/denom)/∂z = -y·∂denom/∂z / denom²
     /// ```
     ///
-    /// ## Computing Intermediate Derivatives
-    ///
-    /// First, compute ∂d/∂p where d = √(β·r² + z²):
+    /// Computing ∂d/∂p where d = √(β·r² + z²):
     ///
     /// ```text
     /// ∂d/∂x = ∂/∂x √(β·(x²+y²) + z²)
@@ -487,7 +477,7 @@ impl CameraModel for EucmCamera {
     /// ∂d/∂z = z / d
     /// ```
     ///
-    /// Then, compute ∂denom/∂p where denom = α·d + (1-α)·z:
+    /// Computing ∂denom/∂p where denom = α·d + (1-α)·z:
     ///
     /// ```text
     /// ∂denom/∂x = α · ∂d/∂x = α·β·x/d
@@ -495,9 +485,7 @@ impl CameraModel for EucmCamera {
     /// ∂denom/∂z = α · ∂d/∂z + (1-α) = α·z/d + (1-α)
     /// ```
     ///
-    /// ## Final Jacobian
-    ///
-    /// Substituting into the quotient rule expressions:
+    /// Final Jacobian (substituting into quotient rule):
     ///
     /// ```text
     /// ∂u/∂x = fx · (denom - x·α·β·x/d) / denom²
@@ -577,11 +565,10 @@ impl CameraModel for EucmCamera {
     ///
     /// ## Jacobian Structure
     ///
-    /// We need to compute:
-    ///
+    /// Intrinsic Jacobian (2×6):
     /// ```text
-    /// J_intrinsics = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂α  ∂u/∂β ]
-    ///                [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂α  ∂v/∂β ]
+    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂α  ∂u/∂β ]
+    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂α  ∂v/∂β ]
     /// ```
     ///
     /// ## Linear Parameters (fx, fy, cx, cy)
@@ -621,13 +608,12 @@ impl CameraModel for EucmCamera {
     ///       = r² / (2d)
     /// ```
     ///
-    /// Then, using chain rule through denom = α·d + (1-α)·z:
-    ///
+    /// Chain rule through denom = α·d + (1-α)·z:
     /// ```text
     /// ∂denom/∂β = α · ∂d/∂β = α · r² / (2d)
     /// ```
     ///
-    /// Finally, using the quotient rule:
+    /// Quotient rule:
     ///
     /// ```text
     /// ∂u/∂β = fx · (-x · ∂denom/∂β) / denom²

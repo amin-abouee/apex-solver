@@ -162,14 +162,12 @@ impl DoubleSphereCamera {
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
     ) -> Result<(), CameraModelError> {
-        // Check if the number of 2D and 3D points match
         if points_2d.ncols() != points_3d.ncols() {
             return Err(CameraModelError::InvalidParams(
                 "Number of 2D and 3D points must match".to_string(),
             ));
         }
 
-        // Set up the linear system to solve for alpha
         let num_points = points_2d.ncols();
         let mut a = nalgebra::DMatrix::zeros(num_points * 2, 1);
         let mut b = nalgebra::DVector::zeros(num_points * 2);
@@ -192,7 +190,6 @@ impl DoubleSphereCamera {
             b[i * 2 + 1] = (self.pinhole.fy * y) - (v_cy * z);
         }
 
-        // Solve the linear system using SVD
         let svd = a.svd(true, true);
         let alpha = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol[0],
@@ -466,17 +463,15 @@ impl CameraModel for DoubleSphereCamera {
     /// v = fy · (y/denom) + cy           // Pixel v-coordinate
     /// ```
     ///
-    /// ## Step 1: Derivatives of intermediate quantities
-    ///
+    /// Derivatives of intermediate quantities:
     /// ```text
     /// ∂d₁/∂x = x/d₁,  ∂d₁/∂y = y/d₁,  ∂d₁/∂z = z/d₁
-    ///
     /// ∂w/∂x = ξ·(∂d₁/∂x) = ξx/d₁
     /// ∂w/∂y = ξ·(∂d₁/∂y) = ξy/d₁
     /// ∂w/∂z = ξ·(∂d₁/∂z) + 1 = ξz/d₁ + 1
     /// ```
     ///
-    /// ## Step 2: Derivative of d₂
+    /// Derivative of d₂:
     ///
     /// Since d₂ = √(x² + y² + w²), using chain rule:
     /// ```text
@@ -485,15 +480,14 @@ impl CameraModel for DoubleSphereCamera {
     /// ∂d₂/∂z = (w·∂w/∂z) / d₂ = w·(ξz/d₁ + 1) / d₂
     /// ```
     ///
-    /// ## Step 3: Derivative of denominator
-    ///
+    /// Derivative of denominator:
     /// ```text
     /// ∂denom/∂x = α·∂d₂/∂x + (1-α)·∂w/∂x
     /// ∂denom/∂y = α·∂d₂/∂y + (1-α)·∂w/∂y
     /// ∂denom/∂z = α·∂d₂/∂z + (1-α)·∂w/∂z
     /// ```
     ///
-    /// ## Step 4: Derivatives of pixel coordinates (quotient rule)
+    /// Derivatives of pixel coordinates (quotient rule):
     ///
     /// For u = fx·(x/denom) + cx:
     /// ```text
@@ -514,7 +508,7 @@ impl CameraModel for DoubleSphereCamera {
     /// ∂v/∂z = -fy·y·∂denom/∂z / denom²
     /// ```
     ///
-    /// ## Final Jacobian Matrix (2×3)
+    /// Final Jacobian matrix (2×3):
     ///
     /// ```text
     /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]

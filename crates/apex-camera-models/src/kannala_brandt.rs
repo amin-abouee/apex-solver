@@ -544,39 +544,19 @@ impl CameraModel for KannalaBrandtCamera {
     /// v = fy · θ_d · (y/r) + cy                  // Pixel v-coordinate
     /// ```
     ///
-    /// ## Step 1: Derivatives of intermediate quantities
-    ///
-    /// ### Radial distance r:
+    /// Derivatives of intermediate quantities:
     /// ```text
-    /// ∂r/∂x = x/r
-    /// ∂r/∂y = y/r
-    /// ∂r/∂z = 0
-    /// ```
-    ///
-    /// ### Angle θ = atan2(r, z):
-    /// Using the atan2 derivative formula:
-    /// ```text
-    /// ∂θ/∂x = ∂(atan2(r,z))/∂x = (z/r²+z²) · ∂r/∂x = z·x / (r·(r²+z²))
+    /// ∂r/∂x = x/r,  ∂r/∂y = y/r,  ∂r/∂z = 0
+    /// ∂θ/∂x = z·x / (r·(r²+z²))
     /// ∂θ/∂y = z·y / (r·(r²+z²))
     /// ∂θ/∂z = -r / (r²+z²)
-    /// ```
-    ///
-    /// ### Distorted angle θ_d:
-    /// The polynomial distortion is θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
-    ///
-    /// Derivative w.r.t. θ:
-    /// ```text
     /// ∂θ_d/∂θ = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
-    /// ```
-    ///
-    /// By chain rule:
-    /// ```text
     /// ∂θ_d/∂x = (∂θ_d/∂θ) · (∂θ/∂x)
     /// ∂θ_d/∂y = (∂θ_d/∂θ) · (∂θ/∂y)
     /// ∂θ_d/∂z = (∂θ_d/∂θ) · (∂θ/∂z)
     /// ```
     ///
-    /// ## Step 2: Derivatives of pixel coordinates (quotient + product rule)
+    /// Derivatives of pixel coordinates (quotient + product rule):
     ///
     /// For u = fx · θ_d · (x/r) + cx:
     /// ```text
@@ -597,21 +577,14 @@ impl CameraModel for KannalaBrandtCamera {
     /// ∂v/∂z = fy · [∂θ_d/∂z · (y/r)]
     /// ```
     ///
-    /// ## Step 3: Special case - Near optical axis (r → 0)
-    ///
-    /// When r is very small, the point is near the optical axis. In this limit:
-    /// - x/r, y/r become undefined
-    /// - θ → 0, so θ_d → 0
-    /// - The projection becomes approximately linear
-    ///
-    /// For numerical stability, use simplified Jacobian:
+    /// Near optical axis (r → 0): Use simplified Jacobian for numerical stability:
     /// ```text
     /// ∂u/∂x ≈ fx · (∂θ_d/∂θ) / z
     /// ∂v/∂y ≈ fy · (∂θ_d/∂θ) / z
     /// (all other terms ≈ 0)
     /// ```
     ///
-    /// ## Final Jacobian Matrix (2×3)
+    /// Final Jacobian matrix (2×3):
     ///
     /// ```text
     /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
@@ -725,27 +698,13 @@ impl CameraModel for KannalaBrandtCamera {
     /// v = fy · θ_d · (y/r) + cy
     /// ```
     ///
-    /// ## Part 1: Linear Parameters (fx, fy, cx, cy)
-    ///
-    /// These have direct, simple derivatives since they appear linearly in the projection:
-    ///
-    /// ### Focal lengths (fx, fy):
+    /// Linear parameters (fx, fy, cx, cy):
     /// ```text
-    /// ∂u/∂fx = θ_d · (x/r)    (coefficient of fx in u)
-    /// ∂u/∂fy = 0              (fy doesn't affect u)
-    /// ∂v/∂fx = 0              (fx doesn't affect v)
-    /// ∂v/∂fy = θ_d · (y/r)    (coefficient of fy in v)
+    /// ∂u/∂fx = θ_d · (x/r),  ∂u/∂fy = 0,  ∂u/∂cx = 1,  ∂u/∂cy = 0
+    /// ∂v/∂fx = 0,  ∂v/∂fy = θ_d · (y/r),  ∂v/∂cx = 0,  ∂v/∂cy = 1
     /// ```
     ///
-    /// ### Principal point (cx, cy):
-    /// ```text
-    /// ∂u/∂cx = 1              (cx adds directly to u)
-    /// ∂u/∂cy = 0              (cy doesn't affect u)
-    /// ∂v/∂cx = 0              (cx doesn't affect v)
-    /// ∂v/∂cy = 1              (cy adds directly to v)
-    /// ```
-    ///
-    /// ## Part 2: Distortion Parameters (k₁, k₂, k₃, k₄)
+    /// Distortion parameters (k₁, k₂, k₃, k₄):
     ///
     /// The distortion affects θ_d through the polynomial expansion.
     ///

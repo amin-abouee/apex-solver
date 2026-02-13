@@ -307,32 +307,23 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// The projection function maps a 3D point p_cam = (x, y, z) to 2D pixel coordinates (u, v).
     ///
-    /// ## Step 1: Normalized Coordinates (BAL Convention)
-    ///
-    /// BAL uses negative Z in front of camera (OpenGL convention):
+    /// Normalized coordinates (BAL uses negative Z convention):
     /// ```text
-    /// x_n = x / (-z)
-    /// y_n = y / (-z)
-    /// ```
-    ///
-    /// Let `inv_neg_z = -1/z`, then:
-    /// ```text
-    /// x_n = x * inv_neg_z
-    /// y_n = y * inv_neg_z
+    /// x_n = x / (-z) = x * inv_neg_z
+    /// y_n = y / (-z) = y * inv_neg_z
     /// ```
     ///
     /// Jacobian of normalized coordinates:
     /// ```text
     /// ∂x_n/∂x = inv_neg_z = -1/z
     /// ∂x_n/∂y = 0
-    /// ∂x_n/∂z = ∂(x * inv_neg_z)/∂z = x * ∂(-1/z)/∂z = x * (1/z²) = x_n * inv_neg_z
-    ///
+    /// ∂x_n/∂z = x_n * inv_neg_z
     /// ∂y_n/∂x = 0
     /// ∂y_n/∂y = inv_neg_z = -1/z
     /// ∂y_n/∂z = y_n * inv_neg_z
     /// ```
     ///
-    /// ## Step 2: Radial Distortion
+    /// Radial distortion:
     ///
     /// The radial distance squared and distortion factor:
     /// ```text
@@ -368,16 +359,13 @@ impl CameraModel for BALPinholeCameraStrict {
     /// ∂y_d/∂y_n = d + y_n · (k1 + 2·k2·r²) · 2·y_n
     /// ```
     ///
-    /// ## Step 3: Pixel Coordinates (Strict BAL: no principal point)
-    ///
+    /// Pixel coordinates (strict BAL has no principal point):
     /// ```text
-    /// u = f · x_d   (no cx offset)
-    /// v = f · y_d   (no cy offset)
+    /// u = f · x_d
+    /// v = f · y_d
     /// ```
     ///
-    /// ## Step 4: Chain Rule
-    ///
-    /// The full Jacobian ∂(u,v)/∂(x,y,z) is computed by chaining:
+    /// Chain rule:
     /// ```text
     /// J = ∂(u,v)/∂(x_d,y_d) · ∂(x_d,y_d)/∂(x_n,y_n) · ∂(x_n,y_n)/∂(x,y,z)
     /// ```
@@ -474,7 +462,7 @@ impl CameraModel for BALPinholeCameraStrict {
     ///
     /// ## SE(3) Right Perturbation
     ///
-    /// We use right perturbation on SE(3): for small δξ = [δρ; δθ] ∈ ℝ⁶:
+    /// Right perturbation on SE(3) for δξ = [δρ; δθ] ∈ ℝ⁶:
     /// ```text
     /// T' = T ∘ Exp(δξ)
     /// ```

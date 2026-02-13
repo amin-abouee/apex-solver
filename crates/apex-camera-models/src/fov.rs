@@ -119,20 +119,15 @@ impl FovCamera {
 
         let num_points = points_2d.ncols();
 
-        // Need at least 2 points for linear estimation
         if num_points < 2 {
             return Err(CameraModelError::InvalidParams(
                 "Need at least 2 point correspondences for linear estimation".to_string(),
             ));
         }
 
-        // Set up the linear system to solve for w
-        // We'll use a simplified approach: estimate w that minimizes reprojection error
-        // Start with a reasonable initial value
         let mut best_w = 1.0;
         let mut best_error = f64::INFINITY;
 
-        // Grid search over reasonable w values
         for w_test in (10..300).map(|i| i as f64 / 100.0) {
             let mut error_sum = 0.0;
             let mut valid_count = 0;
@@ -144,7 +139,6 @@ impl FovCamera {
                 let u_observed = points_2d[(0, i)];
                 let v_observed = points_2d[(1, i)];
 
-                // Try projection with this w value
                 let r2 = x * x + y * y;
                 let r = r2.sqrt();
 
@@ -323,7 +317,6 @@ impl CameraModel for FovCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        // Check if z is valid (too close to camera center)
         if z < f64::EPSILON.sqrt() {
             return Err(CameraModelError::ProjectionOutOfBounds);
         }
@@ -415,20 +408,14 @@ impl CameraModel for FovCamera {
     ///
     /// ## Jacobian Structure
     ///
-    /// We need to compute ∂u/∂p and ∂v/∂p where p = (x, y, z):
+    /// Computing ∂u/∂p and ∂v/∂p where p = (x, y, z):
     ///
     /// ```text
     /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
     ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
     /// ```
     ///
-    /// ## Chain Rule Application
-    ///
-    /// Starting from the projection equations:
-    /// - u = fx · mx + cx = fx · x · rd + cx
-    /// - v = fy · my + cy = fy · y · rd + cy
-    ///
-    /// We apply the chain rule:
+    /// Chain rule for u = fx · x · rd + cx and v = fy · y · rd + cy:
     ///
     /// ```text
     /// ∂u/∂x = fx · ∂(x·rd)/∂x = fx · (rd + x · ∂rd/∂x)
@@ -440,13 +427,7 @@ impl CameraModel for FovCamera {
     /// ∂v/∂z = fy · ∂(y·rd)/∂z = fy · y · ∂rd/∂z
     /// ```
     ///
-    /// ## Computing ∂rd/∂x, ∂rd/∂y, ∂rd/∂z
-    ///
-    /// For r > 0 case (non-optical axis):
-    ///
-    /// rd = atan(α) / (r·w) where α = 2·tan(w/2)·r / z
-    ///
-    /// Using chain rule through r and α:
+    /// Computing ∂rd/∂x, ∂rd/∂y, ∂rd/∂z for r > 0 (rd = atan(α) / (r·w), α = 2·tan(w/2)·r / z):
     ///
     /// ```text
     /// ∂rd/∂r = [∂atan/∂α · ∂α/∂r · r·w - atan(α) · w] / (r·w)²
@@ -464,19 +445,10 @@ impl CameraModel for FovCamera {
     /// ∂rd/∂z = (computed directly above)
     /// ```
     ///
-    /// ## Special Case: Near Optical Axis (r ≈ 0)
-    ///
-    /// When r < ε, we use rd = 2·tan(w/2) / w (constant), so:
-    ///
+    /// Near optical axis (r < ε): rd = 2·tan(w/2) / w is constant, so ∂rd/∂x = ∂rd/∂y = ∂rd/∂z = 0:
     /// ```text
-    /// ∂rd/∂x = 0, ∂rd/∂y = 0, ∂rd/∂z = 0
-    /// ```
-    ///
-    /// Leading to simplified Jacobian:
-    ///
-    /// ```text
-    /// J_point = [ fx·rd    0       0   ]
-    ///           [   0    fy·rd     0   ]
+    /// J_point = [ fx·rd  0      0  ]
+    ///           [ 0      fy·rd  0  ]
     /// ```
     ///
     /// # Arguments
@@ -571,11 +543,10 @@ impl CameraModel for FovCamera {
     ///
     /// ## Jacobian Structure
     ///
-    /// We need to compute:
-    ///
+    /// Intrinsic Jacobian (2×5):
     /// ```text
-    /// J_intrinsics = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂w ]
-    ///                [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂w ]
+    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂w ]
+    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂w ]
     /// ```
     ///
     /// ## Linear Parameters (fx, fy, cx, cy)

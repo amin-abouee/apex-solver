@@ -411,25 +411,15 @@ impl CameraModel for UcmCamera {
     ///
     /// The UCM projection model maps a 3D point p = (x, y, z) to 2D pixel coordinates (u, v).
     ///
-    /// ## Projection Steps
+    /// Projection:
+    /// ```text
+    /// ρ = √(x² + y² + z²)
+    /// D = α·ρ + (1-α)·z
+    /// u = fx · (x/D) + cx
+    /// v = fy · (y/D) + cy
+    /// ```
     ///
-    /// 1. Compute point distance:
-    ///    ```text
-    ///    ρ = √(x² + y² + z²)
-    ///    ```
-    ///
-    /// 2. Unified projection denominator:
-    ///    ```text
-    ///    D = α·ρ + (1-α)·z
-    ///    ```
-    ///
-    /// 3. Pixel coordinates:
-    ///    ```text
-    ///    u = fx · (x/D) + cx
-    ///    v = fy · (y/D) + cy
-    ///    ```
-    ///
-    /// ## Jacobian Computation
+    /// Jacobian:
     ///
     /// Derivatives of D with respect to (x, y, z):
     /// ```text
