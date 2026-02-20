@@ -13,12 +13,12 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, UcmCamera};
 use apex_manifolds::LieGroup;
-use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
-use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::optimizer::OptimizationStatus;
+use apex_solver::ManifoldType;
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 
@@ -267,16 +267,6 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
     let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
     let rmse = (result.final_cost / total_observations as f64).sqrt();
 
-    // Print diagnostic info
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Total observations: {}", total_observations);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     assert!(
         rmse < 2.0,
         "Reprojection RMSE should be < 2 pixels, got {:.4} pixels",
@@ -300,19 +290,9 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
     // - alpha: 10% (projection parameter, reasonably constrained)
     let tolerances = [0.05, 0.05, 0.05, 0.05, 0.10];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..5 {
-        // Use max(0.1, |true|) to handle small true values
         let relative_error =
             (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs().max(0.1);
-
-        println!(
-            "  {}: true={:.4}, final={:.4}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            relative_error * 100.0
-        );
 
         assert!(
             relative_error < tolerances[i],
@@ -325,18 +305,6 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
             final_intrinsics[i]
         );
     }
-
-    // ============================================================================
-    // 13. Print Summary (for debugging when run with --nocapture)
-    // ============================================================================
-
-    println!("\n=== UCM Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     Ok(())
 }

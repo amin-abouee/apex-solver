@@ -20,14 +20,14 @@
 //! - k3: <0.3 absolute error (higher-order term, poorly constrained by planar target)
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, RadTanCamera};
-use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-use apex_solver::ManifoldType;
+use apex_manifolds::LieGroup;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
-use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
+use apex_solver::optimizer::OptimizationStatus;
+use apex_solver::ManifoldType;
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 
@@ -128,12 +128,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         all_observations.push(cam_observations);
     }
 
-    println!(
-        "✓ All {} landmarks visible from all {} cameras",
-        true_landmarks.len(),
-        true_poses.len()
-    );
-
     // ============================================================================
     // 5. Add Noise to Create Initial Estimates
     // ============================================================================
@@ -179,12 +173,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         problem.fix_variable("pose_0", dof);
     }
 
-    println!(
-        "✓ Built problem: {} cameras, {} landmarks, 9 intrinsics",
-        true_poses.len(),
-        true_landmarks.len()
-    );
-
     // ============================================================================
     // 7. Initialize Variables
     // ============================================================================
@@ -227,18 +215,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    println!("\nStarting optimization...");
     let result = solver.optimize(&problem, &initial_values)?;
 
     // ============================================================================
     // 9. Verify Convergence
     // ============================================================================
-
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.6e}", result.initial_cost);
-    println!("Final cost: {:.6e}", result.final_cost);
 
     assert!(
         matches!(
@@ -256,7 +237,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // ============================================================================
 
     let cost_reduction = (result.initial_cost - result.final_cost) / result.initial_cost;
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
 
     assert!(
         cost_reduction > 0.85,
@@ -321,7 +301,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     }
 
     let rmse = (total_error_sq / total_observations as f64).sqrt();
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     assert!(
         rmse < 2.5,
@@ -333,19 +312,9 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // 12. Verify Parameter Recovery
     // ============================================================================
 
-    println!("\n=== Parameter Recovery ===");
-
-    // Focal lengths and principal point (well-conditioned)
     let param_names = ["fx", "fy", "cx", "cy"];
     for i in 0..4 {
         let error = (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i];
-        println!(
-            "{}: true={:.2}, final={:.2}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            error * 100.0
-        );
 
         assert!(
             error < 0.05,
@@ -357,12 +326,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k1 (primary radial distortion)
     let k1_error = (final_intrinsics[4] - true_intrinsics[4]).abs() / true_intrinsics[4].abs();
-    println!(
-        "k1: true={:.4}, final={:.4}, error={:.2}%",
-        true_intrinsics[4],
-        final_intrinsics[4],
-        k1_error * 100.0
-    );
     assert!(
         k1_error < 0.10,
         "k1 should recover within 10%, got {:.2}%",
@@ -371,12 +334,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k2 (secondary radial distortion - use percentage error)
     let k2_error = (final_intrinsics[5] - true_intrinsics[5]).abs() / true_intrinsics[5].abs();
-    println!(
-        "k2: true={:.4}, final={:.4}, error={:.2}%",
-        true_intrinsics[5],
-        final_intrinsics[5],
-        k2_error * 100.0
-    );
     assert!(
         k2_error < 0.15,
         "k2 should recover within 15%, got {:.2}%",
@@ -387,10 +344,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     let tangential_names = ["p1", "p2"];
     for (idx, i) in [6, 7].iter().enumerate() {
         let abs_error = (final_intrinsics[*i] - true_intrinsics[*i]).abs();
-        println!(
-            "{}: true={:.4}, final={:.4}, abs_error={:.4}",
-            tangential_names[idx], true_intrinsics[*i], final_intrinsics[*i], abs_error
-        );
 
         assert!(
             abs_error < 0.015,
@@ -402,17 +355,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k3 (higher-order term, poorly constrained - use absolute error)
     let k3_abs_error = (final_intrinsics[8] - true_intrinsics[8]).abs();
-    println!(
-        "k3: true={:.4}, final={:.4}, abs_error={:.4}",
-        true_intrinsics[8], final_intrinsics[8], k3_abs_error
-    );
     assert!(
         k3_abs_error < 0.3,
         "k3 absolute error should be <0.3 (poorly constrained by planar calibration), got {:.4}",
         k3_abs_error
     );
-
-    println!("\n✓ All RadTan multi-camera calibration tests passed!");
 
     Ok(())
 }
@@ -562,8 +509,6 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
         "3-camera test should achieve >70% cost reduction, got {:.2}%",
         cost_reduction * 100.0
     );
-
-    println!("✓ RadTan 3-camera calibration test passed!");
 
     Ok(())
 }
