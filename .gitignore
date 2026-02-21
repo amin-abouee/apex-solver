@@ -37,9 +37,9 @@ cookbook
 deprecated
 
 # C++ benchmark build artifacts
-benches/cpp_comparison/build/
-benches/cpp_comparison/*.csv
-benches/cpp_comparison/.cache/*
+**/benches/cpp_comparison/build/
+**/benches/cpp_comparison/*.csv
+**/benches/cpp_comparison/.cache/*
 __cmake*
 
 # macOS system files

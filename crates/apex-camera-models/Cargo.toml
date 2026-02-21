@@ -1,0 +1,24 @@
+[package]
+name = "apex-camera-models"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/apex-camera-models"
+description = "Camera projection models (pinhole, fisheye, omnidirectional) for bundle adjustment"
+readme = "README.md"
+keywords = ["camera-model", "computer-vision", "bundle-adjustment", "projection", "calibration"]
+categories = ["computer-vision", "algorithms", "mathematics"]
+
+exclude = ["tests/", "benches/"]
+
+[dependencies]
+apex-manifolds.workspace = true
+nalgebra.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
