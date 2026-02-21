@@ -233,7 +233,7 @@ impl ResidualBlock {
     /// - Equivalent to standard (non-robust) least squares
     pub fn residual_and_jacobian<M>(
         &self,
-        variables: &Vec<&Variable<M>>,
+        variables: &[&Variable<M>],
     ) -> CoreResult<(DVector<f64>, DMatrix<f64>)>
     where
         M: LieGroup + Clone + Into<DVector<f64>>,
