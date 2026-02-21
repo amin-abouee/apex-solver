@@ -559,8 +559,7 @@ impl GaussNewton {
         let mut jacobian_evaluations = 0;
 
         // Initialize optimization state
-        let mut state =
-            optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
 
         // Create linear solver
         let mut linear_solver = optimizer::create_linear_solver(&self.config.linear_solver_type);

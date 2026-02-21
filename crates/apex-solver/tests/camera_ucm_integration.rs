@@ -13,12 +13,12 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, UcmCamera};
 use apex_manifolds::LieGroup;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use apex_solver::optimizer::OptimizationStatus;
-use apex_solver::ManifoldType;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
 use std::collections::HashMap;
 

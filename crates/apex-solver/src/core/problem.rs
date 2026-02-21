@@ -186,8 +186,7 @@ impl VariableEnum {
     pub fn apply_tangent_step(&mut self, step_slice: MatRef<f64>) {
         match self {
             VariableEnum::SE3(var) => {
-                let mut step_data: Vec<f64> =
-                    (0..6).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 6 {
                         step_data[fixed_idx] = 0.0;
@@ -198,8 +197,7 @@ impl VariableEnum {
                 var.set_value(new_value);
             }
             VariableEnum::SE2(var) => {
-                let mut step_data: Vec<f64> =
-                    (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 3 {
                         step_data[fixed_idx] = 0.0;
@@ -210,8 +208,7 @@ impl VariableEnum {
                 var.set_value(new_value);
             }
             VariableEnum::SO3(var) => {
-                let mut step_data: Vec<f64> =
-                    (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 3 {
                         step_data[fixed_idx] = 0.0;
@@ -222,8 +219,7 @@ impl VariableEnum {
                 var.set_value(new_value);
             }
             VariableEnum::SO2(var) => {
-                let mut step_data: Vec<f64> =
-                    (0..1).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..1).map(|i| step_slice[(i, 0)]).collect();
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 1 {
                         step_data[fixed_idx] = 0.0;
@@ -235,8 +231,7 @@ impl VariableEnum {
             }
             VariableEnum::Rn(var) => {
                 let size = var.get_size();
-                let mut step_data: Vec<f64> =
-                    (0..size).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < size {
                         step_data[fixed_idx] = 0.0;
@@ -610,8 +605,11 @@ impl Problem {
                 let variable_enum = match v.0 {
                     ManifoldType::SO2 => {
                         assert_eq!(
-                            v.1.len(), 1,
-                            "Variable '{}': SO2 expects 1 element, got {}", k, v.1.len()
+                            v.1.len(),
+                            1,
+                            "Variable '{}': SO2 expects 1 element, got {}",
+                            k,
+                            v.1.len()
                         );
                         let mut var = Variable::new(so2::SO2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
@@ -624,8 +622,11 @@ impl Problem {
                     }
                     ManifoldType::SO3 => {
                         assert_eq!(
-                            v.1.len(), 4,
-                            "Variable '{}': SO3 expects 4 elements, got {}", k, v.1.len()
+                            v.1.len(),
+                            4,
+                            "Variable '{}': SO3 expects 4 elements, got {}",
+                            k,
+                            v.1.len()
                         );
                         let mut var = Variable::new(so3::SO3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
@@ -638,8 +639,11 @@ impl Problem {
                     }
                     ManifoldType::SE2 => {
                         assert_eq!(
-                            v.1.len(), 3,
-                            "Variable '{}': SE2 expects 3 elements, got {}", k, v.1.len()
+                            v.1.len(),
+                            3,
+                            "Variable '{}': SE2 expects 3 elements, got {}",
+                            k,
+                            v.1.len()
                         );
                         let mut var = Variable::new(se2::SE2::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
@@ -652,8 +656,11 @@ impl Problem {
                     }
                     ManifoldType::SE3 => {
                         assert_eq!(
-                            v.1.len(), 7,
-                            "Variable '{}': SE3 expects 7 elements, got {}", k, v.1.len()
+                            v.1.len(),
+                            7,
+                            "Variable '{}': SE3 expects 7 elements, got {}",
+                            k,
+                            v.1.len()
                         );
                         let mut var = Variable::new(se3::SE3::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {

@@ -156,10 +156,7 @@ use crate::optimizer::{
 };
 use apex_manifolds::ManifoldType;
 
-use faer::{
-    Mat,
-    sparse::SparseColMat,
-};
+use faer::{Mat, sparse::SparseColMat};
 use nalgebra::DVector;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -830,8 +827,7 @@ impl LevenbergMarquardt {
         let mut unsuccessful_steps = 0;
 
         // Initialize optimization state
-        let mut state =
-            crate::optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut state = crate::optimizer::initialize_optimization_state(problem, initial_params)?;
 
         // Create linear solver - must be after variable initialization for Schur solver
         let mut linear_solver: Box<dyn SparseLinearSolver> = match self.config.linear_solver_type {
@@ -1029,8 +1025,11 @@ impl LevenbergMarquardt {
                 };
 
                 // Notify observers that optimization is complete
-                let final_parameters: HashMap<String, VariableEnum> =
-                    state.variables.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                let final_parameters: HashMap<String, VariableEnum> = state
+                    .variables
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
                 self.observers
                     .notify_complete(&final_parameters, iteration + 1);
 

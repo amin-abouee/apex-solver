@@ -1153,8 +1153,7 @@ impl DogLeg {
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
 
-        let mut state =
-            optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
         let mut linear_solver = optimizer::create_linear_solver(&self.config.linear_solver_type);
 
         let mut max_gradient_norm: f64 = 0.0;

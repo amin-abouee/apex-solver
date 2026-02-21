@@ -6,15 +6,15 @@
 
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::BalLoader;
+use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::apex_manifolds::so3::SO3;
-use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{ProjectionFactor, SelfCalibration};
 use apex_solver::linalg::SchurVariant;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use apex_solver::optimizer::OptimizationStatus;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 use std::collections::HashMap;
 
