@@ -13,6 +13,8 @@ readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "bundle-adjustment", "robotics"]
 categories = ["parsing", "data-structures"]
 
+exclude = ["tests/", "benches/"]
+
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
