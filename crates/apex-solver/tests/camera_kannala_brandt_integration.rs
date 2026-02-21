@@ -274,16 +274,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
     let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
     let rmse = (result.final_cost / total_observations as f64).sqrt();
 
-    // Print diagnostic info
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Total observations: {}", total_observations);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     assert!(
         rmse < 2.0,
         "Reprojection RMSE should be < 2 pixels, got {:.4} pixels",
@@ -308,7 +298,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
     // - k2, k3, k4: 20% (higher-order terms harder to recover from planar target)
     let tolerances = [0.05, 0.05, 0.05, 0.05, 0.10, 0.20, 0.20, 0.20];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..8 {
         // For k3 and k4 (indices 6, 7), use absolute error since they're often near zero
         // For other params, use relative error
@@ -325,10 +314,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
         };
 
         if error_type == "abs" {
-            println!(
-                "  {}: true={:.4}, final={:.4}, error={:.4} (absolute)",
-                param_names[i], true_intrinsics[i], final_intrinsics[i], error
-            );
             assert!(
                 error < 0.25,
                 "{} absolute error should be < 0.25, got {:.4} (true={:.4}, final={:.4})",
@@ -338,13 +323,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
                 final_intrinsics[i]
             );
         } else {
-            println!(
-                "  {}: true={:.4}, final={:.4}, error={:.2}%",
-                param_names[i],
-                true_intrinsics[i],
-                final_intrinsics[i],
-                error * 100.0
-            );
             assert!(
                 error < tolerances[i],
                 "{} should recover within {:.0}% of ground truth, got {:.2}% error \
@@ -357,18 +335,6 @@ fn test_kannala_brandt_multi_camera_calibration_200_points() -> TestResult {
             );
         }
     }
-
-    // ============================================================================
-    // 13. Print Summary (for debugging when run with --nocapture)
-    // ============================================================================
-
-    println!("\n=== Kannala-Brandt Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     Ok(())
 }

@@ -6,19 +6,21 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem::{Problem, VariableEnum};
-use crate::linalg;
+use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
+use crate::error;
+use crate::linalg::{self, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
 use apex_manifolds::ManifoldType;
+use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, MatRef};
 use nalgebra::DVector;
 use std::collections::HashMap;
-use std::time;
+use std::time::{self, Duration};
 use std::{
     fmt,
     fmt::{Display, Formatter},
 };
 use thiserror::Error;
-use tracing::error;
+use tracing::{debug, error};
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -384,4 +386,555 @@ pub fn apply_negative_parameter_step(
 pub fn compute_cost(residual: &Mat<f64>) -> f64 {
     let cost = residual.norm_l2();
     0.5 * cost * cost
+}
+
+// ============================================================================
+// Shared optimizer utilities
+// ============================================================================
+// The following types and functions are shared across all three optimizer
+// implementations (Levenberg-Marquardt, Gauss-Newton, Dog Leg) to eliminate
+// code duplication.
+
+/// Per-iteration statistics for detailed logging (Ceres-style output).
+///
+/// Captures all relevant metrics for each optimization iteration, enabling
+/// detailed analysis and debugging of the optimization process.
+#[derive(Debug, Clone)]
+pub struct IterationStats {
+    /// Iteration number (0-indexed)
+    pub iteration: usize,
+    /// Cost function value at this iteration
+    pub cost: f64,
+    /// Change in cost from previous iteration
+    pub cost_change: f64,
+    /// L2 norm of the gradient (||J^T·r||)
+    pub gradient_norm: f64,
+    /// L2 norm of the parameter update step (||Δx||)
+    pub step_norm: f64,
+    /// Trust region ratio (ρ = actual_reduction / predicted_reduction)
+    pub tr_ratio: f64,
+    /// Trust region radius (damping parameter λ for LM, Δ for Dog Leg)
+    pub tr_radius: f64,
+    /// Linear solver iterations (0 for direct solvers like Cholesky)
+    pub ls_iter: usize,
+    /// Time taken for this iteration in milliseconds
+    pub iter_time_ms: f64,
+    /// Total elapsed time since optimization started in milliseconds
+    pub total_time_ms: f64,
+    /// Whether the step was accepted (true) or rejected (false)
+    pub accepted: bool,
+}
+
+impl IterationStats {
+    /// Print table header in Ceres-style format
+    pub fn print_header() {
+        debug!(
+            "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
+            "iter",
+            "cost",
+            "cost_change",
+            "|gradient|",
+            "|step|",
+            "tr_ratio",
+            "tr_radius",
+            "ls_iter",
+            "iter_time",
+            "total_time",
+            "status"
+        );
+    }
+
+    /// Print single iteration line in Ceres-style format with scientific notation
+    pub fn print_line(&self) {
+        let status = if self.iteration == 0 {
+            "-"
+        } else if self.accepted {
+            "✓"
+        } else {
+            "✗"
+        };
+
+        debug!(
+            "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
+            self.iteration,
+            self.cost,
+            self.cost_change,
+            self.gradient_norm,
+            self.step_norm,
+            self.tr_ratio,
+            self.tr_radius,
+            self.ls_iter,
+            self.iter_time_ms,
+            self.total_time_ms,
+            status
+        );
+    }
+}
+
+/// Result of optimization state initialization, shared by all optimizers.
+pub struct InitializedState {
+    pub variables: HashMap<String, VariableEnum>,
+    pub variable_index_map: HashMap<String, usize>,
+    pub sorted_vars: Vec<String>,
+    pub symbolic_structure: SymbolicStructure,
+    pub current_cost: f64,
+    pub initial_cost: f64,
+}
+
+/// Compute total parameter vector norm ||x|| across all variables.
+pub fn compute_parameter_norm(variables: &HashMap<String, VariableEnum>) -> f64 {
+    variables
+        .values()
+        .map(|v| {
+            let vec = v.to_vector();
+            vec.norm_squared()
+        })
+        .sum::<f64>()
+        .sqrt()
+}
+
+/// Create Jacobi scaling diagonal matrix from Jacobian column norms.
+///
+/// The scaling factor for each column is `1 / (1 + ||col||)`, which normalizes
+/// the columns to improve conditioning of the linear system.
+pub fn create_jacobi_scaling(
+    jacobian: &SparseColMat<usize, f64>,
+) -> Result<SparseColMat<usize, f64>, OptimizerError> {
+    let cols = jacobian.ncols();
+    let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
+        .map(|c| {
+            let col_norm_squared: f64 = jacobian
+                .triplet_iter()
+                .filter(|t| t.col == c)
+                .map(|t| t.val * t.val)
+                .sum();
+            let col_norm = col_norm_squared.sqrt();
+            let scaling = 1.0 / (1.0 + col_norm);
+            Triplet::new(c, c, scaling)
+        })
+        .collect();
+
+    SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec)
+        .map_err(|e| OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e))
+}
+
+/// Process Jacobian by applying Jacobi scaling (created on first iteration).
+///
+/// On `iteration == 0`, creates the scaling matrix and stores it. On subsequent
+/// iterations, reuses the cached scaling.
+pub fn process_jacobian(
+    jacobian: &SparseColMat<usize, f64>,
+    jacobi_scaling: &mut Option<SparseColMat<usize, f64>>,
+    iteration: usize,
+) -> Result<SparseColMat<usize, f64>, OptimizerError> {
+    if iteration == 0 {
+        let scaling = create_jacobi_scaling(jacobian)?;
+        *jacobi_scaling = Some(scaling);
+    }
+    let scaling = jacobi_scaling
+        .as_ref()
+        .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+    Ok(jacobian * scaling)
+}
+
+/// Initialize optimization state from problem and initial parameters.
+///
+/// This is the common initialization sequence used by all optimizers:
+/// 1. Create variables from initial values
+/// 2. Build variable-to-column index mapping
+/// 3. Build symbolic sparsity structure for Jacobian
+/// 4. Compute initial cost
+pub fn initialize_optimization_state(
+    problem: &Problem,
+    initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+) -> Result<InitializedState, error::ApexSolverError> {
+    let variables = problem.initialize_variables(initial_params);
+
+    let mut variable_index_map = HashMap::new();
+    let mut col_offset = 0;
+    let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
+    sorted_vars.sort();
+
+    for var_name in &sorted_vars {
+        variable_index_map.insert(var_name.clone(), col_offset);
+        col_offset += variables[var_name].get_size();
+    }
+
+    let symbolic_structure =
+        problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
+
+    let residual = problem.compute_residual_sparse(&variables)?;
+    let current_cost = compute_cost(&residual);
+    let initial_cost = current_cost;
+
+    Ok(InitializedState {
+        variables,
+        variable_index_map,
+        sorted_vars,
+        symbolic_structure,
+        current_cost,
+        initial_cost,
+    })
+}
+
+/// Parameters for convergence checking, shared across optimizers.
+pub struct ConvergenceParams {
+    pub iteration: usize,
+    pub current_cost: f64,
+    pub new_cost: f64,
+    pub parameter_norm: f64,
+    pub parameter_update_norm: f64,
+    pub gradient_norm: f64,
+    pub elapsed: Duration,
+    pub step_accepted: bool,
+    // Config values
+    pub max_iterations: usize,
+    pub gradient_tolerance: f64,
+    pub parameter_tolerance: f64,
+    pub cost_tolerance: f64,
+    pub min_cost_threshold: Option<f64>,
+    pub timeout: Option<Duration>,
+    /// Trust region radius (LM damping or DogLeg radius). None for GN.
+    pub trust_region_radius: Option<f64>,
+    /// Minimum trust region radius threshold. None for GN.
+    pub min_trust_region_radius: Option<f64>,
+}
+
+/// Check convergence criteria common to all optimizers.
+///
+/// Returns `Some(status)` if a termination criterion is met, `None` otherwise.
+pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatus> {
+    // CRITICAL SAFETY CHECKS (perform first)
+
+    // Invalid Numerical Values (NaN/Inf)
+    if !params.new_cost.is_finite()
+        || !params.parameter_update_norm.is_finite()
+        || !params.gradient_norm.is_finite()
+    {
+        return Some(OptimizationStatus::InvalidNumericalValues);
+    }
+
+    // Timeout
+    if let Some(timeout) = params.timeout {
+        if params.elapsed >= timeout {
+            return Some(OptimizationStatus::Timeout);
+        }
+    }
+
+    // Maximum Iterations
+    if params.iteration >= params.max_iterations {
+        return Some(OptimizationStatus::MaxIterationsReached);
+    }
+
+    // CONVERGENCE CRITERIA (only check after accepted steps)
+    if !params.step_accepted {
+        return None;
+    }
+
+    // Gradient Norm (First-Order Optimality)
+    if params.gradient_norm < params.gradient_tolerance {
+        return Some(OptimizationStatus::GradientToleranceReached);
+    }
+
+    // Parameter and cost criteria (only after first iteration)
+    if params.iteration > 0 {
+        // Parameter Change Tolerance (xtol)
+        let relative_step_tolerance =
+            params.parameter_tolerance * (params.parameter_norm + params.parameter_tolerance);
+        if params.parameter_update_norm <= relative_step_tolerance {
+            return Some(OptimizationStatus::ParameterToleranceReached);
+        }
+
+        // Function Value Change Tolerance (ftol)
+        let cost_change = (params.current_cost - params.new_cost).abs();
+        let relative_cost_change = cost_change / params.current_cost.max(1e-10);
+        if relative_cost_change < params.cost_tolerance {
+            return Some(OptimizationStatus::CostToleranceReached);
+        }
+    }
+
+    // Objective Function Cutoff (optional early stopping)
+    if let Some(min_cost) = params.min_cost_threshold {
+        if params.new_cost < min_cost {
+            return Some(OptimizationStatus::MinCostThresholdReached);
+        }
+    }
+
+    // Trust Region Radius (LM and DogLeg only)
+    if let (Some(radius), Some(min_radius)) =
+        (params.trust_region_radius, params.min_trust_region_radius)
+    {
+        if radius < min_radius {
+            return Some(OptimizationStatus::TrustRegionRadiusTooSmall);
+        }
+    }
+
+    None
+}
+
+/// Compute step quality ratio (actual vs predicted reduction).
+///
+/// Used by Levenberg-Marquardt and Dog Leg optimizers to evaluate
+/// whether a proposed step improved the objective function as predicted
+/// by the local quadratic model.
+///
+/// Returns `ρ = actual_reduction / predicted_reduction`, handling
+/// near-zero predicted reduction gracefully.
+pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reduction: f64) -> f64 {
+    let actual_reduction = current_cost - new_cost;
+    if predicted_reduction.abs() < 1e-15 {
+        if actual_reduction > 0.0 { 1.0 } else { 0.0 }
+    } else {
+        actual_reduction / predicted_reduction
+    }
+}
+
+/// Create the appropriate linear solver based on configuration.
+///
+/// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
+/// solver creation logic due to special Schur complement adapter requirements.
+pub fn create_linear_solver(
+    solver_type: &linalg::LinearSolverType,
+) -> Box<dyn SparseLinearSolver> {
+    match solver_type {
+        linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
+        linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
+        linalg::LinearSolverType::SparseSchurComplement => {
+            // Schur complement solver requires special handling - fallback to Cholesky
+            Box::new(SparseCholeskySolver::new())
+        }
+    }
+}
+
+/// Notify observers with current optimization state.
+///
+/// This is the common observer notification pattern used by all three optimizers.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_observers(
+    observers: &mut OptObserverVec,
+    variables: &HashMap<String, VariableEnum>,
+    iteration: usize,
+    cost: f64,
+    gradient_norm: f64,
+    damping: Option<f64>,
+    step_norm: f64,
+    step_quality: Option<f64>,
+    linear_solver: &dyn SparseLinearSolver,
+) {
+    observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
+
+    if !observers.is_empty() {
+        if let (Some(hessian), Some(gradient)) =
+            (linear_solver.get_hessian(), linear_solver.get_gradient())
+        {
+            observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
+        }
+    }
+
+    observers.notify(variables, iteration);
+}
+
+/// Build a SolverResult from common optimization loop outputs.
+///
+/// All three optimizers construct SolverResult identically at convergence.
+#[allow(clippy::too_many_arguments)]
+pub fn build_solver_result(
+    status: OptimizationStatus,
+    iterations: usize,
+    state: InitializedState,
+    elapsed: Duration,
+    final_gradient_norm: f64,
+    final_parameter_update_norm: f64,
+    cost_evaluations: usize,
+    jacobian_evaluations: usize,
+    covariances: Option<HashMap<String, Mat<f64>>>,
+) -> SolverResult<HashMap<String, VariableEnum>> {
+    SolverResult {
+        status,
+        iterations,
+        initial_cost: state.initial_cost,
+        final_cost: state.current_cost,
+        parameters: state.variables.into_iter().collect(),
+        elapsed_time: elapsed,
+        convergence_info: Some(ConvergenceInfo {
+            final_gradient_norm,
+            final_parameter_update_norm,
+            cost_evaluations,
+            jacobian_evaluations,
+        }),
+        covariances,
+    }
+}
+
+/// Unified summary statistics for all optimizer types.
+///
+/// Replaces the separate `LevenbergMarquardtSummary`, `GaussNewtonSummary`,
+/// and `DogLegSummary` structs with a single type that handles algorithm-specific
+/// fields via `Option`.
+#[derive(Debug, Clone)]
+pub struct OptimizerSummary {
+    /// Name of the optimizer algorithm
+    pub optimizer_name: &'static str,
+    /// Initial cost value
+    pub initial_cost: f64,
+    /// Final cost value
+    pub final_cost: f64,
+    /// Total number of iterations performed
+    pub iterations: usize,
+    /// Number of successful steps (None for GN which always accepts)
+    pub successful_steps: Option<usize>,
+    /// Number of unsuccessful steps (None for GN which always accepts)
+    pub unsuccessful_steps: Option<usize>,
+    /// Average cost reduction per iteration
+    pub average_cost_reduction: f64,
+    /// Maximum gradient norm encountered
+    pub max_gradient_norm: f64,
+    /// Final gradient norm
+    pub final_gradient_norm: f64,
+    /// Maximum parameter update norm
+    pub max_parameter_update_norm: f64,
+    /// Final parameter update norm
+    pub final_parameter_update_norm: f64,
+    /// Total time elapsed
+    pub total_time: Duration,
+    /// Average time per iteration
+    pub average_time_per_iteration: Duration,
+    /// Detailed per-iteration statistics history
+    pub iteration_history: Vec<IterationStats>,
+    /// Convergence status
+    pub convergence_status: OptimizationStatus,
+    /// Final damping parameter (LM only)
+    pub final_damping: Option<f64>,
+    /// Final trust region radius (DL only)
+    pub final_trust_region_radius: Option<f64>,
+    /// Step quality ratio (LM only)
+    pub rho: Option<f64>,
+}
+
+impl Display for OptimizerSummary {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let converged = matches!(
+            self.convergence_status,
+            OptimizationStatus::Converged
+                | OptimizationStatus::CostToleranceReached
+                | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::ParameterToleranceReached
+        );
+
+        writeln!(f, "{} Final Result", self.optimizer_name)?;
+
+        if converged {
+            writeln!(f, "CONVERGED ({:?})", self.convergence_status)?;
+        } else {
+            writeln!(f, "DIVERGED ({:?})", self.convergence_status)?;
+        }
+
+        writeln!(f)?;
+        writeln!(f, "Cost:")?;
+        writeln!(f, "  Initial:   {:.6e}", self.initial_cost)?;
+        writeln!(f, "  Final:     {:.6e}", self.final_cost)?;
+        writeln!(
+            f,
+            "  Reduction: {:.6e} ({:.2}%)",
+            self.initial_cost - self.final_cost,
+            100.0 * (self.initial_cost - self.final_cost) / self.initial_cost.max(1e-12)
+        )?;
+        writeln!(f)?;
+        writeln!(f, "Iterations:")?;
+        writeln!(f, "  Total:              {}", self.iterations)?;
+        if let (Some(successful), Some(unsuccessful)) =
+            (self.successful_steps, self.unsuccessful_steps)
+        {
+            writeln!(
+                f,
+                "  Successful steps:   {} ({:.1}%)",
+                successful,
+                100.0 * successful as f64 / self.iterations.max(1) as f64
+            )?;
+            writeln!(
+                f,
+                "  Unsuccessful steps: {} ({:.1}%)",
+                unsuccessful,
+                100.0 * unsuccessful as f64 / self.iterations.max(1) as f64
+            )?;
+        }
+        if let Some(radius) = self.final_trust_region_radius {
+            writeln!(f)?;
+            writeln!(f, "Trust Region:")?;
+            writeln!(f, "  Final radius: {:.6e}", radius)?;
+        }
+        writeln!(f)?;
+        writeln!(f, "Gradient:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_gradient_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_gradient_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Parameter Update:")?;
+        writeln!(f, "  Max norm:   {:.2e}", self.max_parameter_update_norm)?;
+        writeln!(f, "  Final norm: {:.2e}", self.final_parameter_update_norm)?;
+        writeln!(f)?;
+        writeln!(f, "Performance:")?;
+        writeln!(
+            f,
+            "  Total time:             {:.2}ms",
+            self.total_time.as_secs_f64() * 1000.0
+        )?;
+        writeln!(
+            f,
+            "  Average per iteration:  {:.2}ms",
+            self.average_time_per_iteration.as_secs_f64() * 1000.0
+        )?;
+
+        Ok(())
+    }
+}
+
+/// Create an OptimizerSummary from common optimization loop outputs.
+#[allow(clippy::too_many_arguments)]
+pub fn create_optimizer_summary(
+    optimizer_name: &'static str,
+    initial_cost: f64,
+    final_cost: f64,
+    iterations: usize,
+    successful_steps: Option<usize>,
+    unsuccessful_steps: Option<usize>,
+    max_gradient_norm: f64,
+    final_gradient_norm: f64,
+    max_parameter_update_norm: f64,
+    final_parameter_update_norm: f64,
+    total_cost_reduction: f64,
+    total_time: Duration,
+    iteration_history: Vec<IterationStats>,
+    convergence_status: OptimizationStatus,
+    final_damping: Option<f64>,
+    final_trust_region_radius: Option<f64>,
+    rho: Option<f64>,
+) -> OptimizerSummary {
+    OptimizerSummary {
+        optimizer_name,
+        initial_cost,
+        final_cost,
+        iterations,
+        successful_steps,
+        unsuccessful_steps,
+        average_cost_reduction: if iterations > 0 {
+            total_cost_reduction / iterations as f64
+        } else {
+            0.0
+        },
+        max_gradient_norm,
+        final_gradient_norm,
+        max_parameter_update_norm,
+        final_parameter_update_norm,
+        total_time,
+        average_time_per_iteration: if iterations > 0 {
+            total_time / iterations as u32
+        } else {
+            Duration::from_secs(0)
+        },
+        iteration_history,
+        convergence_status,
+        final_damping,
+        final_trust_region_radius,
+        rho,
+    }
 }

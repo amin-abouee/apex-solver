@@ -235,15 +235,6 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
     let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
     let rmse = (result.final_cost / total_observations as f64).sqrt();
 
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Total observations: {}", total_observations);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     assert!(
         rmse < 2.0,
         "Reprojection RMSE should be < 2 pixels, got {:.4} pixels",
@@ -267,18 +258,9 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
     // - w: 10% (distortion parameter, moderately constrained)
     let tolerances = [0.05, 0.05, 0.05, 0.05, 0.10];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..5 {
         let relative_error =
             (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs().max(0.1);
-
-        println!(
-            "  {}: true={:.4}, final={:.4}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            relative_error * 100.0
-        );
 
         assert!(
             relative_error < tolerances[i],
@@ -288,12 +270,6 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
             relative_error * 100.0
         );
     }
-
-    println!("\n=== FOV Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     Ok(())
 }

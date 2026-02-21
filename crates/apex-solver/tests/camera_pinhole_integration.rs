@@ -267,18 +267,9 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     // All parameters should be well-conditioned (no distortion)
     let tolerances = [0.05, 0.05, 0.05, 0.05];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..4 {
         let relative_error =
             (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs();
-
-        println!(
-            "  {}: true={:.4}, final={:.4}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            relative_error * 100.0
-        );
 
         assert!(
             relative_error < tolerances[i],
@@ -288,12 +279,6 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
             relative_error * 100.0
         );
     }
-
-    println!("\n=== Pinhole Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     Ok(())
 }
