@@ -8,7 +8,30 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v1.0.0)
+## What's New in v1.1.0
+
+v1.1.0 restructures the project into a proper **Cargo workspace** with four independently-publishable crates:
+
+| Crate | Version | Description |
+|-------|---------|-------------|
+| **[apex-solver](https://crates.io/crates/apex-solver)** | 1.1.0 | Core optimizer — LM, GN, Dog Leg, Schur complement solvers |
+| **[apex-manifolds](https://crates.io/crates/apex-manifolds)** | 0.1.0 | Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians |
+| **[apex-io](https://crates.io/crates/apex-io)** | 0.1.0 | File I/O for G2O, TORO, BAL pose graph formats |
+| **[apex-camera-models](https://crates.io/crates/apex-camera-models)** | 0.1.0 | 11 camera projection models for bundle adjustment |
+
+Sub-crates can now be used **independently** without pulling in the full solver:
+
+```toml
+apex-manifolds = "0.1.0"      # Only Lie groups
+apex-io = "0.1.0"             # Only file I/O
+apex-camera-models = "0.1.0"  # Only camera models
+```
+
+**Migration from v1.0.0**: All APIs remain the same. Types are re-exported from `apex_solver` root for backward compatibility. If you use sub-crate types directly, add the sub-crate as an explicit dependency in your `Cargo.toml`.
+
+---
+
+## Key Features (v1.1.0)
 
 - **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (11 camera models via apex-camera-models crate)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
@@ -30,9 +53,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::linalg::LinearSolverType;
-use apex_solver::manifold::ManifoldType;
+use apex_solver::{G2oLoader, LinearSolverType, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
 
@@ -97,30 +118,37 @@ Iterations: 5
 The library is organized into five core modules:
 
 ```
-apex-solver/
-├── src/
-│   ├── core/           # Problem formulation, factors, residuals
-│   ├── factors/        # Factor implementations (projection, between, prior)
-│   ├── optimizer/      # LM, GN, Dog Leg algorithms
-│   ├── linalg/         # Cholesky, QR, Explicit/Implicit Schur
-│   ├── manifold/       # SE2, SE3, SO2, SO3, Rn
-│   ├── observers/      # Optimization observers and callbacks
-│   └── io/             # G2O, TORO, TUM file formats
+apex-solver/          (workspace root)
+├── crates/
+│   ├── apex-solver/        # Core optimizer crate (this crate)
+│   │   └── src/
+│   │       ├── core/       # Problem formulation, factors, residuals
+│   │       ├── factors/    # Factor implementations (projection, between, prior)
+│   │       ├── optimizer/  # LM, GN, Dog Leg algorithms
+│   │       ├── linalg/     # Cholesky, QR, Explicit/Implicit Schur
+│   │       └── observers/  # Optimization observers and callbacks
+│   ├── apex-manifolds/     # Lie groups: SE2, SE3, SO2, SO3, Rn (external crate)
+│   ├── apex-io/            # File I/O: G2O, TORO, BAL formats (external crate)
+│   └── apex-camera-models/ # 11 camera projection models (external crate)
 ├── bin/                # Executable binaries
-├── benches/            # Benchmarks (Rust + C++ comparisons)
+├── benches/            # Benchmarks
 ├── examples/           # Example programs
 ├── tests/              # Integration tests
 └── doc/                # Extended documentation
 ```
 
-**Core Modules**:
+**Core Modules** (in `apex-solver/src/`):
 - **`core/`**: Optimization problem definitions, residual blocks, robust loss functions, and variable management
 - **`optimizer/`**: Three optimization algorithms (Levenberg-Marquardt with adaptive damping, Gauss-Newton, Dog Leg trust region) with real-time visualization support
 - **`linalg/`**: Linear algebra backends including sparse Cholesky decomposition, QR factorization, explicit Schur complement, and implicit Schur complement (matrix-free PCG)
-- **`manifold/`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
-- **`io/`**: File format parsers for G2O, TORO, and TUM trajectory formats
+- **`observers/`**: Optimization observers and callbacks (Rerun visualization, custom hooks)
 
-**Core Dependencies**:
+**External Workspace Crates**:
+- **`apex-manifolds`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
+- **`apex-io`**: File format parsers for G2O, TORO, and BAL formats
+- **`apex-camera-models`**: Camera projection models with analytic Jacobians (11 models)
+
+**Low-level Dependencies**:
 - **`apex-manifolds`**: Lie group manifolds (SE2, SE3, SO2, SO3) with exponential/logarithmic maps
 - **`apex-camera-models`**: Camera projection models with analytic Jacobians (11 models: Pinhole, RadTan, Kannala-Brandt, Double Sphere, FOV, UCM, EUCM, Equidistant, Orthographic, BAL variants)
 - **`faer`** / **`nalgebra`**: High-performance linear algebra backends
@@ -284,8 +312,7 @@ Large-scale bundle adjustment benchmarks optimizing **camera poses, 3D landmarks
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::manifold::ManifoldType;
+use apex_solver::{G2oLoader, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
 
