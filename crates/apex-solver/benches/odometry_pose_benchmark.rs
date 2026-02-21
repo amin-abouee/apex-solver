@@ -26,12 +26,14 @@
 //! - Cost tolerance: 1e-4
 //! - Parameter tolerance: 1e-4
 //! - Gradient tolerance: 1e-10 (enables early-exit when gradient converges)
+//! - Initial damping: 1e-4
 //!
 //! ### SE3 (3D) Configuration:
 //! - Max iterations: 100 (matches optimize_3d_graph.rs)
 //! - Cost tolerance: 1e-4
 //! - Parameter tolerance: 1e-4
 //! - Gradient tolerance: 1e-12 (tighter for SE3 due to higher complexity, enables early-exit)
+//! - Initial damping: 1e-4
 //!
 //! ### Timing Methodology:
 //! - Timing starts immediately before `solver.optimize()` call
@@ -496,7 +498,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(150)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-10);
+        .with_gradient_tolerance(1e-10)
+        .with_damping(1e-4);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -590,7 +593,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(100)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-12);
+        .with_gradient_tolerance(1e-12)
+        .with_damping(1e-4);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
