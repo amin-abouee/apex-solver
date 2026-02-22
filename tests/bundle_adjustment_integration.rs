@@ -32,7 +32,7 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 #[test]
 fn test_ladybug_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
     // Load BAL dataset
-    let dataset = BalLoader::load("../../data/bundle_adjustment/Ladybug/problem-21-11315-pre.txt")?;
+    let dataset = BalLoader::load("data/bundle_adjustment/Ladybug/problem-21-11315-pre.txt")?;
 
     let num_observations = dataset.observations.len();
 

@@ -300,42 +300,42 @@ struct Dataset {
 const DATASETS: &[Dataset] = &[
     Dataset {
         name: "M3500",
-        file: "../../data/odometry/M3500.g2o",
+        file: "data/odometry/M3500.g2o",
         is_3d: false,
     },
     Dataset {
         name: "mit",
-        file: "../../data/odometry/mit.g2o",
+        file: "data/odometry/mit.g2o",
         is_3d: false,
     },
     Dataset {
         name: "city10000",
-        file: "../../data/odometry/city10000.g2o",
+        file: "data/odometry/city10000.g2o",
         is_3d: false,
     },
     Dataset {
         name: "ring",
-        file: "../../data/odometry/ring.g2o",
+        file: "data/odometry/ring.g2o",
         is_3d: false,
     },
     Dataset {
         name: "sphere2500",
-        file: "../../data/odometry/sphere2500.g2o",
+        file: "data/odometry/sphere2500.g2o",
         is_3d: true,
     },
     Dataset {
         name: "parking-garage",
-        file: "../../data/odometry/parking-garage.g2o",
+        file: "data/odometry/parking-garage.g2o",
         is_3d: true,
     },
     Dataset {
         name: "torus3D",
-        file: "../../data/odometry/torus3D.g2o",
+        file: "data/odometry/torus3D.g2o",
         is_3d: true,
     },
     Dataset {
         name: "cubicle",
-        file: "../../data/odometry/cubicle.g2o",
+        file: "data/odometry/cubicle.g2o",
         is_3d: true,
     },
 ];
@@ -849,7 +849,8 @@ struct CppBenchmarkResult {
 
 /// Build C++ benchmarks if not already built
 fn build_cpp_benchmarks() -> Result<PathBuf, String> {
-    let bench_dir = Path::new("benches/cpp_comparison");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let bench_dir = Path::new(&manifest_dir).join("benches/cpp_comparison");
     let build_dir = bench_dir.join("build");
 
     // Check if executables already exist
