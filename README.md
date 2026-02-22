@@ -10,7 +10,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 
 ## Key Features (v1.2.0)
 
-- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (11 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
+- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
 - **🛡️ 15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
@@ -110,7 +110,7 @@ apex-solver/                # workspace root = apex-solver crate
 └── crates/
     ├── apex-manifolds/     # Lie groups: SE2, SE3, SO2, SO3, Rn
     ├── apex-io/            # File I/O: G2O, TORO, BAL formats
-    └── apex-camera-models/ # 11 camera projection models
+    └── apex-camera-models/ # 8 camera projection models
 ```
 
 **Core Modules** (in `src/`):
@@ -122,7 +122,7 @@ apex-solver/                # workspace root = apex-solver crate
 **Workspace Sub-crates** (in `crates/`):
 - **`apex-manifolds`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
 - **`apex-io`**: File format parsers for G2O, TORO, and BAL formats
-- **`apex-camera-models`**: Camera projection models with analytic Jacobians (11 models)
+- **`apex-camera-models`**: Camera projection models with analytic Jacobians (8 models)
 
 **Low-level Dependencies**:
 - **`faer`** / **`nalgebra`**: High-performance linear algebra backends
@@ -136,7 +136,7 @@ Apex Solver is organized as a Cargo workspace with specialized sub-crates that c
 | Crate | Description | Docs |
 |-------|-------------|------|
 | **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) |
-| **[apex-camera-models](crates/apex-camera-models)** | 11 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) |
+| **[apex-camera-models](crates/apex-camera-models)** | 8 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) |
 | **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) |
 
 **Using sub-crates independently:**
