@@ -849,7 +849,8 @@ struct CppBenchmarkResult {
 
 /// Build C++ benchmarks if not already built
 fn build_cpp_benchmarks() -> Result<PathBuf, String> {
-    let bench_dir = Path::new("benches/cpp_comparison");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let bench_dir = Path::new(&manifest_dir).join("benches/cpp_comparison");
     let build_dir = bench_dir.join("build");
 
     // Check if executables already exist
