@@ -51,7 +51,7 @@ use crate::core::problem::VariableEnum;
 use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
-use nalgebra::{DMatrix, DVector, Matrix3};
+use nalgebra::{DMatrix, DVector};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::ops::Mul;
@@ -70,7 +70,7 @@ pub struct IterativeSchurSolver {
     preconditioner_type: SchurPreconditioner,
 
     // Cached for matrix-vector products
-    landmark_block_inverses: Vec<Matrix3<f64>>,
+    landmark_block_inverses: Vec<DMatrix<f64>>,
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
 
@@ -209,22 +209,21 @@ impl IterativeSchurSolver {
         }
 
         // Step 3: Apply H_pp^{-1} in-place: temp_lm = H_pp^{-1} * temp_lm
+        let bs = structure.landmark_block_size;
         for (block_idx, (_, start_col, _)) in structure.landmark_blocks.iter().enumerate() {
             let inv_block = &self.landmark_block_inverses[block_idx];
             let local_start = start_col - lm_start;
 
-            // Read input values
-            let in0 = temp_lm[local_start];
-            let in1 = temp_lm[local_start + 1];
-            let in2 = temp_lm[local_start + 2];
+            // Read input values into a temporary buffer
+            let input_vals: Vec<f64> = (0..bs).map(|k| temp_lm[local_start + k]).collect();
 
-            // Apply 3x3 inverse block
-            temp_lm[local_start] =
-                inv_block[(0, 0)] * in0 + inv_block[(0, 1)] * in1 + inv_block[(0, 2)] * in2;
-            temp_lm[local_start + 1] =
-                inv_block[(1, 0)] * in0 + inv_block[(1, 1)] * in1 + inv_block[(1, 2)] * in2;
-            temp_lm[local_start + 2] =
-                inv_block[(2, 0)] * in0 + inv_block[(2, 1)] * in1 + inv_block[(2, 2)] * in2;
+            for r in 0..bs {
+                let mut sum = 0.0;
+                for c in 0..bs {
+                    sum += inv_block[(r, c)] * input_vals[c];
+                }
+                temp_lm[local_start + r] = sum;
+            }
         }
 
         // Step 4: temp_cam = H_cp * temp_lm (iterate over landmark columns)
@@ -325,13 +324,14 @@ impl IterativeSchurSolver {
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
+        let bs = structure.landmark_block_size;
         for (block_idx, (_, start_col, _)) in structure.landmark_blocks.iter().enumerate() {
             let inv_block = &self.landmark_block_inverses[block_idx];
             let local_start = start_col - structure.landmark_col_range().0;
 
-            for i in 0..3 {
+            for i in 0..bs {
                 let mut sum = 0.0;
-                for j in 0..3 {
+                for j in 0..bs {
                     sum += inv_block[(i, j)] * input[(local_start + j, 0)];
                 }
                 output[(local_start + i, 0)] = sum;
@@ -507,10 +507,12 @@ impl IterativeSchurSolver {
                     }
                     let (_, lm_col_start, _) = &structure.landmark_blocks[lm_block_idx];
 
-                    // Extract H_cp[i,j] block (cam_size x 3)
-                    let mut h_cp = DMatrix::<f64>::zeros(*cam_size, 3);
+                    let lm_bs = structure.landmark_block_size;
 
-                    for col_offset in 0..3 {
+                    // Extract H_cp[i,j] block (cam_size x lm_bs)
+                    let mut h_cp = DMatrix::<f64>::zeros(*cam_size, lm_bs);
+
+                    for col_offset in 0..lm_bs {
                         let global_col = lm_col_start + col_offset;
                         let row_indices = symbolic.row_idx_of_col_raw(global_col);
                         let col_values = hessian.val_of_col(global_col);
@@ -528,23 +530,21 @@ impl IterativeSchurSolver {
                     let hpp_inv = &self.landmark_block_inverses[lm_block_idx];
 
                     // Compute contribution: H_cp * H_pp^{-1} * H_cp^T
-                    // First: temp = H_cp * H_pp^{-1} (cam_size x 3)
-                    let mut temp = DMatrix::<f64>::zeros(*cam_size, 3);
+                    let mut temp = DMatrix::<f64>::zeros(*cam_size, lm_bs);
                     for i in 0..*cam_size {
-                        for j in 0..3 {
+                        for j in 0..lm_bs {
                             let mut sum = 0.0;
-                            for k in 0..3 {
+                            for k in 0..lm_bs {
                                 sum += h_cp[(i, k)] * hpp_inv[(k, j)];
                             }
                             temp[(i, j)] = sum;
                         }
                     }
 
-                    // Then: contribution = temp * H_cp^T (cam_size x cam_size)
                     for i in 0..*cam_size {
                         for j in 0..*cam_size {
                             let mut sum = 0.0;
-                            for k in 0..3 {
+                            for k in 0..lm_bs {
                                 sum += temp[(i, k)] * h_cp[(j, k)];
                             }
                             s_ii[(i, j)] -= sum;
@@ -678,33 +678,33 @@ impl IterativeSchurSolver {
         Ok(x)
     }
 
-    /// Extract 3x3 diagonal blocks from H_pp and invert them with numerical robustness
+    /// Extract diagonal blocks from H_pp and invert them with numerical robustness.
     ///
-    /// This function uses parallel processing for the block inversions (156K+ blocks).
-    /// Each block's condition number is checked and regularization applied as needed.
+    /// Uses parallel processing for the block inversions.
     fn invert_landmark_blocks(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
         let structure = self
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
+        let bs = structure.landmark_block_size;
         let symbolic = hessian.symbolic();
 
-        // Step 1: Extract all 3x3 blocks (sequential - requires sparse matrix access)
-        let blocks: Vec<(usize, Matrix3<f64>)> = structure
+        // Step 1: Extract all blocks (sequential - requires sparse matrix access)
+        let blocks: Vec<(usize, DMatrix<f64>)> = structure
             .landmark_blocks
             .iter()
             .enumerate()
             .map(|(i, (_, start_col, _))| {
-                let mut block = Matrix3::<f64>::zeros();
+                let mut block = DMatrix::<f64>::zeros(bs, bs);
 
-                for local_col in 0..3 {
+                for local_col in 0..bs {
                     let global_col = start_col + local_col;
                     let row_indices = symbolic.row_idx_of_col_raw(global_col);
                     let col_values = hessian.val_of_col(global_col);
 
                     for (idx, &row) in row_indices.iter().enumerate() {
-                        if row >= *start_col && row < start_col + 3 {
+                        if row >= *start_col && row < start_col + bs {
                             let local_row = row - start_col;
                             block[(local_row, local_col)] = col_values[idx];
                         }
@@ -716,23 +716,22 @@ impl IterativeSchurSolver {
             .collect();
 
         // Step 2: Invert all blocks in parallel
-        // Thresholds for numerical robustness
         const CONDITION_THRESHOLD: f64 = 1e10;
         const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12;
         const REGULARIZATION_SCALE: f64 = 1e-6;
 
-        let results: Vec<Result<Matrix3<f64>, (usize, String)>> = blocks
+        let results: Vec<Result<DMatrix<f64>, (usize, String)>> = blocks
             .par_iter()
             .map(|(i, block)| {
-                // Check conditioning and apply regularization if needed
-                let eigenvalues = block.symmetric_eigenvalues();
+                let n = block.nrows();
+                let eigenvalues = block.clone().symmetric_eigenvalues();
                 let min_ev = eigenvalues.min();
                 let max_ev = eigenvalues.max();
+                let id = DMatrix::<f64>::identity(n, n);
 
                 if min_ev < MIN_EIGENVALUE_THRESHOLD {
-                    // Severely ill-conditioned: add strong regularization
                     let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * reg;
+                    let regularized = block + &id * reg;
                     regularized.try_inverse().ok_or_else(|| {
                         (
                             *i,
@@ -740,9 +739,8 @@ impl IterativeSchurSolver {
                         )
                     })
                 } else if max_ev / min_ev > CONDITION_THRESHOLD {
-                    // Ill-conditioned: add moderate regularization
                     let extra_reg = max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * extra_reg;
+                    let regularized = block + &id * extra_reg;
                     regularized.try_inverse().ok_or_else(|| {
                         (
                             *i,
@@ -750,8 +748,8 @@ impl IterativeSchurSolver {
                         )
                     })
                 } else {
-                    // Well-conditioned: standard inversion
                     block
+                        .clone()
                         .try_inverse()
                         .ok_or_else(|| (*i, "singular".to_string()))
                 }
@@ -968,17 +966,18 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
             let size = variable.get_size();
 
             if self.ordering.should_eliminate(name, &manifold_type, size) {
+                if structure.num_landmarks == 0 {
+                    structure.landmark_block_size = size;
+                } else if size != structure.landmark_block_size {
+                    return Err(LinAlgError::InvalidInput(format!(
+                        "Landmark {} has DOF {} but expected {} (all landmarks must share the same block size)",
+                        name, size, structure.landmark_block_size
+                    )));
+                }
                 structure
                     .landmark_blocks
                     .push((name.clone(), start_col, size));
                 structure.landmark_dof += size;
-
-                if size != 3 {
-                    return Err(LinAlgError::InvalidInput(format!(
-                        "Landmark {} has DOF {}, expected 3",
-                        name, size
-                    )));
-                }
                 structure.num_landmarks += 1;
             } else {
                 structure
