@@ -11,12 +11,12 @@
 //! - Extension of UCM with additional beta parameter for distortion
 //! - Suitable for fisheye and wide-angle cameras
 
+use apex_camera_models::{CameraModel, DistortionModel, EucmCamera, PinholeParams};
+use apex_manifolds::LieGroup;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::eucm::EucmCamera;
-use apex_solver::factors::camera::{CameraModel, SelfCalibration};
-use apex_solver::manifold::LieGroup;
-use apex_solver::manifold::ManifoldType;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
@@ -44,10 +44,17 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
     // - alpha=0.6: projection parameter
     // - beta=1.2: distortion parameter
     let true_camera = EucmCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy (center of 600x400)
-        0.6, 1.2, // alpha, beta
-    );
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        },
+    )?;
 
     // Image bounds for projection validation
     let img_width = 600.0;
@@ -92,7 +99,7 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
 
             // Verify point is valid for projection
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
@@ -100,12 +107,7 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image coordinates
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify within image bounds
             assert!(
@@ -263,16 +265,6 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
     let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
     let rmse = (result.final_cost / total_observations as f64).sqrt();
 
-    // Print diagnostic info
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Total observations: {}", total_observations);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     assert!(
         rmse < 2.0,
         "Reprojection RMSE should be < 2 pixels, got {:.4} pixels",
@@ -297,19 +289,10 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
     // - beta: 15% (distortion parameter, harder to recover)
     let tolerances = [0.05, 0.05, 0.05, 0.05, 0.10, 0.15];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..6 {
         // Use max(0.1, |true|) to handle small true values
         let relative_error =
             (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs().max(0.1);
-
-        println!(
-            "  {}: true={:.4}, final={:.4}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            relative_error * 100.0
-        );
 
         assert!(
             relative_error < tolerances[i],
@@ -323,18 +306,6 @@ fn test_eucm_multi_camera_calibration_200_points() -> TestResult {
         );
     }
 
-    // ============================================================================
-    // 13. Print Summary (for debugging when run with --nocapture)
-    // ============================================================================
-
-    println!("\n=== EUCM Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     Ok(())
 }
 
@@ -344,10 +315,17 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
     // Simpler setup: 3 cameras, 200 points
     // Uses same camera params as 5-camera test for consistency
     let true_camera = EucmCamera::new(
-        200.0, 200.0, // fx, fy (wide FOV)
-        300.0, 200.0, // cx, cy
-        0.6, 1.2, // alpha, beta
-    );
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::EUCM {
+            alpha: 0.6,
+            beta: 1.2,
+        },
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -363,8 +341,7 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
+            if let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0

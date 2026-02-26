@@ -1,5 +1,5 @@
 use super::Factor;
-use crate::manifold::LieGroup;
+use apex_manifolds::LieGroup;
 use nalgebra::{DMatrix, DVector};
 
 /// Generic between factor for Lie group pose constraints.
@@ -329,10 +329,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifold::se2::{SE2, SE2Tangent};
-    use crate::manifold::se3::SE3;
-    use crate::manifold::so2::SO2;
-    use crate::manifold::so3::SO3;
+    use apex_manifolds::se2::{SE2, SE2Tangent};
+    use apex_manifolds::se3::SE3;
+    use apex_manifolds::so2::SO2;
+    use apex_manifolds::so3::SO3;
     use nalgebra::{DVector, Quaternion, Vector3};
 
     const TOLERANCE: f64 = 1e-9;

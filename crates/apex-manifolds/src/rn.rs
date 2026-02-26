@@ -10,7 +10,7 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::{Interpolatable, LieGroup, Tangent};
+use crate::{Interpolatable, LieGroup, Tangent};
 use nalgebra::{DMatrix, DVector, Matrix3, Vector3};
 use std::{
     fmt,
@@ -108,6 +108,7 @@ impl Rn {
     ///
     /// # Arguments
     /// * `data` - Vector data
+    #[inline]
     pub fn new(data: DVector<f64>) -> Self {
         Rn { data }
     }
@@ -126,16 +127,19 @@ impl Rn {
     }
 
     /// Get the underlying vector.
+    #[inline]
     pub fn data(&self) -> &DVector<f64> {
         &self.data
     }
 
     /// Get the dimension of the space.
+    #[inline]
     pub fn dim(&self) -> usize {
         self.data.len()
     }
 
     /// Get a specific component.
+    #[inline]
     pub fn component(&self, index: usize) -> f64 {
         self.data[index]
     }
@@ -146,16 +150,19 @@ impl Rn {
     }
 
     /// Get the norm (Euclidean length) of the vector.
+    #[inline]
     pub fn norm(&self) -> f64 {
         self.data.norm()
     }
 
     /// Get the squared norm of the vector.
+    #[inline]
     pub fn norm_squared(&self) -> f64 {
         self.data.norm_squared()
     }
 
     /// Convert Rn to a DVector
+    #[inline]
     pub fn to_vector(&self) -> DVector<f64> {
         self.data.clone()
     }
@@ -297,18 +304,14 @@ impl LieGroup for Rn {
         DMatrix::zeros(3, 3)
     }
 
-    /// Normalize the vector (no-op for Euclidean space, but could normalize to unit length).
     fn normalize(&mut self) {
-        // For Euclidean space, we could normalize to unit length
         let norm = self.data.norm();
         if norm > 1e-12 {
             self.data /= norm;
         }
     }
 
-    /// Check if the element is valid (always true for Euclidean space).
     fn is_valid(&self, _tolerance: f64) -> bool {
-        // All finite vectors are valid in Euclidean space
         self.data.iter().all(|x| x.is_finite())
     }
 
@@ -479,6 +482,7 @@ impl RnTangent {
     ///
     /// # Arguments
     /// * `data` - Vector data
+    #[inline]
     pub fn new(data: DVector<f64>) -> Self {
         RnTangent { data }
     }
@@ -497,16 +501,19 @@ impl RnTangent {
     }
 
     /// Get the underlying vector.
+    #[inline]
     pub fn data(&self) -> &DVector<f64> {
         &self.data
     }
 
     /// Get the dimension of the tangent space.
+    #[inline]
     pub fn dim(&self) -> usize {
         self.data.len()
     }
 
     /// Get a specific component.
+    #[inline]
     pub fn component(&self, index: usize) -> f64 {
         self.data[index]
     }
@@ -517,16 +524,19 @@ impl RnTangent {
     }
 
     /// Get the norm (Euclidean length) of the tangent vector.
+    #[inline]
     pub fn norm(&self) -> f64 {
         self.data.norm()
     }
 
     /// Get the squared norm of the tangent vector.
+    #[inline]
     pub fn norm_squared(&self) -> f64 {
         self.data.norm_squared()
     }
 
     /// Convert RnTangent to a DVector
+    #[inline]
     pub fn to_vector(&self) -> DVector<f64> {
         self.data.clone()
     }
@@ -558,25 +568,21 @@ impl Tangent<Rn> for RnTangent {
         Rn::new(self.data.clone())
     }
 
-    /// Right Jacobian for Euclidean space (identity).
     fn right_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Left Jacobian for Euclidean space (identity).
     fn left_jacobian(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Inverse of right Jacobian for Euclidean space (identity).
     fn right_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
     }
 
-    /// Inverse of left Jacobian for Euclidean space (identity).
     fn left_jacobian_inv(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::identity(dim, dim)
@@ -590,9 +596,7 @@ impl Tangent<Rn> for RnTangent {
         DMatrix::from_diagonal(&self.data)
     }
 
-    /// Small adjugate operator for Euclidean space.
-    ///
-    /// For abelian groups, this is zero matrix.
+    /// Small adjoint (zero for abelian group).
     fn small_adj(&self) -> <Rn as LieGroup>::JacobianMatrix {
         let dim = self.data.len();
         DMatrix::zeros(dim, dim)
@@ -689,6 +693,15 @@ impl Interpolatable for Rn {
 
 // Additional convenience implementations
 impl Rn {
+    /// Create identity element with specific dimension.
+    ///
+    /// For Euclidean space, the identity (additive neutral element) is the zero vector.
+    /// The default `identity()` returns a 3D zero vector for compatibility.
+    /// Use this method when you need a specific dimension.
+    pub fn identity_with_dim(dim: usize) -> Self {
+        Rn::new(DVector::zeros(dim))
+    }
+
     /// Create Rn with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
         Rn::new(DVector::zeros(dim))
@@ -712,6 +725,11 @@ impl Rn {
 }
 
 impl RnTangent {
+    /// Create zero tangent vector with specific dimension.
+    pub fn zero_with_dim(dim: usize) -> Self {
+        RnTangent::new(DVector::zeros(dim))
+    }
+
     /// Create RnTangent with specific dimension filled with zeros.
     pub fn zeros(dim: usize) -> Self {
         RnTangent::new(DVector::zeros(dim))
@@ -732,7 +750,7 @@ impl RnTangent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifold::{Interpolatable, LieGroup, Tangent};
+    use crate::{Interpolatable, LieGroup, Tangent};
 
     #[test]
     fn test_rn_basic_operations() {
@@ -1022,5 +1040,70 @@ mod tests {
         // Verify they are identity matrices
         assert!((jac1d - DMatrix::identity(1, 1)).norm() < 1e-10);
         assert!((jac4d - DMatrix::identity(4, 4)).norm() < 1e-10);
+    }
+
+    // T3: Accumulated Error Tests
+
+    #[test]
+    fn test_rn_addition_chain() {
+        // Add same vector 1000 times
+        let increment = Rn::new(DVector::from_vec(vec![0.001, -0.002, 0.003]));
+        let mut accumulated = Rn::new(DVector::zeros(3));
+
+        for _ in 0..1000 {
+            accumulated = accumulated.compose(&increment, None, None);
+        }
+
+        let expected = Rn::new(DVector::from_vec(vec![1.0, -2.0, 3.0]));
+        assert!((accumulated.to_vector() - expected.to_vector()).norm() < 1e-10);
+    }
+
+    // T2: Edge Case Tests
+
+    #[test]
+    #[should_panic(expected = "Rn elements must have the same dimension")]
+    fn test_rn_dimension_mismatch_compose() {
+        let rn_2d = Rn::new(DVector::from_vec(vec![1.0, 2.0]));
+        let rn_3d = Rn::new(DVector::from_vec(vec![3.0, 4.0, 5.0]));
+
+        let _ = rn_2d.compose(&rn_3d, None, None); // Should panic
+    }
+
+    #[test]
+    fn test_rn_zero_dimension() {
+        let rn_0d = Rn::new(DVector::zeros(0));
+        assert_eq!(rn_0d.dim(), 0);
+
+        let identity = Rn::new(DVector::zeros(0));
+        let composed = rn_0d.compose(&identity, None, None);
+        assert_eq!(composed.dim(), 0);
+    }
+
+    #[test]
+    fn test_rn_identity_with_dim() {
+        for dim in [1, 2, 3, 5, 10] {
+            let id = Rn::identity_with_dim(dim);
+            assert_eq!(id.dim(), dim);
+            assert!(id.norm() < 1e-15);
+
+            // Composing with identity should be no-op
+            let v = Rn::random_with_dim(dim);
+            let result = v.compose(&id, None, None);
+            assert!(v.is_approx(&result, 1e-10));
+        }
+    }
+
+    #[test]
+    fn test_rn_tangent_zero_with_dim() {
+        for dim in [1, 2, 3, 5, 10] {
+            let z = RnTangent::zero_with_dim(dim);
+            assert_eq!(z.dim(), dim);
+            assert!(z.is_zero(1e-15));
+        }
+    }
+
+    #[test]
+    fn test_rn_tangent_is_dynamic() {
+        assert!(RnTangent::is_dynamic());
     }
 }

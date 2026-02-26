@@ -1,5 +1,5 @@
+use apex_solver::apex_io::load_graph;
 use apex_solver::init_logger;
-use apex_solver::io::load_graph;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{info, warn};

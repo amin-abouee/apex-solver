@@ -7,8 +7,8 @@
 //! cargo run --example visualize_graph_file --features visualization
 //! ```
 
+use apex_solver::apex_io::{Graph, load_graph};
 use apex_solver::init_logger;
-use apex_solver::io::{Graph, load_graph};
 use clap::Parser;
 use rerun::{
     RecordingStreamBuilder, Transform3D,
@@ -23,7 +23,7 @@ use tracing::info;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the graph file to visualize
-    #[arg(short = 'f', long, default_value = "data/parking-garage.g2o")]
+    #[arg(short = 'f', long, default_value = "data/odometry/parking-garage.g2o")]
     file_path: PathBuf,
 
     /// Scale factor for visualization

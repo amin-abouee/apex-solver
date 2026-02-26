@@ -73,7 +73,7 @@ use crate::core::{
     CoreError, CoreResult, corrector::Corrector, loss_functions::LossFunction, variable::Variable,
 };
 use crate::factors::Factor;
-use crate::manifold::{LieGroup, Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 
 /// A residual block that wraps a factor with an optional robust loss function.
 ///
@@ -233,7 +233,7 @@ impl ResidualBlock {
     /// - Equivalent to standard (non-robust) least squares
     pub fn residual_and_jacobian<M>(
         &self,
-        variables: &Vec<&Variable<M>>,
+        variables: &[&Variable<M>],
     ) -> CoreResult<(DVector<f64>, DMatrix<f64>)>
     where
         M: LieGroup + Clone + Into<DVector<f64>>,
@@ -274,7 +274,7 @@ mod tests {
         variable::Variable,
     };
     use crate::factors::{BetweenFactor, PriorFactor};
-    use crate::manifold::{se2::SE2, se3::SE3};
+    use apex_manifolds::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;

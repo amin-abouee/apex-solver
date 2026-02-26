@@ -87,7 +87,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::manifold::{LieGroup, Tangent};
+use apex_manifolds::{LieGroup, Tangent};
 use faer::Mat;
 use nalgebra::DVector;
 
@@ -262,7 +262,7 @@ where
 }
 
 // Extension implementation for Rn manifold (special case since it's Euclidean)
-use crate::manifold::rn::Rn;
+use apex_manifolds::rn::Rn;
 
 impl Variable<Rn> {
     /// Convert the Rn variable to a vector representation.
@@ -294,7 +294,7 @@ impl Variable<Rn> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::manifold::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
+    use apex_manifolds::{rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3};
     use nalgebra::{DVector, Quaternion, Vector3};
     use std;
 

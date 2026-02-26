@@ -8,17 +8,17 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v1.0.0)
+## Key Features (v1.2.0)
 
-- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models: Pinhole, RadialTangential, FOV, UnifiedCamera, ExtendedUnified, DoubleSphere, KannalaBrandt, Orthographic)
+- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
 - **🛡️ 15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
-- **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3) with analytic Jacobians
+- **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
 - **🚀 Three Optimization Algorithms**: Levenberg-Marquardt, Gauss-Newton, and Dog Leg with unified interface
 - **📌 Prior Factors & Fixed Variables**: Anchor poses with known values and constrain specific parameter indices
 - **📊 Uncertainty Quantification**: Covariance estimation for both Cholesky and QR solvers
 - **🎨 Real-time Visualization**: Integrated [Rerun](https://rerun.io/) support for live debugging of optimization progress
-- **📝 G2O I/O**: Read and write G2O format files for seamless integration with SLAM ecosystems
+- **📝 I/O**: Read and write G2O, Toro, BAL format files for seamless integration with SLAM ecosystems [apex-io](crates/apex-io/README.md)
 - **⚡ High Performance**: Sparse linear algebra with persistent symbolic factorization
 - **✅ Production-Grade**: Comprehensive error handling, structured tracing, integration test suite
 
@@ -30,9 +30,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::linalg::LinearSolverType;
-use apex_solver::manifold::ManifoldType;
+use apex_solver::{G2oLoader, LinearSolverType, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
 
@@ -94,31 +92,65 @@ Iterations: 5
 
 ## 🏗️ Architecture
 
-The library is organized into five core modules:
+The workspace root is the `apex-solver` crate. Sub-crates for manifolds, I/O, and camera models live in `crates/`:
 
 ```
-apex-solver/
+apex-solver/                # workspace root = apex-solver crate
 ├── src/
-│   ├── core/           # Problem formulation, factors, residuals
-│   ├── factors/        # Factor implementations (projection, between, prior)
-│   ├── optimizer/      # LM, GN, Dog Leg algorithms
-│   ├── linalg/         # Cholesky, QR, Explicit/Implicit Schur
-│   ├── manifold/       # SE2, SE3, SO2, SO3, Rn
-│   ├── observers/      # Optimization observers and callbacks
-│   └── io/             # G2O, TORO, TUM file formats
-├── bin/                # Executable binaries
-├── benches/            # Benchmarks (Rust + C++ comparisons)
-├── examples/           # Example programs
-├── tests/              # Integration tests
-└── doc/                # Extended documentation
+│   ├── core/               # Problem formulation, factors, residuals
+│   ├── factors/            # Factor implementations (projection, between, prior)
+│   ├── optimizer/          # LM, GN, Dog Leg algorithms
+│   ├── linalg/             # Cholesky, QR, Explicit/Implicit Schur
+│   └── observers/          # Optimization observers and callbacks
+├── bin/                    # Executable binaries
+├── benches/                # Benchmarks
+├── examples/               # Example programs
+├── tests/                  # Integration tests
+├── doc/                    # Extended documentation
+└── crates/
+    ├── apex-manifolds/     # Lie groups: SE2, SE3, SO2, SO3, Rn
+    ├── apex-io/            # File I/O: G2O, TORO, BAL formats
+    └── apex-camera-models/ # 8 camera projection models
 ```
 
-**Core Modules**:
+**Core Modules** (in `src/`):
 - **`core/`**: Optimization problem definitions, residual blocks, robust loss functions, and variable management
 - **`optimizer/`**: Three optimization algorithms (Levenberg-Marquardt with adaptive damping, Gauss-Newton, Dog Leg trust region) with real-time visualization support
 - **`linalg/`**: Linear algebra backends including sparse Cholesky decomposition, QR factorization, explicit Schur complement, and implicit Schur complement (matrix-free PCG)
-- **`manifold/`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
-- **`io/`**: File format parsers for G2O, TORO, and TUM trajectory formats
+- **`observers/`**: Optimization observers and callbacks (Rerun visualization, custom hooks)
+
+**Workspace Sub-crates** (in `crates/`):
+- **`apex-manifolds`**: Lie group implementations (SE2/SE3 for rigid transformations, SO2/SO3 for rotations, Rn for Euclidean space) with analytic Jacobians
+- **`apex-io`**: File format parsers for G2O, TORO, and BAL formats
+- **`apex-camera-models`**: Camera projection models with analytic Jacobians (8 models)
+
+**Low-level Dependencies**:
+- **`faer`** / **`nalgebra`**: High-performance linear algebra backends
+
+---
+
+## 📦 Workspace Crates
+
+Apex Solver is organized as a Cargo workspace with specialized sub-crates that can be used independently:
+
+| Crate | Description | Docs |
+|-------|-------------|------|
+| **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) |
+| **[apex-camera-models](crates/apex-camera-models)** | 8 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) |
+| **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) |
+
+**Using sub-crates independently:**
+
+```toml
+[dependencies]
+apex-manifolds = "0.1.0"
+
+[dependencies]
+apex-camera-models = "0.1.0"
+
+[dependencies]
+apex-io = "0.1.0"
+```
 
 ---
 
@@ -251,8 +283,7 @@ Large-scale bundle adjustment benchmarks optimizing **camera poses, 3D landmarks
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::manifold::ManifoldType;
+use apex_solver::{G2oLoader, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
 
@@ -356,91 +387,55 @@ problem.add_residual_block(
 
 ### Example 3: Self-Calibration Bundle Adjustment
 
-Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously using `ProjectionFactor<CameraModel, OptConfig>`:
+Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously. See the [apex-camera-models](crates/apex-camera-models) crate for detailed camera model documentation.
 
 ```rust
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::{BALPinholeCameraStrict, SelfCalibration};
-use apex_solver::linalg::LinearSolverType;
-use apex_solver::manifold::ManifoldType;
-use apex_solver::manifold::se3::SE3;
-use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
-use nalgebra::{DVector, Matrix2xX, Vector2};
+use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
+// Use any camera model from apex-camera-models crate
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut problem = Problem::new();
     let mut initial_values = HashMap::new();
-
-    // Add camera poses (SE3) and per-camera intrinsics
-    for (i, cam) in cameras.iter().enumerate() {
-        // SE3 pose: [tx, ty, tz, qw, qi, qj, qk]
-        let pose = SE3::from_translation_so3(cam.translation, cam.rotation);
-        initial_values.insert(
-            format!("pose_{:04}", i),
-            (ManifoldType::SE3, DVector::from(pose))
-        );
-        
-        // Per-camera intrinsics: [focal, k1, k2]
-        initial_values.insert(
-            format!("intr_{:04}", i),
-            (ManifoldType::RN, DVector::from_vec(vec![cam.focal, cam.k1, cam.k2]))
-        );
-    }
-
-    // Add 3D landmarks
-    for (j, point) in landmarks.iter().enumerate() {
-        initial_values.insert(
-            format!("pt_{:05}", j),
-            (ManifoldType::RN, DVector::from_vec(vec![point.x, point.y, point.z]))
-        );
-    }
-
-    // Add projection factors with SelfCalibration optimization type
-    for obs in &observations {
-        let camera = BALPinholeCameraStrict::new(obs.focal, obs.k1, obs.k2);
-        let measurements = Matrix2xX::from_columns(&[Vector2::new(obs.u, obs.v)]);
-        
-        // ProjectionFactor<CameraModel, OptConfig> with compile-time optimization config
-        let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
-            ProjectionFactor::new(measurements, camera);
-        
+    
+    // Add camera poses (SE3), 3D landmarks, and per-camera intrinsics
+    // See apex-camera-models documentation for camera model options
+    
+    // Add projection factors with compile-time optimization config
+    // ProjectionFactor<CameraModel, OptConfig> links poses + landmarks + intrinsics
+    for observation in &observations {
         problem.add_residual_block(
-            &[&format!("pose_{:04}", obs.cam_id), 
-              &format!("pt_{:05}", obs.pt_id),
-              &format!("intr_{:04}", obs.cam_id)],
-            Box::new(factor),
-            None,  // Or Some(Box::new(HuberLoss::new(1.0)?)) for robustness
+            &[&format!("pose_{}", obs.camera_id),
+              &format!("landmark_{}", obs.point_id),
+              &format!("intrinsics_{}", obs.camera_id)],
+            Box::new(projection_factor),
+            Some(Box::new(HuberLoss::new(1.0))),
         );
     }
-
+    
     // Fix first camera for gauge freedom
     for dof in 0..6 {
         problem.fix_variable("pose_0000", dof);
     }
-
-    // Configure with Schur complement solver (best for BA)
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment()
-        .with_max_iterations(50)
-        .with_cost_tolerance(1e-6);
-
-    let mut solver = LevenbergMarquardt::with_config(config);
+    
+    // Configure solver with Schur complement (best for BA)
+    let mut solver = LevenbergMarquardt::for_bundle_adjustment();
     let result = solver.optimize(&problem, &initial_values)?;
-
-    println!("Status: {:?}", result.status);
-    println!("Final RMSE: {:.3} pixels", (result.final_cost / observations.len() as f64).sqrt());
-
+    
     Ok(())
 }
 ```
 
 **Optimization Types** (compile-time configuration):
-- `SelfCalibration`: Optimize pose + landmarks + intrinsics (shown above)
+- `SelfCalibration`: Optimize pose + landmarks + intrinsics
 - `BundleAdjustment`: Optimize pose + landmarks (fixed intrinsics)
-- `OnlyPose`: Visual odometry with fixed landmarks and intrinsics
-- `OnlyLandmarks`: Triangulation with known poses
-- `OnlyIntrinsics`: Camera calibration with known structure
+- `OnlyPose`: Visual odometry (fixed landmarks and intrinsics)
+- `OnlyLandmarks`: Triangulation (known poses)
+- `OnlyIntrinsics`: Camera calibration (known structure)
+
+See [apex-camera-models documentation](crates/apex-camera-models/README.md) for complete camera model reference and advanced examples.
 
 ---
 
@@ -460,25 +455,7 @@ Apex Solver implements mathematically rigorous Lie group operations following th
 | **SO(2)** | 2D rotations | 1 | 2D orientation |
 | **R^n** | Euclidean space | n | Landmarks, camera parameters |
 
-### Camera Projection Models
-
-Apex Solver supports 11 camera projection models for bundle adjustment with analytic Jacobians:
-
-| Model | Parameters | Description |
-|-------|-----------|-------------|
-| **Pinhole** | fx, fy, cx, cy | Standard pinhole camera (~60° FOV) |
-| **RadialTangential** | fx, fy, cx, cy, k1, k2, p1, p2 | Brown-Conrady model with distortion (OpenCV compatible) |
-| **Equidistant** | fx, fy, cx, cy, k1, k2, k3, k4 | Fisheye lens model (~180° FOV) |
-| **FOV** | fx, fy, cx, cy, omega | Field-of-view distortion model |
-| **UnifiedCamera** | fx, fy, cx, cy, xi, alpha | Unified model for wide FOV (>90°) |
-| **ExtendedUnified** | fx, fy, cx, cy, alpha, beta | Extended unified model (>180°) |
-| **DoubleSphere** | fx, fy, cx, cy, xi, alpha | Double sphere projection (>180°) |
-| **Orthographic** | fx, fy, cx, cy | Orthographic projection |
-| **KannalaBrandt** | fx, fy, cx, cy, k1, k2, k3, k4 | GoPro-style fisheye cameras |
-| **UCM** | fx, fy, cx, cy, alpha | Unified camera model |
-| **EUCM** | fx, fy, cx, cy, alpha, beta | Enhanced unified camera model |
-
-All models support compile-time optimization configuration (pose-only, landmark-only, intrinsics-only, or any combination).
+See [apex-manifolds documentation](crates/apex-manifolds/README.md) for detailed API reference, mathematical background, and usage examples.
 
 ### Robust Loss Functions
 

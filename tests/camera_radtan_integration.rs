@@ -19,13 +19,13 @@
 //! - k2, p1, p2: <15% error (secondary distortion terms)
 //! - k3: <0.3 absolute error (higher-order term, poorly constrained by planar target)
 
+use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, RadTanCamera};
+use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::rad_tan::RadTanCamera;
-use apex_solver::factors::camera::{CameraModel, SelfCalibration};
-use apex_solver::manifold::LieGroup;
-use apex_solver::manifold::ManifoldType;
-use apex_solver::manifold::se3::SE3;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
@@ -45,12 +45,20 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // RadTan camera with moderate distortion parameters
     // Use weaker distortion for better convergence with planar calibration
     let true_camera = RadTanCamera::new(
-        200.0, 200.0, // fx, fy (focal lengths - wide FOV)
-        300.0, 200.0, // cx, cy (principal point - centered for 600x400 image)
-        0.1, -0.05, // k1, k2 (moderate radial distortion)
-        0.001, -0.001, // p1, p2 (small tangential distortion)
-        0.0,    // k3 (set to zero - not observable from planar target)
-    );
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: -0.05,
+            p1: 0.001,
+            p2: -0.001,
+            k3: 0.0,
+        },
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -86,7 +94,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
             // Verify point is in front of camera
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
@@ -94,12 +102,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
             );
 
             // Project to image
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}: p_cam = {:?}",
-                    cam_idx, lm_idx, p_cam
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             // Verify projection is inside image bounds
             assert!(
@@ -124,12 +127,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         );
         all_observations.push(cam_observations);
     }
-
-    println!(
-        "✓ All {} landmarks visible from all {} cameras",
-        true_landmarks.len(),
-        true_poses.len()
-    );
 
     // ============================================================================
     // 5. Add Noise to Create Initial Estimates
@@ -176,12 +173,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         problem.fix_variable("pose_0", dof);
     }
 
-    println!(
-        "✓ Built problem: {} cameras, {} landmarks, 9 intrinsics",
-        true_poses.len(),
-        true_landmarks.len()
-    );
-
     // ============================================================================
     // 7. Initialize Variables
     // ============================================================================
@@ -224,18 +215,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    println!("\nStarting optimization...");
     let result = solver.optimize(&problem, &initial_values)?;
 
     // ============================================================================
     // 9. Verify Convergence
     // ============================================================================
-
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.6e}", result.initial_cost);
-    println!("Final cost: {:.6e}", result.final_cost);
 
     assert!(
         matches!(
@@ -253,7 +237,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // ============================================================================
 
     let cost_reduction = (result.initial_cost - result.final_cost) / result.initial_cost;
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
 
     assert!(
         cost_reduction > 0.85,
@@ -272,16 +255,20 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         .to_vector();
 
     let final_camera = RadTanCamera::new(
-        final_intrinsics[0],
-        final_intrinsics[1],
-        final_intrinsics[2],
-        final_intrinsics[3],
-        final_intrinsics[4],
-        final_intrinsics[5],
-        final_intrinsics[6],
-        final_intrinsics[7],
-        final_intrinsics[8],
-    );
+        PinholeParams {
+            fx: final_intrinsics[0],
+            fy: final_intrinsics[1],
+            cx: final_intrinsics[2],
+            cy: final_intrinsics[3],
+        },
+        DistortionModel::BrownConrady {
+            k1: final_intrinsics[4],
+            k2: final_intrinsics[5],
+            p1: final_intrinsics[6],
+            p2: final_intrinsics[7],
+            k3: final_intrinsics[8],
+        },
+    )?;
 
     let final_landmarks_vec = result
         .parameters
@@ -305,7 +292,7 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
         for (lm_idx, true_obs) in true_observations.iter().enumerate() {
             let p_cam = final_pose.act(&final_landmarks[lm_idx], None, None);
-            if let Some(pred_obs) = final_camera.project(&p_cam) {
+            if let Ok(pred_obs) = final_camera.project(&p_cam) {
                 let error = (pred_obs - true_obs).norm();
                 total_error_sq += error * error;
                 total_observations += 1;
@@ -314,7 +301,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     }
 
     let rmse = (total_error_sq / total_observations as f64).sqrt();
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     assert!(
         rmse < 2.5,
@@ -326,19 +312,9 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     // 12. Verify Parameter Recovery
     // ============================================================================
 
-    println!("\n=== Parameter Recovery ===");
-
-    // Focal lengths and principal point (well-conditioned)
     let param_names = ["fx", "fy", "cx", "cy"];
     for i in 0..4 {
         let error = (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i];
-        println!(
-            "{}: true={:.2}, final={:.2}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            error * 100.0
-        );
 
         assert!(
             error < 0.05,
@@ -350,12 +326,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k1 (primary radial distortion)
     let k1_error = (final_intrinsics[4] - true_intrinsics[4]).abs() / true_intrinsics[4].abs();
-    println!(
-        "k1: true={:.4}, final={:.4}, error={:.2}%",
-        true_intrinsics[4],
-        final_intrinsics[4],
-        k1_error * 100.0
-    );
     assert!(
         k1_error < 0.10,
         "k1 should recover within 10%, got {:.2}%",
@@ -364,12 +334,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k2 (secondary radial distortion - use percentage error)
     let k2_error = (final_intrinsics[5] - true_intrinsics[5]).abs() / true_intrinsics[5].abs();
-    println!(
-        "k2: true={:.4}, final={:.4}, error={:.2}%",
-        true_intrinsics[5],
-        final_intrinsics[5],
-        k2_error * 100.0
-    );
     assert!(
         k2_error < 0.15,
         "k2 should recover within 15%, got {:.2}%",
@@ -380,10 +344,6 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
     let tangential_names = ["p1", "p2"];
     for (idx, i) in [6, 7].iter().enumerate() {
         let abs_error = (final_intrinsics[*i] - true_intrinsics[*i]).abs();
-        println!(
-            "{}: true={:.4}, final={:.4}, abs_error={:.4}",
-            tangential_names[idx], true_intrinsics[*i], final_intrinsics[*i], abs_error
-        );
 
         assert!(
             abs_error < 0.015,
@@ -395,17 +355,11 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 
     // k3 (higher-order term, poorly constrained - use absolute error)
     let k3_abs_error = (final_intrinsics[8] - true_intrinsics[8]).abs();
-    println!(
-        "k3: true={:.4}, final={:.4}, abs_error={:.4}",
-        true_intrinsics[8], final_intrinsics[8], k3_abs_error
-    );
     assert!(
         k3_abs_error < 0.3,
         "k3 absolute error should be <0.3 (poorly constrained by planar calibration), got {:.4}",
         k3_abs_error
     );
-
-    println!("\n✓ All RadTan multi-camera calibration tests passed!");
 
     Ok(())
 }
@@ -417,7 +371,21 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_radtan_3_cameras_calibration() -> TestResult {
     // Same setup as main test but with 3 cameras
-    let true_camera = RadTanCamera::new(200.0, 200.0, 300.0, 200.0, 0.1, -0.05, 0.001, -0.001, 0.0);
+    let true_camera = RadTanCamera::new(
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: -0.05,
+            p1: 0.001,
+            p2: -0.001,
+            k3: 0.0,
+        },
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -440,18 +408,13 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
             let p_cam = pose.act(landmark, None, None);
 
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}",
                 cam_idx,
                 lm_idx
             );
 
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             assert!(
                 uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,
@@ -546,8 +509,6 @@ fn test_radtan_3_cameras_calibration() -> TestResult {
         "3-camera test should achieve >70% cost reduction, got {:.2}%",
         cost_reduction * 100.0
     );
-
-    println!("✓ RadTan 3-camera calibration test passed!");
 
     Ok(())
 }

@@ -31,11 +31,11 @@
 //! cargo test -- --ignored
 //! ```
 
+use apex_io::{G2oLoader, GraphLoader};
+use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
@@ -71,7 +71,7 @@ fn run_se3_optimization(
     max_iterations: usize,
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
-    // Load the G2O graph file
+    // Load the G2O graph file (from workspace root, relative to crate)
     let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
@@ -185,7 +185,7 @@ fn run_se2_optimization(
     max_iterations: usize,
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
-    // Load the G2O graph file
+    // Load the G2O graph file (from workspace root, relative to crate)
     let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 

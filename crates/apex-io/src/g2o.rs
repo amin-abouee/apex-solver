@@ -1,4 +1,4 @@
-use crate::io::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
+use crate::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
 use memmap2;
 use rayon::prelude::*;
 use std::collections::HashMap;

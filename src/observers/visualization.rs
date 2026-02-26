@@ -66,10 +66,10 @@
 //! ```
 
 use crate::core::problem::VariableEnum;
-use crate::io;
-use crate::manifold::se3::SE3;
-use crate::manifold::{LieGroup, ManifoldType};
 use crate::observers::{ObserverError, ObserverResult, OptObserver};
+use apex_io as io;
+use apex_manifolds::se3::SE3;
+use apex_manifolds::{LieGroup, ManifoldType};
 use faer::Mat;
 use faer::sparse;
 use nalgebra::DVector;

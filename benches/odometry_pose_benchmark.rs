@@ -26,12 +26,14 @@
 //! - Cost tolerance: 1e-4
 //! - Parameter tolerance: 1e-4
 //! - Gradient tolerance: 1e-10 (enables early-exit when gradient converges)
+//! - Initial damping: 1e-4
 //!
 //! ### SE3 (3D) Configuration:
 //! - Max iterations: 100 (matches optimize_3d_graph.rs)
 //! - Cost tolerance: 1e-4
 //! - Parameter tolerance: 1e-4
 //! - Gradient tolerance: 1e-12 (tighter for SE3 due to higher complexity, enables early-exit)
+//! - Initial damping: 1e-4
 //!
 //! ### Timing Methodology:
 //! - Timing starts immediately before `solver.optimize()` call
@@ -52,12 +54,12 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 // apex-solver imports
+use apex_io::{G2oLoader, GraphLoader};
+use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
@@ -93,9 +95,9 @@ use serde::{Deserialize, Serialize};
 // - Direct computation from G2O constraints
 // ============================================================================
 
-use apex_solver::manifold::LieGroup;
-use apex_solver::manifold::se2::SE2;
-use apex_solver::manifold::se3::SE3;
+use apex_manifolds::LieGroup;
+use apex_manifolds::se2::SE2;
+use apex_manifolds::se3::SE3;
 
 /// Dual cost metrics for benchmarking
 #[derive(Debug, Clone, Copy)]
@@ -109,7 +111,7 @@ struct CostMetrics {
 /// Compute both SE2 cost metrics from G2O graph data
 /// - Chi-squared: sum of r^T * Omega * r (information-weighted)
 /// - Unweighted: 0.5 * sum ||r||^2
-fn compute_se2_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
+fn compute_se2_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
     let mut unweighted_cost = 0.0;
 
@@ -154,7 +156,7 @@ fn compute_se2_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
 /// Compute both SE3 cost metrics from G2O graph data
 /// - Chi-squared: sum of r^T * Omega * r (information-weighted)
 /// - Unweighted: 0.5 * sum ||r||^2
-fn compute_se3_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
+fn compute_se3_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
     let mut unweighted_cost = 0.0;
 
@@ -202,7 +204,7 @@ fn compute_se3_cost_metrics(graph: &apex_solver::io::Graph) -> CostMetrics {
 
 /// Update SE2 graph vertices from tiny-solver optimization result
 fn update_se2_graph_from_tiny_solver(
-    graph: &mut apex_solver::io::Graph,
+    graph: &mut apex_io::Graph,
     tiny_solver_result: &std::collections::HashMap<String, nalgebra::DVector<f64>>,
 ) {
     for (var_name, var_value) in tiny_solver_result {
@@ -219,7 +221,7 @@ fn update_se2_graph_from_tiny_solver(
 
 /// Update SE3 graph vertices from tiny-solver optimization result
 fn update_se3_graph_from_tiny_solver(
-    graph: &mut apex_solver::io::Graph,
+    graph: &mut apex_io::Graph,
     tiny_solver_result: &std::collections::HashMap<String, nalgebra::DVector<f64>>,
 ) {
     use nalgebra::{Quaternion, Vector3};
@@ -239,7 +241,7 @@ fn update_se3_graph_from_tiny_solver(
 
 /// Update SE2 graph vertices from factrs optimization result
 fn update_se2_graph_from_factrs(
-    graph: &mut apex_solver::io::Graph,
+    graph: &mut apex_io::Graph,
     factrs_values: &factrs::containers::Values,
 ) {
     use factrs::assign_symbols;
@@ -260,7 +262,7 @@ fn update_se2_graph_from_factrs(
 
 /// Update SE3 graph vertices from factrs optimization result
 fn update_se3_graph_from_factrs(
-    graph: &mut apex_solver::io::Graph,
+    graph: &mut apex_io::Graph,
     factrs_values: &factrs::containers::Values,
 ) {
     use factrs::assign_symbols;
@@ -496,7 +498,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(150)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-10);
+        .with_gradient_tolerance(1e-10)
+        .with_damping(1e-4);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -590,7 +593,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         .with_max_iterations(100)
         .with_cost_tolerance(1e-4)
         .with_parameter_tolerance(1e-4)
-        .with_gradient_tolerance(1e-12);
+        .with_gradient_tolerance(1e-12)
+        .with_damping(1e-4);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -845,7 +849,8 @@ struct CppBenchmarkResult {
 
 /// Build C++ benchmarks if not already built
 fn build_cpp_benchmarks() -> Result<PathBuf, String> {
-    let bench_dir = Path::new("benches/cpp_comparison");
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let bench_dir = Path::new(&manifest_dir).join("benches/cpp_comparison");
     let build_dir = bench_dir.join("build");
 
     // Check if executables already exist

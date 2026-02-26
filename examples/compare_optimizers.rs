@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{info, warn};
 
+use apex_solver::apex_io::{G2oLoader, GraphLoader};
+use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
-use apex_solver::io::{G2oLoader, GraphLoader};
-use apex_solver::manifold::ManifoldType;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -145,7 +145,7 @@ fn test_se3_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE3)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/{}.g2o", dataset_name);
+    let file_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
@@ -285,7 +285,7 @@ fn test_se2_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE2)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/{}.g2o", dataset_name);
+    let file_path = format!("data/odometry/{}.g2o", dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {

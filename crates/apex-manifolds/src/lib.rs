@@ -39,6 +39,22 @@ use std::{
     fmt::{Display, Formatter},
 };
 
+/// Threshold for switching between exact formulas and Taylor approximations
+/// in small-angle computations.
+///
+/// `f64::EPSILON` (~2.2e-16) is too tight for small-angle detection — angles of ~1e-8 radians
+/// are well within Taylor approximation validity but would fall through to the exact formula
+/// path, where division by near-zero values causes numerical issues.
+///
+/// `1e-10` is chosen because:
+/// - Taylor expansions for sin(θ)/θ, (1-cos(θ))/θ² are accurate to ~1e-20 at this scale
+/// - Avoids catastrophic cancellation in exact formulas near zero
+/// - Consistent with production SLAM libraries (Sophus, GTSAM)
+///
+/// **Note:** This threshold is compared against `θ²` (not `θ`), so the effective angle
+/// threshold is `√(1e-10) ≈ 1e-5` radians (~0.00057°).
+pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
+
 pub mod rn;
 pub mod se2;
 pub mod se3;
@@ -112,29 +128,14 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 
 /// Core trait for Lie group operations.
 ///
-/// This trait provides the fundamental operations for Lie groups, including:
-/// - Group operations (composition, inverse, identity)
-/// - Exponential and logarithmic maps
-/// - Lie group plus/minus operations with Jacobians
-/// - Adjoint operations
-/// - Random sampling and normalization
+/// Provides group operations, exponential/logarithmic maps, plus/minus with Jacobians,
+/// and adjoint representations.
 ///
-/// The design closely follows the [manif](https://github.com/artivis/manif) C++ library.
+/// # Associated Types
 ///
-/// # Type Parameters
-///
-/// Associated types define the mathematical structure:
-/// - `Element`: The Lie group element type (e.g., `Isometry3<f64>` for SE(3))
-/// - `TangentVector`: The tangent space vector type (e.g., `Vector6<f64>` for SE(3))
-/// - `JacobianMatrix`: The Jacobian matrix type for this Lie group
-/// - `LieAlgebra`: Associated Lie algebra type
-///
-/// # Dimensions
-///
-/// Three key dimensions characterize each Lie group:
-/// - `DIM`: Space dimension - dimension of ambient space (e.g., 3 for SE(3))
-/// - `DOF`: Degrees of freedom - tangent space dimension (e.g., 6 for SE(3))
-/// - `REP_SIZE`: Representation size - underlying data size (e.g., 7 for SE(3))
+/// - `TangentVector`: Tangent space (Lie algebra) vector type
+/// - `JacobianMatrix`: Jacobian matrix type for this group
+/// - `LieAlgebra`: Matrix representation of the Lie algebra
 pub trait LieGroup: Clone + PartialEq {
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
@@ -321,13 +322,10 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_tangent: Option<&mut Self::JacobianMatrix>,
         jacobian_self: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        // Left plus: τ ⊕ g = exp(τ) * g
         let exp_tangent = tangent.exp(None);
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            // Note: jacobian_identity() is now implemented in concrete types
-            // This will be handled by the concrete implementation
             *jac_self = self.adjoint();
         }
 
@@ -350,7 +348,6 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self::TangentVector {
-        // Left minus: g1 ⊖ g2 = log(g1 * g2^{-1})
         let other_inverse = other.inverse(None);
         let result_group = self.compose(&other_inverse, None, None);
         let result = result_group.log(None);
@@ -402,7 +399,6 @@ pub trait LieGroup: Clone + PartialEq {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        // Between: g1.between(g2) = g1^{-1} * g2
         let self_inverse = self.inverse(None);
         let result = self_inverse.compose(other, None, None);
 
@@ -445,8 +441,21 @@ pub trait LieGroup: Clone + PartialEq {
 pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
     // Dimension constants
 
-    /// Dimension of the tangent space
+    /// Dimension of the tangent space.
+    ///
+    /// For fixed-size manifolds (SE2, SE3, SO2, SO3), this is the compile-time constant.
+    /// For dynamic-size manifolds (Rn), this is `0` as a sentinel value — use the
+    /// `is_dynamic()` method to check, and the `LieGroup::tangent_dim()` instance method
+    /// to get the actual runtime dimension.
     const DIM: usize;
+
+    /// Whether this tangent type has dynamic (runtime-determined) dimension.
+    ///
+    /// Returns `true` for `RnTangent` where `DIM == 0` is used as a sentinel.
+    /// Returns `false` for all fixed-size tangent types (SE2, SE3, SO2, SO3).
+    fn is_dynamic() -> bool {
+        Self::DIM == 0
+    }
 
     // Exponential map and Jacobians
 

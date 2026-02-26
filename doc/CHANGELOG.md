@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-02-22
+
+### Changed
+- **Workspace layout flattened** - `apex-solver` crate moved from `crates/apex-solver/`
+  to the repository root, following the standard pattern of major Rust projects (tokio,
+  serde, axum). Sub-directories `src/`, `bin/`, `benches/`, `examples/`, `tests/` now
+  live at the top level.
+- Root `Cargo.toml` is now both the workspace manifest and the `apex-solver` crate
+  manifest (combined `[workspace]` + `[package]` sections).
+- All data file paths in benchmarks and integration tests updated to be relative to the
+  workspace root (removed `../../` prefix).
+
+### No API Changes
+All public APIs, types, imports, and behavior are identical to v1.1.0.
+
+## [1.1.0] - 2026-02-21
+
+### Added
+- **Cargo workspace restructuring** - Codebase split into four focused, independently publishable crates:
+  - `apex-manifolds` (v0.1.0) - Lie group manifolds (SE2, SE3, SO2, SO3, Rn) with analytic Jacobians
+  - `apex-io` (v0.1.0) - File I/O for pose graphs (G2O, TORO, BAL formats) with SE2/SE3 support
+  - `apex-camera-models` (v0.1.0) - Camera projection models (pinhole, fisheye, omnidirectional) for bundle adjustment
+  - `apex-solver` (v1.1.0) - Core nonlinear least squares optimizer, now depends on the above crates
+- **`apex-manifolds` crate** - Standalone Lie group library usable independently of the optimizer
+- **`apex-io` crate** - Standalone pose graph I/O library with G2O, TORO, and BAL format support
+- **`apex-camera-models` crate** - Standalone camera model library with 9 projection models and analytic Jacobians
+
+### Changed
+- `apex-solver` now uses workspace dependencies for internal crates (dual `path + version` for local dev and publishing)
+- Benchmark damping explicitly set to `1e-4` in `odometry_pose_benchmark` to match README baseline (global LM default is `1e-3`, optimized for bundle adjustment)
+
 ## [1.0.0] - 2026-01-24
 
 ### Added

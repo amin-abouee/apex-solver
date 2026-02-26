@@ -193,198 +193,14 @@
 //! - Conn, A. R., Gould, N. I. M., & Toint, P. L. (2000). *Trust-Region Methods*. SIAM.
 //! - Ceres Solver: http://ceres-solver.org/ - Google's C++ nonlinear least squares library
 
-use crate::{core::problem, error, linalg, manifold, optimizer};
-
-// Note: Visualization support via observer pattern will be added in a future update
-// For now, use LevenbergMarquardt optimizer for visualization support
+use crate::{core::problem, error, linalg, optimizer};
+use apex_manifolds as manifold;
 
 use faer::sparse;
 use std::{collections, fmt, time};
 use tracing::debug;
 
-/// Summary statistics for the Dog Leg optimization process.
-#[derive(Debug, Clone)]
-pub struct DogLegSummary {
-    /// Initial cost value
-    pub initial_cost: f64,
-    /// Final cost value
-    pub final_cost: f64,
-    /// Total number of iterations performed
-    pub iterations: usize,
-    /// Number of successful steps (cost decreased)
-    pub successful_steps: usize,
-    /// Number of unsuccessful steps (cost increased, step rejected)
-    pub unsuccessful_steps: usize,
-    /// Final trust region radius
-    pub final_trust_region_radius: f64,
-    /// Average cost reduction per iteration
-    pub average_cost_reduction: f64,
-    /// Maximum gradient norm encountered
-    pub max_gradient_norm: f64,
-    /// Final gradient norm
-    pub final_gradient_norm: f64,
-    /// Maximum parameter update norm
-    pub max_parameter_update_norm: f64,
-    /// Final parameter update norm
-    pub final_parameter_update_norm: f64,
-    /// Total time elapsed
-    pub total_time: time::Duration,
-    /// Average time per iteration
-    pub average_time_per_iteration: time::Duration,
-    /// Detailed per-iteration statistics history
-    pub iteration_history: Vec<IterationStats>,
-    /// Convergence status
-    pub convergence_status: optimizer::OptimizationStatus,
-}
-
-/// Per-iteration statistics for detailed logging (Ceres-style output).
-///
-/// Captures all relevant metrics for each optimization iteration, enabling
-/// detailed analysis and debugging of the optimization process.
-#[derive(Debug, Clone)]
-pub struct IterationStats {
-    /// Iteration number (0-indexed)
-    pub iteration: usize,
-    /// Cost function value at this iteration
-    pub cost: f64,
-    /// Change in cost from previous iteration
-    pub cost_change: f64,
-    /// L2 norm of the gradient (||J^T·r||)
-    pub gradient_norm: f64,
-    /// L2 norm of the parameter update step (||Δx||)
-    pub step_norm: f64,
-    /// Trust region ratio (ρ = actual_reduction / predicted_reduction)
-    pub tr_ratio: f64,
-    /// Trust region radius (Δ)
-    pub tr_radius: f64,
-    /// Linear solver iterations (0 for direct solvers like Cholesky)
-    pub ls_iter: usize,
-    /// Time taken for this iteration in milliseconds
-    pub iter_time_ms: f64,
-    /// Total elapsed time since optimization started in milliseconds
-    pub total_time_ms: f64,
-    /// Whether the step was accepted (true) or rejected (false)
-    pub accepted: bool,
-}
-
-impl IterationStats {
-    /// Print table header in Ceres-style format
-    pub fn print_header() {
-        debug!(
-            "{:>4}  {:>13}  {:>13}  {:>13}  {:>13}  {:>11}  {:>11}  {:>7}  {:>11}  {:>13}  {:>6}",
-            "iter",
-            "cost",
-            "cost_change",
-            "|gradient|",
-            "|step|",
-            "tr_ratio",
-            "tr_radius",
-            "ls_iter",
-            "iter_time",
-            "total_time",
-            "status"
-        );
-    }
-
-    /// Print single iteration line in Ceres-style format with scientific notation
-    pub fn print_line(&self) {
-        let status = if self.iteration == 0 {
-            "-"
-        } else if self.accepted {
-            "✓"
-        } else {
-            "✗"
-        };
-
-        debug!(
-            "{:>4}  {:>13.6e}  {:>13.2e}  {:>13.2e}  {:>13.2e}  {:>11.2e}  {:>11.2e}  {:>7}  {:>9.2}ms  {:>11.2}ms  {:>6}",
-            self.iteration,
-            self.cost,
-            self.cost_change,
-            self.gradient_norm,
-            self.step_norm,
-            self.tr_ratio,
-            self.tr_radius,
-            self.ls_iter,
-            self.iter_time_ms,
-            self.total_time_ms,
-            status
-        );
-    }
-}
-
-impl fmt::Display for DogLegSummary {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Determine if converged
-        let converged = matches!(
-            self.convergence_status,
-            optimizer::OptimizationStatus::Converged
-                | optimizer::OptimizationStatus::CostToleranceReached
-                | optimizer::OptimizationStatus::GradientToleranceReached
-                | optimizer::OptimizationStatus::ParameterToleranceReached
-        );
-
-        writeln!(f, "Dog-Leg Final Result")?;
-
-        // Title with convergence status
-        if converged {
-            writeln!(f, "CONVERGED ({:?})", self.convergence_status)?;
-        } else {
-            writeln!(f, "DIVERGED ({:?})", self.convergence_status)?;
-        }
-
-        writeln!(f)?;
-        writeln!(f, "Cost:")?;
-        writeln!(f, "  Initial:   {:.6e}", self.initial_cost)?;
-        writeln!(f, "  Final:     {:.6e}", self.final_cost)?;
-        writeln!(
-            f,
-            "  Reduction: {:.6e} ({:.2}%)",
-            self.initial_cost - self.final_cost,
-            100.0 * (self.initial_cost - self.final_cost) / self.initial_cost.max(1e-12)
-        )?;
-        writeln!(f)?;
-        writeln!(f, "Iterations:")?;
-        writeln!(f, "  Total:              {}", self.iterations)?;
-        writeln!(
-            f,
-            "  Successful steps:   {} ({:.1}%)",
-            self.successful_steps,
-            100.0 * self.successful_steps as f64 / self.iterations.max(1) as f64
-        )?;
-        writeln!(
-            f,
-            "  Unsuccessful steps: {} ({:.1}%)",
-            self.unsuccessful_steps,
-            100.0 * self.unsuccessful_steps as f64 / self.iterations.max(1) as f64
-        )?;
-        writeln!(f)?;
-        writeln!(f, "Trust Region:")?;
-        writeln!(f, "  Final radius: {:.6e}", self.final_trust_region_radius)?;
-        writeln!(f)?;
-        writeln!(f, "Gradient:")?;
-        writeln!(f, "  Max norm:   {:.2e}", self.max_gradient_norm)?;
-        writeln!(f, "  Final norm: {:.2e}", self.final_gradient_norm)?;
-        writeln!(f)?;
-        writeln!(f, "Parameter Update:")?;
-        writeln!(f, "  Max norm:   {:.2e}", self.max_parameter_update_norm)?;
-        writeln!(f, "  Final norm: {:.2e}", self.final_parameter_update_norm)?;
-        writeln!(f)?;
-        writeln!(f, "Performance:")?;
-        writeln!(
-            f,
-            "  Total time:             {:.2}ms",
-            self.total_time.as_secs_f64() * 1000.0
-        )?;
-        writeln!(
-            f,
-            "  Average per iteration:  {:.2}ms",
-            self.average_time_per_iteration.as_secs_f64() * 1000.0
-        )?;
-
-        Ok(())
-    }
-}
+use crate::optimizer::IterationStats;
 
 /// Configuration parameters for the Dog Leg trust region optimizer.
 ///
@@ -770,16 +586,6 @@ impl DogLegConfig {
     }
 }
 
-/// State for optimization iteration
-struct OptimizationState {
-    variables: collections::HashMap<String, problem::VariableEnum>,
-    variable_index_map: collections::HashMap<String, usize>,
-    sorted_vars: Vec<String>,
-    symbolic_structure: problem::SymbolicStructure,
-    current_cost: f64,
-    initial_cost: f64,
-}
-
 /// Result from step computation
 struct StepResult {
     step: faer::Mat<f64>,
@@ -953,20 +759,6 @@ impl DogLeg {
     /// ```
     pub fn add_observer(&mut self, observer: impl optimizer::OptObserver + 'static) {
         self.observers.add(observer);
-    }
-
-    /// Create the appropriate linear solver based on configuration
-    fn create_linear_solver(&self) -> Box<dyn linalg::SparseLinearSolver> {
-        match self.config.linear_solver_type {
-            linalg::LinearSolverType::SparseCholesky => {
-                Box::new(linalg::SparseCholeskySolver::new())
-            }
-            linalg::LinearSolverType::SparseQR => Box::new(linalg::SparseQRSolver::new()),
-            linalg::LinearSolverType::SparseSchurComplement => {
-                // Schur complement solver requires special handling - fallback to Cholesky
-                Box::new(linalg::SparseCholeskySolver::new())
-            }
-        }
     }
 
     /// Compute the Cauchy point (steepest descent step)
@@ -1150,21 +942,6 @@ impl DogLeg {
         }
     }
 
-    /// Compute step quality ratio (actual vs predicted reduction)
-    fn compute_step_quality(
-        &self,
-        current_cost: f64,
-        new_cost: f64,
-        predicted_reduction: f64,
-    ) -> f64 {
-        let actual_reduction = current_cost - new_cost;
-        if predicted_reduction.abs() < 1e-15 {
-            if actual_reduction > 0.0 { 1.0 } else { 0.0 }
-        } else {
-            actual_reduction / predicted_reduction
-        }
-    }
-
     /// Compute predicted cost reduction from linear model
     fn compute_predicted_reduction(
         &self,
@@ -1178,251 +955,6 @@ impl DogLeg {
         let quadratic_term = step.transpose() * &hessian_step;
 
         -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)]
-    }
-
-    /// Check convergence criteria
-    /// Check convergence using comprehensive termination criteria.
-    ///
-    /// Implements 9 termination criteria following Ceres Solver standards for Dog Leg:
-    ///
-    /// 1. **Gradient Norm (First-Order Optimality)**: ||g||∞ ≤ gradient_tolerance
-    /// 2. **Parameter Change Tolerance**: ||h|| ≤ parameter_tolerance * (||x|| + parameter_tolerance)
-    /// 3. **Function Value Change Tolerance**: |ΔF| < cost_tolerance * F
-    /// 4. **Objective Function Cutoff**: F_new < min_cost_threshold (optional)
-    /// 5. **Trust Region Radius**: radius < trust_region_min
-    /// 6. **Singular/Ill-Conditioned Jacobian**: Detected during linear solve
-    /// 7. **Invalid Numerical Values**: NaN or Inf in cost or parameters
-    /// 8. **Maximum Iterations**: iteration >= max_iterations
-    /// 9. **Timeout**: elapsed >= timeout
-    ///
-    /// # Arguments
-    ///
-    /// * `iteration` - Current iteration number
-    /// * `current_cost` - Cost before applying the step
-    /// * `new_cost` - Cost after applying the step
-    /// * `parameter_norm` - L2 norm of current parameter vector ||x||
-    /// * `parameter_update_norm` - L2 norm of parameter update step ||h||
-    /// * `gradient_norm` - Infinity norm of gradient ||g||∞
-    /// * `trust_region_radius` - Current trust region radius
-    /// * `elapsed` - Elapsed time since optimization start
-    /// * `step_accepted` - Whether the current step was accepted
-    ///
-    /// # Returns
-    ///
-    /// `Some(OptimizationStatus)` if any termination criterion is satisfied, `None` otherwise.
-    ///
-    /// # Design Note
-    /// This internal convergence checker requires multiple scalar metrics for comprehensive
-    /// termination criteria. Grouping into a struct would reduce clarity without performance benefit.
-    #[allow(clippy::too_many_arguments)]
-    fn check_convergence(
-        &self,
-        iteration: usize,
-        current_cost: f64,
-        new_cost: f64,
-        parameter_norm: f64,
-        parameter_update_norm: f64,
-        gradient_norm: f64,
-        trust_region_radius: f64,
-        elapsed: time::Duration,
-        step_accepted: bool,
-    ) -> Option<optimizer::OptimizationStatus> {
-        // ========================================================================
-        // CRITICAL SAFETY CHECKS (perform first, before convergence checks)
-        // ========================================================================
-
-        // CRITERION 7: Invalid Numerical Values (NaN/Inf)
-        // Always check for numerical instability first
-        if !new_cost.is_finite() || !parameter_update_norm.is_finite() || !gradient_norm.is_finite()
-        {
-            return Some(optimizer::OptimizationStatus::InvalidNumericalValues);
-        }
-
-        // CRITERION 9: Timeout
-        // Check wall-clock time limit
-        if let Some(timeout) = self.config.timeout
-            && elapsed >= timeout
-        {
-            return Some(optimizer::OptimizationStatus::Timeout);
-        }
-
-        // CRITERION 8: Maximum Iterations
-        // Check iteration count limit
-        if iteration >= self.config.max_iterations {
-            return Some(optimizer::OptimizationStatus::MaxIterationsReached);
-        }
-
-        // ========================================================================
-        // CONVERGENCE CRITERIA (only check after successful steps)
-        // ========================================================================
-
-        // Only check convergence criteria after accepted steps
-        // (rejected steps don't indicate convergence)
-        if !step_accepted {
-            return None;
-        }
-
-        // CRITERION 1: Gradient Norm (First-Order Optimality)
-        // Check if gradient infinity norm is below threshold
-        // This indicates we're at a critical point (local minimum, saddle, or maximum)
-        if gradient_norm < self.config.gradient_tolerance {
-            return Some(optimizer::OptimizationStatus::GradientToleranceReached);
-        }
-
-        // Only check parameter and cost criteria after first iteration
-        if iteration > 0 {
-            // CRITERION 2: Parameter Change Tolerance (xtol)
-            // Ceres formula: ||h|| ≤ ε_param * (||x|| + ε_param)
-            // This is a relative measure that scales with parameter magnitude
-            let relative_step_tolerance = self.config.parameter_tolerance
-                * (parameter_norm + self.config.parameter_tolerance);
-
-            if parameter_update_norm <= relative_step_tolerance {
-                return Some(optimizer::OptimizationStatus::ParameterToleranceReached);
-            }
-
-            // CRITERION 3: Function Value Change Tolerance (ftol)
-            // Ceres formula: |ΔF| < ε_cost * F
-            // Check relative cost change (not absolute)
-            let cost_change = (current_cost - new_cost).abs();
-            let relative_cost_change = cost_change / current_cost.max(1e-10); // Avoid division by zero
-
-            if relative_cost_change < self.config.cost_tolerance {
-                return Some(optimizer::OptimizationStatus::CostToleranceReached);
-            }
-        }
-
-        // CRITERION 4: Objective Function Cutoff (optional early stopping)
-        // Useful for "good enough" solutions
-        if let Some(min_cost) = self.config.min_cost_threshold
-            && new_cost < min_cost
-        {
-            return Some(optimizer::OptimizationStatus::MinCostThresholdReached);
-        }
-
-        // CRITERION 5: Trust Region Radius
-        // If trust region has collapsed, optimization has converged or problem is ill-conditioned
-        if trust_region_radius < self.config.trust_region_min {
-            return Some(optimizer::OptimizationStatus::TrustRegionRadiusTooSmall);
-        }
-
-        // CRITERION 6: Singular/Ill-Conditioned Jacobian
-        // Note: This is typically detected during the linear solve and handled there
-        // The max_condition_number check would be expensive to compute here
-        // If linear solve fails, it returns an error that's converted to NumericalFailure
-
-        // No termination criterion satisfied
-        None
-    }
-
-    /// Compute total parameter vector norm ||x||.
-    ///
-    /// Computes the L2 norm of all parameter vectors concatenated together.
-    /// This is used in the relative parameter tolerance check.
-    ///
-    /// # Arguments
-    ///
-    /// * `variables` - Map of variable names to their current values
-    ///
-    /// # Returns
-    ///
-    /// The L2 norm of the concatenated parameter vector
-    fn compute_parameter_norm(
-        variables: &collections::HashMap<String, problem::VariableEnum>,
-    ) -> f64 {
-        variables
-            .values()
-            .map(|v| {
-                let vec = v.to_vector();
-                vec.norm_squared()
-            })
-            .sum::<f64>()
-            .sqrt()
-    }
-
-    /// Create Jacobi scaling matrix from Jacobian
-    fn create_jacobi_scaling(
-        &self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
-    ) -> Result<sparse::SparseColMat<usize, f64>, optimizer::OptimizerError> {
-        use faer::sparse::Triplet;
-
-        let cols = jacobian.ncols();
-        let jacobi_scaling_vec: Vec<Triplet<usize, usize, f64>> = (0..cols)
-            .map(|c| {
-                let col_norm_squared: f64 = jacobian
-                    .triplet_iter()
-                    .filter(|t| t.col == c)
-                    .map(|t| t.val * t.val)
-                    .sum();
-                let col_norm = col_norm_squared.sqrt();
-                let scaling = 1.0 / (1.0 + col_norm);
-                Triplet::new(c, c, scaling)
-            })
-            .collect();
-
-        sparse::SparseColMat::try_new_from_triplets(cols, cols, &jacobi_scaling_vec).map_err(|e| {
-            optimizer::OptimizerError::JacobiScalingCreation(e.to_string()).log_with_source(e)
-        })
-    }
-
-    /// Initialize optimization state
-    fn initialize_optimization_state(
-        &self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<OptimizationState, error::ApexSolverError> {
-        let variables = problem.initialize_variables(initial_params);
-
-        let mut variable_index_map = collections::HashMap::new();
-        let mut col_offset = 0;
-        let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
-        sorted_vars.sort();
-
-        for var_name in &sorted_vars {
-            variable_index_map.insert(var_name.clone(), col_offset);
-            col_offset += variables[var_name].get_size();
-        }
-
-        let symbolic_structure =
-            problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
-
-        // Initial cost evaluation (residual only, no Jacobian needed)
-        let residual = problem.compute_residual_sparse(&variables)?;
-
-        let residual_norm = residual.norm_l2();
-        let current_cost = residual_norm * residual_norm;
-        let initial_cost = current_cost;
-
-        Ok(OptimizationState {
-            variables,
-            variable_index_map,
-            sorted_vars,
-            symbolic_structure,
-            current_cost,
-            initial_cost,
-        })
-    }
-
-    /// Process Jacobian by creating and applying Jacobi scaling if enabled
-    fn process_jacobian(
-        &mut self,
-        jacobian: &sparse::SparseColMat<usize, f64>,
-        iteration: usize,
-    ) -> Result<sparse::SparseColMat<usize, f64>, optimizer::OptimizerError> {
-        // Create Jacobi scaling on first iteration if enabled
-        if iteration == 0 {
-            let scaling = self.create_jacobi_scaling(jacobian)?;
-            self.jacobi_scaling = Some(scaling);
-        }
-        let scaling = self
-            .jacobi_scaling
-            .as_ref()
-            .ok_or_else(|| optimizer::OptimizerError::JacobiScalingNotInitialized.log())?;
-        Ok(jacobian * scaling)
     }
 
     /// Compute dog leg optimization step
@@ -1554,7 +1086,7 @@ impl DogLeg {
     fn evaluate_and_apply_step(
         &mut self,
         step_result: &StepResult,
-        state: &mut OptimizationState,
+        state: &mut optimizer::InitializedState,
         problem: &problem::Problem,
     ) -> error::ApexSolverResult<StepEvaluation> {
         // Apply parameter updates
@@ -1570,7 +1102,7 @@ impl DogLeg {
         let new_cost = new_residual_norm * new_residual_norm;
 
         // Compute step quality
-        let rho = self.compute_step_quality(
+        let rho = optimizer::compute_step_quality(
             state.current_cost,
             new_cost,
             step_result.predicted_reduction,
@@ -1602,55 +1134,6 @@ impl DogLeg {
         })
     }
 
-    /// Create optimization summary
-    ///
-    /// # Design Note
-    /// This internal summary builder accepts individual scalar results from the optimization loop.
-    /// A struct parameter would not improve readability for this private method.
-    #[allow(clippy::too_many_arguments)]
-    fn create_summary(
-        &self,
-        initial_cost: f64,
-        final_cost: f64,
-        iterations: usize,
-        successful_steps: usize,
-        unsuccessful_steps: usize,
-        max_gradient_norm: f64,
-        final_gradient_norm: f64,
-        max_parameter_update_norm: f64,
-        final_parameter_update_norm: f64,
-        total_cost_reduction: f64,
-        total_time: time::Duration,
-        iteration_history: Vec<IterationStats>,
-        convergence_status: optimizer::OptimizationStatus,
-    ) -> DogLegSummary {
-        DogLegSummary {
-            initial_cost,
-            final_cost,
-            iterations,
-            successful_steps,
-            unsuccessful_steps,
-            final_trust_region_radius: self.config.trust_region_radius,
-            average_cost_reduction: if iterations > 0 {
-                total_cost_reduction / iterations as f64
-            } else {
-                0.0
-            },
-            max_gradient_norm,
-            final_gradient_norm,
-            max_parameter_update_norm,
-            final_parameter_update_norm,
-            total_time,
-            average_time_per_iteration: if iterations > 0 {
-                total_time / iterations as u32
-            } else {
-                time::Duration::from_secs(0)
-            },
-            iteration_history,
-            convergence_status,
-        }
-    }
-
     /// Minimize the optimization problem using Dog Leg algorithm
     pub fn optimize(
         &mut self,
@@ -1670,8 +1153,8 @@ impl DogLeg {
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
 
-        let mut state = self.initialize_optimization_state(problem, initial_params)?;
-        let mut linear_solver = self.create_linear_solver();
+        let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut linear_solver = optimizer::create_linear_solver(&self.config.linear_solver_type);
 
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
@@ -1701,7 +1184,7 @@ impl DogLeg {
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                self.process_jacobian(&jacobian, iteration)?
+                optimizer::process_jacobian(&jacobian, &mut self.jacobi_scaling, iteration)?
             } else {
                 jacobian
             };
@@ -1766,32 +1249,23 @@ impl DogLeg {
             previous_cost = state.current_cost;
 
             // Notify all observers with current state
-            // First set metrics data, then notify observers
-            self.observers.set_iteration_metrics(
+            optimizer::notify_observers(
+                &mut self.observers,
+                &state.variables,
+                iteration,
                 state.current_cost,
                 step_result.gradient_norm,
-                Some(self.config.trust_region_radius), // Dog Leg uses trust region radius
+                Some(self.config.trust_region_radius),
                 step_norm,
                 Some(step_eval.rho),
+                linear_solver.as_ref(),
             );
-
-            // Set matrix data if available and there are observers
-            if !self.observers.is_empty()
-                && let (Some(hessian), Some(gradient)) =
-                    (linear_solver.get_hessian(), linear_solver.get_gradient())
-            {
-                self.observers
-                    .set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
-            }
-
-            // Notify observers with current variable values and iteration number
-            self.observers.notify(&state.variables, iteration);
 
             // Check convergence
             let elapsed = start_time.elapsed();
 
             // Compute parameter norm for relative parameter tolerance check
-            let parameter_norm = Self::compute_parameter_norm(&state.variables);
+            let parameter_norm = optimizer::compute_parameter_norm(&state.variables);
 
             // Compute costs for convergence check
             let new_cost = state.current_cost;
@@ -1802,35 +1276,45 @@ impl DogLeg {
                 state.current_cost
             };
 
-            if let Some(status) = self.check_convergence(
+            if let Some(status) = optimizer::check_convergence(&optimizer::ConvergenceParams {
                 iteration,
-                cost_before_step,
+                current_cost: cost_before_step,
                 new_cost,
                 parameter_norm,
-                step_norm,
-                step_result.gradient_norm,
-                self.config.trust_region_radius,
+                parameter_update_norm: step_norm,
+                gradient_norm: step_result.gradient_norm,
                 elapsed,
-                step_eval.accepted,
-            ) {
-                let summary = self.create_summary(
-                    state.initial_cost,
-                    state.current_cost,
-                    iteration + 1,
-                    successful_steps,
-                    unsuccessful_steps,
-                    max_gradient_norm,
-                    final_gradient_norm,
-                    max_parameter_update_norm,
-                    final_parameter_update_norm,
-                    total_cost_reduction,
-                    elapsed,
-                    iteration_stats.clone(),
-                    status.clone(),
-                );
-
+                step_accepted: step_eval.accepted,
+                max_iterations: self.config.max_iterations,
+                gradient_tolerance: self.config.gradient_tolerance,
+                parameter_tolerance: self.config.parameter_tolerance,
+                cost_tolerance: self.config.cost_tolerance,
+                min_cost_threshold: self.config.min_cost_threshold,
+                timeout: self.config.timeout,
+                trust_region_radius: Some(self.config.trust_region_radius),
+                min_trust_region_radius: Some(self.config.trust_region_min),
+            }) {
                 // Print summary only if debug level is enabled
                 if tracing::enabled!(tracing::Level::DEBUG) {
+                    let summary = optimizer::create_optimizer_summary(
+                        "Dog-Leg",
+                        state.initial_cost,
+                        state.current_cost,
+                        iteration + 1,
+                        Some(successful_steps),
+                        Some(unsuccessful_steps),
+                        max_gradient_norm,
+                        final_gradient_norm,
+                        max_parameter_update_norm,
+                        final_parameter_update_norm,
+                        total_cost_reduction,
+                        elapsed,
+                        iteration_stats.clone(),
+                        status.clone(),
+                        None,
+                        Some(self.config.trust_region_radius),
+                        None,
+                    );
                     debug!("{}", summary);
                 }
 
@@ -1845,21 +1329,17 @@ impl DogLeg {
                     None
                 };
 
-                return Ok(optimizer::SolverResult {
+                return Ok(optimizer::build_solver_result(
                     status,
-                    iterations: iteration + 1,
-                    initial_cost: state.initial_cost,
-                    final_cost: state.current_cost,
-                    parameters: state.variables.into_iter().collect(),
-                    elapsed_time: elapsed,
-                    convergence_info: Some(optimizer::ConvergenceInfo {
-                        final_gradient_norm,
-                        final_parameter_update_norm,
-                        cost_evaluations,
-                        jacobian_evaluations,
-                    }),
+                    iteration + 1,
+                    state,
+                    elapsed,
+                    final_gradient_norm,
+                    final_parameter_update_norm,
+                    cost_evaluations,
+                    jacobian_evaluations,
                     covariances,
-                });
+                ));
             }
 
             // Note: Max iterations and timeout checks are now handled inside check_convergence()
@@ -1895,7 +1375,8 @@ impl optimizer::Solver for DogLeg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{factors, manifold};
+    use crate::factors;
+    use apex_manifolds as manifold;
     use nalgebra;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)

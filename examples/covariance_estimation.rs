@@ -11,12 +11,13 @@
 //! - Active loop closure and exploration
 //! - Data association and outlier rejection
 
+use apex_manifolds::se2::SE2;
 use apex_solver::{
+    ManifoldType,
     core::problem::Problem,
     factors::BetweenFactor,
     init_logger,
     linalg::LinearSolverType,
-    manifold::{ManifoldType, se2::SE2},
     optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig},
 };
 use nalgebra::DVector;

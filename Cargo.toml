@@ -1,27 +1,75 @@
-[package]
-name = "apex-solver"
-version = "1.0.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "crates/apex-manifolds",
+    "crates/apex-io",
+    "crates/apex-camera-models",
+]
+
+[workspace.package]
 authors = ["Amin Abouee <amin.abouee@gmail.com>"]
-description = "A high-performance Rust library for nonlinear least squares optimization with Lie group support, designed for SLAM, bundle adjustment, and pose graph optimization"
+edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/amin-abouee/apex-solver"
 homepage = "https://github.com/amin-abouee/apex-solver"
+rust-version = "1.85"
+
+[workspace.dependencies]
+apex-manifolds = { path = "crates/apex-manifolds", version = "0.1.0" }
+apex-io = { path = "crates/apex-io", version = "0.1.0" }
+apex-camera-models = { path = "crates/apex-camera-models", version = "0.1.0" }
+
+# External dependencies (shared versions)
+nalgebra = { version = "0.33" }
+faer = { version = "0.22", features = ["sparse"] }
+rayon = "1.11"
+thiserror = "2.0.17"
+rand = "0.9.2"
+memmap2 = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4.5", features = ["derive"] }
+chrono = "0.4"
+colored = "2.1"
+num_cpus = "1.16"
+rerun = { version = "0.26.2", features = ["sdk"] }
+
+# Dev dependencies
+criterion = "0.6.0"
+tempfile = "3.23"
+factrs = "0.2.0"
+tiny-solver = "0.17"
+csv = "1.4"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+# apex-solver package (root crate)
+[package]
+name = "apex-solver"
+version = "1.2.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/apex-solver"
+rust-version.workspace = true
+description = "High-performance nonlinear least squares optimization with Lie group support for SLAM and bundle adjustment"
 readme = "README.md"
 keywords = ["optimization", "slam", "computer-vision", "robotics", "nonlinear"]
 categories = ["algorithms", "science", "mathematics"]
+
 exclude = [
+    "crates/",
     "data/*",
-    "data_bk/*",
     "doc/*.md",
     "!doc/CHANGELOG.md",
     "profiles/*",
     "output/*",
-    ".github/*",
-    ".claude/*",
-    ".rust_rules.mdc",
-    "CLAUDE.md",
 ]
 
 [[bin]]
@@ -42,33 +90,40 @@ required-features = ["visualization"]
 
 [features]
 default = []
-visualization = ["dep:rerun"]
+visualization = ["dep:rerun", "apex-io/visualization"]
 
 [dependencies]
-thiserror = "2.0.17"
-nalgebra = { version = "0.33", features = ["convert-glam029"] }
-memmap2 = "0.9"
-rayon = "1.11"
-rand = "0.9.2"
-rerun = { version = "0.26.2", features = ["sdk"], optional = true }
-faer = { version = "0.22", features = ["sparse"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-clap = { version = "4.5", features = ["derive"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-chrono = "0.4"
-colored = "2.1"
-num_cpus = "1.16"
+apex-manifolds.workspace = true
+apex-io.workspace = true
+apex-camera-models.workspace = true
+
+# External dependencies
+nalgebra.workspace = true
+faer.workspace = true
+rayon.workspace = true
+thiserror.workspace = true
+rand.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+colored.workspace = true
+num_cpus.workspace = true
+chrono.workspace = true
+
+[dependencies.rerun]
+workspace = true
+optional = true
 
 [dev-dependencies]
-criterion = "0.6.0"
-tempfile = "3.23"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-factrs = "0.2.0"
-tiny-solver = "0.17"
-csv = "1.4"
-serde = { version = "1.0", features = ["derive"] }
+criterion.workspace = true
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+factrs.workspace = true
+tiny-solver.workspace = true
+csv.workspace = true
+serde.workspace = true
 
 [[bench]]
 name = "odometry_pose_benchmark"
@@ -78,18 +133,21 @@ harness = false
 name = "bundle_adjustment_benchmark"
 harness = false
 
+[lints]
+workspace = true
+
 [profile.dev]
-split-debuginfo = "unpacked"  # Faster linking, less memory usage
-debug = 1  # Line numbers only, not full debug info
+split-debuginfo = "unpacked"
+debug = 1
 
 [profile.test]
-split-debuginfo = "unpacked"  # Faster linking, less memory usage
-debug = 1  # Line numbers only, not full debug info
+split-debuginfo = "unpacked"
+debug = 1
 
 [profile.profiling]
 inherits = "release"
-debug = true  # Include debug symbols for better profiling with samply/flamegraph
+debug = true
 
-[lints.clippy]
-unwrap_used = "deny"
-expect_used = "deny"
+[profile.release]
+opt-level = 3
+lto = "thin"

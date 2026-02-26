@@ -21,16 +21,16 @@
 //!
 //! Uses ProjectionFactor with SE3 poses and BALPinholeCameraStrict camera model.
 
+use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
+use apex_solver::apex_io::{BalDataset, BalLoader};
+use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::apex_manifolds::se3::SE3;
+use apex_solver::apex_manifolds::so3::SO3;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::BALPinholeCameraStrict;
 use apex_solver::init_logger;
-use apex_solver::io::{BalDataset, BalLoader};
 use apex_solver::linalg::SchurVariant;
-use apex_solver::manifold::ManifoldType;
-use apex_solver::manifold::se3::SE3;
-use apex_solver::manifold::so3::SO3;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -161,7 +161,7 @@ fn run_bundle_adjustment(
     opt_type: OptimizationType,
     verbose: bool,
 ) -> Result<(), Box<dyn Error>> {
-    use apex_solver::factors::camera::{
+    use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
     };
 
@@ -318,7 +318,7 @@ fn run_bundle_adjustment(
 fn add_factors<OP>(
     problem: &mut Problem,
     dataset: &BalDataset,
-    valid_obs: &[&apex_solver::io::BalObservation],
+    valid_obs: &[&apex_solver::apex_io::BalObservation],
     include_intrinsics: bool,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -326,7 +326,19 @@ where
 {
     for obs in valid_obs {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = BALPinholeCameraStrict::new(cam.focal_length, cam.k1, cam.k2);
+        // Focal length is already normalized by BAL loader
+        let camera = BALPinholeCameraStrict::new(
+            PinholeParams {
+                fx: cam.focal_length,
+                fy: cam.focal_length,
+                cx: 0.0,
+                cy: 0.0,
+            },
+            DistortionModel::Radial {
+                k1: cam.k1,
+                k2: cam.k2,
+            },
+        )?;
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);

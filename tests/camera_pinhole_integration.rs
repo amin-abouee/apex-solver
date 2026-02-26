@@ -11,12 +11,12 @@
 //! - Linear projection model (no distortion)
 //! - Best parameter recovery expected among all camera models
 
+use apex_camera_models::{CameraModel, DistortionModel, PinholeCamera, PinholeParams};
+use apex_manifolds::LieGroup;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::factors::camera::pinhole::PinholeCamera;
-use apex_solver::factors::camera::{CameraModel, SelfCalibration};
-use apex_solver::manifold::LieGroup;
-use apex_solver::manifold::ManifoldType;
+use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
@@ -43,9 +43,14 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     // - Focal length 200px gives wide FOV to see entire wall
     // - No distortion parameters
     let true_camera = PinholeCamera::new(
-        200.0, 200.0, // fx, fy
-        300.0, 200.0, // cx, cy (center of 600x400)
-    );
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::None,
+    )?;
 
     // Image bounds for projection validation
     let img_width = 600.0;
@@ -83,19 +88,14 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
             let p_cam = pose.act(landmark, None, None);
 
             assert!(
-                true_camera.is_valid_point(&p_cam),
+                true_camera.project(&p_cam).is_ok(),
                 "Camera {} cannot see landmark {}: p_cam = {:?}",
                 cam_idx,
                 lm_idx,
                 p_cam
             );
 
-            let uv = true_camera.project(&p_cam).unwrap_or_else(|| {
-                panic!(
-                    "Projection failed for camera {} landmark {}",
-                    cam_idx, lm_idx
-                )
-            });
+            let uv = true_camera.project(&p_cam)?;
 
             assert!(
                 uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height,
@@ -267,18 +267,9 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     // All parameters should be well-conditioned (no distortion)
     let tolerances = [0.05, 0.05, 0.05, 0.05];
 
-    println!("\nIntrinsic Recovery:");
     for i in 0..4 {
         let relative_error =
             (final_intrinsics[i] - true_intrinsics[i]).abs() / true_intrinsics[i].abs();
-
-        println!(
-            "  {}: true={:.4}, final={:.4}, error={:.2}%",
-            param_names[i],
-            true_intrinsics[i],
-            final_intrinsics[i],
-            relative_error * 100.0
-        );
 
         assert!(
             relative_error < tolerances[i],
@@ -289,12 +280,6 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
         );
     }
 
-    println!("\n=== Pinhole Multi-Camera Calibration Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
-
     Ok(())
 }
 
@@ -302,9 +287,14 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
 #[test]
 fn test_pinhole_3_cameras_calibration() -> TestResult {
     let true_camera = PinholeCamera::new(
-        200.0, 200.0, // fx, fy
-        300.0, 200.0, // cx, cy
-    );
+        PinholeParams {
+            fx: 200.0,
+            fy: 200.0,
+            cx: 300.0,
+            cy: 200.0,
+        },
+        DistortionModel::None,
+    )?;
 
     let img_width = 600.0;
     let img_height = 400.0;
@@ -318,8 +308,7 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if true_camera.is_valid_point(&p_cam)
-                && let Some(uv) = true_camera.project(&p_cam)
+            if let Ok(uv) = true_camera.project(&p_cam)
                 && uv.x >= 0.0
                 && uv.x < img_width
                 && uv.y >= 0.0

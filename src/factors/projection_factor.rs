@@ -1,19 +1,13 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
-use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3, Matrix3xX, Vector3};
+use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
 use std::marker::PhantomData;
 use tracing::warn;
 
-use crate::factors::Factor;
-use crate::factors::camera::{CameraModel, OptimizeParams};
-use crate::manifold::LieGroup;
-use crate::manifold::se3::SE3;
-
-/// Compute skew-symmetric matrix from vector.
-/// [v]× such that [v]× * w = v × w (cross product)
-fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
-    Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
-}
+use crate::factors::{Factor, OptimizeParams};
+use apex_camera_models::CameraModel;
+use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 
 /// Trait for optimization configuration.
 ///
@@ -40,16 +34,18 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Type Parameters
 ///
 /// - `CAM`: Camera model implementing [`CameraModel`] trait
-/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](crate::factors::camera::BundleAdjustment))
+/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](apex_camera_models::BundleAdjustment))
 ///
 /// # Examples
 ///
 /// ```
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// use apex_solver::factors::projection_factor::ProjectionFactor;
-/// use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+/// use apex_solver::factors::BundleAdjustment;
+/// use apex_camera_models::PinholeCamera;
 /// use nalgebra::{Matrix2xX, Vector2};
 ///
-/// let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+/// let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
 /// let observations = Matrix2xX::from_columns(&[
 ///     Vector2::new(100.0, 150.0),
 ///     Vector2::new(200.0, 250.0),
@@ -58,6 +54,8 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
 /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
 ///     ProjectionFactor::new(observations, camera);
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Clone)]
 pub struct ProjectionFactor<CAM, OP>
@@ -99,13 +97,17 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
-    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use apex_solver::factors::BundleAdjustment;
+    /// # use apex_camera_models::PinholeCamera;
     /// # use nalgebra::{Matrix2xX, Vector2};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
     ///     ProjectionFactor::new(observations, camera);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(observations: Matrix2xX<f64>, camera: CAM) -> Self {
         Self {
@@ -123,14 +125,18 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
-    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use apex_solver::factors::BundleAdjustment;
+    /// # use apex_camera_models::PinholeCamera;
     /// # use apex_solver::manifold::se3::SE3;
     /// # use nalgebra::{Matrix2xX, Vector2};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// let factor = factor.with_fixed_pose(SE3::identity());
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_fixed_pose(mut self, pose: SE3) -> Self {
         self.fixed_pose = Some(pose);
@@ -142,14 +148,18 @@ where
     /// # Example
     ///
     /// ```
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// # use apex_solver::factors::projection_factor::ProjectionFactor;
-    /// # use apex_solver::factors::camera::{PinholeCamera, BundleAdjustment};
+    /// # use apex_solver::factors::BundleAdjustment;
+    /// # use apex_camera_models::PinholeCamera;
     /// # use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};
-    /// # let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    /// # let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
     /// # let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
     /// # let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> = ProjectionFactor::new(observations, camera);
     /// # let landmarks = Matrix3xX::from_columns(&[Vector3::new(0.1, 0.2, 1.0)]);
     /// let factor = factor.with_fixed_landmarks(landmarks);
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn with_fixed_landmarks(mut self, landmarks: Matrix3xX<f64>) -> Self {
         self.fixed_landmarks = Some(landmarks);
@@ -212,30 +222,20 @@ where
             // pose.act() computes exactly: R * p_world + t = p_cam
             let p_cam = pose.act(&p_world, None, None);
 
-            // Check validity and project
-            if !camera.is_valid_point(&p_cam) {
-                if self.verbose_cheirality {
-                    warn!(
-                        "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
-                        i, p_cam.x, p_cam.y, p_cam.z
-                    );
-                }
-                // Invalid projection: use zero residual (matches Ceres convention)
-                residuals[i * 2] = 0.0;
-                residuals[i * 2 + 1] = 0.0;
-                // Jacobian rows remain zero
-                continue;
-            }
-
-            // Project point
+            // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
-                Some(proj) => proj,
-                None => {
+                Ok(proj) => proj,
+                Err(_) => {
                     if self.verbose_cheirality {
-                        warn!("Projection failed for point {}", i);
+                        warn!(
+                            "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
+                            i, p_cam.x, p_cam.y, p_cam.z
+                        );
                     }
+                    // Invalid projection: use zero residual (matches Ceres convention)
                     residuals[i * 2] = 0.0;
                     residuals[i * 2 + 1] = 0.0;
+                    // Jacobian rows remain zero
                     continue;
                 }
             };
@@ -249,49 +249,9 @@ where
                 let mut col_offset = 0;
 
                 // Jacobian w.r.t. pose (world-to-camera convention)
-                // This matches ReprojectionFactor exactly
                 if OP::POSE {
-                    // Jacobian of projection w.r.t. point in camera frame
-                    let d_uv_d_pcam = camera.jacobian_point(&p_cam);
-
-                    // Jacobian of p_cam w.r.t. pose for world-to-camera convention
-                    // p_cam = R * p_world + t
-                    //
-                    // Using right perturbation: pose' = pose ∘ Exp([δρ; δθ])
-                    // For small perturbations:
-                    //   R' = R * Exp(δθ) ≈ R * (I + [δθ]×)
-                    //   t' = t + R * δρ
-                    //
-                    // So:
-                    //   p_cam' = R' * p_world + t' = R*(I+[δθ]×)*p_world + t + R*δρ
-                    //          = R*p_world + t + R*[δθ]×*p_world + R*δρ
-                    //          = p_cam + R*(δρ + [δθ]× * p_world)
-                    //          = p_cam + R*(δρ - [p_world]× * δθ)
-                    //          = p_cam + R*δρ - R*[p_world]×*δθ
-                    //
-                    // ∂p_cam/∂δρ = R
-                    // ∂p_cam/∂δθ = -R * [p_world]×
-                    let rotation = pose.rotation_so3().rotation_matrix();
-                    let p_world_skew = skew_symmetric(&p_world);
-
-                    let d_pcam_d_pose = nalgebra::SMatrix::<f64, 3, 6>::from_fn(|r, c| {
-                        if c < 3 {
-                            // Translation part: R
-                            rotation[(r, c)]
-                        } else {
-                            // Rotation part: -R * [p_world]×
-                            let col = c - 3;
-                            let mut sum = 0.0;
-                            for k in 0..3 {
-                                sum += rotation[(r, k)] * p_world_skew[(k, col)];
-                            }
-                            -sum
-                        }
-                    });
-
-                    // Chain rule: ∂uv/∂pose = ∂uv/∂p_cam * ∂p_cam/∂pose
+                    let (d_uv_d_pcam, d_pcam_d_pose) = camera.jacobian_pose(&p_world, pose);
                     let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
-
                     for r in 0..2 {
                         for c in 0..6 {
                             jac[(i * 2 + r, col_offset + c)] = d_uv_d_pose[(r, c)];
@@ -342,6 +302,7 @@ where
 impl<CAM, OP> Factor for ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
+    for<'a> CAM: From<&'a [f64]>,
     OP: OptimizationConfig,
 {
     fn linearize(
@@ -353,39 +314,39 @@ where
 
         // Get pose (from params if optimized, else from fixed_pose)
         let pose: SE3 = if OP::POSE {
-            if param_idx >= params.len() {
-                panic!("Missing pose parameter");
-            }
-            let p = SE3::from(params[param_idx].clone());
-            param_idx += 1;
-            p
+            params
+                .get(param_idx)
+                .map(|p| {
+                    param_idx += 1;
+                    SE3::from(p.clone())
+                })
+                .unwrap_or_else(SE3::identity)
         } else {
-            self.fixed_pose.clone().unwrap_or_else(|| {
-                panic!("Fixed pose required when POSE = false. Use with_fixed_pose() when creating ProjectionFactor with OptimizeParams<false, _, _>")
-            })
+            self.fixed_pose.clone().unwrap_or_else(SE3::identity)
         };
 
         // Get landmarks (3×N)
         let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
-            if param_idx >= params.len() {
-                panic!("Missing landmark parameters");
-            }
-            let flat = &params[param_idx];
-            let n = flat.len() / 3;
-            param_idx += 1;
-            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+            params
+                .get(param_idx)
+                .map(|flat| {
+                    let n = flat.len() / 3;
+                    param_idx += 1;
+                    Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+                })
+                .unwrap_or_else(|| Matrix3xX::zeros(0))
         } else {
-            self.fixed_landmarks.clone().unwrap_or_else(|| {
-                panic!("Fixed landmarks required when LANDMARK = false. Use with_fixed_landmarks() when creating ProjectionFactor with OptimizeParams<_, false, _>")
-            })
+            self.fixed_landmarks
+                .clone()
+                .unwrap_or_else(|| Matrix3xX::zeros(0))
         };
 
         // Get camera intrinsics
         let camera: CAM = if OP::INTRINSIC {
-            if param_idx >= params.len() {
-                panic!("Missing intrinsic parameters");
-            }
-            CAM::from_params(params[param_idx].as_slice())
+            params
+                .get(param_idx)
+                .map(|p| <CAM as From<&[f64]>>::from(p.as_slice()))
+                .unwrap_or_else(|| self.camera.clone())
         } else {
             self.camera.clone()
         };
@@ -412,16 +373,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::camera::{
-        BundleAdjustment, OnlyIntrinsics, PinholeCamera, SelfCalibration,
-    };
+    use crate::factors::{BundleAdjustment, OnlyIntrinsics, SelfCalibration};
+    use apex_camera_models::PinholeCamera;
     use nalgebra::{Vector2, Vector3};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
-    fn test_projection_factor_creation() {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    fn test_projection_factor_creation() -> TestResult {
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
         // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
@@ -430,11 +390,13 @@ mod tests {
 
         assert_eq!(factor.num_observations(), 1);
         assert_eq!(factor.get_dimension(), 2);
+
+        Ok(())
     }
 
     #[test]
     fn test_bundle_adjustment_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
 
         // Create known landmark and observation
         // World-to-camera convention: p_cam = R * p_world + t
@@ -444,10 +406,9 @@ mod tests {
 
         // Project to get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
-        let _landmarks = Matrix3xX::from_columns(&[p_world]);
 
         // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
@@ -473,13 +434,13 @@ mod tests {
 
     #[test]
     fn test_self_calibration_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
         // Get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
         let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
@@ -505,13 +466,13 @@ mod tests {
 
     #[test]
     fn test_calibration_factor() -> TestResult {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 
         // World-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
-        let uv = camera.project(&p_cam).ok_or("Projection failed")?;
+        let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
         let landmarks = Matrix3xX::from_columns(&[p_world]);
@@ -538,8 +499,8 @@ mod tests {
     }
 
     #[test]
-    fn test_invalid_projection_handling() {
-        let camera = PinholeCamera::new(500.0, 500.0, 320.0, 240.0);
+    fn test_invalid_projection_handling() -> TestResult {
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
@@ -558,5 +519,7 @@ mod tests {
         // Invalid projections should have zero residual (Ceres convention)
         assert!(residual[0].abs() < 1e-10);
         assert!(residual[1].abs() < 1e-10);
+
+        Ok(())
     }
 }

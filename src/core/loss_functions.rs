@@ -173,6 +173,7 @@ impl Default for L2Loss {
 }
 
 impl LossFunction for L2Loss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         [s, 1.0, 0.0]
     }
@@ -234,6 +235,7 @@ impl Default for L1Loss {
 }
 
 impl LossFunction for L1Loss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             // Near zero: use L2 to avoid singularity
@@ -359,6 +361,7 @@ impl LossFunction for HuberLoss {
     /// # Returns
     ///
     /// `[ρ(s), ρ'(s), ρ''(s)]` - Cost, first derivative, second derivative
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s > self.scale2 {
             // Outlier region: s > δ²
@@ -491,6 +494,7 @@ impl LossFunction for CauchyLoss {
     /// # Returns
     ///
     /// `[ρ(s), ρ'(s), ρ''(s)]` - Cost, first derivative, second derivative
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let sum = 1.0 + s * self.c; // 1 + s/δ²
         let inv = 1.0 / sum; // 1 / (1 + s/δ²)
@@ -580,6 +584,7 @@ impl FairLoss {
 }
 
 impl LossFunction for FairLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             return [s, 1.0, 0.0];
@@ -668,6 +673,7 @@ impl GemanMcClureLoss {
 }
 
 impl LossFunction for GemanMcClureLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let denom = 1.0 + s * self.c; // 1 + s/c²
         let inv = 1.0 / denom;
@@ -752,6 +758,7 @@ impl WelschLoss {
 }
 
 impl LossFunction for WelschLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let exp_term = (-s * self.inv_scale2).exp();
 
@@ -840,6 +847,7 @@ impl TukeyBiweightLoss {
 }
 
 impl LossFunction for TukeyBiweightLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
 
@@ -940,6 +948,7 @@ impl AndrewsWaveLoss {
 }
 
 impl LossFunction for AndrewsWaveLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
 
@@ -1027,6 +1036,7 @@ impl RamsayEaLoss {
 }
 
 impl LossFunction for RamsayEaLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         let x = s.sqrt();
         let ax = self.scale * x;
@@ -1121,6 +1131,7 @@ impl TrimmedMeanLoss {
 }
 
 impl LossFunction for TrimmedMeanLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s <= self.scale2 {
             [s / 2.0, 0.5, 0.0]
@@ -1195,6 +1206,7 @@ impl LpNormLoss {
 }
 
 impl LossFunction for LpNormLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         if s < f64::EPSILON {
             return [s, 1.0, 0.0];
@@ -1301,6 +1313,7 @@ impl BarronGeneralLoss {
 }
 
 impl LossFunction for BarronGeneralLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         // Handle special case α ≈ 0 (Cauchy loss)
         if self.alpha.abs() < 1e-6 {
@@ -1429,6 +1442,7 @@ impl TDistributionLoss {
 }
 
 impl LossFunction for TDistributionLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         // ρ(s) = (ν + 1)/2 · log(1 + s/ν)
         let inner = 1.0 + s / self.nu;
@@ -1552,6 +1566,7 @@ impl AdaptiveBarronLoss {
 }
 
 impl LossFunction for AdaptiveBarronLoss {
+    #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
         self.inner.evaluate(s)
     }

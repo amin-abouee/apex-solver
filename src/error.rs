@@ -21,9 +21,10 @@
 //! ```
 
 use crate::{
-    core::CoreError, io::IoError, linalg::LinAlgError, manifold::ManifoldError,
-    observers::ObserverError, optimizer::OptimizerError,
+    core::CoreError, linalg::LinAlgError, observers::ObserverError, optimizer::OptimizerError,
 };
+use apex_io::IoError;
+use apex_manifolds::ManifoldError;
 use std::error::Error as StdError;
 use thiserror::Error;
 
@@ -202,9 +203,9 @@ mod tests {
         };
 
         let apex_error: ApexSolverError = manifold_error.into();
-        match apex_error {
-            ApexSolverError::Manifold(_) => { /* Expected */ }
-            _ => panic!("Expected Manifold variant"),
-        }
+        assert!(
+            matches!(apex_error, ApexSolverError::Manifold(_)),
+            "Expected Manifold variant"
+        );
     }
 }

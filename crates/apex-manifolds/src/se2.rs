@@ -10,7 +10,7 @@
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
-use crate::manifold::{LieGroup, Tangent, so2::SO2};
+use crate::{LieGroup, Tangent, so2::SO2};
 use nalgebra::{
     Complex, DVector, Isometry2, Matrix2, Matrix3, Point2, Translation2, UnitComplex, Vector2,
     Vector3,
@@ -94,6 +94,7 @@ impl SE2 {
     /// # Arguments
     /// * `translation` - Translation vector [x, y]
     /// * `rotation` - Unit complex number representing rotation
+    #[inline]
     pub fn new(translation: Vector2<f64>, rotation: UnitComplex<f64>) -> Self {
         SE2 {
             translation,
@@ -168,11 +169,13 @@ impl SE2 {
     }
 
     /// Get the x component of translation.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.translation.x
     }
 
     /// Get the y component of translation.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.translation.y
     }
@@ -188,6 +191,7 @@ impl SE2 {
     }
 
     /// Get the rotation angle in radians.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.rotation.angle()
     }
@@ -211,7 +215,6 @@ impl LieGroup for SE2 {
         let trans_inv = -(rot_inv * self.translation);
 
         if let Some(jac) = jacobian {
-            // Jacobian of inverse operation: -Ad(g)
             *jac = -self.adjoint();
         }
 
@@ -252,7 +255,7 @@ impl LieGroup for SE2 {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -419,28 +422,39 @@ impl From<SE2Tangent> for DVector<f64> {
 
 impl SE2Tangent {
     /// Create a new SE2Tangent from x, y, and theta components.
+    #[inline]
     pub fn new(x: f64, y: f64, theta: f64) -> Self {
         SE2Tangent {
             data: Vector3::new(x, y, theta),
         }
     }
 
+    /// Alias for `new()`, for API consistency with SO3Tangent/SE3Tangent.
+    #[inline]
+    pub fn from_components(x: f64, y: f64, theta: f64) -> Self {
+        SE2Tangent::new(x, y, theta)
+    }
+
     /// Get the x (translational) component.
+    #[inline]
     pub fn x(&self) -> f64 {
         self.data[0]
     }
 
     /// Get the y (translational) component.
+    #[inline]
     pub fn y(&self) -> f64 {
         self.data[1]
     }
 
     /// Get the theta (rotational) component.
+    #[inline]
     pub fn angle(&self) -> f64 {
         self.data[2]
     }
 
     /// Get the translation part as Vector2.
+    #[inline]
     pub fn translation(&self) -> Vector2<f64> {
         Vector2::new(self.x(), self.y())
     }
@@ -457,7 +471,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -486,7 +500,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -504,7 +518,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac[(1, 0)] = -b;
         jac[(1, 1)] = a;
 
-        if theta_sq < f64::EPSILON {
+        if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             jac[(0, 2)] = -self.y() / 2.0 + theta * self.x() / 6.0;
             jac[(1, 2)] = self.x() / 2.0 + theta * self.y() / 6.0;
         } else {
@@ -526,7 +540,7 @@ impl Tangent<SE2> for SE2Tangent {
         let sin_theta = theta.sin();
         let theta_sq = theta * theta;
 
-        let (a, b) = if theta_sq < f64::EPSILON {
+        let (a, b) = if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Taylor approximation
             let a = 1.0 - theta_sq / 6.0;
             let b = 0.5 * theta - theta * theta_sq / 24.0;
@@ -544,7 +558,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac[(1, 0)] = b;
         jac[(1, 1)] = a;
 
-        if theta_sq < f64::EPSILON {
+        if theta_sq < crate::SMALL_ANGLE_THRESHOLD {
             jac[(0, 2)] = self.y() / 2.0 + theta * self.x() / 6.0;
             jac[(1, 2)] = -self.x() / 2.0 + theta * self.y() / 6.0;
         } else {
@@ -571,7 +585,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
 
-        if theta_sq > f64::EPSILON {
+        if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
 
@@ -610,7 +624,7 @@ impl Tangent<SE2> for SE2Tangent {
         jac_inv[(1, 0)] = -jac_inv[(0, 1)];
         jac_inv[(2, 2)] = 1.0;
 
-        if theta_sq > f64::EPSILON {
+        if theta_sq > crate::SMALL_ANGLE_THRESHOLD {
             let a = theta * sin_theta;
             let b = theta * cos_theta;
 
@@ -662,9 +676,9 @@ impl Tangent<SE2> for SE2Tangent {
         use rand::Rng;
         let mut rng = rand::rng();
         SE2Tangent::new(
-            rng.random_range(-1.0..1.0),                                   // x
-            rng.random_range(-1.0..1.0),                                   // y
-            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI), // theta
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-1.0..1.0),
+            rng.random_range(-std::f64::consts::PI..std::f64::consts::PI),
         )
     }
 
@@ -697,17 +711,10 @@ impl Tangent<SE2> for SE2Tangent {
     ///
     /// For SE(2), the small adjoint involves the angular component.
     fn small_adj(&self) -> <SE2 as LieGroup>::JacobianMatrix {
-        let _theta = self.angle();
         let x = self.x();
         let y = self.y();
 
         let mut small_adj = Matrix3::zeros();
-
-        // Following the C++ manif implementation structure:
-        // smallAdj(0,1) = -angle();
-        // smallAdj(1,0) =  angle();
-        // smallAdj(0,2) =  y();
-        // smallAdj(1,2) = -x();
         small_adj[(0, 1)] = -self.angle();
         small_adj[(1, 0)] = self.angle();
         small_adj[(0, 2)] = y;
@@ -1441,5 +1448,105 @@ mod tests {
         assert_eq!(hat_matrix[(2, 0)], 0.0);
         assert_eq!(hat_matrix[(2, 1)], 0.0);
         assert_eq!(hat_matrix[(2, 2)], 0.0);
+    }
+
+    // T3: Accumulated Error Tests
+
+    #[test]
+    fn test_se2_circular_path_accumulation() {
+        // Robot driving in a circle: 360 steps of 1° turn + 1cm forward
+        let step = SE2::from_xy_angle(0.01, 0.0, (std::f64::consts::PI * 2.0) / 360.0);
+
+        let mut pose = SE2::identity();
+        for _ in 0..360 {
+            pose = pose.compose(&step, None, None);
+        }
+
+        // Should return near identity (full circle)
+        assert!(pose.is_approx(&SE2::identity(), 1e-2));
+    }
+
+    // T2: Edge Case Tests
+
+    #[test]
+    fn test_se2_angle_wrap_around() {
+        // Angles > 2π should wrap correctly
+        let se2_wrapped = SE2::from_xy_angle(1.0, 2.0, 3.0 * std::f64::consts::PI);
+        let se2_canonical = SE2::from_xy_angle(1.0, 2.0, std::f64::consts::PI);
+
+        // Log and exp should handle wrapping
+        let tangent_wrapped = se2_wrapped.log(None);
+        let tangent_canonical = se2_canonical.log(None);
+
+        // Angles should be equivalent modulo 2π
+        let angle_diff = (tangent_wrapped.angle() - tangent_canonical.angle()).abs();
+        assert!(angle_diff < 1e-10 || (angle_diff - 2.0 * std::f64::consts::PI).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_negative_angles() {
+        let se2_neg = SE2::from_xy_angle(0.5, -0.3, -std::f64::consts::PI / 4.0);
+        let tangent = se2_neg.log(None);
+        let recovered = tangent.exp(None);
+        assert!(se2_neg.is_approx(&recovered, 1e-10));
+    }
+
+    // T4: Jacobian Inverse Identity Tests
+
+    #[test]
+    fn test_se2_right_jacobian_inverse_identity() {
+        let test_tangents = vec![
+            SE2Tangent::new(0.1, 0.2, 0.3),
+            SE2Tangent::new(0.5, -0.3, 1.5),
+        ];
+
+        for tangent in test_tangents {
+            let jr = tangent.right_jacobian();
+            let jr_inv = tangent.right_jacobian_inv();
+            let product = jr * jr_inv;
+            let identity = Matrix3::identity();
+
+            assert!((product - identity).norm() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_se2_left_jacobian_inverse_identity() {
+        // Same pattern for left Jacobian
+        let tangent = SE2Tangent::new(0.2, 0.3, 0.8);
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product = jl * jl_inv;
+
+        assert!((product - Matrix3::identity()).norm() < 1e-10);
+    }
+
+    #[test]
+    fn test_se2_tangent_from_components() {
+        let t1 = SE2Tangent::new(1.0, 2.0, 0.5);
+        let t2 = SE2Tangent::from_components(1.0, 2.0, 0.5);
+        assert!(t1.is_approx(&t2, 1e-15));
+        assert_eq!(t2.x(), 1.0);
+        assert_eq!(t2.y(), 2.0);
+        assert_eq!(t2.angle(), 0.5);
+    }
+
+    #[test]
+    fn test_se2_small_angle_threshold_exp_log() {
+        // Test angles near the SMALL_ANGLE_THRESHOLD boundary round-trip correctly
+        // sqrt(1e-10) ≈ 1e-5 is the effective angle threshold
+        let near_threshold_angles = [1e-6, 1e-5, 1e-4, 1e-3];
+
+        for &angle in &near_threshold_angles {
+            let tangent = SE2Tangent::new(1.0, 2.0, angle);
+            let se2 = tangent.exp(None);
+            let recovered = se2.log(None);
+            assert!(
+                (tangent.x() - recovered.x()).abs() < 1e-10
+                    && (tangent.y() - recovered.y()).abs() < 1e-10
+                    && (tangent.angle() - recovered.angle()).abs() < 1e-10,
+                "SE2 exp-log round-trip failed for angle = {angle}"
+            );
+        }
     }
 }

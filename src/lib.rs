@@ -23,13 +23,42 @@
 //! - **Sparse Cholesky**: Efficient for positive definite systems
 //! - **Sparse QR**: More robust for rank-deficient or ill-conditioned systems
 
+// Re-export workspace crates
+pub use apex_camera_models;
+pub use apex_io;
+pub use apex_manifolds;
+
+// Create module aliases for backward compatibility
+pub mod manifold {
+    pub use apex_manifolds::*;
+}
+
+pub mod camera_models {
+    pub use apex_camera_models::*;
+}
+
+// Re-export commonly used types from workspace crates
+pub use apex_camera_models::{
+    CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera, PinholeCamera,
+    RadTanCamera, UcmCamera,
+};
+
+// Re-export optimization configuration types from factors module
+pub use apex_io::{BalLoader, G2oLoader, Graph, ToroLoader};
+pub use apex_manifolds::{
+    Interpolatable, LieGroup, ManifoldType, Tangent, rn::Rn, se2::SE2, se3::SE3, so2::SO2, so3::SO3,
+};
+pub use factors::{
+    BundleAdjustment, LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose,
+    OptimizeParams, PoseAndIntrinsics, SelfCalibration,
+};
+
+// Local modules
 pub mod core;
 pub mod error;
 pub mod factors;
-pub mod io;
 pub mod linalg;
 pub mod logger;
-pub mod manifold;
 pub mod observers;
 pub mod optimizer;
 
@@ -38,19 +67,15 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult};
 
 // Re-export factor types
-
 pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
-// Re-export new unified camera module types
-
-pub use factors::camera::{
-    BundleAdjustment, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
-    LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose, OptimizeParams, PinholeCamera,
-    PoseAndIntrinsics, RadTanCamera, SelfCalibration, UcmCamera,
-};
-
+// Re-export linear algebra types
 pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+
+// Re-export logger
 pub use logger::{init_logger, init_logger_with_level};
+
+// Re-export optimizer types
 pub use optimizer::{
     LevenbergMarquardt, OptObserver, OptObserverVec, OptimizerType, Solver,
     levenberg_marquardt::LevenbergMarquardtConfig,

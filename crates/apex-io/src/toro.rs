@@ -1,4 +1,4 @@
-use crate::io::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
+use crate::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
 use memmap2::Mmap;
 use std::{fs, io::Write, path::Path};
 
