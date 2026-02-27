@@ -653,7 +653,7 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_inv_jac = SO3Tangent::new(-theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(-rho, -theta);
         jac.fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&theta_left_inv_jac);

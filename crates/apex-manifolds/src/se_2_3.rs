@@ -22,15 +22,16 @@
 //! - manif C++ library: include/manif/impl/se_2_3/
 //! - "A micro Lie theory for state estimation in robotics" - Solà et al.
 
-use crate::manifold::{
+use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use nalgebra::{DVector, Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{DVector, Matrix3, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3};
 
-// Type aliases for SE_2(3) - 9 DOF
-type Vector9<T> = SVector<T, 9>;
-type Matrix9<T> = SMatrix<T, 9, 9>;
+/// Type alias for 9x1 vector
+pub type Vector9<T> = SVector<T, 9>;
+/// Type alias for 9x9 matrix
+pub type Matrix9<T> = SMatrix<T, 9, 9>;
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -166,37 +167,80 @@ impl SE_2_3 {
     pub fn vz(&self) -> f64 {
         self.velocity.z
     }
+
+    /// Get the rotation matrix (3x3).
+    pub fn rotation_matrix(&self) -> Matrix3<f64> {
+        self.rotation.rotation_matrix()
+    }
+
+    /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz].
+    pub fn coeffs(&self) -> [f64; 10] {
+        let q = self.rotation.quaternion();
+        [
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+            self.velocity.x,
+            self.velocity.y,
+            self.velocity.z,
+        ]
+    }
+
+    /// Get the 5x5 homogeneous matrix representation.
+    ///
+    /// ```text
+    /// [ R   t   v ]
+    /// [ 0   1   0 ]
+    /// [ 0   0   1 ]
+    /// ```
+    pub fn matrix(&self) -> SMatrix<f64, 5, 5> {
+        let mut mat = SMatrix::<f64, 5, 5>::identity();
+        let rot = self.rotation_matrix();
+        mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
+        mat[(0, 3)] = self.translation.x;
+        mat[(1, 3)] = self.translation.y;
+        mat[(2, 3)] = self.translation.z;
+        mat[(0, 4)] = self.velocity.x;
+        mat[(1, 4)] = self.velocity.y;
+        mat[(2, 4)] = self.velocity.z;
+        mat
+    }
 }
 
-// Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SE_2_3 {
+    /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
     fn from(data: DVector<f64>) -> Self {
         let translation = Vector3::new(data[0], data[1], data[2]);
-        let velocity = Vector3::new(data[3], data[4], data[5]);
-        let rotation = SO3::from_quaternion_coeffs(data[6], data[7], data[8], data[9]);
+        let q = Quaternion::new(data[3], data[4], data[5], data[6]);
+        let rotation = SO3::new(UnitQuaternion::from_quaternion(q));
+        let velocity = Vector3::new(data[7], data[8], data[9]);
         SE_2_3::from_components(translation, velocity, rotation)
     }
 }
 
 impl From<SE_2_3> for DVector<f64> {
+    /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
     fn from(se_2_3: SE_2_3) -> Self {
         let q = se_2_3.rotation.quaternion();
         DVector::from_vec(vec![
             se_2_3.translation.x,
             se_2_3.translation.y,
             se_2_3.translation.z,
-            se_2_3.velocity.x,
-            se_2_3.velocity.y,
-            se_2_3.velocity.z,
+            q.w,
             q.i,
             q.j,
             q.k,
-            q.w,
+            se_2_3.velocity.x,
+            se_2_3.velocity.y,
+            se_2_3.velocity.z,
         ])
     }
 }
 
-// Implement LieGroup trait
 impl LieGroup for SE_2_3 {
     type TangentVector = SE_2_3Tangent;
     type JacobianMatrix = Matrix9<f64>;
@@ -371,6 +415,14 @@ impl LieGroup for SE_2_3 {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
     }
+
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix9::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix9::<f64>::zeros()
+    }
 }
 
 /// SE_2(3) tangent space element.
@@ -437,6 +489,28 @@ impl SE_2_3Tangent {
         self.data.fixed_rows::<3>(6).into_owned()
     }
 
+    /// Create SE_2_3Tangent from individual scalar components.
+    ///
+    /// Order: [ρ_x, ρ_y, ρ_z, θ_x, θ_y, θ_z, ν_x, ν_y, ν_z]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_components(
+        rho_x: f64,
+        rho_y: f64,
+        rho_z: f64,
+        theta_x: f64,
+        theta_y: f64,
+        theta_z: f64,
+        nu_x: f64,
+        nu_y: f64,
+        nu_z: f64,
+    ) -> Self {
+        SE_2_3Tangent {
+            data: Vector9::from_column_slice(&[
+                rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, nu_x, nu_y, nu_z,
+            ]),
+        }
+    }
+
     /// Compute the Q matrix for SE_2(3) Jacobians (same as SE(3)).
     fn q_matrix(rho: Vector3<f64>, theta: Vector3<f64>) -> Matrix3<f64> {
         let rho_skew = SO3Tangent::new(rho).hat();
@@ -448,7 +522,7 @@ impl SE_2_3Tangent {
         let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
         let mut d = -1.0 / 60.0;
 
-        if theta_squared > f64::EPSILON {
+        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
             let theta_norm_3 = theta_norm * theta_squared;
             let theta_norm_4 = theta_squared * theta_squared;
@@ -547,7 +621,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
         let theta = self.theta();
         let nu = self.nu();
 
-        let theta_left_inv_jac = SO3Tangent::new(-theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
         let q_rho = Self::q_matrix(-rho, -theta);
         let q_nu = Self::q_matrix(-nu, -theta);
 
@@ -1052,5 +1126,243 @@ mod tests {
         assert_eq!(se_2_3.vx(), 4.0);
         assert_eq!(se_2_3.vy(), 5.0);
         assert_eq!(se_2_3.vz(), 6.0);
+    }
+
+    #[test]
+    fn test_se_2_3_tangent_basic() {
+        let tangent = SE_2_3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+
+        assert!((tangent.rho() - Vector3::new(1.0, 2.0, 3.0)).norm() < TOLERANCE);
+        assert!((tangent.theta() - Vector3::new(0.1, 0.2, 0.3)).norm() < TOLERANCE);
+        assert!((tangent.nu() - Vector3::new(4.0, 5.0, 6.0)).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se_2_3_tangent_from_components() {
+        let tangent = SE_2_3Tangent::from_components(1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0, 6.0);
+
+        let expected = SE_2_3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+
+        assert!(tangent.is_approx(&expected, TOLERANCE));
+    }
+
+    #[test]
+    fn test_se_2_3_normalize() {
+        let mut se_2_3 = SE_2_3::random();
+        se_2_3.normalize();
+        assert!(se_2_3.is_valid(TOLERANCE));
+
+        let mut identity = SE_2_3::identity();
+        identity.normalize();
+        assert!(identity.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_se_2_3_coeffs() {
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let velocity = Vector3::new(4.0, 5.0, 6.0);
+        let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
+
+        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let c = se_2_3.coeffs();
+
+        assert!((c[0] - 1.0).abs() < TOLERANCE);
+        assert!((c[1] - 2.0).abs() < TOLERANCE);
+        assert!((c[2] - 3.0).abs() < TOLERANCE);
+        let q = se_2_3.rotation_quaternion();
+        assert!((c[3] - q.w).abs() < TOLERANCE);
+        assert!((c[4] - q.i).abs() < TOLERANCE);
+        assert!((c[5] - q.j).abs() < TOLERANCE);
+        assert!((c[6] - q.k).abs() < TOLERANCE);
+        assert!((c[7] - 4.0).abs() < TOLERANCE);
+        assert!((c[8] - 5.0).abs() < TOLERANCE);
+        assert!((c[9] - 6.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se_2_3_matrix() {
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let velocity = Vector3::new(4.0, 5.0, 6.0);
+        let rotation = UnitQuaternion::identity();
+
+        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let mat = se_2_3.matrix();
+
+        // Top-left 3x3 is rotation (identity here)
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((mat[(i, j)] - expected).abs() < TOLERANCE);
+            }
+        }
+        // Translation column
+        assert!((mat[(0, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((mat[(1, 3)] - 2.0).abs() < TOLERANCE);
+        assert!((mat[(2, 3)] - 3.0).abs() < TOLERANCE);
+        // Velocity column
+        assert!((mat[(0, 4)] - 4.0).abs() < TOLERANCE);
+        assert!((mat[(1, 4)] - 5.0).abs() < TOLERANCE);
+        assert!((mat[(2, 4)] - 6.0).abs() < TOLERANCE);
+        // Bottom rows
+        assert!((mat[(3, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((mat[(4, 4)] - 1.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se_2_3_manif_like_operations() {
+        let a = SE_2_3::random();
+        let b = SE_2_3::random();
+        let c = SE_2_3::random();
+
+        // plus(minus(b, a)) == b
+        let diff = b.right_minus(&a, None, None);
+        let recovered = a.right_plus(&diff, None, None);
+        assert!(recovered.is_approx(&b, 1e-8));
+
+        // between chain: a.between(b).compose(b.between(c)) == a.between(c)
+        let ab = a.between(&b, None, None);
+        let bc = b.between(&c, None, None);
+        let ac = a.between(&c, None, None);
+        let chain = ab.compose(&bc, None, None);
+        assert!(chain.is_approx(&ac, 1e-8));
+    }
+
+    #[test]
+    fn test_se_2_3_right_jacobian_inverse_identity() {
+        let tangent = SE_2_3Tangent::new(
+            Vector3::new(0.1, -0.2, 0.3),
+            Vector3::new(0.05, -0.03, 0.07),
+            Vector3::new(0.4, 0.5, -0.6),
+        );
+
+        let jr = tangent.right_jacobian();
+        let jr_inv = tangent.right_jacobian_inv();
+        let product = jr * jr_inv;
+
+        let identity = Matrix9::<f64>::identity();
+        assert!(
+            (product - identity).norm() < 1e-8,
+            "Jr * Jr_inv should be identity, error = {}",
+            (product - identity).norm()
+        );
+    }
+
+    #[test]
+    fn test_se_2_3_left_jacobian_inverse_identity() {
+        let tangent = SE_2_3Tangent::new(
+            Vector3::new(0.1, -0.2, 0.3),
+            Vector3::new(0.05, -0.03, 0.07),
+            Vector3::new(0.4, 0.5, -0.6),
+        );
+
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product = jl * jl_inv;
+
+        let identity = Matrix9::<f64>::identity();
+        assert!(
+            (product - identity).norm() < 1e-8,
+            "Jl * Jl_inv should be identity, error = {}",
+            (product - identity).norm()
+        );
+    }
+
+    #[test]
+    fn test_se_2_3_jacobi_identity() {
+        let a = SE_2_3Tangent::random();
+        let b = SE_2_3Tangent::random();
+        let c = SE_2_3Tangent::random();
+
+        let bc = b.lie_bracket(&c);
+        let ca = c.lie_bracket(&a);
+        let ab = a.lie_bracket(&b);
+
+        let term1 = a.lie_bracket(&bc);
+        let term2 = b.lie_bracket(&ca);
+        let term3 = c.lie_bracket(&ab);
+
+        let sum = term1.data + term2.data + term3.data;
+        assert!(
+            sum.norm() < 1e-8,
+            "Jacobi identity violated, norm = {}",
+            sum.norm()
+        );
+    }
+
+    #[test]
+    fn test_se_2_3_hat_matrix_structure() {
+        let tangent = SE_2_3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+        let hat = tangent.hat();
+
+        // Top-left 3x3 should be skew-symmetric (theta hat)
+        let theta_hat = SO3Tangent::new(tangent.theta()).hat();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (hat[(i, j)] - theta_hat[(i, j)]).abs() < TOLERANCE,
+                    "hat({},{}) mismatch",
+                    i,
+                    j
+                );
+            }
+        }
+
+        // Column 3 should be rho
+        assert!((hat[(0, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((hat[(1, 3)] - 2.0).abs() < TOLERANCE);
+        assert!((hat[(2, 3)] - 3.0).abs() < TOLERANCE);
+
+        // Column 4 should be nu
+        assert!((hat[(0, 4)] - 4.0).abs() < TOLERANCE);
+        assert!((hat[(1, 4)] - 5.0).abs() < TOLERANCE);
+        assert!((hat[(2, 4)] - 6.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se_2_3_dvector_round_trip() {
+        let se_2_3 = SE_2_3::random();
+        let dvec: DVector<f64> = se_2_3.clone().into();
+        let recovered = SE_2_3::from(dvec);
+        assert!(se_2_3.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn test_se_2_3_tangent_norm() {
+        let tangent = SE_2_3Tangent::new(
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::zeros(),
+            Vector3::zeros(),
+        );
+        assert!((tangent.data.norm() - 1.0).abs() < TOLERANCE);
+
+        let zero = SE_2_3Tangent::zero();
+        assert!(zero.data.norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se_2_3_tangent_normalize() {
+        let mut tangent = SE_2_3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.3, 0.4, 0.0),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+        tangent.normalize();
+        let theta_norm = tangent.theta().norm();
+        assert!((theta_norm - 1.0).abs() < TOLERANCE);
+
+        let normalized = tangent.normalized();
+        assert!((normalized.theta().norm() - 1.0).abs() < TOLERANCE);
     }
 }

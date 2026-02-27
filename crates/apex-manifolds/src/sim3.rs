@@ -29,7 +29,7 @@
 //! - Ethan Eade: "Lie Groups for Computer Vision" - https://www.ethaneade.com/lie.pdf
 //! - Sophus library: sophus/sim3.hpp
 
-use crate::manifold::{
+use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
@@ -177,13 +177,27 @@ impl Sim3 {
     pub fn z(&self) -> f64 {
         self.translation.z
     }
+
+    /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, s].
+    pub fn coeffs(&self) -> [f64; 8] {
+        let q = self.rotation.quaternion();
+        [
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+            self.scale,
+        ]
+    }
 }
 
-// Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for Sim3 {
     fn from(data: DVector<f64>) -> Self {
         let translation = Vector3::new(data[0], data[1], data[2]);
-        let rotation = SO3::from_quaternion_coeffs(data[3], data[4], data[5], data[6]);
+        let rotation = SO3::from_quaternion_wxyz(data[3], data[4], data[5], data[6]);
         let scale = data[7];
         Sim3::from_components(translation, rotation, scale)
     }
@@ -196,16 +210,15 @@ impl From<Sim3> for DVector<f64> {
             sim3.translation.x,
             sim3.translation.y,
             sim3.translation.z,
+            q.w,
             q.i,
             q.j,
             q.k,
-            q.w,
             sim3.scale,
         ])
     }
 }
 
-// Implement LieGroup trait
 impl LieGroup for Sim3 {
     type TangentVector = Sim3Tangent;
     type JacobianMatrix = Matrix7<f64>;
@@ -381,6 +394,14 @@ impl LieGroup for Sim3 {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
     }
+
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix7::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix7::<f64>::zeros()
+    }
 }
 
 impl Sim3 {
@@ -390,15 +411,14 @@ impl Sim3 {
     fn compute_v_inv(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let theta_norm_sq = theta.coeffs().norm_squared();
 
-        if theta_norm_sq < f64::EPSILON && sigma.abs() < f64::EPSILON {
-            // Small angle and small scale approximation
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
             return Matrix3::identity();
         }
 
         let theta_hat = theta.hat();
         let theta_hat_sq = theta_hat * theta_hat;
 
-        if theta_norm_sq < f64::EPSILON {
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD {
             // Only scale, no rotation
             let a = if sigma.abs() < f64::EPSILON {
                 1.0
@@ -491,20 +511,34 @@ impl Sim3Tangent {
         self.data[6]
     }
 
+    /// Create Sim3Tangent from individual scalar components.
+    pub fn from_components(
+        rho_x: f64,
+        rho_y: f64,
+        rho_z: f64,
+        theta_x: f64,
+        theta_y: f64,
+        theta_z: f64,
+        sigma: f64,
+    ) -> Self {
+        Sim3Tangent {
+            data: Vector7::from_column_slice(&[rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, sigma]),
+        }
+    }
+
     /// Compute the V matrix for Sim(3) exponential map.
     ///
     /// Based on Ethan Eade's formulation.
     fn v_matrix(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let theta_norm_sq = theta.coeffs().norm_squared();
 
-        if theta_norm_sq < f64::EPSILON && sigma.abs() < f64::EPSILON {
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
             return Matrix3::identity();
         }
 
         let theta_hat = theta.hat();
 
-        if theta_norm_sq < f64::EPSILON {
-            // Only scale, no rotation
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD {
             let a = if sigma.abs() < f64::EPSILON {
                 1.0
             } else {
@@ -536,18 +570,16 @@ impl Sim3Tangent {
         let theta_skew = SO3Tangent::new(theta).hat();
         let theta_squared = theta.norm_squared();
 
-        // For small angles, use Taylor series approximation
-        if theta_squared < f64::EPSILON && sigma.abs() < f64::EPSILON {
+        if theta_squared < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
             return 0.5 * rho_skew;
         }
 
-        // General case - extended version of SE(3) Q matrix with scale term
         let a = 0.5;
         let mut b = 1.0 / 6.0;
         let mut c = -1.0 / 24.0;
         let mut d = -1.0 / 60.0;
 
-        if theta_squared > f64::EPSILON {
+        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
             let theta_norm_3 = theta_norm * theta_squared;
             let theta_norm_4 = theta_squared * theta_squared;
@@ -653,7 +685,7 @@ impl Tangent<Sim3> for Sim3Tangent {
         let theta = self.theta();
         let sigma = self.sigma();
 
-        let theta_left_inv_jac = SO3Tangent::new(-theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
         let q_block = Self::q_matrix(-rho, -theta, -sigma);
 
         jac.fixed_view_mut::<3, 3>(0, 0)
@@ -780,7 +812,7 @@ impl Tangent<Sim3> for Sim3Tangent {
         small_adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&rho_skew);
         small_adj
             .fixed_view_mut::<3, 1>(0, 6)
-            .copy_from(&self.rho());
+            .copy_from(&(-self.rho()));
         small_adj
             .fixed_view_mut::<3, 3>(3, 3)
             .copy_from(&theta_skew);
@@ -1199,9 +1231,140 @@ mod tests {
 
         let transformed = sim3.act(&point, None, None);
 
-        // With identity rotation and zero translation, should just scale
         assert!((transformed.x - 2.0).abs() < TOLERANCE);
         assert!((transformed.y - 4.0).abs() < TOLERANCE);
         assert!((transformed.z - 6.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_tangent_basic() {
+        let rho = Vector3::new(0.1, 0.2, 0.3);
+        let theta = Vector3::new(0.4, 0.5, 0.6);
+        let sigma = 0.1;
+        let tangent = Sim3Tangent::new(rho, theta, sigma);
+        assert!((tangent.rho() - rho).norm() < TOLERANCE);
+        assert!((tangent.theta() - theta).norm() < TOLERANCE);
+        assert!((tangent.sigma() - sigma).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_tangent_from_components() {
+        let t1 = Sim3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.4, 0.5, 0.6),
+            0.1,
+        );
+        let t2 = Sim3Tangent::from_components(1.0, 2.0, 3.0, 0.4, 0.5, 0.6, 0.1);
+        assert!(t1.is_approx(&t2, TOLERANCE));
+    }
+
+    #[test]
+    fn test_sim3_normalize() {
+        let mut sim3 = Sim3::random();
+        sim3.normalize();
+        assert!(sim3.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_sim3_coeffs() {
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let rotation = UnitQuaternion::identity();
+        let scale = 1.5;
+        let sim3 = Sim3::new(translation, rotation, scale);
+        let c = sim3.coeffs();
+        assert!((c[0] - 1.0).abs() < TOLERANCE);
+        assert!((c[1] - 2.0).abs() < TOLERANCE);
+        assert!((c[2] - 3.0).abs() < TOLERANCE);
+        assert!((c[3] - 1.0).abs() < TOLERANCE); // qw
+        assert!((c[7] - 1.5).abs() < TOLERANCE); // scale
+    }
+
+    #[test]
+    fn test_sim3_manif_like_operations() {
+        let a = Sim3::random();
+        let b = Sim3::random();
+
+        let a_to_b = a.between(&b, None, None);
+        let recovered_b = a.compose(&a_to_b, None, None);
+        assert!(recovered_b.is_approx(&b, TOLERANCE));
+
+        let tangent = Sim3Tangent::new(
+            Vector3::new(0.01, 0.02, 0.03),
+            Vector3::new(0.001, 0.002, 0.003),
+            0.01,
+        );
+        let perturbed = a.plus(&tangent, None, None);
+        let recovered_tangent = perturbed.minus(&a, None, None);
+        assert!((tangent.data - recovered_tangent.data).norm() < 1e-6);
+    }
+
+    #[test]
+    fn test_sim3_right_jacobian_inverse_identity() {
+        let tangent = Sim3Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.01, 0.02, 0.03),
+            0.1,
+        );
+        let jr = tangent.right_jacobian();
+        let jr_inv = tangent.right_jacobian_inv();
+        let product = jr * jr_inv;
+        let identity = Matrix7::<f64>::identity();
+        assert!((product - identity).norm() < 0.01);
+    }
+
+    #[test]
+    fn test_sim3_left_jacobian_inverse_identity() {
+        let tangent = Sim3Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.01, 0.02, 0.03),
+            0.1,
+        );
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product = jl * jl_inv;
+        let identity = Matrix7::<f64>::identity();
+        assert!((product - identity).norm() < 0.01);
+    }
+
+    #[test]
+    fn test_sim3_jacobi_identity() {
+        let a = Sim3Tangent::random();
+        let b = Sim3Tangent::random();
+        let c = Sim3Tangent::random();
+
+        let term1 = a.lie_bracket(&b.lie_bracket(&c));
+        let term2 = b.lie_bracket(&c.lie_bracket(&a));
+        let term3 = c.lie_bracket(&a.lie_bracket(&b));
+
+        assert!((term1.data + term2.data + term3.data).norm() < 1e-8);
+    }
+
+    #[test]
+    fn test_sim3_hat_matrix_structure() {
+        let tangent = Sim3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let hat = tangent.hat();
+
+        for j in 0..4 {
+            assert_eq!(hat[(3, j)], 0.0);
+        }
+
+        assert!((hat[(0, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((hat[(1, 3)] - 2.0).abs() < TOLERANCE);
+        assert!((hat[(2, 3)] - 3.0).abs() < TOLERANCE);
+
+        // Diagonal includes sigma
+        assert!((hat[(0, 0)] - 0.5).abs() < 0.5); // theta_skew + sigma
+    }
+
+    #[test]
+    fn test_sim3_dvector_round_trip() {
+        let sim3 = Sim3::random();
+        let dvec: DVector<f64> = sim3.clone().into();
+        let recovered: Sim3 = dvec.into();
+        assert!(sim3.is_approx(&recovered, TOLERANCE));
     }
 }

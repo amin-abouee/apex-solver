@@ -3,7 +3,9 @@
 //! This module provides manifold representations commonly used in computer vision and robotics:
 //! - **SE(3)**: Special Euclidean group (rigid body transformations)
 //! - **SO(3)**: Special Orthogonal group (rotations)
-//! - **Sim(3)**: Similarity transformations
+//! - **Sim(3)**: Similarity transformations (rotation + translation + scale)
+//! - **SGal(3)**: Special Galilean group (rotation + translation + velocity + time)
+//! - **SE_2(3)**: Extended Special Euclidean group (rotation + translation + velocity)
 //! - **SE(2)**: Rigid transformations in 2D
 //! - **SO(2)**: Rotations in 2D
 //!
@@ -16,6 +18,9 @@
 //! 3-sphere      | S³,.   | 4   | 3   | q ∈ H             | q*q = 1         | θ/2 ∈ Hp          | θ ∈ R³                | q = exp(uθ/2)      | q₁q₂  | qxq*
 //! Rotation      | SO(3),.| 9   | 3   | R                 | RᵀR = I         | [θ]x ∈ so(3)      | [θ] ∈ R³              | R = exp([θ]x)      | R₁R₂  | Rx
 //! Rigid motion  | SE(3),.| 16  | 6   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(3)       | [v̂] ∈ R⁶              | Exp([v̂])           | M₁M₂  | Rx+t
+//! Similarity    | Sim(3),.| 16 | 7   | M = [sR t; 0 1]   | RᵀR=I, s>0     | [v̂] ∈ sim(3)      | [ρ,θ,σ] ∈ R⁷          | Exp([v̂])           | M₁M₂  | sRx+t
+//! Galilean      | SGal(3),.| 25| 10  | (R,t,v,s)         | RᵀR = I         | [v̂] ∈ sgal(3)     | [ρ,ν,θ,s] ∈ R¹⁰       | Exp([v̂])           | M₁M₂  | Rx+t+sv
+//! Extended pose | SE_2(3),.| 25| 9   | (R,t,v)           | RᵀR = I         | [v̂] ∈ se_2_3      | [ρ,θ,ν] ∈ R⁹          | Exp([v̂])           | M₁M₂  | Rx+t
 //!
 //! The design is inspired by the [manif](https://github.com/artivis/manif) C++ library
 //! and provides:

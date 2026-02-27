@@ -26,11 +26,11 @@
 //! - manif C++ library: include/manif/impl/sgal3/
 //! - "All About the Galilean Group SGal(3)" (arXiv:2312.07555)
 
-use crate::manifold::{
+use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use nalgebra::{DVector, Matrix3, SMatrix, UnitQuaternion, Vector3};
+use nalgebra::{DVector, Matrix3, Quaternion, SMatrix, UnitQuaternion, Vector3};
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -185,14 +185,58 @@ impl SGal3 {
     pub fn vz(&self) -> f64 {
         self.velocity.z
     }
+
+    /// Get the rotation matrix (3x3).
+    pub fn rotation_matrix(&self) -> Matrix3<f64> {
+        self.rotation.rotation_matrix()
+    }
+
+    /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, s].
+    pub fn coeffs(&self) -> [f64; 11] {
+        let q = self.rotation.quaternion();
+        [
+            self.translation.x,
+            self.translation.y,
+            self.translation.z,
+            q.w,
+            q.i,
+            q.j,
+            q.k,
+            self.velocity.x,
+            self.velocity.y,
+            self.velocity.z,
+            self.time,
+        ]
+    }
+
+    /// Get the 5x5 homogeneous matrix representation.
+    ///
+    /// ```text
+    /// [ R   t   v ]
+    /// [ 0   1   s ]
+    /// [ 0   0   1 ]
+    /// ```
+    pub fn matrix(&self) -> SMatrix<f64, 5, 5> {
+        let mut mat = SMatrix::<f64, 5, 5>::identity();
+        let rot = self.rotation_matrix();
+        mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
+        mat[(0, 3)] = self.translation.x;
+        mat[(1, 3)] = self.translation.y;
+        mat[(2, 3)] = self.translation.z;
+        mat[(0, 4)] = self.velocity.x;
+        mat[(1, 4)] = self.velocity.y;
+        mat[(2, 4)] = self.velocity.z;
+        mat[(3, 4)] = self.time;
+        mat
+    }
 }
 
-// Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SGal3 {
     fn from(data: DVector<f64>) -> Self {
         let translation = Vector3::new(data[0], data[1], data[2]);
-        let velocity = Vector3::new(data[3], data[4], data[5]);
-        let rotation = SO3::from_quaternion_coeffs(data[6], data[7], data[8], data[9]);
+        let q = Quaternion::new(data[3], data[4], data[5], data[6]);
+        let rotation = SO3::new(UnitQuaternion::from_quaternion(q));
+        let velocity = Vector3::new(data[7], data[8], data[9]);
         let time = data[10];
         SGal3::from_components(translation, velocity, rotation, time)
     }
@@ -205,19 +249,18 @@ impl From<SGal3> for DVector<f64> {
             sgal3.translation.x,
             sgal3.translation.y,
             sgal3.translation.z,
-            sgal3.velocity.x,
-            sgal3.velocity.y,
-            sgal3.velocity.z,
+            q.w,
             q.i,
             q.j,
             q.k,
-            q.w,
+            sgal3.velocity.x,
+            sgal3.velocity.y,
+            sgal3.velocity.z,
             sgal3.time,
         ])
     }
 }
 
-// Implement LieGroup trait
 impl LieGroup for SGal3 {
     type TangentVector = SGal3Tangent;
     type JacobianMatrix = Matrix10<f64>;
@@ -425,6 +468,14 @@ impl LieGroup for SGal3 {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
     }
+
+    fn jacobian_identity() -> Self::JacobianMatrix {
+        Matrix10::<f64>::identity()
+    }
+
+    fn zero_jacobian() -> Self::JacobianMatrix {
+        Matrix10::<f64>::zeros()
+    }
 }
 
 /// SGal(3) tangent space element.
@@ -502,6 +553,29 @@ impl SGal3Tangent {
         self.data[9]
     }
 
+    /// Create SGal3Tangent from individual scalar components.
+    ///
+    /// Order: [ρ_x, ρ_y, ρ_z, ν_x, ν_y, ν_z, θ_x, θ_y, θ_z, s]
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_components(
+        rho_x: f64,
+        rho_y: f64,
+        rho_z: f64,
+        nu_x: f64,
+        nu_y: f64,
+        nu_z: f64,
+        theta_x: f64,
+        theta_y: f64,
+        theta_z: f64,
+        s: f64,
+    ) -> Self {
+        SGal3Tangent {
+            data: Vector10::from_column_slice(&[
+                rho_x, rho_y, rho_z, nu_x, nu_y, nu_z, theta_x, theta_y, theta_z, s,
+            ]),
+        }
+    }
+
     /// Compute the Q matrix for SGal(3) Jacobians (same as SE(3)).
     fn q_matrix(rho: Vector3<f64>, theta: Vector3<f64>) -> Matrix3<f64> {
         let rho_skew = SO3Tangent::new(rho).hat();
@@ -513,7 +587,7 @@ impl SGal3Tangent {
         let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
         let mut d = -1.0 / 60.0;
 
-        if theta_squared > f64::EPSILON {
+        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
             let theta_norm_3 = theta_norm * theta_squared;
             let theta_norm_4 = theta_squared * theta_squared;
@@ -615,7 +689,7 @@ impl Tangent<SGal3> for SGal3Tangent {
         let nu = self.nu();
         let theta = self.theta();
 
-        let theta_left_inv_jac = SO3Tangent::new(-theta).left_jacobian_inv();
+        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
         let q_rho = Self::q_matrix(-rho, -theta);
         let q_nu = Self::q_matrix(-nu, -theta);
 
@@ -741,8 +815,8 @@ impl Tangent<SGal3> for SGal3Tangent {
         let theta_skew = SO3Tangent::new(self.theta()).hat();
 
         // Block structure for SGal(3) with ordering [ρ, ν, θ, s]:
-        // [θ×   0    ρ×   ρ ]
-        // [0    θ×   ν×   ν ]
+        // [θ×   0    ρ×   ν ]
+        // [0    θ×   ν×   0 ]
         // [0    0    θ×   0 ]
         // [0    0    0    0 ]
 
@@ -752,13 +826,12 @@ impl Tangent<SGal3> for SGal3Tangent {
         small_adj.fixed_view_mut::<3, 3>(0, 6).copy_from(&rho_skew);
         small_adj
             .fixed_view_mut::<3, 1>(0, 9)
-            .copy_from(&self.rho());
+            .copy_from(&self.nu());
 
         small_adj
             .fixed_view_mut::<3, 3>(3, 3)
             .copy_from(&theta_skew);
         small_adj.fixed_view_mut::<3, 3>(3, 6).copy_from(&nu_skew);
-        small_adj.fixed_view_mut::<3, 1>(3, 9).copy_from(&self.nu());
 
         small_adj
             .fixed_view_mut::<3, 3>(6, 6)
@@ -1137,7 +1210,6 @@ mod tests {
 
     #[test]
     fn test_sgal3_tangent_ordering() {
-        // Test that the tangent ordering is [ρ, ν, θ, s]
         let rho = Vector3::new(1.0, 2.0, 3.0);
         let nu = Vector3::new(4.0, 5.0, 6.0);
         let theta = Vector3::new(0.1, 0.2, 0.3);
@@ -1150,7 +1222,6 @@ mod tests {
         assert_eq!(tangent.theta(), theta);
         assert_eq!(tangent.s(), s);
 
-        // Check data ordering
         assert_eq!(tangent.data[0], 1.0); // ρ_x
         assert_eq!(tangent.data[1], 2.0); // ρ_y
         assert_eq!(tangent.data[2], 3.0); // ρ_z
@@ -1161,5 +1232,261 @@ mod tests {
         assert_eq!(tangent.data[7], 0.2); // θ_y
         assert_eq!(tangent.data[8], 0.3); // θ_z
         assert_eq!(tangent.data[9], 0.5); // s
+    }
+
+    #[test]
+    fn test_sgal3_tangent_basic() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+
+        assert!((tangent.rho() - Vector3::new(1.0, 2.0, 3.0)).norm() < TOLERANCE);
+        assert!((tangent.nu() - Vector3::new(4.0, 5.0, 6.0)).norm() < TOLERANCE);
+        assert!((tangent.theta() - Vector3::new(0.1, 0.2, 0.3)).norm() < TOLERANCE);
+        assert!((tangent.s() - 0.5).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_tangent_from_components() {
+        let tangent =
+            SGal3Tangent::from_components(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.1, 0.2, 0.3, 0.5);
+
+        let expected = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+
+        assert!(tangent.is_approx(&expected, TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_normalize() {
+        let mut sgal3 = SGal3::random();
+        sgal3.normalize();
+        assert!(sgal3.is_valid(TOLERANCE));
+
+        // Normalize identity
+        let mut identity = SGal3::identity();
+        identity.normalize();
+        assert!(identity.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_coeffs() {
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let velocity = Vector3::new(4.0, 5.0, 6.0);
+        let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
+        let time = 0.5;
+
+        let sgal3 = SGal3::new(translation, velocity, rotation, time);
+        let c = sgal3.coeffs();
+
+        assert!((c[0] - 1.0).abs() < TOLERANCE);
+        assert!((c[1] - 2.0).abs() < TOLERANCE);
+        assert!((c[2] - 3.0).abs() < TOLERANCE);
+        // qw, qx, qy, qz
+        let q = sgal3.rotation_quaternion();
+        assert!((c[3] - q.w).abs() < TOLERANCE);
+        assert!((c[4] - q.i).abs() < TOLERANCE);
+        assert!((c[5] - q.j).abs() < TOLERANCE);
+        assert!((c[6] - q.k).abs() < TOLERANCE);
+        // vx, vy, vz
+        assert!((c[7] - 4.0).abs() < TOLERANCE);
+        assert!((c[8] - 5.0).abs() < TOLERANCE);
+        assert!((c[9] - 6.0).abs() < TOLERANCE);
+        // time
+        assert!((c[10] - 0.5).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_matrix() {
+        let translation = Vector3::new(1.0, 2.0, 3.0);
+        let velocity = Vector3::new(4.0, 5.0, 6.0);
+        let rotation = UnitQuaternion::identity();
+        let time = 0.5;
+
+        let sgal3 = SGal3::new(translation, velocity, rotation, time);
+        let mat = sgal3.matrix();
+
+        // Top-left 3x3 is rotation (identity here)
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!((mat[(i, j)] - expected).abs() < TOLERANCE);
+            }
+        }
+        // Translation column
+        assert!((mat[(0, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((mat[(1, 3)] - 2.0).abs() < TOLERANCE);
+        assert!((mat[(2, 3)] - 3.0).abs() < TOLERANCE);
+        // Velocity column
+        assert!((mat[(0, 4)] - 4.0).abs() < TOLERANCE);
+        assert!((mat[(1, 4)] - 5.0).abs() < TOLERANCE);
+        assert!((mat[(2, 4)] - 6.0).abs() < TOLERANCE);
+        // Time
+        assert!((mat[(3, 4)] - 0.5).abs() < TOLERANCE);
+        // Bottom row
+        assert!((mat[(4, 4)] - 1.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_manif_like_operations() {
+        let a = SGal3::random();
+        let b = SGal3::random();
+        let c = SGal3::random();
+
+        // plus(minus(b, a)) == b
+        let diff = b.right_minus(&a, None, None);
+        let recovered = a.right_plus(&diff, None, None);
+        assert!(recovered.is_approx(&b, 1e-8));
+
+        // between chain: a.between(b).compose(b.between(c)) == a.between(c)
+        let ab = a.between(&b, None, None);
+        let bc = b.between(&c, None, None);
+        let ac = a.between(&c, None, None);
+        let chain = ab.compose(&bc, None, None);
+        assert!(chain.is_approx(&ac, 1e-8));
+    }
+
+    #[test]
+    fn test_sgal3_right_jacobian_inverse_identity() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(0.1, -0.2, 0.3),
+            Vector3::new(0.4, 0.5, -0.6),
+            Vector3::new(0.05, -0.03, 0.07),
+            0.2,
+        );
+
+        let jr = tangent.right_jacobian();
+        let jr_inv = tangent.right_jacobian_inv();
+        let product = jr * jr_inv;
+
+        let identity = Matrix10::<f64>::identity();
+        assert!(
+            (product - identity).norm() < 1e-8,
+            "Jr * Jr_inv should be identity, error = {}",
+            (product - identity).norm()
+        );
+    }
+
+    #[test]
+    fn test_sgal3_left_jacobian_inverse_identity() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(0.1, -0.2, 0.3),
+            Vector3::new(0.4, 0.5, -0.6),
+            Vector3::new(0.05, -0.03, 0.07),
+            0.2,
+        );
+
+        let jl = tangent.left_jacobian();
+        let jl_inv = tangent.left_jacobian_inv();
+        let product = jl * jl_inv;
+
+        let identity = Matrix10::<f64>::identity();
+        assert!(
+            (product - identity).norm() < 1e-8,
+            "Jl * Jl_inv should be identity, error = {}",
+            (product - identity).norm()
+        );
+    }
+
+    #[test]
+    fn test_sgal3_jacobi_identity() {
+        // Jacobi identity: [a, [b, c]] + [b, [c, a]] + [c, [a, b]] = 0
+        let a = SGal3Tangent::random();
+        let b = SGal3Tangent::random();
+        let c = SGal3Tangent::random();
+
+        let bc = b.lie_bracket(&c);
+        let ca = c.lie_bracket(&a);
+        let ab = a.lie_bracket(&b);
+
+        let term1 = a.lie_bracket(&bc);
+        let term2 = b.lie_bracket(&ca);
+        let term3 = c.lie_bracket(&ab);
+
+        let sum = term1.data + term2.data + term3.data;
+        assert!(
+            sum.norm() < 1e-8,
+            "Jacobi identity violated, norm = {}",
+            sum.norm()
+        );
+    }
+
+    #[test]
+    fn test_sgal3_hat_matrix_structure() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let hat = tangent.hat();
+
+        // Top-left 3x3 should be skew-symmetric (theta hat)
+        let theta_hat = SO3Tangent::new(tangent.theta()).hat();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(
+                    (hat[(i, j)] - theta_hat[(i, j)]).abs() < TOLERANCE,
+                    "hat({},{}) mismatch",
+                    i,
+                    j
+                );
+            }
+        }
+
+        // Column 3 should be rho
+        assert!((hat[(0, 3)] - 1.0).abs() < TOLERANCE);
+        assert!((hat[(1, 3)] - 2.0).abs() < TOLERANCE);
+        assert!((hat[(2, 3)] - 3.0).abs() < TOLERANCE);
+
+        // Column 4 should be nu
+        assert!((hat[(0, 4)] - 4.0).abs() < TOLERANCE);
+        assert!((hat[(1, 4)] - 5.0).abs() < TOLERANCE);
+        assert!((hat[(2, 4)] - 6.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_dvector_round_trip() {
+        let sgal3 = SGal3::random();
+        let dvec: DVector<f64> = sgal3.clone().into();
+        let recovered = SGal3::from(dvec);
+        assert!(sgal3.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_tangent_norm() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::zeros(),
+            Vector3::zeros(),
+            0.0,
+        );
+        assert!((tangent.data.norm() - 1.0).abs() < TOLERANCE);
+
+        let zero = SGal3Tangent::zero();
+        assert!(zero.data.norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_tangent_normalize() {
+        let mut tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.3, 0.4, 0.0),
+            0.5,
+        );
+        tangent.normalize();
+        let theta_norm = tangent.theta().norm();
+        assert!((theta_norm - 1.0).abs() < TOLERANCE);
+
+        let normalized = tangent.normalized();
+        assert!((normalized.theta().norm() - 1.0).abs() < TOLERANCE);
     }
 }
