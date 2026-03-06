@@ -129,6 +129,28 @@ apex-solver/                # workspace root = apex-solver crate
 
 ---
 
+## 📂 Data Files (Git LFS)
+
+The benchmark datasets in `data/` are stored with [Git LFS](https://git-lfs.com/).
+After cloning, pull the actual data files:
+
+```bash
+# Install Git LFS (once per machine)
+git lfs install
+
+# Download all data files
+git lfs pull
+```
+
+Without this step, the `.g2o` files will be empty LFS pointer stubs, causing
+`Graph Statistics: Vertices: 0, Edges: 0` errors when running the binaries.
+
+Available datasets:
+- **SE2** (2D): `intel`, `M3500`, `mit`, `ring`
+- **SE3** (3D): `sphere2500`, `parking-garage`, `torus3D`, `cubicle`
+
+---
+
 ## 📦 Workspace Crates
 
 Apex Solver is organized as a Cargo workspace with specialized sub-crates that can be used independently:
@@ -545,8 +567,8 @@ let result = solver.optimize(&problem, &initial_values)?;
 **Run Examples**:
 ```bash
 # Enable visualization feature and run
-cargo run --release --bin optimize_3d_graph -- --dataset sphere2500 --with-visualizer
-cargo run --release --bin optimize_2d_graph -- --dataset intel --with-visualizer
+cargo run --release --features visualization --bin pose_graph_g2o -- --dataset sphere2500 --with-visualizer
+cargo run --release --features visualization --bin pose_graph_g2o -- --dataset intel --with-visualizer
 ```
 
 Zero overhead when disabled (feature-gated).
