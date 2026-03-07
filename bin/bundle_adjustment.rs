@@ -99,6 +99,12 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable real-time Rerun visualization
+    /// (Requires the `visualization` feature to be enabled)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    with_visualizer: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -132,6 +138,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("  Load time: {:?}", load_time);
     info!("");
 
+    #[cfg(feature = "visualization")]
+    let with_visualizer = args.with_visualizer;
+    #[cfg(not(feature = "visualization"))]
+    let with_visualizer = false;
+
     // Run bundle adjustment
     run_bundle_adjustment(
         &dataset,
@@ -139,6 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.solver.into(),
         args.r#type,
         args.verbose,
+        with_visualizer,
     )
 }
 
@@ -154,12 +166,14 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 }
 
 /// Run bundle adjustment with specified solver and optimization type
+#[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
     solver_variant: SchurVariant,
     opt_type: OptimizationType,
     verbose: bool,
+    with_visualizer: bool,
 ) -> Result<(), Box<dyn Error>> {
     use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
@@ -253,6 +267,18 @@ fn run_bundle_adjustment(
     info!("  Preconditioner: {:?}", config.schur_preconditioner);
 
     let mut solver = LevenbergMarquardt::with_config(config);
+
+    #[cfg(feature = "visualization")]
+    if with_visualizer {
+        use apex_solver::observers::RerunObserver;
+        match RerunObserver::new_for_bundle_adjustment(true, None, true) {
+            Ok(observer) => {
+                solver.add_observer(observer);
+                info!("Rerun visualization enabled for bundle adjustment");
+            }
+            Err(e) => tracing::warn!("Failed to create Rerun observer: {}", e),
+        }
+    }
 
     // Print diagnostic info
     let num_cameras = dataset.cameras.len();

@@ -505,6 +505,23 @@ fn test_se2_dataset(
         }
     };
 
+    /// Helper macro to optionally attach a Rerun observer to a solver.
+    macro_rules! attach_visualizer {
+        ($solver:expr, $args:expr) => {
+            #[cfg(feature = "visualization")]
+            if $args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        $solver.add_observer(observer);
+                        info!("Rerun visualization enabled");
+                    }
+                    Err(e) => warn!("Failed to create Rerun observer: {}", e),
+                }
+            }
+        };
+    }
+
     let opt_start = Instant::now();
     let result = match optimizer_name {
         "GN" => {
@@ -515,6 +532,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = GaussNewton::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
@@ -525,6 +543,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = DogLeg::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
@@ -535,6 +554,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = LevenbergMarquardt::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
     };
@@ -855,6 +875,23 @@ fn test_se3_dataset(
         }
     };
 
+    /// Helper macro to optionally attach a Rerun observer to a solver.
+    macro_rules! attach_visualizer {
+        ($solver:expr, $args:expr) => {
+            #[cfg(feature = "visualization")]
+            if $args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        $solver.add_observer(observer);
+                        info!("Rerun visualization enabled");
+                    }
+                    Err(e) => warn!("Failed to create Rerun observer: {}", e),
+                }
+            }
+        };
+    }
+
     let opt_start = Instant::now();
     let result = match optimizer_name {
         "GN" => {
@@ -865,6 +902,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = GaussNewton::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
@@ -875,6 +913,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = DogLeg::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
@@ -885,6 +924,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = LevenbergMarquardt::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
     };
