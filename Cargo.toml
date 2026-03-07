@@ -50,7 +50,7 @@ expect_used = "deny"
 # apex-solver package (root crate)
 [package]
 name = "apex-solver"
-version = "1.2.0"
+version = "1.2.1"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
