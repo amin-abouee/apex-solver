@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Visualization for bundle_adjustment binary** - Fixed and improved visualization:
   - Added documentation and usage examples for `--with-visualizer` flag
   - Changed 3D point colors to white (255,255,255) for better visibility
-  - Reduced camera frustum scale to 1/10 for less cluttered visualization
+  - Reduced camera frustum scale
   - Now displays both initial and optimized states
 - **Binary instructions in README** - Fixed outdated command examples and added proper usage documentation for visualization features
 - **Git LFS setup** - Added clear instructions in README Quick Start section reminding users to pull data files using `git lfs pull` before running examples
