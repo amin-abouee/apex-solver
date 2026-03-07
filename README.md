@@ -415,7 +415,8 @@ Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously. See t
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
+use apex_solver::core::loss_functions::HuberLoss;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 // Use any camera model from apex-camera-models crate
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -433,7 +434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               &format!("landmark_{}", obs.point_id),
               &format!("intrinsics_{}", obs.camera_id)],
             Box::new(projection_factor),
-            Some(Box::new(HuberLoss::new(1.0))),
+            Some(Box::new(HuberLoss::new(1.0)?)),
         );
     }
     
@@ -443,7 +444,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Configure solver with Schur complement (best for BA)
-    let mut solver = LevenbergMarquardt::for_bundle_adjustment();
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    let mut solver = LevenbergMarquardt::with_config(config);
     let result = solver.optimize(&problem, &initial_values)?;
     
     Ok(())
