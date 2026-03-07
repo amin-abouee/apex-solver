@@ -175,6 +175,8 @@ pub struct VisualizationConfig {
     pub se2_pose_radius: f32,
     /// Color for initial SE2 poses RGB (default: blue [100, 150, 255])
     pub initial_se2_color: [u8; 3],
+    /// Color for optimized SE2 poses RGB (default: green [50, 200, 100])
+    pub optimized_se2_color: [u8; 3],
 
     // === Matrix Visualization Settings ===
     /// Target size for Hessian downsampling (default: 100)
@@ -214,6 +216,7 @@ impl Default for VisualizationConfig {
             // SE2 pose settings
             se2_pose_radius: 0.5,
             initial_se2_color: [100, 150, 255], // Blue
+            optimized_se2_color: [50, 200, 100], // Green
 
             // Matrix visualization
             hessian_downsample_size: 100,
@@ -316,6 +319,12 @@ impl VisualizationConfig {
     /// Set color for initial SE2 poses (RGB).
     pub fn with_initial_se2_color(mut self, rgb: [u8; 3]) -> Self {
         self.initial_se2_color = rgb;
+        self
+    }
+
+    /// Set color for optimized SE2 poses (RGB).
+    pub fn with_optimized_se2_color(mut self, rgb: [u8; 3]) -> Self {
+        self.optimized_se2_color = rgb;
         self
     }
 
@@ -1011,7 +1020,10 @@ impl RerunObserver {
 
         // Collect final 3D landmarks for batch logging
         let mut final_landmark_positions: Vec<[f32; 3]> = Vec::new();
+        // Collect final SE2 positions for batch logging
+        let mut final_se2_positions: Vec<[f32; 2]> = Vec::new();
         let mut camera_count = 0;
+        let mut se2_count = 0;
 
         for (var_name, var) in values {
             match var {
@@ -1069,6 +1081,11 @@ impl RerunObserver {
 
                     camera_count += 1;
                 }
+                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+                    final_se2_positions
+                        .push([v.value.x() as f32, v.value.y() as f32]);
+                    se2_count += 1;
+                }
                 VariableEnum::Rn(v) if self.config.show_landmarks => {
                     // Handle 3D landmarks (Rn with dimension 3)
                     let data = v.value.data();
@@ -1109,11 +1126,32 @@ impl RerunObserver {
             })?;
         }
 
+        // Batch log all final SE2 poses as a single 2D point cloud
+        if self.config.show_se2_poses && !final_se2_positions.is_empty() {
+            let color = self.config.optimized_se2_color;
+            rec.log(
+                "final_graph/se2_poses",
+                &rerun::archetypes::Points2D::new(final_se2_positions)
+                    .with_radii([self.config.se2_pose_radius])
+                    .with_colors([rerun::components::Color::from_rgb(
+                        color[0], color[1], color[2],
+                    )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "final_graph/se2_poses".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
         info!(
-            "Logged final BA state after {} iterations: {} cameras, {} landmarks",
+            "Logged final state after {} iterations: {} cameras, {} landmarks, {} SE2 poses",
             iterations,
             camera_count,
-            final_landmark_positions.len()
+            final_landmark_positions.len(),
+            se2_count
         );
 
         // Log displacement statistics
@@ -1361,6 +1399,8 @@ impl RerunObserver {
 
         // Collect 3D landmarks for batch logging (much more efficient for large point clouds)
         let mut landmark_positions: Vec<[f32; 3]> = Vec::new();
+        // Collect SE2 positions for batch logging
+        let mut se2_positions: Vec<[f32; 2]> = Vec::new();
 
         for (var_name, var) in variables {
             match var {
@@ -1417,23 +1457,7 @@ impl RerunObserver {
                     })?;
                 }
                 VariableEnum::SE2(v) if self.config.show_se2_poses => {
-                    let x = v.value.x();
-                    let y = v.value.y();
-
-                    let position = rerun::external::glam::Vec3::new(x as f32, y as f32, 0.0);
-                    let rotation = rerun::external::glam::Quat::IDENTITY;
-
-                    let transform =
-                        rerun::Transform3D::from_translation_rotation(position, rotation);
-
-                    let entity_path = format!("optimized_graph/se2_poses/{}", var_name);
-                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
+                    se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
                 }
                 VariableEnum::Rn(v) if self.config.show_landmarks => {
                     // Handle 3D landmarks (Rn with dimension 3)
@@ -1463,6 +1487,26 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::LoggingFailed {
                     entity_path: "optimized_graph/landmarks".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
+        // Batch log all SE2 poses as a single 2D point cloud
+        if self.config.show_se2_poses && !se2_positions.is_empty() {
+            let color = self.config.optimized_se2_color;
+            rec.log(
+                "optimized_graph/se2_poses",
+                &rerun::archetypes::Points2D::new(se2_positions)
+                    .with_radii([self.config.se2_pose_radius])
+                    .with_colors([rerun::components::Color::from_rgb(
+                        color[0], color[1], color[2],
+                    )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "optimized_graph/se2_poses".to_string(),
                     reason: format!("{}", e),
                 }
                 .log_with_source(e)
