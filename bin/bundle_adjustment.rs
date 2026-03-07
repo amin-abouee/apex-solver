@@ -15,6 +15,12 @@
 //!
 //! # With specific optimization type:
 //! cargo run --release --bin bundle_adjustment -- problem.txt --type bundle-adjustment
+//!
+//! # With visualization (requires visualization feature):
+//! cargo run --release --features visualization --bin bundle_adjustment -- path/to/problem.txt --with-visualizer
+//!
+//! # With limited points and visualization:
+//! cargo run --release --features visualization --bin bundle_adjustment -- problem.txt -n 1000 --with-visualizer
 //! ```
 //!
 //! # Camera Parameterization
@@ -271,7 +277,12 @@ fn run_bundle_adjustment(
     #[cfg(feature = "visualization")]
     if with_visualizer {
         use apex_solver::observers::RerunObserver;
-        match RerunObserver::new_for_bundle_adjustment(true, None, true) {
+        use apex_solver::observers::visualization::VisualizationConfig;
+        let config = VisualizationConfig::for_bundle_adjustment()
+            .with_camera_frustum_scale(0.1)
+            .with_initial_landmark_color([255, 255, 255])
+            .with_optimized_landmark_color([255, 255, 255]);
+        match RerunObserver::with_config(true, None, config) {
             Ok(observer) => {
                 solver.add_observer(observer);
                 info!("Rerun visualization enabled for bundle adjustment");
