@@ -8,7 +8,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v1.2.0)
+## Key Features (v1.2.1)
 
 - **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
@@ -572,6 +572,9 @@ let result = solver.optimize(&problem, &initial_values)?;
 cargo run --release --features visualization --bin pose_graph_g2o -- --dataset sphere2500 --with-visualizer
 cargo run --release --features visualization --bin pose_graph_g2o -- --dataset intel --with-visualizer
 ```
+
+> **Note:** The data files (e.g., `sphere2500.g2o`) need to be pulled using Git LFS. 
+> See [📂 Data Files (Git LFS)](#-data-files-git-lfs) for instructions.
 
 Zero overhead when disabled (feature-gated).
 
