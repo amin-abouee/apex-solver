@@ -8,7 +8,9 @@
 
 use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
 use crate::error;
-use crate::linalg::{self, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+use crate::linalg::{
+    self, DenseCholeskySolver, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver,
+};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, MatRef};
@@ -701,6 +703,7 @@ pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn S
             // Schur complement solver requires special handling - fallback to Cholesky
             Box::new(SparseCholeskySolver::new())
         }
+        linalg::LinearSolverType::DenseCholesky => Box::new(DenseCholeskySolver::new()),
     }
 }
 

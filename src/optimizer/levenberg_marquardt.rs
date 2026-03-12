@@ -147,8 +147,8 @@
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    LinearSolverType, SchurPreconditioner, SchurSolverAdapter, SchurVariant, SparseCholeskySolver,
-    SparseLinearSolver, SparseQRSolver,
+    DenseCholeskySolver, LinearSolverType, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
+    SparseCholeskySolver, SparseLinearSolver, SparseQRSolver,
 };
 use crate::optimizer::{
     ConvergenceParams, InitializedState, IterationStats, OptObserverVec, OptimizerError, Solver,
@@ -848,6 +848,7 @@ impl LevenbergMarquardt {
                     .log()
                 })?,
             ),
+            LinearSolverType::DenseCholesky => Box::new(DenseCholeskySolver::new()),
         };
 
         // Initialize summary tracking variables
