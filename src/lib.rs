@@ -70,7 +70,10 @@ pub use error::{ApexSolverError, ApexSolverResult};
 pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
-pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+pub use linalg::{
+    DenseCholeskySolver, LinearSolver, LinearSolverType, SparseCholeskySolver, SparseLinearSolver,
+    SparseQRSolver,
+};
 
 // Re-export logger
 pub use logger::{init_logger, init_logger_with_level};
