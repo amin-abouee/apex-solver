@@ -102,10 +102,11 @@
 //! ```no_run
 //! use apex_solver::LevenbergMarquardt;
 //! use apex_solver::core::problem::Problem;
+//! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut problem = Problem::new();
+//! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
 //! let initial_values = HashMap::new();
@@ -147,16 +148,18 @@
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    DenseCholeskySolver, LinearSolverType, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
-    SparseCholeskySolver, SparseLinearSolver, SparseQRSolver,
+    DenseCholeskySolver, DenseMode, JacobianMode, LinAlgSolver, LinearSolverType,
+    SchurPreconditioner, SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseMode,
+    SparseQRSolver,
 };
 use crate::optimizer::{
     ConvergenceParams, InitializedState, IterationStats, OptObserverVec, OptimizerError, Solver,
-    SolverResult, apply_negative_parameter_step, apply_parameter_step, compute_cost,
+    SolverResult, SystemAssembly, apply_negative_parameter_step, apply_parameter_step,
+    compute_cost,
 };
 use apex_manifolds::ManifoldType;
 
-use faer::{Mat, sparse::SparseColMat};
+use faer::Mat;
 use nalgebra::DVector;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -632,7 +635,7 @@ struct StepEvaluation {
 /// - [`DogLeg`](crate::DogLeg) - Alternative trust region method
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
-    jacobi_scaling: Option<SparseColMat<usize, f64>>,
+    jacobi_scaling: Option<Vec<f64>>,
     observers: OptObserverVec,
 }
 
@@ -721,12 +724,12 @@ impl LevenbergMarquardt {
         (0.5 * step.transpose() * &diff)[(0, 0)]
     }
 
-    /// Compute optimization step by solving the augmented system
-    fn compute_levenberg_marquardt_step(
+    /// Compute optimization step by solving the augmented system (generic over assembly mode).
+    fn compute_step_generic<M: SystemAssembly>(
         &self,
         residuals: &Mat<f64>,
-        scaled_jacobian: &SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn SparseLinearSolver>,
+        scaled_jacobian: &M::Jacobian,
+        linear_solver: &mut dyn LinAlgSolver<M>,
     ) -> Result<StepResult, OptimizerError> {
         // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
         let residuals_owned = residuals.as_ref().to_owned();
@@ -734,12 +737,9 @@ impl LevenbergMarquardt {
             .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
-        // Get cached gradient and Hessian from the solver
+        // Get cached gradient from the solver
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
-        })?;
-        let _hessian = linear_solver.get_hessian().ok_or_else(|| {
-            OptimizerError::NumericalInstability("Hessian not available".into()).log()
         })?;
         let gradient_norm = gradient.norm_l2();
 
@@ -749,7 +749,7 @@ impl LevenbergMarquardt {
                 .jacobi_scaling
                 .as_ref()
                 .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
-            &scaled_step * scaling
+            M::apply_inverse_scaling(&scaled_step, scaling)
         } else {
             scaled_step
         };
@@ -814,42 +814,25 @@ impl LevenbergMarquardt {
         })
     }
 
-    pub fn optimize(
+    /// Run optimization using the specified assembly mode and linear solver.
+    ///
+    /// This is the core generic optimization loop. The public `optimize()` method
+    /// dispatches to this based on `LinearSolverType`.
+    fn optimize_with_mode<M: SystemAssembly>(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+        linear_solver: &mut dyn LinAlgSolver<M>,
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
         let start_time = Instant::now();
         let mut iteration = 0;
-        let mut cost_evaluations = 1; // Initial cost evaluation
+        let mut cost_evaluations = 1;
         let mut jacobian_evaluations = 0;
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
 
         // Initialize optimization state
         let mut state = crate::optimizer::initialize_optimization_state(problem, initial_params)?;
-
-        // Create linear solver - must be after variable initialization for Schur solver
-        let mut linear_solver: Box<dyn SparseLinearSolver> = match self.config.linear_solver_type {
-            LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
-            LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
-            LinearSolverType::SparseSchurComplement => Box::new(
-                SchurSolverAdapter::new_with_structure_and_config(
-                    &state.variables,
-                    &state.variable_index_map,
-                    self.config.schur_variant,
-                    self.config.schur_preconditioner,
-                )
-                .map_err(|e| {
-                    OptimizerError::LinearSolveFailed(format!(
-                        "Failed to initialize Schur solver: {}",
-                        e
-                    ))
-                    .log()
-                })?,
-            ),
-            LinearSolverType::DenseCholesky => Box::new(DenseCholeskySolver::new()),
-        };
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
@@ -871,27 +854,31 @@ impl LevenbergMarquardt {
         // Main optimization loop
         loop {
             let iter_start = Instant::now();
-            // Evaluate residuals and Jacobian
-            let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
+
+            // Evaluate residuals and Jacobian using the assembly mode
+            let (residuals, jacobian) = M::assemble(
+                problem,
                 &state.variables,
                 &state.variable_index_map,
-                &state.symbolic_structure,
+                state.symbolic_structure.as_ref(),
+                state.total_dof,
             )?;
             jacobian_evaluations += 1;
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                crate::optimizer::process_jacobian(&jacobian, &mut self.jacobi_scaling, iteration)?
+                crate::optimizer::process_jacobian_generic::<M>(
+                    &jacobian,
+                    &mut self.jacobi_scaling,
+                    iteration,
+                )?
             } else {
                 jacobian
             };
 
             // Compute optimization step
-            let step_result = self.compute_levenberg_marquardt_step(
-                &residuals,
-                &scaled_jacobian,
-                &mut linear_solver,
-            )?;
+            let step_result =
+                self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver)?;
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -913,7 +900,6 @@ impl LevenbergMarquardt {
             }
 
             // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
@@ -926,7 +912,7 @@ impl LevenbergMarquardt {
                     step_norm,
                     tr_ratio: step_eval.rho,
                     tr_radius: self.config.damping,
-                    ls_iter: 0, // Direct solver (Cholesky) has no iterations
+                    ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
                     accepted: step_eval.accepted,
@@ -939,7 +925,7 @@ impl LevenbergMarquardt {
             previous_cost = state.current_cost;
 
             // Notify all observers with current state
-            crate::optimizer::notify_observers(
+            crate::optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
                 iteration,
@@ -948,24 +934,13 @@ impl LevenbergMarquardt {
                 Some(self.config.damping),
                 step_norm,
                 Some(step_eval.rho),
-                linear_solver.as_ref(),
+                linear_solver,
             );
 
             // Check convergence
             let elapsed = start_time.elapsed();
-
-            // Compute parameter norm for relative parameter tolerance check
             let parameter_norm = crate::optimizer::compute_parameter_norm(&state.variables);
-
-            // Compute new cost for convergence check (state may already have new cost if step accepted)
-            let new_cost = if step_eval.accepted {
-                state.current_cost
-            } else {
-                // Use cost before step application
-                state.current_cost
-            };
-
-            // Cost before this step (need to add back reduction if step was accepted)
+            let new_cost = state.current_cost;
             let cost_before_step = if step_eval.accepted {
                 state.current_cost + step_eval.cost_reduction
             } else {
@@ -990,7 +965,6 @@ impl LevenbergMarquardt {
                 trust_region_radius: Some(self.config.trust_region_radius),
                 min_trust_region_radius: Some(self.config.min_trust_region_radius),
             }) {
-                // Print summary only if debug level is enabled
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let summary = crate::optimizer::create_optimizer_summary(
                         "Levenberg-Marquardt",
@@ -1016,8 +990,8 @@ impl LevenbergMarquardt {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances(
-                        &mut linear_solver,
+                    problem.compute_and_set_covariances_generic::<M>(
+                        linear_solver,
                         &mut state.variables,
                         &state.variable_index_map,
                     )
@@ -1047,9 +1021,57 @@ impl LevenbergMarquardt {
                 ));
             }
 
-            // Note: Max iterations and timeout checks are now handled inside check_convergence()
-
             iteration += 1;
+        }
+    }
+
+    /// Run optimization, dispatching based on `problem.jacobian_mode`.
+    ///
+    /// - `JacobianMode::Dense` → always uses `DenseCholeskySolver`
+    /// - `JacobianMode::Sparse` → uses the solver selected by `config.linear_solver_type`
+    pub fn optimize(
+        &mut self,
+        problem: &Problem,
+        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
+        match problem.jacobian_mode {
+            JacobianMode::Dense => {
+                let mut solver = DenseCholeskySolver::new();
+                self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+            }
+            JacobianMode::Sparse => match self.config.linear_solver_type {
+                LinearSolverType::SparseQR => {
+                    let mut solver = SparseQRSolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+                LinearSolverType::SparseSchurComplement => {
+                    // Schur complement needs special initialization with variable structure
+                    // We need to init state first to get variables, then create solver
+                    let state =
+                        crate::optimizer::initialize_optimization_state(problem, initial_params)?;
+                    let mut solver = SchurSolverAdapter::new_with_structure_and_config(
+                        &state.variables,
+                        &state.variable_index_map,
+                        self.config.schur_variant,
+                        self.config.schur_preconditioner,
+                    )
+                    .map_err(|e| {
+                        OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {}",
+                            e
+                        ))
+                        .log()
+                    })?;
+                    // Note: optimize_with_mode will re-initialize state, which is acceptable
+                    // since Schur initialization is cheap
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    // SparseCholesky (default) or DenseCholesky with sparse mode → SparseCholeskySolver
+                    let mut solver = SparseCholeskySolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+            },
         }
     }
 }
@@ -1153,7 +1175,7 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        let mut problem = Problem::new();
+        let mut problem = Problem::new(JacobianMode::Sparse);
         let mut initial_values = HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)
