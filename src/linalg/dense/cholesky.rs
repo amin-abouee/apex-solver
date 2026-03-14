@@ -5,7 +5,7 @@ use faer::{
 };
 
 use crate::linalg::{
-    LinAlgError, LinAlgResult, LinearSolver, SparseLinearSolver,
+    DenseMode, LinAlgError, LinAlgResult, LinAlgSolver, LinearSolver, SparseLinearSolver,
     utils::sparse_to_dense,
 };
 
@@ -58,9 +58,10 @@ impl DenseCholeskySolver {
         let gradient = jacobian.transpose() * residuals;
 
         // Dense Cholesky factorization
-        let llt = hessian.as_ref().llt(Side::Lower).map_err(|e| {
-            map_llt_error(e, "Dense Cholesky factorization failed")
-        })?;
+        let llt = hessian
+            .as_ref()
+            .llt(Side::Lower)
+            .map_err(|e| map_llt_error(e, "Dense Cholesky factorization failed"))?;
 
         // Solve H · dx = -g
         let dx = llt.solve(-&gradient);
@@ -95,9 +96,10 @@ impl DenseCholeskySolver {
         }
 
         // Dense Cholesky factorization on augmented system
-        let llt = augmented.as_ref().llt(Side::Lower).map_err(|e| {
-            map_llt_error(e, "Augmented dense Cholesky factorization failed")
-        })?;
+        let llt = augmented
+            .as_ref()
+            .llt(Side::Lower)
+            .map_err(|e| map_llt_error(e, "Augmented dense Cholesky factorization failed"))?;
 
         // Solve H_aug · dx = -g
         let dx = llt.solve(-&gradient);
@@ -153,6 +155,54 @@ impl LinearSolver for DenseCholeskySolver {
 
     fn hessian(&self) -> Option<&Self::Hessian> {
         self.hessian.as_ref()
+    }
+}
+
+// ============================================================================
+// LinAlgSolver<DenseMode> (native dense path, no conversions)
+// ============================================================================
+
+impl LinAlgSolver<DenseMode> for DenseCholeskySolver {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        self.solve_dense_normal(residuals, jacobian)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &Mat<f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>> {
+        self.solve_dense_augmented(residuals, jacobian, lambda)
+    }
+
+    fn get_hessian(&self) -> Option<&Mat<f64>> {
+        self.hessian.as_ref()
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        if self.covariance_matrix.is_none()
+            && let Some(hessian) = &self.hessian
+            && let Some(factorizer) = &self.factorizer
+        {
+            let n = hessian.nrows();
+            let identity = Mat::identity(n, n);
+            let cov = factorizer.solve(&identity);
+            self.covariance_matrix = Some(cov);
+        }
+        self.covariance_matrix.as_ref()
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
     }
 }
 
@@ -346,7 +396,7 @@ mod tests {
 
         let _ = SparseLinearSolver::solve_normal_equation(&mut solver, &r, &j_sparse)?;
 
-        let cov = solver.compute_covariance_matrix();
+        let cov = SparseLinearSolver::compute_covariance_matrix(&mut solver);
         assert!(cov.is_some(), "Covariance should be computable");
 
         let cov = cov.unwrap();
