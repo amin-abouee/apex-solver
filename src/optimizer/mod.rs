@@ -6,10 +6,12 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
+use crate::core::assembly::sparse::SymbolicStructure;
+use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    self, DenseCholeskySolver, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver,
+    self, AssemblyMode, DenseCholeskySolver, DenseMode, JacobianMode, LinAlgSolver,
+    SparseCholeskySolver, SparseLinearSolver, SparseMode, SparseQRSolver,
 };
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -34,6 +36,151 @@ pub use levenberg_marquardt::LevenbergMarquardt;
 
 // Re-export observer types from the observers module
 pub use crate::observers::{OptObserver, OptObserverVec};
+
+// ============================================================================
+// SystemAssembly trait (bridges Problem assembly with linear solver types)
+// ============================================================================
+
+/// Trait that bridges the Problem's Jacobian assembly with the linear solver's
+/// expected types. Extends [`AssemblyMode`] with operations needed by optimizers.
+///
+/// This trait is implemented for [`SparseMode`] and [`DenseMode`], providing
+/// zero-cost static dispatch through the entire pipeline.
+pub trait SystemAssembly: AssemblyMode {
+    /// Assemble residuals and Jacobian from the problem.
+    fn assemble(
+        problem: &Problem,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+        symbolic_structure: Option<&SymbolicStructure>,
+        total_dof: usize,
+    ) -> crate::error::ApexSolverResult<(Mat<f64>, Self::Jacobian)>;
+
+    /// Compute column norms of the Jacobian (for Jacobi scaling).
+    fn compute_column_norms(jacobian: &Self::Jacobian) -> Vec<f64>;
+
+    /// Apply diagonal column scaling to the Jacobian.
+    /// Returns a new Jacobian with columns scaled by `1 / (1 + norm)`.
+    fn apply_column_scaling(jacobian: &Self::Jacobian, scaling: &[f64]) -> Self::Jacobian;
+
+    /// Apply inverse scaling to a step vector: step_i *= scaling_i
+    fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64>;
+
+    /// Hessian-vector product: H * v (needed by DogLeg for Cauchy point)
+    fn hessian_vec_product(hessian: &Self::Hessian, vec: &Mat<f64>) -> Mat<f64>;
+}
+
+impl SystemAssembly for SparseMode {
+    fn assemble(
+        problem: &Problem,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+        symbolic_structure: Option<&SymbolicStructure>,
+        _total_dof: usize,
+    ) -> crate::error::ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+        let sym = symbolic_structure.ok_or_else(|| {
+            crate::error::ApexSolverError::from(OptimizerError::InvalidParameters(
+                "SparseMode requires symbolic structure".to_string(),
+            ))
+        })?;
+        crate::core::assembly::sparse::assemble_sparse(problem, variables, variable_index_map, sym)
+    }
+
+    fn compute_column_norms(jacobian: &SparseColMat<usize, f64>) -> Vec<f64> {
+        let ncols = jacobian.ncols();
+        let sparse_ref = jacobian.as_ref();
+        (0..ncols)
+            .map(|c| {
+                let col_norm_squared: f64 =
+                    sparse_ref.val_of_col(c).iter().map(|&val| val * val).sum();
+                col_norm_squared.sqrt()
+            })
+            .collect()
+    }
+
+    fn apply_column_scaling(
+        jacobian: &SparseColMat<usize, f64>,
+        scaling: &[f64],
+    ) -> SparseColMat<usize, f64> {
+        let ncols = jacobian.ncols();
+        // Build diagonal sparse scaling matrix
+        let triplets: Vec<Triplet<usize, usize, f64>> =
+            (0..ncols).map(|c| Triplet::new(c, c, scaling[c])).collect();
+        // Diagonal matrix construction from triplets cannot fail for valid column count
+        let scaling_mat = match SparseColMat::try_new_from_triplets(ncols, ncols, &triplets) {
+            Ok(mat) => mat,
+            Err(_) => return jacobian.clone(), // Fallback: return unscaled
+        };
+        // J_scaled = J * S (right-multiply by diagonal)
+        jacobian * &scaling_mat
+    }
+
+    fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
+        let mut result = step.clone();
+        for i in 0..step.nrows() {
+            result[(i, 0)] *= scaling[i];
+        }
+        result
+    }
+
+    fn hessian_vec_product(hessian: &SparseColMat<usize, f64>, vec: &Mat<f64>) -> Mat<f64> {
+        use std::ops::Mul;
+        hessian.as_ref().mul(vec)
+    }
+}
+
+impl SystemAssembly for DenseMode {
+    fn assemble(
+        problem: &Problem,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+        _symbolic_structure: Option<&SymbolicStructure>,
+        total_dof: usize,
+    ) -> crate::error::ApexSolverResult<(Mat<f64>, Mat<f64>)> {
+        crate::core::assembly::dense::assemble_dense(
+            problem,
+            variables,
+            variable_index_map,
+            total_dof,
+        )
+    }
+
+    fn compute_column_norms(jacobian: &Mat<f64>) -> Vec<f64> {
+        let ncols = jacobian.ncols();
+        (0..ncols)
+            .map(|c| {
+                let mut norm_sq = 0.0;
+                for r in 0..jacobian.nrows() {
+                    let v = jacobian[(r, c)];
+                    norm_sq += v * v;
+                }
+                norm_sq.sqrt()
+            })
+            .collect()
+    }
+
+    fn apply_column_scaling(jacobian: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
+        let mut result = jacobian.clone();
+        for c in 0..jacobian.ncols() {
+            for r in 0..jacobian.nrows() {
+                result[(r, c)] *= scaling[c];
+            }
+        }
+        result
+    }
+
+    fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
+        let mut result = step.clone();
+        for i in 0..step.nrows() {
+            result[(i, 0)] *= scaling[i];
+        }
+        result
+    }
+
+    fn hessian_vec_product(hessian: &Mat<f64>, vec: &Mat<f64>) -> Mat<f64> {
+        hessian * vec
+    }
+}
 
 /// Type of optimization solver algorithm to use
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -478,7 +625,8 @@ pub struct InitializedState {
     pub variables: HashMap<String, VariableEnum>,
     pub variable_index_map: HashMap<String, usize>,
     pub sorted_vars: Vec<String>,
-    pub symbolic_structure: SymbolicStructure,
+    pub symbolic_structure: Option<SymbolicStructure>,
+    pub total_dof: usize,
     pub current_cost: f64,
     pub initial_cost: f64,
 }
@@ -544,8 +692,10 @@ pub fn process_jacobian(
 /// This is the common initialization sequence used by all optimizers:
 /// 1. Create variables from initial values
 /// 2. Build variable-to-column index mapping
-/// 3. Build symbolic sparsity structure for Jacobian
+/// 3. Build symbolic sparsity structure for Jacobian (sparse mode only)
 /// 4. Compute initial cost
+///
+/// The assembly mode is determined by `problem.jacobian_mode`.
 pub fn initialize_optimization_state(
     problem: &Problem,
     initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
@@ -562,8 +712,17 @@ pub fn initialize_optimization_state(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
+    let total_dof = col_offset;
+
+    let symbolic_structure = match problem.jacobian_mode {
+        JacobianMode::Sparse => Some(crate::core::assembly::sparse::build_symbolic_structure(
+            problem,
+            &variables,
+            &variable_index_map,
+            total_dof,
+        )?),
+        JacobianMode::Dense => None,
+    };
 
     let residual = problem.compute_residual_sparse(&variables)?;
     let current_cost = compute_cost(&residual);
@@ -574,6 +733,7 @@ pub fn initialize_optimization_state(
         variable_index_map,
         sorted_vars,
         symbolic_structure,
+        total_dof,
         current_cost,
         initial_cost,
     })
@@ -707,7 +867,7 @@ pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn S
     }
 }
 
-/// Notify observers with current optimization state.
+/// Notify observers with current optimization state (sparse path).
 ///
 /// This is the common observer notification pattern used by all three optimizers.
 #[allow(clippy::too_many_arguments)]
@@ -733,6 +893,48 @@ pub fn notify_observers(
     }
 
     observers.notify(variables, iteration);
+}
+
+/// Notify observers with current optimization state (generic path).
+///
+/// For dense mode, the Hessian is converted to sparse for observer compatibility.
+/// This is acceptable since observers are for visualization/debugging, not the hot path.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_observers_generic<M: SystemAssembly>(
+    observers: &mut OptObserverVec,
+    variables: &HashMap<String, VariableEnum>,
+    iteration: usize,
+    cost: f64,
+    gradient_norm: f64,
+    damping: Option<f64>,
+    step_norm: f64,
+    step_quality: Option<f64>,
+    _linear_solver: &dyn LinAlgSolver<M>,
+) {
+    observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
+    // Skip matrix data for generic path since observers expect sparse Hessian.
+    // Observer matrix visualization is optional and only used for debugging.
+    observers.notify(variables, iteration);
+}
+
+/// Process Jacobian with Jacobi scaling (generic over assembly mode).
+///
+/// On `iteration == 0`, computes the scaling factors and stores them.
+/// On subsequent iterations, reuses the cached scaling.
+pub fn process_jacobian_generic<M: SystemAssembly>(
+    jacobian: &M::Jacobian,
+    jacobi_scaling: &mut Option<Vec<f64>>,
+    iteration: usize,
+) -> Result<M::Jacobian, OptimizerError> {
+    if iteration == 0 {
+        let norms = M::compute_column_norms(jacobian);
+        let scaling: Vec<f64> = norms.iter().map(|n| 1.0 / (1.0 + n)).collect();
+        *jacobi_scaling = Some(scaling);
+    }
+    let scaling = jacobi_scaling
+        .as_ref()
+        .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+    Ok(M::apply_column_scaling(jacobian, scaling))
 }
 
 /// Build a SolverResult from common optimization loop outputs.
