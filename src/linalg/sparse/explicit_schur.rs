@@ -40,9 +40,11 @@
 //! # }
 //! ```
 
-use crate::core::problem::VariableEnum;
 use super::implicit_schur::IterativeSchurSolver;
-use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
+use crate::core::problem::VariableEnum;
+use crate::linalg::{
+    LinAlgError, LinAlgResult, LinAlgSolver, SparseMode, StructuredSparseLinearSolver,
+};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -1328,6 +1330,43 @@ impl SchurSolverAdapter {
             schur_solver: solver,
             initialized: true,
         })
+    }
+}
+
+impl LinAlgSolver<SparseMode> for SchurSolverAdapter {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        crate::linalg::SparseLinearSolver::solve_normal_equation(self, residuals, jacobian)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>> {
+        crate::linalg::SparseLinearSolver::solve_augmented_equation(
+            self, residuals, jacobian, lambda,
+        )
+    }
+
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        crate::linalg::SparseLinearSolver::get_hessian(self)
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        crate::linalg::SparseLinearSolver::get_gradient(self)
+    }
+
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        crate::linalg::SparseLinearSolver::compute_covariance_matrix(self)
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        crate::linalg::SparseLinearSolver::get_covariance_matrix(self)
     }
 }
 
