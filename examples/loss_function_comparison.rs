@@ -4,8 +4,10 @@ use tracing::{error, info, warn};
 
 use apex_solver::apex_io::{G2oLoader, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::core::assembly::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
+use apex_solver::JacobianMode;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -264,7 +266,7 @@ fn benchmark_dataset_se3(
 
             let scale_value = scale;
             // Build problem with this loss function
-            let mut problem = Problem::new();
+            let mut problem = Problem::new(JacobianMode::Sparse);
 
             for edge in &graph.edges_se3 {
                 let id0 = format!("x{}", edge.from);
@@ -308,7 +310,8 @@ fn benchmark_dataset_se3(
                 col_offset += variables[var_name].get_size();
             }
 
-            let symbolic_structure = problem.build_symbolic_structure(
+            let symbolic_structure = build_symbolic_structure(
+                &problem,
                 &variables,
                 &variable_name_to_col_idx_dict,
                 col_offset,
@@ -455,7 +458,7 @@ fn benchmark_dataset_se2(
             info!("  Testing {} (scale={:.4})...", loss_name, scale);
 
             let scale_value = scale;
-            let mut problem = Problem::new();
+            let mut problem = Problem::new(JacobianMode::Sparse);
 
             for edge in &graph.edges_se2 {
                 let id0 = format!("x{}", edge.from);
@@ -498,7 +501,8 @@ fn benchmark_dataset_se2(
                 col_offset += variables[var_name].get_size();
             }
 
-            let symbolic_structure = problem.build_symbolic_structure(
+            let symbolic_structure = build_symbolic_structure(
+                &problem,
                 &variables,
                 &variable_name_to_col_idx_dict,
                 col_offset,

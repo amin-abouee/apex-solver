@@ -4,8 +4,10 @@ use tracing::{info, warn};
 
 use apex_solver::apex_io::{G2oLoader, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::core::assembly::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
+use apex_solver::JacobianMode;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -175,7 +177,7 @@ fn test_se3_dataset(
     }
 
     // Create problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
@@ -216,7 +218,7 @@ fn test_se3_dataset(
     }
 
     let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
+        build_symbolic_structure(&problem, &variables, &variable_name_to_col_idx_dict, col_offset)?;
 
     let (residual, _) = problem.compute_residual_and_jacobian_sparse(
         &variables,
@@ -313,7 +315,7 @@ fn test_se2_dataset(
     }
 
     // Create problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
@@ -354,7 +356,7 @@ fn test_se2_dataset(
     }
 
     let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
+        build_symbolic_structure(&problem, &variables, &variable_name_to_col_idx_dict, col_offset)?;
 
     let (residual, _) = problem.compute_residual_and_jacobian_sparse(
         &variables,
