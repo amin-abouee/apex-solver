@@ -36,7 +36,7 @@
 //! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
