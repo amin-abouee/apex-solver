@@ -21,6 +21,31 @@ pub use sparse::{
 // Re-export dense solver types
 pub use dense::DenseCholeskySolver;
 
+// Re-export assembly mode types
+// (AssemblyMode, SparseMode, DenseMode, LinAlgSolver are defined below in this file)
+
+// ============================================================================
+// Jacobian mode selection
+// ============================================================================
+
+/// Controls which Jacobian assembly strategy the Problem uses.
+///
+/// Set this when constructing a [`Problem`](crate::core::problem::Problem):
+/// - `Problem::new(JacobianMode::Sparse)` — sparse (default, best for large-scale problems)
+/// - `Problem::new(JacobianMode::Dense)` — dense (best for small-to-medium problems < ~500 DOF)
+/// - `Problem::default()` — equivalent to `JacobianMode::Sparse`
+///
+/// The optimizer reads this field and dispatches to the appropriate assembly path.
+/// `LinearSolverType` selects the specific algorithm within the sparse path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum JacobianMode {
+    /// Sparse Jacobian using symbolic structure and `SparseColMat`. Best for large problems.
+    #[default]
+    Sparse,
+    /// Dense Jacobian using `Mat<f64>`. Best for small-to-medium problems (< ~500 DOF).
+    Dense,
+}
+
 // ============================================================================
 // Linear solver type selection
 // ============================================================================
@@ -226,6 +251,88 @@ pub trait SparseLinearSolver {
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
 
     /// Get the cached gradient vector (J^T * r) from the last solve
+    fn get_gradient(&self) -> Option<&Mat<f64>>;
+
+    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>>;
+
+    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>>;
+}
+
+// ============================================================================
+// AssemblyMode trait (static dispatch for sparse vs dense paths)
+// ============================================================================
+
+/// Marker trait that defines the matrix types for a linear algebra path.
+///
+/// This trait enables zero-cost static dispatch between sparse and dense
+/// linear algebra backends. Optimizers are generic over `AssemblyMode`,
+/// so the compiler generates specialized code for each path.
+///
+/// Two implementations are provided:
+/// - [`SparseMode`]: Jacobian and Hessian are `SparseColMat<usize, f64>`
+/// - [`DenseMode`]: Jacobian and Hessian are `Mat<f64>`
+pub trait AssemblyMode: 'static {
+    /// The Jacobian matrix type (SparseColMat or Mat)
+    type Jacobian: Send + Sync;
+    /// The Hessian matrix type (SparseColMat or Mat)
+    type Hessian: Send + Sync;
+}
+
+/// Sparse linear algebra mode.
+///
+/// Uses `SparseColMat<usize, f64>` for Jacobians and Hessians.
+/// Optimal for large-scale problems with sparse structure (e.g., pose graphs).
+pub struct SparseMode;
+
+impl AssemblyMode for SparseMode {
+    type Jacobian = SparseColMat<usize, f64>;
+    type Hessian = SparseColMat<usize, f64>;
+}
+
+/// Dense linear algebra mode.
+///
+/// Uses `Mat<f64>` for Jacobians and Hessians.
+/// Optimal for small-to-medium problems (< 500 DOF) or dense Jacobians
+/// (e.g., bundle adjustment with few cameras).
+pub struct DenseMode;
+
+impl AssemblyMode for DenseMode {
+    type Jacobian = Mat<f64>;
+    type Hessian = Mat<f64>;
+}
+
+// ============================================================================
+// LinAlgSolver trait (unified solver interface, generic over AssemblyMode)
+// ============================================================================
+
+/// Unified linear solver interface parameterized by [`AssemblyMode`].
+///
+/// This trait provides the same operations as [`SparseLinearSolver`] but
+/// with types determined by the assembly mode. When `M` is a concrete type
+/// (e.g., `SparseMode`), this trait is object-safe and can be used as
+/// `dyn LinAlgSolver<SparseMode>`.
+pub trait LinAlgSolver<M: AssemblyMode> {
+    /// Solve the normal equations: (J^T · J) · dx = −J^T · r
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &M::Jacobian,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Solve the augmented equations: (J^T · J + λI) · dx = −J^T · r
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &M::Jacobian,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>>;
+
+    /// Get the cached Hessian matrix (J^T · J) from the last solve
+    fn get_hessian(&self) -> Option<&M::Hessian>;
+
+    /// Get the cached gradient vector (J^T · r) from the last solve
     fn get_gradient(&self) -> Option<&Mat<f64>>;
 
     /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian

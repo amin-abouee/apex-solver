@@ -1,4 +1,7 @@
-use faer::{Mat, sparse::{SparseColMat, Triplet}};
+use faer::{
+    Mat,
+    sparse::{SparseColMat, Triplet},
+};
 
 use crate::linalg::{LinAlgError, LinAlgResult};
 
