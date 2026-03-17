@@ -81,6 +81,9 @@ name = "bundle_adjustment"
 path = "bin/bundle_adjustment.rs"
 
 [[example]]
+name = "compare_solvers"
+
+[[example]]
 name = "visualize_graph_file"
 required-features = ["visualization"]
 
@@ -141,6 +144,7 @@ split-debuginfo = "unpacked"
 debug = 1
 
 [profile.test]
+inherits = "release"
 split-debuginfo = "unpacked"
 debug = 1
 
