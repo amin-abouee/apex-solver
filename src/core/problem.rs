@@ -106,7 +106,7 @@ use crate::{
     },
     error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
-    linalg::{JacobianMode, SparseLinearSolver, extract_variable_covariances},
+    linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
 };
 use apex_manifolds::{ManifoldType, rn, se2, se3, so2, so3};
 
@@ -979,7 +979,7 @@ impl Problem {
     ///
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn SparseLinearSolver>,
+        linear_solver: &mut Box<dyn LinearSolver<SparseMode>>,
         variables: &mut HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
     ) -> Option<HashMap<String, Mat<f64>>> {
@@ -1007,7 +1007,7 @@ impl Problem {
     /// with any assembly mode (sparse or dense).
     pub fn compute_and_set_covariances_generic<M: crate::linalg::AssemblyMode>(
         &self,
-        linear_solver: &mut dyn crate::linalg::LinAlgSolver<M>,
+        linear_solver: &mut dyn crate::linalg::LinearSolver<M>,
         variables: &mut HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
     ) -> Option<HashMap<String, Mat<f64>>> {
