@@ -11,7 +11,7 @@ use std::{
 use thiserror::Error;
 use tracing::error;
 
-// Re-export sparse solver types (backward compatibility)
+// Re-export sparse solver types
 pub use sparse::{
     IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner,
     SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseQRSolver,
@@ -19,10 +19,7 @@ pub use sparse::{
 };
 
 // Re-export dense solver types
-pub use dense::DenseCholeskySolver;
-
-// Re-export assembly mode types
-// (AssemblyMode, SparseMode, DenseMode, LinAlgSolver are defined below in this file)
+pub use dense::{DenseCholeskySolver, DenseQRSolver};
 
 // ============================================================================
 // Jacobian mode selection
@@ -58,6 +55,7 @@ pub enum LinearSolverType {
     SparseQR,
     SparseSchurComplement,
     DenseCholesky,
+    DenseQR,
 }
 
 impl Display for LinearSolverType {
@@ -67,6 +65,7 @@ impl Display for LinearSolverType {
             LinearSolverType::SparseQR => write!(f, "Sparse QR"),
             LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
             LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
+            LinearSolverType::DenseQR => write!(f, "Dense QR"),
         }
     }
 }
@@ -123,69 +122,7 @@ impl LinAlgError {
 pub type LinAlgResult<T> = Result<T, LinAlgError>;
 
 // ============================================================================
-// Generic LinearSolver trait (fundamental abstraction)
-// ============================================================================
-
-/// A purely generic linear solver boundary.
-///
-/// Converts a Jacobian and residual into a parameter step, caching the
-/// resulting gradient and Hessian in their native formats.
-///
-/// This trait uses associated types so that each backend can define its own
-/// native matrix representations (e.g., `faer::Mat<f64>` for CPU dense,
-/// `faer::sparse::SparseColMat` for CPU sparse, `cudarc::CudaSlice` for GPU).
-///
-/// # Type Parameters
-///
-/// - `Vector`: The native 1-D array type (e.g., `faer::Mat<f64>`)
-/// - `Jacobian`: The native matrix type for the Jacobian J
-/// - `Hessian`: The native matrix type for the Hessian approximation J^T · J
-/// - `Error`: A generic error type for factorization or memory failures
-pub trait LinearSolver {
-    /// The native 1-D array type (e.g., `faer::Mat<f64>` or `CudaSlice<f64>`)
-    type Vector;
-
-    /// The native matrix type for the Jacobian (J)
-    type Jacobian;
-
-    /// The native matrix type for the Hessian approximation (J^T · J)
-    type Hessian;
-
-    /// A generic error type for factorization or memory failures
-    type Error: Debug;
-
-    // ========================================================================
-    // Core solves
-    // ========================================================================
-
-    /// Solve the normal equations: (J^T · J) · dx = −J^T · r
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Self::Vector,
-        jacobian: &Self::Jacobian,
-    ) -> Result<Self::Vector, Self::Error>;
-
-    /// Solve the augmented equations: (J^T · J + λI) · dx = −J^T · r
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Self::Vector,
-        jacobian: &Self::Jacobian,
-        lambda: f64,
-    ) -> Result<Self::Vector, Self::Error>;
-
-    // ========================================================================
-    // Cached state access
-    // ========================================================================
-
-    /// Retrieve the cached gradient (g = J^T · r) computed during the last solve.
-    fn gradient(&self) -> Option<&Self::Vector>;
-
-    /// Retrieve the cached Hessian (H = J^T · J) computed during the last solve.
-    fn hessian(&self) -> Option<&Self::Hessian>;
-}
-
-// ============================================================================
-// SparseLinearSolver trait (optimizer-facing, object-safe bridge)
+// StructuredSparseLinearSolver
 // ============================================================================
 
 /// Trait for structured sparse linear solvers that require variable information.
@@ -221,43 +158,6 @@ pub trait StructuredSparseLinearSolver {
 
     /// Get the cached gradient vector
     fn get_gradient(&self) -> Option<&Mat<f64>>;
-}
-
-/// Object-safe trait for linear solvers used by the optimizer.
-///
-/// This trait uses concrete `faer` types (`Mat<f64>` for vectors,
-/// `SparseColMat<usize, f64>` for Jacobians/Hessians) so it can be used
-/// as `dyn SparseLinearSolver` for runtime solver selection.
-///
-/// All CPU solvers implement this trait. Dense solvers accept sparse Jacobians
-/// and convert internally. GPU solvers will implement via host-side adapters.
-pub trait SparseLinearSolver {
-    /// Solve the normal equation: (J^T * J) * dx = -J^T * r
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>>;
-
-    /// Solve the augmented equation: (J^T * J + λI) * dx = -J^T * r
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
-        lambda: f64,
-    ) -> LinAlgResult<Mat<f64>>;
-
-    /// Get the cached Hessian matrix (J^T * J) from the last solve
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
-
-    /// Get the cached gradient vector (J^T * r) from the last solve
-    fn get_gradient(&self) -> Option<&Mat<f64>>;
-
-    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>>;
-
-    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>>;
 }
 
 // ============================================================================
@@ -304,16 +204,20 @@ impl AssemblyMode for DenseMode {
 }
 
 // ============================================================================
-// LinAlgSolver trait (unified solver interface, generic over AssemblyMode)
+// LinearSolver trait (unified solver interface, generic over AssemblyMode)
 // ============================================================================
 
 /// Unified linear solver interface parameterized by [`AssemblyMode`].
 ///
-/// This trait provides the same operations as [`SparseLinearSolver`] but
-/// with types determined by the assembly mode. When `M` is a concrete type
-/// (e.g., `SparseMode`), this trait is object-safe and can be used as
-/// `dyn LinAlgSolver<SparseMode>`.
-pub trait LinAlgSolver<M: AssemblyMode> {
+/// This is the single trait implemented by all linear solvers. When `M` is
+/// a concrete type (e.g., `SparseMode`), this trait is object-safe and can
+/// be used as `dyn LinearSolver<SparseMode>` or `dyn LinearSolver<DenseMode>`.
+///
+/// - Sparse solvers (`SparseCholeskySolver`, `SparseQRSolver`, `SchurSolverAdapter`)
+///   implement `LinearSolver<SparseMode>`.
+/// - Dense solvers (`DenseCholeskySolver`, `DenseQRSolver`)
+///   implement `LinearSolver<DenseMode>`.
+pub trait LinearSolver<M: AssemblyMode> {
     /// Solve the normal equations: (J^T · J) · dx = −J^T · r
     fn solve_normal_equation(
         &mut self,
