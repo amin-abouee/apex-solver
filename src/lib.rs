@@ -71,8 +71,8 @@ pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
 pub use linalg::{
-    DenseCholeskySolver, JacobianMode, LinearSolver, LinearSolverType, SparseCholeskySolver,
-    SparseLinearSolver, SparseQRSolver,
+    AssemblyMode, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
+    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 
 // Re-export logger
