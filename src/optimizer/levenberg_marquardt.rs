@@ -148,7 +148,7 @@
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, JacobianMode, LinAlgSolver, LinearSolverType,
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
     SchurPreconditioner, SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseMode,
     SparseQRSolver,
 };
@@ -729,7 +729,7 @@ impl LevenbergMarquardt {
         &self,
         residuals: &Mat<f64>,
         scaled_jacobian: &M::Jacobian,
-        linear_solver: &mut dyn LinAlgSolver<M>,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<StepResult, OptimizerError> {
         // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
         let residuals_owned = residuals.as_ref().to_owned();
@@ -822,7 +822,7 @@ impl LevenbergMarquardt {
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-        linear_solver: &mut dyn LinAlgSolver<M>,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
         let start_time = Instant::now();
         let mut iteration = 0;
@@ -1035,10 +1035,16 @@ impl LevenbergMarquardt {
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
     ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
         match problem.jacobian_mode {
-            JacobianMode::Dense => {
-                let mut solver = DenseCholeskySolver::new();
-                self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
-            }
+            JacobianMode::Dense => match self.config.linear_solver_type {
+                LinearSolverType::DenseQR => {
+                    let mut solver = DenseQRSolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    let mut solver = DenseCholeskySolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+            },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();

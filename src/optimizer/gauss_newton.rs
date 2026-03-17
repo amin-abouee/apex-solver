@@ -123,8 +123,8 @@ use std::{collections, time};
 use tracing::debug;
 
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, JacobianMode, LinAlgSolver, SparseCholeskySolver, SparseMode,
-    SparseQRSolver,
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
+    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{IterationStats, SystemAssembly};
 
@@ -489,7 +489,7 @@ impl GaussNewton {
         &self,
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &M::Jacobian,
-        linear_solver: &mut dyn LinAlgSolver<M>,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<StepResult, optimizer::OptimizerError> {
         // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
         let residuals_owned = residuals.as_ref().to_owned();
@@ -560,7 +560,7 @@ impl GaussNewton {
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
-        linear_solver: &mut dyn LinAlgSolver<M>,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
         error::ApexSolverError,
@@ -760,10 +760,16 @@ impl GaussNewton {
         error::ApexSolverError,
     > {
         match problem.jacobian_mode {
-            JacobianMode::Dense => {
-                let mut solver = DenseCholeskySolver::new();
-                self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
-            }
+            JacobianMode::Dense => match self.config.linear_solver_type {
+                LinearSolverType::DenseQR => {
+                    let mut solver = DenseQRSolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    let mut solver = DenseCholeskySolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+            },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();

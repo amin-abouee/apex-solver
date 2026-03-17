@@ -10,8 +10,8 @@ use crate::core::assembly::sparse::SymbolicStructure;
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    self, AssemblyMode, DenseCholeskySolver, DenseMode, JacobianMode, LinAlgSolver,
-    SparseCholeskySolver, SparseLinearSolver, SparseMode, SparseQRSolver,
+    self, AssemblyMode, DenseMode, JacobianMode, LinearSolver,
+    SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -855,15 +855,15 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
 ///
 /// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
 /// solver creation logic due to special Schur complement adapter requirements.
-pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn SparseLinearSolver> {
+pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn LinearSolver<SparseMode>> {
     match solver_type {
         linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
-        linalg::LinearSolverType::SparseSchurComplement => {
-            // Schur complement solver requires special handling - fallback to Cholesky
+        _ => {
+            // SparseSchurComplement requires special handling; DenseCholesky/DenseQR are
+            // dispatched via the dense path in each optimizer — all fall back to Cholesky here.
             Box::new(SparseCholeskySolver::new())
         }
-        linalg::LinearSolverType::DenseCholesky => Box::new(DenseCholeskySolver::new()),
     }
 }
 
@@ -880,7 +880,7 @@ pub fn notify_observers(
     damping: Option<f64>,
     step_norm: f64,
     step_quality: Option<f64>,
-    linear_solver: &dyn SparseLinearSolver,
+    linear_solver: &dyn LinearSolver<SparseMode>,
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
@@ -909,7 +909,7 @@ pub fn notify_observers_generic<M: SystemAssembly>(
     damping: Option<f64>,
     step_norm: f64,
     step_quality: Option<f64>,
-    _linear_solver: &dyn LinAlgSolver<M>,
+    _linear_solver: &dyn LinearSolver<M>,
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
     // Skip matrix data for generic path since observers expect sparse Hessian.
