@@ -6,9 +6,7 @@ use faer::{
 };
 use std::ops::Mul;
 
-use crate::linalg::{
-    LinAlgError, LinAlgResult, LinAlgSolver, LinearSolver, SparseLinearSolver, SparseMode,
-};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
@@ -67,7 +65,7 @@ impl SparseQRSolver {
     pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
         // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
-            SparseLinearSolver::compute_covariance_matrix(self);
+            LinearSolver::<SparseMode>::compute_covariance_matrix(self);
         }
 
         // Return None if hessian is not available (solver not initialized)
@@ -103,7 +101,7 @@ impl Default for SparseQRSolver {
     }
 }
 
-impl SparseLinearSolver for SparseQRSolver {
+impl LinearSolver<SparseMode> for SparseQRSolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
@@ -262,73 +260,6 @@ impl SparseLinearSolver for SparseQRSolver {
     }
 }
 
-impl LinAlgSolver<SparseMode> for SparseQRSolver {
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        SparseLinearSolver::solve_normal_equation(self, residuals, jacobian)
-    }
-
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-        lambda: f64,
-    ) -> LinAlgResult<Mat<f64>> {
-        SparseLinearSolver::solve_augmented_equation(self, residuals, jacobian, lambda)
-    }
-
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
-        self.hessian.as_ref()
-    }
-
-    fn get_gradient(&self) -> Option<&Mat<f64>> {
-        self.gradient.as_ref()
-    }
-
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        SparseLinearSolver::compute_covariance_matrix(self)
-    }
-
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        SparseLinearSolver::get_covariance_matrix(self)
-    }
-}
-
-impl LinearSolver for SparseQRSolver {
-    type Vector = Mat<f64>;
-    type Jacobian = SparseColMat<usize, f64>;
-    type Hessian = SparseColMat<usize, f64>;
-    type Error = crate::linalg::LinAlgError;
-
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Self::Vector,
-        jacobian: &Self::Jacobian,
-    ) -> Result<Self::Vector, Self::Error> {
-        SparseLinearSolver::solve_normal_equation(self, residuals, jacobian)
-    }
-
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Self::Vector,
-        jacobian: &Self::Jacobian,
-        lambda: f64,
-    ) -> Result<Self::Vector, Self::Error> {
-        SparseLinearSolver::solve_augmented_equation(self, residuals, jacobian, lambda)
-    }
-
-    fn gradient(&self) -> Option<&Self::Vector> {
-        self.gradient.as_ref()
-    }
-
-    fn hessian(&self) -> Option<&Self::Hessian> {
-        self.hessian.as_ref()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,7 +310,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         let solution =
-            SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert_eq!(solution.nrows(), 3); // Number of variables
         assert_eq!(solution.ncols(), 1);
 
@@ -395,11 +326,11 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let sol1 = SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol1 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let sol2 = SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol2 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Results should be identical
         for i in 0..sol1.nrows() {
@@ -415,7 +346,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
         let lambda = 0.1;
 
-        let solution = SparseLinearSolver::solve_augmented_equation(
+        let solution = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
@@ -435,13 +366,13 @@ mod tests {
         let lambda1 = 0.01;
         let lambda2 = 1.0;
 
-        let sol1 = SparseLinearSolver::solve_augmented_equation(
+        let sol1 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
             lambda1,
         )?;
-        let sol2 = SparseLinearSolver::solve_augmented_equation(
+        let sol2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
@@ -484,7 +415,7 @@ mod tests {
         let residuals = Mat::from_fn(3, 1, |i, _| i as f64);
 
         // QR should still provide a least squares solution
-        let result = SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        let result = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
         assert!(result.is_ok());
         Ok(())
     }
@@ -505,7 +436,7 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
         let lambda = 0.5;
 
-        let solution = SparseLinearSolver::solve_augmented_equation(
+        let solution = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
@@ -532,7 +463,7 @@ mod tests {
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
         let solution =
-            SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         // Expected solution should be [1, 2, 3]
         for i in 0..3 {
             let expected = (i + 1) as f64;
@@ -563,9 +494,9 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         let normal_sol =
-            SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let augmented_sol =
-            SparseLinearSolver::solve_augmented_equation(&mut solver, &residuals, &jacobian, 0.0)?;
+            LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &residuals, &jacobian, 0.0)?;
 
         // Solutions should be very close (within numerical precision)
         for i in 0..normal_sol.nrows() {
@@ -584,10 +515,10 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Now compute covariance matrix
-        let cov_matrix = SparseLinearSolver::compute_covariance_matrix(&mut solver);
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
@@ -622,7 +553,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -667,9 +598,9 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
-        SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        let cov_matrix = SparseLinearSolver::compute_covariance_matrix(&mut solver);
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
@@ -690,10 +621,10 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // First covariance computation
-        SparseLinearSolver::compute_covariance_matrix(&mut solver);
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(solver.covariance_matrix.is_some());
 
         // Get pointer to first computation
@@ -701,7 +632,7 @@ mod tests {
             let cov1_ptr = cov1.as_ptr();
 
             // Second covariance computation should return cached result
-            SparseLinearSolver::compute_covariance_matrix(&mut solver);
+            LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
             assert!(solver.covariance_matrix.is_some());
 
             // Get pointer to second computation
@@ -731,10 +662,10 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         // QR can handle rank-deficient systems, but covariance may be problematic
-        let result = SparseLinearSolver::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        let result = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
         if result.is_ok() {
             // If solve succeeded, covariance computation might still fail due to singularity
-            let cov_matrix = SparseLinearSolver::compute_covariance_matrix(&mut solver);
+            let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
             // We don't assert failure here since QR might handle this case
             if let Some(cov) = cov_matrix {
                 // If covariance is computed, check that it's reasonable
