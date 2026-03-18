@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use apex_solver::apex_io::{G2oLoader, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
-use apex_solver::core::assembly::sparse::build_symbolic_structure;
+use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::JacobianMode;
