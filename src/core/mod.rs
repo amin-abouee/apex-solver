@@ -7,7 +7,6 @@
 //! - Loss functions for robust estimation
 //! - Correctors for applying loss functions
 
-pub mod assembly;
 pub mod corrector;
 pub mod loss_functions;
 pub mod problem;

@@ -111,7 +111,7 @@ use crate::{
 use apex_manifolds::{ManifoldType, rn, se2, se3, so2, so3};
 
 // Re-export SymbolicStructure from the assembly module for backward compatibility
-pub use super::assembly::sparse::SymbolicStructure;
+pub use crate::linearizer::cpu::sparse::SymbolicStructure;
 
 /// Enum to handle mixed manifold variable types
 #[derive(Clone)]
@@ -839,7 +839,7 @@ impl Problem {
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
-        super::assembly::sparse::assemble_sparse(
+        crate::linearizer::cpu::sparse::assemble_sparse(
             self,
             variables,
             variable_index_sparce_matrix,
@@ -856,7 +856,7 @@ impl Problem {
         variable_index_map: &HashMap<String, usize>,
         total_dof: usize,
     ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
-        super::assembly::dense::assemble_dense(self, variables, variable_index_map, total_dof)
+        crate::linearizer::cpu::dense::assemble_dense(self, variables, variable_index_map, total_dof)
     }
 
     /// Compute only the residual for a single residual block (no Jacobian).
@@ -1005,7 +1005,7 @@ impl Problem {
     ///
     /// This is the generic version of [`compute_and_set_covariances`] that works
     /// with any assembly mode (sparse or dense).
-    pub fn compute_and_set_covariances_generic<M: crate::linalg::AssemblyMode>(
+    pub fn compute_and_set_covariances_generic<M: crate::linalg::LinearizationMode>(
         &self,
         linear_solver: &mut dyn crate::linalg::LinearSolver<M>,
         variables: &mut HashMap<String, VariableEnum>,
@@ -1323,7 +1323,7 @@ mod tests {
         }
 
         // Build symbolic structure
-        let symbolic_structure = crate::core::assembly::sparse::build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem,
             &variables,
             &variable_index_sparce_matrix,
@@ -1357,7 +1357,7 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = crate::core::assembly::sparse::build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem,
             &variables,
             &variable_index_sparce_matrix,
@@ -1394,7 +1394,7 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = crate::core::assembly::sparse::build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem,
             &variables,
             &variable_index_sparce_matrix,
