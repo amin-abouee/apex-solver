@@ -58,6 +58,7 @@ pub mod core;
 pub mod error;
 pub mod factors;
 pub mod linalg;
+pub mod linearizer;
 pub mod logger;
 pub mod observers;
 pub mod optimizer;
@@ -71,8 +72,8 @@ pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
 pub use linalg::{
-    AssemblyMode, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
+    LinearSolverType, LinearizationMode, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 
 // Re-export logger
