@@ -11,15 +11,15 @@ use std::{
 use thiserror::Error;
 use tracing::error;
 
-// Re-export sparse solver types
 pub use sparse::{
     IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner,
     SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseQRSolver,
     SparseSchurComplementSolver,
 };
 
-// Re-export dense solver types
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
+
+pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
 
 // ============================================================================
 // Jacobian mode selection
@@ -161,53 +161,14 @@ pub trait StructuredSparseLinearSolver {
 }
 
 // ============================================================================
-// AssemblyMode trait (static dispatch for sparse vs dense paths)
+// LinearizationMode — re-exported from linearizer/cpu where it is defined
 // ============================================================================
 
-/// Marker trait that defines the matrix types for a linear algebra path.
-///
-/// This trait enables zero-cost static dispatch between sparse and dense
-/// linear algebra backends. Optimizers are generic over `AssemblyMode`,
-/// so the compiler generates specialized code for each path.
-///
-/// Two implementations are provided:
-/// - [`SparseMode`]: Jacobian and Hessian are `SparseColMat<usize, f64>`
-/// - [`DenseMode`]: Jacobian and Hessian are `Mat<f64>`
-pub trait AssemblyMode: 'static {
-    /// The Jacobian matrix type (SparseColMat or Mat)
-    type Jacobian: Send + Sync;
-    /// The Hessian matrix type (SparseColMat or Mat)
-    type Hessian: Send + Sync;
-}
-
-/// Sparse linear algebra mode.
-///
-/// Uses `SparseColMat<usize, f64>` for Jacobians and Hessians.
-/// Optimal for large-scale problems with sparse structure (e.g., pose graphs).
-pub struct SparseMode;
-
-impl AssemblyMode for SparseMode {
-    type Jacobian = SparseColMat<usize, f64>;
-    type Hessian = SparseColMat<usize, f64>;
-}
-
-/// Dense linear algebra mode.
-///
-/// Uses `Mat<f64>` for Jacobians and Hessians.
-/// Optimal for small-to-medium problems (< 500 DOF) or dense Jacobians
-/// (e.g., bundle adjustment with few cameras).
-pub struct DenseMode;
-
-impl AssemblyMode for DenseMode {
-    type Jacobian = Mat<f64>;
-    type Hessian = Mat<f64>;
-}
-
 // ============================================================================
-// LinearSolver trait (unified solver interface, generic over AssemblyMode)
+// LinearSolver trait (unified solver interface, generic over LinearizationMode)
 // ============================================================================
 
-/// Unified linear solver interface parameterized by [`AssemblyMode`].
+/// Unified linear solver interface parameterized by [`LinearizationMode`].
 ///
 /// This is the single trait implemented by all linear solvers. When `M` is
 /// a concrete type (e.g., `SparseMode`), this trait is object-safe and can
@@ -217,7 +178,7 @@ impl AssemblyMode for DenseMode {
 ///   implement `LinearSolver<SparseMode>`.
 /// - Dense solvers (`DenseCholeskySolver`, `DenseQRSolver`)
 ///   implement `LinearSolver<DenseMode>`.
-pub trait LinearSolver<M: AssemblyMode> {
+pub trait LinearSolver<M: LinearizationMode> {
     /// Solve the normal equations: (J^T · J) · dx = −J^T · r
     fn solve_normal_equation(
         &mut self,
