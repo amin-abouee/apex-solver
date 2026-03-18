@@ -1,14 +1,15 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
 use apex_solver::apex_manifolds::se3::SE3;
+use apex_solver::linearizer;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::{Problem, VariableEnum};
-use apex_solver::JacobianMode;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
@@ -459,7 +460,7 @@ fn test_se2_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = apex_solver::core::assembly::sparse::build_symbolic_structure(
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
         &problem,
         &variables,
         &variable_name_to_col_idx_dict,
@@ -816,7 +817,7 @@ fn test_se3_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = apex_solver::core::assembly::sparse::build_symbolic_structure(
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
         &problem,
         &variables,
         &variable_name_to_col_idx_dict,
