@@ -204,7 +204,7 @@ use crate::linalg::{
     DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
     LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
-use crate::optimizer::{IterationStats, SystemAssembly};
+use crate::optimizer::{IterationStats, SystemLinearizer};
 
 /// Configuration parameters for the Dog Leg trust region optimizer.
 ///
@@ -771,7 +771,7 @@ impl DogLeg {
     /// Returns (alpha, cauchy_point) where:
     /// - alpha: optimal step length α = ||g||² / (g^T H g)
     /// - cauchy_point: p_c = -α * g (the Cauchy point)
-    fn compute_cauchy_point_and_alpha_generic<M: SystemAssembly>(
+    fn compute_cauchy_point_and_alpha_generic<M: SystemLinearizer>(
         &self,
         gradient: &faer::Mat<f64>,
         hessian: &M::Hessian,
@@ -943,7 +943,7 @@ impl DogLeg {
     }
 
     /// Compute predicted cost reduction from linear model (generic over assembly mode).
-    fn compute_predicted_reduction_generic<M: SystemAssembly>(
+    fn compute_predicted_reduction_generic<M: SystemLinearizer>(
         &self,
         step: &faer::Mat<f64>,
         gradient: &faer::Mat<f64>,
@@ -958,7 +958,7 @@ impl DogLeg {
     }
 
     /// Compute dog leg optimization step (generic over assembly mode).
-    fn compute_optimization_step_generic<M: SystemAssembly>(
+    fn compute_optimization_step_generic<M: SystemLinearizer>(
         &mut self,
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &M::Jacobian,
@@ -1139,7 +1139,7 @@ impl DogLeg {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
-    fn optimize_with_mode<M: SystemAssembly>(
+    fn optimize_with_mode<M: SystemLinearizer>(
         &mut self,
         problem: &problem::Problem,
         initial_params: &collections::HashMap<

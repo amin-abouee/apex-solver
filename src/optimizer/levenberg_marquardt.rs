@@ -154,7 +154,7 @@ use crate::linalg::{
 };
 use crate::optimizer::{
     ConvergenceParams, InitializedState, IterationStats, OptObserverVec, OptimizerError, Solver,
-    SolverResult, SystemAssembly, apply_negative_parameter_step, apply_parameter_step,
+    SolverResult, SystemLinearizer, apply_negative_parameter_step, apply_parameter_step,
     compute_cost,
 };
 use apex_manifolds::ManifoldType;
@@ -725,7 +725,7 @@ impl LevenbergMarquardt {
     }
 
     /// Compute optimization step by solving the augmented system (generic over assembly mode).
-    fn compute_step_generic<M: SystemAssembly>(
+    fn compute_step_generic<M: SystemLinearizer>(
         &self,
         residuals: &Mat<f64>,
         scaled_jacobian: &M::Jacobian,
@@ -818,7 +818,7 @@ impl LevenbergMarquardt {
     ///
     /// This is the core generic optimization loop. The public `optimize()` method
     /// dispatches to this based on `LinearSolverType`.
-    fn optimize_with_mode<M: SystemAssembly>(
+    fn optimize_with_mode<M: SystemLinearizer>(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
