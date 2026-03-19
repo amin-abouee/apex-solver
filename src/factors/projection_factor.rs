@@ -13,7 +13,7 @@ use apex_manifolds::se3::SE3;
 ///
 /// This trait allows accessing the compile-time boolean flags for
 /// parameter optimization (pose, landmarks, intrinsics).
-pub trait OptimizationConfig: Send + Sync + 'static + Clone + Copy + Default {
+pub trait OptimizationConfig: Send + Sync + 'static {
     const POSE: bool;
     const LANDMARK: bool;
     const INTRINSIC: bool;
