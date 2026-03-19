@@ -58,10 +58,11 @@
 //! use nalgebra::{DVector, dvector};
 //! use std::collections::HashMap;
 //! use apex_solver::manifold::se2::SE2;
+//! use apex_solver::JacobianMode;
 //! # use apex_solver::error::ApexSolverResult;
 //! # fn example() -> ApexSolverResult<()> {
 //!
-//! let mut problem = Problem::new();
+//! let mut problem = Problem::new(JacobianMode::Sparse);
 //!
 //! // Add prior factor to anchor the first pose
 //! let prior = Box::new(PriorFactor {
@@ -93,10 +94,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use faer::{
-    Col, Mat, MatRef,
-    sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat},
-};
+use faer::{Col, Mat, MatRef, sparse::SparseColMat};
 use nalgebra::DVector;
 use rayon::prelude::*;
 use tracing::warn;
@@ -108,24 +106,12 @@ use crate::{
     },
     error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
-    linalg::{SparseLinearSolver, extract_variable_covariances},
+    linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
 };
 use apex_manifolds::{ManifoldType, rn, se2, se3, so2, so3};
 
-/// Symbolic structure for sparse matrix operations.
-///
-/// Contains the sparsity pattern (which entries are non-zero) and an ordering
-/// for efficient numerical computation. This is computed once at the beginning
-/// and reused throughout optimization.
-///
-/// # Fields
-///
-/// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
-/// - `order`: A fill-reducing ordering/permutation for numerical stability
-pub struct SymbolicStructure {
-    pub pattern: SymbolicSparseColMat<usize>,
-    pub order: Argsort<usize>,
-}
+// Re-export SymbolicStructure from the assembly module for backward compatibility
+pub use crate::linearizer::cpu::sparse::SymbolicStructure;
 
 /// Enum to handle mixed manifold variable types
 #[derive(Clone)]
@@ -359,7 +345,7 @@ impl VariableEnum {
 ///
 /// # Workflow
 ///
-/// 1. **Construction**: Create a new Problem with `Problem::new()`
+/// 1. **Construction**: Create a new Problem with `Problem::new(JacobianMode::Sparse)`
 /// 2. **Add Factors**: Use `add_residual_block()` to add constraints
 /// 3. **Initialize Variables**: Use `initialize_variables()` with initial values
 /// 4. **Build Sparsity**: Use `build_symbolic_structure()` once before optimization
@@ -373,10 +359,11 @@ impl VariableEnum {
 /// use apex_solver::factors::BetweenFactor;
 /// use apex_solver::manifold::ManifoldType;
 /// use apex_solver::manifold::se2::SE2;
+/// use apex_solver::JacobianMode;
 /// use nalgebra::dvector;
 /// use std::collections::HashMap;
 ///
-/// let mut problem = Problem::new();
+/// let mut problem = Problem::new(JacobianMode::Sparse);
 ///
 /// // Add a between factor
 /// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
@@ -394,6 +381,13 @@ pub struct Problem {
     /// Total dimension of the stacked residual vector (sum of all residual block dimensions)
     pub total_residual_dimension: usize,
 
+    /// Controls which Jacobian assembly strategy is used (sparse or dense).
+    ///
+    /// Set via `Problem::new(JacobianMode::Sparse)` (sparse, default) or
+    /// `Problem::new(JacobianMode::Dense)` (dense).
+    /// The optimizer reads this field to select the assembly path.
+    pub jacobian_mode: JacobianMode,
+
     /// Counter for assigning unique IDs to residual blocks
     residual_id_count: usize,
 
@@ -410,29 +404,36 @@ pub struct Problem {
 }
 impl Default for Problem {
     fn default() -> Self {
-        Self::new()
+        Self::new(JacobianMode::Sparse)
     }
 }
 
 impl Problem {
-    /// Create a new empty optimization problem.
+    /// Create a new empty optimization problem with the given Jacobian assembly mode.
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// A new `Problem` with no residual blocks or variables
+    /// * `jacobian_mode` - Assembly strategy: [`JacobianMode::Sparse`] (default, large problems)
+    ///   or [`JacobianMode::Dense`] (small-to-medium problems < ~500 DOF)
     ///
     /// # Example
     ///
     /// ```
     /// use apex_solver::core::problem::Problem;
+    /// use apex_solver::JacobianMode;
     ///
-    /// let problem = Problem::new();
-    /// assert_eq!(problem.num_residual_blocks(), 0);
-    /// assert_eq!(problem.total_residual_dimension, 0);
+    /// // Sparse (default for large-scale problems)
+    /// let sparse_problem = Problem::new(JacobianMode::Sparse);
+    /// assert_eq!(sparse_problem.num_residual_blocks(), 0);
+    ///
+    /// // Dense (for small-to-medium problems)
+    /// let dense_problem = Problem::new(JacobianMode::Dense);
+    /// assert_eq!(dense_problem.jacobian_mode, JacobianMode::Dense);
     /// ```
-    pub fn new() -> Self {
+    pub fn new(jacobian_mode: JacobianMode) -> Self {
         Self {
             total_residual_dimension: 0,
+            jacobian_mode,
             residual_id_count: 0,
             residual_blocks: HashMap::new(),
             fixed_variable_indexes: HashMap::new(),
@@ -461,12 +462,13 @@ impl Problem {
     /// use apex_solver::core::problem::Problem;
     /// use apex_solver::factors::{BetweenFactor, PriorFactor};
     /// use apex_solver::core::loss_functions::HuberLoss;
+    /// use apex_solver::JacobianMode;
     /// use nalgebra::dvector;
     /// use apex_solver::manifold::se2::SE2;
     /// # use apex_solver::error::ApexSolverResult;
     /// # fn example() -> ApexSolverResult<()> {
     ///
-    /// let mut problem = Problem::new();
+    /// let mut problem = Problem::new(JacobianMode::Sparse);
     ///
     /// // Add prior factor (unary constraint)
     /// let prior = Box::new(PriorFactor { data: dvector![0.0, 0.0, 0.0] });
@@ -582,10 +584,11 @@ impl Problem {
     /// ```
     /// use apex_solver::core::problem::Problem;
     /// use apex_solver::manifold::ManifoldType;
+    /// use apex_solver::JacobianMode;
     /// use nalgebra::dvector;
     /// use std::collections::HashMap;
     ///
-    /// let problem = Problem::new();
+    /// let problem = Problem::new(JacobianMode::Sparse);
     ///
     /// let mut initial = HashMap::new();
     /// initial.insert("pose0".to_string(), (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]));
@@ -694,123 +697,9 @@ impl Problem {
         self.residual_blocks.len()
     }
 
-    /// Build symbolic structure for sparse Jacobian computation
-    ///
-    /// This method constructs the sparsity pattern of the Jacobian matrix before numerical
-    /// computation. It determines which entries in the Jacobian will be non-zero based on
-    /// the structure of the optimization problem (which residual blocks connect which variables).
-    ///
-    /// # Purpose
-    /// - Pre-allocates memory for sparse matrix operations
-    /// - Enables efficient sparse linear algebra (avoiding dense operations)
-    /// - Computed once at the beginning, used throughout optimization
-    ///
-    /// # Arguments
-    /// * `variables` - Map of variable names to their values and properties (SE2, SE3, etc.)
-    /// * `variable_index_sparce_matrix` - Map from variable name to starting column index in Jacobian
-    /// * `total_dof` - Total degrees of freedom (number of columns in Jacobian)
-    ///
-    /// # Returns
-    /// A `SymbolicStructure` containing:
-    /// - `pattern`: The symbolic sparse column matrix structure (row/col indices of non-zeros)
-    /// - `order`: An ordering/permutation for efficient numerical computation
-    ///
-    /// # Algorithm
-    /// For each residual block:
-    /// 1. Identify which variables it depends on
-    /// 2. For each (residual_dimension × variable_dof) block, mark entries as non-zero
-    /// 3. Convert to optimized sparse matrix representation
-    ///
-    /// # Example Structure
-    /// For a simple problem with 3 SE2 poses (9 DOF total):
-    /// - Between(x0, x1): Creates 3×6 block at rows 0-2, cols 0-5
-    /// - Between(x1, x2): Creates 3×6 block at rows 3-5, cols 3-8
-    /// - Prior(x0): Creates 3×3 block at rows 6-8, cols 0-2
-    ///
-    /// Result: 9×9 sparse Jacobian with 45 non-zero entries
-    pub fn build_symbolic_structure(
-        &self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_dof: usize,
-    ) -> ApexSolverResult<SymbolicStructure> {
-        // Vector to accumulate all (row, col) pairs that will be non-zero in the Jacobian
-        // Each Pair represents one entry in the sparse matrix
-        let mut indices = Vec::<Pair<usize, usize>>::new();
-
-        // Iterate through all residual blocks (factors/constraints) in the problem
-        // Each residual block contributes a block of entries to the Jacobian
-        self.residual_blocks.iter().for_each(|(_, residual_block)| {
-            // Create local indexing for this residual block's variables
-            // Maps each variable to its local starting index and size within this factor
-            // Example: For Between(x0, x1) with SE2: [(0, 3), (3, 3)]
-            //   - x0 starts at local index 0, has 3 DOF
-            //   - x1 starts at local index 3, has 3 DOF
-            let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
-            let mut count_variable_local_idx: usize = 0;
-
-            // Build the local index mapping for this residual block
-            for var_key in &residual_block.variable_key_list {
-                if let Some(variable) = variables.get(var_key) {
-                    // Store (local_start_index, dof_size) for this variable
-                    variable_local_idx_size_list
-                        .push((count_variable_local_idx, variable.get_size()));
-                    count_variable_local_idx += variable.get_size();
-                }
-            }
-
-            // For each variable in this residual block, generate Jacobian entries
-            for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
-                if let Some(variable_global_idx) = variable_index_sparce_matrix.get(var_key) {
-                    // Get the DOF size for this variable
-                    let (_, var_size) = variable_local_idx_size_list[i];
-
-                    // Generate all (row, col) pairs for the Jacobian block:
-                    // ∂(residual) / ∂(variable)
-                    //
-                    // For a residual block with dimension R and variable with DOF V:
-                    // Creates R × V entries in the Jacobian
-
-                    // Iterate over each residual dimension (rows)
-                    for row_idx in 0..residual_block.factor.get_dimension() {
-                        // Iterate over each variable DOF (columns)
-                        for col_idx in 0..var_size {
-                            // Compute global row index:
-                            // Start from this residual block's first row, add offset
-                            let global_row_idx = residual_block.residual_row_start_idx + row_idx;
-
-                            // Compute global column index:
-                            // Start from this variable's first column, add offset
-                            let global_col_idx = variable_global_idx + col_idx;
-
-                            // Record this (row, col) pair as a non-zero entry
-                            indices.push(Pair::new(global_row_idx, global_col_idx));
-                        }
-                    }
-                }
-            }
-        });
-
-        // Convert the list of (row, col) pairs into an optimized symbolic sparse matrix
-        // This performs:
-        // 1. Duplicate elimination (same entry might be referenced multiple times)
-        // 2. Sorting for column-wise storage format
-        // 3. Computing a fill-reducing ordering for numerical stability
-        // 4. Allocating the symbolic structure (no values yet, just pattern)
-        let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
-            self.total_residual_dimension, // Number of rows (total residual dimension)
-            total_dof,                     // Number of columns (total DOF)
-            &indices,                      // List of non-zero entry locations
-        )
-        .map_err(|e| {
-            CoreError::SymbolicStructure(
-                "Failed to build symbolic sparse matrix structure".to_string(),
-            )
-            .log_with_source(e)
-        })?;
-
-        // Return the symbolic structure that will be filled with numerical values later
-        Ok(SymbolicStructure { pattern, order })
+    /// Get a reference to the residual blocks map (crate-internal for assembly modules)
+    pub(crate) fn residual_blocks(&self) -> &HashMap<usize, ResidualBlock> {
+        &self.residual_blocks
     }
 
     /// Compute only the residual vector for the current variable values.
@@ -846,9 +735,10 @@ impl Problem {
     ///
     /// ```no_run
     /// # use apex_solver::core::problem::Problem;
+    /// # use apex_solver::JacobianMode;
     /// # use std::collections::HashMap;
     /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let problem = Problem::new();
+    /// # let problem = Problem::new(JacobianMode::Sparse);
     /// # let variables = HashMap::new();
     /// // Initial cost evaluation (no Jacobian needed)
     /// let residual = problem.compute_residual_sparse(&variables)?;
@@ -940,72 +830,38 @@ impl Problem {
     /// //
     /// // Use for linear system: J^T J dx = -J^T r
     /// ```
+    /// Compute residuals and sparse Jacobian.
+    ///
+    /// Delegates to [`assembly::sparse::assemble_sparse()`](super::assembly::sparse::assemble_sparse).
     pub fn compute_residual_and_jacobian_sparse(
         &self,
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
-        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
-
-        // OPTIMIZATION: Pre-allocate exact size to avoid double allocation and flattening
-        // This eliminates the Vec<Vec<f64>> → Vec<f64> conversion overhead
-        let total_nnz = symbolic_structure.pattern.compute_nnz();
-
-        // Collect block results with pre-computed sizes
-        let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, ApexSolverError> = self
-            .residual_blocks
-            .par_iter()
-            .map(|(_, residual_block)| {
-                let values = self.compute_residual_and_jacobian_block(
-                    residual_block,
-                    variables,
-                    variable_index_sparce_matrix,
-                    &total_residual,
-                )?;
-                let size = values.len();
-                Ok((size, values))
-            })
-            .collect();
-
-        let jacobian_blocks = jacobian_blocks?;
-
-        // Pre-allocate final vec with exact size
-        let mut jacobian_values = Vec::with_capacity(total_nnz);
-        for (_size, mut block_values) in jacobian_blocks {
-            jacobian_values.append(&mut block_values);
-        }
-
-        let total_residual = Arc::try_unwrap(total_residual)
-            .map_err(|_| {
-                CoreError::ParallelComputation(
-                    "Failed to unwrap Arc for total residual".to_string(),
-                )
-                .log()
-            })?
-            .into_inner()
-            .map_err(|e| {
-                CoreError::ParallelComputation(
-                    "Failed to extract mutex inner value for total residual".to_string(),
-                )
-                .log_with_source(e)
-            })?;
-
-        // Convert faer Col to Mat (column vector as n×1 matrix)
-        let residual_faer = total_residual.as_ref().as_mat().to_owned();
-        let jacobian_sparse = SparseColMat::new_from_argsort(
-            symbolic_structure.pattern.clone(),
-            &symbolic_structure.order,
-            jacobian_values.as_slice(),
+        crate::linearizer::cpu::sparse::assemble_sparse(
+            self,
+            variables,
+            variable_index_sparce_matrix,
+            symbolic_structure,
         )
-        .map_err(|e| {
-            CoreError::SymbolicStructure(
-                "Failed to create sparse Jacobian from argsort".to_string(),
-            )
-            .log_with_source(e)
-        })?;
+    }
 
-        Ok((residual_faer, jacobian_sparse))
+    /// Compute residuals and dense Jacobian.
+    ///
+    /// Delegates to [`assembly::dense::assemble_dense()`](super::assembly::dense::assemble_dense).
+    pub fn compute_residual_and_jacobian_dense(
+        &self,
+        variables: &HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+        total_dof: usize,
+    ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
+        crate::linearizer::cpu::dense::assemble_dense(
+            self,
+            variables,
+            variable_index_map,
+            total_dof,
+        )
     }
 
     /// Compute only the residual for a single residual block (no Jacobian).
@@ -1050,90 +906,6 @@ impl Problem {
         }
 
         Ok(())
-    }
-
-    /// Compute residual and Jacobian for a single residual block.
-    ///
-    /// Helper method for `compute_residual_and_jacobian_sparse()`.
-    fn compute_residual_and_jacobian_block(
-        &self,
-        residual_block: &ResidualBlock,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_sparce_matrix: &HashMap<String, usize>,
-        total_residual: &Arc<Mutex<Col<f64>>>,
-    ) -> ApexSolverResult<Vec<f64>> {
-        let mut param_vectors: Vec<DVector<f64>> = Vec::new();
-        let mut var_sizes: Vec<usize> = Vec::new();
-        let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
-        let mut count_variable_local_idx: usize = 0;
-
-        for var_key in &residual_block.variable_key_list {
-            if let Some(variable) = variables.get(var_key) {
-                param_vectors.push(variable.to_vector());
-                let var_size = variable.get_size();
-                var_sizes.push(var_size);
-                variable_local_idx_size_list.push((count_variable_local_idx, var_size));
-                count_variable_local_idx += var_size;
-            }
-        }
-
-        let (mut res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
-        let mut jac = jac_opt.ok_or_else(|| {
-            CoreError::FactorLinearization(
-                "Factor returned None for Jacobian when compute_jacobian=true".to_string(),
-            )
-            .log()
-        })?;
-
-        // Apply loss function if present (critical for robust optimization)
-        if let Some(loss_func) = &residual_block.loss_func {
-            let squared_norm = res.dot(&res);
-            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-            corrector.correct_jacobian(&res, &mut jac);
-            corrector.correct_residuals(&mut res);
-        }
-
-        // Update total residual
-        {
-            let mut total_residual = total_residual.lock().map_err(|e| {
-                CoreError::ParallelComputation(
-                    "Failed to acquire lock on total residual".to_string(),
-                )
-                .log_with_source(e)
-            })?;
-
-            // Copy residual values from nalgebra DVector to faer Col
-            let start_idx = residual_block.residual_row_start_idx;
-            let dim = residual_block.factor.get_dimension();
-            let mut total_residual_mut = total_residual.as_mut();
-            for i in 0..dim {
-                total_residual_mut[start_idx + i] = res[i];
-            }
-        }
-
-        // Extract Jacobian values in the correct order
-        let mut local_jacobian_values = Vec::new();
-        for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
-            if variable_index_sparce_matrix.contains_key(var_key) {
-                let (variable_local_idx, var_size) = variable_local_idx_size_list[i];
-                let variable_jac = jac.view((0, variable_local_idx), (jac.shape().0, var_size));
-
-                for row_idx in 0..jac.shape().0 {
-                    for col_idx in 0..var_size {
-                        local_jacobian_values.push(variable_jac[(row_idx, col_idx)]);
-                    }
-                }
-            } else {
-                return Err(CoreError::Variable(format!(
-                    "Missing key {} in variable-to-column-index mapping",
-                    var_key
-                ))
-                .log()
-                .into());
-            }
-        }
-
-        Ok(local_jacobian_values)
     }
 
     /// Log residual vector to a text file
@@ -1212,7 +984,7 @@ impl Problem {
     ///
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn SparseLinearSolver>,
+        linear_solver: &mut Box<dyn LinearSolver<SparseMode>>,
         variables: &mut HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
     ) -> Option<HashMap<String, Mat<f64>>> {
@@ -1225,6 +997,31 @@ impl Problem {
             extract_variable_covariances(&full_cov, variables, variable_index_map);
 
         // Set covariances in Variable objects for easy access
+        for (var_name, cov) in &per_var_covariances {
+            if let Some(var) = variables.get_mut(var_name) {
+                var.set_covariance(cov.clone());
+            }
+        }
+
+        Some(per_var_covariances)
+    }
+
+    /// Compute and set covariances using a generic linear solver.
+    ///
+    /// This is the generic version of [`compute_and_set_covariances`] that works
+    /// with any assembly mode (sparse or dense).
+    pub fn compute_and_set_covariances_generic<M: crate::linalg::LinearizationMode>(
+        &self,
+        linear_solver: &mut dyn crate::linalg::LinearSolver<M>,
+        variables: &mut HashMap<String, VariableEnum>,
+        variable_index_map: &HashMap<String, usize>,
+    ) -> Option<HashMap<String, Mat<f64>>> {
+        linear_solver.compute_covariance_matrix()?;
+        let full_cov = linear_solver.get_covariance_matrix()?.clone();
+
+        let per_var_covariances =
+            extract_variable_covariances(&full_cov, variables, variable_index_map);
+
         for (var_name, cov) in &per_var_covariances {
             if let Some(var) = variables.get_mut(var_name) {
                 var.set_covariance(cov.clone());
@@ -1255,7 +1052,7 @@ mod tests {
 
     /// Create a test SE2 dataset with 10 vertices in a loop
     fn create_se2_test_problem() -> TestProblemResult {
-        let mut problem = Problem::new();
+        let mut problem = Problem::new(JacobianMode::Sparse);
         let mut initial_values = HashMap::new();
 
         // Create 10 SE2 poses in a rough circle pattern
@@ -1320,7 +1117,7 @@ mod tests {
 
     /// Create a test SE3 dataset with 8 vertices in a 3D pattern
     fn create_se3_test_problem() -> TestProblemResult {
-        let mut problem = Problem::new();
+        let mut problem = Problem::new(JacobianMode::Sparse);
         let mut initial_values = HashMap::new();
 
         // Create 8 SE3 poses in a rough 3D cube pattern
@@ -1531,7 +1328,8 @@ mod tests {
         }
 
         // Build symbolic structure
-        let symbolic_structure = problem.build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem,
             &variables,
             &variable_index_sparce_matrix,
             col_offset,
@@ -1564,7 +1362,8 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = problem.build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem,
             &variables,
             &variable_index_sparce_matrix,
             col_offset,
@@ -1600,7 +1399,8 @@ mod tests {
         }
 
         // Test sparse computation
-        let symbolic_structure = problem.build_symbolic_structure(
+        let symbolic_structure = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem,
             &variables,
             &variable_index_sparce_matrix,
             col_offset,
@@ -1621,7 +1421,7 @@ mod tests {
 
     #[test]
     fn test_residual_block_operations() -> TestResult {
-        let mut problem = Problem::new();
+        let mut problem = Problem::new(JacobianMode::Sparse);
 
         // Test adding residual blocks
         let block_id1 = problem.add_residual_block(
@@ -1658,7 +1458,7 @@ mod tests {
 
     #[test]
     fn test_variable_constraints() -> TestResult {
-        let mut problem = Problem::new();
+        let mut problem = Problem::new(JacobianMode::Sparse);
 
         // Test fixing variables
         problem.fix_variable("x0", 0);

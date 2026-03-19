@@ -151,10 +151,11 @@
 //! ```no_run
 //! use apex_solver::optimizer::DogLeg;
 //! use apex_solver::core::problem::Problem;
+//! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let mut problem = Problem::new();
+//! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
 //! let initial_values = HashMap::new();
@@ -196,11 +197,14 @@
 use crate::{core::problem, error, linalg, optimizer};
 use apex_manifolds as manifold;
 
-use faer::sparse;
 use std::{collections, fmt, time};
 use tracing::debug;
 
-use crate::optimizer::IterationStats;
+use crate::linalg::{
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
+    SparseCholeskySolver, SparseMode, SparseQRSolver,
+};
+use crate::optimizer::{IterationStats, SystemLinearizer};
 
 /// Configuration parameters for the Dog Leg trust region optimizer.
 ///
@@ -662,10 +666,11 @@ struct StepEvaluation {
 /// ```no_run
 /// use apex_solver::optimizer::DogLeg;
 /// use apex_solver::core::problem::Problem;
+/// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut problem = Problem::new();
+/// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
 /// let initial_values = HashMap::new();
@@ -684,7 +689,7 @@ struct StepEvaluation {
 /// - [`GaussNewton`](crate::optimizer::GaussNewton) - Undamped variant
 pub struct DogLeg {
     config: DogLegConfig,
-    jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
+    jacobi_scaling: Option<Vec<f64>>,
     observers: optimizer::OptObserverVec,
 
     // Adaptive mu regularization (Ceres-style)
@@ -761,26 +766,21 @@ impl DogLeg {
         self.observers.add(observer);
     }
 
-    /// Compute the Cauchy point (steepest descent step)
-    /// Returns the optimal step along the negative gradient direction
-    /// Compute Cauchy point and optimal step length for steepest descent
+    /// Compute Cauchy point and optimal step length for steepest descent (generic).
     ///
     /// Returns (alpha, cauchy_point) where:
     /// - alpha: optimal step length α = ||g||² / (g^T H g)
     /// - cauchy_point: p_c = -α * g (the Cauchy point)
-    ///
-    /// This is the optimal point along the steepest descent direction within
-    /// the quadratic approximation of the objective function.
-    fn compute_cauchy_point_and_alpha(
+    fn compute_cauchy_point_and_alpha_generic<M: SystemLinearizer>(
         &self,
         gradient: &faer::Mat<f64>,
-        hessian: &sparse::SparseColMat<usize, f64>,
+        hessian: &M::Hessian,
     ) -> (f64, faer::Mat<f64>) {
         // Optimal step size along steepest descent: α = (g^T*g) / (g^T*H*g)
         let g_norm_sq_mat = gradient.transpose() * gradient;
         let g_norm_sq = g_norm_sq_mat[(0, 0)];
 
-        let h_g = hessian * gradient;
+        let h_g = M::hessian_vec_product(hessian, gradient);
         let g_h_g_mat = gradient.transpose() * &h_g;
         let g_h_g = g_h_g_mat[(0, 0)];
 
@@ -942,27 +942,27 @@ impl DogLeg {
         }
     }
 
-    /// Compute predicted cost reduction from linear model
-    fn compute_predicted_reduction(
+    /// Compute predicted cost reduction from linear model (generic over assembly mode).
+    fn compute_predicted_reduction_generic<M: SystemLinearizer>(
         &self,
         step: &faer::Mat<f64>,
         gradient: &faer::Mat<f64>,
-        hessian: &sparse::SparseColMat<usize, f64>,
+        hessian: &M::Hessian,
     ) -> f64 {
         // Dog Leg predicted reduction: -step^T * gradient - 0.5 * step^T * H * step
         let linear_term = step.transpose() * gradient;
-        let hessian_step = hessian * step;
+        let hessian_step = M::hessian_vec_product(hessian, step);
         let quadratic_term = step.transpose() * &hessian_step;
 
         -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)]
     }
 
-    /// Compute dog leg optimization step
-    fn compute_optimization_step(
+    /// Compute dog leg optimization step (generic over assembly mode).
+    fn compute_optimization_step_generic<M: SystemLinearizer>(
         &mut self,
         residuals: &faer::Mat<f64>,
-        scaled_jacobian: &sparse::SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
+        scaled_jacobian: &M::Jacobian,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Option<StepResult> {
         // Check if we can reuse cached step (Ceres-style optimization)
         // Safety limit: prevent excessive reuse that could lead to stale gradient/Hessian
@@ -996,14 +996,16 @@ impl DogLeg {
 
             let step = if self.config.use_jacobi_scaling {
                 let scaling = self.jacobi_scaling.as_ref()?;
-                scaling * &scaled_step
+                M::apply_inverse_scaling(&scaled_step, scaling)
             } else {
                 scaled_step.clone()
             };
 
+            // For cached reuse, we need the hessian for predicted reduction.
+            // Use hessian from linear solver if available.
             let hessian = linear_solver.get_hessian()?;
             let predicted_reduction =
-                self.compute_predicted_reduction(&scaled_step, cached_grad, hessian);
+                self.compute_predicted_reduction_generic::<M>(&scaled_step, cached_grad, hessian);
 
             return Some(StepResult {
                 step,
@@ -1048,7 +1050,8 @@ impl DogLeg {
         }
 
         // 4. Compute Cauchy point and optimal step length
-        let (alpha, cauchy_point) = self.compute_cauchy_point_and_alpha(gradient, hessian);
+        let (alpha, cauchy_point) =
+            self.compute_cauchy_point_and_alpha_generic::<M>(gradient, hessian);
 
         // 5. Compute dog leg step based on trust region radius
         let (scaled_step, _step_type) = self.compute_dog_leg_step(
@@ -1061,13 +1064,14 @@ impl DogLeg {
         // 6. Apply inverse Jacobi scaling if enabled
         let step = if self.config.use_jacobi_scaling {
             let scaling = self.jacobi_scaling.as_ref()?;
-            scaling * &scaled_step
+            M::apply_inverse_scaling(&scaled_step, scaling)
         } else {
             scaled_step.clone()
         };
 
         // 7. Compute predicted reduction
-        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, gradient, hessian);
+        let predicted_reduction =
+            self.compute_predicted_reduction_generic::<M>(&scaled_step, gradient, hessian);
 
         // 8. Cache step components for potential reuse (Ceres-style)
         self.cached_gn_step = Some(scaled_gn_step.clone());
@@ -1134,14 +1138,15 @@ impl DogLeg {
         })
     }
 
-    /// Minimize the optimization problem using Dog Leg algorithm
-    pub fn optimize(
+    /// Run optimization using the specified assembly mode and linear solver.
+    fn optimize_with_mode<M: SystemLinearizer>(
         &mut self,
         problem: &problem::Problem,
         initial_params: &collections::HashMap<
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
         error::ApexSolverError,
@@ -1154,7 +1159,6 @@ impl DogLeg {
         let mut unsuccessful_steps = 0;
 
         let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
-        let mut linear_solver = optimizer::create_linear_solver(&self.config.linear_solver_type);
 
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
@@ -1166,7 +1170,7 @@ impl DogLeg {
         let mut iteration_stats = Vec::with_capacity(self.config.max_iterations);
         let mut previous_cost = state.current_cost;
 
-        // Print configuration and header if info/debug level is enabled
+        // Print configuration and header if debug level is enabled
         if tracing::enabled!(tracing::Level::DEBUG) {
             self.config.print_configuration();
             IterationStats::print_header();
@@ -1174,26 +1178,33 @@ impl DogLeg {
 
         loop {
             let iter_start = time::Instant::now();
-            // Evaluate residuals and Jacobian
-            let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
+
+            // Evaluate residuals and Jacobian using the assembly mode
+            let (residuals, jacobian) = M::assemble(
+                problem,
                 &state.variables,
                 &state.variable_index_map,
-                &state.symbolic_structure,
+                state.symbolic_structure.as_ref(),
+                state.total_dof,
             )?;
             jacobian_evaluations += 1;
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                optimizer::process_jacobian(&jacobian, &mut self.jacobi_scaling, iteration)?
+                optimizer::process_jacobian_generic::<M>(
+                    &jacobian,
+                    &mut self.jacobi_scaling,
+                    iteration,
+                )?
             } else {
                 jacobian
             };
 
             // Compute dog leg step
-            let step_result = match self.compute_optimization_step(
+            let step_result = match self.compute_optimization_step_generic::<M>(
                 &residuals,
                 &scaled_jacobian,
-                &mut linear_solver,
+                linear_solver,
             ) {
                 Some(result) => result,
                 None => {
@@ -1223,7 +1234,6 @@ impl DogLeg {
             }
 
             // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
@@ -1236,7 +1246,7 @@ impl DogLeg {
                     step_norm,
                     tr_ratio: step_eval.rho,
                     tr_radius: self.config.trust_region_radius,
-                    ls_iter: 0, // Direct solver (Cholesky) has no iterations
+                    ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
                     accepted: step_eval.accepted,
@@ -1249,7 +1259,7 @@ impl DogLeg {
             previous_cost = state.current_cost;
 
             // Notify all observers with current state
-            optimizer::notify_observers(
+            optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
                 iteration,
@@ -1258,16 +1268,12 @@ impl DogLeg {
                 Some(self.config.trust_region_radius),
                 step_norm,
                 Some(step_eval.rho),
-                linear_solver.as_ref(),
+                linear_solver,
             );
 
             // Check convergence
             let elapsed = start_time.elapsed();
-
-            // Compute parameter norm for relative parameter tolerance check
             let parameter_norm = optimizer::compute_parameter_norm(&state.variables);
-
-            // Compute costs for convergence check
             let new_cost = state.current_cost;
 
             let cost_before_step = if step_eval.accepted {
@@ -1320,8 +1326,8 @@ impl DogLeg {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances(
-                        &mut linear_solver,
+                    problem.compute_and_set_covariances_generic::<M>(
+                        linear_solver,
                         &mut state.variables,
                         &state.variable_index_map,
                     )
@@ -1342,9 +1348,45 @@ impl DogLeg {
                 ));
             }
 
-            // Note: Max iterations and timeout checks are now handled inside check_convergence()
-
             iteration += 1;
+        }
+    }
+
+    /// Run optimization, automatically selecting sparse or dense path based on config.
+    pub fn optimize(
+        &mut self,
+        problem: &problem::Problem,
+        initial_params: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
+        error::ApexSolverError,
+    > {
+        match problem.jacobian_mode {
+            JacobianMode::Dense => match self.config.linear_solver_type {
+                LinearSolverType::DenseQR => {
+                    let mut solver = DenseQRSolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    let mut solver = DenseCholeskySolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+            },
+            JacobianMode::Sparse => match self.config.linear_solver_type {
+                linalg::LinearSolverType::SparseQR => {
+                    let mut solver = SparseQRSolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    // SparseCholesky (default), SparseSchurComplement or DenseCholesky with
+                    // sparse mode → SparseCholeskySolver
+                    let mut solver = SparseCholeskySolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+            },
         }
     }
 }
@@ -1454,7 +1496,7 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        let mut problem = problem::Problem::new();
+        let mut problem = problem::Problem::new(JacobianMode::Sparse);
         let mut initial_values = collections::HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)

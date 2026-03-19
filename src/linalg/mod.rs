@@ -1,24 +1,61 @@
-pub mod cholesky;
-pub mod explicit_schur;
-pub mod implicit_schur;
-pub mod qr;
+pub mod dense;
+pub mod sparse;
+pub mod utils;
 
 use crate::core::problem::VariableEnum;
 use faer::{Mat, sparse::SparseColMat};
 use std::{
     collections::HashMap,
-    fmt,
-    fmt::{Display, Formatter},
+    fmt::{self, Debug, Display, Formatter},
 };
 use thiserror::Error;
 use tracing::error;
 
+pub use sparse::{
+    IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner,
+    SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseQRSolver,
+    SparseSchurComplementSolver,
+};
+
+pub use dense::{DenseCholeskySolver, DenseQRSolver};
+
+pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
+
+// ============================================================================
+// Jacobian mode selection
+// ============================================================================
+
+/// Controls which Jacobian assembly strategy the Problem uses.
+///
+/// Set this when constructing a [`Problem`](crate::core::problem::Problem):
+/// - `Problem::new(JacobianMode::Sparse)` — sparse (default, best for large-scale problems)
+/// - `Problem::new(JacobianMode::Dense)` — dense (best for small-to-medium problems < ~500 DOF)
+/// - `Problem::default()` — equivalent to `JacobianMode::Sparse`
+///
+/// The optimizer reads this field and dispatches to the appropriate assembly path.
+/// `LinearSolverType` selects the specific algorithm within the sparse path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum JacobianMode {
+    /// Sparse Jacobian using symbolic structure and `SparseColMat`. Best for large problems.
+    #[default]
+    Sparse,
+    /// Dense Jacobian using `Mat<f64>`. Best for small-to-medium problems (< ~500 DOF).
+    Dense,
+}
+
+// ============================================================================
+// Linear solver type selection
+// ============================================================================
+
+#[non_exhaustive]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LinearSolverType {
     #[default]
     SparseCholesky,
     SparseQR,
     SparseSchurComplement,
+    DenseCholesky,
+    DenseQR,
 }
 
 impl Display for LinearSolverType {
@@ -27,9 +64,15 @@ impl Display for LinearSolverType {
             LinearSolverType::SparseCholesky => write!(f, "Sparse Cholesky"),
             LinearSolverType::SparseQR => write!(f, "Sparse QR"),
             LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
+            LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
+            LinearSolverType::DenseQR => write!(f, "Dense QR"),
         }
     }
 }
+
+// ============================================================================
+// Error types
+// ============================================================================
 
 /// Linear algebra specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
@@ -61,20 +104,6 @@ pub enum LinAlgError {
 
 impl LinAlgError {
     /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the linalg module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::linalg::LinAlgError;
-    /// # fn operation() -> Result<(), LinAlgError> { Ok(()) }
-    /// # fn example() -> Result<(), LinAlgError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[must_use]
     pub fn log(self) -> Self {
         error!("{}", self);
@@ -82,31 +111,8 @@ impl LinAlgError {
     }
 
     /// Log the error with the original source error from a third-party library
-    ///
-    /// This method logs both the LinAlgError and the underlying error
-    /// from external libraries (e.g., faer's FaerError, LltError, CreationError).
-    /// This provides full debugging context when errors occur in third-party code.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error from the third-party library (must implement Debug)
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::linalg::LinAlgError;
-    /// # fn symbolic_llt_op() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), LinAlgError> {
-    /// symbolic_llt_op()
-    ///     .map_err(|e| {
-    ///         LinAlgError::FactorizationFailed(
-    ///             "Symbolic Cholesky decomposition failed".to_string()
-    ///         )
-    ///         .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
     #[must_use]
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+    pub fn log_with_source<E: Debug>(self, source_error: E) -> Self {
         error!("{} | Source: {:?}", self, source_error);
         self
     }
@@ -115,30 +121,9 @@ impl LinAlgError {
 /// Result type for linear algebra operations
 pub type LinAlgResult<T> = Result<T, LinAlgError>;
 
-// /// Contains statistical information about the quality of the optimization solution.
-// #[derive(Debug, Clone)]
-// pub struct SolverElement {
-//     /// The Hessian matrix, computed as `(J^T * W * J)`.
-//     ///
-//     /// This is `None` if the Hessian could not be computed.
-//     pub hessian: Option<sparse::SparseColMat<usize, f64>>,
-
-//     /// The gradient vector, computed as `J^T * W * r`.
-//     ///
-//     /// This is `None` if the gradient could not be computed.
-//     pub gradient: Option<Mat<f64>>,
-
-//     /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
-//     ///
-//     /// This is `None` if the Hessian is singular or ill-conditioned.
-//     pub covariance_matrix: Option<Mat<f64>>,
-//     /// Asymptotic standard errors of the parameters.
-//     ///
-//     /// This is `None` if the covariance matrix could not be computed.
-//     /// Each error is the square root of the corresponding diagonal element
-//     /// of the covariance matrix.
-//     pub standard_errors: Option<Mat<f64>>,
-// }
+// ============================================================================
+// StructuredSparseLinearSolver
+// ============================================================================
 
 /// Trait for structured sparse linear solvers that require variable information.
 ///
@@ -147,12 +132,6 @@ pub type LinAlgResult<T> = Result<T, LinAlgError>;
 /// These solvers need access to variable information to partition the problem.
 pub trait StructuredSparseLinearSolver {
     /// Initialize the solver's block structure from problem variables.
-    ///
-    /// This must be called before solving to set up the internal structure.
-    ///
-    /// # Arguments
-    /// * `variables` - Map of variable names to their typed instances
-    /// * `variable_index_map` - Map from variable names to starting column indices
     fn initialize_structure(
         &mut self,
         variables: &HashMap<String, VariableEnum>,
@@ -181,75 +160,61 @@ pub trait StructuredSparseLinearSolver {
     fn get_gradient(&self) -> Option<&Mat<f64>>;
 }
 
-/// Trait for sparse linear solvers that can solve both normal and augmented equations
-pub trait SparseLinearSolver {
-    /// Solve the normal equation: (J^T * J) * dx = -J^T * r
-    ///
-    /// # Errors
-    /// Returns `LinAlgError` if:
-    /// - Matrix factorization fails
-    /// - Matrix is singular or ill-conditioned
-    /// - Numerical instability is detected
+// ============================================================================
+// LinearizationMode — re-exported from linearizer/cpu where it is defined
+// ============================================================================
+
+// ============================================================================
+// LinearSolver trait (unified solver interface, generic over LinearizationMode)
+// ============================================================================
+
+/// Unified linear solver interface parameterized by [`LinearizationMode`].
+///
+/// This is the single trait implemented by all linear solvers. When `M` is
+/// a concrete type (e.g., `SparseMode`), this trait is object-safe and can
+/// be used as `dyn LinearSolver<SparseMode>` or `dyn LinearSolver<DenseMode>`.
+///
+/// - Sparse solvers (`SparseCholeskySolver`, `SparseQRSolver`, `SchurSolverAdapter`)
+///   implement `LinearSolver<SparseMode>`.
+/// - Dense solvers (`DenseCholeskySolver`, `DenseQRSolver`)
+///   implement `LinearSolver<DenseMode>`.
+pub trait LinearSolver<M: LinearizationMode> {
+    /// Solve the normal equations: (J^T · J) · dx = −J^T · r
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
+        jacobian: &M::Jacobian,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Solve the augmented equation: (J^T * J + λI) * dx = -J^T * r
-    ///
-    /// # Errors
-    /// Returns `LinAlgError` if:
-    /// - Matrix factorization fails
-    /// - Matrix is singular or ill-conditioned
-    /// - Numerical instability is detected
+    /// Solve the augmented equations: (J^T · J + λI) · dx = −J^T · r
     fn solve_augmented_equation(
         &mut self,
         residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
+        jacobian: &M::Jacobian,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Get the cached Hessian matrix (J^T * J) from the last solve
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
+    /// Get the cached Hessian matrix (J^T · J) from the last solve
+    fn get_hessian(&self) -> Option<&M::Hessian>;
 
-    /// Get the cached gradient vector (J^T * r) from the last solve
+    /// Get the cached gradient vector (J^T · r) from the last solve
     fn get_gradient(&self) -> Option<&Mat<f64>>;
 
     /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian
-    ///
-    /// Returns a reference to the covariance matrix if successful, None otherwise.
-    /// The covariance matrix represents parameter uncertainty in the tangent space.
     fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>>;
 
     /// Get the cached covariance matrix (H^{-1}) computed from the Hessian
-    ///
-    /// Returns None if covariance has not been computed yet.
     fn get_covariance_matrix(&self) -> Option<&Mat<f64>>;
 }
 
-pub use cholesky::SparseCholeskySolver;
-pub use explicit_schur::{
-    SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
-    SparseSchurComplementSolver,
-};
-pub use implicit_schur::IterativeSchurSolver;
-pub use qr::SparseQRSolver;
+// ============================================================================
+// Utility functions
+// ============================================================================
 
 /// Extract per-variable covariance blocks from the full covariance matrix.
 ///
 /// Given the full covariance matrix H^{-1} (inverse of information matrix),
 /// this function extracts the diagonal blocks corresponding to each individual variable.
-///
-/// # Arguments
-/// * `full_covariance` - Full covariance matrix of size n×n (from H^{-1})
-/// * `variables` - Map of variable names to their Variable objects
-/// * `variable_index_map` - Map from variable names to their starting column index in the full matrix
-///
-/// # Returns
-/// HashMap mapping variable names to their covariance matrices in tangent space.
-/// For SE3 variables, this would be 6×6 matrices; for SE2, 3×3; etc.
-///
 pub fn extract_variable_covariances(
     full_covariance: &Mat<f64>,
     variables: &HashMap<String, VariableEnum>,
@@ -258,13 +223,8 @@ pub fn extract_variable_covariances(
     let mut result = HashMap::new();
 
     for (var_name, var) in variables {
-        // Get the starting column/row index for this variable
         if let Some(&start_idx) = variable_index_map.get(var_name) {
-            // Get the tangent space dimension for this variable
             let dim = var.get_size();
-
-            // Extract the block diagonal covariance for this variable
-            // This is the block [start_idx:start_idx+dim, start_idx:start_idx+dim]
             let mut var_cov = Mat::zeros(dim, dim);
 
             for i in 0..dim {

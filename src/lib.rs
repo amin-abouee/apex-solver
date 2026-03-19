@@ -58,6 +58,7 @@ pub mod core;
 pub mod error;
 pub mod factors;
 pub mod linalg;
+pub mod linearizer;
 pub mod logger;
 pub mod observers;
 pub mod optimizer;
@@ -70,7 +71,10 @@ pub use error::{ApexSolverError, ApexSolverResult};
 pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
-pub use linalg::{LinearSolverType, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+pub use linalg::{
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
+    LinearizationMode, SparseCholeskySolver, SparseMode, SparseQRSolver,
+};
 
 // Re-export logger
 pub use logger::{init_logger, init_logger_with_level};

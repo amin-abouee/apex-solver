@@ -38,10 +38,11 @@
 //! use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
 //! use apex_solver::observers::OptObserver;
 //! # use apex_solver::core::problem::Problem;
+//! # use apex_solver::JacobianMode;
 //! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
@@ -65,6 +66,7 @@
 //! # use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
 //! # use apex_solver::core::problem::{Problem, VariableEnum};
 //! # use apex_solver::observers::OptObserver;
+//! # use apex_solver::JacobianMode;
 //! # use std::collections::HashMap;
 //!
 //! // Custom observer that logs to CSV
@@ -80,7 +82,7 @@
 //! }
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //! let mut solver = LevenbergMarquardt::new();
 //!

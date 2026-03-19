@@ -32,6 +32,7 @@
 //! ```
 
 use apex_io::{G2oLoader, GraphLoader};
+use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
@@ -79,7 +80,7 @@ fn run_se3_optimization(
     let num_edges = graph.edges_se3.len();
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add SE3 vertices as variables
@@ -193,7 +194,7 @@ fn run_se2_optimization(
     let num_edges = graph.edges_se2.len();
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add SE2 vertices as variables

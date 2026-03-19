@@ -6,9 +6,12 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem::{Problem, SymbolicStructure, VariableEnum};
+use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
-use crate::linalg::{self, SparseCholeskySolver, SparseLinearSolver, SparseQRSolver};
+use crate::linalg::{
+    self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
+};
+use crate::linearizer::SymbolicStructure;
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, MatRef};
@@ -32,6 +35,9 @@ pub use levenberg_marquardt::LevenbergMarquardt;
 
 // Re-export observer types from the observers module
 pub use crate::observers::{OptObserver, OptObserverVec};
+
+// Re-export SystemLinearizer so optimizer sub-modules can import it from optimizer::
+pub use crate::linearizer::SystemLinearizer;
 
 /// Type of optimization solver algorithm to use
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -476,7 +482,8 @@ pub struct InitializedState {
     pub variables: HashMap<String, VariableEnum>,
     pub variable_index_map: HashMap<String, usize>,
     pub sorted_vars: Vec<String>,
-    pub symbolic_structure: SymbolicStructure,
+    pub symbolic_structure: Option<SymbolicStructure>,
+    pub total_dof: usize,
     pub current_cost: f64,
     pub initial_cost: f64,
 }
@@ -542,8 +549,10 @@ pub fn process_jacobian(
 /// This is the common initialization sequence used by all optimizers:
 /// 1. Create variables from initial values
 /// 2. Build variable-to-column index mapping
-/// 3. Build symbolic sparsity structure for Jacobian
+/// 3. Build symbolic sparsity structure for Jacobian (sparse mode only)
 /// 4. Compute initial cost
+///
+/// The assembly mode is determined by `problem.jacobian_mode`.
 pub fn initialize_optimization_state(
     problem: &Problem,
     initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
@@ -560,8 +569,17 @@ pub fn initialize_optimization_state(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_index_map, col_offset)?;
+    let total_dof = col_offset;
+
+    let symbolic_structure = match problem.jacobian_mode {
+        JacobianMode::Sparse => Some(crate::linearizer::cpu::sparse::build_symbolic_structure(
+            problem,
+            &variables,
+            &variable_index_map,
+            total_dof,
+        )?),
+        JacobianMode::Dense => None,
+    };
 
     let residual = problem.compute_residual_sparse(&variables)?;
     let current_cost = compute_cost(&residual);
@@ -572,6 +590,7 @@ pub fn initialize_optimization_state(
         variable_index_map,
         sorted_vars,
         symbolic_structure,
+        total_dof,
         current_cost,
         initial_cost,
     })
@@ -693,18 +712,21 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
 ///
 /// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
 /// solver creation logic due to special Schur complement adapter requirements.
-pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn SparseLinearSolver> {
+pub fn create_linear_solver(
+    solver_type: &linalg::LinearSolverType,
+) -> Box<dyn LinearSolver<SparseMode>> {
     match solver_type {
         linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
-        linalg::LinearSolverType::SparseSchurComplement => {
-            // Schur complement solver requires special handling - fallback to Cholesky
+        _ => {
+            // SparseSchurComplement requires special handling; DenseCholesky/DenseQR are
+            // dispatched via the dense path in each optimizer — all fall back to Cholesky here.
             Box::new(SparseCholeskySolver::new())
         }
     }
 }
 
-/// Notify observers with current optimization state.
+/// Notify observers with current optimization state (sparse path).
 ///
 /// This is the common observer notification pattern used by all three optimizers.
 #[allow(clippy::too_many_arguments)]
@@ -717,7 +739,7 @@ pub fn notify_observers(
     damping: Option<f64>,
     step_norm: f64,
     step_quality: Option<f64>,
-    linear_solver: &dyn SparseLinearSolver,
+    linear_solver: &dyn LinearSolver<SparseMode>,
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
@@ -730,6 +752,48 @@ pub fn notify_observers(
     }
 
     observers.notify(variables, iteration);
+}
+
+/// Notify observers with current optimization state (generic path).
+///
+/// For dense mode, the Hessian is converted to sparse for observer compatibility.
+/// This is acceptable since observers are for visualization/debugging, not the hot path.
+#[allow(clippy::too_many_arguments)]
+pub fn notify_observers_generic<M: SystemLinearizer>(
+    observers: &mut OptObserverVec,
+    variables: &HashMap<String, VariableEnum>,
+    iteration: usize,
+    cost: f64,
+    gradient_norm: f64,
+    damping: Option<f64>,
+    step_norm: f64,
+    step_quality: Option<f64>,
+    _linear_solver: &dyn LinearSolver<M>,
+) {
+    observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
+    // Skip matrix data for generic path since observers expect sparse Hessian.
+    // Observer matrix visualization is optional and only used for debugging.
+    observers.notify(variables, iteration);
+}
+
+/// Process Jacobian with Jacobi scaling (generic over assembly mode).
+///
+/// On `iteration == 0`, computes the scaling factors and stores them.
+/// On subsequent iterations, reuses the cached scaling.
+pub fn process_jacobian_generic<M: SystemLinearizer>(
+    jacobian: &M::Jacobian,
+    jacobi_scaling: &mut Option<Vec<f64>>,
+    iteration: usize,
+) -> Result<M::Jacobian, OptimizerError> {
+    if iteration == 0 {
+        let norms = M::compute_column_norms(jacobian);
+        let scaling: Vec<f64> = norms.iter().map(|n| 1.0 / (1.0 + n)).collect();
+        *jacobi_scaling = Some(scaling);
+    }
+    let scaling = jacobi_scaling
+        .as_ref()
+        .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+    Ok(M::apply_column_scaling(jacobian, scaling))
 }
 
 /// Build a SolverResult from common optimization loop outputs.

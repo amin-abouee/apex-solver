@@ -27,6 +27,7 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::problem::{Problem, VariableEnum};
@@ -179,7 +180,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     }
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add all SE3 edges as between factors
     for edge in &graph.edges_se3 {
@@ -297,7 +298,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     use apex_solver::factors::BetweenFactor;
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add all SE2 edges as between factors
     for edge in &graph.edges_se2 {

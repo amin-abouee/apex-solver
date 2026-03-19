@@ -60,6 +60,7 @@ use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
+use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
@@ -463,7 +464,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     // Compute initial cost using unified cost function
     let initial_cost = compute_se2_cost_metrics(&graph);
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add vertices
@@ -551,7 +552,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     // Compute initial cost using unified cost function
     let initial_cost = compute_se3_cost_metrics(&graph);
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add vertices

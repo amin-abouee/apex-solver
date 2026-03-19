@@ -27,6 +27,7 @@
 //!
 //! Uses ProjectionFactor with SE3 poses and BALPinholeCameraStrict camera model.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::{BalDataset, BalLoader};
 use apex_solver::apex_manifolds::ManifoldType;
@@ -100,7 +101,7 @@ struct Args {
 
     /// Optimization type
     #[arg(short = 't', long, value_enum, default_value = "self-calibration")]
-    r#type: OptimizationType,
+    optimization_type: OptimizationType,
 
     /// Verbose output
     #[arg(short, long)]
@@ -154,7 +155,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &dataset,
         num_points_to_use,
         args.solver.into(),
-        args.r#type,
+        args.optimization_type,
         args.verbose,
         with_visualizer,
     )
@@ -185,7 +186,7 @@ fn run_bundle_adjustment(
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
     };
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add cameras as SE3 poses + intrinsic variables

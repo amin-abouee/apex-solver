@@ -4,6 +4,7 @@
 //! and runs self-calibration optimization to verify convergence, RMSE reduction,
 //! and monitor execution time.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::BalLoader;
 use apex_solver::apex_manifolds::ManifoldType;
@@ -37,7 +38,7 @@ fn test_ladybug_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> 
     let num_observations = dataset.observations.len();
 
     // Build problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values: HashMap<String, (ManifoldType, DVector<f64>)> = HashMap::new();
 
     // Add camera poses (SE3) and intrinsics (RN)

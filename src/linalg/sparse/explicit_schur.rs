@@ -40,9 +40,10 @@
 //! # }
 //! ```
 
+use super::implicit_schur::IterativeSchurSolver;
 use crate::core::problem::VariableEnum;
 use crate::linalg::{
-    LinAlgError, LinAlgResult, StructuredSparseLinearSolver, implicit_schur::IterativeSchurSolver,
+    LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructuredSparseLinearSolver,
 };
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -1332,7 +1333,7 @@ impl SchurSolverAdapter {
     }
 }
 
-impl crate::linalg::SparseLinearSolver for SchurSolverAdapter {
+impl LinearSolver<SparseMode> for SchurSolverAdapter {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,

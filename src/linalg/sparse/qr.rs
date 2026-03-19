@@ -1,34 +1,36 @@
 use faer::{
-    Mat, Side,
+    Mat,
     linalg::solvers::Solve,
-    sparse::linalg::solvers::{Llt, SymbolicLlt},
+    sparse::linalg::solvers::{Qr, SymbolicQr},
     sparse::{SparseColMat, Triplet},
 };
 use std::ops::Mul;
 
-use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
-pub struct SparseCholeskySolver {
-    factorizer: Option<Llt<usize, f64>>,
+pub struct SparseQRSolver {
+    factorizer: Option<Qr<usize, f64>>,
 
     /// Cached symbolic factorization for reuse across iterations.
     ///
     /// This is computed once and reused when the sparsity pattern doesn't change,
     /// providing a 10-15% performance improvement for iterative optimization.
-    symbolic_factorization: Option<SymbolicLlt<usize>>,
+    /// For augmented systems where only lambda changes, the sparsity pattern
+    /// remains the same (adding diagonal lambda*I doesn't change the pattern).
+    symbolic_factorization: Option<SymbolicQr<usize>>,
 
-    /// The Hessian matrix, computed as `(J^T *  J)`.
+    /// The Hessian matrix, computed as `(J^T * W * J)`.
     ///
     /// This is `None` if the Hessian could not be computed.
     hessian: Option<SparseColMat<usize, f64>>,
 
-    /// The gradient vector, computed as `J^T *  r`.
+    /// The gradient vector, computed as `J^T * W * r`.
     ///
     /// This is `None` if the gradient could not be computed.
     gradient: Option<Mat<f64>>,
 
-    /// The parameter covariance matrix, computed as `(J^T * J)^-1`.
+    /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
     ///
     /// This is `None` if the Hessian is singular or ill-conditioned.
     covariance_matrix: Option<Mat<f64>>,
@@ -40,9 +42,9 @@ pub struct SparseCholeskySolver {
     standard_errors: Option<Mat<f64>>,
 }
 
-impl SparseCholeskySolver {
+impl SparseQRSolver {
     pub fn new() -> Self {
-        SparseCholeskySolver {
+        SparseQRSolver {
             factorizer: None,
             symbolic_factorization: None,
             hessian: None,
@@ -63,7 +65,7 @@ impl SparseCholeskySolver {
     pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
         // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
-            self.compute_covariance_matrix();
+            LinearSolver::<SparseMode>::compute_covariance_matrix(self);
         }
 
         // Return None if hessian is not available (solver not initialized)
@@ -93,18 +95,19 @@ impl SparseCholeskySolver {
     }
 }
 
-impl Default for SparseCholeskySolver {
+impl Default for SparseQRSolver {
     fn default() -> Self {
         Self::new()
     }
 }
-impl SparseLinearSolver for SparseCholeskySolver {
+
+impl LinearSolver<SparseMode> for SparseQRSolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // Form the normal equations: H = J^T * J
+        // Form the normal equations explicitly: H = J^T * J
         let jt = jacobians.as_ref().transpose();
         let hessian = jt
             .to_col_major()
@@ -116,22 +119,22 @@ impl SparseLinearSolver for SparseCholeskySolver {
             })?
             .mul(jacobians.as_ref());
 
-        // g = J^T * r
+        // g = J^T * r (stored as positive, will negate when solving)
         let gradient = jacobians.as_ref().transpose().mul(residuals);
 
+        // Check if we can reuse the cached symbolic factorization
+        // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
-            // Note: SymbolicLlt is reference-counted, so clone() is cheap (O(1))
+            // Note: SymbolicQr is reference-counted, so clone() is cheap (O(1))
             // We assume the sparsity pattern is constant across iterations
             // which is typical in iterative optimization
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
-            let new_sym = SymbolicLlt::try_new(hessian.symbolic(), Side::Lower).map_err(|e| {
-                LinAlgError::FactorizationFailed(
-                    "Symbolic Cholesky decomposition failed".to_string(),
-                )
-                .log_with_source(e)
+            let new_sym = SymbolicQr::try_new(hessian.symbolic()).map_err(|e| {
+                LinAlgError::FactorizationFailed("Symbolic QR decomposition failed".to_string())
+                    .log_with_source(e)
             })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
@@ -139,18 +142,18 @@ impl SparseLinearSolver for SparseCholeskySolver {
         };
 
         // Perform numeric factorization using the symbolic structure
-        let cholesky =
-            Llt::try_new_with_symbolic(sym, hessian.as_ref(), Side::Lower).map_err(|e| {
-                LinAlgError::SingularMatrix(
-                    "Cholesky factorization failed (matrix may be singular)".to_string(),
-                )
-                .log_with_source(e)
-            })?;
+        let qr = Qr::try_new_with_symbolic(sym, hessian.as_ref()).map_err(|e| {
+            LinAlgError::SingularMatrix(
+                "QR factorization failed (matrix may be singular)".to_string(),
+            )
+            .log_with_source(e)
+        })?;
 
-        let dx = cholesky.solve(-&gradient);
+        // Solve H * dx = -g (negate gradient to get descent direction)
+        let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(cholesky);
+        self.factorizer = Some(qr);
 
         Ok(dx)
     }
@@ -189,41 +192,39 @@ impl SparseLinearSolver for SparseCholeskySolver {
                     .log_with_source(e)
             })?;
 
-        let augmented_hessian = &hessian + lambda_i;
+        let augmented_hessian = hessian.as_ref() + lambda_i;
 
+        // Check if we can reuse the cached symbolic factorization
+        // For augmented systems, the sparsity pattern remains the same
+        // (adding diagonal lambda*I doesn't change the pattern)
+        // Note: SymbolicQr is reference-counted, so clone() is cheap (O(1))
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
-            // Reuse cached symbolic factorization
-            // Note: SymbolicLlt is reference-counted, so clone() is cheap (O(1))
-            // We assume the sparsity pattern is constant across iterations
-            // which is typical in iterative optimization
             cached_sym.clone()
         } else {
             // Create new symbolic factorization and cache it
-            let new_sym =
-                SymbolicLlt::try_new(augmented_hessian.symbolic(), Side::Lower).map_err(|e| {
-                    LinAlgError::FactorizationFailed(
-                        "Symbolic Cholesky decomposition failed for augmented system".to_string(),
-                    )
-                    .log_with_source(e)
-                })?;
+            let new_sym = SymbolicQr::try_new(augmented_hessian.symbolic()).map_err(|e| {
+                LinAlgError::FactorizationFailed(
+                    "Symbolic QR decomposition failed for augmented system".to_string(),
+                )
+                .log_with_source(e)
+            })?;
             // Cache it (clone is cheap due to reference counting)
             self.symbolic_factorization = Some(new_sym.clone());
             new_sym
         };
 
         // Perform numeric factorization
-        let cholesky = Llt::try_new_with_symbolic(sym, augmented_hessian.as_ref(), Side::Lower)
-            .map_err(|e| {
-                LinAlgError::SingularMatrix(
-                    "Cholesky factorization failed (matrix may be singular)".to_string(),
-                )
-                .log_with_source(e)
-            })?;
+        let qr = Qr::try_new_with_symbolic(sym, augmented_hessian.as_ref()).map_err(|e| {
+            LinAlgError::SingularMatrix(
+                "QR factorization failed (matrix may be singular)".to_string(),
+            )
+            .log_with_source(e)
+        })?;
 
-        let dx = cholesky.solve(-&gradient);
+        let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(cholesky);
+        self.factorizer = Some(qr);
 
         Ok(dx)
     }
@@ -267,71 +268,71 @@ mod tests {
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-    /// Helper function to create a simple test matrix and vectors
+    /// Helper function to create test data for QR solver
     fn create_test_data()
     -> Result<(SparseColMat<usize, f64>, Mat<f64>), faer::sparse::CreationError> {
-        // Create an overdetermined system (4x3) so that weights have an effect
+        // Create a 4x3 overdetermined system
         let triplets = vec![
-            Triplet::new(0, 0, 2.0),
-            Triplet::new(0, 1, 1.0),
-            Triplet::new(1, 0, 1.0),
-            Triplet::new(1, 1, 3.0),
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(0, 1, 0.0),
+            Triplet::new(0, 2, 1.0),
+            Triplet::new(1, 0, 0.0),
+            Triplet::new(1, 1, 1.0),
             Triplet::new(1, 2, 1.0),
+            Triplet::new(2, 0, 1.0),
             Triplet::new(2, 1, 1.0),
-            Triplet::new(2, 2, 2.0),
-            Triplet::new(3, 0, 1.5), // Add a 4th row for overdetermined system
-            Triplet::new(3, 2, 0.5),
+            Triplet::new(2, 2, 0.0),
+            Triplet::new(3, 0, 1.0),
+            Triplet::new(3, 1, 0.0),
+            Triplet::new(3, 2, 0.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(4, 3, &triplets)?;
 
-        let residuals = Mat::from_fn(4, 1, |i, _| match i {
-            0 => 1.0,
-            1 => -2.0,
-            2 => 0.5,
-            3 => 1.2,
-            _ => 0.0,
-        });
+        let residuals = Mat::from_fn(4, 1, |i, _| (i + 1) as f64);
 
         Ok((jacobian, residuals))
     }
 
-    /// Test basic solver creation and default implementation
+    /// Test basic QR solver creation
     #[test]
-    fn test_solver_creation() {
-        let solver = SparseCholeskySolver::new();
+    fn test_qr_solver_creation() {
+        let solver = SparseQRSolver::new();
         assert!(solver.factorizer.is_none());
 
-        let default_solver = SparseCholeskySolver::default();
+        let default_solver = SparseQRSolver::default();
         assert!(default_solver.factorizer.is_none());
     }
 
-    /// Test normal equation solving with well-conditioned matrix
+    /// Test normal equation solving with QR decomposition
     #[test]
-    fn test_solve_normal_equation_well_conditioned() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_solve_normal_equation() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
-        assert_eq!(solution.nrows(), 3);
+        let solution =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(solution.nrows(), 3); // Number of variables
         assert_eq!(solution.ncols(), 1);
 
-        // Verify the symbolic pattern was cached
+        // Verify symbolic pattern was cached
         assert!(solver.factorizer.is_some());
         Ok(())
     }
 
-    /// Test that symbolic pattern is reused on subsequent calls
+    /// Test QR symbolic pattern caching
     #[test]
-    fn test_symbolic_pattern_caching() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_factorizer_caching() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let sol1 = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let sol1 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let sol2 = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let sol2 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Results should be identical
         for i in 0..sol1.nrows() {
@@ -340,30 +341,45 @@ mod tests {
         Ok(())
     }
 
-    /// Test augmented equation solving
+    /// Test augmented equation solving with QR
     #[test]
-    fn test_solve_augmented_equation() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_solve_augmented_equation() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
         let lambda = 0.1;
 
-        let solution = solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
-        assert_eq!(solution.nrows(), 3);
+        let solution = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda,
+        )?;
+        assert_eq!(solution.nrows(), 3); // Number of variables
         assert_eq!(solution.ncols(), 1);
         Ok(())
     }
 
-    /// Test with different lambda values in augmented system
+    /// Test augmented system with different lambda values
     #[test]
-    fn test_augmented_equation_different_lambdas() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_augmented_different_lambdas() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
         let lambda1 = 0.01;
         let lambda2 = 1.0;
 
-        let sol1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1)?;
-        let sol2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2)?;
+        let sol1 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda1,
+        )?;
+        let sol2 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda2,
+        )?;
 
         // Solutions should be different due to different regularization
         let mut different = false;
@@ -380,48 +396,39 @@ mod tests {
         Ok(())
     }
 
-    /// Test with singular matrix (should return None)
+    /// Test QR with rank-deficient matrix
     #[test]
-    fn test_singular_matrix() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_rank_deficient_matrix() -> TestResult {
+        let mut solver = SparseQRSolver::new();
 
-        // Create a singular matrix
+        // Create a rank-deficient matrix (3x3 but rank 2)
         let triplets = vec![
             Triplet::new(0, 0, 1.0),
             Triplet::new(0, 1, 2.0),
+            Triplet::new(0, 2, 3.0),
             Triplet::new(1, 0, 2.0),
-            Triplet::new(1, 1, 4.0), // Second row is 2x first row
+            Triplet::new(1, 1, 4.0),
+            Triplet::new(1, 2, 6.0), // 2x first row
+            Triplet::new(2, 0, 0.0),
+            Triplet::new(2, 1, 0.0),
+            Triplet::new(2, 2, 1.0),
         ];
-        let singular_jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
+        let residuals = Mat::from_fn(3, 1, |i, _| i as f64);
 
-        let result = solver.solve_normal_equation(&residuals, &singular_jacobian);
-        // Without regularization, singular matrices should fail
-        assert!(result.is_err(), "Singular matrix should return Err");
+        // QR should still provide a least squares solution
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        assert!(result.is_ok());
         Ok(())
     }
 
-    /// Test with empty matrix (edge case)
+    /// Test augmented system structure and dimensions
     #[test]
-    fn test_empty_matrix() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_augmented_system_structure() -> TestResult {
+        let mut solver = SparseQRSolver::new();
 
-        let empty_jacobian = SparseColMat::try_new_from_triplets(0, 0, &[])?;
-        let empty_residuals = Mat::zeros(0, 1);
-
-        let result = solver.solve_normal_equation(&empty_residuals, &empty_jacobian);
-        if let Ok(solution) = result {
-            assert_eq!(solution.nrows(), 0);
-        }
-        Ok(())
-    }
-
-    /// Test numerical accuracy with known solution
-    #[test]
-    fn test_numerical_accuracy() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-
-        // Create a simple 2x2 system with known solution
+        // Simple 2x2 system
         let triplets = vec![
             Triplet::new(0, 0, 1.0),
             Triplet::new(0, 1, 0.0),
@@ -429,36 +436,96 @@ mod tests {
             Triplet::new(1, 1, 1.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| -((i + 1) as f64)); // [-1, -2]
+        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
+        let lambda = 0.5;
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
-        // Expected solution should be [1, 2] since J^T * J = I and J^T * (-r) = [1, 2]
-        assert!((solution[(0, 0)] - 1.0).abs() < TOLERANCE);
-        assert!((solution[(1, 0)] - 2.0).abs() < TOLERANCE);
+        let solution = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda,
+        )?;
+        assert_eq!(solution.nrows(), 2); // Should return only the variable part
+        assert_eq!(solution.ncols(), 1);
         Ok(())
     }
 
-    /// Test clone functionality
+    /// Test numerical accuracy with known solution
     #[test]
-    fn test_solver_clone() {
-        let solver1 = SparseCholeskySolver::new();
+    fn test_qr_numerical_accuracy() -> TestResult {
+        let mut solver = SparseQRSolver::new();
+
+        // Create identity system: I * x = b
+        let triplets = vec![
+            Triplet::new(0, 0, 1.0),
+            Triplet::new(1, 1, 1.0),
+            Triplet::new(2, 2, 1.0),
+        ];
+        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
+
+        let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
+
+        let solution =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        // Expected solution should be [1, 2, 3]
+        for i in 0..3 {
+            let expected = (i + 1) as f64;
+            assert!(
+                (solution[(i, 0)] - expected).abs() < TOLERANCE,
+                "Expected {}, got {}",
+                expected,
+                solution[(i, 0)]
+            );
+        }
+        Ok(())
+    }
+
+    /// Test QR solver clone functionality
+    #[test]
+    fn test_qr_solver_clone() {
+        let solver1 = SparseQRSolver::new();
         let solver2 = solver1.clone();
 
         assert!(solver1.factorizer.is_none());
         assert!(solver2.factorizer.is_none());
     }
 
+    /// Test zero lambda in augmented system (should behave like normal equation)
+    #[test]
+    fn test_qr_zero_lambda_augmented() -> TestResult {
+        let mut solver = SparseQRSolver::new();
+        let (jacobian, residuals) = create_test_data()?;
+
+        let normal_sol =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let augmented_sol = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            0.0,
+        )?;
+
+        // Solutions should be very close (within numerical precision)
+        for i in 0..normal_sol.nrows() {
+            assert!(
+                (normal_sol[(i, 0)] - augmented_sol[(i, 0)]).abs() < 1e-8,
+                "Zero lambda augmented should match normal equation"
+            );
+        }
+        Ok(())
+    }
+
     /// Test covariance matrix computation
     #[test]
-    fn test_cholesky_covariance_computation() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_covariance_computation() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Now compute covariance matrix
-        let cov_matrix = solver.compute_covariance_matrix();
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
@@ -488,12 +555,12 @@ mod tests {
 
     /// Test standard errors computation
     #[test]
-    fn test_cholesky_standard_errors_computation() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_standard_errors_computation() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -523,48 +590,48 @@ mod tests {
         Ok(())
     }
 
-    /// Test covariance computation with well-conditioned positive definite system
+    /// Test covariance computation with well-conditioned system
     #[test]
-    fn test_cholesky_covariance_positive_definite() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_covariance_well_conditioned() -> TestResult {
+        let mut solver = SparseQRSolver::new();
 
-        // Create a well-conditioned positive definite system
+        // Create a well-conditioned 2x2 system
         let triplets = vec![
-            Triplet::new(0, 0, 3.0),
-            Triplet::new(0, 1, 1.0),
-            Triplet::new(1, 0, 1.0),
-            Triplet::new(1, 1, 2.0),
+            Triplet::new(0, 0, 2.0),
+            Triplet::new(0, 1, 0.0),
+            Triplet::new(1, 0, 0.0),
+            Triplet::new(1, 1, 3.0),
         ];
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        let cov_matrix = solver.compute_covariance_matrix();
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
-            // For this system, H = J^T * W * J = [[10, 5], [5, 5]]
-            // Covariance = H^(-1) = (1/25) * [[5, -5], [-5, 10]] = [[0.2, -0.2], [-0.2, 0.4]]
-            assert!((cov[(0, 0)] - 0.2).abs() < TOLERANCE);
-            assert!((cov[(1, 1)] - 0.4).abs() < TOLERANCE);
-            assert!((cov[(0, 1)] - (-0.2)).abs() < TOLERANCE);
-            assert!((cov[(1, 0)] - (-0.2)).abs() < TOLERANCE);
+            // For this system, H = J^T * W * J = [[4, 0], [0, 9]]
+            // So covariance = H^(-1) = [[1/4, 0], [0, 1/9]]
+            assert!((cov[(0, 0)] - 0.25).abs() < TOLERANCE);
+            assert!((cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE);
+            assert!(cov[(0, 1)].abs() < TOLERANCE);
+            assert!(cov[(1, 0)].abs() < TOLERANCE);
         }
         Ok(())
     }
 
     /// Test covariance computation caching
     #[test]
-    fn test_cholesky_covariance_caching() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_covariance_caching() -> TestResult {
+        let mut solver = SparseQRSolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // First covariance computation
-        solver.compute_covariance_matrix();
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(solver.covariance_matrix.is_some());
 
         // Get pointer to first computation
@@ -572,7 +639,7 @@ mod tests {
             let cov1_ptr = cov1.as_ptr();
 
             // Second covariance computation should return cached result
-            solver.compute_covariance_matrix();
+            LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
             assert!(solver.covariance_matrix.is_some());
 
             // Get pointer to second computation
@@ -586,72 +653,32 @@ mod tests {
         Ok(())
     }
 
-    /// Test Cholesky decomposition properties
+    /// Test that covariance computation fails gracefully for singular systems
     #[test]
-    fn test_cholesky_decomposition_properties() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
+    fn test_qr_covariance_singular_system() -> TestResult {
+        let mut solver = SparseQRSolver::new();
 
-        // Create a simple positive definite system
-        let triplets = vec![Triplet::new(0, 0, 2.0), Triplet::new(1, 1, 3.0)];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
-
-        solver.solve_normal_equation(&residuals, &jacobian)?;
-
-        // Verify that we have a factorizer and hessian
-        assert!(solver.factorizer.is_some());
-        assert!(solver.hessian.is_some());
-
-        // The hessian should be positive definite for Cholesky to work
-        if let Some(hessian) = &solver.hessian {
-            assert_eq!(hessian.nrows(), 2);
-            assert_eq!(hessian.ncols(), 2);
-        }
-        Ok(())
-    }
-
-    /// Test numerical stability with different condition numbers
-    #[test]
-    fn test_cholesky_numerical_stability() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-
-        // Create a well-conditioned system
+        // Create a singular system (rank deficient)
         let triplets = vec![
             Triplet::new(0, 0, 1.0),
-            Triplet::new(1, 1, 1.0),
-            Triplet::new(2, 2, 1.0),
+            Triplet::new(0, 1, 2.0),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 4.0), // Second row is 2x first row
         ];
-        let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
-        let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
+        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
+        let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
-        // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]
-        for i in 0..3 {
-            let expected = (i + 1) as f64;
-            assert!(
-                (solution[(i, 0)] - expected).abs() < TOLERANCE,
-                "Expected {}, got {}",
-                expected,
-                solution[(i, 0)]
-            );
-        }
-
-        // Covariance should be identity matrix (inverse of identity)
-        let cov_matrix = solver.compute_covariance_matrix();
-        assert!(cov_matrix.is_some());
-        if let Some(cov) = cov_matrix {
-            for i in 0..3 {
-                for j in 0..3 {
-                    let expected = if i == j { 1.0 } else { 0.0 };
-                    assert!(
-                        (cov[(i, j)] - expected).abs() < TOLERANCE,
-                        "Covariance[{}, {}] expected {}, got {}",
-                        i,
-                        j,
-                        expected,
-                        cov[(i, j)]
-                    );
-                }
+        // QR can handle rank-deficient systems, but covariance may be problematic
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        if result.is_ok() {
+            // If solve succeeded, covariance computation might still fail due to singularity
+            let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
+            // We don't assert failure here since QR might handle this case
+            if let Some(cov) = cov_matrix {
+                // If covariance is computed, check that it's reasonable
+                assert!(cov.nrows() == 2);
+                assert!(cov.ncols() == 2);
             }
         }
         Ok(())

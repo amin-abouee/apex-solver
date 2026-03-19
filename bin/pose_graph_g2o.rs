@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
@@ -10,6 +11,7 @@ use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linearizer;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -359,7 +361,7 @@ fn test_se2_dataset(
     }
 
     let setup_start = Instant::now();
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
@@ -458,15 +460,19 @@ fn test_se2_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .map_err(|e| {
-            apex_solver::core::CoreError::SymbolicStructure(format!(
-                "Failed to build symbolic structure for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )
+    .map_err(|e| {
+        apex_solver::core::CoreError::SymbolicStructure(format!(
+            "Failed to build symbolic structure for dataset {}",
+            dataset_name
+        ))
+        .log_with_source(e)
+    })?;
 
     let (residual, _jacobian) = problem
         .compute_residual_and_jacobian_sparse(
@@ -736,7 +742,7 @@ fn test_se3_dataset(
         .into());
     }
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
@@ -831,15 +837,19 @@ fn test_se3_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .map_err(|e| {
-            apex_solver::core::CoreError::SymbolicStructure(format!(
-                "Failed to build symbolic structure for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )
+    .map_err(|e| {
+        apex_solver::core::CoreError::SymbolicStructure(format!(
+            "Failed to build symbolic structure for dataset {}",
+            dataset_name
+        ))
+        .log_with_source(e)
+    })?;
 
     let (residual, _jacobian) = problem
         .compute_residual_and_jacobian_sparse(
