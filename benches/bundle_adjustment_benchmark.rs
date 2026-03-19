@@ -194,7 +194,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
             );
             return BABenchmarkResult::failed(
                 dataset_name,
-                "Apex-Iterative",
+                "Apex-Solver",
                 "Rust",
                 &format!("TIMEOUT ({} minutes)", timeout_mins),
             );
@@ -203,7 +203,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
         // Check if thread completed
         if handle.is_finished() {
             return handle.join().unwrap_or_else(|_| {
-                BABenchmarkResult::failed(dataset_name, "Apex-Iterative", "Rust", "Thread panicked")
+                BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", "Thread panicked")
             });
         }
 
@@ -220,12 +220,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         Ok(d) => d,
         Err(e) => {
             error!("Failed to load BAL dataset: {}", e);
-            return BABenchmarkResult::failed(
-                dataset_name,
-                "Apex-Iterative",
-                "Rust",
-                &e.to_string(),
-            );
+            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
         }
     };
 
@@ -363,12 +358,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
-            return BABenchmarkResult::failed(
-                dataset_name,
-                "Apex-Iterative",
-                "Rust",
-                &e.to_string(),
-            );
+            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
         }
     };
     let elapsed_seconds = start.elapsed().as_secs_f64();
@@ -400,7 +390,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
 
     BABenchmarkResult::success(
         dataset_name,
-        "Apex-Iterative",
+        "Apex-Solver",
         "Rust",
         dataset.cameras.len(),
         dataset.points.len(),
