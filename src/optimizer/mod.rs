@@ -36,8 +36,8 @@ pub use levenberg_marquardt::LevenbergMarquardt;
 // Re-export observer types from the observers module
 pub use crate::observers::{OptObserver, OptObserverVec};
 
-// Re-export SystemLinearizer so optimizer sub-modules can import it from optimizer::
-pub use crate::linearizer::SystemLinearizer;
+// Re-export AssemblyBackend so optimizer sub-modules can import it from optimizer::
+pub use crate::linearizer::AssemblyBackend;
 
 /// Type of optimization solver algorithm to use
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -304,22 +304,20 @@ pub struct SolverResult<T> {
     pub covariances: Option<HashMap<String, Mat<f64>>>,
 }
 
-/// Core trait for optimization solvers.
-pub trait Solver {
-    /// Configuration type for this solver
-    type Config;
-    /// Error type
-    type Error;
-
-    /// Create a new solver with the given configuration
-    fn new() -> Self;
-
-    /// Optimize the problem to minimize the cost function
+/// Unified optimizer interface. Object-safe — `Box<dyn Optimizer>` is valid.
+///
+/// All three optimizers ([`LevenbergMarquardt`](crate::optimizer::levenberg_marquardt::LevenbergMarquardt),
+/// [`GaussNewton`](crate::optimizer::gauss_newton::GaussNewton),
+/// [`DogLeg`](crate::optimizer::dog_leg::DogLeg)) implement this trait.
+/// Each optimizer also provides inherent `new()`, `with_config()`, and `optimize()` methods
+/// for direct (non-polymorphic) usage.
+pub trait Optimizer {
+    /// Optimize the problem to minimize the cost function.
     fn optimize(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error>;
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::error::ApexSolverError>;
 }
 
 /// Apply parameter update step to all variables.
@@ -759,7 +757,7 @@ pub fn notify_observers(
 /// For dense mode, the Hessian is converted to sparse for observer compatibility.
 /// This is acceptable since observers are for visualization/debugging, not the hot path.
 #[allow(clippy::too_many_arguments)]
-pub fn notify_observers_generic<M: SystemLinearizer>(
+pub fn notify_observers_generic<M: AssemblyBackend>(
     observers: &mut OptObserverVec,
     variables: &HashMap<String, VariableEnum>,
     iteration: usize,
@@ -780,7 +778,7 @@ pub fn notify_observers_generic<M: SystemLinearizer>(
 ///
 /// On `iteration == 0`, computes the scaling factors and stores them.
 /// On subsequent iterations, reuses the cached scaling.
-pub fn process_jacobian_generic<M: SystemLinearizer>(
+pub fn process_jacobian_generic<M: AssemblyBackend>(
     jacobian: &M::Jacobian,
     jacobi_scaling: &mut Option<Vec<f64>>,
     iteration: usize,

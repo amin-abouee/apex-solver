@@ -126,7 +126,7 @@ use crate::linalg::{
     DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
     SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
-use crate::optimizer::{IterationStats, SystemLinearizer};
+use crate::optimizer::{AssemblyBackend, IterationStats};
 
 /// Configuration parameters for the Gauss-Newton optimizer.
 ///
@@ -485,7 +485,7 @@ impl GaussNewton {
     }
 
     /// Compute Gauss-Newton step by solving the normal equations (generic over assembly mode).
-    fn compute_step_generic<M: SystemLinearizer>(
+    fn compute_step_generic<M: AssemblyBackend>(
         &self,
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &M::Jacobian,
@@ -553,7 +553,7 @@ impl GaussNewton {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
-    fn optimize_with_mode<M: SystemLinearizer>(
+    fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &problem::Problem,
         initial_params: &collections::HashMap<
@@ -786,14 +786,7 @@ impl GaussNewton {
     }
 }
 
-impl optimizer::Solver for GaussNewton {
-    type Config = GaussNewtonConfig;
-    type Error = error::ApexSolverError;
-
-    fn new() -> Self {
-        Self::default()
-    }
-
+impl optimizer::Optimizer for GaussNewton {
     fn optimize(
         &mut self,
         problem: &problem::Problem,
@@ -803,7 +796,7 @@ impl optimizer::Solver for GaussNewton {
         >,
     ) -> Result<
         optimizer::SolverResult<std::collections::HashMap<String, problem::VariableEnum>>,
-        Self::Error,
+        crate::error::ApexSolverError,
     > {
         self.optimize(problem, initial_params)
     }
