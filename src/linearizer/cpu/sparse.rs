@@ -20,8 +20,8 @@ use crate::{
     error::{ApexSolverError, ApexSolverResult},
 };
 
-use crate::core::problem::{Problem, VariableEnum};
 use super::super::linearize_block;
+use crate::core::problem::{Problem, VariableEnum};
 
 /// Symbolic structure for sparse matrix operations.
 ///
