@@ -9,8 +9,7 @@
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
-    self, JacobianMode, LinearSolver,
-    SparseCholeskySolver, SparseMode, SparseQRSolver,
+    self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::linearizer::SymbolicStructure;
 use apex_manifolds::ManifoldType;
@@ -713,7 +712,9 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
 ///
 /// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
 /// solver creation logic due to special Schur complement adapter requirements.
-pub fn create_linear_solver(solver_type: &linalg::LinearSolverType) -> Box<dyn LinearSolver<SparseMode>> {
+pub fn create_linear_solver(
+    solver_type: &linalg::LinearSolverType,
+) -> Box<dyn LinearSolver<SparseMode>> {
     match solver_type {
         linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
