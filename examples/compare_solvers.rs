@@ -70,8 +70,8 @@ fn jacobian_stats(problem: &Problem, initial_values: &InitialValues) -> (usize, 
     let nrows = jacobian.nrows();
     let ncols = jacobian.ncols();
     let nnz = jacobian.compute_nnz();
-    let density = nnz as f64 / (nrows * ncols) as f64 * 100.0;
-    (nrows, ncols, nnz, density)
+    let sparsity = (1.0 - nnz as f64 / (nrows * ncols) as f64) * 100.0;
+    (nrows, ncols, nnz, sparsity)
 }
 
 fn run_solver(
@@ -294,10 +294,10 @@ fn main() {
     };
 
     // Compute and print Jacobian density (from sparse problem)
-    let (jac_rows, jac_cols, nnz, density_pct) = jacobian_stats(&sparse_problem, &sparse_init);
+    let (jac_rows, jac_cols, nnz, sparsity_pct) = jacobian_stats(&sparse_problem, &sparse_init);
     info!(
-        "Jacobian: {}×{} | NNZ: {} | Density: {:.4}%",
-        jac_rows, jac_cols, nnz, density_pct
+        "Jacobian: {}×{} | NNZ: {} | Sparsity: {:.4}%",
+        jac_rows, jac_cols, nnz, sparsity_pct
     );
 
     if vertices > 500 {
