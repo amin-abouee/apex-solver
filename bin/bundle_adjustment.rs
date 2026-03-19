@@ -15,6 +15,12 @@
 //!
 //! # With specific optimization type:
 //! cargo run --release --bin bundle_adjustment -- problem.txt --type bundle-adjustment
+//!
+//! # With visualization (requires visualization feature):
+//! cargo run --release --features visualization --bin bundle_adjustment -- path/to/problem.txt --with-visualizer
+//!
+//! # With limited points and visualization:
+//! cargo run --release --features visualization --bin bundle_adjustment -- problem.txt -n 1000 --with-visualizer
 //! ```
 //!
 //! # Camera Parameterization
@@ -100,6 +106,12 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable real-time Rerun visualization
+    /// (Requires the `visualization` feature to be enabled)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    with_visualizer: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -133,6 +145,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("  Load time: {:?}", load_time);
     info!("");
 
+    #[cfg(feature = "visualization")]
+    let with_visualizer = args.with_visualizer;
+    #[cfg(not(feature = "visualization"))]
+    let with_visualizer = false;
+
     // Run bundle adjustment
     run_bundle_adjustment(
         &dataset,
@@ -140,6 +157,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         args.solver.into(),
         args.optimization_type,
         args.verbose,
+        with_visualizer,
     )
 }
 
@@ -155,12 +173,14 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 }
 
 /// Run bundle adjustment with specified solver and optimization type
+#[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
     solver_variant: SchurVariant,
     opt_type: OptimizationType,
     verbose: bool,
+    with_visualizer: bool,
 ) -> Result<(), Box<dyn Error>> {
     use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
@@ -254,6 +274,23 @@ fn run_bundle_adjustment(
     info!("  Preconditioner: {:?}", config.schur_preconditioner);
 
     let mut solver = LevenbergMarquardt::with_config(config);
+
+    #[cfg(feature = "visualization")]
+    if with_visualizer {
+        use apex_solver::observers::RerunObserver;
+        use apex_solver::observers::visualization::VisualizationConfig;
+        let config = VisualizationConfig::for_bundle_adjustment()
+            .with_camera_frustum_scale(0.1)
+            .with_initial_landmark_color([255, 255, 255])
+            .with_optimized_landmark_color([255, 255, 255]);
+        match RerunObserver::with_config(true, None, config) {
+            Ok(observer) => {
+                solver.add_observer(observer);
+                info!("Rerun visualization enabled for bundle adjustment");
+            }
+            Err(e) => tracing::warn!("Failed to create Rerun observer: {}", e),
+        }
+    }
 
     // Print diagnostic info
     let num_cameras = dataset.cameras.len();
