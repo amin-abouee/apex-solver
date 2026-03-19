@@ -32,8 +32,8 @@
 //! ```
 
 use apex_io::{G2oLoader, GraphLoader};
-use apex_solver::ManifoldType;
 use apex_solver::JacobianMode;
+use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};

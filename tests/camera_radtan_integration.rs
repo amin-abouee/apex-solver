@@ -22,8 +22,8 @@
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, RadTanCamera};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-use apex_solver::ManifoldType;
 use apex_solver::JacobianMode;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
