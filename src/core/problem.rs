@@ -856,7 +856,12 @@ impl Problem {
         variable_index_map: &HashMap<String, usize>,
         total_dof: usize,
     ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
-        crate::linearizer::cpu::dense::assemble_dense(self, variables, variable_index_map, total_dof)
+        crate::linearizer::cpu::dense::assemble_dense(
+            self,
+            variables,
+            variable_index_map,
+            total_dof,
+        )
     }
 
     /// Compute only the residual for a single residual block (no Jacobian).
