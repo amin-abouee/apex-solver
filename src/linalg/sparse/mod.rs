@@ -5,7 +5,7 @@ pub mod qr;
 
 pub use cholesky::SparseCholeskySolver;
 pub use explicit_schur::{
-    SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurSolverAdapter, SchurVariant,
+    SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
     SparseSchurComplementSolver,
 };
 pub use implicit_schur::IterativeSchurSolver;
