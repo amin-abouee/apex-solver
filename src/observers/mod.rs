@@ -133,11 +133,7 @@ pub use visualization::{RerunObserver, VisualizationConfig, VisualizationMode};
 
 // Re-export conversion traits for ergonomic use
 #[cfg(feature = "visualization")]
-pub use conversions::{
-    CollectRerunArrows2D, CollectRerunArrows3D, CollectRerunPoints2D, CollectRerunPoints3D,
-    ToRerunArrows2D, ToRerunArrows3D, ToRerunPoints2D, ToRerunPoints3D, ToRerunTransform3D,
-    ToRerunTransform3DFrom2D, ToRerunVec2D, ToRerunVec3D,
-};
+pub use conversions::{CollectRerun2D, CollectRerun3D, RerunConvert2D, RerunConvert3D};
 
 use crate::core::problem::VariableEnum;
 use faer::Mat;
