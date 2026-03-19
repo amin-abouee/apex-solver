@@ -27,10 +27,10 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::problem::{Problem, VariableEnum};
-use apex_solver::JacobianMode;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;

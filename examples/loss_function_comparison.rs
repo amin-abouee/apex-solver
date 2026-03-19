@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
-use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
-use apex_solver::JacobianMode;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
+use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;

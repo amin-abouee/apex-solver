@@ -4,11 +4,11 @@ use tracing::{info, warn};
 
 use apex_solver::apex_io::{G2oLoader, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
-use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{LevenbergMarquardt, OptimizationStatus};
 use apex_solver::{JacobianMode, LinearSolverType};
@@ -16,6 +16,7 @@ use clap::Parser;
 use nalgebra::dvector;
 
 type InitialValues = HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>;
+type BuildResult = Result<(Problem, InitialValues), Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
 #[command(about = "Compare all 4 linear solvers (Sparse/Dense × Cholesky/QR) on any G2O dataset")]
@@ -108,7 +109,15 @@ fn run_solver(
         _ => "NOT CONVERGED",
     };
 
-    Some(RunResult { solver_name, init_chi2, final_chi2, improvement_pct, iterations: result.iterations, time_ms, status })
+    Some(RunResult {
+        solver_name,
+        init_chi2,
+        final_chi2,
+        improvement_pct,
+        iterations: result.iterations,
+        time_ms,
+        status,
+    })
 }
 
 fn print_table(results: &[RunResult]) {
@@ -122,16 +131,19 @@ fn print_table(results: &[RunResult]) {
     for r in results {
         info!(
             "{:<18} | {:>12.4e} | {:>12.4e} | {:>10.2}% | {:>5} | {:>8} | {:<12}",
-            r.solver_name, r.init_chi2, r.final_chi2, r.improvement_pct, r.iterations, r.time_ms, r.status
+            r.solver_name,
+            r.init_chi2,
+            r.final_chi2,
+            r.improvement_pct,
+            r.iterations,
+            r.time_ms,
+            r.status
         );
     }
     info!("{}", "─".repeat(w));
 }
 
-fn build_se3_problem(
-    graph: &apex_solver::apex_io::Graph,
-    mode: JacobianMode,
-) -> (Problem, InitialValues) {
+fn build_se3_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
     let mut initial_values = InitialValues::new();
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
@@ -142,7 +154,10 @@ fn build_se3_problem(
             let t = v.pose.translation();
             initial_values.insert(
                 format!("x{id}"),
-                (ManifoldType::SE3, dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k]),
+                (
+                    ManifoldType::SE3,
+                    dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
+                ),
             );
         }
     }
@@ -154,9 +169,15 @@ fn build_se3_problem(
     {
         let q = v.pose.rotation_quaternion();
         let t = v.pose.translation();
-        let prior = PriorFactor { data: dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k] };
-        let loss = HuberLoss::new(1.0).expect("valid huber loss");
-        problem.add_residual_block(&[&format!("x{first_id}")], Box::new(prior), Some(Box::new(loss)));
+        let prior = PriorFactor {
+            data: dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
+        };
+        let loss = HuberLoss::new(1.0)?;
+        problem.add_residual_block(
+            &[&format!("x{first_id}")],
+            Box::new(prior),
+            Some(Box::new(loss)),
+        );
     }
 
     for edge in &graph.edges_se3 {
@@ -167,13 +188,10 @@ fn build_se3_problem(
         );
     }
 
-    (problem, initial_values)
+    Ok((problem, initial_values))
 }
 
-fn build_se2_problem(
-    graph: &apex_solver::apex_io::Graph,
-    mode: JacobianMode,
-) -> (Problem, InitialValues) {
+fn build_se2_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
     let mut initial_values = InitialValues::new();
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
     vertex_ids.sort();
@@ -182,7 +200,10 @@ fn build_se2_problem(
         if let Some(v) = graph.vertices_se2.get(&id) {
             initial_values.insert(
                 format!("x{id}"),
-                (ManifoldType::SE2, dvector![v.pose.x(), v.pose.y(), v.pose.angle()]),
+                (
+                    ManifoldType::SE2,
+                    dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
+                ),
             );
         }
     }
@@ -192,9 +213,15 @@ fn build_se2_problem(
     if let Some(&first_id) = vertex_ids.first()
         && let Some(v) = graph.vertices_se2.get(&first_id)
     {
-        let prior = PriorFactor { data: dvector![v.pose.x(), v.pose.y(), v.pose.angle()] };
-        let loss = HuberLoss::new(1.0).expect("valid huber loss");
-        problem.add_residual_block(&[&format!("x{first_id}")], Box::new(prior), Some(Box::new(loss)));
+        let prior = PriorFactor {
+            data: dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
+        };
+        let loss = HuberLoss::new(1.0)?;
+        problem.add_residual_block(
+            &[&format!("x{first_id}")],
+            Box::new(prior),
+            Some(Box::new(loss)),
+        );
     }
 
     for edge in &graph.edges_se2 {
@@ -205,7 +232,7 @@ fn build_se2_problem(
         );
     }
 
-    (problem, initial_values)
+    Ok((problem, initial_values))
 }
 
 fn main() {
@@ -235,18 +262,35 @@ fn main() {
     info!("APEX-SOLVER — LINEAR SOLVER COMPARISON");
     info!("Dataset : {} ({})", dataset_name, manifold_label);
     info!("Problem : {} vertices, {} edges", vertices, edges);
-    info!("Config  : max_iter={}, cost_tol={:.0e}", args.max_iterations, args.cost_tolerance);
+    info!(
+        "Config  : max_iter={}, cost_tol={:.0e}",
+        args.max_iterations, args.cost_tolerance
+    );
 
     // Build sparse and dense problems
-    let (sparse_problem, sparse_init) = if is_se3 {
+    let build_sparse = if is_se3 {
         build_se3_problem(&graph, JacobianMode::Sparse)
     } else {
         build_se2_problem(&graph, JacobianMode::Sparse)
     };
-    let (dense_problem, dense_init) = if is_se3 {
+    let (sparse_problem, sparse_init) = match build_sparse {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Failed to build sparse problem: {e}");
+            std::process::exit(1);
+        }
+    };
+    let build_dense = if is_se3 {
         build_se3_problem(&graph, JacobianMode::Dense)
     } else {
         build_se2_problem(&graph, JacobianMode::Dense)
+    };
+    let (dense_problem, dense_init) = match build_dense {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Failed to build dense problem: {e}");
+            std::process::exit(1);
+        }
     };
 
     // Compute and print Jacobian density (from sparse problem)
@@ -257,12 +301,15 @@ fn main() {
     );
 
     if vertices > 500 {
-        warn!("Large problem ({} vertices) — dense solvers may be slow", vertices);
+        warn!(
+            "Large problem ({} vertices) — dense solvers may be slow",
+            vertices
+        );
     }
 
     info!("");
 
-    const SOLVERS: &[(&'static str, LinearSolverType, bool)] = &[
+    const SOLVERS: &[(&str, LinearSolverType, bool)] = &[
         ("Sparse Cholesky", LinearSolverType::SparseCholesky, false),
         ("Sparse QR", LinearSolverType::SparseQR, false),
         ("Dense Cholesky", LinearSolverType::DenseCholesky, true),

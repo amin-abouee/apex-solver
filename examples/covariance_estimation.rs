@@ -13,8 +13,7 @@
 
 use apex_manifolds::se2::SE2;
 use apex_solver::{
-    JacobianMode,
-    ManifoldType,
+    JacobianMode, ManifoldType,
     core::problem::Problem,
     factors::BetweenFactor,
     init_logger,
