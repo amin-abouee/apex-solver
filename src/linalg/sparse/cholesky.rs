@@ -771,4 +771,19 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Test that `compute_standard_errors()` returns `None` when called before any solve.
+    ///
+    /// Covers the early-return `?` at the `let hessian = self.hessian.as_ref()?;` line:
+    /// a freshly-created solver has no hessian, so the method returns `None`.
+    #[test]
+    fn test_compute_standard_errors_before_solve_returns_none() {
+        let mut solver = SparseCholeskySolver::new();
+        // No solve has been performed → hessian is None → should return None
+        let result = solver.compute_standard_errors();
+        assert!(
+            result.is_none(),
+            "compute_standard_errors on uninitialized solver (no hessian) should return None"
+        );
+    }
 }
