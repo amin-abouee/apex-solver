@@ -1014,6 +1014,8 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     // -------------------------------------------------------------------------
     // compute_cost
     // -------------------------------------------------------------------------
@@ -1079,7 +1081,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_jacobi_scaling_identity_jacobian() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_create_jacobi_scaling_identity_jacobian() -> TestResult {
         // For identity Jacobian each column has norm 1.0 → scaling = 1/(1+1) = 0.5
         let jac = make_identity_jacobian(3);
         let scaling = create_jacobi_scaling(&jac)?;
@@ -1094,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_jacobi_scaling_zero_column() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_create_jacobi_scaling_zero_column() -> TestResult {
         // A zero column has norm 0 → scaling = 1/(1+0) = 1.0
         let triplets = vec![Triplet::new(0_usize, 0_usize, 1.0_f64)];
         let jac = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
@@ -1112,7 +1114,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_process_jacobian_creates_at_iter0() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_process_jacobian_creates_at_iter0() -> TestResult {
         let jac = make_identity_jacobian(2);
         let mut cache: Option<SparseColMat<usize, f64>> = None;
         let scaled = process_jacobian(&jac, &mut cache, 0)?;
@@ -1124,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn test_process_jacobian_reuses_at_iter1() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_process_jacobian_reuses_at_iter1() -> TestResult {
         let jac = make_identity_jacobian(2);
         let mut cache: Option<SparseColMat<usize, f64>> = None;
         // build cache at iter 0
@@ -1476,7 +1478,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_build_solver_result_fields() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_solver_result_fields() -> TestResult {
         let mut variables: HashMap<String, VariableEnum> = HashMap::new();
         variables.insert(
             "x".into(),
@@ -1610,7 +1612,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_initialize_optimization_state() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_initialize_optimization_state() -> TestResult {
         use crate::core::problem::Problem;
 
         let mut problem = Problem::new(JacobianMode::Sparse);

@@ -73,7 +73,7 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # fn main() -> TestResult {
 //! // Create optimization problem
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
@@ -415,7 +415,7 @@ struct CostEvaluation {
 /// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
@@ -809,6 +809,8 @@ mod tests {
     use nalgebra::dvector;
     use std::collections;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
@@ -876,7 +878,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_rosenbrock_optimization() -> TestResult {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -1068,7 +1070,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_gn_max_iterations_termination() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_max_iterations_termination() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(2);
         let mut solver = optimizer::GaussNewton::with_config(cfg);
@@ -1081,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_gradient_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_gradient_tolerance_convergence() -> TestResult {
         let (problem, initial_values) = linear_problem(1.0);
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
             .with_gradient_tolerance(1e3)
@@ -1097,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_cost_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_cost_tolerance_convergence() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
             .with_cost_tolerance(1e2) // very loose
@@ -1116,7 +1118,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_qr_solver() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
@@ -1129,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_jacobi_scaling_enabled() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_jacobi_scaling_enabled() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
             .with_jacobi_scaling(true)
@@ -1141,7 +1143,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_min_cost_threshold() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_min_cost_threshold() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
             .with_min_cost_threshold(1e10)
@@ -1158,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_result_fields() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_result_fields() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let mut solver = optimizer::GaussNewton::new();
         let result = solver.optimize(&problem, &initial_values)?;
@@ -1168,7 +1170,7 @@ mod tests {
     }
 
     #[test]
-    fn test_gn_convergence_info_populated() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_gn_convergence_info_populated() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let mut solver = optimizer::GaussNewton::new();
         let result = solver.optimize(&problem, &initial_values)?;

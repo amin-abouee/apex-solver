@@ -154,7 +154,7 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # fn main() -> TestResult {
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
@@ -669,7 +669,7 @@ struct StepEvaluation {
 /// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
@@ -1414,6 +1414,8 @@ mod tests {
     use apex_manifolds as manifold;
     use nalgebra;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
@@ -1481,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_rosenbrock_optimization() -> TestResult {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -1684,7 +1686,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_dl_max_iterations_termination() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_max_iterations_termination() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new().with_max_iterations(2);
         let mut solver = DogLeg::with_config(cfg);
@@ -1698,7 +1700,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_gradient_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_gradient_tolerance_convergence() -> TestResult {
         let (problem, initial_values) = linear_problem(1.0);
         let cfg = DogLegConfig::new()
             .with_gradient_tolerance(1e3)
@@ -1714,7 +1716,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_cost_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_cost_tolerance_convergence() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_cost_tolerance(1e2) // very loose
@@ -1733,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_qr_solver() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
@@ -1746,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_jacobi_scaling_disabled() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_jacobi_scaling_disabled() -> TestResult {
         // DogLeg has Jacobi scaling ON by default; test with it explicitly disabled
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
@@ -1759,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_min_cost_threshold() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_min_cost_threshold() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_min_cost_threshold(1e10)
@@ -1776,7 +1778,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_trust_region_radius_in_config() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_trust_region_radius_in_config() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_trust_region_radius(0.1) // small initial radius
@@ -1788,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_step_reuse_config() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_step_reuse_config() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_step_reuse(true)
@@ -1817,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn test_dl_result_fields() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dl_result_fields() -> TestResult {
         let (problem, initial_values) = rosenbrock_problem();
         let mut solver = DogLeg::new();
         let result = solver.optimize(&problem, &initial_values)?;
