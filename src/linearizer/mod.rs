@@ -287,6 +287,8 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     struct LinearFactor {
         target: f64,
     }
@@ -324,7 +326,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_linearize_block_residual_value() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_linearize_block_residual_value() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
@@ -340,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linearize_block_jacobian_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_linearize_block_jacobian_shape() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
@@ -356,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_linearize_block_variable_local_idx() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_linearize_block_variable_local_idx() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
@@ -378,7 +380,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_sparse_backend_assemble() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sparse_backend_assemble() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (residual, _) = SparseMode::assemble(
@@ -393,8 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_assemble_no_symbolic_returns_error()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let result = SparseMode::assemble(
@@ -409,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_compute_column_norms() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sparse_backend_compute_column_norms() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (_, jacobian) = SparseMode::assemble(
@@ -426,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_apply_column_scaling() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sparse_backend_apply_column_scaling() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (_, jacobian) = SparseMode::assemble(
@@ -452,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_hessian_vec_product() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_sparse_backend_hessian_vec_product() -> TestResult {
         let triplets = vec![faer::sparse::Triplet::new(0usize, 0usize, 4.0_f64)];
         let h = SparseColMat::try_new_from_triplets(1, 1, &triplets)?;
         let v = Mat::from_fn(1, 1, |_, _| 2.0_f64);
@@ -466,7 +467,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_dense_backend_assemble() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_dense_backend_assemble() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
         let mut init = HashMap::new();

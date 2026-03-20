@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_dense_basic() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_basic() -> TestResult {
         let (problem, init) = one_var_dense_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (residual, jacobian) = assemble_dense(
@@ -171,7 +171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_dense_jacobian_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_jacobian_dimensions() -> TestResult {
         let (problem, init) = one_var_dense_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (residual, jacobian) = assemble_dense(
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_dense_zero_residual() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_zero_residual() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 3.0 }), None);
         let mut init = HashMap::new();
@@ -204,7 +204,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_dense_two_variables() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_two_variables() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
         problem.add_residual_block(&["y"], Box::new(LinearFactor { target: 0.0 }), None);
@@ -226,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_dense_residual_faer_shape() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_residual_faer_shape() -> TestResult {
         let (problem, init) = one_var_dense_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let (residual, _) = assemble_dense(
@@ -277,7 +277,7 @@ mod tests {
 
     /// Test that a binary factor correctly scatters its Jacobian blocks into two separate columns.
     #[test]
-    fn test_assemble_dense_binary_factor() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_binary_factor() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         problem.add_residual_block(
             &["x", "y"],
@@ -338,7 +338,7 @@ mod tests {
 
     /// Test that individual residual values in a multi-block problem are correct.
     #[test]
-    fn test_assemble_dense_multi_block_residual_values() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_dense_multi_block_residual_values() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 1.0 }), None);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 4.0 }), None);

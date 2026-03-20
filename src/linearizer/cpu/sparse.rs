@@ -225,6 +225,8 @@ mod tests {
     use nalgebra::{DMatrix, DVector, dvector};
     use std::collections::HashMap;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     struct LinearFactor {
         target: f64,
     }
@@ -262,7 +264,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_build_symbolic_structure_nnz() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_symbolic_structure_nnz() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let sym = build_symbolic_structure(
@@ -276,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_symbolic_structure_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_symbolic_structure_dimensions() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let sym = build_symbolic_structure(
@@ -291,7 +293,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_symbolic_structure_two_factors() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_build_symbolic_structure_two_factors() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 1.0 }), None);
@@ -313,7 +315,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_assemble_sparse_basic() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_sparse_basic() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let sym = state
@@ -326,7 +328,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_sparse_jacobian_value() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_sparse_jacobian_value() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let sym = state
@@ -340,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_sparse_zero_residual() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_sparse_zero_residual() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 3.0 }), None);
         let mut init = HashMap::new();
@@ -356,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_sparse_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_sparse_dimensions() -> TestResult {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let sym = state
@@ -372,7 +374,7 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_sparse_two_variables() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_assemble_sparse_two_variables() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Sparse);
         problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
         problem.add_residual_block(&["y"], Box::new(LinearFactor { target: 0.0 }), None);
@@ -388,6 +390,29 @@ mod tests {
         assert_eq!(residual.nrows(), 2);
         let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
         assert!((rsum - 9.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    /// Exercises the `CoreError::Variable` error path inside `scatter_sparse_block()`.
+    ///
+    /// The symbolic structure is built correctly, but we pass an empty
+    /// `variable_index_map` to `assemble_sparse` so the variable key lookup
+    /// fails, triggering the `Missing key` error branch.
+    #[test]
+    fn test_assemble_sparse_missing_variable_key_returns_error() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
+
+        // Pass an empty variable_index_map: "x" is missing → should trigger CoreError::Variable
+        let empty_map = HashMap::new();
+        let result = assemble_sparse(&problem, &state.variables, &empty_map, &sym);
+        assert!(
+            result.is_err(),
+            "assemble_sparse with missing variable key should return Err"
+        );
         Ok(())
     }
 }
