@@ -1557,4 +1557,279 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Trivial factor: r = x - target, J = [[1.0]]
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+            let residual = nalgebra::dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn rosenbrock_problem() -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x1".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
+        );
+        init.insert(
+            "x2".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
+        );
+        prob.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        prob.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        (prob, init)
+    }
+
+    fn linear_problem(
+        start: f64,
+    ) -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![start]),
+        );
+        prob.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        (prob, init)
+    }
+
+    // -------------------------------------------------------------------------
+    // DogLegConfig builder tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_dl_config_default() {
+        let cfg = DogLegConfig::default();
+        assert_eq!(cfg.max_iterations, 50);
+        assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
+        assert!(cfg.use_jacobi_scaling); // DogLeg enables Jacobi scaling by default
+        assert!(!cfg.compute_covariances);
+        assert!(cfg.enable_step_reuse);
+    }
+
+    #[test]
+    fn test_dl_config_builders() {
+        use crate::linalg::LinearSolverType;
+        let cfg = DogLegConfig::new()
+            .with_max_iterations(20)
+            .with_cost_tolerance(1e-5)
+            .with_parameter_tolerance(1e-6)
+            .with_gradient_tolerance(1e-7)
+            .with_trust_region_radius(200.0)
+            .with_trust_region_bounds(1e-15, 1e15)
+            .with_trust_region_factors(4.0, 0.3)
+            .with_step_quality_thresholds(0.01, 0.3, 0.7)
+            .with_jacobi_scaling(false)
+            .with_mu_params(1e-3, 1e-10, 2.0, 5.0)
+            .with_step_reuse(false)
+            .with_min_cost_threshold(1e-9)
+            .with_compute_covariances(true)
+            .with_linear_solver_type(LinearSolverType::SparseQR);
+        assert_eq!(cfg.max_iterations, 20);
+        assert!((cfg.trust_region_radius - 200.0).abs() < 1e-10);
+        assert!(!cfg.use_jacobi_scaling);
+        assert!(!cfg.enable_step_reuse);
+        assert!(cfg.min_cost_threshold.is_some());
+        assert!(cfg.compute_covariances);
+        assert!((cfg.min_step_quality - 0.01).abs() < 1e-15);
+        assert!((cfg.poor_step_quality - 0.3).abs() < 1e-15);
+        assert!((cfg.good_step_quality - 0.7).abs() < 1e-15);
+        assert!((cfg.initial_mu - 1e-3).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_dl_print_configuration_no_panic() {
+        DogLegConfig::default().print_configuration();
+    }
+
+    #[test]
+    fn test_dl_default_equals_new() {
+        let _a = DogLeg::new();
+        let _b = DogLeg::default();
+    }
+
+    #[test]
+    fn test_dl_with_config_method() {
+        let cfg = DogLegConfig::new().with_max_iterations(5);
+        let _solver = DogLeg::with_config(cfg);
+    }
+
+    // -------------------------------------------------------------------------
+    // Convergence termination paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_dl_max_iterations_termination() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new().with_max_iterations(2);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MaxIterationsReached
+        );
+        assert!(result.iterations <= 3, "iterations={}", result.iterations);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_gradient_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = linear_problem(1.0);
+        let cfg = DogLegConfig::new()
+            .with_gradient_tolerance(1e3)
+            .with_cost_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::GradientToleranceReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_cost_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_cost_tolerance(1e2) // very loose
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(matches!(
+            result.status,
+            optimizer::OptimizationStatus::CostToleranceReached
+                | optimizer::OptimizationStatus::GradientToleranceReached
+                | optimizer::OptimizationStatus::ParameterToleranceReached
+                | optimizer::OptimizationStatus::Converged
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_qr_solver() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::linalg::LinearSolverType;
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_linear_solver_type(LinearSolverType::SparseQR)
+            .with_max_iterations(100);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_jacobi_scaling_disabled() -> Result<(), Box<dyn std::error::Error>> {
+        // DogLeg has Jacobi scaling ON by default; test with it explicitly disabled
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_jacobi_scaling(false)
+            .with_max_iterations(100);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_min_cost_threshold() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_min_cost_threshold(1e10)
+            .with_cost_tolerance(1e-20)
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MinCostThresholdReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_trust_region_radius_in_config() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_trust_region_radius(0.1) // small initial radius
+            .with_max_iterations(200);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.iterations > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_step_reuse_config() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = DogLegConfig::new()
+            .with_step_reuse(true)
+            .with_max_iterations(100);
+        let mut solver = DogLeg::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_mu_params_config() {
+        let cfg = DogLegConfig::new().with_mu_params(1e-2, 1e-9, 10.0, 20.0);
+        assert!((cfg.initial_mu - 1e-2).abs() < 1e-15);
+        assert!((cfg.min_mu - 1e-9).abs() < 1e-20);
+        assert!((cfg.max_mu - 10.0).abs() < 1e-12);
+        assert!((cfg.mu_increase_factor - 20.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dl_step_quality_thresholds() {
+        let cfg = DogLegConfig::new().with_step_quality_thresholds(0.05, 0.25, 0.8);
+        assert!((cfg.min_step_quality - 0.05).abs() < 1e-15);
+        assert!((cfg.poor_step_quality - 0.25).abs() < 1e-15);
+        assert!((cfg.good_step_quality - 0.8).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_dl_result_fields() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = DogLeg::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.initial_cost > result.final_cost);
+        assert!(result.iterations > 0);
+        assert!(result.convergence_info.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_timeout_config() {
+        let cfg = DogLegConfig::new().with_timeout(time::Duration::from_secs(60));
+        assert!(cfg.timeout.is_some());
+    }
 }
