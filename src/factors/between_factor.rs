@@ -337,6 +337,7 @@ mod tests {
 
     const TOLERANCE: f64 = 1e-9;
     const FD_EPSILON: f64 = 1e-6;
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     #[test]
     fn test_between_factor_se2_identity() {
@@ -377,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_se2_jacobian_numerical() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_se2_jacobian_numerical() -> TestResult {
         // Verify Jacobian using finite differences with manifold perturbations
         let relative = SE2::from_xy_angle(1.0, 0.0, 0.1);
         let factor = BetweenFactor::new(relative);
@@ -438,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_se3_jacobian_numerical() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_se3_jacobian_numerical() -> TestResult {
         // Verify Jacobian using finite differences for SE3
         let relative = SE3::from_translation_quaternion(
             Vector3::new(1.0, 0.0, 0.0),
@@ -493,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_dimension_se2() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_dimension_se2() -> TestResult {
         let relative = SE2::from_xy_angle(1.0, 0.5, 0.1);
         let factor = BetweenFactor::new(relative);
 
@@ -512,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_dimension_se3() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_dimension_se3() -> TestResult {
         let relative = SE3::identity();
         let factor = BetweenFactor::new(relative);
 
@@ -531,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_so2_so3() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_so2_so3() -> TestResult {
         // Test SO2 (rotation-only in 2D)
         let so2_relative = SO2::from_angle(0.1);
         let so2_factor = BetweenFactor::new(so2_relative);
@@ -565,7 +566,7 @@ mod tests {
     }
 
     #[test]
-    fn test_between_factor_finiteness() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_between_factor_finiteness() -> TestResult {
         // Test numerical stability with various inputs
         let relative = SE2::from_xy_angle(100.0, -200.0, std::f64::consts::PI);
         let factor = BetweenFactor::new(relative);
