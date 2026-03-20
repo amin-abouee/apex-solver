@@ -236,8 +236,11 @@ mod tests {
             compute_jacobian: bool,
         ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let residual = dvector![params[0][0] - self.target];
-            let jacobian =
-                if compute_jacobian { Some(DMatrix::from_element(1, 1, 1.0)) } else { None };
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
             (residual, jacobian)
         }
 
@@ -313,7 +316,9 @@ mod tests {
     fn test_assemble_sparse_basic() -> Result<(), Box<dyn std::error::Error>> {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let sym = state.symbolic_structure.unwrap();
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
         let (residual, _) =
             assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
@@ -324,7 +329,9 @@ mod tests {
     fn test_assemble_sparse_jacobian_value() -> Result<(), Box<dyn std::error::Error>> {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let sym = state.symbolic_structure.unwrap();
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
         let (_, jacobian) =
             assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
         let val = jacobian.as_ref().val_of_col(0)[0];
@@ -339,7 +346,9 @@ mod tests {
         let mut init = HashMap::new();
         init.insert("x".to_string(), (ManifoldType::RN, dvector![3.0]));
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let sym = state.symbolic_structure.unwrap();
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
         let (residual, _) =
             assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
         assert!(residual[(0, 0)].abs() < 1e-12);
@@ -350,7 +359,9 @@ mod tests {
     fn test_assemble_sparse_dimensions() -> Result<(), Box<dyn std::error::Error>> {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let sym = state.symbolic_structure.unwrap();
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
         let (residual, jacobian) =
             assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
         assert_eq!(residual.nrows(), 1);
@@ -369,7 +380,9 @@ mod tests {
         init.insert("x".to_string(), (ManifoldType::RN, dvector![2.0]));
         init.insert("y".to_string(), (ManifoldType::RN, dvector![7.0]));
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let sym = state.symbolic_structure.unwrap();
+        let sym = state
+            .symbolic_structure
+            .ok_or("symbolic_structure is None")?;
         let (residual, _) =
             assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
         assert_eq!(residual.nrows(), 2);

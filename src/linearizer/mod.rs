@@ -282,7 +282,10 @@ mod tests {
     use apex_manifolds::ManifoldType;
     use faer::Col;
     use nalgebra::{DMatrix, DVector, dvector};
-    use std::{collections::HashMap, sync::{Arc, Mutex}};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     struct LinearFactor {
         target: f64,
@@ -295,8 +298,11 @@ mod tests {
             compute_jacobian: bool,
         ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let residual = dvector![params[0][0] - self.target];
-            let jacobian =
-                if compute_jacobian { Some(DMatrix::from_element(1, 1, 1.0)) } else { None };
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
             (residual, jacobian)
         }
 
@@ -322,9 +328,13 @@ mod tests {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
-        let block = problem.residual_blocks().values().next().unwrap();
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
         linearize_block(block, &state.variables, &total_residual)?;
-        let r = total_residual.lock().unwrap();
+        let r = total_residual.lock().map_err(|e| format!("{e:?}"))?;
         assert!((r[0] - 5.0).abs() < 1e-12);
         Ok(())
     }
@@ -334,7 +344,11 @@ mod tests {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
-        let block = problem.residual_blocks().values().next().unwrap();
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
         let result = linearize_block(block, &state.variables, &total_residual)?;
         assert_eq!(result.jacobian.nrows(), 1);
         assert_eq!(result.jacobian.ncols(), 1);
@@ -346,7 +360,11 @@ mod tests {
         let (problem, init) = one_var_problem();
         let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
-        let block = problem.residual_blocks().values().next().unwrap();
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
         let result = linearize_block(block, &state.variables, &total_residual)?;
         assert_eq!(result.variable_local_idx_size_list.len(), 1);
         let (local_idx, size) = result.variable_local_idx_size_list[0];
@@ -375,9 +393,10 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_assemble_no_symbolic_returns_error() {
+    fn test_sparse_backend_assemble_no_symbolic_returns_error()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init).unwrap();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
         let result = SparseMode::assemble(
             &problem,
             &state.variables,
@@ -386,6 +405,7 @@ mod tests {
             state.total_dof,
         );
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
@@ -432,12 +452,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sparse_backend_hessian_vec_product() {
+    fn test_sparse_backend_hessian_vec_product() -> Result<(), Box<dyn std::error::Error>> {
         let triplets = vec![faer::sparse::Triplet::new(0usize, 0usize, 4.0_f64)];
-        let h = SparseColMat::try_new_from_triplets(1, 1, &triplets).unwrap();
+        let h = SparseColMat::try_new_from_triplets(1, 1, &triplets)?;
         let v = Mat::from_fn(1, 1, |_, _| 2.0_f64);
         let result = SparseMode::hessian_vec_product(&h, &v);
         assert!((result[(0, 0)] - 8.0).abs() < 1e-12);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------

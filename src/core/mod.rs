@@ -188,7 +188,7 @@ mod tests {
     #[test]
     fn test_core_error_log_with_source_returns_self() {
         let e = CoreError::DimensionMismatch("mismatch".into());
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "source error");
+        let source = std::io::Error::other("source error");
         let returned = e.log_with_source(source);
         assert!(returned.to_string().contains("mismatch"));
     }
@@ -200,7 +200,7 @@ mod tests {
     #[test]
     fn test_core_result_ok() {
         let r: CoreResult<i32> = Ok(42);
-        assert_eq!(r.unwrap(), 42);
+        assert!(matches!(r, Ok(42)));
     }
 
     #[test]

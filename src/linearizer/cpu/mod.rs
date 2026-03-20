@@ -59,27 +59,31 @@ mod tests {
     use super::*;
     use faer::{Mat, sparse::SparseColMat};
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn test_sparse_mode_jacobian_is_sparse_col_mat() {
-        let j: <SparseMode as LinearizationMode>::Jacobian =
-            SparseColMat::try_new_from_triplets(1, 1, &[faer::sparse::Triplet::new(0usize, 0usize, 1.0f64)])
-                .unwrap();
+    fn test_sparse_mode_jacobian_is_sparse_col_mat() -> TestResult {
+        let j: <SparseMode as LinearizationMode>::Jacobian = SparseColMat::try_new_from_triplets(
+            1,
+            1,
+            &[faer::sparse::Triplet::new(0usize, 0usize, 1.0f64)],
+        )?;
         assert_eq!(j.ncols(), 1);
+        Ok(())
     }
 
     #[test]
-    fn test_sparse_mode_hessian_is_sparse_col_mat() {
-        let h: <SparseMode as LinearizationMode>::Hessian =
-            SparseColMat::try_new_from_triplets(
-                2,
-                2,
-                &[
-                    faer::sparse::Triplet::new(0usize, 0usize, 1.0f64),
-                    faer::sparse::Triplet::new(1usize, 1usize, 2.0f64),
-                ],
-            )
-            .unwrap();
+    fn test_sparse_mode_hessian_is_sparse_col_mat() -> TestResult {
+        let h: <SparseMode as LinearizationMode>::Hessian = SparseColMat::try_new_from_triplets(
+            2,
+            2,
+            &[
+                faer::sparse::Triplet::new(0usize, 0usize, 1.0f64),
+                faer::sparse::Triplet::new(1usize, 1usize, 2.0f64),
+            ],
+        )?;
         assert_eq!(h.nrows(), 2);
+        Ok(())
     }
 
     #[test]
