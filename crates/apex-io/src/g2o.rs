@@ -639,6 +639,9 @@ enum ParsedItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Matrix3, Matrix6, UnitQuaternion, Vector3};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -688,5 +691,781 @@ mod tests {
         let parts = vec!["VERTEX_SE2", "0"];
         let result = G2oLoader::parse_vertex_se2(&parts, 1);
         assert!(matches!(result, Err(IoError::MissingFields { .. })));
+    }
+
+    #[test]
+    fn test_write_se2_graph_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 1.0, 2.0, 0.5));
+        graph
+            .vertices_se2
+            .insert(1, VertexSE2::new(1, 3.0, 4.0, 1.0));
+        let info = Matrix3::new(500.0, 0.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 200.0);
+        graph
+            .edges_se2
+            .push(EdgeSE2::new(0, 1, 0.5, 0.3, 0.1, info));
+
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+
+        assert_eq!(loaded.vertices_se2.len(), 2);
+        assert_eq!(loaded.edges_se2.len(), 1);
+        let v0 = &loaded.vertices_se2[&0];
+        assert!((v0.x() - 1.0).abs() < 1e-10);
+        assert!((v0.y() - 2.0).abs() < 1e-10);
+        let e = &loaded.edges_se2[0];
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+        assert!((e.information[(0, 0)] - 500.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_se3_graph_round_trip() -> TestResult {
+        let trans = Vector3::new(1.0, 2.0, 3.0);
+        let rot = UnitQuaternion::identity();
+        let mut graph = Graph::new();
+        graph.vertices_se3.insert(0, VertexSE3::new(0, trans, rot));
+        graph
+            .vertices_se3
+            .insert(1, VertexSE3::new(1, Vector3::zeros(), rot));
+        graph
+            .edges_se3
+            .push(EdgeSE3::new(0, 1, trans, rot, Matrix6::identity()));
+
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+
+        assert_eq!(loaded.vertices_se3.len(), 2);
+        assert_eq!(loaded.edges_se3.len(), 1);
+        let v0 = &loaded.vertices_se3[&0];
+        assert!((v0.x() - 1.0).abs() < 1e-10);
+        assert!((v0.y() - 2.0).abs() < 1e-10);
+        assert!((v0.z() - 3.0).abs() < 1e-10);
+        let e = &loaded.edges_se3[0];
+        assert!((e.information[(0, 0)] - 1.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_mixed_graph_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 1.0, 0.0, 0.0));
+        graph.vertices_se3.insert(
+            1,
+            VertexSE3::new(1, Vector3::new(0.0, 0.0, 1.0), UnitQuaternion::identity()),
+        );
+
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+
+        assert_eq!(loaded.vertices_se2.len(), 1);
+        assert_eq!(loaded.vertices_se3.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_empty_graph() -> TestResult {
+        let graph = Graph::new();
+        let f = NamedTempFile::new()?;
+        G2oLoader::write(&graph, f.path())?;
+        let loaded = G2oLoader::load(f.path())?;
+        assert_eq!(loaded.vertices_se2.len(), 0);
+        assert_eq!(loaded.vertices_se3.len(), 0);
+        assert_eq!(loaded.edges_se2.len(), 0);
+        assert_eq!(loaded.edges_se3.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = G2oLoader::load("/nonexistent/path/file.g2o");
+        assert!(result.is_err(), "loading a missing file should return Err");
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_quaternion_norm() -> TestResult {
+        // qw=0.1 gives norm ≈ 0.1, which is far from 1.0 (threshold: |norm-1| > 0.01)
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 0.0 0.0 0.0 0.0 0.0 0.0 0.1")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidQuaternion { .. })),
+            "far-from-unit quaternion should return InvalidQuaternion"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_information_matrix() -> TestResult {
+        // parse_edge_se2 reads info values as: i11, i12, i13, i22, i23, i33
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 0.0 0.0 0.0")?;
+        writeln!(f, "VERTEX_SE2 1 1.0 0.0 0.0")?;
+        writeln!(f, "EDGE_SE2 0 1 1.0 0.0 0.0 500.0 0.0 0.0 300.0 0.0 200.0")?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.edges_se2.len(), 1);
+        let e = &graph.edges_se2[0];
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+        assert!(
+            (e.information[(0, 0)] - 500.0).abs() < 1e-10,
+            "i11={}",
+            e.information[(0, 0)]
+        );
+        assert!(
+            (e.information[(1, 1)] - 300.0).abs() < 1e-10,
+            "i22={}",
+            e.information[(1, 1)]
+        );
+        assert!(
+            (e.information[(2, 2)] - 200.0).abs() < 1e-10,
+            "i33={}",
+            e.information[(2, 2)]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_information_matrix() -> TestResult {
+        // EDGE_SE3:QUAT: from to tx ty tz qx qy qz qw + 21 upper-triangular values
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 0.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
+        writeln!(f, "VERTEX_SE3:QUAT 1 1.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
+        // Information matrix: identity (diagonal 1.0, off-diagonal 0.0), upper triangular = 21 values
+        let info_vals = "100.0 0.0 0.0 0.0 0.0 0.0 100.0 0.0 0.0 0.0 0.0 100.0 0.0 0.0 0.0 100.0 0.0 0.0 100.0 0.0 100.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.edges_se3.len(), 1);
+        let e = &graph.edges_se3[0];
+        assert!((e.information[(0, 0)] - 100.0).abs() < 1e-10);
+        assert!((e.information[(1, 1)] - 100.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_vertex_se2 error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vertex_se2_invalid_x() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 bad 2.0 0.5")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid x in VERTEX_SE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se2_invalid_y() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 1.0 bad 0.5")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid y in VERTEX_SE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se2_invalid_theta() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 1.0 2.0 bad")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid theta in VERTEX_SE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se2_missing_fields() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 0 1.0")?; // only 3 parts (needs 5)
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::MissingFields { .. })),
+            "VERTEX_SE2 with too few fields should return MissingFields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_duplicate_vertex_se2() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE2 3 1.0 2.0 0.0")?;
+        writeln!(f, "VERTEX_SE2 3 3.0 4.0 0.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::DuplicateVertex { id: 3 })),
+            "duplicate VERTEX_SE2 ID should return DuplicateVertex"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_vertex_se3 error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vertex_se3_missing_fields() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0")?; // only 4 parts (needs 9)
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::MissingFields { .. })),
+            "VERTEX_SE3:QUAT with too few fields should return MissingFields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_translation() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 bad 2.0 3.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid translation in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_quaternion_field() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0 3.0 bad 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid quaternion field should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_duplicate_vertex_se3() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 7 1.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
+        writeln!(f, "VERTEX_SE3:QUAT 7 2.0 0.0 0.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::DuplicateVertex { id: 7 })),
+            "duplicate VERTEX_SE3:QUAT ID should return DuplicateVertex"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_id() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT bad 1.0 2.0 3.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid id in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_y() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 bad 3.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid y in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_z() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0 bad 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid z in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_qy() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0 3.0 0.0 bad 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qy in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_qz() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0 3.0 0.0 0.0 bad 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qz in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex_se3_invalid_qw() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX_SE3:QUAT 0 1.0 2.0 3.0 0.0 0.0 0.0 bad")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qw in VERTEX_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_edge_se2 error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_edge_se2_missing_fields() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE2 0 1 1.0 0.0")?; // only 5 parts (needs 12)
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::MissingFields { .. })),
+            "EDGE_SE2 with too few fields should return MissingFields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_from_id() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(
+            f,
+            "EDGE_SE2 bad 1 1.0 0.0 0.0 500.0 0.0 0.0 500.0 0.0 200.0"
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid from-ID in EDGE_SE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_measurement() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE2 0 1 bad 0.0 0.0 500.0 0.0 0.0 500.0 0.0 200.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid measurement in EDGE_SE2 should return error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_to_id() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(
+            f,
+            "EDGE_SE2 0 bad 1.0 0.0 0.0 500.0 0.0 0.0 500.0 0.0 200.0"
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid to-ID in EDGE_SE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_dy() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE2 0 1 1.0 bad 0.0 500.0 0.0 0.0 500.0 0.0 200.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid dy in EDGE_SE2 should return error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_dtheta() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE2 0 1 1.0 0.0 bad 500.0 0.0 0.0 500.0 0.0 200.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid dtheta in EDGE_SE2 should return error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se2_invalid_info_matrix() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE2 0 1 1.0 0.0 0.0 bad 0.0 0.0 500.0 0.0 200.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid info-matrix value in EDGE_SE2 should return error"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_edge_se3 error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_edge_se3_missing_fields() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE3:QUAT 0 1 1.0 0.0")?; // only 5 parts (needs >= 10)
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::MissingFields { .. })),
+            "EDGE_SE3:QUAT with too few fields should return MissingFields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_translation() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        // bad tx
+        writeln!(f, "EDGE_SE3:QUAT 0 1 bad 0.0 0.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid translation in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_quaternion_field() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        // bad qz field
+        let info_vals =
+            "1.0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 1.0 0.0 1.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 0.0 bad 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid quaternion field in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_from_id() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        let info_vals =
+            "1.0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 1.0 0.0 1.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT bad 1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid from-id in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_to_id() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        let info_vals =
+            "1.0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 1.0 0.0 1.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 bad 1.0 0.0 0.0 0.0 0.0 0.0 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid to-id in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_ty() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE3:QUAT 0 1 1.0 bad 0.0 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid ty in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_tz() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE3:QUAT 0 1 1.0 0.0 bad 0.0 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid tz in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_qx() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 bad 0.0 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qx in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_qy() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 bad 0.0 1.0")?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qy in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_qw() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        let info_vals =
+            "1.0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 1.0 0.0 1.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 0.0 0.0 bad {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid qw in EDGE_SE3:QUAT should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge_se3_invalid_info_matrix() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        let info_vals = "bad 0.0 0.0 0.0 0.0 0.0 100.0 0.0 0.0 0.0 0.0 100.0 0.0 0.0 0.0 100.0 0.0 0.0 100.0 0.0 100.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid info-matrix values in EDGE_SE3:QUAT should return error"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_line: comment / empty / unknown token paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_comment_and_empty_lines_ignored() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "# This is a comment")?;
+        writeln!(f, "VERTEX_SE2 0 1.0 2.0 0.0")?;
+        writeln!(f)?; // empty line
+        writeln!(f, "VERTEX_SE2 1 3.0 4.0 0.0")?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(
+            graph.vertices_se2.len(),
+            2,
+            "comments and empty lines should be ignored"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_unknown_token_ignored() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "FIX 0")?; // unknown token
+        writeln!(f, "VERTEX_SE2 0 0.0 0.0 0.0")?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 1);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_parallel (> 1000 lines triggers parallel path)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_parallel_large_se2_file() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for i in 0..1001usize {
+            writeln!(f, "VERTEX_SE2 {} {} {} 0.0", i, i as f64, i as f64)?;
+        }
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 1001);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parallel_with_se2_edges() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for i in 0..1001usize {
+            writeln!(f, "VERTEX_SE2 {} 0.0 0.0 0.0", i)?;
+        }
+        writeln!(f, "EDGE_SE2 0 1 1.0 0.0 0.0 500.0 0.0 0.0 500.0 0.0 200.0")?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 1001);
+        assert_eq!(graph.edges_se2.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parallel_with_se3_vertices() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for i in 0..1001usize {
+            writeln!(
+                f,
+                "VERTEX_SE3:QUAT {} 0.0 0.0 {} 0.0 0.0 0.0 1.0",
+                i, i as f64
+            )?;
+        }
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se3.len(), 1001);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parallel_with_se3_edges() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for i in 0..1001usize {
+            writeln!(f, "VERTEX_SE3:QUAT {} 0.0 0.0 0.0 0.0 0.0 0.0 1.0", i)?;
+        }
+        let info_vals =
+            "1.0 0.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 0.0 1.0 0.0 0.0 0.0 1.0 0.0 0.0 1.0 0.0 1.0";
+        writeln!(
+            f,
+            "EDGE_SE3:QUAT 0 1 1.0 0.0 0.0 0.0 0.0 0.0 1.0 {}",
+            info_vals
+        )?;
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se3.len(), 1001);
+        assert_eq!(graph.edges_se3.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parallel_duplicate_vertex_returns_error() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        for i in 0..1000usize {
+            writeln!(f, "VERTEX_SE2 {} 0.0 0.0 0.0", i)?;
+        }
+        writeln!(f, "VERTEX_SE2 0 9.0 9.0 0.0")?; // duplicate of ID 0
+        f.flush()?;
+        let result = G2oLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::DuplicateVertex { id: 0 })),
+            "duplicate vertex in parallel parse should return DuplicateVertex"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_parallel_comment_and_empty_lines_ignored() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "# parallel parse comment test")?;
+        for i in 0..1000usize {
+            writeln!(f, "VERTEX_SE2 {} 0.0 0.0 0.0", i)?;
+        }
+        writeln!(f)?; // empty line at end
+        f.flush()?;
+        let graph = G2oLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 1000);
+        Ok(())
     }
 }
