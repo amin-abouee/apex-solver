@@ -780,4 +780,250 @@ mod tests {
         let cross_direct = v.cross(&w);
         assert!((cross_via_skew - cross_direct).norm() < 1e-10);
     }
+
+    // -------------------------------------------------------------------------
+    // PinholeParams::validate() error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_pinhole_validate_negative_focal_length() {
+        let result = PinholeParams::new(-1.0, 300.0, 320.0, 240.0);
+        assert!(result.is_err(), "negative fx should fail validation");
+    }
+
+    #[test]
+    fn test_pinhole_validate_zero_focal_length() {
+        let result = PinholeParams::new(0.0, 300.0, 320.0, 240.0);
+        assert!(result.is_err(), "fx = 0 should fail validation");
+    }
+
+    #[test]
+    fn test_pinhole_validate_nan_focal_length() {
+        let result = PinholeParams::new(f64::NAN, 300.0, 320.0, 240.0);
+        assert!(result.is_err(), "NaN fx should fail validation");
+    }
+
+    #[test]
+    fn test_pinhole_validate_infinite_focal_length() {
+        // Inf is > 0 so passes the first check, but fails the is_finite() check
+        let result = PinholeParams::new(f64::INFINITY, 300.0, 320.0, 240.0);
+        assert!(result.is_err(), "Inf fx should fail validation");
+    }
+
+    #[test]
+    fn test_pinhole_validate_nan_principal_point() {
+        let result = PinholeParams::new(300.0, 300.0, f64::NAN, 240.0);
+        assert!(result.is_err(), "NaN cx should fail validation");
+    }
+
+    // -------------------------------------------------------------------------
+    // DistortionModel::validate() branches
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_distortion_none_is_valid() {
+        assert!(DistortionModel::None.validate().is_ok());
+    }
+
+    #[test]
+    fn test_distortion_radial_nan_fails() {
+        let d = DistortionModel::Radial {
+            k1: f64::NAN,
+            k2: 0.0,
+        };
+        assert!(d.validate().is_err(), "NaN k1 should fail");
+    }
+
+    #[test]
+    fn test_distortion_brown_conrady_nan_fails() {
+        let d = DistortionModel::BrownConrady {
+            k1: 0.0,
+            k2: f64::NAN,
+            p1: 0.0,
+            p2: 0.0,
+            k3: 0.0,
+        };
+        assert!(d.validate().is_err(), "NaN k2 should fail");
+    }
+
+    #[test]
+    fn test_distortion_kannala_brandt_nan_fails() {
+        let d = DistortionModel::KannalaBrandt {
+            k1: 0.0,
+            k2: 0.0,
+            k3: f64::NAN,
+            k4: 0.0,
+        };
+        assert!(d.validate().is_err(), "NaN k3 should fail");
+    }
+
+    #[test]
+    fn test_distortion_fov_invalid_w_zero() {
+        let d = DistortionModel::FOV { w: 0.0 };
+        assert!(d.validate().is_err(), "w = 0 should fail (must be > 0)");
+    }
+
+    #[test]
+    fn test_distortion_fov_invalid_w_too_large() {
+        let d = DistortionModel::FOV {
+            w: std::f64::consts::PI + 0.1,
+        };
+        assert!(d.validate().is_err(), "w > π should fail");
+    }
+
+    #[test]
+    fn test_distortion_fov_valid() {
+        let d = DistortionModel::FOV { w: 1.0 };
+        assert!(d.validate().is_ok(), "w = 1.0 should be valid");
+    }
+
+    #[test]
+    fn test_distortion_ucm_alpha_out_of_range() {
+        let d = DistortionModel::UCM { alpha: 1.5 };
+        assert!(d.validate().is_err(), "alpha > 1 should fail for UCM");
+    }
+
+    #[test]
+    fn test_distortion_ucm_alpha_valid() {
+        let d = DistortionModel::UCM { alpha: 0.5 };
+        assert!(d.validate().is_ok());
+    }
+
+    #[test]
+    fn test_distortion_eucm_alpha_out_of_range() {
+        let d = DistortionModel::EUCM {
+            alpha: 1.5,
+            beta: 1.0,
+        };
+        assert!(d.validate().is_err(), "alpha > 1 should fail for EUCM");
+    }
+
+    #[test]
+    fn test_distortion_eucm_beta_nonpositive() {
+        let d = DistortionModel::EUCM {
+            alpha: 0.5,
+            beta: -1.0,
+        };
+        assert!(d.validate().is_err(), "beta <= 0 should fail for EUCM");
+    }
+
+    #[test]
+    fn test_distortion_double_sphere_xi_out_of_range() {
+        let d = DistortionModel::DoubleSphere {
+            xi: 2.0,
+            alpha: 0.6,
+        };
+        assert!(d.validate().is_err(), "xi > 1 should fail");
+    }
+
+    #[test]
+    fn test_distortion_double_sphere_alpha_invalid() {
+        let d = DistortionModel::DoubleSphere {
+            xi: 0.0,
+            alpha: 0.0,
+        };
+        assert!(d.validate().is_err(), "alpha = 0 should fail");
+    }
+
+    // -------------------------------------------------------------------------
+    // validate_point_in_front()
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_point_in_front_valid_z() {
+        assert!(
+            validate_point_in_front(1.0).is_ok(),
+            "z = 1.0 should be valid"
+        );
+    }
+
+    #[test]
+    fn test_validate_point_in_front_behind_camera() {
+        assert!(
+            validate_point_in_front(-1.0).is_err(),
+            "z = -1.0 should fail"
+        );
+    }
+
+    #[test]
+    fn test_validate_point_in_front_at_center() {
+        // z = 0 < sqrt(EPSILON) ≈ 1.49e-8, should fail
+        assert!(validate_point_in_front(0.0).is_err(), "z = 0 should fail");
+    }
+
+    // -------------------------------------------------------------------------
+    // project_batch() default implementation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_project_batch_default_impl() -> TestResult {
+        let pinhole = PinholeParams::new(500.0, 500.0, 320.0, 240.0)?;
+        let camera = PinholeCamera::new(pinhole, DistortionModel::None)?;
+
+        // 3 valid points + 1 invalid (behind camera)
+        let pts = Matrix3xX::from_columns(&[
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.1, 0.2, 1.0),
+            Vector3::new(-0.1, 0.1, 2.0),
+            Vector3::new(0.0, 0.0, -1.0), // behind camera → sentinel (1e6, 1e6)
+        ]);
+
+        let result = camera.project_batch(&pts);
+        assert_eq!(result.ncols(), 4);
+        assert!(result[(0, 0)].is_finite());
+        assert!(result[(1, 0)].is_finite());
+        assert!(
+            (result[(0, 3)] - 1e6).abs() < 1.0,
+            "Invalid projection should be sentinel 1e6, got {}",
+            result[(0, 3)]
+        );
+        assert!(
+            (result[(1, 3)] - 1e6).abs() < 1.0,
+            "Invalid projection should be sentinel 1e6, got {}",
+            result[(1, 3)]
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // CameraModelError Display strings
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_camera_model_error_display_focal_length_not_positive() {
+        let e = CameraModelError::FocalLengthNotPositive {
+            fx: -1.0,
+            fy: 300.0,
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("fx") && s.contains("-1"),
+            "Display should include parameter values: {s}"
+        );
+    }
+
+    #[test]
+    fn test_camera_model_error_display_point_behind_camera() {
+        let e = CameraModelError::PointBehindCamera {
+            z: -0.5,
+            min_z: 1e-6,
+        };
+        let s = format!("{e}");
+        assert!(s.contains("z="), "Display should include z: {s}");
+    }
+
+    #[test]
+    fn test_camera_model_error_display_parameter_out_of_range() {
+        let e = CameraModelError::ParameterOutOfRange {
+            param: "alpha".to_string(),
+            value: 1.5,
+            min: 0.0,
+            max: 1.0,
+        };
+        let s = format!("{e}");
+        assert!(
+            s.contains("alpha") && s.contains("1.5"),
+            "Display should include param and value: {s}"
+        );
+    }
 }
