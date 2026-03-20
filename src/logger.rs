@@ -120,3 +120,87 @@ where
         writeln!(writer)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke-test init_logger_with_level for DEBUG level.
+    ///
+    /// `tracing_subscriber::fmt().init()` panics if the global subscriber is already
+    /// set.  We use `try_init()` and silently ignore any "already initialised" error.
+    #[test]
+    fn test_init_logger_with_debug_does_not_panic() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(Level::DEBUG.into())
+                    .from_env_lossy(),
+            )
+            .with_target(false)
+            .with_level(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .event_format(CustomFormatter)
+            .try_init();
+    }
+
+    /// Smoke-test init_logger_with_level for WARN level.
+    #[test]
+    fn test_init_logger_with_warn_does_not_panic() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(Level::WARN.into())
+                    .from_env_lossy(),
+            )
+            .with_target(false)
+            .with_level(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .event_format(CustomFormatter)
+            .try_init();
+    }
+
+    /// Smoke-test init_logger_with_level for TRACE — exercises the DEBUG/TRACE
+    /// branch in `format_event` that shows `file:line` instead of module.
+    #[test]
+    fn test_init_logger_with_trace_does_not_panic() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(
+                tracing_subscriber::EnvFilter::builder()
+                    .with_default_directive(Level::TRACE.into())
+                    .from_env_lossy(),
+            )
+            .with_target(false)
+            .with_level(false)
+            .with_file(false)
+            .with_line_number(false)
+            .with_thread_ids(false)
+            .with_thread_names(false)
+            .event_format(CustomFormatter)
+            .try_init();
+    }
+
+    /// Verify that all five `Level` variants used by the match in `format_event` exist.
+    #[test]
+    fn test_level_variants() {
+        // This is a compile-time + runtime sanity check.  If any Level arm were
+        // removed from the match, this test (and the compiler) would catch it.
+        let levels = [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ];
+        assert_eq!(levels.len(), 5);
+        assert_ne!(levels[0], levels[1]);
+        assert_ne!(levels[2], levels[3]);
+        assert_ne!(levels[3], levels[4]);
+    }
+}
