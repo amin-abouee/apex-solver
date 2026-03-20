@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn test_observer_error_log_with_source_returns_self() {
         let e = ObserverError::MatrixVisualizationFailed("src_test".into());
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let source = std::io::Error::other("src");
         let returned = e.log_with_source(source);
         assert!(returned.to_string().contains("src_test"));
     }
@@ -817,7 +817,7 @@ mod tests {
         observers.add(observer);
         observers.notify_complete(&HashMap::new(), 10);
 
-        let count = *complete_calls.lock().unwrap();
+        let count = *complete_calls.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(count, 1);
     }
 
