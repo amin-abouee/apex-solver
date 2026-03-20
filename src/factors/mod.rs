@@ -290,51 +290,51 @@ mod tests {
 
     #[test]
     fn test_optimize_params_bundle_adjustment_flags() {
-        assert!(BundleAdjustment::POSE);
-        assert!(BundleAdjustment::LANDMARK);
-        assert!(!BundleAdjustment::INTRINSIC);
+        const { assert!(BundleAdjustment::POSE) };
+        const { assert!(BundleAdjustment::LANDMARK) };
+        const { assert!(!BundleAdjustment::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_self_calibration_flags() {
-        assert!(SelfCalibration::POSE);
-        assert!(SelfCalibration::LANDMARK);
-        assert!(SelfCalibration::INTRINSIC);
+        const { assert!(SelfCalibration::POSE) };
+        const { assert!(SelfCalibration::LANDMARK) };
+        const { assert!(SelfCalibration::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_only_intrinsics_flags() {
-        assert!(!OnlyIntrinsics::POSE);
-        assert!(!OnlyIntrinsics::LANDMARK);
-        assert!(OnlyIntrinsics::INTRINSIC);
+        const { assert!(!OnlyIntrinsics::POSE) };
+        const { assert!(!OnlyIntrinsics::LANDMARK) };
+        const { assert!(OnlyIntrinsics::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_only_pose_flags() {
-        assert!(OnlyPose::POSE);
-        assert!(!OnlyPose::LANDMARK);
-        assert!(!OnlyPose::INTRINSIC);
+        const { assert!(OnlyPose::POSE) };
+        const { assert!(!OnlyPose::LANDMARK) };
+        const { assert!(!OnlyPose::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_only_landmarks_flags() {
-        assert!(!OnlyLandmarks::POSE);
-        assert!(OnlyLandmarks::LANDMARK);
-        assert!(!OnlyLandmarks::INTRINSIC);
+        const { assert!(!OnlyLandmarks::POSE) };
+        const { assert!(OnlyLandmarks::LANDMARK) };
+        const { assert!(!OnlyLandmarks::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_pose_and_intrinsics_flags() {
-        assert!(PoseAndIntrinsics::POSE);
-        assert!(!PoseAndIntrinsics::LANDMARK);
-        assert!(PoseAndIntrinsics::INTRINSIC);
+        const { assert!(PoseAndIntrinsics::POSE) };
+        const { assert!(!PoseAndIntrinsics::LANDMARK) };
+        const { assert!(PoseAndIntrinsics::INTRINSIC) };
     }
 
     #[test]
     fn test_optimize_params_landmarks_and_intrinsics_flags() {
-        assert!(!LandmarksAndIntrinsics::POSE);
-        assert!(LandmarksAndIntrinsics::LANDMARK);
-        assert!(LandmarksAndIntrinsics::INTRINSIC);
+        const { assert!(!LandmarksAndIntrinsics::POSE) };
+        const { assert!(LandmarksAndIntrinsics::LANDMARK) };
+        const { assert!(LandmarksAndIntrinsics::INTRINSIC) };
     }
 
     // -------------------------------------------------------------------------
@@ -343,7 +343,10 @@ mod tests {
 
     #[test]
     fn test_factor_error_invalid_dimension_display() {
-        let e = FactorError::InvalidDimension { expected: 3, actual: 6 };
+        let e = FactorError::InvalidDimension {
+            expected: 3,
+            actual: 6,
+        };
         let s = e.to_string();
         assert!(s.contains("3"), "{s}");
         assert!(s.contains("6"), "{s}");
@@ -387,7 +390,7 @@ mod tests {
     #[test]
     fn test_factor_error_log_with_source_returns_self() {
         let e = FactorError::InvalidProjection("proj_log".into());
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let source = std::io::Error::other("src");
         let returned = e.log_with_source(source);
         assert!(returned.to_string().contains("proj_log"));
     }
@@ -407,8 +410,11 @@ mod tests {
             compute_jacobian: bool,
         ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let residual = dvector![params[0][0] - self.value];
-            let jacobian =
-                if compute_jacobian { Some(DMatrix::from_element(1, 1, 1.0)) } else { None };
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
             (residual, jacobian)
         }
 
@@ -424,7 +430,8 @@ mod tests {
         let (r, j) = f.linearize(&params, true);
         assert!((r[0] - 2.0).abs() < 1e-12);
         assert!(j.is_some());
-        assert!((j.unwrap()[(0, 0)] - 1.0).abs() < 1e-12);
+        let j = j.unwrap_or_else(|| DMatrix::from_element(1, 1, 0.0));
+        assert!((j[(0, 0)] - 1.0).abs() < 1e-12);
     }
 
     #[test]
