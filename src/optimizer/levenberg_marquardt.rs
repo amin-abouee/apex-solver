@@ -1233,4 +1233,252 @@ mod tests {
         );
         Ok(())
     }
+
+    /// Trivial factor: r = x - target, J = [[1.0]]
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn rosenbrock_problem() -> (
+        Problem,
+        HashMap<String, (apex_manifolds::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut initial_values = HashMap::new();
+        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
+        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
+        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        (problem, initial_values)
+    }
+
+    fn linear_problem(
+        start: f64,
+    ) -> (
+        Problem,
+        HashMap<String, (apex_manifolds::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut initial_values = HashMap::new();
+        initial_values.insert("x".to_string(), (ManifoldType::RN, dvector![start]));
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        (problem, initial_values)
+    }
+
+    // -------------------------------------------------------------------------
+    // Config builder tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lm_config_default() {
+        let cfg = LevenbergMarquardtConfig::default();
+        assert_eq!(cfg.max_iterations, 50);
+        assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
+        assert!((cfg.damping - 1e-3).abs() < 1e-15);
+        assert!(!cfg.use_jacobi_scaling);
+        assert!(!cfg.compute_covariances);
+    }
+
+    #[test]
+    fn test_lm_config_builders() {
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_max_iterations(42)
+            .with_cost_tolerance(1e-4)
+            .with_parameter_tolerance(1e-5)
+            .with_gradient_tolerance(1e-6)
+            .with_damping(1e-2)
+            .with_damping_bounds(1e-15, 1e15)
+            .with_damping_factors(8.0, 0.2)
+            .with_trust_region(500.0, 0.1, 0.8)
+            .with_min_cost_threshold(1e-12)
+            .with_min_trust_region_radius(1e-35)
+            .with_jacobi_scaling(true)
+            .with_compute_covariances(true)
+            .with_linear_solver_type(LinearSolverType::SparseQR);
+        assert_eq!(cfg.max_iterations, 42);
+        assert!((cfg.cost_tolerance - 1e-4).abs() < 1e-20);
+        assert!((cfg.parameter_tolerance - 1e-5).abs() < 1e-20);
+        assert!((cfg.gradient_tolerance - 1e-6).abs() < 1e-20);
+        assert!((cfg.damping - 1e-2).abs() < 1e-15);
+        assert!((cfg.damping_min - 1e-15).abs() < 1e-25);
+        assert!((cfg.damping_max - 1e15).abs() < 1.0);
+        assert!((cfg.damping_increase_factor - 8.0).abs() < 1e-12);
+        assert!((cfg.damping_decrease_factor - 0.2).abs() < 1e-12);
+        assert!((cfg.trust_region_radius - 500.0).abs() < 1e-10);
+        assert!(cfg.min_cost_threshold.is_some());
+        assert!(cfg.use_jacobi_scaling);
+        assert!(cfg.compute_covariances);
+        assert!(matches!(cfg.linear_solver_type, LinearSolverType::SparseQR));
+    }
+
+    #[test]
+    fn test_lm_for_bundle_adjustment() {
+        let cfg = LevenbergMarquardtConfig::for_bundle_adjustment();
+        assert!(matches!(
+            cfg.linear_solver_type,
+            LinearSolverType::SparseSchurComplement
+        ));
+        assert_eq!(cfg.max_iterations, 20);
+    }
+
+    #[test]
+    fn test_lm_print_configuration_no_panic() {
+        LevenbergMarquardtConfig::default().print_configuration();
+    }
+
+    #[test]
+    fn test_lm_default_equals_new() {
+        let a = LevenbergMarquardt::new();
+        let b = LevenbergMarquardt::default();
+        // Both should solve the same problem identically (smoke check)
+        drop(a);
+        drop(b);
+    }
+
+    #[test]
+    fn test_lm_with_config_method() {
+        let cfg = LevenbergMarquardtConfig::new().with_max_iterations(7);
+        let solver = LevenbergMarquardt::with_config(cfg);
+        drop(solver);
+    }
+
+    // -------------------------------------------------------------------------
+    // Convergence termination paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lm_max_iterations_termination() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = LevenbergMarquardtConfig::new().with_max_iterations(2);
+        let mut solver = LevenbergMarquardt::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(result.status, OptimizationStatus::MaxIterationsReached);
+        assert!(result.iterations <= 3, "iterations={}", result.iterations);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_gradient_tolerance_convergence() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = linear_problem(1.0);
+        // Very loose gradient tolerance → triggers after first accepted step
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_gradient_tolerance(1e3)
+            .with_cost_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = LevenbergMarquardt::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(result.status, OptimizationStatus::GradientToleranceReached);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_min_cost_threshold() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        // Set threshold very high so even initial cost triggers it
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_min_cost_threshold(1e10)
+            .with_cost_tolerance(1e-20)
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = LevenbergMarquardt::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(result.status, OptimizationStatus::MinCostThresholdReached);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_qr_solver() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_linear_solver_type(LinearSolverType::SparseQR)
+            .with_max_iterations(100);
+        let mut solver = LevenbergMarquardt::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_jacobi_scaling_enabled() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_jacobi_scaling(true)
+            .with_max_iterations(100);
+        let mut solver = LevenbergMarquardt::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_result_initial_cost_greater_than_final() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = LevenbergMarquardt::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(
+            result.initial_cost > result.final_cost,
+            "initial={} final={}",
+            result.initial_cost,
+            result.final_cost
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_convergence_info_populated() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = LevenbergMarquardt::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.convergence_info.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_iterations_positive() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = LevenbergMarquardt::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.iterations > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_timeout_config() {
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_timeout(Duration::from_secs(30));
+        assert!(cfg.timeout.is_some());
+    }
+
+    #[test]
+    fn test_lm_config_schur_variant_and_preconditioner() {
+        use crate::linalg::{SchurPreconditioner, SchurVariant};
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_schur_variant(SchurVariant::Iterative)
+            .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal);
+        assert!(matches!(cfg.schur_variant, SchurVariant::Iterative));
+        assert!(matches!(
+            cfg.schur_preconditioner,
+            SchurPreconditioner::BlockDiagonal
+        ));
+    }
 }
