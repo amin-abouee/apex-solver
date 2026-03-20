@@ -53,3 +53,47 @@ impl LinearizationMode for DenseMode {
     type Jacobian = Mat<f64>;
     type Hessian = Mat<f64>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use faer::{Mat, sparse::SparseColMat};
+
+    #[test]
+    fn test_sparse_mode_jacobian_is_sparse_col_mat() {
+        let j: <SparseMode as LinearizationMode>::Jacobian =
+            SparseColMat::try_new_from_triplets(1, 1, &[faer::sparse::Triplet::new(0usize, 0usize, 1.0f64)])
+                .unwrap();
+        assert_eq!(j.ncols(), 1);
+    }
+
+    #[test]
+    fn test_sparse_mode_hessian_is_sparse_col_mat() {
+        let h: <SparseMode as LinearizationMode>::Hessian =
+            SparseColMat::try_new_from_triplets(
+                2,
+                2,
+                &[
+                    faer::sparse::Triplet::new(0usize, 0usize, 1.0f64),
+                    faer::sparse::Triplet::new(1usize, 1usize, 2.0f64),
+                ],
+            )
+            .unwrap();
+        assert_eq!(h.nrows(), 2);
+    }
+
+    #[test]
+    fn test_dense_mode_jacobian_is_mat() {
+        let j: <DenseMode as LinearizationMode>::Jacobian = Mat::zeros(3, 4);
+        assert_eq!(j.nrows(), 3);
+        assert_eq!(j.ncols(), 4);
+    }
+
+    #[test]
+    fn test_dense_mode_hessian_is_mat() {
+        let h: <DenseMode as LinearizationMode>::Hessian =
+            Mat::from_fn(2, 2, |i, j| if i == j { 1.0 } else { 0.0 });
+        assert!((h[(0, 0)] - 1.0).abs() < 1e-12);
+        assert!(h[(0, 1)].abs() < 1e-12);
+    }
+}
