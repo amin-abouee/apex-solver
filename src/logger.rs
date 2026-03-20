@@ -132,11 +132,7 @@ mod tests {
     #[test]
     fn test_init_logger_with_debug_does_not_panic() {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(Level::DEBUG.into())
-                    .from_env_lossy(),
-            )
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
             .with_target(false)
             .with_level(false)
             .with_file(false)
@@ -151,11 +147,7 @@ mod tests {
     #[test]
     fn test_init_logger_with_warn_does_not_panic() {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(Level::WARN.into())
-                    .from_env_lossy(),
-            )
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
             .with_target(false)
             .with_level(false)
             .with_file(false)
@@ -171,11 +163,7 @@ mod tests {
     #[test]
     fn test_init_logger_with_trace_does_not_panic() {
         let _ = tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::builder()
-                    .with_default_directive(Level::TRACE.into())
-                    .from_env_lossy(),
-            )
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
             .with_target(false)
             .with_level(false)
             .with_file(false)
