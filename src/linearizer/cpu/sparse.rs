@@ -216,3 +216,165 @@ fn scatter_sparse_block(
 
     Ok(local_jacobian_values)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{core::problem::Problem, factors, linalg::JacobianMode, optimizer};
+    use apex_manifolds::ManifoldType;
+    use nalgebra::{DMatrix, DVector, dvector};
+    use std::collections::HashMap;
+
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.target];
+            let jacobian =
+                if compute_jacobian { Some(DMatrix::from_element(1, 1, 1.0)) } else { None };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn one_var_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        (problem, init)
+    }
+
+    // -------------------------------------------------------------------------
+    // build_symbolic_structure
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_symbolic_structure_nnz() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = build_symbolic_structure(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(sym.pattern.compute_nnz(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_symbolic_structure_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = build_symbolic_structure(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(sym.pattern.nrows(), 1);
+        assert_eq!(sym.pattern.ncols(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_symbolic_structure_two_factors() -> Result<(), Box<dyn std::error::Error>> {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 1.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = build_symbolic_structure(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(sym.pattern.compute_nnz(), 2);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // assemble_sparse
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_assemble_sparse_basic() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state.symbolic_structure.unwrap();
+        let (residual, _) =
+            assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
+        assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_sparse_jacobian_value() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state.symbolic_structure.unwrap();
+        let (_, jacobian) =
+            assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
+        let val = jacobian.as_ref().val_of_col(0)[0];
+        assert!((val - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_sparse_zero_residual() -> Result<(), Box<dyn std::error::Error>> {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 3.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![3.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state.symbolic_structure.unwrap();
+        let (residual, _) =
+            assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
+        assert!(residual[(0, 0)].abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_sparse_dimensions() -> Result<(), Box<dyn std::error::Error>> {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state.symbolic_structure.unwrap();
+        let (residual, jacobian) =
+            assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
+        assert_eq!(residual.nrows(), 1);
+        assert_eq!(residual.ncols(), 1);
+        assert_eq!(jacobian.nrows(), 1);
+        assert_eq!(jacobian.ncols(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_sparse_two_variables() -> Result<(), Box<dyn std::error::Error>> {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&["y"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![2.0]));
+        init.insert("y".to_string(), (ManifoldType::RN, dvector![7.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let sym = state.symbolic_structure.unwrap();
+        let (residual, _) =
+            assemble_sparse(&problem, &state.variables, &state.variable_index_map, &sym)?;
+        assert_eq!(residual.nrows(), 2);
+        let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
+        assert!((rsum - 9.0).abs() < 1e-12);
+        Ok(())
+    }
+}
