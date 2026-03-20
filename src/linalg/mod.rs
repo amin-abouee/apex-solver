@@ -228,3 +228,205 @@ pub fn extract_variable_covariances(
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::problem::VariableEnum;
+    use crate::core::variable::Variable;
+    use apex_manifolds::rn::Rn;
+    use faer::Mat;
+    use nalgebra::dvector;
+    use std::collections::HashMap;
+
+    // -------------------------------------------------------------------------
+    // JacobianMode
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_jacobian_mode_default_is_sparse() {
+        assert_eq!(JacobianMode::default(), JacobianMode::Sparse);
+    }
+
+    #[test]
+    fn test_jacobian_mode_equality() {
+        assert_eq!(JacobianMode::Sparse, JacobianMode::Sparse);
+        assert_eq!(JacobianMode::Dense, JacobianMode::Dense);
+        assert_ne!(JacobianMode::Sparse, JacobianMode::Dense);
+    }
+
+    // -------------------------------------------------------------------------
+    // LinearSolverType Display + Default
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_linear_solver_type_default_is_cholesky() {
+        assert_eq!(
+            LinearSolverType::default(),
+            LinearSolverType::SparseCholesky
+        );
+    }
+
+    #[test]
+    fn test_linear_solver_type_display_all_variants() {
+        assert_eq!(
+            format!("{}", LinearSolverType::SparseCholesky),
+            "Sparse Cholesky"
+        );
+        assert_eq!(
+            format!("{}", LinearSolverType::SparseQR),
+            "Sparse QR"
+        );
+        assert_eq!(
+            format!("{}", LinearSolverType::SparseSchurComplement),
+            "Sparse Schur Complement"
+        );
+        assert_eq!(
+            format!("{}", LinearSolverType::DenseCholesky),
+            "Dense Cholesky"
+        );
+        assert_eq!(
+            format!("{}", LinearSolverType::DenseQR),
+            "Dense QR"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // LinAlgError Display — one per variant
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lin_alg_error_factorization_failed_display() {
+        let e = LinAlgError::FactorizationFailed("non-positive definite".into());
+        assert!(e.to_string().contains("non-positive definite"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_singular_matrix_display() {
+        let e = LinAlgError::SingularMatrix("rank deficient".into());
+        assert!(e.to_string().contains("rank deficient"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_sparse_matrix_creation_display() {
+        let e = LinAlgError::SparseMatrixCreation("bad triplets".into());
+        assert!(e.to_string().contains("bad triplets"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_matrix_conversion_display() {
+        let e = LinAlgError::MatrixConversion("size mismatch".into());
+        assert!(e.to_string().contains("size mismatch"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_invalid_input_display() {
+        let e = LinAlgError::InvalidInput("null jacobian".into());
+        assert!(e.to_string().contains("null jacobian"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_invalid_state_display() {
+        let e = LinAlgError::InvalidState("not initialized".into());
+        assert!(e.to_string().contains("not initialized"));
+    }
+
+    // -------------------------------------------------------------------------
+    // log() / log_with_source() return self
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lin_alg_error_log_returns_self() {
+        let e = LinAlgError::InvalidInput("log_test".into());
+        let returned = e.log();
+        assert!(returned.to_string().contains("log_test"));
+    }
+
+    #[test]
+    fn test_lin_alg_error_log_with_source_returns_self() {
+        let e = LinAlgError::SingularMatrix("source_test".into());
+        let source = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let returned = e.log_with_source(source);
+        assert!(returned.to_string().contains("source_test"));
+    }
+
+    // -------------------------------------------------------------------------
+    // LinAlgResult type alias
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lin_alg_result_ok() {
+        let r: LinAlgResult<i32> = Ok(7);
+        assert_eq!(r.unwrap(), 7);
+    }
+
+    #[test]
+    fn test_lin_alg_result_err() {
+        let r: LinAlgResult<i32> = Err(LinAlgError::InvalidInput("oops".into()));
+        assert!(r.is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // extract_variable_covariances
+    // -------------------------------------------------------------------------
+
+    fn make_rn_var(val: f64) -> VariableEnum {
+        VariableEnum::Rn(Variable::new(Rn::new(dvector![val])))
+    }
+
+    #[test]
+    fn test_extract_variable_covariances_single_variable() {
+        let mut variables = HashMap::new();
+        variables.insert("x".into(), make_rn_var(1.0));
+        let mut variable_index_map = HashMap::new();
+        variable_index_map.insert("x".into(), 0usize);
+
+        // 1×1 covariance matrix
+        let full_cov = Mat::from_fn(1, 1, |_, _| 2.5);
+        let result =
+            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        assert_eq!(result.len(), 1);
+        assert!((result["x"][(0, 0)] - 2.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_extract_variable_covariances_two_variables() {
+        let mut variables = HashMap::new();
+        variables.insert("a".into(), make_rn_var(1.0));
+        variables.insert("b".into(), make_rn_var(2.0));
+        let mut variable_index_map = HashMap::new();
+        variable_index_map.insert("a".into(), 0usize);
+        variable_index_map.insert("b".into(), 1usize);
+
+        // 2×2 diagonal covariance: a=3.0, b=7.0
+        let full_cov = Mat::from_fn(2, 2, |i, j| if i == j { [3.0, 7.0][i] } else { 0.0 });
+        let result =
+            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        assert_eq!(result.len(), 2);
+        assert!((result["a"][(0, 0)] - 3.0).abs() < 1e-12);
+        assert!((result["b"][(0, 0)] - 7.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_extract_variable_covariances_empty_variables() {
+        let variables: HashMap<String, VariableEnum> = HashMap::new();
+        let variable_index_map: HashMap<String, usize> = HashMap::new();
+        let full_cov = Mat::zeros(0, 0);
+        let result =
+            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_extract_variable_covariances_var_not_in_index_map() {
+        // variable present but NOT in index map — should be skipped
+        let mut variables = HashMap::new();
+        variables.insert("x".into(), make_rn_var(1.0));
+        let variable_index_map: HashMap<String, usize> = HashMap::new(); // empty
+
+        let full_cov = Mat::from_fn(1, 1, |_, _| 5.0);
+        let result =
+            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        assert!(result.is_empty());
+    }
+}
