@@ -414,6 +414,7 @@ pub fn load_graph<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::{Matrix3, Matrix6, Quaternion, UnitQuaternion, Vector3};
     use std::{error, io::Write};
     use tempfile::NamedTempFile;
 
@@ -520,5 +521,164 @@ mod tests {
         assert!((pos.x - 1.0).abs() < 1e-6);
         assert!((pos.y - 2.0).abs() < 1e-6);
         assert!((pos.z - 5.0).abs() < 1e-6);
+    }
+
+    // -------------------------------------------------------------------------
+    // VertexSE2 / VertexSE3 constructors
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_vertex_se2_from_vector() {
+        let v = VertexSE2::from_vector(5, Vector3::new(1.0, 2.0, 0.5));
+        assert_eq!(v.id(), 5);
+        assert!((v.x() - 1.0).abs() < 1e-12);
+        assert!((v.y() - 2.0).abs() < 1e-12);
+        assert!((v.theta() - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_vertex_se3_from_vector() {
+        // [tx, ty, tz, qx, qy, qz, qw]
+        let arr = [1.0f64, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0];
+        let v = VertexSE3::from_vector(7, arr);
+        assert_eq!(v.id(), 7);
+        assert!((v.x() - 1.0).abs() < 1e-10);
+        assert!((v.y() - 2.0).abs() < 1e-10);
+        assert!((v.z() - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_vertex_se3_from_translation_quaternion() {
+        let trans = Vector3::new(1.0, 2.0, 3.0);
+        // nalgebra Quaternion::new(w, i, j, k)
+        let quat = Quaternion::new(1.0, 0.0, 0.0, 0.0);
+        let v = VertexSE3::from_translation_quaternion(3, trans, quat);
+        assert_eq!(v.id(), 3);
+        assert!((v.x() - 1.0).abs() < 1e-10);
+        assert!((v.y() - 2.0).abs() < 1e-10);
+        assert!((v.z() - 3.0).abs() < 1e-10);
+    }
+
+    // -------------------------------------------------------------------------
+    // Display implementations
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_vertex_se2_display() {
+        let v = VertexSE2::new(0, 1.0, 2.0, 0.5);
+        let s = format!("{v}");
+        assert!(
+            s.contains("VertexSE2"),
+            "Display should contain 'VertexSE2': {s}"
+        );
+        assert!(s.contains('0'), "Display should contain id: {s}");
+    }
+
+    #[test]
+    fn test_vertex_se3_display() {
+        let v = VertexSE3::new(1, Vector3::new(1.0, 2.0, 3.0), UnitQuaternion::identity());
+        let s = format!("{v}");
+        assert!(
+            s.contains("VertexSE3"),
+            "Display should contain 'VertexSE3': {s}"
+        );
+        assert!(s.contains('1'), "Display should contain id: {s}");
+    }
+
+    #[test]
+    fn test_edge_se2_display() {
+        let e = EdgeSE2::new(0, 1, 1.0, 0.0, 0.0, Matrix3::identity());
+        let s = format!("{e}");
+        assert!(
+            s.contains("EdgeSE2"),
+            "Display should contain 'EdgeSE2': {s}"
+        );
+    }
+
+    #[test]
+    fn test_edge_se3_display() {
+        let e = EdgeSE3::new(
+            0,
+            1,
+            Vector3::zeros(),
+            UnitQuaternion::identity(),
+            Matrix6::identity(),
+        );
+        let s = format!("{e}");
+        assert!(
+            s.contains("EdgeSE3"),
+            "Display should contain 'EdgeSE3': {s}"
+        );
+    }
+
+    #[test]
+    fn test_graph_display() {
+        let mut g = Graph::new();
+        g.vertices_se2.insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        let s = format!("{g}");
+        assert!(s.contains("Graph"), "Display should contain 'Graph': {s}");
+        assert!(s.contains("count: 1"), "Display should show count: {s}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Graph helpers
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_graph_default_is_empty() {
+        let g = Graph::default();
+        assert_eq!(g.vertex_count(), 0);
+        assert_eq!(g.edge_count(), 0);
+    }
+
+    #[test]
+    fn test_graph_vertex_and_edge_counts() {
+        let mut g = Graph::new();
+        g.vertices_se2.insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        g.vertices_se3.insert(
+            1,
+            VertexSE3::new(1, Vector3::zeros(), UnitQuaternion::identity()),
+        );
+        g.edges_se2
+            .push(EdgeSE2::new(0, 1, 0.0, 0.0, 0.0, Matrix3::identity()));
+        assert_eq!(g.vertex_count(), 2);
+        assert_eq!(g.edge_count(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // load_graph() dispatch
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_graph_unsupported_extension() {
+        let result = load_graph("fake_path.xyz");
+        assert!(
+            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            "unknown extension should return UnsupportedFormat"
+        );
+    }
+
+    #[test]
+    fn test_load_graph_no_extension() {
+        let result = load_graph("/tmp/no_extension_file");
+        assert!(
+            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            "path with no extension should return UnsupportedFormat"
+        );
+    }
+
+    #[test]
+    fn test_load_graph_toro_extension() -> Result<(), Box<dyn error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "VERTEX2 0 0.0 0.0 0.0")?;
+        writeln!(f, "VERTEX2 1 1.0 0.0 0.0")?;
+        f.flush()?;
+        // Rename temp file path to have .graph extension
+        let toro_path = f.path().with_extension("graph");
+        std::fs::copy(f.path(), &toro_path)?;
+        let graph = load_graph(&toro_path)?;
+        std::fs::remove_file(&toro_path)?;
+        assert_eq!(graph.vertices_se2.len(), 2);
+        Ok(())
     }
 }
