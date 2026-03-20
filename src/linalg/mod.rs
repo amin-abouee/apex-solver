@@ -273,10 +273,7 @@ mod tests {
             format!("{}", LinearSolverType::SparseCholesky),
             "Sparse Cholesky"
         );
-        assert_eq!(
-            format!("{}", LinearSolverType::SparseQR),
-            "Sparse QR"
-        );
+        assert_eq!(format!("{}", LinearSolverType::SparseQR), "Sparse QR");
         assert_eq!(
             format!("{}", LinearSolverType::SparseSchurComplement),
             "Sparse Schur Complement"
@@ -285,10 +282,7 @@ mod tests {
             format!("{}", LinearSolverType::DenseCholesky),
             "Dense Cholesky"
         );
-        assert_eq!(
-            format!("{}", LinearSolverType::DenseQR),
-            "Dense QR"
-        );
+        assert_eq!(format!("{}", LinearSolverType::DenseQR), "Dense QR");
     }
 
     // -------------------------------------------------------------------------
@@ -345,7 +339,7 @@ mod tests {
     #[test]
     fn test_lin_alg_error_log_with_source_returns_self() {
         let e = LinAlgError::SingularMatrix("source_test".into());
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "src");
+        let source = std::io::Error::other("src");
         let returned = e.log_with_source(source);
         assert!(returned.to_string().contains("source_test"));
     }
@@ -357,7 +351,7 @@ mod tests {
     #[test]
     fn test_lin_alg_result_ok() {
         let r: LinAlgResult<i32> = Ok(7);
-        assert_eq!(r.unwrap(), 7);
+        assert!(matches!(r, Ok(7)));
     }
 
     #[test]
@@ -383,8 +377,7 @@ mod tests {
 
         // 1×1 covariance matrix
         let full_cov = Mat::from_fn(1, 1, |_, _| 2.5);
-        let result =
-            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        let result = extract_variable_covariances(&full_cov, &variables, &variable_index_map);
         assert_eq!(result.len(), 1);
         assert!((result["x"][(0, 0)] - 2.5).abs() < 1e-12);
     }
@@ -400,8 +393,7 @@ mod tests {
 
         // 2×2 diagonal covariance: a=3.0, b=7.0
         let full_cov = Mat::from_fn(2, 2, |i, j| if i == j { [3.0, 7.0][i] } else { 0.0 });
-        let result =
-            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        let result = extract_variable_covariances(&full_cov, &variables, &variable_index_map);
         assert_eq!(result.len(), 2);
         assert!((result["a"][(0, 0)] - 3.0).abs() < 1e-12);
         assert!((result["b"][(0, 0)] - 7.0).abs() < 1e-12);
@@ -412,8 +404,7 @@ mod tests {
         let variables: HashMap<String, VariableEnum> = HashMap::new();
         let variable_index_map: HashMap<String, usize> = HashMap::new();
         let full_cov = Mat::zeros(0, 0);
-        let result =
-            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        let result = extract_variable_covariances(&full_cov, &variables, &variable_index_map);
         assert!(result.is_empty());
     }
 
@@ -425,8 +416,7 @@ mod tests {
         let variable_index_map: HashMap<String, usize> = HashMap::new(); // empty
 
         let full_cov = Mat::from_fn(1, 1, |_, _| 5.0);
-        let result =
-            extract_variable_covariances(&full_cov, &variables, &variable_index_map);
+        let result = extract_variable_covariances(&full_cov, &variables, &variable_index_map);
         assert!(result.is_empty());
     }
 }

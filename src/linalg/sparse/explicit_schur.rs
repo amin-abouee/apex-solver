@@ -1675,7 +1675,7 @@ mod tests {
         let mut solver = SparseSchurComplementSolver::new();
         solver.initialize_structure(&variables, &variable_index_map)?;
 
-        let bs = solver.block_structure().expect("block_structure should be Some");
+        let bs = solver.block_structure().ok_or("block_structure is None")?;
         assert_eq!(bs.camera_blocks.len(), 2);
         assert_eq!(bs.landmark_blocks.len(), 3);
         assert_eq!(bs.camera_dof, 12); // 2 × 6
@@ -1695,7 +1695,7 @@ mod tests {
         let (g_c, g_p) = solver.extract_gradient_blocks(&gradient)?;
 
         assert_eq!(g_c.nrows(), 12); // camera DOF
-        assert_eq!(g_p.nrows(), 9);  // landmark DOF
+        assert_eq!(g_p.nrows(), 9); // landmark DOF
         Ok(())
     }
 
@@ -1703,15 +1703,11 @@ mod tests {
     #[test]
     fn test_explicit_schur_solve_normal_equation() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new()
-            .with_variant(SchurVariant::Sparse);
+        let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
         solver.initialize_structure(&variables, &variable_index_map)?;
 
-        let delta = LinearSolver::<SparseMode>::solve_normal_equation(
-            &mut solver,
-            &residuals,
-            &jacobian,
-        )?;
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert_eq!(delta.nrows(), 21);
         assert_eq!(delta.ncols(), 1);
         Ok(())
@@ -1721,8 +1717,7 @@ mod tests {
     #[test]
     fn test_explicit_schur_solve_augmented_equation() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new()
-            .with_variant(SchurVariant::Sparse);
+        let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
         solver.initialize_structure(&variables, &variable_index_map)?;
 
         let delta = LinearSolver::<SparseMode>::solve_augmented_equation(
@@ -1744,11 +1739,8 @@ mod tests {
             .with_cg_params(200, 1e-6);
         solver.initialize_structure(&variables, &variable_index_map)?;
 
-        let delta = LinearSolver::<SparseMode>::solve_normal_equation(
-            &mut solver,
-            &residuals,
-            &jacobian,
-        )?;
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert_eq!(delta.nrows(), 21);
         Ok(())
     }
@@ -1769,8 +1761,10 @@ mod tests {
         let g = LinearSolver::<SparseMode>::get_gradient(&solver);
         assert!(h.is_some());
         assert!(g.is_some());
-        assert_eq!(h.unwrap().nrows(), 21);
-        assert_eq!(g.unwrap().nrows(), 21);
+        let h = h.ok_or("hessian is None")?;
+        let g = g.ok_or("gradient is None")?;
+        assert_eq!(h.nrows(), 21);
+        assert_eq!(g.nrows(), 21);
         Ok(())
     }
 
@@ -1798,8 +1792,13 @@ mod tests {
         )?;
 
         // Different λ values should produce different updates
-        let norm_diff: f64 = (0..21).map(|i| (delta1[(i, 0)] - delta2[(i, 0)]).powi(2)).sum();
-        assert!(norm_diff > 1e-10, "Different λ should yield different updates");
+        let norm_diff: f64 = (0..21)
+            .map(|i| (delta1[(i, 0)] - delta2[(i, 0)]).powi(2))
+            .sum();
+        assert!(
+            norm_diff > 1e-10,
+            "Different λ should yield different updates"
+        );
         Ok(())
     }
 
@@ -1830,17 +1829,188 @@ mod tests {
 
     /// Test solve without initialize_structure returns error
     #[test]
-    fn test_explicit_schur_solve_without_init_returns_error() {
+    fn test_explicit_schur_solve_without_init_returns_error() -> TestResult {
         let triplets: Vec<Triplet<usize, usize, f64>> = vec![Triplet::new(0, 0, 1.0)];
-        let jacobian = SparseColMat::try_new_from_triplets(1, 1, &triplets).unwrap();
+        let jacobian =
+            SparseColMat::try_new_from_triplets(1, 1, &triplets).map_err(|e| format!("{e:?}"))?;
         let residuals = Mat::from_fn(1, 1, |_, _| 1.0);
         let mut solver = SparseSchurComplementSolver::new();
 
-        let result = LinearSolver::<SparseMode>::solve_normal_equation(
-            &mut solver,
-            &residuals,
-            &jacobian,
-        );
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
         assert!(result.is_err());
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // New tests for previously uncovered code paths
+    // -------------------------------------------------------------------------
+
+    /// Test SchurOrdering::new() produces the same result as default().
+    #[test]
+    fn test_schur_ordering_new_equals_default() {
+        let a = SchurOrdering::new();
+        let b = SchurOrdering::default();
+        assert_eq!(a.eliminate_rn_size, b.eliminate_rn_size);
+        assert_eq!(a.eliminate_types.len(), b.eliminate_types.len());
+    }
+
+    /// Test extract_camera_block produces a square matrix of camera DOF.
+    #[test]
+    fn test_extract_camera_block() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        // Build Hessian H = J^T J
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let hessian = solver.hessian.clone().ok_or("hessian is None")?;
+
+        let mut fresh = SparseSchurComplementSolver::new();
+        fresh.initialize_structure(&variables, &variable_index_map)?;
+        let h_cc = fresh.extract_camera_block(&hessian)?;
+
+        // camera DOF = 12 (2 cameras × 6)
+        assert_eq!(h_cc.nrows(), 12);
+        assert_eq!(h_cc.ncols(), 12);
+        Ok(())
+    }
+
+    /// Test extract_coupling_block produces a matrix with camera rows × landmark cols.
+    #[test]
+    fn test_extract_coupling_block() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let hessian = solver.hessian.clone().ok_or("hessian is None")?;
+
+        let mut fresh = SparseSchurComplementSolver::new();
+        fresh.initialize_structure(&variables, &variable_index_map)?;
+        let h_cp = fresh.extract_coupling_block(&hessian)?;
+
+        // H_cp: camera DOF rows × landmark DOF cols = 12 × 9
+        assert_eq!(h_cp.nrows(), 12);
+        assert_eq!(h_cp.ncols(), 9);
+        Ok(())
+    }
+
+    /// Test extract_landmark_blocks produces one 3×3 block per landmark.
+    #[test]
+    fn test_extract_landmark_blocks() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let hessian = solver.hessian.clone().ok_or("hessian is None")?;
+
+        let mut fresh = SparseSchurComplementSolver::new();
+        fresh.initialize_structure(&variables, &variable_index_map)?;
+        let blocks = fresh.extract_landmark_blocks(&hessian)?;
+
+        // 3 landmarks → 3 blocks
+        assert_eq!(blocks.len(), 3);
+        Ok(())
+    }
+
+    /// Test solve_with_cholesky satisfies Ax ≈ b for a known SPD system.
+    #[test]
+    fn test_solve_with_cholesky_small_spd() -> TestResult {
+        let solver = SparseSchurComplementSolver::new();
+
+        // 2×2 SPD matrix A = [[4,1],[1,3]]
+        let triplets = vec![
+            Triplet::new(0usize, 0usize, 4.0f64),
+            Triplet::new(1usize, 0usize, 1.0f64),
+            Triplet::new(0usize, 1usize, 1.0f64),
+            Triplet::new(1usize, 1usize, 3.0f64),
+        ];
+        let a =
+            SparseColMat::try_new_from_triplets(2, 2, &triplets).map_err(|e| format!("{e:?}"))?;
+        let b = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
+
+        let x = solver.solve_with_cholesky(&a, &b)?;
+        assert_eq!(x.nrows(), 2);
+
+        // Verify: A·x ≈ b
+        // A·x = [4*x0+1*x1; 1*x0+3*x1]
+        let ax0 = 4.0 * x[(0, 0)] + 1.0 * x[(1, 0)];
+        let ax1 = 1.0 * x[(0, 0)] + 3.0 * x[(1, 0)];
+        assert!((ax0 - 1.0).abs() < 1e-8, "A·x[0] = {ax0}");
+        assert!((ax1 - 2.0).abs() < 1e-8, "A·x[1] = {ax1}");
+        Ok(())
+    }
+
+    /// Test solve_with_pcg converges on a small diagonal (trivial) system.
+    #[test]
+    fn test_solve_with_pcg_diagonal_system() -> TestResult {
+        let solver = SparseSchurComplementSolver::new();
+
+        // Diagonal SPD: [[2,0],[0,3]]
+        let triplets = vec![
+            Triplet::new(0usize, 0usize, 2.0f64),
+            Triplet::new(1usize, 1usize, 3.0f64),
+        ];
+        let a =
+            SparseColMat::try_new_from_triplets(2, 2, &triplets).map_err(|e| format!("{e:?}"))?;
+        let b = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
+
+        let x = solver.solve_with_pcg(&a, &b)?;
+        // Expected: x = [1/2; 2/3]
+        assert!((x[(0, 0)] - 0.5).abs() < 1e-6, "x[0] = {}", x[(0, 0)]);
+        assert!((x[(1, 0)] - 2.0 / 3.0).abs() < 1e-6, "x[1] = {}", x[(1, 0)]);
+        Ok(())
+    }
+
+    /// Test initialize_structure returns Err when only landmark variables are present (no cameras).
+    #[test]
+    fn test_initialize_structure_no_cameras_returns_error() {
+        use crate::core::variable::Variable;
+        use apex_manifolds::rn;
+        use nalgebra::DVector;
+
+        // Only landmark variables ("pt_" prefix)
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "pt_0".to_string(),
+            VariableEnum::Rn(Variable::new(rn::Rn::from(DVector::zeros(3)))),
+        );
+        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
+        variable_index_map.insert("pt_0".to_string(), 0);
+
+        let mut solver = SparseSchurComplementSolver::new();
+        let result = solver.initialize_structure(&variables, &variable_index_map);
+        assert!(
+            result.is_err(),
+            "Expected Err when no camera variables present"
+        );
+    }
+
+    /// Test initialize_structure returns Err when only camera variables are present (no landmarks).
+    #[test]
+    fn test_initialize_structure_no_landmarks_returns_error() {
+        use crate::core::variable::Variable;
+        use apex_manifolds::se3;
+        use nalgebra::DVector;
+
+        // Only camera variables (no "pt_" prefix)
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "cam_0".to_string(),
+            VariableEnum::SE3(Variable::new(se3::SE3::from(DVector::from_vec(vec![
+                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ])))),
+        );
+        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
+        variable_index_map.insert("cam_0".to_string(), 0);
+
+        let mut solver = SparseSchurComplementSolver::new();
+        let result = solver.initialize_structure(&variables, &variable_index_map);
+        assert!(
+            result.is_err(),
+            "Expected Err when no landmark variables present"
+        );
     }
 }
