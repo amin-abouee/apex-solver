@@ -258,3 +258,472 @@ impl ToroLoader {
         Ok(EdgeSE2::new(from, to, dx, dy, dtheta, information))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EdgeSE3, VertexSE3};
+    use nalgebra::{Matrix3, UnitQuaternion, Vector3};
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn write_toro_content(content: &str) -> Result<NamedTempFile, Box<dyn std::error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        write!(f, "{}", content)?;
+        f.flush()?;
+        Ok(f)
+    }
+
+    #[test]
+    fn test_parse_vertex2_and_edge2() -> TestResult {
+        let content = "VERTEX2 0 1.0 2.0 0.5\n\
+                       VERTEX2 1 3.0 4.0 1.0\n\
+                       EDGE2 0 1 0.5 0.3 0.1 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let graph = ToroLoader::load(f.path())?;
+        assert_eq!(graph.vertices_se2.len(), 2);
+        assert_eq!(graph.edges_se2.len(), 1);
+        let v0 = &graph.vertices_se2[&0];
+        assert!((v0.x() - 1.0).abs() < 1e-10);
+        assert!((v0.y() - 2.0).abs() < 1e-10);
+        let e = &graph.edges_se2[0];
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+        assert!((e.information[(0, 0)] - 500.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_and_reload_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 1.0, 2.0, 0.5));
+        graph
+            .vertices_se2
+            .insert(1, VertexSE2::new(1, 3.0, 4.0, 1.0));
+        let info = Matrix3::new(500.0, 0.0, 0.0, 0.0, 500.0, 0.0, 0.0, 0.0, 200.0);
+        graph
+            .edges_se2
+            .push(EdgeSE2::new(0, 1, 0.5, 0.3, 0.1, info));
+
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+
+        assert_eq!(loaded.vertices_se2.len(), 2);
+        assert_eq!(loaded.edges_se2.len(), 1);
+        let v0 = &loaded.vertices_se2[&0];
+        assert!((v0.x() - 1.0).abs() < 1e-10);
+        assert!((v0.y() - 2.0).abs() < 1e-10);
+        let e = &loaded.edges_se2[0];
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+        assert!((e.information[(0, 0)] - 500.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_rejects_se3_vertices() -> TestResult {
+        let mut graph = Graph::new();
+        graph.vertices_se3.insert(
+            0,
+            VertexSE3::new(0, Vector3::zeros(), UnitQuaternion::identity()),
+        );
+        let f = NamedTempFile::new()?;
+        let result = ToroLoader::write(&graph, f.path());
+        assert!(
+            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            "should reject graph with SE3 vertices"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_rejects_se3_edges() -> TestResult {
+        let mut graph = Graph::new();
+        graph.edges_se3.push(EdgeSE3::new(
+            0,
+            1,
+            Vector3::zeros(),
+            UnitQuaternion::identity(),
+            nalgebra::Matrix6::identity(),
+        ));
+        let f = NamedTempFile::new()?;
+        let result = ToroLoader::write(&graph, f.path());
+        assert!(
+            matches!(result, Err(IoError::UnsupportedFormat(_))),
+            "should reject graph with SE3 edges"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_duplicate_vertex_returns_error() -> TestResult {
+        let content = "VERTEX2 5 1.0 2.0 0.0\nVERTEX2 5 3.0 4.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::DuplicateVertex { id: 5 })),
+            "duplicate vertex ID should return DuplicateVertex error"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_missing_vertex_fields() -> TestResult {
+        // VERTEX2 needs 5 fields: VERTEX2 id x y theta
+        let content = "VERTEX2 0 1.0\n"; // only 3 fields
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(result.is_err(), "VERTEX2 with too few fields should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_missing_edge_fields() -> TestResult {
+        // EDGE2 needs 12 fields
+        let content = "EDGE2 0 1 0.5 0.3\n"; // only 5 fields
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(result.is_err(), "EDGE2 with too few fields should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_comment_and_empty_lines_ignored() -> TestResult {
+        let content = "# this is a comment\n\
+                       VERTEX2 0 1.0 2.0 0.0\n\
+                       \n\
+                       VERTEX2 1 2.0 3.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let graph = ToroLoader::load(f.path())?;
+        assert_eq!(
+            graph.vertices_se2.len(),
+            2,
+            "comments and blank lines should be ignored"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unknown_token_ignored() -> TestResult {
+        let content = "UNKNOWN_TOKEN 1 2 3\nVERTEX2 0 0.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let graph = ToroLoader::load(f.path())?;
+        assert_eq!(
+            graph.vertices_se2.len(),
+            1,
+            "unknown token lines should be silently skipped"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = ToroLoader::load("/no/such/file.graph");
+        assert!(result.is_err(), "loading missing file should return Err");
+    }
+
+    #[test]
+    fn test_write_empty_graph() -> TestResult {
+        let graph = Graph::new();
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+        assert_eq!(loaded.vertices_se2.len(), 0);
+        assert_eq!(loaded.edges_se2.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex2_invalid_number() -> TestResult {
+        let content = "VERTEX2 0 bad 2.0 0.0\n"; // bad x value
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(result.is_err(), "invalid number in VERTEX2 should fail");
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_vertex2 additional error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vertex2_invalid_id() -> TestResult {
+        let content = "VERTEX2 bad 1.0 2.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid id in VERTEX2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex2_invalid_y() -> TestResult {
+        let content = "VERTEX2 0 1.0 bad 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid y in VERTEX2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_vertex2_invalid_theta() -> TestResult {
+        let content = "VERTEX2 0 1.0 2.0 bad\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid theta in VERTEX2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_edge2 error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_edge2_invalid_from() -> TestResult {
+        let content = "EDGE2 bad 1 0.5 0.3 0.1 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid from-id in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_to() -> TestResult {
+        let content = "EDGE2 0 bad 0.5 0.3 0.1 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid to-id in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_dx() -> TestResult {
+        let content = "EDGE2 0 1 bad 0.3 0.1 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid dx in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_dy() -> TestResult {
+        let content = "EDGE2 0 1 0.5 bad 0.1 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid dy in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_dtheta() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 bad 500.0 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid dtheta in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i11() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 bad 0.0 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i11 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i12() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 500.0 bad 500.0 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i12 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i22() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 500.0 0.0 bad 200.0 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i22 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i33() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 500.0 0.0 500.0 bad 0.0 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i33 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i13() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 500.0 0.0 500.0 200.0 bad 0.0\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i13 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_edge2_invalid_i23() -> TestResult {
+        let content = "EDGE2 0 1 0.5 0.3 0.1 500.0 0.0 500.0 200.0 0.0 bad\n";
+        let f = write_toro_content(content)?;
+        let result = ToroLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid i23 in EDGE2 should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Round-trip fidelity
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_edge_measurement_all_components_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        graph
+            .vertices_se2
+            .insert(1, VertexSE2::new(1, 1.0, 0.0, 0.0));
+        let info = Matrix3::identity();
+        graph
+            .edges_se2
+            .push(EdgeSE2::new(0, 1, 1.5, 2.5, 0.7, info));
+
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+
+        let e = &loaded.edges_se2[0];
+        assert!((e.measurement.x() - 1.5).abs() < 1e-10, "dx mismatch");
+        assert!((e.measurement.y() - 2.5).abs() < 1e-10, "dy mismatch");
+        assert!(
+            (e.measurement.angle() - 0.7).abs() < 1e-10,
+            "dtheta mismatch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_off_diagonal_info_matrix_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        graph
+            .vertices_se2
+            .insert(1, VertexSE2::new(1, 1.0, 0.0, 0.0));
+        // Symmetric matrix with off-diagonal entries
+        let info = Matrix3::new(500.0, 10.0, 5.0, 10.0, 400.0, 3.0, 5.0, 3.0, 200.0);
+        graph
+            .edges_se2
+            .push(EdgeSE2::new(0, 1, 1.0, 0.0, 0.0, info));
+
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+
+        let e = &loaded.edges_se2[0];
+        assert!((e.information[(0, 0)] - 500.0).abs() < 1e-10, "i11");
+        assert!((e.information[(0, 1)] - 10.0).abs() < 1e-10, "i12");
+        assert!((e.information[(1, 1)] - 400.0).abs() < 1e-10, "i22");
+        assert!((e.information[(2, 2)] - 200.0).abs() < 1e-10, "i33");
+        assert!((e.information[(0, 2)] - 5.0).abs() < 1e-10, "i13");
+        assert!((e.information[(1, 2)] - 3.0).abs() < 1e-10, "i23");
+        Ok(())
+    }
+
+    #[test]
+    fn test_multiple_edges_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        for i in 0..4usize {
+            graph
+                .vertices_se2
+                .insert(i, VertexSE2::new(i, i as f64, 0.0, 0.0));
+        }
+        let info = Matrix3::identity();
+        for i in 0..3usize {
+            graph
+                .edges_se2
+                .push(EdgeSE2::new(i, i + 1, 1.0, 0.0, 0.0, info));
+        }
+
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+
+        assert_eq!(loaded.vertices_se2.len(), 4);
+        assert_eq!(loaded.edges_se2.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_vertex_theta_preserved_round_trip() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 1.0, 2.0, std::f64::consts::PI / 4.0));
+
+        let f = NamedTempFile::new()?;
+        ToroLoader::write(&graph, f.path())?;
+        let loaded = ToroLoader::load(f.path())?;
+
+        let v = &loaded.vertices_se2[&0];
+        assert!(
+            (v.theta() - std::f64::consts::PI / 4.0).abs() < 1e-10,
+            "theta not preserved"
+        );
+        Ok(())
+    }
+}
