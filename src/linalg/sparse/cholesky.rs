@@ -684,4 +684,91 @@ mod tests {
         }
         Ok(())
     }
+
+    /// Test hessian() getter returns None before solve and Some after
+    #[test]
+    fn test_cholesky_hessian_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(solver.hessian().is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(solver.hessian().is_some());
+        Ok(())
+    }
+
+    /// Test gradient() getter returns None before solve and Some after
+    #[test]
+    fn test_cholesky_gradient_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(solver.gradient().is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(solver.gradient().is_some());
+        Ok(())
+    }
+
+    /// Test reset_covariance() clears the cached covariance
+    #[test]
+    fn test_cholesky_reset_covariance() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals) = create_test_data()?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
+        assert!(solver.covariance_matrix.is_some());
+
+        solver.reset_covariance();
+        assert!(solver.covariance_matrix.is_none());
+        assert!(solver.standard_errors.is_none());
+        Ok(())
+    }
+
+    /// Test get_hessian() trait method returns Some after solve
+    #[test]
+    fn test_cholesky_get_hessian_trait() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_some());
+        Ok(())
+    }
+
+    /// Test get_gradient() trait method returns Some after solve
+    #[test]
+    fn test_cholesky_get_gradient_trait() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_some());
+        Ok(())
+    }
+
+    /// Test get_covariance_matrix() getter matches compute result
+    #[test]
+    fn test_cholesky_get_covariance_matrix_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals) = create_test_data()?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
+
+        let via_getter = LinearSolver::<SparseMode>::get_covariance_matrix(&solver);
+        assert!(via_getter.is_some());
+
+        if let Some(cov) = via_getter {
+            assert_eq!(cov.nrows(), 3);
+            assert_eq!(cov.ncols(), 3);
+        }
+        Ok(())
+    }
 }
