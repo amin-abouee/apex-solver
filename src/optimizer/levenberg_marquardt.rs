@@ -105,6 +105,7 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
+//! # type TestResult = Result<(), Box<dyn std::error::Error>>;
 //! # fn main() -> TestResult {
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
@@ -1621,13 +1622,16 @@ mod tests {
 
     /// Verifies `with_max_condition_number` and `with_min_relative_decrease` builder methods.
     #[test]
-    fn test_lm_config_condition_number_and_relative_decrease() {
+    fn test_lm_config_condition_number_and_relative_decrease() -> TestResult {
         let cfg = LevenbergMarquardtConfig::new()
             .with_max_condition_number(1e8)
             .with_min_relative_decrease(1e-4);
-        assert!(cfg.max_condition_number.is_some());
-        assert!((cfg.max_condition_number.unwrap() - 1e8).abs() < 1.0);
+        let max_cond = cfg
+            .max_condition_number
+            .ok_or("max_condition_number should be Some")?;
+        assert!((max_cond - 1e8).abs() < 1.0);
         assert!((cfg.min_relative_decrease - 1e-4).abs() < 1e-20);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1653,7 +1657,9 @@ mod tests {
                 _values: &HashMap<String, VariableEnum>,
                 _iterations: usize,
             ) {
-                *self.complete_calls.lock().unwrap() += 1;
+                if let Ok(mut guard) = self.complete_calls.lock() {
+                    *guard += 1;
+                }
             }
         }
 
@@ -1667,9 +1673,11 @@ mod tests {
         solver.add_observer(observer);
         let _ = solver.optimize(&problem, &initial_values)?;
 
+        let count = *call_count
+            .lock()
+            .map_err(|e| format!("mutex poisoned: {e}"))?;
         assert_eq!(
-            *call_count.lock().unwrap(),
-            1,
+            count, 1,
             "on_optimization_complete should be called exactly once"
         );
         Ok(())

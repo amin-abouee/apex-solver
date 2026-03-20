@@ -73,6 +73,7 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
+//! # type TestResult = Result<(), Box<dyn std::error::Error>>;
 //! # fn main() -> TestResult {
 //! // Create optimization problem
 //! let mut problem = Problem::new(JacobianMode::Sparse);
@@ -415,6 +416,7 @@ struct CostEvaluation {
 /// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
+/// # type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...

@@ -154,6 +154,7 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
+//! # type TestResult = Result<(), Box<dyn std::error::Error>>;
 //! # fn main() -> TestResult {
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
@@ -669,6 +670,7 @@ struct StepEvaluation {
 /// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
+/// # type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
