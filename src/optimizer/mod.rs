@@ -1006,8 +1006,8 @@ mod tests {
     use crate::core::variable::Variable;
     use crate::factors::Factor;
     use crate::linalg::JacobianMode;
-    use apex_manifolds::rn::Rn;
     use apex_manifolds::ManifoldType;
+    use apex_manifolds::rn::Rn;
     use faer::Mat;
     use faer::sparse::{SparseColMat, Triplet};
     use nalgebra::{DMatrix, DVector, dvector};
@@ -1071,31 +1071,40 @@ mod tests {
     fn make_identity_jacobian(n: usize) -> SparseColMat<usize, f64> {
         let triplets: Vec<Triplet<usize, usize, f64>> =
             (0..n).map(|i| Triplet::new(i, i, 1.0)).collect();
-        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap()
+        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap_or_else(|_| {
+            let empty: Vec<Triplet<usize, usize, f64>> = vec![];
+            SparseColMat::try_new_from_triplets(0, 0, &empty)
+                .unwrap_or_else(|_| panic!("failed to create empty matrix"))
+        })
     }
 
     #[test]
-    fn test_create_jacobi_scaling_identity_jacobian() {
+    fn test_create_jacobi_scaling_identity_jacobian() -> Result<(), Box<dyn std::error::Error>> {
         // For identity Jacobian each column has norm 1.0 → scaling = 1/(1+1) = 0.5
         let jac = make_identity_jacobian(3);
-        let scaling = create_jacobi_scaling(&jac).expect("scaling ok");
+        let scaling = create_jacobi_scaling(&jac)?;
         for i in 0..3 {
             let val = scaling.get(i, i).copied().unwrap_or(0.0);
-            assert!((val - 0.5).abs() < 1e-12, "col {i}: expected 0.5, got {val}");
+            assert!(
+                (val - 0.5).abs() < 1e-12,
+                "col {i}: expected 0.5, got {val}"
+            );
         }
+        Ok(())
     }
 
     #[test]
-    fn test_create_jacobi_scaling_zero_column() {
+    fn test_create_jacobi_scaling_zero_column() -> Result<(), Box<dyn std::error::Error>> {
         // A zero column has norm 0 → scaling = 1/(1+0) = 1.0
         let triplets = vec![Triplet::new(0_usize, 0_usize, 1.0_f64)];
-        let jac = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
-        let scaling = create_jacobi_scaling(&jac).expect("scaling ok");
+        let jac = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
+        let scaling = create_jacobi_scaling(&jac)?;
         // col 0: norm=1 → 0.5; col 1: norm=0 → 1.0
         let s0 = scaling.get(0, 0).copied().unwrap_or(0.0);
         let s1 = scaling.get(1, 1).copied().unwrap_or(0.0);
         assert!((s0 - 0.5).abs() < 1e-12);
         assert!((s1 - 1.0).abs() < 1e-12);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1372,8 +1381,7 @@ mod tests {
     #[test]
     fn test_create_linear_solver_fallback_for_schur() {
         // SparseSchurComplement is special; falls back to Cholesky in create_linear_solver
-        let solver =
-            create_linear_solver(&crate::linalg::LinearSolverType::SparseSchurComplement);
+        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseSchurComplement);
         let _ = solver.get_hessian();
     }
 
@@ -1383,31 +1391,27 @@ mod tests {
 
     #[test]
     fn test_optimizer_type_display() {
-        assert_eq!(format!("{}", OptimizerType::LevenbergMarquardt), "Levenberg-Marquardt");
+        assert_eq!(
+            format!("{}", OptimizerType::LevenbergMarquardt),
+            "Levenberg-Marquardt"
+        );
         assert_eq!(format!("{}", OptimizerType::GaussNewton), "Gauss-Newton");
         assert_eq!(format!("{}", OptimizerType::DogLeg), "Dog Leg");
     }
 
     #[test]
     fn test_optimization_status_display() {
-        assert_eq!(
-            format!("{}", OptimizationStatus::Converged),
-            "Converged"
-        );
+        assert_eq!(format!("{}", OptimizationStatus::Converged), "Converged");
         assert_eq!(
             format!("{}", OptimizationStatus::MaxIterationsReached),
             "Maximum iterations reached"
         );
-        assert_eq!(
-            format!("{}", OptimizationStatus::Timeout),
-            "Timeout"
-        );
+        assert_eq!(format!("{}", OptimizationStatus::Timeout), "Timeout");
         assert_eq!(
             format!("{}", OptimizationStatus::InvalidNumericalValues),
             "Invalid numerical values (NaN/Inf) detected"
         );
-        assert!(format!("{}", OptimizationStatus::Failed("oops".into()))
-            .contains("oops"));
+        assert!(format!("{}", OptimizationStatus::Failed("oops".into())).contains("oops"));
     }
 
     #[test]
@@ -1472,11 +1476,11 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_build_solver_result_fields() {
+    fn test_build_solver_result_fields() -> Result<(), Box<dyn std::error::Error>> {
         let mut variables: HashMap<String, VariableEnum> = HashMap::new();
         variables.insert(
             "x".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![1.0]))),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![3.0]))),
         );
         let state = InitializedState {
             variables,
@@ -1502,9 +1506,13 @@ mod tests {
         assert_eq!(result.iterations, 10);
         assert!((result.initial_cost - 5.0).abs() < 1e-12);
         assert!((result.final_cost - 0.1).abs() < 1e-12);
-        let ci = result.convergence_info.expect("convergence_info present");
+        let ci = result
+            .convergence_info
+            .as_ref()
+            .ok_or("convergence_info is None")?;
         assert_eq!(ci.cost_evaluations, 15);
         assert_eq!(ci.jacobian_evaluations, 10);
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1584,8 +1592,11 @@ mod tests {
             compute_jacobian: bool,
         ) -> (DVector<f64>, Option<DMatrix<f64>>) {
             let residual = dvector![params[0][0] - self.target];
-            let jacobian =
-                if compute_jacobian { Some(DMatrix::from_element(1, 1, 1.0)) } else { None };
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
             (residual, jacobian)
         }
 

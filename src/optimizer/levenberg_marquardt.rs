@@ -1464,8 +1464,7 @@ mod tests {
 
     #[test]
     fn test_lm_timeout_config() {
-        let cfg = LevenbergMarquardtConfig::new()
-            .with_timeout(Duration::from_secs(30));
+        let cfg = LevenbergMarquardtConfig::new().with_timeout(Duration::from_secs(30));
         assert!(cfg.timeout.is_some());
     }
 
