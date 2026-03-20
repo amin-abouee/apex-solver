@@ -149,12 +149,12 @@ use crate::core::problem::{Problem, VariableEnum};
 use crate::error;
 use crate::linalg::{
     DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
-    SchurPreconditioner, SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseMode,
-    SparseQRSolver,
+    SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    SparseSchurComplementSolver, StructureAware,
 };
 use crate::optimizer::{
-    ConvergenceParams, InitializedState, IterationStats, OptObserverVec, OptimizerError, Solver,
-    SolverResult, SystemLinearizer, apply_negative_parameter_step, apply_parameter_step,
+    AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
+    OptimizerError, SolverResult, apply_negative_parameter_step, apply_parameter_step,
     compute_cost,
 };
 use apex_manifolds::ManifoldType;
@@ -725,7 +725,7 @@ impl LevenbergMarquardt {
     }
 
     /// Compute optimization step by solving the augmented system (generic over assembly mode).
-    fn compute_step_generic<M: SystemLinearizer>(
+    fn compute_step_generic<M: AssemblyBackend>(
         &self,
         residuals: &Mat<f64>,
         scaled_jacobian: &M::Jacobian,
@@ -818,7 +818,7 @@ impl LevenbergMarquardt {
     ///
     /// This is the core generic optimization loop. The public `optimize()` method
     /// dispatches to this based on `LinearSolverType`.
-    fn optimize_with_mode<M: SystemLinearizer>(
+    fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
@@ -1051,25 +1051,24 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
                 }
                 LinearSolverType::SparseSchurComplement => {
-                    // Schur complement needs special initialization with variable structure
-                    // We need to init state first to get variables, then create solver
+                    // Schur complement needs variable structure before the first solve.
+                    // Initialize state once to get variables, then create and prepare the solver.
+                    // optimize_with_mode will re-initialize state internally, which is acceptable
+                    // since Schur structure initialization is cheap.
                     let state =
                         crate::optimizer::initialize_optimization_state(problem, initial_params)?;
-                    let mut solver = SchurSolverAdapter::new_with_structure_and_config(
-                        &state.variables,
-                        &state.variable_index_map,
-                        self.config.schur_variant,
-                        self.config.schur_preconditioner,
-                    )
-                    .map_err(|e| {
-                        OptimizerError::LinearSolveFailed(format!(
-                            "Failed to initialize Schur solver: {}",
-                            e
-                        ))
-                        .log()
-                    })?;
-                    // Note: optimize_with_mode will re-initialize state, which is acceptable
-                    // since Schur initialization is cheap
+                    let mut solver = SparseSchurComplementSolver::new()
+                        .with_variant(self.config.schur_variant)
+                        .with_preconditioner(self.config.schur_preconditioner);
+                    solver
+                        .initialize_structure(&state.variables, &state.variable_index_map)
+                        .map_err(|e| {
+                            OptimizerError::LinearSolveFailed(format!(
+                                "Failed to initialize Schur solver: {}",
+                                e
+                            ))
+                            .log()
+                        })?;
                     self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
                 }
                 _ => {
@@ -1081,20 +1080,12 @@ impl LevenbergMarquardt {
         }
     }
 }
-// Implement Solver trait
-impl Solver for LevenbergMarquardt {
-    type Config = LevenbergMarquardtConfig;
-    type Error = error::ApexSolverError;
-
-    fn new() -> Self {
-        Self::default()
-    }
-
+impl crate::optimizer::Optimizer for LevenbergMarquardt {
     fn optimize(
         &mut self,
         problem: &Problem,
         initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, Self::Error> {
+    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::error::ApexSolverError> {
         self.optimize(problem, initial_params)
     }
 }

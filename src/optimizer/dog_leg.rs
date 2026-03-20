@@ -204,7 +204,7 @@ use crate::linalg::{
     DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
     SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
-use crate::optimizer::{IterationStats, SystemLinearizer};
+use crate::optimizer::{AssemblyBackend, IterationStats};
 
 /// Configuration parameters for the Dog Leg trust region optimizer.
 ///
@@ -771,7 +771,7 @@ impl DogLeg {
     /// Returns (alpha, cauchy_point) where:
     /// - alpha: optimal step length α = ||g||² / (g^T H g)
     /// - cauchy_point: p_c = -α * g (the Cauchy point)
-    fn compute_cauchy_point_and_alpha_generic<M: SystemLinearizer>(
+    fn compute_cauchy_point_and_alpha_generic<M: AssemblyBackend>(
         &self,
         gradient: &faer::Mat<f64>,
         hessian: &M::Hessian,
@@ -943,7 +943,7 @@ impl DogLeg {
     }
 
     /// Compute predicted cost reduction from linear model (generic over assembly mode).
-    fn compute_predicted_reduction_generic<M: SystemLinearizer>(
+    fn compute_predicted_reduction_generic<M: AssemblyBackend>(
         &self,
         step: &faer::Mat<f64>,
         gradient: &faer::Mat<f64>,
@@ -958,7 +958,7 @@ impl DogLeg {
     }
 
     /// Compute dog leg optimization step (generic over assembly mode).
-    fn compute_optimization_step_generic<M: SystemLinearizer>(
+    fn compute_optimization_step_generic<M: AssemblyBackend>(
         &mut self,
         residuals: &faer::Mat<f64>,
         scaled_jacobian: &M::Jacobian,
@@ -1139,7 +1139,7 @@ impl DogLeg {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
-    fn optimize_with_mode<M: SystemLinearizer>(
+    fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &problem::Problem,
         initial_params: &collections::HashMap<
@@ -1391,14 +1391,7 @@ impl DogLeg {
     }
 }
 
-impl optimizer::Solver for DogLeg {
-    type Config = DogLegConfig;
-    type Error = error::ApexSolverError;
-
-    fn new() -> Self {
-        Self::default()
-    }
-
+impl optimizer::Optimizer for DogLeg {
     fn optimize(
         &mut self,
         problem: &problem::Problem,
@@ -1408,7 +1401,7 @@ impl optimizer::Solver for DogLeg {
         >,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        Self::Error,
+        crate::error::ApexSolverError,
     > {
         self.optimize(problem, initial_params)
     }

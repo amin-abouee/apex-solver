@@ -81,7 +81,7 @@ pub use logger::{init_logger, init_logger_with_level};
 
 // Re-export optimizer types
 pub use optimizer::{
-    LevenbergMarquardt, OptObserver, OptObserverVec, OptimizerType, Solver,
+    LevenbergMarquardt, OptObserver, OptObserverVec, Optimizer, OptimizerType,
     levenberg_marquardt::LevenbergMarquardtConfig,
 };
 
