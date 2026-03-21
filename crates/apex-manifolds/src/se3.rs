@@ -1554,26 +1554,8 @@ mod tests {
         assert!(se3.is_approx(&recovered, 1e-3));
     }
 
-    // T4: Jacobian Inverse Identity Tests
-    //
-    // NOTE: These tests verify Jr * Jr_inv ≈ I with LOOSE tolerances (0.01).
-    // This is NOT a bug! SE3 inherits SO(3) numerical conditioning issues plus
-    // scale-dependent precision challenges.
-    //
-    // The 6×6 Jacobian inverse has poor conditioning because:
-    // - Embedded SO(3) rotation component (inherits trig singularities)
-    // - Q-block coupling between rotation and translation
-    // - Scale amplification for large translations
-    //
-    // Expected precision:
-    // - θ < 0.01 rad: Jr * Jr_inv ≈ I within ~1e-6
-    // - θ > 0.01 rad: Jr * Jr_inv ≈ I within ~0.01
-    //
-    // This matches production SLAM libraries (ORB-SLAM3, GTSAM, Cartographer).
-
     #[test]
     fn test_se3_right_jacobian_inverse_identity() {
-        // Test with very small rotation angle (Jacobian inverse has poor numerical conditioning)
         let tangent = SE3Tangent::new(
             Vector3::new(0.1, 0.15, 0.2),
             Vector3::new(0.001, 0.002, 0.003),
@@ -1583,13 +1565,15 @@ mod tests {
         let product = jr * jr_inv;
         let identity = Matrix6::identity();
 
-        // Very loose tolerance due to numerical conditioning issues
-        assert!((product - identity).norm() < 0.01);
+        assert!(
+            (product - identity).norm() < 1e-10,
+            "Jr * Jr_inv should be identity, got error: {}",
+            (product - identity).norm()
+        );
     }
 
     #[test]
     fn test_se3_left_jacobian_inverse_identity() {
-        // Test with very small rotation angle (Jacobian inverse has poor numerical conditioning)
         let tangent = SE3Tangent::new(
             Vector3::new(0.1, 0.15, 0.2),
             Vector3::new(0.001, 0.002, 0.003),
@@ -1598,7 +1582,10 @@ mod tests {
         let jl_inv = tangent.left_jacobian_inv();
         let product = jl * jl_inv;
 
-        // Very loose tolerance due to numerical conditioning issues
-        assert!((product - Matrix6::identity()).norm() < 0.01);
+        assert!(
+            (product - Matrix6::identity()).norm() < 1e-10,
+            "Jl * Jl_inv should be identity, got error: {}",
+            (product - Matrix6::identity()).norm()
+        );
     }
 }
