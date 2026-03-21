@@ -94,6 +94,12 @@ const ODOMETRY_DATASETS: &[OdometryDataset] = &[
         filename: "rim.g2o",
         category: OdometryCategory::D3G2o,
     },
+    OdometryDataset {
+        name: "sphere2500",
+        url: "https://raw.githubusercontent.com/david-m-rosen/SE-Sync/master/data/sphere2500.g2o",
+        filename: "sphere2500.g2o",
+        category: OdometryCategory::D3G2o,
+    },
     // 2D g2o format datasets (Carlone)
     OdometryDataset {
         name: "intel",
@@ -325,7 +331,7 @@ fn list_datasets() {
 
     println!("Odometry (g2o format):");
     println!(
-        "  1. 3D g2o      - 6 files (sphere_bignoise, torus3D, grid3D, parking-garage, cubicle, rim)"
+        "  1. 3D g2o      - 7 files (sphere_bignoise, torus3D, grid3D, parking-garage, cubicle, rim, sphere2500)"
     );
     println!("  2. 2D g2o      - 6 files (intel, mit, M3500, M3500a, M3500b, M3500c)");
     println!("  3. All odometry g2o - 12 files (all odometry datasets)");
