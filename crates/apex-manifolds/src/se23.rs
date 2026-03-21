@@ -41,7 +41,7 @@ use std::{
 ///
 /// Represented as (rotation, translation, velocity).
 #[derive(Clone, PartialEq)]
-pub struct SE_2_3 {
+pub struct SE23 {
     /// Rotation part as SO(3) element
     rotation: SO3,
     /// Translation part (position) as Vector3
@@ -50,20 +50,20 @@ pub struct SE_2_3 {
     velocity: Vector3<f64>,
 }
 
-impl Display for SE_2_3 {
+impl Display for SE23 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let t = self.translation();
         let v = self.velocity();
         let q = self.rotation_quaternion();
         write!(
             f,
-            "SE_2_3(translation: [{:.4}, {:.4}, {:.4}], velocity: [{:.4}, {:.4}, {:.4}], rotation: [w: {:.4}, x: {:.4}, y: {:.4}, z: {:.4}])",
+            "SE23(translation: [{:.4}, {:.4}, {:.4}], velocity: [{:.4}, {:.4}, {:.4}], rotation: [w: {:.4}, x: {:.4}, y: {:.4}, z: {:.4}])",
             t.x, t.y, t.z, v.x, v.y, v.z, q.w, q.i, q.j, q.k
         )
     }
 }
 
-impl SE_2_3 {
+impl SE23 {
     /// Space dimension - dimension of the ambient space
     pub const DIM: usize = 3;
 
@@ -75,7 +75,7 @@ impl SE_2_3 {
 
     /// Get the identity element of the group.
     pub fn identity() -> Self {
-        SE_2_3 {
+        SE23 {
             rotation: SO3::identity(),
             translation: Vector3::zeros(),
             velocity: Vector3::zeros(),
@@ -98,7 +98,7 @@ impl SE_2_3 {
         velocity: Vector3<f64>,
         rotation: UnitQuaternion<f64>,
     ) -> Self {
-        SE_2_3 {
+        SE23 {
             rotation: SO3::new(rotation),
             translation,
             velocity,
@@ -111,7 +111,7 @@ impl SE_2_3 {
         velocity: Vector3<f64>,
         rotation: SO3,
     ) -> Self {
-        SE_2_3 {
+        SE23 {
             rotation,
             translation,
             velocity,
@@ -211,38 +211,38 @@ impl SE_2_3 {
     }
 }
 
-impl From<DVector<f64>> for SE_2_3 {
+impl From<DVector<f64>> for SE23 {
     /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
     fn from(data: DVector<f64>) -> Self {
         let translation = Vector3::new(data[0], data[1], data[2]);
         let q = Quaternion::new(data[3], data[4], data[5], data[6]);
         let rotation = SO3::new(UnitQuaternion::from_quaternion(q));
         let velocity = Vector3::new(data[7], data[8], data[9]);
-        SE_2_3::from_components(translation, velocity, rotation)
+        SE23::from_components(translation, velocity, rotation)
     }
 }
 
-impl From<SE_2_3> for DVector<f64> {
+impl From<SE23> for DVector<f64> {
     /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
-    fn from(se_2_3: SE_2_3) -> Self {
-        let q = se_2_3.rotation.quaternion();
+    fn from(val: SE23) -> Self {
+        let q = val.rotation.quaternion();
         DVector::from_vec(vec![
-            se_2_3.translation.x,
-            se_2_3.translation.y,
-            se_2_3.translation.z,
+            val.translation.x,
+            val.translation.y,
+            val.translation.z,
             q.w,
             q.i,
             q.j,
             q.k,
-            se_2_3.velocity.x,
-            se_2_3.velocity.y,
-            se_2_3.velocity.z,
+            val.velocity.x,
+            val.velocity.y,
+            val.velocity.z,
         ])
     }
 }
 
-impl LieGroup for SE_2_3 {
-    type TangentVector = SE_2_3Tangent;
+impl LieGroup for SE23 {
+    type TangentVector = SE23Tangent;
     type JacobianMatrix = Matrix9<f64>;
     type LieAlgebra = SMatrix<f64, 5, 5>;
 
@@ -258,7 +258,7 @@ impl LieGroup for SE_2_3 {
             *jac = -self.adjoint();
         }
 
-        SE_2_3::from_components(trans_inv, vel_inv, rot_inv)
+        SE23::from_components(trans_inv, vel_inv, rot_inv)
     }
 
     /// Composition of this and another SE_2(3) element.
@@ -276,7 +276,7 @@ impl LieGroup for SE_2_3 {
         let composed_velocity = self.rotation.act(&other.velocity, None, None) + self.velocity;
 
         let result =
-            SE_2_3::from_components(composed_translation, composed_velocity, composed_rotation);
+            SE23::from_components(composed_translation, composed_velocity, composed_rotation);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -302,7 +302,7 @@ impl LieGroup for SE_2_3 {
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
         data.fixed_rows_mut::<3>(6).copy_from(&velocity_vector);
 
-        let result = SE_2_3Tangent { data };
+        let result = SE23Tangent { data };
 
         if let Some(jac) = jacobian {
             *jac = result.right_jacobian_inv();
@@ -396,7 +396,7 @@ impl LieGroup for SE_2_3 {
 
         let rotation = SO3::random();
 
-        SE_2_3::from_components(translation, velocity, rotation)
+        SE23::from_components(translation, velocity, rotation)
     }
 
     fn normalize(&mut self) {
@@ -432,12 +432,12 @@ impl LieGroup for SE_2_3 {
 /// - θ: rotational component (axis-angle)
 /// - ν: velocity component
 #[derive(Clone, PartialEq)]
-pub struct SE_2_3Tangent {
+pub struct SE23Tangent {
     /// Internal data: [ρ_x, ρ_y, ρ_z, θ_x, θ_y, θ_z, ν_x, ν_y, ν_z]
     data: Vector9<f64>,
 }
 
-impl fmt::Display for SE_2_3Tangent {
+impl fmt::Display for SE23Tangent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let rho = self.rho();
         let theta = self.theta();
@@ -450,28 +450,28 @@ impl fmt::Display for SE_2_3Tangent {
     }
 }
 
-impl From<DVector<f64>> for SE_2_3Tangent {
+impl From<DVector<f64>> for SE23Tangent {
     fn from(data_vector: DVector<f64>) -> Self {
-        SE_2_3Tangent {
+        SE23Tangent {
             data: Vector9::from_iterator(data_vector.iter().copied()),
         }
     }
 }
 
-impl From<SE_2_3Tangent> for DVector<f64> {
-    fn from(tangent: SE_2_3Tangent) -> Self {
+impl From<SE23Tangent> for DVector<f64> {
+    fn from(tangent: SE23Tangent) -> Self {
         DVector::from_vec(tangent.data.as_slice().to_vec())
     }
 }
 
-impl SE_2_3Tangent {
+impl SE23Tangent {
     /// Create a new SE_2(3)Tangent from components.
     pub fn new(rho: Vector3<f64>, theta: Vector3<f64>, nu: Vector3<f64>) -> Self {
         let mut data = Vector9::zeros();
         data.fixed_rows_mut::<3>(0).copy_from(&rho);
         data.fixed_rows_mut::<3>(3).copy_from(&theta);
         data.fixed_rows_mut::<3>(6).copy_from(&nu);
-        SE_2_3Tangent { data }
+        SE23Tangent { data }
     }
 
     /// Get the ρ (translational) part.
@@ -489,7 +489,7 @@ impl SE_2_3Tangent {
         self.data.fixed_rows::<3>(6).into_owned()
     }
 
-    /// Create SE_2_3Tangent from individual scalar components.
+    /// Create SE23Tangent from individual scalar components.
     ///
     /// Order: [ρ_x, ρ_y, ρ_z, θ_x, θ_y, θ_z, ν_x, ν_y, ν_z]
     #[allow(clippy::too_many_arguments)]
@@ -504,7 +504,7 @@ impl SE_2_3Tangent {
         nu_y: f64,
         nu_z: f64,
     ) -> Self {
-        SE_2_3Tangent {
+        SE23Tangent {
             data: Vector9::from_column_slice(&[
                 rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, nu_x, nu_y, nu_z,
             ]),
@@ -551,11 +551,11 @@ impl SE_2_3Tangent {
     }
 }
 
-impl Tangent<SE_2_3> for SE_2_3Tangent {
+impl Tangent<SE23> for SE23Tangent {
     const DIM: usize = 9;
 
     /// Exponential map to SE_2(3).
-    fn exp(&self, jacobian: Option<&mut <SE_2_3 as LieGroup>::JacobianMatrix>) -> SE_2_3 {
+    fn exp(&self, jacobian: Option<&mut <SE23 as LieGroup>::JacobianMatrix>) -> SE23 {
         let rho = self.rho();
         let theta = self.theta();
         let nu = self.nu();
@@ -570,11 +570,11 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
             *jac = self.right_jacobian();
         }
 
-        SE_2_3::from_components(translation, velocity, rotation)
+        SE23::from_components(translation, velocity, rotation)
     }
 
     /// Right Jacobian for SE_2(3).
-    fn right_jacobian(&self) -> <SE_2_3 as LieGroup>::JacobianMatrix {
+    fn right_jacobian(&self) -> <SE23 as LieGroup>::JacobianMatrix {
         let mut jac = Matrix9::zeros();
         let rho = self.rho();
         let theta = self.theta();
@@ -595,7 +595,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
     }
 
     /// Left Jacobian for SE_2(3).
-    fn left_jacobian(&self) -> <SE_2_3 as LieGroup>::JacobianMatrix {
+    fn left_jacobian(&self) -> <SE23 as LieGroup>::JacobianMatrix {
         let mut jac = Matrix9::zeros();
         let rho = self.rho();
         let theta = self.theta();
@@ -615,7 +615,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
     }
 
     /// Inverse of right Jacobian.
-    fn right_jacobian_inv(&self) -> <SE_2_3 as LieGroup>::JacobianMatrix {
+    fn right_jacobian_inv(&self) -> <SE23 as LieGroup>::JacobianMatrix {
         let mut jac = Matrix9::zeros();
         let rho = self.rho();
         let theta = self.theta();
@@ -642,7 +642,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
     }
 
     /// Inverse of left Jacobian.
-    fn left_jacobian_inv(&self) -> <SE_2_3 as LieGroup>::JacobianMatrix {
+    fn left_jacobian_inv(&self) -> <SE23 as LieGroup>::JacobianMatrix {
         let mut jac = Matrix9::zeros();
         let rho = self.rho();
         let theta = self.theta();
@@ -669,7 +669,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
     }
 
     /// Hat operator: maps tangent vector to Lie algebra matrix (5x5).
-    fn hat(&self) -> <SE_2_3 as LieGroup>::LieAlgebra {
+    fn hat(&self) -> <SE23 as LieGroup>::LieAlgebra {
         let mut lie_alg = SMatrix::<f64, 5, 5>::zeros();
 
         let theta_hat = SO3Tangent::new(self.theta()).hat();
@@ -687,14 +687,14 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
         lie_alg
     }
 
-    fn zero() -> <SE_2_3 as LieGroup>::TangentVector {
-        SE_2_3Tangent::new(Vector3::zeros(), Vector3::zeros(), Vector3::zeros())
+    fn zero() -> <SE23 as LieGroup>::TangentVector {
+        SE23Tangent::new(Vector3::zeros(), Vector3::zeros(), Vector3::zeros())
     }
 
-    fn random() -> <SE_2_3 as LieGroup>::TangentVector {
+    fn random() -> <SE23 as LieGroup>::TangentVector {
         use rand::Rng;
         let mut rng = rand::rng();
-        SE_2_3Tangent::new(
+        SE23Tangent::new(
             Vector3::new(
                 rng.random_range(-1.0..1.0),
                 rng.random_range(-1.0..1.0),
@@ -726,16 +726,16 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
         }
     }
 
-    fn normalized(&self) -> <SE_2_3 as LieGroup>::TangentVector {
+    fn normalized(&self) -> <SE23 as LieGroup>::TangentVector {
         let norm = self.theta().norm();
         if norm > f64::EPSILON {
-            SE_2_3Tangent::new(self.rho(), self.theta() / norm, self.nu())
+            SE23Tangent::new(self.rho(), self.theta() / norm, self.nu())
         } else {
-            SE_2_3Tangent::new(self.rho(), Vector3::zeros(), self.nu())
+            SE23Tangent::new(self.rho(), Vector3::zeros(), self.nu())
         }
     }
 
-    fn small_adj(&self) -> <SE_2_3 as LieGroup>::JacobianMatrix {
+    fn small_adj(&self) -> <SE23 as LieGroup>::JacobianMatrix {
         let mut small_adj = Matrix9::zeros();
         let rho_skew = SO3Tangent::new(self.rho()).hat();
         let theta_skew = SO3Tangent::new(self.theta()).hat();
@@ -761,9 +761,9 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
         small_adj
     }
 
-    fn lie_bracket(&self, other: &Self) -> <SE_2_3 as LieGroup>::TangentVector {
+    fn lie_bracket(&self, other: &Self) -> <SE23 as LieGroup>::TangentVector {
         let bracket_result = self.small_adj() * other.data;
-        SE_2_3Tangent {
+        SE23Tangent {
             data: bracket_result,
         }
     }
@@ -772,7 +772,7 @@ impl Tangent<SE_2_3> for SE_2_3Tangent {
         (self.data - other.data).norm() < tolerance
     }
 
-    fn generator(&self, i: usize) -> <SE_2_3 as LieGroup>::LieAlgebra {
+    fn generator(&self, i: usize) -> <SE23 as LieGroup>::LieAlgebra {
         assert!(i < 9, "SE_2(3) only has generators for indices 0-8");
 
         let mut generator = SMatrix::<f64, 5, 5>::zeros();
@@ -820,8 +820,8 @@ mod tests {
     const TOLERANCE: f64 = 1e-9;
 
     #[test]
-    fn test_se_2_3_identity() {
-        let identity = SE_2_3::identity();
+    fn test_se23_identity() {
+        let identity = SE23::identity();
         assert!(identity.is_valid(TOLERANCE));
         assert!(identity.translation().norm() < TOLERANCE);
         assert!(identity.velocity().norm() < TOLERANCE);
@@ -829,30 +829,30 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_new() {
+    fn test_se23_new() {
         let translation = Vector3::new(1.0, 2.0, 3.0);
         let velocity = Vector3::new(0.5, 0.6, 0.7);
         let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
 
-        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let se_2_3 = SE23::new(translation, velocity, rotation);
         assert!(se_2_3.is_valid(TOLERANCE));
         assert!((se_2_3.translation() - translation).norm() < TOLERANCE);
         assert!((se_2_3.velocity() - velocity).norm() < TOLERANCE);
     }
 
     #[test]
-    fn test_se_2_3_random() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_random() {
+        let se_2_3 = SE23::random();
         assert!(se_2_3.is_valid(TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_inverse() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_inverse() {
+        let se_2_3 = SE23::random();
         let se_2_3_inv = se_2_3.inverse(None);
 
         let composed = se_2_3.compose(&se_2_3_inv, None, None);
-        let identity = SE_2_3::identity();
+        let identity = SE23::identity();
 
         assert!(composed.translation().norm() < TOLERANCE);
         assert!(composed.velocity().norm() < TOLERANCE);
@@ -861,22 +861,22 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_compose() {
-        let se_2_3_1 = SE_2_3::random();
-        let se_2_3_2 = SE_2_3::random();
+    fn test_se23_compose() {
+        let se_2_3_1 = SE23::random();
+        let se_2_3_2 = SE23::random();
 
         let composed = se_2_3_1.compose(&se_2_3_2, None, None);
         assert!(composed.is_valid(TOLERANCE));
 
         // Test composition with identity
-        let identity = SE_2_3::identity();
+        let identity = SE23::identity();
         let composed_with_identity = se_2_3_1.compose(&identity, None, None);
         assert!(composed_with_identity.is_approx(&se_2_3_1, TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_exp_log() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_exp_log() {
+        let tangent = SE23Tangent::new(
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(0.01, 0.02, 0.03),
             Vector3::new(0.5, 0.6, 0.7),
@@ -889,25 +889,25 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_exp_zero() {
-        let zero_tangent = SE_2_3Tangent::zero();
+    fn test_se23_exp_zero() {
+        let zero_tangent = SE23Tangent::zero();
         let se_2_3 = zero_tangent.exp(None);
-        let identity = SE_2_3::identity();
+        let identity = SE23::identity();
 
         assert!(se_2_3.is_approx(&identity, TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_log_identity() {
-        let identity = SE_2_3::identity();
+    fn test_se23_log_identity() {
+        let identity = SE23::identity();
         let tangent = identity.log(None);
 
         assert!(tangent.data.norm() < TOLERANCE);
     }
 
     #[test]
-    fn test_se_2_3_adjoint() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_adjoint() {
+        let se_2_3 = SE23::random();
         let adj = se_2_3.adjoint();
 
         assert_eq!(adj.nrows(), 9);
@@ -918,52 +918,52 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_act() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_act() {
+        let se_2_3 = SE23::random();
         let point = Vector3::new(1.0, 2.0, 3.0);
 
         let _transformed_point = se_2_3.act(&point, None, None);
 
-        let identity = SE_2_3::identity();
+        let identity = SE23::identity();
         let identity_transformed = identity.act(&point, None, None);
 
         assert!((identity_transformed - point).norm() < TOLERANCE);
     }
 
     #[test]
-    fn test_se_2_3_between() {
-        let se_2_3_a = SE_2_3::random();
+    fn test_se23_between() {
+        let se_2_3_a = SE23::random();
         let se_2_3_b = se_2_3_a.clone();
         let se_2_3_between_identity = se_2_3_a.between(&se_2_3_b, None, None);
-        assert!(se_2_3_between_identity.is_approx(&SE_2_3::identity(), TOLERANCE));
+        assert!(se_2_3_between_identity.is_approx(&SE23::identity(), TOLERANCE));
 
-        let se_2_3_c = SE_2_3::random();
+        let se_2_3_c = SE23::random();
         let se_2_3_between = se_2_3_a.between(&se_2_3_c, None, None);
         let expected = se_2_3_a.inverse(None).compose(&se_2_3_c, None, None);
         assert!(se_2_3_between.is_approx(&expected, TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_tangent_zero() {
-        let zero = SE_2_3Tangent::zero();
+    fn test_se23_tangent_zero() {
+        let zero = SE23Tangent::zero();
         assert!(zero.data.norm() < TOLERANCE);
 
-        let tangent = SE_2_3Tangent::new(Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
+        let tangent = SE23Tangent::new(Vector3::zeros(), Vector3::zeros(), Vector3::zeros());
         assert!(tangent.is_zero(TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_manifold_properties() {
-        assert_eq!(SE_2_3::DIM, 3);
-        assert_eq!(SE_2_3::DOF, 9);
-        assert_eq!(SE_2_3::REP_SIZE, 10);
+    fn test_se23_manifold_properties() {
+        assert_eq!(SE23::DIM, 3);
+        assert_eq!(SE23::DOF, 9);
+        assert_eq!(SE23::REP_SIZE, 10);
     }
 
     #[test]
-    fn test_se_2_3_consistency() {
-        let se_2_3_1 = SE_2_3::random();
-        let se_2_3_2 = SE_2_3::random();
-        let se_2_3_3 = SE_2_3::random();
+    fn test_se23_consistency() {
+        let se_2_3_1 = SE23::random();
+        let se_2_3_2 = SE23::random();
+        let se_2_3_3 = SE23::random();
 
         // Test associativity
         let left_assoc = se_2_3_1
@@ -975,8 +975,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_tangent_small_adj() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_tangent_small_adj() {
+        let tangent = SE23Tangent::new(
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(0.4, 0.5, 0.6),
             Vector3::new(0.7, 0.8, 0.9),
@@ -988,13 +988,13 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_tangent_lie_bracket() {
-        let tangent_a = SE_2_3Tangent::new(
+    fn test_se23_tangent_lie_bracket() {
+        let tangent_a = SE23Tangent::new(
             Vector3::new(0.1, 0.0, 0.0),
             Vector3::new(0.0, 0.2, 0.0),
             Vector3::new(0.0, 0.0, 0.3),
         );
-        let tangent_b = SE_2_3Tangent::new(
+        let tangent_b = SE23Tangent::new(
             Vector3::new(0.0, 0.3, 0.0),
             Vector3::new(0.0, 0.0, 0.4),
             Vector3::new(0.5, 0.0, 0.0),
@@ -1012,18 +1012,18 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_tangent_is_approx() {
-        let tangent_1 = SE_2_3Tangent::new(
+    fn test_se23_tangent_is_approx() {
+        let tangent_1 = SE23Tangent::new(
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(0.4, 0.5, 0.6),
             Vector3::new(0.7, 0.8, 0.9),
         );
-        let tangent_2 = SE_2_3Tangent::new(
+        let tangent_2 = SE23Tangent::new(
             Vector3::new(0.1 + 1e-12, 0.2, 0.3),
             Vector3::new(0.4, 0.5, 0.6),
             Vector3::new(0.7, 0.8, 0.9),
         );
-        let tangent_3 = SE_2_3Tangent::new(
+        let tangent_3 = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(4.0, 5.0, 6.0),
             Vector3::new(7.0, 8.0, 9.0),
@@ -1035,8 +1035,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_generators() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_generators() {
+        let tangent = SE23Tangent::new(
             Vector3::new(1.0, 1.0, 1.0),
             Vector3::new(1.0, 1.0, 1.0),
             Vector3::new(1.0, 1.0, 1.0),
@@ -1063,8 +1063,8 @@ mod tests {
 
     #[test]
     #[should_panic]
-    fn test_se_2_3_generator_invalid_index() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_generator_invalid_index() {
+        let tangent = SE23Tangent::new(
             Vector3::new(1.0, 1.0, 1.0),
             Vector3::new(1.0, 1.0, 1.0),
             Vector3::new(1.0, 1.0, 1.0),
@@ -1073,8 +1073,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_vee() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_vee() {
+        let se_2_3 = SE23::random();
         let tangent_log = se_2_3.log(None);
         let tangent_vee = se_2_3.vee();
 
@@ -1082,14 +1082,14 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_is_approx() {
-        let se_2_3_1 = SE_2_3::random();
+    fn test_se23_is_approx() {
+        let se_2_3_1 = SE23::random();
         let se_2_3_2 = se_2_3_1.clone();
 
         assert!(se_2_3_1.is_approx(&se_2_3_1, 1e-10));
         assert!(se_2_3_1.is_approx(&se_2_3_2, 1e-10));
 
-        let small_tangent = SE_2_3Tangent::new(
+        let small_tangent = SE23Tangent::new(
             Vector3::new(1e-12, 1e-12, 1e-12),
             Vector3::new(1e-12, 1e-12, 1e-12),
             Vector3::new(1e-12, 1e-12, 1e-12),
@@ -1099,8 +1099,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_small_angle_approximations() {
-        let small_tangent = SE_2_3Tangent::new(
+    fn test_se23_small_angle_approximations() {
+        let small_tangent = SE23Tangent::new(
             Vector3::new(1e-8, 2e-8, 3e-8),
             Vector3::new(1e-9, 2e-9, 3e-9),
             Vector3::new(4e-8, 5e-8, 6e-8),
@@ -1113,12 +1113,12 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_accessors() {
+    fn test_se23_accessors() {
         let translation = Vector3::new(1.0, 2.0, 3.0);
         let velocity = Vector3::new(4.0, 5.0, 6.0);
         let rotation = UnitQuaternion::identity();
 
-        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let se_2_3 = SE23::new(translation, velocity, rotation);
 
         assert_eq!(se_2_3.x(), 1.0);
         assert_eq!(se_2_3.y(), 2.0);
@@ -1129,8 +1129,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_tangent_basic() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_tangent_basic() {
+        let tangent = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(4.0, 5.0, 6.0),
@@ -1142,10 +1142,10 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_tangent_from_components() {
-        let tangent = SE_2_3Tangent::from_components(1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0, 6.0);
+    fn test_se23_tangent_from_components() {
+        let tangent = SE23Tangent::from_components(1.0, 2.0, 3.0, 0.1, 0.2, 0.3, 4.0, 5.0, 6.0);
 
-        let expected = SE_2_3Tangent::new(
+        let expected = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(4.0, 5.0, 6.0),
@@ -1155,23 +1155,23 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_normalize() {
-        let mut se_2_3 = SE_2_3::random();
+    fn test_se23_normalize() {
+        let mut se_2_3 = SE23::random();
         se_2_3.normalize();
         assert!(se_2_3.is_valid(TOLERANCE));
 
-        let mut identity = SE_2_3::identity();
+        let mut identity = SE23::identity();
         identity.normalize();
         assert!(identity.is_valid(TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_coeffs() {
+    fn test_se23_coeffs() {
         let translation = Vector3::new(1.0, 2.0, 3.0);
         let velocity = Vector3::new(4.0, 5.0, 6.0);
         let rotation = UnitQuaternion::from_euler_angles(0.1, 0.2, 0.3);
 
-        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let se_2_3 = SE23::new(translation, velocity, rotation);
         let c = se_2_3.coeffs();
 
         assert!((c[0] - 1.0).abs() < TOLERANCE);
@@ -1188,12 +1188,12 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_matrix() {
+    fn test_se23_matrix() {
         let translation = Vector3::new(1.0, 2.0, 3.0);
         let velocity = Vector3::new(4.0, 5.0, 6.0);
         let rotation = UnitQuaternion::identity();
 
-        let se_2_3 = SE_2_3::new(translation, velocity, rotation);
+        let se_2_3 = SE23::new(translation, velocity, rotation);
         let mat = se_2_3.matrix();
 
         // Top-left 3x3 is rotation (identity here)
@@ -1217,10 +1217,10 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_manif_like_operations() {
-        let a = SE_2_3::random();
-        let b = SE_2_3::random();
-        let c = SE_2_3::random();
+    fn test_se23_manif_like_operations() {
+        let a = SE23::random();
+        let b = SE23::random();
+        let c = SE23::random();
 
         // plus(minus(b, a)) == b
         let diff = b.right_minus(&a, None, None);
@@ -1236,8 +1236,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_right_jacobian_inverse_identity() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_right_jacobian_inverse_identity() {
+        let tangent = SE23Tangent::new(
             Vector3::new(0.1, -0.2, 0.3),
             Vector3::new(0.05, -0.03, 0.07),
             Vector3::new(0.4, 0.5, -0.6),
@@ -1256,8 +1256,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_left_jacobian_inverse_identity() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_left_jacobian_inverse_identity() {
+        let tangent = SE23Tangent::new(
             Vector3::new(0.1, -0.2, 0.3),
             Vector3::new(0.05, -0.03, 0.07),
             Vector3::new(0.4, 0.5, -0.6),
@@ -1276,10 +1276,10 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_jacobi_identity() {
-        let a = SE_2_3Tangent::random();
-        let b = SE_2_3Tangent::random();
-        let c = SE_2_3Tangent::random();
+    fn test_se23_jacobi_identity() {
+        let a = SE23Tangent::random();
+        let b = SE23Tangent::random();
+        let c = SE23Tangent::random();
 
         let bc = b.lie_bracket(&c);
         let ca = c.lie_bracket(&a);
@@ -1298,8 +1298,8 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_hat_matrix_structure() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_hat_matrix_structure() {
+        let tangent = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(4.0, 5.0, 6.0),
@@ -1331,29 +1331,29 @@ mod tests {
     }
 
     #[test]
-    fn test_se_2_3_dvector_round_trip() {
-        let se_2_3 = SE_2_3::random();
+    fn test_se23_dvector_round_trip() {
+        let se_2_3 = SE23::random();
         let dvec: DVector<f64> = se_2_3.clone().into();
-        let recovered = SE_2_3::from(dvec);
+        let recovered = SE23::from(dvec);
         assert!(se_2_3.is_approx(&recovered, TOLERANCE));
     }
 
     #[test]
-    fn test_se_2_3_tangent_norm() {
-        let tangent = SE_2_3Tangent::new(
+    fn test_se23_tangent_norm() {
+        let tangent = SE23Tangent::new(
             Vector3::new(1.0, 0.0, 0.0),
             Vector3::zeros(),
             Vector3::zeros(),
         );
         assert!((tangent.data.norm() - 1.0).abs() < TOLERANCE);
 
-        let zero = SE_2_3Tangent::zero();
+        let zero = SE23Tangent::zero();
         assert!(zero.data.norm() < TOLERANCE);
     }
 
     #[test]
-    fn test_se_2_3_tangent_normalize() {
-        let mut tangent = SE_2_3Tangent::new(
+    fn test_se23_tangent_normalize() {
+        let mut tangent = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.3, 0.4, 0.0),
             Vector3::new(4.0, 5.0, 6.0),
