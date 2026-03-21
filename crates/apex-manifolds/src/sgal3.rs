@@ -827,9 +827,7 @@ impl Tangent<SGal3> for SGal3Tangent {
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(-s * Matrix3::identity()));
         small_adj.fixed_view_mut::<3, 3>(0, 6).copy_from(&rho_skew);
-        small_adj
-            .fixed_view_mut::<3, 1>(0, 9)
-            .copy_from(&self.nu());
+        small_adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&self.nu());
 
         small_adj
             .fixed_view_mut::<3, 3>(3, 3)
@@ -1491,5 +1489,212 @@ mod tests {
 
         let normalized = tangent.normalized();
         assert!((normalized.theta().norm() - 1.0).abs() < TOLERANCE);
+    }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn test_sgal3_display() {
+        let sgal3 = SGal3::identity();
+        let s = format!("{}", sgal3);
+        assert!(s.contains("SGal3"));
+
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let ts = format!("{}", tangent);
+        assert!(ts.contains("sgal3"));
+    }
+
+    #[test]
+    fn test_sgal3_jacobian_identity_static() {
+        let jac = SGal3::jacobian_identity();
+        assert!((jac - Matrix10::identity()).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_rotation_so3() {
+        let sgal3 = SGal3::random();
+        let so3 = sgal3.rotation_so3();
+        assert!(so3.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_inverse_with_jacobian() {
+        let sgal3 = SGal3::random();
+        let mut jac = Matrix10::zeros();
+        let inv = sgal3.inverse(Some(&mut jac));
+        let expected_jac = -sgal3.adjoint();
+        assert!((jac - expected_jac).norm() < TOLERANCE);
+        let composed = sgal3.compose(&inv, None, None);
+        assert!(composed.is_approx(&SGal3::identity(), TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_compose_with_jacobians() {
+        let a = SGal3::random();
+        let b = SGal3::random();
+        let mut jac_a = Matrix10::zeros();
+        let mut jac_b = Matrix10::zeros();
+        let _composed = a.compose(&b, Some(&mut jac_a), Some(&mut jac_b));
+        assert!(jac_a.norm() > 0.0);
+        assert!(jac_b.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sgal3_act_with_jacobians() {
+        let sgal3 = SGal3::random();
+        let point = Vector3::new(1.0, 2.0, 3.0);
+        let mut jac_self = Matrix10::zeros();
+        let mut jac_point = Matrix3::<f64>::zeros();
+        let result = sgal3.act(&point, Some(&mut jac_self), Some(&mut jac_point));
+        assert!(result.norm() > 0.0);
+        assert!(jac_self.norm() > 0.0);
+        assert!(jac_point.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sgal3_liegroup_jacobian_identity() {
+        let jac = <SGal3 as LieGroup>::jacobian_identity();
+        assert!((jac - Matrix10::identity()).norm() < TOLERANCE);
+
+        let zero = <SGal3 as LieGroup>::zero_jacobian();
+        assert!(zero.norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_tangent_dvector_conversions() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let dvec: DVector<f64> = tangent.clone().into();
+        let recovered = SGal3Tangent::from(dvec);
+        assert!(tangent.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn test_sgal3_exp_with_jacobian() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.4, 0.5, 0.6),
+            Vector3::new(0.01, 0.02, 0.03),
+            0.1,
+        );
+        let mut jac = Matrix10::zeros();
+        let _result = tangent.exp(Some(&mut jac));
+        assert!(jac.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sgal3_exp_log_stress() {
+        for _ in 0..100 {
+            let tangent = SGal3Tangent::random();
+            let sgal3 = tangent.exp(None);
+            let recovered = sgal3.log(None);
+            assert!(
+                tangent.is_approx(&recovered, 1e-6),
+                "exp/log round-trip failed: error = {}",
+                (tangent.data - recovered.data).norm()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sgal3_right_plus_minus_round_trip() {
+        let a = SGal3::random();
+        let b = SGal3::random();
+        let diff = a.right_minus(&b, None, None);
+        let recovered = b.right_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_sgal3_left_plus_minus_round_trip() {
+        let a = SGal3::random();
+        let b = SGal3::random();
+        let diff = a.left_minus(&b, None, None);
+        let recovered = b.left_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_sgal3_compose_associativity() {
+        let a = SGal3::random();
+        let b = SGal3::random();
+        let c = SGal3::random();
+        let ab_c = a.compose(&b, None, None).compose(&c, None, None);
+        let a_bc = a.compose(&b.compose(&c, None, None), None, None);
+        assert!(ab_c.is_approx(&a_bc, 1e-6));
+    }
+
+    #[test]
+    fn test_sgal3_inverse_twice() {
+        let g = SGal3::random();
+        let g_inv_inv = g.inverse(None).inverse(None);
+        assert!(g.is_approx(&g_inv_inv, 1e-6));
+    }
+
+    #[test]
+    fn test_sgal3_tangent_normalize_zero_theta() {
+        let tangent = SGal3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(4.0, 5.0, 6.0),
+            Vector3::zeros(),
+            0.5,
+        );
+        let normalized = tangent.normalized();
+        assert!(normalized.theta().norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sgal3_tangent_generator_all() {
+        let tangent = SGal3Tangent::zero();
+        for i in 0..10 {
+            let g = tangent.generator(i);
+            assert!(g.norm() > 0.0, "Generator {} should be non-zero", i);
+        }
+    }
+
+    #[test]
+    fn test_sgal3_hat_linearity() {
+        let a = SGal3Tangent::random();
+        let b = SGal3Tangent::random();
+        let alpha = 2.5;
+
+        // hat(α*a) = α*hat(a)
+        let scaled_tangent = SGal3Tangent {
+            data: a.data * alpha,
+        };
+        let hat_scaled = scaled_tangent.hat();
+        let scaled_hat = a.hat() * alpha;
+        assert!(
+            (hat_scaled - scaled_hat).norm() < TOLERANCE,
+            "hat should be linear"
+        );
+
+        // hat(a + b) = hat(a) + hat(b)
+        let sum_tangent = SGal3Tangent {
+            data: a.data + b.data,
+        };
+        let hat_sum = sum_tangent.hat();
+        let sum_hat = a.hat() + b.hat();
+        assert!(
+            (hat_sum - sum_hat).norm() < TOLERANCE,
+            "hat should be additive"
+        );
+    }
+
+    #[test]
+    fn test_sgal3_pure_time() {
+        let tangent = SGal3Tangent::new(Vector3::zeros(), Vector3::zeros(), Vector3::zeros(), 1.0);
+        let sgal3 = tangent.exp(None);
+        let recovered = sgal3.log(None);
+        assert!(tangent.is_approx(&recovered, TOLERANCE));
     }
 }
