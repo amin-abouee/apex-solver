@@ -110,7 +110,7 @@ use crate::{
     factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
 };
-use apex_manifolds::{ManifoldType, rn, se2, se3, so2, so3};
+use apex_manifolds::{ManifoldType, rn, se2, se23, se3, sgal3, sim3, so2, so3};
 
 /// Symbolic structure for sparse matrix operations.
 ///
@@ -133,7 +133,7 @@ pub enum VariableEnum {
     Rn(Variable<rn::Rn>),
     SE2(Variable<se2::SE2>),
     SE3(Variable<se3::SE3>),
-    SE23(Variable<se_2_3::SE_2_3>),
+    SE23(Variable<se23::SE23>),
     SGal3(Variable<sgal3::SGal3>),
     Sim3(Variable<sim3::Sim3>),
     SO2(Variable<so2::SO2>),
@@ -147,6 +147,9 @@ impl VariableEnum {
             VariableEnum::Rn(_) => ManifoldType::RN,
             VariableEnum::SE2(_) => ManifoldType::SE2,
             VariableEnum::SE3(_) => ManifoldType::SE3,
+            VariableEnum::SE23(_) => ManifoldType::SE23,
+            VariableEnum::SGal3(_) => ManifoldType::SGal3,
+            VariableEnum::Sim3(_) => ManifoldType::Sim3,
             VariableEnum::SO2(_) => ManifoldType::SO2,
             VariableEnum::SO3(_) => ManifoldType::SO3,
         }
@@ -250,7 +253,7 @@ impl VariableEnum {
                 }
 
                 let step_dvector = DVector::from_vec(step_data);
-                let tangent = se_2_3::SE_2_3Tangent::from(step_dvector);
+                let tangent = se23::SE23Tangent::from(step_dvector);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -403,7 +406,7 @@ impl VariableEnum {
                 var.set_value(new_se3);
             }
             VariableEnum::SE23(var) => {
-                let new_se23: se_2_3::SE_2_3 = vec.clone().into();
+                let new_se23: se23::SE23 = vec.clone().into();
                 var.set_value(new_se23);
             }
             VariableEnum::SGal3(var) => {
@@ -766,7 +769,7 @@ impl Problem {
                         VariableEnum::Rn(var)
                     }
                     ManifoldType::SE23 => {
-                        let mut var = Variable::new(se_2_3::SE_2_3::from(v.1.clone()));
+                        let mut var = Variable::new(se23::SE23::from(v.1.clone()));
                         if let Some(indexes) = self.fixed_variable_indexes.get(k) {
                             var.fixed_indices = indexes.clone();
                         }
