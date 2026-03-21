@@ -15,6 +15,10 @@ categories = ["parsing", "data-structures"]
 
 exclude = ["tests/", "benches/"]
 
+[[bin]]
+name = "download_datasets"
+path = "bin/download_datasets.rs"
+
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
@@ -25,6 +29,9 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
+clap.workspace = true
+ureq.workspace = true
+bzip2.workspace = true
 
 [dependencies.rerun]
 workspace = true

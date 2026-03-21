@@ -20,6 +20,12 @@ pub mod bal;
 pub mod g2o;
 pub mod toro;
 
+/// Default directory for odometry (pose graph) datasets relative to the workspace root.
+pub const ODOMETRY_DATA_DIR: &str = "data/odometry";
+
+/// Default directory for bundle adjustment datasets relative to the workspace root.
+pub const BUNDLE_ADJUSTMENT_DATA_DIR: &str = "data/bundle_adjustment";
+
 // Re-exports
 pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
