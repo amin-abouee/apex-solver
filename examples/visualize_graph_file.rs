@@ -7,7 +7,7 @@
 //! cargo run --example visualize_graph_file --features visualization
 //! ```
 
-use apex_solver::apex_io::{Graph, load_graph};
+use apex_solver::apex_io::{ODOMETRY_DATA_DIR, Graph, load_graph};
 use apex_solver::init_logger;
 use clap::Parser;
 use rerun::{
@@ -22,9 +22,9 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the graph file to visualize
-    #[arg(short = 'f', long, default_value = "data/odometry/parking-garage.g2o")]
-    file_path: PathBuf,
+    /// Path to the graph file to visualize (default: `{ODOMETRY_DATA_DIR}/parking-garage.g2o`)
+    #[arg(short = 'f', long)]
+    file_path: Option<PathBuf>,
 
     /// Scale factor for visualization
     #[arg(short, long, default_value_t = 0.1)]
@@ -49,8 +49,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger with INFO level
     init_logger();
 
-    info!("Loading graph from: {}", args.file_path.display());
-    let graph = load_graph(&args.file_path)?;
+    let file_path = args.file_path.unwrap_or_else(|| {
+        PathBuf::from(format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR))
+    });
+    info!("Loading graph from: {}", file_path.display());
+    let graph = load_graph(&file_path)?;
 
     // Initialize Rerun
     let rec = RecordingStreamBuilder::new("apex-solver-graph-visualization").spawn()?;

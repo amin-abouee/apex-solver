@@ -27,7 +27,7 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
+use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::JacobianMode;
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Construct dataset path
-    let dataset_path = format!("data/odometry/{}.g2o", args.dataset);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR, args.dataset);
     info!("Loading dataset: {}", dataset_path);
 
     // Load graph from G2O file
