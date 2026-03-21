@@ -605,32 +605,15 @@ impl Tangent<SO3> for SO3Tangent {
 
             Matrix3::identity()
                 + (1.0 - cos_theta) / angle * tangent_skew
-                + (theta - sin_theta) / (angle * angle) * tangent_skew * tangent_skew
+                + (theta - sin_theta) / (angle * theta) * tangent_skew * tangent_skew
         }
     }
 
     /// Right Jacobian inverse for SO(3)
     ///
-    /// # Notes
-    /// # Equation 145: Right Jacobian inverse for SO(3) Exp map
-    /// J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// Computed as transpose of left Jacobian inverse: Jr⁻¹ = (Jl⁻¹)ᵀ
     ///
-    /// # Numerical Conditioning Warning
-    ///
-    /// **This function has inherent numerical conditioning issues that cannot be eliminated.**
-    ///
-    /// The formula contains the term `(1 + cos θ) / (2θ sin θ)` which:
-    /// - Becomes indeterminate (0/0) as θ → 0
-    /// - Has a singularity as θ → π (sin θ → 0)
-    /// - Amplifies floating-point errors for θ > 0.5 rad
-    ///
-    /// **Expected Precision**:
-    /// - θ < 0.01 rad: Jr * Jr⁻¹ ≈ I within ~1e-6
-    /// - 0.01 < θ < 0.1 rad: Jr * Jr⁻¹ ≈ I within ~1e-4
-    /// - θ > 0.1 rad: Jr * Jr⁻¹ ≈ I within ~0.01
-    ///
-    /// This is **mathematically unavoidable** and is consistent with all production
-    /// Lie group libraries (manif, Sophus, GTSAM). See module documentation for references.
+    /// Has numerical conditioning issues near θ → π (sin θ → 0).
     ///
     fn right_jacobian_inv(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         self.left_jacobian_inv().transpose()
@@ -638,27 +621,9 @@ impl Tangent<SO3> for SO3Tangent {
 
     /// Left Jacobian inverse for SO(3)
     ///
-    /// # Notes
-    /// # Equation 146: Left Jacobian inverse for SO(3) Exp map
     /// J_L⁻¹(θ) = I - (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
     ///
-    /// # Numerical Conditioning Warning
-    ///
-    /// **This function has inherent numerical conditioning issues that cannot be eliminated.**
-    ///
-    /// The problematic term `1/θ² - (1 + cos θ)/(2θ sin θ)` exhibits:
-    /// - Catastrophic cancellation as θ → 0 (requires Taylor series expansion)
-    /// - Division by zero as θ → π (sin θ → 0)
-    /// - Poor conditioning for θ > 0.5 rad (~29°)
-    ///
-    /// **Expected Precision** (same as right Jacobian inverse):
-    /// - θ < 0.01 rad: Jl * Jl⁻¹ ≈ I within ~1e-6
-    /// - 0.01 < θ < 0.1 rad: Jl * Jl⁻¹ ≈ I within ~1e-4
-    /// - θ > 0.1 rad: Jl * Jl⁻¹ ≈ I within ~0.01
-    ///
-    /// This is a **fundamental mathematical limitation** documented in:
-    /// - Nurlanov et al. (2021): SO(3) log map degeneracies
-    /// - Sophus library: <https://github.com/strasdat/Sophus/issues/179>
+    /// Has numerical conditioning issues near θ → π (sin θ → 0).
     ///
     fn left_jacobian_inv(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         let angle = self.data.norm_squared();
@@ -1535,32 +1500,16 @@ mod tests {
         assert!(so3.is_approx(&recovered, 1e-6));
     }
 
-    // T4: Jacobian Inverse Identity Tests
-    //
-    // NOTE: These tests verify Jr * Jr_inv ≈ I, but use LOOSE tolerances (0.01).
-    // This is NOT a bug! Jacobian inverses have inherent numerical conditioning issues
-    // documented in robotics literature (Nurlanov et al. 2021, Sophus library).
-    //
-    // The formula contains term (1 + cos θ) / (2θ sin θ) which:
-    // - Becomes indeterminate (0/0) as θ → 0
-    // - Has singularity as θ → π (sin θ → 0)
-    // - Amplifies floating-point errors for θ > 0.01 rad
-    //
-    // Even with θ = 0.001 rad (very small!), we get errors ~0.01. This is EXPECTED
-    // and consistent with production libraries (manif, Sophus, GTSAM).
-
     #[test]
     fn test_so3_right_jacobian_inverse_identity() {
-        // Test with very small angle (Jacobian inverse has poor numerical conditioning)
         let tangent = SO3Tangent::new(Vector3::new(0.001, 0.002, 0.003));
         let jr = tangent.right_jacobian();
         let jr_inv = tangent.right_jacobian_inv();
         let product = jr * jr_inv;
         let identity = Matrix3::identity();
 
-        // Tolerance of 0.01 reflects inherent mathematical conditioning, not implementation bug
         assert!(
-            (product - identity).norm() < 0.01,
+            (product - identity).norm() < 1e-10,
             "Jr * Jr_inv should be identity, got error: {}",
             (product - identity).norm()
         );
@@ -1568,15 +1517,17 @@ mod tests {
 
     #[test]
     fn test_so3_left_jacobian_inverse_identity() {
-        // Test with very small angle (Jacobian inverse has poor numerical conditioning)
         let tangent = SO3Tangent::new(Vector3::new(0.001, 0.002, 0.003));
         let jl = tangent.left_jacobian();
         let jl_inv = tangent.left_jacobian_inv();
         let product = jl * jl_inv;
         let identity = Matrix3::identity();
 
-        // Tolerance of 0.01 reflects inherent mathematical conditioning, not implementation bug
-        assert!((product - identity).norm() < 0.01);
+        assert!(
+            (product - identity).norm() < 1e-10,
+            "Jl * Jl_inv should be identity, got error: {}",
+            (product - identity).norm()
+        );
     }
 
     #[test]
