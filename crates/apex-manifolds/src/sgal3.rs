@@ -753,8 +753,7 @@ impl Tangent<SGal3> for SGal3Tangent {
         lie_alg[(0, 4)] = nu[0];
         lie_alg[(1, 4)] = nu[1];
         lie_alg[(2, 4)] = nu[2];
-        lie_alg[(3, 5)] = 1.0;
-        lie_alg[(4, 5)] = self.s();
+        lie_alg[(3, 5)] = self.s();
 
         lie_alg
     }
@@ -813,16 +812,20 @@ impl Tangent<SGal3> for SGal3Tangent {
         let rho_skew = SO3Tangent::new(self.rho()).hat();
         let nu_skew = SO3Tangent::new(self.nu()).hat();
         let theta_skew = SO3Tangent::new(self.theta()).hat();
+        let s = self.s();
 
         // Block structure for SGal(3) with ordering [ρ, ν, θ, s]:
-        // [θ×   0    ρ×   ν ]
-        // [0    θ×   ν×   0 ]
-        // [0    0    θ×   0 ]
-        // [0    0    0    0 ]
+        // [θ×  -s·I   ρ×   ν ]
+        // [0    θ×    ν×   0 ]
+        // [0    0     θ×   0 ]
+        // [0    0     0    0 ]
 
         small_adj
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&theta_skew);
+        small_adj
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&(-s * Matrix3::identity()));
         small_adj.fixed_view_mut::<3, 3>(0, 6).copy_from(&rho_skew);
         small_adj
             .fixed_view_mut::<3, 1>(0, 9)
