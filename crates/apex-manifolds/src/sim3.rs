@@ -407,43 +407,10 @@ impl LieGroup for Sim3 {
 impl Sim3 {
     /// Compute V^{-1} matrix for Sim(3) logarithm.
     ///
-    /// Based on Ethan Eade's formulation for Sim(3).
+    /// Compute the inverse of the V matrix for Sim(3) logarithm.
     fn compute_v_inv(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
-        let theta_norm_sq = theta.coeffs().norm_squared();
-
-        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
-            return Matrix3::identity();
-        }
-
-        let theta_hat = theta.hat();
-        let theta_hat_sq = theta_hat * theta_hat;
-
-        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD {
-            // Only scale, no rotation
-            let a = if sigma.abs() < f64::EPSILON {
-                1.0
-            } else {
-                (1.0 - (-sigma).exp()) / sigma
-            };
-            return Matrix3::identity() / a;
-        }
-
-        let theta_norm = theta_norm_sq.sqrt();
-        let sin_theta = theta_norm.sin();
-        let cos_theta = theta_norm.cos();
-
-        // Compute coefficients for V^{-1}
-        let a = if sigma.abs() < f64::EPSILON {
-            (theta_norm * sin_theta) / (2.0 * (1.0 - cos_theta))
-        } else {
-            sigma / (1.0 - (-sigma).exp())
-        };
-
-        let b = (1.0 - cos_theta) / theta_norm_sq;
-        let c = (theta_norm - sin_theta) / (theta_norm * theta_norm_sq);
-
-        Matrix3::identity() / a - 0.5 * theta_hat
-            + (1.0 / a - 0.5 - c / b) * theta_hat_sq / theta_norm_sq
+        let v = Sim3Tangent::v_matrix(theta, sigma);
+        v.try_inverse().unwrap_or(Matrix3::identity())
     }
 }
 
@@ -528,22 +495,22 @@ impl Sim3Tangent {
 
     /// Compute the V matrix for Sim(3) exponential map.
     ///
-    /// Based on Ethan Eade's formulation.
+    /// V = ∫₀¹ exp(σt) · exp(θt×) dt = A·I + B·[θ]× + C·[θ]×²
+    ///
+    /// Based on Ethan Eade's "Lie Groups for Computer Vision" formulation.
     fn v_matrix(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let theta_norm_sq = theta.coeffs().norm_squared();
 
-        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < crate::SMALL_ANGLE_THRESHOLD
+        {
             return Matrix3::identity();
         }
 
         let theta_hat = theta.hat();
 
         if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD {
-            let a = if sigma.abs() < f64::EPSILON {
-                1.0
-            } else {
-                ((-sigma).exp() - 1.0) / (-sigma)
-            };
+            // Pure scale, no rotation: V = (e^σ - 1)/σ · I
+            let a = (sigma.exp() - 1.0) / sigma;
             return a * Matrix3::identity();
         }
 
@@ -551,17 +518,26 @@ impl Sim3Tangent {
         let sin_theta = theta_norm.sin();
         let cos_theta = theta_norm.cos();
 
-        // Compute A coefficient
-        let a = if sigma.abs() < f64::EPSILON {
-            (2.0 * (1.0 - cos_theta)) / (theta_norm * sin_theta)
-        } else {
-            ((-sigma).exp() - 1.0) / (-sigma)
-        };
+        if sigma.abs() < crate::SMALL_ANGLE_THRESHOLD {
+            // Pure rotation, no scale: V = SO(3) left Jacobian
+            let a = 1.0;
+            let b = (1.0 - cos_theta) / theta_norm_sq;
+            let c = (theta_norm - sin_theta) / (theta_norm * theta_norm_sq);
+            return a * Matrix3::identity() + b * theta_hat + c * theta_hat * theta_hat;
+        }
 
-        let b = (1.0 - cos_theta) / theta_norm_sq;
-        let c = (theta_norm - sin_theta) / (theta_norm * theta_norm_sq);
+        // General case: both sigma and theta nonzero
+        let e_sigma = sigma.exp();
+        let alpha_sq = sigma * sigma + theta_norm_sq;
 
-        a * (Matrix3::identity() + b * theta_hat + c * theta_hat * theta_hat)
+        let a = (e_sigma - 1.0) / sigma;
+        let b = (e_sigma * (sigma * sin_theta - theta_norm * cos_theta) + theta_norm)
+            / (theta_norm * alpha_sq);
+        let cos_integral =
+            (e_sigma * (sigma * cos_theta + theta_norm * sin_theta) - sigma) / alpha_sq;
+        let c = (a - cos_integral) / theta_norm_sq;
+
+        a * Matrix3::identity() + b * theta_hat + c * theta_hat * theta_hat
     }
 
     /// Compute the Q matrix for Sim(3) Jacobians.
@@ -680,48 +656,16 @@ impl Tangent<Sim3> for Sim3Tangent {
 
     /// Inverse of right Jacobian.
     fn right_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix7::zeros();
-        let rho = self.rho();
-        let theta = self.theta();
-        let sigma = self.sigma();
-
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
-        let q_block = Self::q_matrix(-rho, -theta, -sigma);
-
-        jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-
-        let top_right = -1.0 * theta_left_inv_jac * q_block * theta_left_inv_jac;
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
-
-        jac[(6, 6)] = 1.0;
-
-        jac
+        self.right_jacobian()
+            .try_inverse()
+            .unwrap_or(Matrix7::identity())
     }
 
     /// Inverse of left Jacobian.
     fn left_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix7::zeros();
-        let rho = self.rho();
-        let theta = self.theta();
-        let sigma = self.sigma();
-
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
-        let q_block = Self::q_matrix(rho, theta, sigma);
-
-        jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-
-        let top_right = -1.0 * theta_left_inv_jac * q_block * theta_left_inv_jac;
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
-
-        jac[(6, 6)] = 1.0;
-
-        jac
+        self.left_jacobian()
+            .try_inverse()
+            .unwrap_or(Matrix7::identity())
     }
 
     /// Hat operator: maps tangent vector to Lie algebra matrix (4x4).
