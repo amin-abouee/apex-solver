@@ -489,7 +489,9 @@ impl Sim3Tangent {
         sigma: f64,
     ) -> Self {
         Sim3Tangent {
-            data: Vector7::from_column_slice(&[rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, sigma]),
+            data: Vector7::from_column_slice(&[
+                rho_x, rho_y, rho_z, theta_x, theta_y, theta_z, sigma,
+            ]),
         }
     }
 
@@ -501,7 +503,8 @@ impl Sim3Tangent {
     fn v_matrix(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let theta_norm_sq = theta.coeffs().norm_squared();
 
-        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < crate::SMALL_ANGLE_THRESHOLD
+        if theta_norm_sq < crate::SMALL_ANGLE_THRESHOLD
+            && sigma.abs() < crate::SMALL_ANGLE_THRESHOLD
         {
             return Matrix3::identity();
         }
@@ -1310,5 +1313,226 @@ mod tests {
         let dvec: DVector<f64> = sim3.clone().into();
         let recovered: Sim3 = dvec.into();
         assert!(sim3.is_approx(&recovered, TOLERANCE));
+    }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn test_sim3_display() {
+        let sim3 = Sim3::identity();
+        let s = format!("{}", sim3);
+        assert!(s.contains("Sim3"));
+
+        let tangent = Sim3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let ts = format!("{}", tangent);
+        assert!(ts.contains("sim3"));
+    }
+
+    #[test]
+    fn test_sim3_jacobian_identity_static() {
+        let jac = Sim3::jacobian_identity();
+        assert!((jac - Matrix7::identity()).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_rotation_so3() {
+        let sim3 = Sim3::random();
+        let so3 = sim3.rotation_so3();
+        assert!(so3.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_sim3_inverse_with_jacobian() {
+        let sim3 = Sim3::random();
+        let mut jac = Matrix7::zeros();
+        let inv = sim3.inverse(Some(&mut jac));
+        let expected_jac = -sim3.adjoint();
+        assert!((jac - expected_jac).norm() < TOLERANCE);
+        let composed = sim3.compose(&inv, None, None);
+        assert!(composed.is_approx(&Sim3::identity(), TOLERANCE));
+    }
+
+    #[test]
+    fn test_sim3_compose_with_jacobians() {
+        let a = Sim3::random();
+        let b = Sim3::random();
+        let mut jac_a = Matrix7::zeros();
+        let mut jac_b = Matrix7::zeros();
+        let _composed = a.compose(&b, Some(&mut jac_a), Some(&mut jac_b));
+        assert!(jac_a.norm() > 0.0);
+        assert!(jac_b.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sim3_act_with_jacobians() {
+        let sim3 = Sim3::random();
+        let point = Vector3::new(1.0, 2.0, 3.0);
+        let mut jac_self = Matrix7::zeros();
+        let mut jac_point = Matrix3::<f64>::zeros();
+        let result = sim3.act(&point, Some(&mut jac_self), Some(&mut jac_point));
+        assert!(result.norm() > 0.0);
+        assert!(jac_self.norm() > 0.0);
+        assert!(jac_point.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sim3_liegroup_jacobian_identity() {
+        let jac = <Sim3 as LieGroup>::jacobian_identity();
+        assert!((jac - Matrix7::identity()).norm() < TOLERANCE);
+
+        let zero = <Sim3 as LieGroup>::zero_jacobian();
+        assert!(zero.norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_tangent_dvector_conversions() {
+        let tangent = Sim3Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            0.5,
+        );
+        let dvec: DVector<f64> = tangent.clone().into();
+        let recovered = Sim3Tangent::from(dvec);
+        assert!(tangent.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn test_sim3_exp_with_jacobian() {
+        let tangent = Sim3Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.01, 0.02, 0.03),
+            0.1,
+        );
+        let mut jac = Matrix7::zeros();
+        let _result = tangent.exp(Some(&mut jac));
+        assert!(jac.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sim3_exp_log_stress() {
+        for _ in 0..100 {
+            let tangent = Sim3Tangent::random();
+            let sim3 = tangent.exp(None);
+            let recovered = sim3.log(None);
+            assert!(
+                tangent.is_approx(&recovered, 1e-6),
+                "exp/log round-trip failed: error = {}",
+                (tangent.data - recovered.data).norm()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sim3_right_plus_minus_round_trip() {
+        let a = Sim3::random();
+        let b = Sim3::random();
+        let diff = a.right_minus(&b, None, None);
+        let recovered = b.right_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_sim3_left_plus_minus_round_trip() {
+        let a = Sim3::random();
+        let b = Sim3::random();
+        let diff = a.left_minus(&b, None, None);
+        let recovered = b.left_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_sim3_compose_associativity() {
+        let a = Sim3::random();
+        let b = Sim3::random();
+        let c = Sim3::random();
+        let ab_c = a.compose(&b, None, None).compose(&c, None, None);
+        let a_bc = a.compose(&b.compose(&c, None, None), None, None);
+        assert!(ab_c.is_approx(&a_bc, 1e-6));
+    }
+
+    #[test]
+    fn test_sim3_inverse_twice() {
+        let g = Sim3::random();
+        let g_inv_inv = g.inverse(None).inverse(None);
+        assert!(g.is_approx(&g_inv_inv, 1e-6));
+    }
+
+    #[test]
+    fn test_sim3_pure_scale() {
+        // exp/log with only sigma nonzero (theta=0)
+        let tangent = Sim3Tangent::new(Vector3::zeros(), Vector3::zeros(), 0.5);
+        let sim3 = tangent.exp(None);
+        let recovered = sim3.log(None);
+        assert!(tangent.is_approx(&recovered, TOLERANCE));
+        assert!((sim3.scale() - 0.5_f64.exp()).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_pure_rotation() {
+        // exp/log with only theta nonzero (sigma=0)
+        let tangent = Sim3Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.05, 0.1, 0.15),
+            0.0,
+        );
+        let sim3 = tangent.exp(None);
+        let recovered = sim3.log(None);
+        assert!(tangent.is_approx(&recovered, 1e-6));
+        assert!((sim3.scale() - 1.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_scale_compose() {
+        let a = Sim3::from_components(Vector3::zeros(), SO3::identity(), 2.0);
+        let b = Sim3::from_components(Vector3::zeros(), SO3::identity(), 3.0);
+        let ab = a.compose(&b, None, None);
+        assert!((ab.scale() - 6.0).abs() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_tangent_normalize_zero_theta() {
+        let tangent = Sim3Tangent::new(Vector3::new(1.0, 2.0, 3.0), Vector3::zeros(), 0.5);
+        let normalized = tangent.normalized();
+        assert!(normalized.theta().norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_sim3_tangent_generator_all() {
+        let tangent = Sim3Tangent::zero();
+        for i in 0..7 {
+            let g = tangent.generator(i);
+            assert!(g.norm() > 0.0, "Generator {} should be non-zero", i);
+        }
+    }
+
+    #[test]
+    fn test_sim3_v_matrix_sigma_zero_matches_so3_jl() {
+        // When sigma=0, V-matrix should equal SO3 left Jacobian
+        let theta = SO3Tangent::new(Vector3::new(0.3, 0.4, 0.5));
+        let v = Sim3Tangent::v_matrix(&theta, 0.0);
+        let jl = theta.left_jacobian();
+        assert!(
+            (v - jl).norm() < 1e-10,
+            "V(θ,0) should equal Jl(θ), error = {}",
+            (v - jl).norm()
+        );
+    }
+
+    #[test]
+    fn test_sim3_v_matrix_theta_zero() {
+        // When theta=0, V-matrix should be (e^σ - 1)/σ * I
+        let theta = SO3Tangent::new(Vector3::zeros());
+        let sigma = 0.5;
+        let v = Sim3Tangent::v_matrix(&theta, sigma);
+        let expected = (sigma.exp() - 1.0) / sigma * Matrix3::<f64>::identity();
+        assert!(
+            (v - expected).norm() < 1e-10,
+            "V(0,σ) should equal (e^σ-1)/σ * I, error = {}",
+            (v - expected).norm()
+        );
     }
 }
