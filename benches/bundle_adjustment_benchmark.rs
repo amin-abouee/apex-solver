@@ -46,7 +46,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
-use apex_io::BalLoader;
+use apex_io::{BalLoader, BUNDLE_ADJUSTMENT_DATA_DIR};
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use apex_solver::ManifoldType;
@@ -76,19 +76,19 @@ fn get_datasets() -> Vec<DatasetConfig> {
     vec![
         DatasetConfig {
             name: "Ladybug".to_string(),
-            path: "data/bundle_adjustment/Ladybug/problem-1723-156502-pre.txt".to_string(),
+            path: format!("{}/Ladybug/problem-1723-156502-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
         },
         DatasetConfig {
             name: "Trafalgar".to_string(),
-            path: "data/bundle_adjustment/Trafalgar/problem-257-65132-pre.txt".to_string(),
+            path: format!("{}/Trafalgar/problem-257-65132-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
         },
         DatasetConfig {
             name: "Dubrovnik".to_string(),
-            path: "data/bundle_adjustment/Dubrovnik/problem-356-226730-pre.txt".to_string(),
+            path: format!("{}/Dubrovnik/problem-356-226730-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
         },
         DatasetConfig {
             name: "Venice".to_string(),
-            path: "data/bundle_adjustment/Venice/problem-1778-993923-pre.txt".to_string(),
+            path: format!("{}/Venice/problem-1778-993923-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
         },
     ]
 }
