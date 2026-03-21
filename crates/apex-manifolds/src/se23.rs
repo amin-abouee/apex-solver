@@ -1365,4 +1365,180 @@ mod tests {
         let normalized = tangent.normalized();
         assert!((normalized.theta().norm() - 1.0).abs() < TOLERANCE);
     }
+
+    // --- Additional coverage tests ---
+
+    #[test]
+    fn test_se23_display() {
+        let se23 = SE23::identity();
+        let s = format!("{}", se23);
+        assert!(s.contains("SE23"));
+
+        let tangent = SE23Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+        let ts = format!("{}", tangent);
+        assert!(ts.contains("se_2_3"));
+    }
+
+    #[test]
+    fn test_se23_jacobian_identity_static() {
+        let jac = SE23::jacobian_identity();
+        assert!((jac - Matrix9::identity()).norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se23_rotation_so3() {
+        let se23 = SE23::random();
+        let so3 = se23.rotation_so3();
+        assert!(so3.is_valid(TOLERANCE));
+    }
+
+    #[test]
+    fn test_se23_inverse_with_jacobian() {
+        let se23 = SE23::random();
+        let mut jac = Matrix9::zeros();
+        let inv = se23.inverse(Some(&mut jac));
+        // Jacobian of inverse should be -Ad(g)
+        let expected_jac = -se23.adjoint();
+        assert!((jac - expected_jac).norm() < TOLERANCE);
+        // Verify inverse is correct
+        let composed = se23.compose(&inv, None, None);
+        assert!(composed.is_approx(&SE23::identity(), TOLERANCE));
+    }
+
+    #[test]
+    fn test_se23_compose_with_jacobians() {
+        let a = SE23::random();
+        let b = SE23::random();
+        let mut jac_a = Matrix9::zeros();
+        let mut jac_b = Matrix9::zeros();
+        let _composed = a.compose(&b, Some(&mut jac_a), Some(&mut jac_b));
+        // Jacobians should be populated (non-zero)
+        assert!(jac_a.norm() > 0.0);
+        assert!(jac_b.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_se23_act_with_jacobians() {
+        let se23 = SE23::random();
+        let point = Vector3::new(1.0, 2.0, 3.0);
+        let mut jac_self = Matrix9::zeros();
+        let mut jac_point = Matrix3::<f64>::zeros();
+        let result = se23.act(&point, Some(&mut jac_self), Some(&mut jac_point));
+        assert!(result.norm() > 0.0);
+        assert!(jac_self.norm() > 0.0);
+        assert!(jac_point.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_se23_liegroup_jacobian_identity() {
+        let jac = <SE23 as LieGroup>::jacobian_identity();
+        assert!((jac - Matrix9::identity()).norm() < TOLERANCE);
+
+        let zero = <SE23 as LieGroup>::zero_jacobian();
+        assert!(zero.norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se23_tangent_dvector_conversions() {
+        let tangent = SE23Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+        let dvec: DVector<f64> = tangent.clone().into();
+        let recovered = SE23Tangent::from(dvec);
+        assert!(tangent.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn test_se23_exp_with_jacobian() {
+        let tangent = SE23Tangent::new(
+            Vector3::new(0.1, 0.2, 0.3),
+            Vector3::new(0.01, 0.02, 0.03),
+            Vector3::new(0.4, 0.5, 0.6),
+        );
+        let mut jac = Matrix9::zeros();
+        let _result = tangent.exp(Some(&mut jac));
+        assert!(jac.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_se23_exp_log_stress() {
+        for _ in 0..100 {
+            let tangent = SE23Tangent::random();
+            let se23 = tangent.exp(None);
+            let recovered = se23.log(None);
+            assert!(
+                tangent.is_approx(&recovered, 1e-6),
+                "exp/log round-trip failed: error = {}",
+                (tangent.data - recovered.data).norm()
+            );
+        }
+    }
+
+    #[test]
+    fn test_se23_right_plus_minus_round_trip() {
+        let a = SE23::random();
+        let b = SE23::random();
+        let diff = a.right_minus(&b, None, None);
+        let recovered = b.right_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_se23_left_plus_minus_round_trip() {
+        let a = SE23::random();
+        let b = SE23::random();
+        let diff = a.left_minus(&b, None, None);
+        let recovered = b.left_plus(&diff, None, None);
+        assert!(a.is_approx(&recovered, 1e-6));
+    }
+
+    #[test]
+    fn test_se23_compose_associativity() {
+        let a = SE23::random();
+        let b = SE23::random();
+        let c = SE23::random();
+        let ab_c = a.compose(&b, None, None).compose(&c, None, None);
+        let a_bc = a.compose(&b.compose(&c, None, None), None, None);
+        assert!(ab_c.is_approx(&a_bc, 1e-6));
+    }
+
+    #[test]
+    fn test_se23_inverse_twice() {
+        let g = SE23::random();
+        let g_inv_inv = g.inverse(None).inverse(None);
+        assert!(g.is_approx(&g_inv_inv, 1e-6));
+    }
+
+    #[test]
+    fn test_se23_tangent_normalize_zero_theta() {
+        let tangent = SE23Tangent::new(
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::zeros(),
+            Vector3::new(4.0, 5.0, 6.0),
+        );
+        let normalized = tangent.normalized();
+        assert!(normalized.theta().norm() < TOLERANCE);
+    }
+
+    #[test]
+    fn test_se23_tangent_generator_all() {
+        let tangent = SE23Tangent::zero();
+        for i in 0..9 {
+            let g = tangent.generator(i);
+            assert!(g.norm() > 0.0, "Generator {} should be non-zero", i);
+        }
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_se23_tangent_generator_out_of_range() {
+        let tangent = SE23Tangent::zero();
+        tangent.generator(9);
+    }
 }
