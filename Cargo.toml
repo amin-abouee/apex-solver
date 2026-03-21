@@ -82,10 +82,6 @@ path = "bin/pose_graph_g2o.rs"
 name = "bundle_adjustment"
 path = "bin/bundle_adjustment.rs"
 
-[[bin]]
-name = "download_datasets"
-path = "bin/download_datasets.rs"
-
 [[example]]
 name = "compare_solvers"
 
