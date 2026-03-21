@@ -62,8 +62,8 @@ pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
 
 pub mod rn;
 pub mod se2;
-pub mod se3;
 pub mod se23;
+pub mod se3;
 pub mod sgal3;
 pub mod sim3;
 pub mod so2;

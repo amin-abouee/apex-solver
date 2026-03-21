@@ -110,7 +110,7 @@ use crate::{
     factors::Factor,
     linalg::{SparseLinearSolver, extract_variable_covariances},
 };
-use apex_manifolds::{ManifoldType, rn, se2, se23, se3, sgal3, sim3, so2, so3};
+use apex_manifolds::{ManifoldType, rn, se2, se3, se23, sgal3, sim3, so2, so3};
 
 /// Symbolic structure for sparse matrix operations.
 ///
