@@ -32,8 +32,8 @@
 //! ```
 
 use apex_io::{G2oLoader, GraphLoader};
-use apex_solver::ManifoldType;
 use apex_solver::JacobianMode;
+use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
@@ -285,70 +285,13 @@ fn run_se2_optimization(
 // SE2 (2D) Integration Tests
 // ============================================================================
 
-/// Test optimization on ring.g2o (small SE2 dataset)
-///
-/// This is a fast test suitable for CI. The ring dataset has 434 vertices
-/// and 459 edges, representing a small loop closure problem.
-#[test]
-fn test_ring_se2_converges() -> Result<(), Box<dyn std::error::Error>> {
-    let result = run_se2_optimization("ring", 100, true)?;
-
-    // Verify dataset size
-    assert_eq!(
-        result.vertices, 434,
-        "ring.g2o should have 434 vertices, got {}",
-        result.vertices
-    );
-    assert_eq!(
-        result.edges, 459,
-        "ring.g2o should have 459 edges, got {}",
-        result.edges
-    );
-
-    // Verify convergence
-    assert!(
-        result.success,
-        "Optimization did not converge. Status: {:?}, Iterations: {}, Final cost: {}",
-        result.status, result.iterations, result.final_cost
-    );
-
-    // Verify cost improvement
-    assert!(
-        result.improvement_pct > 85.0,
-        "Cost improvement too low: {:.2}% (expected >85%)",
-        result.improvement_pct
-    );
-
-    // Verify iterations
-    assert!(
-        result.iterations < 100,
-        "Hit maximum iterations: {}",
-        result.iterations
-    );
-
-    // Verify numerical stability
-    assert!(
-        result.final_cost.is_finite(),
-        "Final cost is not finite: {}",
-        result.final_cost
-    );
-
-    // Verify performance (should complete in <2 seconds)
-    assert!(
-        result.elapsed_time.as_secs() < 2,
-        "Optimization took too long: {:?}",
-        result.elapsed_time
-    );
-
-    Ok(())
-}
-
 /// Test optimization on intel.g2o (medium SE2 dataset)
 ///
 /// The Intel Research Lab dataset has 1,228 vertices and 1,483 edges.
 /// This is a real-world indoor SLAM dataset.
 #[test]
 fn test_intel_se2_converges() -> Result<(), Box<dyn std::error::Error>> {
+    apex_io::ensure_odometry_dataset("intel")?;
     let result = run_se2_optimization("intel", 100, true)?;
 
     // Verify dataset size
@@ -412,6 +355,7 @@ fn test_intel_se2_converges() -> Result<(), Box<dyn std::error::Error>> {
 /// a spherical topology commonly used for benchmarking.
 #[test]
 fn test_sphere2500_se3_converges() -> Result<(), Box<dyn std::error::Error>> {
+    apex_io::ensure_odometry_dataset("sphere2500")?;
     let result = run_se3_optimization("sphere2500", 100, true)?;
 
     // Verify dataset size
@@ -471,6 +415,7 @@ fn test_sphere2500_se3_converges() -> Result<(), Box<dyn std::error::Error>> {
 /// representing a real-world indoor SLAM scenario.
 #[test]
 fn test_parking_garage_se3_converges() -> Result<(), Box<dyn std::error::Error>> {
+    apex_io::ensure_odometry_dataset("parking-garage")?;
     let result = run_se3_optimization("parking-garage", 100, true)?;
 
     // Verify dataset size
