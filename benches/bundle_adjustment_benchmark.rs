@@ -46,7 +46,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
-use apex_io::{BalLoader, BUNDLE_ADJUSTMENT_DATA_DIR};
+use apex_io::{BalLoader, utils::DatasetRegistry};
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use apex_solver::ManifoldType;
@@ -73,24 +73,23 @@ struct DatasetConfig {
 
 /// Get all datasets to benchmark
 fn get_datasets() -> Vec<DatasetConfig> {
-    vec![
-        DatasetConfig {
-            name: "Ladybug".to_string(),
-            path: format!("{}/Ladybug/problem-1723-156502-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
-        },
-        DatasetConfig {
-            name: "Trafalgar".to_string(),
-            path: format!("{}/Trafalgar/problem-257-65132-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
-        },
-        DatasetConfig {
-            name: "Dubrovnik".to_string(),
-            path: format!("{}/Dubrovnik/problem-356-226730-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
-        },
-        DatasetConfig {
-            name: "Venice".to_string(),
-            path: format!("{}/Venice/problem-1778-993923-pre.txt", BUNDLE_ADJUSTMENT_DATA_DIR),
-        },
-    ]
+    let registry = DatasetRegistry::load();
+    // (registry_key, display_name, cameras, points)
+    let specs = [
+        ("ladybug", "Ladybug", 1723u32, 156502u32),
+        ("trafalgar", "Trafalgar", 257u32, 65132u32),
+        ("dubrovnik", "Dubrovnik", 356u32, 226730u32),
+        ("venice", "Venice", 1778u32, 993923u32),
+    ];
+    specs
+        .iter()
+        .filter_map(|(key, display, cameras, points)| {
+            registry.ba_path(key, *cameras, *points).map(|p| DatasetConfig {
+                name: display.to_string(),
+                path: p.to_string_lossy().into_owned(),
+            })
+        })
+        .collect()
 }
 
 /// Bundle Adjustment Benchmark Result
