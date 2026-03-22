@@ -27,10 +27,10 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{DatasetRegistry, G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::problem::{Problem, VariableEnum};
-use apex_solver::JacobianMode;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -127,7 +127,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     // Resolve dataset path from registry (handles 2d/3d subdirectory automatically)
-    let dataset_path = DatasetRegistry::load()
+    let dataset_path = DatasetRegistry::load()?
         .odometry_path(&args.dataset)
         .ok_or_else(|| format!("Dataset '{}' not found in registry. Use the dataset name (e.g. 'sphere2500', 'intel').", args.dataset))?;
     info!("Loading dataset: {}", dataset_path.display());
