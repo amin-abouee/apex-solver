@@ -13,8 +13,8 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeCamera, PinholeParams};
 use apex_manifolds::LieGroup;
-use apex_solver::ManifoldType;
 use apex_solver::JacobianMode;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
@@ -236,15 +236,6 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
 
     let total_observations: usize = all_observations.iter().map(|o| o.len()).sum();
     let rmse = (result.final_cost / total_observations as f64).sqrt();
-
-    println!("\n=== Optimization Results ===");
-    println!("Status: {:?}", result.status);
-    println!("Iterations: {}", result.iterations);
-    println!("Initial cost: {:.4e}", result.initial_cost);
-    println!("Final cost: {:.4e}", result.final_cost);
-    println!("Cost reduction: {:.2}%", cost_reduction * 100.0);
-    println!("Total observations: {}", total_observations);
-    println!("Reprojection RMSE: {:.4} pixels", rmse);
 
     // Pinhole should achieve excellent RMSE (tightest tolerance)
     assert!(

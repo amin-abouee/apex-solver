@@ -31,7 +31,7 @@
 //! cargo test -- --ignored
 //! ```
 
-use apex_io::{G2oLoader, GraphLoader};
+use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
@@ -73,7 +73,7 @@ fn run_se3_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file (from workspace root, relative to crate)
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se3.len();
@@ -187,7 +187,7 @@ fn run_se2_optimization(
     use_prior: bool,
 ) -> Result<TestResult, Box<dyn std::error::Error>> {
     // Load the G2O graph file (from workspace root, relative to crate)
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
     let graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se2.len();
