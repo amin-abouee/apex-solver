@@ -24,7 +24,8 @@ use apex_io::utils::{DatasetRegistry, decompress_bzip2, download_file};
 use apex_io::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR};
 use clap::Parser;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -51,8 +52,8 @@ struct Args {
 // ---------------------------------------------------------------------------
 
 fn download_and_size(url: &str, dest: &PathBuf) -> Result<u64, Box<dyn std::error::Error>> {
-    println!("  Downloading: {url}");
-    println!("  Saving to: {dest:?}");
+    info!("  Downloading: {url}");
+    info!("  Saving to: {dest:?}");
     download_file(url, dest).map_err(|e| format!("HTTP request failed: {e}"))?;
     let size = std::fs::metadata(dest)?.len();
     Ok(size)
@@ -62,14 +63,13 @@ fn decompress_and_cleanup(
     compressed: &PathBuf,
     decompressed: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("  Decompressing: {compressed:?}");
-    println!("  Extracting to: {decompressed:?}");
-    decompress_bzip2(compressed, decompressed)
-        .map_err(|e| format!("Decompression failed: {e}"))?;
+    info!("  Decompressing: {compressed:?}");
+    info!("  Extracting to: {decompressed:?}");
+    decompress_bzip2(compressed, decompressed).map_err(|e| format!("Decompression failed: {e}"))?;
     if let Err(e) = std::fs::remove_file(compressed) {
-        eprintln!("  Warning: could not remove compressed file: {e}");
+        warn!("  Warning: could not remove compressed file: {e}");
     }
-    println!("  Done!");
+    info!("  Done!");
     Ok(())
 }
 
@@ -78,34 +78,34 @@ fn decompress_and_cleanup(
 // ---------------------------------------------------------------------------
 
 fn list_datasets(registry: &DatasetRegistry) {
-    println!("\n=== Available Datasets ===\n");
+    info!("\n=== Available Datasets ===\n");
 
     let d3: Vec<_> = registry.odometry_by_category("3d");
     let d2: Vec<_> = registry.odometry_by_category("2d");
 
-    println!("Odometry (g2o format):");
-    println!(
+    info!("Odometry (g2o format):");
+    info!(
         "  1. 3D g2o      - {} files ({})",
         d3.len(),
         d3.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     );
-    println!(
+    info!(
         "  2. 2D g2o      - {} files ({})",
         d2.len(),
         d2.iter().map(|(n, _)| *n).collect::<Vec<_>>().join(", ")
     );
-    println!(
+    info!(
         "  3. All odometry g2o - {} files (all odometry datasets)",
         d3.len() + d2.len()
     );
-    println!();
+    info!("");
 
-    println!("Bundle Adjustment (UW BAL format):");
+    info!("Bundle Adjustment (UW BAL format):");
     let ba = registry.ba_sorted();
     for (idx, (name, entry)) in ba.iter().enumerate() {
         let largest = entry.largest();
         let (cameras, points) = largest.map(|[c, p]| (c, p)).unwrap_or((0, 0));
-        println!(
+        info!(
             "  {}. {:12} - {} problems (largest: {}x{})",
             idx + 4,
             name,
@@ -116,7 +116,11 @@ fn list_datasets(registry: &DatasetRegistry) {
     }
 
     let ba_len = ba.len();
-    println!("  {}. Largest each  - {} problems (largest from each BA)", ba_len + 4, ba_len);
+    info!(
+        "  {}. Largest each  - {} problems (largest from each BA)",
+        ba_len + 4,
+        ba_len
+    );
 
     let total_ba: usize = registry
         .bundle_adjustment
@@ -125,13 +129,13 @@ fn list_datasets(registry: &DatasetRegistry) {
         .sum();
     let total_odometry = registry.odometry.len();
 
-    println!();
-    println!(
+    info!("");
+    info!(
         "  {}. Benchmark datasets - {} files (all odometry g2o + largest each BA)",
         ba_len + 5,
         total_odometry + ba_len
     );
-    println!(
+    info!(
         "  {}. All datasets       - {} files ({} g2o + {} BA problems)",
         ba_len + 6,
         total_odometry + total_ba,
@@ -147,7 +151,7 @@ fn list_datasets(registry: &DatasetRegistry) {
 fn download_odometry_by_category(
     registry: &DatasetRegistry,
     category: &str,
-    base_output: &PathBuf,
+    base_output: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let mut success_count = 0;
     let mut fail_count = 0;
@@ -164,11 +168,11 @@ fn download_odometry_by_category(
             Ok(size) => {
                 total_bytes += size;
                 success_count += 1;
-                println!("OK ({size} bytes)");
+                info!("OK ({size} bytes)");
             }
             Err(e) => {
                 fail_count += 1;
-                println!("FAILED: {e}");
+                info!("FAILED: {e}");
             }
         }
     }
@@ -177,7 +181,7 @@ fn download_odometry_by_category(
 
 fn download_all_g2o(
     registry: &DatasetRegistry,
-    base_output: &PathBuf,
+    base_output: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let (s1, f1, b1) = download_odometry_by_category(registry, "3d", base_output)?;
     let (s2, f2, b2) = download_odometry_by_category(registry, "2d", base_output)?;
@@ -187,7 +191,7 @@ fn download_all_g2o(
 fn download_single_ba_dataset(
     name: &str,
     registry: &DatasetRegistry,
-    base_output: &PathBuf,
+    base_output: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let entry = registry
         .bundle_adjustment
@@ -201,8 +205,7 @@ fn download_single_ba_dataset(
     let dataset_path = base_output.join(name);
 
     for [cameras, points] in &entry.problems {
-        let compressed_path =
-            dataset_path.join(format!("problem-{cameras}-{points}-pre.txt.bz2"));
+        let compressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt.bz2"));
         let decompressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt"));
         let url = entry.problem_url(*cameras, *points);
 
@@ -215,17 +218,17 @@ fn download_single_ba_dataset(
                 match decompress_and_cleanup(&compressed_path, &decompressed_path) {
                     Ok(()) => {
                         success_count += 1;
-                        println!("OK ({size} bytes)");
+                        info!("OK ({size} bytes)");
                     }
                     Err(e) => {
                         fail_count += 1;
-                        println!("DECOMPRESS FAILED: {e}");
+                        info!("DECOMPRESS FAILED: {e}");
                     }
                 }
             }
             Err(e) => {
                 fail_count += 1;
-                println!("FAILED: {e}");
+                info!("FAILED: {e}");
             }
         }
     }
@@ -235,7 +238,7 @@ fn download_single_ba_dataset(
 
 fn download_largest_each_ba(
     registry: &DatasetRegistry,
-    base_output: &PathBuf,
+    base_output: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let mut success_count = 0;
     let mut fail_count = 0;
@@ -247,8 +250,7 @@ fn download_largest_each_ba(
         };
 
         let dataset_path = base_output.join(name);
-        let compressed_path =
-            dataset_path.join(format!("problem-{cameras}-{points}-pre.txt.bz2"));
+        let compressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt.bz2"));
         let decompressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt"));
         let url = entry.problem_url(cameras, points);
 
@@ -261,17 +263,17 @@ fn download_largest_each_ba(
                 match decompress_and_cleanup(&compressed_path, &decompressed_path) {
                     Ok(()) => {
                         success_count += 1;
-                        println!("OK ({size} bytes)");
+                        info!("OK ({size} bytes)");
                     }
                     Err(e) => {
                         fail_count += 1;
-                        println!("DECOMPRESS FAILED: {e}");
+                        info!("DECOMPRESS FAILED: {e}");
                     }
                 }
             }
             Err(e) => {
                 fail_count += 1;
-                println!("FAILED: {e}");
+                info!("FAILED: {e}");
             }
         }
     }
@@ -281,7 +283,7 @@ fn download_largest_each_ba(
 
 fn download_all_ba(
     registry: &DatasetRegistry,
-    base_output: &PathBuf,
+    base_output: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let mut total_success = 0;
     let mut total_fail = 0;
@@ -299,8 +301,8 @@ fn download_all_ba(
 
 fn download_benchmark_datasets(
     registry: &DatasetRegistry,
-    base_output_odometry: &PathBuf,
-    base_output_ba: &PathBuf,
+    base_output_odometry: &Path,
+    base_output_ba: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let (s1, f1, b1) = download_all_g2o(registry, base_output_odometry)?;
     let (s2, f2, b2) = download_largest_each_ba(registry, base_output_ba)?;
@@ -309,8 +311,8 @@ fn download_benchmark_datasets(
 
 fn download_all_datasets(
     registry: &DatasetRegistry,
-    base_output_odometry: &PathBuf,
-    base_output_ba: &PathBuf,
+    base_output_odometry: &Path,
+    base_output_ba: &Path,
 ) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
     let (s1, f1, b1) = download_all_g2o(registry, base_output_odometry)?;
     let (s2, f2, b2) = download_all_ba(registry, base_output_ba)?;
@@ -323,7 +325,7 @@ fn download_all_datasets(
 
 fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::error::Error>> {
     list_datasets(registry);
-    println!();
+    info!("");
 
     let ba_count = registry.bundle_adjustment.len();
     let max = ba_count + 6;
@@ -339,7 +341,9 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
         .map_err(|_| format!("Invalid input. Please enter a number between 0 and {max}."))?;
 
     if selection > max {
-        return Err(format!("Invalid selection. Please enter a number between 0 and {max}.").into());
+        return Err(
+            format!("Invalid selection. Please enter a number between 0 and {max}.").into(),
+        );
     }
 
     Ok(selection)
@@ -350,8 +354,10 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt::init();
+
     let args = Args::parse();
-    let registry = DatasetRegistry::load();
+    let registry = DatasetRegistry::load()?;
 
     if args.list {
         list_datasets(&registry);
@@ -365,7 +371,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(s) => {
             let max = ba_count + 6;
             if s > max {
-                println!("Invalid selection: {s}. Please enter a number between 0 and {max}.");
+                info!("Invalid selection: {s}. Please enter a number between 0 and {max}.");
                 return Ok(());
             }
             s
@@ -373,8 +379,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => get_user_selection(&registry)?,
     };
 
-    println!("\n=== Dataset Downloader ===");
-    println!("Selected: {selection}");
+    info!("\n=== Dataset Downloader ===");
+    info!("Selected: {selection}");
 
     let odometry_output = args
         .output
@@ -391,24 +397,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match selection {
         1 => {
-            println!("\n--- Downloading 3D g2o datasets ---");
-            println!("Output: {:?}\n", odometry_output.join("3d"));
+            info!("\n--- Downloading 3D g2o datasets ---");
+            info!("Output: {:?}\n", odometry_output.join("3d"));
             let (s, f, b) = download_odometry_by_category(&registry, "3d", &odometry_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         2 => {
-            println!("\n--- Downloading 2D g2o datasets ---");
-            println!("Output: {:?}\n", odometry_output.join("2d"));
+            info!("\n--- Downloading 2D g2o datasets ---");
+            info!("Output: {:?}\n", odometry_output.join("2d"));
             let (s, f, b) = download_odometry_by_category(&registry, "2d", &odometry_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         3 => {
-            println!("\n--- Downloading all odometry g2o datasets ---");
-            println!("Output: {:?} and {:?}\n", odometry_output.join("2d"), odometry_output.join("3d"));
+            info!("\n--- Downloading all odometry g2o datasets ---");
+            info!(
+                "Output: {:?} and {:?}\n",
+                odometry_output.join("2d"),
+                odometry_output.join("3d")
+            );
             let (s, f, b) = download_all_g2o(&registry, &odometry_output)?;
             total_success += s;
             total_fail += f;
@@ -417,49 +427,53 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         n if n >= 4 && n <= ba_count + 3 => {
             let ds_idx = n - 4;
             let (name, _) = ba_sorted[ds_idx];
-            println!("\n--- Downloading {name} ---");
-            println!("Output: {ba_output:?}\n");
+            info!("\n--- Downloading {name} ---");
+            info!("Output: {ba_output:?}\n");
             let (s, f, b) = download_single_ba_dataset(name, &registry, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 4 => {
-            println!("\n--- Downloading largest problem from each BA dataset ---");
-            println!("Output: {ba_output:?}\n");
+            info!("\n--- Downloading largest problem from each BA dataset ---");
+            info!("Output: {ba_output:?}\n");
             let (s, f, b) = download_largest_each_ba(&registry, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 5 => {
-            println!("\n--- Downloading benchmark datasets (all odometry + largest each BA) ---");
-            println!("Odometry output: {:?} / {:?}", odometry_output.join("2d"), odometry_output.join("3d"));
-            println!("BA output:       {ba_output:?}\n");
+            info!("\n--- Downloading benchmark datasets (all odometry + largest each BA) ---");
+            info!(
+                "Odometry output: {:?} / {:?}",
+                odometry_output.join("2d"),
+                odometry_output.join("3d")
+            );
+            info!("BA output:       {ba_output:?}\n");
             let (s, f, b) = download_benchmark_datasets(&registry, &odometry_output, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 6 => {
-            println!("\n--- Downloading ALL datasets ---");
-            println!("Odometry output: {odometry_output:?}");
-            println!("BA output:       {ba_output:?}\n");
+            info!("\n--- Downloading ALL datasets ---");
+            info!("Odometry output: {odometry_output:?}");
+            info!("BA output:       {ba_output:?}\n");
             let (s, f, b) = download_all_datasets(&registry, &odometry_output, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         _ => {
-            println!("Invalid selection: {selection}. Run with --list to see available options.");
+            info!("Invalid selection: {selection}. Run with --list to see available options.");
             return Ok(());
         }
     }
 
-    println!("\n=== Download Complete ===");
-    println!("Success: {total_success}");
-    println!("Failed:  {total_fail}");
-    println!(
+    info!("\n=== Download Complete ===");
+    info!("Success: {total_success}");
+    info!("Failed:  {total_fail}");
+    info!(
         "Total:   {total_bytes} bytes ({:.2} MB)",
         total_bytes as f64 / 1_048_576.0
     );

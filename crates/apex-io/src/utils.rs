@@ -17,7 +17,7 @@
 //! ```no_run
 //! use apex_io::utils::DatasetRegistry;
 //!
-//! let registry = DatasetRegistry::load();
+//! let registry = DatasetRegistry::load().unwrap();
 //! for (name, entry) in registry.odometry_by_category("3d") {
 //!     println!("{name}: {}", entry.url);
 //! }
@@ -29,6 +29,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use tracing::info;
 
 use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR};
 
@@ -86,11 +87,11 @@ pub struct DatasetRegistry {
 impl DatasetRegistry {
     /// Load the registry from the compile-time embedded `datasets.toml`.
     ///
-    /// This always succeeds — the TOML is validated at compile time via
-    /// `include_str!`. Panics only if the file is malformed (developer error).
-    pub fn load() -> Self {
-        toml::from_str(DATASETS_TOML)
-            .expect("datasets.toml is embedded at compile time and must be valid TOML")
+    /// # Errors
+    /// Returns an error only if `datasets.toml` is malformed TOML — a
+    /// developer error that should never occur with the bundled file.
+    pub fn load() -> io::Result<Self> {
+        toml::from_str(DATASETS_TOML).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Returns the on-disk path for an odometry dataset, including its category subdirectory.
@@ -100,11 +101,14 @@ impl DatasetRegistry {
     /// # Example
     /// ```
     /// use apex_io::DatasetRegistry;
-    /// let reg = DatasetRegistry::load();
+    /// # fn main() -> std::io::Result<()> {
+    /// let reg = DatasetRegistry::load()?;
     /// assert_eq!(
-    ///     reg.odometry_path("intel").unwrap().to_str().unwrap(),
-    ///     "data/odometry/2d/intel.g2o"
+    ///     reg.odometry_path("intel").map(|p| p.to_str().unwrap().to_string()),
+    ///     Some("data/odometry/2d/intel.g2o".to_string())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn odometry_path(&self, name: &str) -> Option<std::path::PathBuf> {
         self.odometry.get(name).map(|e| {
@@ -166,7 +170,7 @@ impl DatasetRegistry {
 /// Returns an error if the dataset name is not in the registry, the download
 /// fails, or the file cannot be written.
 pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
-    let registry = DatasetRegistry::load();
+    let registry = DatasetRegistry::load()?;
 
     let entry = registry.odometry.get(name).ok_or_else(|| {
         io::Error::other(format!(
@@ -187,10 +191,10 @@ pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
         return Ok(path);
     }
 
-    eprintln!("Downloading {name} ({}) ...", entry.filename);
+    info!("Downloading {name} ({}) ...", entry.filename);
     download_file(&entry.url, &path)
         .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
-    eprintln!("Saved to {}", path.display());
+    info!("Saved to {}", path.display());
     Ok(path)
 }
 
@@ -211,14 +215,17 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
         return Ok(txt_path);
     }
 
-    let registry = DatasetRegistry::load();
+    let registry = DatasetRegistry::load()?;
     let entry = registry.bundle_adjustment.get(name).ok_or_else(|| {
         io::Error::other(format!(
             "BA dataset '{name}' not found in registry. \
              Available: {}",
             {
-                let mut names: Vec<_> =
-                    registry.bundle_adjustment.keys().map(String::as_str).collect();
+                let mut names: Vec<_> = registry
+                    .bundle_adjustment
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
                 names.sort();
                 names.join(", ")
             }
@@ -228,7 +235,7 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
     let url = entry.problem_url(cameras, points);
     let bz2_path = txt_path.with_extension("txt.bz2");
 
-    eprintln!("Downloading {name}/problem-{cameras}-{points} ...");
+    info!("Downloading {name}/problem-{cameras}-{points} ...");
     download_file(&url, &bz2_path)
         .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
 
@@ -236,7 +243,7 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
         .map_err(|e| io::Error::other(format!("Failed to decompress: {e}")))?;
 
     let _ = fs::remove_file(&bz2_path); // clean up; ignore errors
-    eprintln!("Saved to {}", txt_path.display());
+    info!("Saved to {}", txt_path.display());
     Ok(txt_path)
 }
 
@@ -299,40 +306,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_parses_without_panic() {
-        let registry = DatasetRegistry::load();
-        assert!(!registry.odometry.is_empty(), "odometry section must not be empty");
+    fn registry_parses_without_panic() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        assert!(
+            !registry.odometry.is_empty(),
+            "odometry section must not be empty"
+        );
         assert!(
             !registry.bundle_adjustment.is_empty(),
             "bundle_adjustment section must not be empty"
         );
+        Ok(())
     }
 
     #[test]
-    fn registry_contains_expected_odometry_datasets() {
-        let registry = DatasetRegistry::load();
+    fn registry_contains_expected_odometry_datasets() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         for name in &["sphere2500", "parking-garage", "intel", "M3500"] {
             assert!(
                 registry.odometry.contains_key(*name),
                 "missing expected dataset: {name}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn registry_contains_expected_ba_datasets() {
-        let registry = DatasetRegistry::load();
+    fn registry_contains_expected_ba_datasets() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         for name in &["ladybug", "trafalgar", "dubrovnik", "venice", "final"] {
             assert!(
                 registry.bundle_adjustment.contains_key(*name),
                 "missing expected BA dataset: {name}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn odometry_entries_have_valid_categories() {
-        let registry = DatasetRegistry::load();
+    fn odometry_entries_have_valid_categories() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         for (name, entry) in &registry.odometry {
             assert!(
                 entry.category == "2d" || entry.category == "3d",
@@ -340,85 +353,103 @@ mod tests {
                 entry.category
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn ba_entries_have_at_least_one_problem() {
-        let registry = DatasetRegistry::load();
+    fn ba_entries_have_at_least_one_problem() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         for (name, entry) in &registry.bundle_adjustment {
             assert!(
                 !entry.problems.is_empty(),
                 "BA dataset '{name}' has no problems listed"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn ba_problem_url_format_is_correct() {
-        let registry = DatasetRegistry::load();
-        let ladybug = registry.bundle_adjustment.get("ladybug").unwrap();
+    fn ba_problem_url_format_is_correct() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let ladybug = registry
+            .bundle_adjustment
+            .get("ladybug")
+            .ok_or_else(|| io::Error::other("ladybug dataset not found"))?;
         let url = ladybug.problem_url(49, 7776);
         assert_eq!(
             url,
             "https://grail.cs.washington.edu/projects/bal/data/ladybug/problem-49-7776-pre.txt.bz2"
         );
+        Ok(())
     }
 
     #[test]
-    fn odometry_by_category_returns_only_3d() {
-        let registry = DatasetRegistry::load();
+    fn odometry_by_category_returns_only_3d() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         let entries = registry.odometry_by_category("3d");
         for (_, entry) in &entries {
             assert_eq!(entry.category, "3d");
         }
         assert!(!entries.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn sphere2500_uses_dropbox_url() {
-        let registry = DatasetRegistry::load();
-        let entry = registry.odometry.get("sphere2500").expect("sphere2500 must exist");
+    fn sphere2500_uses_dropbox_url() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entry = registry
+            .odometry
+            .get("sphere2500")
+            .ok_or_else(|| io::Error::other("sphere2500 must exist"))?;
         assert!(
             entry.url.contains("dropbox"),
             "sphere2500 should use the Dropbox URL, got: {}",
             entry.url
         );
+        Ok(())
     }
 
     #[test]
-    fn registry_contains_new_vertigo_datasets() {
-        let registry = DatasetRegistry::load();
+    fn registry_contains_new_vertigo_datasets() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         for name in &["manhattanOlson3500", "ring", "ring_city", "city10000"] {
             assert!(
                 registry.odometry.contains_key(*name),
                 "missing expected dataset: {name}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn odometry_path_includes_category_subdir() {
-        let registry = DatasetRegistry::load();
-        let path_3d = registry.odometry_path("sphere2500").unwrap();
-        let path_2d = registry.odometry_path("intel").unwrap();
+    fn odometry_path_includes_category_subdir() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let path_3d = registry
+            .odometry_path("sphere2500")
+            .ok_or_else(|| io::Error::other("sphere2500 path not found"))?;
+        let path_2d = registry
+            .odometry_path("intel")
+            .ok_or_else(|| io::Error::other("intel path not found"))?;
         assert!(
-            path_3d.to_str().unwrap().contains("/3d/"),
+            path_3d.to_str().is_some_and(|s| s.contains("/3d/")),
             "3D path should contain /3d/, got: {}",
             path_3d.display()
         );
         assert!(
-            path_2d.to_str().unwrap().contains("/2d/"),
+            path_2d.to_str().is_some_and(|s| s.contains("/2d/")),
             "2D path should contain /2d/, got: {}",
             path_2d.display()
         );
+        Ok(())
     }
 
     #[test]
-    fn sphere_bignoise_removed_from_registry() {
-        let registry = DatasetRegistry::load();
+    fn sphere_bignoise_removed_from_registry() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
         assert!(
             !registry.odometry.contains_key("sphere_bignoise"),
             "sphere_bignoise should have been removed (merged into sphere2500)"
         );
+        Ok(())
     }
 }
