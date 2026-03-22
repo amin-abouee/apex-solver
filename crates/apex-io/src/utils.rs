@@ -395,15 +395,15 @@ mod tests {
     }
 
     #[test]
-    fn sphere2500_uses_dropbox_url() -> io::Result<()> {
+    fn sphere2500_uses_github_url() -> io::Result<()> {
         let registry = DatasetRegistry::load()?;
         let entry = registry
             .odometry
             .get("sphere2500")
             .ok_or_else(|| io::Error::other("sphere2500 must exist"))?;
         assert!(
-            entry.url.contains("dropbox"),
-            "sphere2500 should use the Dropbox URL, got: {}",
+            entry.url.contains("github"),
+            "sphere2500 should use the GitHub URL, got: {}",
             entry.url
         );
         Ok(())
