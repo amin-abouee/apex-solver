@@ -21,7 +21,7 @@
 //! ```
 
 use apex_io::utils::{DatasetRegistry, decompress_bzip2, download_file};
-use apex_io::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR};
+use apex_io::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR, init_logger};
 use clap::Parser;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -354,7 +354,7 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
 // ---------------------------------------------------------------------------
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    init_logger();
 
     let args = Args::parse();
     let registry = DatasetRegistry::load()?;

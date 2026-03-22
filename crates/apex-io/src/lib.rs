@@ -18,9 +18,11 @@ use apex_manifolds::{se2::SE2, se3::SE3};
 // Module declarations
 pub mod bal;
 pub mod g2o;
+pub mod logger;
 pub mod toro;
 pub mod utils;
 
+pub use logger::init_logger;
 pub use utils::{DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset};
 
 /// Default base directory for odometry (pose graph) datasets relative to the workspace root.
