@@ -431,13 +431,13 @@ mod tests {
             .odometry_path("intel")
             .ok_or_else(|| io::Error::other("intel path not found"))?;
         assert!(
-            path_3d.to_str().is_some_and(|s| s.contains("/3d/")),
-            "3D path should contain /3d/, got: {}",
+            path_3d.components().any(|c| c.as_os_str() == "3d"),
+            "3D path should contain '3d' component, got: {}",
             path_3d.display()
         );
         assert!(
-            path_2d.to_str().is_some_and(|s| s.contains("/2d/")),
-            "2D path should contain /2d/, got: {}",
+            path_2d.components().any(|c| c.as_os_str() == "2d"),
+            "2D path should contain '2d' component, got: {}",
             path_2d.display()
         );
         Ok(())
