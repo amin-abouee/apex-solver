@@ -74,12 +74,7 @@ mod tests {
             Triplet::new(1, 0, 3.0),
             Triplet::new(1, 1, 4.0),
         ];
-<<<<<<< HEAD
-        let sparse = SparseColMat::try_new_from_triplets(2, 2, &triplets)
-            .map_err(|e| format!("failed to create sparse matrix: {e:?}"))?;
-=======
         let sparse = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
->>>>>>> main
 
         let dense = sparse_to_dense(&sparse);
         assert_eq!(dense[(0, 0)], 1.0);
@@ -119,12 +114,7 @@ mod tests {
     fn test_sparse_to_dense_empty_columns() -> TestResult {
         // 3×3 matrix with only diagonal entries — middle column empty
         let triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(2, 2, 9.0)];
-<<<<<<< HEAD
-        let sparse = SparseColMat::try_new_from_triplets(3, 3, &triplets)
-            .map_err(|e| format!("failed to create sparse matrix: {e:?}"))?;
-=======
         let sparse = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
->>>>>>> main
 
         let dense = sparse_to_dense(&sparse);
         assert_eq!(dense[(0, 0)], 1.0);
