@@ -15,8 +15,8 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, DoubleSphereCamera, PinholeParams};
 use apex_manifolds::LieGroup;
-use apex_solver::ManifoldType;
 use apex_solver::JacobianMode;
+use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
