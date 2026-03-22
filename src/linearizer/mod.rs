@@ -34,12 +34,12 @@ use faer::sparse::{SparseColMat, Triplet};
 use faer::{Col, Mat};
 use nalgebra::{DMatrix, DVector};
 
+use crate::core::problem::{Problem, VariableEnum};
 use crate::{
     core::{CoreError, corrector::Corrector, residual_block::ResidualBlock},
     error::{ApexSolverError, ApexSolverResult},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
 };
-use crate::core::problem::{Problem, VariableEnum};
 
 pub use cpu::sparse::SymbolicStructure;
 

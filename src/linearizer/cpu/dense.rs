@@ -17,8 +17,8 @@ use crate::{
     error::{ApexSolverError, ApexSolverResult},
 };
 
-use crate::core::problem::{Problem, VariableEnum};
 use super::super::linearize_block;
+use crate::core::problem::{Problem, VariableEnum};
 
 /// Assemble residuals and dense Jacobian from the current variable values.
 ///

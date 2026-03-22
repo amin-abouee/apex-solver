@@ -63,8 +63,10 @@ mod tests {
     use super::*;
     use faer::sparse::{SparseColMat, Triplet};
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn test_sparse_to_dense_roundtrip() {
+    fn test_sparse_to_dense_roundtrip() -> TestResult {
         // Create a small sparse matrix
         let triplets = vec![
             Triplet::new(0, 0, 1.0),
@@ -72,24 +74,26 @@ mod tests {
             Triplet::new(1, 0, 3.0),
             Triplet::new(1, 1, 4.0),
         ];
-        let sparse = SparseColMat::try_new_from_triplets(2, 2, &triplets).unwrap();
+        let sparse = SparseColMat::try_new_from_triplets(2, 2, &triplets)
+            .map_err(|e| format!("failed to create sparse matrix: {e:?}"))?;
 
         let dense = sparse_to_dense(&sparse);
         assert_eq!(dense[(0, 0)], 1.0);
         assert_eq!(dense[(0, 1)], 2.0);
         assert_eq!(dense[(1, 0)], 3.0);
         assert_eq!(dense[(1, 1)], 4.0);
+        Ok(())
     }
 
     #[test]
-    fn test_dense_to_sparse_roundtrip() {
+    fn test_dense_to_sparse_roundtrip() -> TestResult {
         let mut dense = Mat::zeros(3, 3);
         dense[(0, 0)] = 5.0;
         dense[(1, 1)] = 3.0;
         dense[(2, 2)] = 1.0;
         dense[(0, 2)] = 0.5;
 
-        let sparse = dense_to_sparse(&dense, 1e-15).unwrap();
+        let sparse = dense_to_sparse(&dense, 1e-15)?;
         let back = sparse_to_dense(&sparse);
 
         for i in 0..3 {
@@ -104,18 +108,21 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn test_sparse_to_dense_empty_columns() {
+    fn test_sparse_to_dense_empty_columns() -> TestResult {
         // 3×3 matrix with only diagonal entries — middle column empty
         let triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(2, 2, 9.0)];
-        let sparse = SparseColMat::try_new_from_triplets(3, 3, &triplets).unwrap();
+        let sparse = SparseColMat::try_new_from_triplets(3, 3, &triplets)
+            .map_err(|e| format!("failed to create sparse matrix: {e:?}"))?;
 
         let dense = sparse_to_dense(&sparse);
         assert_eq!(dense[(0, 0)], 1.0);
         assert_eq!(dense[(1, 1)], 0.0);
         assert_eq!(dense[(2, 2)], 9.0);
         assert_eq!(dense[(0, 1)], 0.0);
+        Ok(())
     }
 }

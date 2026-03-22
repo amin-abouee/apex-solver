@@ -201,8 +201,8 @@ use std::{collections, fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
+    SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{IterationStats, SystemLinearizer};
 

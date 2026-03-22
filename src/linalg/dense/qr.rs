@@ -297,7 +297,10 @@ mod tests {
                 break;
             }
         }
-        assert!(different, "Solutions should differ with different lambda values");
+        assert!(
+            different,
+            "Solutions should differ with different lambda values"
+        );
 
         Ok(())
     }
@@ -308,9 +311,15 @@ mod tests {
 
         // Rank-deficient Jacobian (3×3, rank 2): second row = 2 × first row
         let mut j = Mat::zeros(3, 3);
-        j[(0, 0)] = 1.0; j[(0, 1)] = 2.0; j[(0, 2)] = 3.0;
-        j[(1, 0)] = 2.0; j[(1, 1)] = 4.0; j[(1, 2)] = 6.0;
-        j[(2, 0)] = 0.0; j[(2, 1)] = 0.0; j[(2, 2)] = 1.0;
+        j[(0, 0)] = 1.0;
+        j[(0, 1)] = 2.0;
+        j[(0, 2)] = 3.0;
+        j[(1, 0)] = 2.0;
+        j[(1, 1)] = 4.0;
+        j[(1, 2)] = 6.0;
+        j[(2, 0)] = 0.0;
+        j[(2, 1)] = 0.0;
+        j[(2, 2)] = 1.0;
 
         let mut r = Mat::zeros(3, 1);
         r[(0, 0)] = 1.0;
@@ -367,7 +376,8 @@ mod tests {
         let mut solver = DenseQRSolver::new();
 
         let normal_dx = LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-        let augmented_dx = LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, 0.0)?;
+        let augmented_dx =
+            LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, 0.0)?;
 
         for i in 0..normal_dx.nrows() {
             assert!(
@@ -389,7 +399,7 @@ mod tests {
         let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov.is_some(), "Covariance should be computable");
 
-        let cov = cov.unwrap();
+        let cov = cov.ok_or("covariance should be Some")?;
         let n = cov.nrows();
 
         // Symmetry
@@ -420,14 +430,20 @@ mod tests {
         let errors = solver.compute_standard_errors();
         assert!(errors.is_some(), "Standard errors should be computable");
 
-        let errors = errors.unwrap().clone();
-        let cov = solver.covariance_matrix.as_ref().unwrap();
+        let errors = errors.ok_or("standard errors should be Some")?.clone();
+        let cov = solver
+            .covariance_matrix
+            .as_ref()
+            .ok_or("covariance should be Some")?;
 
         assert_eq!(errors.nrows(), cov.nrows());
         assert_eq!(errors.ncols(), 1);
 
         for i in 0..errors.nrows() {
-            assert!(errors[(i, 0)] > 0.0, "Standard error at {i} should be positive");
+            assert!(
+                errors[(i, 0)] > 0.0,
+                "Standard error at {i} should be positive"
+            );
             let expected = cov[(i, i)].sqrt();
             assert!(
                 (errors[(i, 0)] - expected).abs() < TOLERANCE,
@@ -453,9 +469,16 @@ mod tests {
 
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
-        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver).unwrap();
-        assert!((cov[(0, 0)] - 0.25).abs() < TOLERANCE, "cov[0,0] should be 0.25");
-        assert!((cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE, "cov[1,1] should be 1/9");
+        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
+            .ok_or("covariance should be Some")?;
+        assert!(
+            (cov[(0, 0)] - 0.25).abs() < TOLERANCE,
+            "cov[0,0] should be 0.25"
+        );
+        assert!(
+            (cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE,
+            "cov[1,1] should be 1/9"
+        );
         assert!(cov[(0, 1)].abs() < TOLERANCE);
         assert!(cov[(1, 0)].abs() < TOLERANCE);
 
@@ -470,11 +493,19 @@ mod tests {
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
         LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr1 = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+        let ptr1 = solver
+            .covariance_matrix
+            .as_ref()
+            .ok_or("covariance should be cached")?
+            .as_ptr();
 
         // Second call should return cached result (same pointer)
         LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr2 = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+        let ptr2 = solver
+            .covariance_matrix
+            .as_ref()
+            .ok_or("covariance should be cached")?
+            .as_ptr();
 
         assert_eq!(ptr1, ptr2, "Covariance matrix should be cached");
 
@@ -487,8 +518,10 @@ mod tests {
 
         // Singular Jacobian: second row = 2 × first row
         let mut j = Mat::zeros(2, 2);
-        j[(0, 0)] = 1.0; j[(0, 1)] = 2.0;
-        j[(1, 0)] = 2.0; j[(1, 1)] = 4.0;
+        j[(0, 0)] = 1.0;
+        j[(0, 1)] = 2.0;
+        j[(1, 0)] = 2.0;
+        j[(1, 1)] = 4.0;
 
         let mut r = Mat::zeros(2, 1);
         r[(0, 0)] = 0.0;

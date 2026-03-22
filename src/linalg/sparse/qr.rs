@@ -326,11 +326,13 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let sol1 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol1 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let sol2 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol2 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Results should be identical
         for i in 0..sol1.nrows() {
@@ -415,7 +417,8 @@ mod tests {
         let residuals = Mat::from_fn(3, 1, |i, _| i as f64);
 
         // QR should still provide a least squares solution
-        let result = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
         assert!(result.is_ok());
         Ok(())
     }
@@ -495,8 +498,12 @@ mod tests {
 
         let normal_sol =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        let augmented_sol =
-            LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &residuals, &jacobian, 0.0)?;
+        let augmented_sol = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            0.0,
+        )?;
 
         // Solutions should be very close (within numerical precision)
         for i in 0..normal_sol.nrows() {
@@ -662,7 +669,8 @@ mod tests {
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
         // QR can handle rank-deficient systems, but covariance may be problematic
-        let result = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
         if result.is_ok() {
             // If solve succeeded, covariance computation might still fail due to singularity
             let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);

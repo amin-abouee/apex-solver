@@ -254,7 +254,7 @@ mod tests {
         let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov.is_some(), "Covariance should be computable");
 
-        let cov = cov.unwrap();
+        let cov = cov.ok_or("covariance should be Some")?;
         let n = cov.nrows();
 
         // Symmetry
@@ -290,9 +290,16 @@ mod tests {
 
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
-        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver).unwrap();
-        assert!((cov[(0, 0)] - 0.25).abs() < TOLERANCE, "cov[0,0] should be 0.25");
-        assert!((cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE, "cov[1,1] should be 1/9");
+        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
+            .ok_or("covariance should be Some")?;
+        assert!(
+            (cov[(0, 0)] - 0.25).abs() < TOLERANCE,
+            "cov[0,0] should be 0.25"
+        );
+        assert!(
+            (cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE,
+            "cov[1,1] should be 1/9"
+        );
         assert!(cov[(0, 1)].abs() < TOLERANCE);
         assert!(cov[(1, 0)].abs() < TOLERANCE);
 
@@ -307,11 +314,19 @@ mod tests {
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
         LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr1 = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+        let ptr1 = solver
+            .covariance_matrix
+            .as_ref()
+            .ok_or("covariance should be cached")?
+            .as_ptr();
 
         // Second call should return cached result (same pointer)
         LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr2 = solver.covariance_matrix.as_ref().unwrap().as_ptr();
+        let ptr2 = solver
+            .covariance_matrix
+            .as_ref()
+            .ok_or("covariance should be cached")?
+            .as_ptr();
 
         assert_eq!(ptr1, ptr2, "Covariance matrix should be cached");
 

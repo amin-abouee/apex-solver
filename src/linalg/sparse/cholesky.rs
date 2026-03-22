@@ -328,11 +328,13 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let sol1 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol1 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let sol2 = LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        let sol2 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Results should be identical
         for i in 0..sol1.nrows() {
@@ -411,8 +413,11 @@ mod tests {
         let singular_jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
-        let result =
-            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &singular_jacobian);
+        let result = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut solver,
+            &residuals,
+            &singular_jacobian,
+        );
         // Without regularization, singular matrices should fail
         assert!(result.is_err(), "Singular matrix should return Err");
         Ok(())
