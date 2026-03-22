@@ -2,16 +2,18 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use apex_solver::JacobianMode;
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3};
+use apex_solver::apex_io::{
+    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
+};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
 use apex_solver::apex_manifolds::se3::SE3;
-use apex_solver::linearizer;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linearizer;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;

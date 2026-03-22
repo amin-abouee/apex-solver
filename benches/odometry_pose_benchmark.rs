@@ -300,14 +300,46 @@ struct Dataset {
 
 fn get_datasets() -> Vec<Dataset> {
     vec![
-        Dataset { name: "M3500",          file: format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D),          is_3d: false },
-        Dataset { name: "mit",            file: format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D),            is_3d: false },
-        Dataset { name: "city10000",      file: format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D),      is_3d: false },
-        Dataset { name: "ring",           file: format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D),           is_3d: false },
-        Dataset { name: "sphere2500",     file: format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D),     is_3d: true  },
-        Dataset { name: "parking-garage", file: format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D), is_3d: true  },
-        Dataset { name: "torus3D",        file: format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D),        is_3d: true  },
-        Dataset { name: "cubicle",        file: format!("{}/cubicle.g2o", ODOMETRY_DATA_DIR_3D),        is_3d: true  },
+        Dataset {
+            name: "M3500",
+            file: format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "mit",
+            file: format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "city10000",
+            file: format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "ring",
+            file: format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "sphere2500",
+            file: format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "parking-garage",
+            file: format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "torus3D",
+            file: format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "cubicle",
+            file: format!("{}/cubicle.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
     ]
 }
 
