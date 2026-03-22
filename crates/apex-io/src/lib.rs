@@ -18,13 +18,19 @@ use apex_manifolds::{se2::SE2, se3::SE3};
 // Module declarations
 pub mod bal;
 pub mod g2o;
-pub mod test_data;
 pub mod toro;
+pub mod utils;
 
-pub use test_data::{ensure_ba_dataset, ensure_odometry_dataset};
+pub use utils::{DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset};
 
-/// Default directory for odometry (pose graph) datasets relative to the workspace root.
+/// Default base directory for odometry (pose graph) datasets relative to the workspace root.
 pub const ODOMETRY_DATA_DIR: &str = "data/odometry";
+
+/// Directory for 2D odometry datasets (`data/odometry/2d`).
+pub const ODOMETRY_DATA_DIR_2D: &str = "data/odometry/2d";
+
+/// Directory for 3D odometry datasets (`data/odometry/3d`).
+pub const ODOMETRY_DATA_DIR_3D: &str = "data/odometry/3d";
 
 /// Default directory for bundle adjustment datasets relative to the workspace root.
 pub const BUNDLE_ADJUSTMENT_DATA_DIR: &str = "data/bundle_adjustment";
