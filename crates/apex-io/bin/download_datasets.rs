@@ -78,7 +78,7 @@ fn decompress_and_cleanup(
 // ---------------------------------------------------------------------------
 
 fn list_datasets(registry: &DatasetRegistry) {
-    info!("\n=== Available Datasets ===\n");
+    info!("=== Available Datasets ===");
 
     let d3: Vec<_> = registry.odometry_by_category("3d");
     let d2: Vec<_> = registry.odometry_by_category("2d");
@@ -161,7 +161,7 @@ fn download_odometry_by_category(
         let category_dir = base_output.join(&entry.category);
         std::fs::create_dir_all(&category_dir)?;
         let output_path = category_dir.join(&entry.filename);
-        print!("  {name} ... ");
+        info!("  {name} ... ");
         std::io::stdout().flush()?;
 
         match download_and_size(&entry.url, &output_path) {
@@ -209,7 +209,7 @@ fn download_single_ba_dataset(
         let decompressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt"));
         let url = entry.problem_url(*cameras, *points);
 
-        print!("  problem-{cameras}-{points} ... ");
+        info!("  problem-{cameras}-{points} ... ");
         std::io::stdout().flush()?;
 
         match download_and_size(&url, &compressed_path) {
@@ -254,7 +254,7 @@ fn download_largest_each_ba(
         let decompressed_path = dataset_path.join(format!("problem-{cameras}-{points}-pre.txt"));
         let url = entry.problem_url(cameras, points);
 
-        print!("  {name} largest (problem-{cameras}-{points}) ... ");
+        info!("  {name} largest (problem-{cameras}-{points}) ... ");
         std::io::stdout().flush()?;
 
         match download_and_size(&url, &compressed_path) {
@@ -263,17 +263,17 @@ fn download_largest_each_ba(
                 match decompress_and_cleanup(&compressed_path, &decompressed_path) {
                     Ok(()) => {
                         success_count += 1;
-                        info!("OK ({size} bytes)");
+                        info!("    OK ({size} bytes)");
                     }
                     Err(e) => {
                         fail_count += 1;
-                        info!("DECOMPRESS FAILED: {e}");
+                        info!("    DECOMPRESS FAILED: {e}");
                     }
                 }
             }
             Err(e) => {
                 fail_count += 1;
-                info!("FAILED: {e}");
+                info!("    FAILED: {e}");
             }
         }
     }
@@ -329,7 +329,7 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
 
     let ba_count = registry.bundle_adjustment.len();
     let max = ba_count + 6;
-    print!("Enter your selection (0-{max}): ");
+    info!("Enter your selection (0-{max}): ");
     std::io::stdout().flush()?;
 
     let mut input = String::new();
@@ -379,7 +379,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => get_user_selection(&registry)?,
     };
 
-    info!("\n=== Dataset Downloader ===");
+    info!("=== Dataset Downloader ===");
     info!("Selected: {selection}");
 
     let odometry_output = args
@@ -397,25 +397,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match selection {
         1 => {
-            info!("\n--- Downloading 3D g2o datasets ---");
-            info!("Output: {:?}\n", odometry_output.join("3d"));
+            info!("--- Downloading 3D g2o datasets ---");
+            info!("Output: {:?}", odometry_output.join("3d"));
             let (s, f, b) = download_odometry_by_category(&registry, "3d", &odometry_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         2 => {
-            info!("\n--- Downloading 2D g2o datasets ---");
-            info!("Output: {:?}\n", odometry_output.join("2d"));
+            info!("--- Downloading 2D g2o datasets ---");
+            info!("Output: {:?}", odometry_output.join("2d"));
             let (s, f, b) = download_odometry_by_category(&registry, "2d", &odometry_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         3 => {
-            info!("\n--- Downloading all odometry g2o datasets ---");
+            info!("--- Downloading all odometry g2o datasets ---");
             info!(
-                "Output: {:?} and {:?}\n",
+                "Output: {:?} and {:?}",
                 odometry_output.join("2d"),
                 odometry_output.join("3d")
             );
@@ -427,38 +427,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         n if n >= 4 && n <= ba_count + 3 => {
             let ds_idx = n - 4;
             let (name, _) = ba_sorted[ds_idx];
-            info!("\n--- Downloading {name} ---");
-            info!("Output: {ba_output:?}\n");
+            info!("--- Downloading {name} ---");
+            info!("Output: {ba_output:?}");
             let (s, f, b) = download_single_ba_dataset(name, &registry, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 4 => {
-            info!("\n--- Downloading largest problem from each BA dataset ---");
-            info!("Output: {ba_output:?}\n");
+            info!("--- Downloading largest problem from each BA dataset ---");
+            info!("Output: {ba_output:?}");
             let (s, f, b) = download_largest_each_ba(&registry, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 5 => {
-            info!("\n--- Downloading benchmark datasets (all odometry + largest each BA) ---");
+            info!("--- Downloading benchmark datasets (all odometry + largest each BA) ---");
             info!(
                 "Odometry output: {:?} / {:?}",
                 odometry_output.join("2d"),
                 odometry_output.join("3d")
             );
-            info!("BA output:       {ba_output:?}\n");
+            info!("BA output:       {ba_output:?}");
             let (s, f, b) = download_benchmark_datasets(&registry, &odometry_output, &ba_output)?;
             total_success += s;
             total_fail += f;
             total_bytes += b;
         }
         n if n == ba_count + 6 => {
-            info!("\n--- Downloading ALL datasets ---");
+            info!("--- Downloading ALL datasets ---");
             info!("Odometry output: {odometry_output:?}");
-            info!("BA output:       {ba_output:?}\n");
+            info!("BA output:       {ba_output:?}");
             let (s, f, b) = download_all_datasets(&registry, &odometry_output, &ba_output)?;
             total_success += s;
             total_fail += f;
@@ -470,7 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    info!("\n=== Download Complete ===");
+    info!("=== Download Complete ===");
     info!("Success: {total_success}");
     info!("Failed:  {total_fail}");
     info!(
