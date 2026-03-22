@@ -73,7 +73,8 @@ struct DatasetConfig {
 
 /// Get all datasets to benchmark
 fn get_datasets() -> Vec<DatasetConfig> {
-    let registry = DatasetRegistry::load();
+    let registry =
+        DatasetRegistry::load().unwrap_or_else(|e| panic!("failed to load dataset registry: {e}"));
     // (registry_key, display_name, cameras, points)
     let specs = [
         ("ladybug", "Ladybug", 1723u32, 156502u32),
@@ -84,10 +85,12 @@ fn get_datasets() -> Vec<DatasetConfig> {
     specs
         .iter()
         .filter_map(|(key, display, cameras, points)| {
-            registry.ba_path(key, *cameras, *points).map(|p| DatasetConfig {
-                name: display.to_string(),
-                path: p.to_string_lossy().into_owned(),
-            })
+            registry
+                .ba_path(key, *cameras, *points)
+                .map(|p| DatasetConfig {
+                    name: display.to_string(),
+                    path: p.to_string_lossy().into_owned(),
+                })
         })
         .collect()
 }
