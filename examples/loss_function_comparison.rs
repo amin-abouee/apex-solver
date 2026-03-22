@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{error, info, warn};
 
-use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR};
+use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::core::loss_functions::*;
@@ -729,9 +729,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Benchmark SE3 datasets (all available 3D pose graphs)
     let se3_datasets: Vec<(String, &str)> = vec![
-        (format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR), "sphere2500"),
-        (format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR), "parking-garage"),
-        (format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR), "torus3D"),
+        (format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D), "sphere2500"),
+        (format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D), "parking-garage"),
+        (format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D), "torus3D"),
     ];
 
     for (path, name) in &se3_datasets {
@@ -747,13 +747,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Benchmark SE2 datasets (all available 2D pose graphs)
     let se2_datasets: Vec<(String, &str)> = vec![
-        (format!("{}/intel.g2o", ODOMETRY_DATA_DIR), "intel"),
-        (format!("{}/mit.g2o", ODOMETRY_DATA_DIR), "mit"),
-        (format!("{}/M3500.g2o", ODOMETRY_DATA_DIR), "M3500"),
-        (format!("{}/manhattanOlson3500.g2o", ODOMETRY_DATA_DIR), "manhattan"),
-        (format!("{}/city10000.g2o", ODOMETRY_DATA_DIR), "city10000"),
-        (format!("{}/ring.g2o", ODOMETRY_DATA_DIR), "ring"),
-        (format!("{}/ringCity.g2o", ODOMETRY_DATA_DIR), "ringCity"),
+        (format!("{}/intel.g2o", ODOMETRY_DATA_DIR_2D), "intel"),
+        (format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D), "mit"),
+        (format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D), "M3500"),
+        (format!("{}/manhattanOlson3500.g2o", ODOMETRY_DATA_DIR_2D), "manhattan"),
+        (format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D), "city10000"),
+        (format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D), "ring"),
+        (format!("{}/ringCity.g2o", ODOMETRY_DATA_DIR_2D), "ringCity"),
     ];
 
     for (path, name) in &se2_datasets {

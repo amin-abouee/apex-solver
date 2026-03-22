@@ -7,7 +7,7 @@
 //! cargo run --example visualize_graph_file --features visualization
 //! ```
 
-use apex_solver::apex_io::{ODOMETRY_DATA_DIR, Graph, load_graph};
+use apex_solver::apex_io::{ODOMETRY_DATA_DIR_3D, Graph, load_graph};
 use apex_solver::init_logger;
 use clap::Parser;
 use rerun::{
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logger();
 
     let file_path = args.file_path.unwrap_or_else(|| {
-        PathBuf::from(format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR))
+        PathBuf::from(format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D))
     });
     info!("Loading graph from: {}", file_path.display());
     let graph = load_graph(&file_path)?;
