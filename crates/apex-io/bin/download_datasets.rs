@@ -149,7 +149,9 @@ fn download_odometry_by_category(
     let mut total_bytes = 0u64;
 
     for (name, entry) in registry.odometry_by_category(category) {
-        let output_path = base_output.join(&entry.filename);
+        let category_dir = base_output.join(&entry.category);
+        std::fs::create_dir_all(&category_dir)?;
+        let output_path = category_dir.join(&entry.filename);
         print!("  {name} ... ");
         std::io::stdout().flush()?;
 
@@ -375,7 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match selection {
         1 => {
             println!("\n--- Downloading 3D g2o datasets ---");
-            println!("Output: {odometry_output:?}\n");
+            println!("Output: {:?}\n", odometry_output.join("3d"));
             let (s, f, b) = download_odometry_by_category(&registry, "3d", &odometry_output)?;
             total_success += s;
             total_fail += f;
@@ -383,7 +385,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         2 => {
             println!("\n--- Downloading 2D g2o datasets ---");
-            println!("Output: {odometry_output:?}\n");
+            println!("Output: {:?}\n", odometry_output.join("2d"));
             let (s, f, b) = download_odometry_by_category(&registry, "2d", &odometry_output)?;
             total_success += s;
             total_fail += f;
@@ -391,7 +393,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         3 => {
             println!("\n--- Downloading all odometry g2o datasets ---");
-            println!("Output: {odometry_output:?}\n");
+            println!("Output: {:?} and {:?}\n", odometry_output.join("2d"), odometry_output.join("3d"));
             let (s, f, b) = download_all_g2o(&registry, &odometry_output)?;
             total_success += s;
             total_fail += f;
