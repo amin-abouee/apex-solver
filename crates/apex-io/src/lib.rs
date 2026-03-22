@@ -462,14 +462,16 @@ mod tests {
 
     #[test]
     fn test_load_m3500() -> Result<(), Box<dyn error::Error>> {
-        let graph = G2oLoader::load("../../data/odometry/2d/M3500.g2o")?;
+        let path = utils::ensure_odometry_dataset("M3500")?;
+        let graph = G2oLoader::load(&path)?;
         assert!(!graph.vertices_se2.is_empty());
         Ok(())
     }
 
     #[test]
     fn test_load_sphere2500() -> Result<(), Box<dyn error::Error>> {
-        let graph = G2oLoader::load("../../data/odometry/3d/sphere2500.g2o")?;
+        let path = utils::ensure_odometry_dataset("sphere2500")?;
+        let graph = G2oLoader::load(&path)?;
         assert!(!graph.vertices_se3.is_empty());
         Ok(())
     }

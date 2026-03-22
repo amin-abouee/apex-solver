@@ -19,7 +19,7 @@
 # ---------------------------------------------------------------------------
 
 [odometry.sphere2500]
-url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/sphere2500/originalDataset/sphere2500.g2o"
+url = "https://www.dropbox.com/s/ej5hb1ckcp3x42u/sphere_bignoise_vertex3.g2o?dl=1"
 filename = "sphere2500.g2o"
 category = "3d"
 
