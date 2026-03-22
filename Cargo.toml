@@ -37,6 +37,7 @@ num_cpus = "1.17"
 rerun = { version = "0.26.2", features = ["sdk"] }
 ureq = "2.12"
 bzip2 = "0.5"
+toml = "0.8"
 
 # Dev dependencies
 criterion = "0.6.0"
