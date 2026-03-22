@@ -29,26 +29,26 @@
 //! ## Usage Example
 //!
 //! ```no_run
-//! # use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::StructureAware;
 //! # use std::collections::HashMap;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let variables = HashMap::new();
 //! # let variable_index_map = HashMap::new();
-//! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::StructureAware;
 //!
-//! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
-//!     &variables,
-//!     &variable_index_map,
-//!     SchurVariant::Iterative, // Implicit Schur with PCG
-//!     SchurPreconditioner::SchurJacobi, // Recommended for PCG
-//! )?;
+//! let mut solver = SparseSchurComplementSolver::new()
+//!     .with_variant(SchurVariant::Iterative) // Implicit Schur with PCG
+//!     .with_preconditioner(SchurPreconditioner::SchurJacobi); // Recommended for PCG
+//! solver.initialize_structure(&variables, &variable_index_map)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use super::explicit_schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
 use crate::core::problem::VariableEnum;
-use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::{DMatrix, DVector, Matrix3};
@@ -952,7 +952,7 @@ impl Default for IterativeSchurSolver {
     }
 }
 
-impl StructuredSparseLinearSolver for IterativeSchurSolver {
+impl StructureAware for IterativeSchurSolver {
     fn initialize_structure(
         &mut self,
         variables: &HashMap<String, VariableEnum>,
@@ -1005,7 +1005,9 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         self.block_structure = Some(structure);
         Ok(())
     }
+}
 
+impl LinearSolver<SparseMode> for IterativeSchurSolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,

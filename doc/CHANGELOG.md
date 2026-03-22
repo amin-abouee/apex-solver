@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-03-07
+
+### Fixed
+- **Visualization for pose_graph_g2o binary** - Fixed `--with-visualizer` flag to work properly with Rerun visualization (requires `visualization` feature). Now displays both initial and optimized pose graphs.
+- **Visualization for bundle_adjustment binary** - Fixed and improved visualization:
+  - Added documentation and usage examples for `--with-visualizer` flag
+  - Changed 3D point colors to white (255,255,255) for better visibility
+  - Reduced camera frustum scale
+  - Now displays both initial and optimized states
+- **Binary instructions in README** - Fixed outdated command examples and added proper usage documentation for visualization features
+- **Git LFS setup** - Added clear instructions in README Quick Start section reminding users to pull data files using `git lfs pull` before running examples
+
+### Changed
+- Updated version to v1.2.1 in README
+
 ## [1.2.0] - 2026-02-22
 
 ### Changed

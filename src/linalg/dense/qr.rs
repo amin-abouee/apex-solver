@@ -396,10 +396,8 @@ mod tests {
 
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
-        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov.is_some(), "Covariance should be computable");
-
-        let cov = cov.ok_or("covariance should be Some")?;
+        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
+            .ok_or("covariance should be computable")?;
         let n = cov.nrows();
 
         // Symmetry
@@ -427,14 +425,15 @@ mod tests {
 
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
-        let errors = solver.compute_standard_errors();
-        assert!(errors.is_some(), "Standard errors should be computable");
-
-        let errors = errors.ok_or("standard errors should be Some")?.clone();
+        // clone to release the borrow on `solver` so we can access covariance_matrix next
+        let errors = solver
+            .compute_standard_errors()
+            .ok_or("standard errors should be computable")?
+            .clone();
         let cov = solver
             .covariance_matrix
             .as_ref()
-            .ok_or("covariance should be Some")?;
+            .ok_or("covariance matrix not available")?;
 
         assert_eq!(errors.nrows(), cov.nrows());
         assert_eq!(errors.ncols(), 1);
@@ -470,7 +469,7 @@ mod tests {
         LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
 
         let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
-            .ok_or("covariance should be Some")?;
+            .ok_or("covariance computation failed")?;
         assert!(
             (cov[(0, 0)] - 0.25).abs() < TOLERANCE,
             "cov[0,0] should be 0.25"
@@ -496,7 +495,7 @@ mod tests {
         let ptr1 = solver
             .covariance_matrix
             .as_ref()
-            .ok_or("covariance should be cached")?
+            .ok_or("covariance not cached after first call")?
             .as_ptr();
 
         // Second call should return cached result (same pointer)
@@ -504,7 +503,7 @@ mod tests {
         let ptr2 = solver
             .covariance_matrix
             .as_ref()
-            .ok_or("covariance should be cached")?
+            .ok_or("covariance not cached after second call")?
             .as_ptr();
 
         assert_eq!(ptr1, ptr2, "Covariance matrix should be cached");

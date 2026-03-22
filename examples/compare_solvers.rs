@@ -16,6 +16,7 @@ use clap::Parser;
 use nalgebra::dvector;
 
 type InitialValues = HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>;
+type BuildResult = Result<(Problem, InitialValues), Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
 #[command(about = "Compare all 4 linear solvers (Sparse/Dense × Cholesky/QR) on any G2O dataset")]
@@ -69,8 +70,8 @@ fn jacobian_stats(problem: &Problem, initial_values: &InitialValues) -> (usize, 
     let nrows = jacobian.nrows();
     let ncols = jacobian.ncols();
     let nnz = jacobian.compute_nnz();
-    let density = nnz as f64 / (nrows * ncols) as f64 * 100.0;
-    (nrows, ncols, nnz, density)
+    let sparsity = (1.0 - nnz as f64 / (nrows * ncols) as f64) * 100.0;
+    (nrows, ncols, nnz, sparsity)
 }
 
 fn run_solver(
@@ -142,10 +143,7 @@ fn print_table(results: &[RunResult]) {
     info!("{}", "─".repeat(w));
 }
 
-fn build_se3_problem(
-    graph: &apex_solver::apex_io::Graph,
-    mode: JacobianMode,
-) -> (Problem, InitialValues) {
+fn build_se3_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
     let mut initial_values = InitialValues::new();
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
@@ -174,7 +172,7 @@ fn build_se3_problem(
         let prior = PriorFactor {
             data: dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
         };
-        let loss = HuberLoss::new(1.0).unwrap_or_else(|e| panic!("valid huber loss: {e}"));
+        let loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
             &[&format!("x{first_id}")],
             Box::new(prior),
@@ -190,13 +188,10 @@ fn build_se3_problem(
         );
     }
 
-    (problem, initial_values)
+    Ok((problem, initial_values))
 }
 
-fn build_se2_problem(
-    graph: &apex_solver::apex_io::Graph,
-    mode: JacobianMode,
-) -> (Problem, InitialValues) {
+fn build_se2_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
     let mut initial_values = InitialValues::new();
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
     vertex_ids.sort();
@@ -221,7 +216,7 @@ fn build_se2_problem(
         let prior = PriorFactor {
             data: dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
         };
-        let loss = HuberLoss::new(1.0).unwrap_or_else(|e| panic!("valid huber loss: {e}"));
+        let loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
             &[&format!("x{first_id}")],
             Box::new(prior),
@@ -237,7 +232,7 @@ fn build_se2_problem(
         );
     }
 
-    (problem, initial_values)
+    Ok((problem, initial_values))
 }
 
 fn main() {
@@ -273,22 +268,36 @@ fn main() {
     );
 
     // Build sparse and dense problems
-    let (sparse_problem, sparse_init) = if is_se3 {
+    let build_sparse = if is_se3 {
         build_se3_problem(&graph, JacobianMode::Sparse)
     } else {
         build_se2_problem(&graph, JacobianMode::Sparse)
     };
-    let (dense_problem, dense_init) = if is_se3 {
+    let (sparse_problem, sparse_init) = match build_sparse {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Failed to build sparse problem: {e}");
+            std::process::exit(1);
+        }
+    };
+    let build_dense = if is_se3 {
         build_se3_problem(&graph, JacobianMode::Dense)
     } else {
         build_se2_problem(&graph, JacobianMode::Dense)
     };
+    let (dense_problem, dense_init) = match build_dense {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("Failed to build dense problem: {e}");
+            std::process::exit(1);
+        }
+    };
 
     // Compute and print Jacobian density (from sparse problem)
-    let (jac_rows, jac_cols, nnz, density_pct) = jacobian_stats(&sparse_problem, &sparse_init);
+    let (jac_rows, jac_cols, nnz, sparsity_pct) = jacobian_stats(&sparse_problem, &sparse_init);
     info!(
-        "Jacobian: {}×{} | NNZ: {} | Density: {:.4}%",
-        jac_rows, jac_cols, nnz, density_pct
+        "Jacobian: {}×{} | NNZ: {} | Sparsity: {:.4}%",
+        jac_rows, jac_cols, nnz, sparsity_pct
     );
 
     if vertices > 500 {

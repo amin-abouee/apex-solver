@@ -23,28 +23,26 @@
 //! ## Usage Example
 //!
 //! ```no_run
-//! # use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::StructureAware;
 //! # use std::collections::HashMap;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let variables = HashMap::new();
 //! # let variable_index_map = HashMap::new();
-//! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant};
+//! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::StructureAware;
 //!
-//! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
-//!     &variables,
-//!     &variable_index_map,
-//!     SchurVariant::Sparse, // Explicit Schur with Cholesky
-//!     SchurPreconditioner::None,
-//! )?;
+//! let mut solver = SparseSchurComplementSolver::new()
+//!     .with_variant(SchurVariant::Sparse) // Explicit Schur with Cholesky
+//!     .with_preconditioner(SchurPreconditioner::None);
+//! solver.initialize_structure(&variables, &variable_index_map)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use super::implicit_schur::IterativeSchurSolver;
 use crate::core::problem::VariableEnum;
-use crate::linalg::{
-    LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructuredSparseLinearSolver,
-};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -1043,7 +1041,7 @@ impl Default for SparseSchurComplementSolver {
     }
 }
 
-impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
+impl StructureAware for SparseSchurComplementSolver {
     fn initialize_structure(
         &mut self,
         variables: &HashMap<String, VariableEnum>,
@@ -1067,13 +1065,16 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
 
         Ok(())
     }
+}
 
+impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
+        jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
         use std::ops::Mul;
+        let jacobians = jacobian;
 
         if self.block_structure.is_none() {
             return Err(LinAlgError::InvalidInput(
@@ -1134,10 +1135,11 @@ impl StructuredSparseLinearSolver for SparseSchurComplementSolver {
     fn solve_augmented_equation(
         &mut self,
         residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
+        jacobian: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
         use std::ops::Mul;
+        let jacobians = jacobian;
 
         if self.block_structure.is_none() {
             return Err(LinAlgError::InvalidInput(
@@ -1283,108 +1285,7 @@ impl SparseSchurComplementSolver {
     }
 }
 
-/// Adapter to use SparseSchurComplementSolver as a standard SparseLinearSolver
-///
-/// This adapter bridges the gap between StructuredSparseLinearSolver (which requires
-/// variable information) and the standard SparseLinearSolver trait used by optimizers.
-pub struct SchurSolverAdapter {
-    schur_solver: SparseSchurComplementSolver,
-    initialized: bool,
-}
-
-impl SchurSolverAdapter {
-    /// Create a new Schur solver adapter with problem structure
-    ///
-    /// This initializes the internal Schur solver with variable partitioning information.
-    ///
-    /// # Arguments
-    /// * `variables` - Map of variable names to their typed instances
-    /// * `variable_index_map` - Map from variable names to starting column indices in Jacobian
-    ///
-    /// # Returns
-    /// Initialized adapter ready to solve linear systems
-    pub fn new_with_structure(
-        variables: &std::collections::HashMap<String, crate::core::problem::VariableEnum>,
-        variable_index_map: &std::collections::HashMap<String, usize>,
-    ) -> LinAlgResult<Self> {
-        let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(variables, variable_index_map)?;
-        Ok(Self {
-            schur_solver: solver,
-            initialized: true,
-        })
-    }
-
-    /// Create with custom configuration
-    pub fn new_with_structure_and_config(
-        variables: &std::collections::HashMap<String, crate::core::problem::VariableEnum>,
-        variable_index_map: &std::collections::HashMap<String, usize>,
-        variant: SchurVariant,
-        preconditioner: SchurPreconditioner,
-    ) -> LinAlgResult<Self> {
-        let mut solver = SparseSchurComplementSolver::new()
-            .with_variant(variant)
-            .with_preconditioner(preconditioner);
-        solver.initialize_structure(variables, variable_index_map)?;
-        Ok(Self {
-            schur_solver: solver,
-            initialized: true,
-        })
-    }
-}
-
-impl LinearSolver<SparseMode> for SchurSolverAdapter {
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        if !self.initialized {
-            return Err(LinAlgError::InvalidInput(
-                "Schur solver adapter not initialized with structure".to_string(),
-            ));
-        }
-        self.schur_solver.solve_normal_equation(residuals, jacobian)
-    }
-
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-        lambda: f64,
-    ) -> LinAlgResult<Mat<f64>> {
-        if !self.initialized {
-            return Err(LinAlgError::InvalidInput(
-                "Schur solver adapter not initialized with structure".to_string(),
-            ));
-        }
-        self.schur_solver
-            .solve_augmented_equation(residuals, jacobian, lambda)
-    }
-
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
-        self.schur_solver.get_hessian()
-    }
-
-    fn get_gradient(&self) -> Option<&Mat<f64>> {
-        self.schur_solver.get_gradient()
-    }
-
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        // TODO: Implement covariance computation for Schur complement solver
-        // This requires inverting the Schur complement S, which is non-trivial
-        // For now, return None
-        None
-    }
-
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        // Not implemented yet
-        None
-    }
-}
-
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1477,11 +1378,11 @@ mod tests {
     }
 
     #[test]
-    fn test_3x3_block_inversion() {
+    fn test_3x3_block_inversion() -> Result<(), LinAlgError> {
         let block = Matrix3::new(2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0);
-        let inv = SparseSchurComplementSolver::invert_landmark_blocks(&[block])
-            .expect("Test: Block inversion should succeed");
+        let inv = SparseSchurComplementSolver::invert_landmark_blocks(&[block])?;
         assert!((inv[0][(0, 0)] - 0.5).abs() < 1e-10);
+        Ok(())
     }
 
     #[test]
@@ -1496,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_schur_complement_known_matrix() {
+    fn test_compute_schur_complement_known_matrix() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
         let solver = SparseSchurComplementSolver::new();
@@ -1504,12 +1405,12 @@ mod tests {
         // Create simple 2x2 H_cc (camera block)
         let h_cc_triplets = vec![Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 5.0)];
         let h_cc = SparseColMat::try_new_from_triplets(2, 2, &h_cc_triplets)
-            .expect("Test: H_cc matrix creation should succeed");
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // Create 2x3 H_cp (coupling block - 1 landmark with 3 DOF)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0)];
         let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .expect("Test: H_cp matrix creation should succeed");
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // Create H_pp^{-1} as identity scaled by 0.5
         let hpp_inv = vec![Matrix3::new(0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5)];
@@ -1524,9 +1425,7 @@ mod tests {
         //   The diagonal will be: row·row for each
         // Let me recalculate: S(0,0) = 4 - 0.5*1 = 3.5, but actual is 3.75
         // Actually the formula computes sum over all landmark DOF
-        let s = solver
-            .compute_schur_complement(&h_cc, &h_cp, &hpp_inv)
-            .expect("Test: Schur complement computation should succeed");
+        let s = solver.compute_schur_complement(&h_cc, &h_cp, &hpp_inv)?;
 
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
@@ -1539,10 +1438,11 @@ mod tests {
         // S(0,0) = 4 - 0.5 = 3.5, S(1,1) = 5 - 2.0 = 3.0
         assert!((s[(0, 0)] - 3.5).abs() < 1e-10, "S(0,0) = {}", s[(0, 0)]);
         assert!((s[(1, 1)] - 3.0).abs() < 1e-10, "S(1,1) = {}", s[(1, 1)]);
+        Ok(())
     }
 
     #[test]
-    fn test_back_substitute() {
+    fn test_back_substitute() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
         let solver = SparseSchurComplementSolver::new();
@@ -1554,7 +1454,7 @@ mod tests {
         // H_cp (2x3)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
         let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .expect("Test: H_cp matrix creation should succeed");
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // H_pp^{-1} (identity)
         let hpp_inv = vec![Matrix3::identity()];
@@ -1563,18 +1463,17 @@ mod tests {
         // H_cp^T * δc = [1*1; 1*2; 0] = [1; 2; 0]
         // g_p - result = [1; 2; 3] - [1; 2; 0] = [0; 0; 3]
         // H_pp^{-1} * [0; 0; 3] = [0; 0; 3]
-        let delta_p = solver
-            .back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv)
-            .expect("Test: Back substitution should succeed");
+        let delta_p = solver.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv)?;
 
         assert_eq!(delta_p.nrows(), 3);
         assert!((delta_p[(0, 0)]).abs() < 1e-10);
         assert!((delta_p[(1, 0)]).abs() < 1e-10);
         assert!((delta_p[(2, 0)] - 3.0).abs() < 1e-10);
+        Ok(())
     }
 
     #[test]
-    fn test_compute_reduced_gradient() {
+    fn test_compute_reduced_gradient() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
         let solver = SparseSchurComplementSolver::new();
@@ -1586,7 +1485,7 @@ mod tests {
         // H_cp (2x3)
         let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
         let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .expect("Test: H_cp matrix creation should succeed");
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // H_pp^{-1} (2*identity)
         let hpp_inv = vec![Matrix3::new(2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0)];
@@ -1595,12 +1494,11 @@ mod tests {
         // H_pp^{-1} * g_p = 2*[1; 2; 3] = [2; 4; 6]
         // H_cp * [2; 4; 6] = [1*2; 1*4] = [2; 4]
         // g_reduced = [1; 2] - [2; 4] = [-1; -2]
-        let g_reduced = solver
-            .compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv)
-            .expect("Test: Reduced gradient computation should succeed");
+        let g_reduced = solver.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv)?;
 
         assert_eq!(g_reduced.nrows(), 2);
         assert!((g_reduced[(0, 0)] + 1.0).abs() < 1e-10);
         assert!((g_reduced[(1, 0)] + 2.0).abs() < 1e-10);
+        Ok(())
     }
 }

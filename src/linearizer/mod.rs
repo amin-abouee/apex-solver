@@ -5,13 +5,13 @@
 //! - [`linearize_block()`]: Shared factor evaluation (loss correction, residual accumulation)
 //! - [`cpu::sparse`]: Sparse Jacobian assembly using `SparseColMat` and symbolic structure
 //! - [`cpu::dense`]: Dense Jacobian assembly using `Mat<f64>`
-//! - [`SystemLinearizer`]: Trait bridging linearization with the optimizer's solver types
+//! - [`AssemblyBackend`]: Trait bridging linearization with the optimizer's solver types
 //!
 //! # Architecture
 //!
 //! ```text
 //! Problem (factor graph)
-//!     │  SystemLinearizer::assemble()
+//!     │  AssemblyBackend::assemble()
 //!     ▼
 //! (r: Mat<f64>, J: M::Jacobian)   ← M: LinearizationMode
 //!     │
@@ -129,18 +129,20 @@ pub(crate) fn linearize_block(
 }
 
 // ============================================================================
-// SystemLinearizer trait (bridges linearizer output with optimizer solver types)
+// AssemblyBackend trait (bridges linearizer output with optimizer solver types)
 // ============================================================================
 
-/// Trait that bridges the linearizer output with the linear solver's expected types.
+/// Type-level backend for assembling (residuals, Jacobian) and performing
+/// matrix operations. Implemented by [`SparseMode`] and [`DenseMode`].
 ///
-/// Extends [`LinearizationMode`] with the five operations an optimizer needs
-/// each iteration: building `(r, J)`, scaling `J`, unscaling `dx`, and `H·v`.
+/// All methods are static — this trait is used as a compile-time strategy
+/// selector, not as an object interface. Extends [`LinearizationMode`] with
+/// the five operations an optimizer needs each iteration: building `(r, J)`,
+/// scaling `J`, unscaling `dx`, and `H·v`.
 ///
-/// Implemented for [`SparseMode`] and [`DenseMode`], providing zero-cost static
-/// dispatch through the entire pipeline. All three optimizers (LM, GN, DogLeg)
-/// are generic over `M: SystemLinearizer`.
-pub trait SystemLinearizer: LinearizationMode {
+/// All three optimizers (LM, GN, DogLeg) are generic over `M: AssemblyBackend`,
+/// giving zero-cost static dispatch through the entire pipeline.
+pub trait AssemblyBackend: LinearizationMode {
     /// Assemble residuals and Jacobian from the problem.
     fn assemble(
         problem: &Problem,
@@ -164,7 +166,7 @@ pub trait SystemLinearizer: LinearizationMode {
     fn hessian_vec_product(hessian: &Self::Hessian, vec: &Mat<f64>) -> Mat<f64>;
 }
 
-impl SystemLinearizer for SparseMode {
+impl AssemblyBackend for SparseMode {
     fn assemble(
         problem: &Problem,
         variables: &HashMap<String, VariableEnum>,
@@ -220,7 +222,7 @@ impl SystemLinearizer for SparseMode {
     }
 }
 
-impl SystemLinearizer for DenseMode {
+impl AssemblyBackend for DenseMode {
     fn assemble(
         problem: &Problem,
         variables: &HashMap<String, VariableEnum>,

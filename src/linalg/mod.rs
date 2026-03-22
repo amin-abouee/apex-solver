@@ -3,7 +3,7 @@ pub mod sparse;
 pub mod utils;
 
 use crate::core::problem::VariableEnum;
-use faer::{Mat, sparse::SparseColMat};
+use faer::Mat;
 use std::{
     collections::HashMap,
     fmt::{self, Debug, Display, Formatter},
@@ -12,9 +12,8 @@ use thiserror::Error;
 use tracing::error;
 
 pub use sparse::{
-    IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner,
-    SchurSolverAdapter, SchurVariant, SparseCholeskySolver, SparseQRSolver,
-    SparseSchurComplementSolver,
+    IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
+    SparseCholeskySolver, SparseQRSolver, SparseSchurComplementSolver,
 };
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
@@ -122,42 +121,22 @@ impl LinAlgError {
 pub type LinAlgResult<T> = Result<T, LinAlgError>;
 
 // ============================================================================
-// StructuredSparseLinearSolver
+// StructureAware
 // ============================================================================
 
-/// Trait for structured sparse linear solvers that require variable information.
+/// For solvers that need variable structure information before solving.
 ///
-/// This trait extends the basic sparse solver interface to support solvers that
-/// exploit problem structure (e.g., Schur complement for bundle adjustment).
-/// These solvers need access to variable information to partition the problem.
-pub trait StructuredSparseLinearSolver {
+/// Implemented by Schur complement solvers, which must partition variables
+/// into camera and landmark blocks before performing any linear solves.
+/// Call [`initialize_structure`](StructureAware::initialize_structure) once
+/// during solver setup, before passing the solver to an optimizer.
+pub trait StructureAware {
     /// Initialize the solver's block structure from problem variables.
     fn initialize_structure(
         &mut self,
         variables: &HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
     ) -> LinAlgResult<()>;
-
-    /// Solve the normal equation: (J^T * J) * dx = -J^T * r
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>>;
-
-    /// Solve the augmented equation: (J^T * J + λI) * dx = -J^T * r
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobians: &SparseColMat<usize, f64>,
-        lambda: f64,
-    ) -> LinAlgResult<Mat<f64>>;
-
-    /// Get the cached Hessian matrix
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>>;
-
-    /// Get the cached gradient vector
-    fn get_gradient(&self) -> Option<&Mat<f64>>;
 }
 
 // ============================================================================
@@ -200,11 +179,21 @@ pub trait LinearSolver<M: LinearizationMode> {
     /// Get the cached gradient vector (J^T · r) from the last solve
     fn get_gradient(&self) -> Option<&Mat<f64>>;
 
-    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>>;
+    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian.
+    ///
+    /// Returns `None` for solvers that do not support covariance estimation
+    /// (e.g., QR solvers, Schur complement solvers). Only Cholesky-based
+    /// solvers provide a real implementation.
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        None
+    }
 
-    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>>;
+    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian.
+    ///
+    /// Returns `None` if covariance has not been computed or is not supported.
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        None
+    }
 }
 
 // ============================================================================
