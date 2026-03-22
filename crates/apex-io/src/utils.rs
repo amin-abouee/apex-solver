@@ -127,6 +127,20 @@ impl DatasetRegistry {
         entries
     }
 
+    /// Returns the on-disk path for a specific BA problem file.
+    ///
+    /// The path follows the same layout the downloader creates:
+    /// `data/bundle_adjustment/{name}/problem-{cameras}-{points}-pre.txt`
+    ///
+    /// Returns `None` if `name` is not in the registry.
+    pub fn ba_path(&self, name: &str, cameras: u32, points: u32) -> Option<std::path::PathBuf> {
+        self.bundle_adjustment.get(name).map(|_| {
+            std::path::PathBuf::from(crate::BUNDLE_ADJUSTMENT_DATA_DIR)
+                .join(name)
+                .join(format!("problem-{cameras}-{points}-pre.txt"))
+        })
+    }
+
     /// Returns all bundle adjustment entries sorted alphabetically by name.
     pub fn ba_sorted(&self) -> Vec<(&str, &BaEntry)> {
         let mut entries: Vec<_> = self

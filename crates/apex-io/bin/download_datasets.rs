@@ -127,8 +127,13 @@ fn list_datasets(registry: &DatasetRegistry) {
 
     println!();
     println!(
-        "  {}. All datasets - {} files ({} g2o + {} BA problems)",
+        "  {}. Benchmark datasets - {} files (all odometry g2o + largest each BA)",
         ba_len + 5,
+        total_odometry + ba_len
+    );
+    println!(
+        "  {}. All datasets       - {} files ({} g2o + {} BA problems)",
+        ba_len + 6,
         total_odometry + total_ba,
         total_odometry,
         total_ba
@@ -292,6 +297,16 @@ fn download_all_ba(
     Ok((total_success, total_fail, total_bytes))
 }
 
+fn download_benchmark_datasets(
+    registry: &DatasetRegistry,
+    base_output_odometry: &PathBuf,
+    base_output_ba: &PathBuf,
+) -> Result<(usize, usize, u64), Box<dyn std::error::Error>> {
+    let (s1, f1, b1) = download_all_g2o(registry, base_output_odometry)?;
+    let (s2, f2, b2) = download_largest_each_ba(registry, base_output_ba)?;
+    Ok((s1 + s2, f1 + f2, b1 + b2))
+}
+
 fn download_all_datasets(
     registry: &DatasetRegistry,
     base_output_odometry: &PathBuf,
@@ -311,7 +326,7 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
     println!();
 
     let ba_count = registry.bundle_adjustment.len();
-    let max = ba_count + 5;
+    let max = ba_count + 6;
     print!("Enter your selection (0-{max}): ");
     std::io::stdout().flush()?;
 
@@ -348,7 +363,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let selection = match args.select {
         Some(s) => {
-            let max = ba_count + 5;
+            let max = ba_count + 6;
             if s > max {
                 println!("Invalid selection: {s}. Please enter a number between 0 and {max}.");
                 return Ok(());
@@ -418,6 +433,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_bytes += b;
         }
         n if n == ba_count + 5 => {
+            println!("\n--- Downloading benchmark datasets (all odometry + largest each BA) ---");
+            println!("Odometry output: {:?} / {:?}", odometry_output.join("2d"), odometry_output.join("3d"));
+            println!("BA output:       {ba_output:?}\n");
+            let (s, f, b) = download_benchmark_datasets(&registry, &odometry_output, &ba_output)?;
+            total_success += s;
+            total_fail += f;
+            total_bytes += b;
+        }
+        n if n == ba_count + 6 => {
             println!("\n--- Downloading ALL datasets ---");
             println!("Odometry output: {odometry_output:?}");
             println!("BA output:       {ba_output:?}\n");
