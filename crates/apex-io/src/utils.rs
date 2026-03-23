@@ -104,8 +104,8 @@ impl DatasetRegistry {
     /// # fn main() -> std::io::Result<()> {
     /// let reg = DatasetRegistry::load()?;
     /// assert_eq!(
-    ///     reg.odometry_path("intel").map(|p| p.to_str().unwrap().to_string()),
-    ///     Some("data/odometry/2d/intel.g2o".to_string())
+    ///     reg.odometry_path("intel"),
+    ///     Some(std::path::Path::new("data/odometry").join("2d").join("intel.g2o"))
     /// );
     /// # Ok(())
     /// # }
