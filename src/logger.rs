@@ -153,8 +153,7 @@ mod tests {
         }
 
         fn captured(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner()))
-                .to_string()
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner())).to_string()
         }
     }
 
