@@ -1,0 +1,158 @@
+# Dataset registry for apex-solver
+#
+# All dataset metadata lives here — URLs, filenames, categories.
+# This file is embedded at compile time via include_str!() in utils.rs.
+# To add a new dataset, add an entry here; no Rust code needs to change.
+#
+# Odometry sections: [odometry.<name>]
+#   url      - direct download URL (.g2o file)
+#   filename - filename on disk (saved to data/odometry/<category>/<filename>)
+#   category - "2d" or "3d"
+#
+# Bundle adjustment sections: [bundle_adjustment.<name>]
+#   url_prefix - base URL; full URL = <url_prefix>/problem-<c>-<p>-pre.txt.bz2
+#   problems   - array of [cameras, points] pairs
+
+# ---------------------------------------------------------------------------
+# 3D odometry datasets (Luca Carlone's MIT pose graph collection)
+# Source: https://lucacarlone.mit.edu/datasets/
+# ---------------------------------------------------------------------------
+
+[odometry.sphere2500]
+url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/sphere2500/originalDataset/sphere2500.g2o"
+filename = "sphere2500.g2o"
+category = "3d"
+
+[odometry.parking-garage]
+url = "https://www.dropbox.com/s/zu23p8d522qccor/parking-garage.g2o?dl=1"
+filename = "parking-garage.g2o"
+category = "3d"
+
+[odometry.torus3D]
+url = "https://www.dropbox.com/s/o95o2lbvww1100r/torus3D.g2o?dl=1"
+filename = "torus3D.g2o"
+category = "3d"
+
+[odometry.grid3D]
+url = "https://www.dropbox.com/s/gjw9xl3t632gbrk/grid3D.g2o?dl=1"
+filename = "grid3D.g2o"
+category = "3d"
+
+[odometry.cubicle]
+url = "https://www.dropbox.com/s/twpqdfphdw4md94/cubicle.g2o?dl=1"
+filename = "cubicle.g2o"
+category = "3d"
+
+[odometry.rim]
+url = "https://www.dropbox.com/s/25qijwvfpmzh257/rim.g2o?dl=1"
+filename = "rim.g2o"
+category = "3d"
+
+# ---------------------------------------------------------------------------
+# 2D odometry datasets
+# Carlone collection: https://lucacarlone.mit.edu/datasets/
+# OpenSLAM Vertigo collection: https://github.com/OpenSLAM-org/openslam_vertigo
+# ---------------------------------------------------------------------------
+
+[odometry.intel]
+url = "https://www.dropbox.com/s/vcz8cag7bo0zlaj/input_INTEL_g2o.g2o?dl=1"
+filename = "intel.g2o"
+category = "2d"
+
+[odometry.mit]
+url = "https://www.dropbox.com/s/d8fcn1jg1mebx8f/input_MITb_g2o.g2o?dl=1"
+filename = "mit.g2o"
+category = "2d"
+
+[odometry.M3500]
+url = "https://www.dropbox.com/s/gmdzo74b3tzvbrw/input_M3500_g2o.g2o?dl=1"
+filename = "M3500.g2o"
+category = "2d"
+
+[odometry.M3500a]
+url = "https://www.dropbox.com/s/m9e866tdr2jlhf6/input_M3500a_g2o.g2o?dl=1"
+filename = "M3500a.g2o"
+category = "2d"
+
+[odometry.M3500b]
+url = "https://www.dropbox.com/s/4tugr2hf8janxr3/input_M3500b_g2o.g2o?dl=1"
+filename = "M3500b.g2o"
+category = "2d"
+
+[odometry.M3500c]
+url = "https://www.dropbox.com/s/6plsfzadfc1959r/input_M3500c_g2o.g2o?dl=1"
+filename = "M3500c.g2o"
+category = "2d"
+
+[odometry.manhattanOlson3500]
+url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/manhattan/originalDataset/g2o/manhattanOlson3500.g2o"
+filename = "manhattanOlson3500.g2o"
+category = "2d"
+
+[odometry.ring]
+url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/ring/originalDataset/ring.g2o"
+filename = "ring.g2o"
+category = "2d"
+
+[odometry.ring_city]
+url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/ringCity/originalDataset/ringCity.g2o"
+filename = "ringCity.g2o"
+category = "2d"
+
+[odometry.city10000]
+url = "https://raw.githubusercontent.com/OpenSLAM-org/openslam_vertigo/master/datasets/city10000/originalDataset/city10000.g2o"
+filename = "city10000.g2o"
+category = "2d"
+
+# ---------------------------------------------------------------------------
+# Bundle adjustment datasets (UW GRAIL BAL collection)
+# Source: https://grail.cs.washington.edu/projects/bal/
+# URL pattern: <url_prefix>/problem-<cameras>-<points>-pre.txt.bz2
+# ---------------------------------------------------------------------------
+
+[bundle_adjustment.ladybug]
+url_prefix = "https://grail.cs.washington.edu/projects/bal/data/ladybug"
+problems = [
+    [49, 7776], [73, 11032], [138, 19878], [318, 41628], [372, 47423],
+    [412, 52215], [460, 56811], [539, 65220], [598, 69218], [646, 73584],
+    [707, 78455], [783, 84444], [810, 88814], [856, 93344], [885, 97473],
+    [931, 102699], [969, 105826], [1031, 110968], [1064, 113655], [1118, 118384],
+    [1152, 122269], [1197, 126327], [1235, 129634], [1266, 132593], [1340, 137079],
+    [1469, 145199], [1514, 147317], [1587, 150845], [1642, 153820], [1695, 155710],
+    [1723, 156502],
+]
+
+[bundle_adjustment.trafalgar]
+url_prefix = "https://grail.cs.washington.edu/projects/bal/data/trafalgar"
+problems = [
+    [21, 11315], [39, 18060], [50, 20431], [126, 40037], [138, 44033],
+    [161, 48126], [170, 49267], [174, 50489], [193, 53101], [201, 54427],
+    [206, 54562], [215, 55910], [225, 57665], [257, 65132],
+]
+
+[bundle_adjustment.dubrovnik]
+url_prefix = "https://grail.cs.washington.edu/projects/bal/data/dubrovnik"
+problems = [
+    [16, 22106], [88, 64298], [135, 90642], [142, 93602], [150, 95821],
+    [161, 103832], [173, 111908], [182, 116770], [202, 132796], [237, 154414],
+    [253, 163691], [262, 169354], [273, 176305], [287, 182023], [308, 195089],
+    [356, 226730],
+]
+
+[bundle_adjustment.venice]
+url_prefix = "https://grail.cs.washington.edu/projects/bal/data/venice"
+problems = [
+    [52, 64053], [89, 110973], [245, 198739], [427, 310384], [744, 543562],
+    [951, 708276], [1102, 780462], [1158, 802917], [1184, 816583], [1238, 843534],
+    [1288, 866452], [1350, 894716], [1408, 912229], [1425, 916895], [1473, 930345],
+    [1490, 935273], [1521, 939551], [1544, 942409], [1638, 976803], [1666, 983911],
+    [1672, 986962], [1681, 983415], [1682, 983268], [1684, 983269], [1695, 984689],
+    [1696, 984816], [1706, 985529], [1776, 993909], [1778, 993923],
+]
+
+[bundle_adjustment.final]
+url_prefix = "https://grail.cs.washington.edu/projects/bal/data/final"
+problems = [
+    [93, 61203], [394, 100368], [871, 527480], [961, 187103],
+    [1936, 649673], [3068, 310854], [4585, 1324582], [13682, 4456117],
+]

@@ -54,7 +54,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 // apex-solver imports
-use apex_io::{G2oLoader, GraphLoader};
+use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
@@ -294,52 +294,54 @@ fn update_se3_graph_from_factrs(
 #[derive(Clone)]
 struct Dataset {
     name: &'static str,
-    file: &'static str,
+    file: String,
     is_3d: bool,
 }
 
-const DATASETS: &[Dataset] = &[
-    Dataset {
-        name: "M3500",
-        file: "data/odometry/M3500.g2o",
-        is_3d: false,
-    },
-    Dataset {
-        name: "mit",
-        file: "data/odometry/mit.g2o",
-        is_3d: false,
-    },
-    Dataset {
-        name: "city10000",
-        file: "data/odometry/city10000.g2o",
-        is_3d: false,
-    },
-    Dataset {
-        name: "ring",
-        file: "data/odometry/ring.g2o",
-        is_3d: false,
-    },
-    Dataset {
-        name: "sphere2500",
-        file: "data/odometry/sphere2500.g2o",
-        is_3d: true,
-    },
-    Dataset {
-        name: "parking-garage",
-        file: "data/odometry/parking-garage.g2o",
-        is_3d: true,
-    },
-    Dataset {
-        name: "torus3D",
-        file: "data/odometry/torus3D.g2o",
-        is_3d: true,
-    },
-    Dataset {
-        name: "cubicle",
-        file: "data/odometry/cubicle.g2o",
-        is_3d: true,
-    },
-];
+fn get_datasets() -> Vec<Dataset> {
+    vec![
+        Dataset {
+            name: "M3500",
+            file: format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "mit",
+            file: format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "city10000",
+            file: format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "ring",
+            file: format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D),
+            is_3d: false,
+        },
+        Dataset {
+            name: "sphere2500",
+            file: format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "parking-garage",
+            file: format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "torus3D",
+            file: format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+        Dataset {
+            name: "cubicle",
+            file: format!("{}/cubicle.g2o", ODOMETRY_DATA_DIR_3D),
+            is_3d: true,
+        },
+    ]
+}
 
 /// Benchmark result structure with dual metrics
 #[derive(Debug, Clone, Serialize)]
@@ -454,7 +456,7 @@ fn is_converged(status: &OptimizationStatus) -> bool {
 }
 
 fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
-    let mut graph = match G2oLoader::load(dataset.file) {
+    let mut graph = match G2oLoader::load(dataset.file.as_str()) {
         Ok(g) => g,
         Err(e) => {
             return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
@@ -542,7 +544,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
 }
 
 fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
-    let mut graph = match G2oLoader::load(dataset.file) {
+    let mut graph = match G2oLoader::load(dataset.file.as_str()) {
         Ok(g) => g,
         Err(e) => {
             return BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string());
@@ -641,7 +643,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
 
 fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation (without factrs prior)
-    let mut raw_graph = match G2oLoader::load(dataset.file) {
+    let mut raw_graph = match G2oLoader::load(dataset.file.as_str()) {
         Ok(g) => g,
         Err(e) => return BenchmarkResult::failed(dataset.name, "factrs", "Rust", &e.to_string()),
     };
@@ -655,7 +657,8 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     };
 
     // Catch panics from factrs parsing/loading
-    let load_result = panic::catch_unwind(|| load_g20(dataset.file));
+    let file = dataset.file.clone();
+    let load_result = panic::catch_unwind(|| load_g20(file.as_str()));
 
     let (graph, init) = match load_result {
         Ok((g, i)) => (g, i),
@@ -743,7 +746,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
 
 fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     // Load raw G2O graph for unified cost computation
-    let mut raw_graph = match G2oLoader::load(dataset.file) {
+    let mut raw_graph = match G2oLoader::load(dataset.file.as_str()) {
         Ok(g) => g,
         Err(e) => {
             return BenchmarkResult::failed(dataset.name, "tiny-solver", "Rust", &e.to_string());
@@ -751,7 +754,8 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     };
 
     // Catch panics from tiny-solver parsing/loading
-    let load_result = panic::catch_unwind(|| load_tiny_g2o(dataset.file));
+    let file = dataset.file.clone();
+    let load_result = panic::catch_unwind(|| load_tiny_g2o(file.as_str()));
 
     let (graph, init) = match load_result {
         Ok((g, i)) => (g, i),
@@ -1071,7 +1075,8 @@ fn main() {
     let solvers = ["apex-solver", "factrs", "tiny-solver"];
     let mut all_results = Vec::new();
 
-    for dataset in DATASETS {
+    let datasets = get_datasets();
+    for dataset in &datasets {
         info!("Dataset: {}", dataset.name);
 
         for solver in &solvers {
