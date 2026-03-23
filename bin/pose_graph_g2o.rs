@@ -2,7 +2,9 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use apex_solver::JacobianMode;
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
+use apex_solver::apex_io::{
+    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
+};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
@@ -329,7 +331,7 @@ fn test_se2_dataset(
     };
 
     let load_start = Instant::now();
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
     let load_time = load_start.elapsed();
 
@@ -719,7 +721,7 @@ fn test_se3_dataset(
         ),
     };
 
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se3.len();

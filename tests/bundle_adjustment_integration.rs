@@ -1,6 +1,6 @@
 //! Integration test for bundle adjustment on a real BAL dataset.
 //!
-//! Loads the Ladybug problem-21-11315-pre dataset (21 cameras, 11315 points)
+//! Loads the Trafalgar problem-21-11315-pre dataset (21 cameras, 11315 points)
 //! and runs self-calibration optimization to verify convergence, RMSE reduction,
 //! and monitor execution time.
 
@@ -31,9 +31,12 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 }
 
 #[test]
-fn test_ladybug_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
+fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
+    // Ensure the dataset is present, downloading it if necessary.
+    apex_solver::apex_io::ensure_ba_dataset("trafalgar", 21, 11315)?;
+
     // Load BAL dataset
-    let dataset = BalLoader::load("data/bundle_adjustment/Ladybug/problem-21-11315-pre.txt")?;
+    let dataset = BalLoader::load("data/bundle_adjustment/trafalgar/problem-21-11315-pre.txt")?;
 
     let num_observations = dataset.observations.len();
 

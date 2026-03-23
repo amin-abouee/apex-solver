@@ -142,7 +142,7 @@ benchmark_utils::BenchmarkResult BenchmarkCeres(const std::string& dataset_path)
 int main(int argc, char** argv) {
     google::InitGoogleLogging(argv[0]);
     
-    std::string dataset_path = "../../../data/bundle_adjustment/problem-1723-156502-pre.txt";
+    std::string dataset_path = "../../../data/bundle_adjustment/ladybug/problem-1723-156502-pre.txt";
     
     if (argc > 1) {
         dataset_path = argv[1];
