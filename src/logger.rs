@@ -124,71 +124,214 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
 
-    /// Smoke-test init_logger_with_level for DEBUG level.
-    ///
-    /// `tracing_subscriber::fmt().init()` panics if the global subscriber is already
-    /// set.  We use `try_init()` and silently ignore any "already initialised" error.
-    #[test]
-    fn test_init_logger_with_debug_does_not_panic() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
-            .with_target(false)
-            .with_level(false)
-            .with_file(false)
-            .with_line_number(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .event_format(CustomFormatter)
-            .try_init();
+    struct SharedBuf(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedBuf {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
-    /// Smoke-test init_logger_with_level for WARN level.
-    #[test]
-    fn test_init_logger_with_warn_does_not_panic() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
-            .with_target(false)
-            .with_level(false)
-            .with_file(false)
-            .with_line_number(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .event_format(CustomFormatter)
-            .try_init();
+    #[derive(Clone)]
+    struct CapturingWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturingWriter {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn captured(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+        }
     }
 
-    /// Smoke-test init_logger_with_level for TRACE — exercises the DEBUG/TRACE
-    /// branch in `format_event` that shows `file:line` instead of module.
-    #[test]
-    fn test_init_logger_with_trace_does_not_panic() {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
-            .with_target(false)
-            .with_level(false)
-            .with_file(false)
-            .with_line_number(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .event_format(CustomFormatter)
-            .try_init();
+    impl<'a> MakeWriter<'a> for CapturingWriter {
+        type Writer = SharedBuf;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedBuf(Arc::clone(&self.0))
+        }
     }
 
-    /// Verify that all five `Level` variants used by the match in `format_event` exist.
+    fn capturing_subscriber(writer: CapturingWriter) -> impl tracing::Subscriber + Send + Sync {
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("trace"))
+            .with_writer(writer)
+            .event_format(CustomFormatter)
+            .finish()
+    }
+
     #[test]
-    fn test_level_variants() {
-        // This is a compile-time + runtime sanity check.  If any Level arm were
-        // removed from the match, this test (and the compiler) would catch it.
-        let levels = [
-            Level::ERROR,
-            Level::WARN,
-            Level::INFO,
-            Level::DEBUG,
-            Level::TRACE,
-        ];
-        assert_eq!(levels.len(), 5);
-        assert_ne!(levels[0], levels[1]);
-        assert_ne!(levels[2], levels[3]);
-        assert_ne!(levels[3], levels[4]);
+    fn info_output_contains_ansi_green() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("hello info");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("\x1b[32mINFO\x1b[0m"),
+            "expected green INFO ANSI code, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn warn_output_contains_ansi_yellow() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::warn!("hello warn");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("\x1b[33mWARN\x1b[0m"),
+            "expected yellow WARN ANSI code, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn error_output_contains_ansi_red() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::error!("hello error");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("\x1b[31mERROR\x1b[0m"),
+            "expected red ERROR ANSI code, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn debug_output_contains_ansi_blue_and_filename() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::debug!("hello debug");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("\x1b[34mDEBUG\x1b[0m"),
+            "expected blue DEBUG ANSI code, got: {out:?}"
+        );
+        // DEBUG branch uses file:line — the filename should appear before ':'
+        assert!(
+            out.contains("logger.rs:"),
+            "expected file:line in DEBUG output, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn trace_output_contains_ansi_magenta_and_filename() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::trace!("hello trace");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("\x1b[35mTRACE\x1b[0m"),
+            "expected magenta TRACE ANSI code, got: {out:?}"
+        );
+        assert!(
+            out.contains("logger.rs:"),
+            "expected file:line in TRACE output, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn output_contains_timestamp() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("timestamp test");
+        });
+        let out = w.captured();
+        // Timestamp format: YYYY-MM-DD HH:MM:SS — check for year prefix " 20"
+        assert!(
+            out.contains(" 20"),
+            "expected timestamp starting with year 20xx, got: {out:?}"
+        );
+        // Date contains hyphens and time contains colons
+        assert!(
+            out.contains('-'),
+            "expected date separator '-', got: {out:?}"
+        );
+        assert!(
+            out.contains(':'),
+            "expected time separator ':', got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn output_ends_with_newline() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("newline test");
+        });
+        let out = w.captured();
+        assert!(
+            out.ends_with('\n'),
+            "expected trailing newline, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn output_contains_message_text() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("unique_sentinel_abc123");
+        });
+        let out = w.captured();
+        assert!(
+            out.contains("unique_sentinel_abc123"),
+            "expected message in output, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn output_is_wrapped_in_brackets() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("bracket test");
+        });
+        let out = w.captured();
+        assert!(out.starts_with('['), "expected '[' at start, got: {out:?}");
+        assert!(
+            out.contains("] "),
+            "expected '] ' closing bracket, got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn info_uses_target_not_file_line() {
+        let w = CapturingWriter::new();
+        tracing::subscriber::with_default(capturing_subscriber(w.clone()), || {
+            tracing::info!("info target check");
+        });
+        let out = w.captured();
+        // INFO/WARN/ERROR show module target, not file:line
+        assert!(
+            !out.contains("logger.rs:"),
+            "INFO output must use target, not file:line, got: {out:?}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Smoke test for the public init API
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn init_logger_with_level_does_not_panic() {
+        // Can't call the real init_logger() (sets global subscriber once).
+        // Verify the builder path compiles and runs via try_init.
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off"))
+            .event_format(CustomFormatter)
+            .try_init();
     }
 }
