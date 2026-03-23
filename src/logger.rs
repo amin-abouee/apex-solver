@@ -132,7 +132,10 @@ mod tests {
 
     impl Write for SharedBuf {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            self.0
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .extend_from_slice(buf);
             Ok(buf.len())
         }
 
@@ -150,7 +153,8 @@ mod tests {
         }
 
         fn captured(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+            String::from_utf8_lossy(&self.0.lock().unwrap_or_else(|e| e.into_inner()))
+                .to_string()
         }
     }
 
