@@ -297,10 +297,6 @@ pub fn decompress_bzip2(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -449,6 +445,180 @@ mod tests {
         assert!(
             !registry.odometry.contains_key("sphere_bignoise"),
             "sphere_bignoise should have been removed (merged into sphere2500)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ba_path_returns_correct_structure() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let path = registry
+            .ba_path("ladybug", 49, 7776)
+            .ok_or_else(|| io::Error::other("ladybug ba_path not found"))?;
+        assert!(
+            path.components()
+                .any(|c| c.as_os_str() == "bundle_adjustment"),
+            "path should contain 'bundle_adjustment', got: {}",
+            path.display()
+        );
+        assert!(
+            path.components().any(|c| c.as_os_str() == "ladybug"),
+            "path should contain 'ladybug', got: {}",
+            path.display()
+        );
+        assert!(
+            path.file_name()
+                .is_some_and(|f| f == "problem-49-7776-pre.txt"),
+            "filename should be 'problem-49-7776-pre.txt', got: {}",
+            path.display()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ba_path_returns_none_for_unknown() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        assert!(
+            registry.ba_path("nonexistent_ba_xyz", 1, 1).is_none(),
+            "unknown BA name should return None"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ba_sorted_returns_alphabetical_order() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entries = registry.ba_sorted();
+        assert!(!entries.is_empty(), "ba_sorted should not be empty");
+        for window in entries.windows(2) {
+            assert!(
+                window[0].0 <= window[1].0,
+                "ba_sorted is not sorted: '{}' > '{}'",
+                window[0].0,
+                window[1].0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ba_entry_largest_returns_last_problem() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let ladybug = registry
+            .bundle_adjustment
+            .get("ladybug")
+            .ok_or_else(|| io::Error::other("ladybug not found"))?;
+        let largest = ladybug.largest();
+        assert!(largest.is_some(), "ladybug should have a largest problem");
+        assert_eq!(
+            largest,
+            ladybug.problems.last().copied(),
+            "largest() should equal the last problem"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ba_entry_largest_empty_returns_none() {
+        let entry = BaEntry {
+            url_prefix: "https://example.com".to_string(),
+            problems: vec![],
+        };
+        assert!(
+            entry.largest().is_none(),
+            "empty problems should return None"
+        );
+    }
+
+    #[test]
+    fn odometry_by_category_returns_only_2d() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entries = registry.odometry_by_category("2d");
+        assert!(!entries.is_empty(), "should have at least one 2d dataset");
+        for (_, entry) in &entries {
+            assert_eq!(entry.category, "2d");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn odometry_by_category_is_sorted() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entries = registry.odometry_by_category("3d");
+        for window in entries.windows(2) {
+            assert!(
+                window[0].0 <= window[1].0,
+                "odometry_by_category is not sorted: '{}' > '{}'",
+                window[0].0,
+                window[1].0
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn odometry_entries_have_nonempty_url_and_filename() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        for (name, entry) in &registry.odometry {
+            assert!(!entry.url.is_empty(), "dataset '{name}' has empty url");
+            assert!(
+                !entry.filename.is_empty(),
+                "dataset '{name}' has empty filename"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn decompress_bzip2_roundtrip() -> io::Result<()> {
+        use bzip2::Compression;
+        use bzip2::write::BzEncoder;
+        use std::io::Write as _;
+
+        let original = b"hello bzip2 roundtrip test data";
+
+        // Write compressed bytes to a temp file
+        let tmp_dir = tempfile::tempdir()?;
+        let bz2_path = tmp_dir.path().join("test.txt.bz2");
+        let txt_path = tmp_dir.path().join("test.txt");
+
+        {
+            let file = fs::File::create(&bz2_path)?;
+            let mut encoder = BzEncoder::new(file, Compression::fast());
+            encoder.write_all(original)?;
+            encoder.finish()?;
+        }
+
+        decompress_bzip2(&bz2_path, &txt_path)?;
+
+        let decompressed = fs::read(&txt_path)?;
+        assert_eq!(
+            decompressed, original,
+            "decompressed content must match original"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_odometry_dataset_unknown_name_errors() -> io::Result<()> {
+        let err = ensure_odometry_dataset("nonexistent_dataset_xyz_abc")
+            .err()
+            .ok_or_else(|| io::Error::other("expected Err but got Ok"))?;
+        assert!(
+            err.to_string().contains("not found in registry"),
+            "error message should mention registry, got: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ensure_ba_dataset_unknown_name_errors() -> io::Result<()> {
+        let err = ensure_ba_dataset("nonexistent_ba_xyz_abc", 1, 1)
+            .err()
+            .ok_or_else(|| io::Error::other("expected Err but got Ok"))?;
+        assert!(
+            err.to_string().contains("not found in registry"),
+            "error message should mention registry, got: {err}"
         );
         Ok(())
     }
