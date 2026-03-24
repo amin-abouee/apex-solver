@@ -242,7 +242,7 @@ fn main() {
     let graph = match G2oLoader::load(&args.path) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("Failed to load '{}': {}", args.path, e);
+            warn!("Failed to load '{}': {}", args.path, e);
             std::process::exit(1);
         }
     };
@@ -276,7 +276,7 @@ fn main() {
     let (sparse_problem, sparse_init) = match build_sparse {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("Failed to build sparse problem: {e}");
+            warn!("Failed to build sparse problem: {e}");
             std::process::exit(1);
         }
     };
@@ -288,7 +288,7 @@ fn main() {
     let (dense_problem, dense_init) = match build_dense {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("Failed to build dense problem: {e}");
+            warn!("Failed to build dense problem: {e}");
             std::process::exit(1);
         }
     };
