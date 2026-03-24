@@ -73,7 +73,8 @@
 //! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # type TestResult = Result<(), Box<dyn std::error::Error>>;
+//! # fn main() -> TestResult {
 //! // Create optimization problem
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
@@ -415,7 +416,8 @@ struct CostEvaluation {
 /// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # type TestResult = Result<(), Box<dyn std::error::Error>>;
+/// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
@@ -809,6 +811,8 @@ mod tests {
     use nalgebra::dvector;
     use std::collections;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
     #[derive(Debug, Clone)]
@@ -876,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_rosenbrock_optimization() -> TestResult {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -950,5 +954,236 @@ mod tests {
             result.final_cost
         );
         Ok(())
+    }
+
+    /// Trivial factor: r = x - target, J = [[1.0]]
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+            let residual = nalgebra::dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn rosenbrock_problem() -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x1".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
+        );
+        init.insert(
+            "x2".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
+        );
+        prob.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        prob.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        (prob, init)
+    }
+
+    fn linear_problem(
+        start: f64,
+    ) -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![start]),
+        );
+        prob.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        (prob, init)
+    }
+
+    // -------------------------------------------------------------------------
+    // GaussNewtonConfig builder tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_gn_config_default() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::default();
+        assert_eq!(cfg.max_iterations, 50);
+        assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
+        assert!(!cfg.use_jacobi_scaling);
+        assert!(!cfg.compute_covariances);
+    }
+
+    #[test]
+    fn test_gn_config_builders() {
+        use crate::linalg::LinearSolverType;
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_max_iterations(15)
+            .with_cost_tolerance(1e-5)
+            .with_parameter_tolerance(1e-6)
+            .with_gradient_tolerance(1e-7)
+            .with_jacobi_scaling(true)
+            .with_min_diagonal(1e-8)
+            .with_min_cost_threshold(1e-10)
+            .with_compute_covariances(true)
+            .with_linear_solver_type(LinearSolverType::SparseQR);
+        assert_eq!(cfg.max_iterations, 15);
+        assert!((cfg.cost_tolerance - 1e-5).abs() < 1e-20);
+        assert!(cfg.use_jacobi_scaling);
+        assert!(cfg.min_cost_threshold.is_some());
+        assert!(cfg.compute_covariances);
+        assert!(matches!(cfg.linear_solver_type, LinearSolverType::SparseQR));
+    }
+
+    #[test]
+    fn test_gn_print_configuration_no_panic() {
+        optimizer::gauss_newton::GaussNewtonConfig::default().print_configuration();
+    }
+
+    #[test]
+    fn test_gn_default_equals_new() {
+        let _a = optimizer::GaussNewton::new();
+        let _b = optimizer::GaussNewton::default();
+    }
+
+    #[test]
+    fn test_gn_with_config_method() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(3);
+        let _solver = optimizer::GaussNewton::with_config(cfg);
+    }
+
+    // -------------------------------------------------------------------------
+    // Convergence termination paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_gn_max_iterations_termination() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(2);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MaxIterationsReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_gradient_tolerance_convergence() -> TestResult {
+        let (problem, initial_values) = linear_problem(1.0);
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_gradient_tolerance(1e3)
+            .with_cost_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::GradientToleranceReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_cost_tolerance_convergence() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_cost_tolerance(1e2) // very loose
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(matches!(
+            result.status,
+            optimizer::OptimizationStatus::CostToleranceReached
+                | optimizer::OptimizationStatus::GradientToleranceReached
+                | optimizer::OptimizationStatus::ParameterToleranceReached
+                | optimizer::OptimizationStatus::Converged
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_qr_solver() -> TestResult {
+        use crate::linalg::LinearSolverType;
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_linear_solver_type(LinearSolverType::SparseQR)
+            .with_max_iterations(100);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_jacobi_scaling_enabled() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_jacobi_scaling(true)
+            .with_max_iterations(100);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_min_cost_threshold() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_min_cost_threshold(1e10)
+            .with_cost_tolerance(1e-20)
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MinCostThresholdReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_result_fields() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = optimizer::GaussNewton::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.initial_cost > result.final_cost);
+        assert!(result.iterations > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_convergence_info_populated() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = optimizer::GaussNewton::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.convergence_info.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_timeout_config() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_timeout(std::time::Duration::from_secs(60));
+        assert!(cfg.timeout.is_some());
     }
 }

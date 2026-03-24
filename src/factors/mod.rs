@@ -278,3 +278,190 @@ pub trait Factor: Send + Sync {
     /// - Prior factor: dimension of the variable
     fn get_dimension(&self) -> usize;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nalgebra::{DMatrix, DVector, dvector};
+
+    // -------------------------------------------------------------------------
+    // OptimizeParams const generic flags — all 7 type aliases
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_optimize_params_bundle_adjustment_flags() {
+        const { assert!(BundleAdjustment::POSE) };
+        const { assert!(BundleAdjustment::LANDMARK) };
+        const { assert!(!BundleAdjustment::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_self_calibration_flags() {
+        const { assert!(SelfCalibration::POSE) };
+        const { assert!(SelfCalibration::LANDMARK) };
+        const { assert!(SelfCalibration::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_only_intrinsics_flags() {
+        const { assert!(!OnlyIntrinsics::POSE) };
+        const { assert!(!OnlyIntrinsics::LANDMARK) };
+        const { assert!(OnlyIntrinsics::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_only_pose_flags() {
+        const { assert!(OnlyPose::POSE) };
+        const { assert!(!OnlyPose::LANDMARK) };
+        const { assert!(!OnlyPose::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_only_landmarks_flags() {
+        const { assert!(!OnlyLandmarks::POSE) };
+        const { assert!(OnlyLandmarks::LANDMARK) };
+        const { assert!(!OnlyLandmarks::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_pose_and_intrinsics_flags() {
+        const { assert!(PoseAndIntrinsics::POSE) };
+        const { assert!(!PoseAndIntrinsics::LANDMARK) };
+        const { assert!(PoseAndIntrinsics::INTRINSIC) };
+    }
+
+    #[test]
+    fn test_optimize_params_landmarks_and_intrinsics_flags() {
+        const { assert!(!LandmarksAndIntrinsics::POSE) };
+        const { assert!(LandmarksAndIntrinsics::LANDMARK) };
+        const { assert!(LandmarksAndIntrinsics::INTRINSIC) };
+    }
+
+    // -------------------------------------------------------------------------
+    // FactorError Display — one per variant
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_factor_error_invalid_dimension_display() {
+        let e = FactorError::InvalidDimension {
+            expected: 3,
+            actual: 6,
+        };
+        let s = e.to_string();
+        assert!(s.contains("3"), "{s}");
+        assert!(s.contains("6"), "{s}");
+    }
+
+    #[test]
+    fn test_factor_error_invalid_projection_display() {
+        let e = FactorError::InvalidProjection("behind camera".into());
+        assert!(e.to_string().contains("behind camera"));
+    }
+
+    #[test]
+    fn test_factor_error_jacobian_failed_display() {
+        let e = FactorError::JacobianFailed("singular".into());
+        assert!(e.to_string().contains("singular"));
+    }
+
+    #[test]
+    fn test_factor_error_invalid_parameters_display() {
+        let e = FactorError::InvalidParameters("nan detected".into());
+        assert!(e.to_string().contains("nan detected"));
+    }
+
+    #[test]
+    fn test_factor_error_numerical_instability_display() {
+        let e = FactorError::NumericalInstability("overflow".into());
+        assert!(e.to_string().contains("overflow"));
+    }
+
+    // -------------------------------------------------------------------------
+    // log() / log_with_source() return self
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_factor_error_log_returns_self() {
+        let e = FactorError::JacobianFailed("test_log".into());
+        let returned = e.log();
+        assert!(returned.to_string().contains("test_log"));
+    }
+
+    #[test]
+    fn test_factor_error_log_with_source_returns_self() {
+        let e = FactorError::InvalidProjection("proj_log".into());
+        let source = std::io::Error::other("src");
+        let returned = e.log_with_source(source);
+        assert!(returned.to_string().contains("proj_log"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Factor trait — local implementation
+    // -------------------------------------------------------------------------
+
+    struct ConstantFactor {
+        value: f64,
+    }
+
+    impl Factor for ConstantFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.value];
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    #[test]
+    fn test_factor_linearize_with_jacobian() {
+        let f = ConstantFactor { value: 3.0 };
+        let params = vec![dvector![5.0]];
+        let (r, j) = f.linearize(&params, true);
+        assert!((r[0] - 2.0).abs() < 1e-12);
+        assert!(j.is_some());
+        let j = j.unwrap_or_else(|| DMatrix::from_element(1, 1, 0.0));
+        assert!((j[(0, 0)] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_factor_linearize_without_jacobian() {
+        let f = ConstantFactor { value: 3.0 };
+        let params = vec![dvector![5.0]];
+        let (r, j) = f.linearize(&params, false);
+        assert!((r[0] - 2.0).abs() < 1e-12);
+        assert!(j.is_none());
+    }
+
+    #[test]
+    fn test_factor_get_dimension() {
+        let f = ConstantFactor { value: 0.0 };
+        assert_eq!(f.get_dimension(), 1);
+    }
+
+    // -------------------------------------------------------------------------
+    // FactorResult type alias
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_factor_result_ok() {
+        let r: FactorResult<f64> = Ok(1.0);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn test_factor_result_err() {
+        let r: FactorResult<f64> = Err(FactorError::InvalidParameters("bad".into()));
+        assert!(r.is_err());
+    }
+}

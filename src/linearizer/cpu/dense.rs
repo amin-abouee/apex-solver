@@ -112,3 +112,259 @@ pub fn assemble_dense(
     let residual_faer = total_residual.as_ref().as_mat().to_owned();
     Ok((residual_faer, jacobian_dense))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{core::problem::Problem, factors, linalg::JacobianMode, optimizer};
+    use apex_manifolds::ManifoldType;
+    use nalgebra::{DMatrix, DVector, dvector};
+    use std::collections::HashMap;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn one_var_dense_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        (problem, init)
+    }
+
+    #[test]
+    fn test_assemble_dense_basic() -> TestResult {
+        let (problem, init) = one_var_dense_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
+        assert!((jacobian[(0, 0)] - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_dense_jacobian_dimensions() -> TestResult {
+        let (problem, init) = one_var_dense_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(residual.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian.nrows(), problem.total_residual_dimension);
+        assert_eq!(jacobian.ncols(), state.total_dof);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_dense_zero_residual() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 3.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![3.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, _) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert!(residual[(0, 0)].abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_dense_two_variables() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.add_residual_block(&["y"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![2.0]));
+        init.insert("y".to_string(), (ManifoldType::RN, dvector![7.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(jacobian.nrows(), 2);
+        assert_eq!(jacobian.ncols(), 2);
+        let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
+        assert!((rsum - 9.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_assemble_dense_residual_faer_shape() -> TestResult {
+        let (problem, init) = one_var_dense_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, _) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+        assert_eq!(residual.nrows(), 1);
+        assert_eq!(residual.ncols(), 1);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // New tests for previously uncovered code paths
+    // -------------------------------------------------------------------------
+
+    /// Factor that connects two variables (verifies column scattering for multi-variable factors).
+    struct BinaryLinearFactor {
+        target_x: f64,
+        target_y: f64,
+    }
+
+    impl factors::Factor for BinaryLinearFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual =
+                nalgebra::dvector![params[0][0] - self.target_x, params[1][0] - self.target_y];
+            let jacobian = if compute_jacobian {
+                // 2 residuals × 2 variables = 2×2 Jacobian: identity blocks side-by-side
+                let mut j = DMatrix::zeros(2, 2);
+                j[(0, 0)] = 1.0;
+                j[(1, 1)] = 1.0;
+                Some(j)
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            2
+        }
+    }
+
+    /// Test that a binary factor correctly scatters its Jacobian blocks into two separate columns.
+    #[test]
+    fn test_assemble_dense_binary_factor() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(
+            &["x", "y"],
+            Box::new(BinaryLinearFactor {
+                target_x: 0.0,
+                target_y: 0.0,
+            }),
+            None,
+        );
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, nalgebra::dvector![3.0]));
+        init.insert("y".to_string(), (ManifoldType::RN, nalgebra::dvector![5.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+
+        // 2 residuals, 2 DOF columns
+        assert_eq!(residual.nrows(), 2);
+        assert_eq!(jacobian.nrows(), 2);
+        assert_eq!(jacobian.ncols(), 2);
+
+        // Residuals should be the variable values (since targets are 0)
+        let r_sum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
+        assert!((r_sum - 8.0).abs() < 1e-10, "residual sum = {r_sum}");
+
+        // Jacobian: each variable has its own 1×1 identity block
+        // col 0 → x block, col 1 → y block (or vice versa depending on sort order)
+        let jac_sum: f64 = (0..2)
+            .map(|c| (0..2).map(|r| jacobian[(r, c)]).sum::<f64>())
+            .sum();
+        assert!(
+            (jac_sum - 2.0).abs() < 1e-10,
+            "sum of jacobian entries = {jac_sum}"
+        );
+        Ok(())
+    }
+
+    /// Test that a missing variable key in variable_index_map returns an Err.
+    #[test]
+    fn test_assemble_dense_missing_variable_key_returns_error() -> TestResult {
+        let (problem, init) = one_var_dense_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+
+        // Pass an empty index map — the key "x" will be missing
+        let empty_map: HashMap<String, usize> = HashMap::new();
+        let result = assemble_dense(&problem, &state.variables, &empty_map, state.total_dof);
+        assert!(
+            result.is_err(),
+            "missing variable key should produce an Err"
+        );
+        Ok(())
+    }
+
+    /// Test that individual residual values in a multi-block problem are correct.
+    #[test]
+    fn test_assemble_dense_multi_block_residual_values() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 1.0 }), None);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 4.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![3.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.total_dof,
+        )?;
+
+        // 2 residual blocks of dimension 1 each → 2 rows
+        assert_eq!(residual.nrows(), 2);
+
+        // residuals: [3-1, 3-4] = [2, -1] in some order
+        let vals: std::collections::HashSet<i64> =
+            (0..2).map(|i| (residual[(i, 0)] * 1e6) as i64).collect();
+        assert!(vals.contains(&2_000_000), "Missing residual entry 2.0");
+        assert!(vals.contains(&-1_000_000), "Missing residual entry -1.0");
+
+        // Jacobian: both rows should have a 1 in column 0 (single variable "x")
+        assert!((jacobian[(0, 0)] - 1.0).abs() < 1e-10);
+        assert!((jacobian[(1, 0)] - 1.0).abs() < 1e-10);
+        Ok(())
+    }
+}

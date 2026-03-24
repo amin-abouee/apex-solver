@@ -274,3 +274,245 @@ impl AssemblyBackend for DenseMode {
         hessian * vec
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{core::problem::Problem, factors, linalg::JacobianMode, optimizer};
+    use apex_manifolds::ManifoldType;
+    use faer::Col;
+    use nalgebra::{DMatrix, DVector, dvector};
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn one_var_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        (problem, init)
+    }
+
+    // -------------------------------------------------------------------------
+    // linearize_block
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_linearize_block_residual_value() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
+        linearize_block(block, &state.variables, &total_residual)?;
+        let r = total_residual.lock().map_err(|e| format!("{e:?}"))?;
+        assert!((r[0] - 5.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linearize_block_jacobian_shape() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
+        let result = linearize_block(block, &state.variables, &total_residual)?;
+        assert_eq!(result.jacobian.nrows(), 1);
+        assert_eq!(result.jacobian.ncols(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_linearize_block_variable_local_idx() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no residual blocks")?;
+        let result = linearize_block(block, &state.variables, &total_residual)?;
+        assert_eq!(result.variable_local_idx_size_list.len(), 1);
+        let (local_idx, size) = result.variable_local_idx_size_list[0];
+        assert_eq!(local_idx, 0);
+        assert_eq!(size, 1);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // SparseMode AssemblyBackend
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_sparse_backend_assemble() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, _) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+        )?;
+        assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let result = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            None, // no symbolic structure
+            state.total_dof,
+        );
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparse_backend_compute_column_norms() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (_, jacobian) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+        )?;
+        let norms = SparseMode::compute_column_norms(&jacobian);
+        assert_eq!(norms.len(), 1);
+        assert!((norms[0] - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparse_backend_apply_column_scaling() -> TestResult {
+        let (problem, init) = one_var_problem();
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (_, jacobian) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+        )?;
+        let scaling = vec![0.5_f64];
+        let scaled = SparseMode::apply_column_scaling(&jacobian, &scaling);
+        let val = scaled.as_ref().val_of_col(0)[0];
+        assert!((val - 0.5).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_sparse_backend_apply_inverse_scaling() {
+        let step = Mat::from_fn(1, 1, |_, _| 1.0_f64);
+        let scaling = vec![2.0_f64];
+        let result = SparseMode::apply_inverse_scaling(&step, &scaling);
+        assert!((result[(0, 0)] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_sparse_backend_hessian_vec_product() -> TestResult {
+        let triplets = vec![faer::sparse::Triplet::new(0usize, 0usize, 4.0_f64)];
+        let h = SparseColMat::try_new_from_triplets(1, 1, &triplets)?;
+        let v = Mat::from_fn(1, 1, |_, _| 2.0_f64);
+        let result = SparseMode::hessian_vec_product(&h, &v);
+        assert!((result[(0, 0)] - 8.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // DenseMode AssemblyBackend
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_dense_backend_assemble() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Dense);
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        let mut init = HashMap::new();
+        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        let state = optimizer::initialize_optimization_state(&problem, &init)?;
+        let (residual, _) = DenseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            None,
+            state.total_dof,
+        )?;
+        assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dense_backend_compute_column_norms() {
+        let jacobian = Mat::from_fn(1, 1, |_, _| 1.0_f64);
+        let norms = DenseMode::compute_column_norms(&jacobian);
+        assert_eq!(norms.len(), 1);
+        assert!((norms[0] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dense_backend_apply_column_scaling() {
+        let jacobian = Mat::from_fn(1, 1, |_, _| 1.0_f64);
+        let scaling = vec![0.5_f64];
+        let scaled = DenseMode::apply_column_scaling(&jacobian, &scaling);
+        assert!((scaled[(0, 0)] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dense_backend_apply_inverse_scaling() {
+        let step = Mat::from_fn(1, 1, |_, _| 1.0_f64);
+        let scaling = vec![2.0_f64];
+        let result = DenseMode::apply_inverse_scaling(&step, &scaling);
+        assert!((result[(0, 0)] - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_dense_backend_hessian_vec_product() {
+        let h = Mat::from_fn(1, 1, |_, _| 4.0_f64);
+        let v = Mat::from_fn(1, 1, |_, _| 2.0_f64);
+        let result = DenseMode::hessian_vec_product(&h, &v);
+        assert!((result[(0, 0)] - 8.0).abs() < 1e-12);
+    }
+}

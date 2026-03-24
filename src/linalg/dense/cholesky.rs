@@ -330,4 +330,115 @@ mod tests {
 
         Ok(())
     }
+
+    // -------------------------------------------------------------------------
+    // New tests for previously uncovered code paths
+    // -------------------------------------------------------------------------
+
+    /// get_hessian() and get_gradient() should return None before any solve.
+    #[test]
+    fn test_accessors_before_solve() {
+        let solver = DenseCholeskySolver::new();
+        assert!(
+            LinearSolver::<DenseMode>::get_hessian(&solver).is_none(),
+            "hessian should be None before solve"
+        );
+        assert!(
+            LinearSolver::<DenseMode>::get_gradient(&solver).is_none(),
+            "gradient should be None before solve"
+        );
+    }
+
+    /// get_covariance_matrix() should return None before any solve.
+    #[test]
+    fn test_get_covariance_before_solve() {
+        let mut solver = DenseCholeskySolver::new();
+        // No solve has happened yet
+        assert!(
+            LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver).is_none(),
+            "covariance should be None when no factorizer is cached"
+        );
+        assert!(
+            LinearSolver::<DenseMode>::get_covariance_matrix(&solver).is_none(),
+            "get_covariance_matrix should be None before compute"
+        );
+    }
+
+    /// DenseCholeskySolver::default() should behave identically to new().
+    #[test]
+    fn test_default_equals_new() {
+        let solver = DenseCholeskySolver::default();
+        assert!(solver.hessian.is_none());
+        assert!(solver.gradient.is_none());
+        assert!(solver.factorizer.is_none());
+        assert!(solver.covariance_matrix.is_none());
+    }
+
+    /// A rank-deficient (singular) Jacobian should return an Err from solve_normal_equation.
+    #[test]
+    fn test_singular_jacobian_returns_error() {
+        let mut solver = DenseCholeskySolver::new();
+
+        // Jacobian with an all-zero column → H = J^T J is singular
+        let mut j = Mat::zeros(3, 2);
+        j[(0, 0)] = 1.0;
+        j[(1, 0)] = 2.0;
+        j[(2, 0)] = 3.0;
+        // column 1 is all zeros
+
+        let mut r = Mat::zeros(3, 1);
+        r[(0, 0)] = 1.0;
+
+        let result = LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j);
+        assert!(
+            result.is_err(),
+            "Singular Jacobian must produce a factorization error"
+        );
+    }
+
+    /// After a second solve, the cached covariance_matrix should be reset to None.
+    #[test]
+    fn test_covariance_reset_after_second_solve() -> TestResult {
+        let (j, r) = create_test_data();
+        let mut solver = DenseCholeskySolver::new();
+
+        // First solve + covariance computation
+        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
+        LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
+        assert!(
+            solver.covariance_matrix.is_some(),
+            "covariance should exist after first compute"
+        );
+
+        // Second solve should invalidate the cached covariance
+        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
+        assert!(
+            solver.covariance_matrix.is_none(),
+            "covariance should be None after a new solve"
+        );
+        Ok(())
+    }
+
+    /// solve_augmented_equation with lambda=0 should produce the same result as solve_normal_equation.
+    #[test]
+    fn test_augmented_with_zero_lambda_matches_normal() -> TestResult {
+        let (j, r) = create_test_data();
+        let mut solver_n = DenseCholeskySolver::new();
+        let mut solver_a = DenseCholeskySolver::new();
+
+        let dx_normal = LinearSolver::<DenseMode>::solve_normal_equation(&mut solver_n, &r, &j)?;
+        let dx_augmented =
+            LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver_a, &r, &j, 0.0)?;
+
+        for i in 0..dx_normal.nrows() {
+            assert!(
+                (dx_normal[(i, 0)] - dx_augmented[(i, 0)]).abs() < TOLERANCE,
+                "Element {} differs: normal={}, augmented(λ=0)={}",
+                i,
+                dx_normal[(i, 0)],
+                dx_augmented[(i, 0)]
+            );
+        }
+        Ok(())
+    }
 }

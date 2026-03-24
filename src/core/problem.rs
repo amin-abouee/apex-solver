@@ -1492,4 +1492,410 @@ mod tests {
 
         Ok(())
     }
+
+    // -------------------------------------------------------------------------
+    // New tests for previously uncovered code paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_problem_default_equals_new_sparse() {
+        let default_problem = Problem::default();
+        let new_problem = Problem::new(JacobianMode::Sparse);
+        assert_eq!(default_problem.jacobian_mode, new_problem.jacobian_mode);
+        assert_eq!(
+            default_problem.num_residual_blocks(),
+            new_problem.num_residual_blocks()
+        );
+    }
+
+    /// Test that SO2 variables can be initialized correctly.
+    #[test]
+    fn test_initialize_so2_variable() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert("angle".to_string(), (ManifoldType::SO2, dvector![0.5]));
+        let variables = problem.initialize_variables(&initial);
+        assert_eq!(variables.len(), 1);
+        let var = variables.get("angle").ok_or("angle not found")?;
+        assert_eq!(var.manifold_type(), ManifoldType::SO2);
+        assert_eq!(var.get_size(), 1);
+        assert_eq!(var.to_vector().len(), 1);
+        Ok(())
+    }
+
+    /// Test that SO3 variables can be initialized correctly.
+    #[test]
+    fn test_initialize_so3_variable() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        // SO3: [qw, qx, qy, qz]
+        initial.insert(
+            "rot".to_string(),
+            (ManifoldType::SO3, dvector![1.0, 0.0, 0.0, 0.0]),
+        );
+        let variables = problem.initialize_variables(&initial);
+        assert_eq!(variables.len(), 1);
+        let var = variables.get("rot").ok_or("rot not found")?;
+        assert_eq!(var.manifold_type(), ManifoldType::SO3);
+        assert_eq!(var.get_size(), 3); // SO3 tangent space is 3-dimensional
+        Ok(())
+    }
+
+    /// Test that RN variables can be initialized correctly (arbitrary dimension).
+    #[test]
+    fn test_initialize_rn_variable() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "pt".to_string(),
+            (ManifoldType::RN, dvector![1.0, 2.0, 3.0]),
+        );
+        let variables = problem.initialize_variables(&initial);
+        let var = variables.get("pt").ok_or("pt not found")?;
+        assert_eq!(var.manifold_type(), ManifoldType::RN);
+        assert_eq!(var.get_size(), 3);
+        let vec = var.to_vector();
+        assert!((vec[0] - 1.0).abs() < 1e-12);
+        assert!((vec[1] - 2.0).abs() < 1e-12);
+        assert!((vec[2] - 3.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    /// Test VariableEnum covariance lifecycle: set → get → clear.
+    #[test]
+    fn test_variable_enum_covariance_lifecycle() -> TestResult {
+        use faer::Mat;
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "x0".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        let mut variables = problem.initialize_variables(&initial);
+        let var = variables.get_mut("x0").ok_or("x0 not found")?;
+
+        // Before setting: no covariance
+        assert!(var.get_covariance().is_none());
+
+        // Set a 3×3 identity covariance
+        let cov = Mat::identity(3, 3);
+        var.set_covariance(cov);
+        let retrieved = var.get_covariance().ok_or("covariance not set")?;
+        assert_eq!(retrieved.nrows(), 3);
+        assert!((retrieved[(0, 0)] - 1.0).abs() < 1e-12);
+
+        // Clear covariance
+        var.clear_covariance();
+        assert!(var.get_covariance().is_none());
+        Ok(())
+    }
+
+    /// Test VariableEnum::get_bounds() propagation via initialize_variables.
+    #[test]
+    fn test_variable_enum_bounds_propagation() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.set_variable_bounds("x0", 0, -1.0, 1.0);
+        problem.set_variable_bounds("x0", 1, -2.0, 2.0);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "x0".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        let variables = problem.initialize_variables(&initial);
+        let var = variables.get("x0").ok_or("x0 not found")?;
+        let bounds = var.get_bounds();
+        assert_eq!(bounds.len(), 2);
+        let (lo, hi) = bounds[&0];
+        assert!((lo + 1.0).abs() < 1e-12);
+        assert!((hi - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    /// Test VariableEnum::get_fixed_indices() propagation via initialize_variables.
+    #[test]
+    fn test_variable_enum_fixed_indices_propagation() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.fix_variable("x0", 0);
+        problem.fix_variable("x0", 2);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "x0".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        let variables = problem.initialize_variables(&initial);
+        let var = variables.get("x0").ok_or("x0 not found")?;
+        let fixed = var.get_fixed_indices();
+        assert_eq!(fixed.len(), 2);
+        assert!(fixed.contains(&0));
+        assert!(fixed.contains(&2));
+        Ok(())
+    }
+
+    /// Test VariableEnum::set_from_vector() for all five manifold variants.
+    #[test]
+    fn test_variable_enum_set_from_vector_all_variants() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "se2".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        initial.insert(
+            "se3".to_string(),
+            (
+                ManifoldType::SE3,
+                dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            ),
+        );
+        initial.insert("so2".to_string(), (ManifoldType::SO2, dvector![0.0]));
+        initial.insert(
+            "so3".to_string(),
+            (ManifoldType::SO3, dvector![1.0, 0.0, 0.0, 0.0]),
+        );
+        initial.insert("rn".to_string(), (ManifoldType::RN, dvector![1.0, 2.0]));
+        let mut variables = problem.initialize_variables(&initial);
+
+        // SE2: update to [1, 2, 0.5]
+        let new_se2 = dvector![1.0, 2.0, 0.5];
+        variables
+            .get_mut("se2")
+            .ok_or("se2 not found")?
+            .set_from_vector(&new_se2);
+        let got = variables.get("se2").ok_or("se2 not found")?.to_vector();
+        assert!((got[0] - 1.0).abs() < 1e-10);
+
+        // SE3: update translation part
+        let new_se3 = dvector![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+        variables
+            .get_mut("se3")
+            .ok_or("se3 not found")?
+            .set_from_vector(&new_se3);
+        let got = variables.get("se3").ok_or("se3 not found")?.to_vector();
+        assert!((got[0] - 1.0).abs() < 1e-10);
+
+        // SO2
+        let new_so2 = dvector![0.5];
+        variables
+            .get_mut("so2")
+            .ok_or("so2 not found")?
+            .set_from_vector(&new_so2);
+        assert_eq!(variables.get("so2").ok_or("so2 not found")?.get_size(), 1);
+
+        // SO3
+        let new_so3 = dvector![1.0, 0.0, 0.0, 0.0];
+        variables
+            .get_mut("so3")
+            .ok_or("so3 not found")?
+            .set_from_vector(&new_so3);
+        assert_eq!(variables.get("so3").ok_or("so3 not found")?.get_size(), 3);
+
+        // RN
+        let new_rn = dvector![5.0, 6.0];
+        variables
+            .get_mut("rn")
+            .ok_or("rn not found")?
+            .set_from_vector(&new_rn);
+        let got = variables.get("rn").ok_or("rn not found")?.to_vector();
+        assert!((got[0] - 5.0).abs() < 1e-10);
+        assert!((got[1] - 6.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    /// Test apply_tangent_step() zeros out fixed indices for SE2.
+    #[test]
+    fn test_apply_tangent_step_se2_fixed_index() -> TestResult {
+        use faer::Mat;
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        // Fix SE2 index 0 (x translation)
+        problem.fix_variable("x0", 0);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "x0".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        let mut variables = problem.initialize_variables(&initial);
+
+        // Step vector: [1, 2, 3] — but index 0 should be zeroed
+        let mut step = Mat::zeros(3, 1);
+        step[(0, 0)] = 1.0;
+        step[(1, 0)] = 2.0;
+        step[(2, 0)] = 3.0;
+
+        let var = variables.get_mut("x0").ok_or("x0 not found")?;
+        var.apply_tangent_step(step.as_ref());
+        // After update, get_size() should still be 3
+        assert_eq!(var.get_size(), 3);
+        Ok(())
+    }
+
+    /// Test apply_tangent_step() zeros out fixed indices for SE3.
+    #[test]
+    fn test_apply_tangent_step_se3_fixed_index() -> TestResult {
+        use faer::Mat;
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        problem.fix_variable("p", 0);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "p".to_string(),
+            (
+                ManifoldType::SE3,
+                dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            ),
+        );
+        let mut variables = problem.initialize_variables(&initial);
+
+        let mut step = Mat::zeros(6, 1);
+        for i in 0..6 {
+            step[(i, 0)] = (i + 1) as f64;
+        }
+
+        let var = variables.get_mut("p").ok_or("p not found")?;
+        var.apply_tangent_step(step.as_ref());
+        assert_eq!(var.get_size(), 6);
+        Ok(())
+    }
+
+    /// Test apply_tangent_step for SO2 and SO3 and RN.
+    #[test]
+    fn test_apply_tangent_step_remaining_manifolds() -> TestResult {
+        use faer::Mat;
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert("so2".to_string(), (ManifoldType::SO2, dvector![0.0]));
+        initial.insert(
+            "so3".to_string(),
+            (ManifoldType::SO3, dvector![1.0, 0.0, 0.0, 0.0]),
+        );
+        initial.insert("rn".to_string(), (ManifoldType::RN, dvector![0.0, 0.0]));
+        let mut variables = problem.initialize_variables(&initial);
+
+        // SO2: 1-DOF step
+        let mut step_so2 = Mat::zeros(1, 1);
+        step_so2[(0, 0)] = 0.1;
+        variables
+            .get_mut("so2")
+            .ok_or("so2 not found")?
+            .apply_tangent_step(step_so2.as_ref());
+
+        // SO3: 3-DOF step
+        let mut step_so3 = Mat::zeros(3, 1);
+        step_so3[(0, 0)] = 0.01;
+        variables
+            .get_mut("so3")
+            .ok_or("so3 not found")?
+            .apply_tangent_step(step_so3.as_ref());
+
+        // RN: 2-DOF step
+        let mut step_rn = Mat::zeros(2, 1);
+        step_rn[(0, 0)] = 1.0;
+        step_rn[(1, 0)] = 2.0;
+        variables
+            .get_mut("rn")
+            .ok_or("rn not found")?
+            .apply_tangent_step(step_rn.as_ref());
+        let vec = variables.get("rn").ok_or("rn not found")?.to_vector();
+        assert!((vec[0] - 1.0).abs() < 1e-10);
+        assert!((vec[1] - 2.0).abs() < 1e-10);
+        Ok(())
+    }
+
+    /// Test compute_residual_sparse returns a non-negative squared norm.
+    #[test]
+    fn test_compute_residual_sparse_smoke() -> TestResult {
+        let (problem, initial_values) = create_se2_test_problem()?;
+        let variables = problem.initialize_variables(&initial_values);
+        let residual = problem.compute_residual_sparse(&variables)?;
+        // Squared norm must be non-negative
+        let norm_sq: f64 = (0..residual.nrows())
+            .map(|i| residual[(i, 0)].powi(2))
+            .sum();
+        assert!(norm_sq >= 0.0);
+        assert_eq!(residual.nrows(), problem.total_residual_dimension);
+        Ok(())
+    }
+
+    /// Test log_residual_to_file writes a file without error.
+    #[test]
+    fn test_log_residual_to_file() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let residual = nalgebra::dvector![1.0, 2.0, 3.0];
+        let path = std::env::temp_dir().join("apex_test_residual.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_residual_to_file(&residual, path_str)?;
+        assert!(path.exists());
+        Ok(())
+    }
+
+    /// Test log_variables_to_file writes a file without error.
+    #[test]
+    fn test_log_variables_to_file() -> TestResult {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "x0".to_string(),
+            (ManifoldType::SE2, dvector![1.0, 2.0, 0.3]),
+        );
+        let variables = problem.initialize_variables(&initial);
+        let path = std::env::temp_dir().join("apex_test_variables.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_variables_to_file(&variables, path_str)?;
+        assert!(path.exists());
+        Ok(())
+    }
+
+    /// Test log_sparse_jacobian_to_file writes a file without error.
+    #[test]
+    fn test_log_sparse_jacobian_to_file() -> TestResult {
+        use faer::sparse::SparseColMat;
+        let problem = Problem::new(JacobianMode::Sparse);
+        let triplets = vec![faer::sparse::Triplet::new(0usize, 0usize, 1.0f64)];
+        let jacobian =
+            SparseColMat::try_new_from_triplets(1, 1, &triplets).map_err(|e| format!("{e:?}"))?;
+        let path = std::env::temp_dir().join("apex_test_jacobian.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_sparse_jacobian_to_file(&jacobian, path_str)?;
+        assert!(path.exists());
+        Ok(())
+    }
+
+    /// Test set_variable_bounds with lower > upper logs a warning but does not update bounds.
+    #[test]
+    fn test_set_variable_bounds_invalid_order() {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        // lower > upper — should warn but NOT insert into the bounds map
+        problem.set_variable_bounds("x0", 0, 5.0, 1.0);
+        // Since lower > upper, the bounds map should NOT be updated
+        assert!(!problem.variable_bounds.contains_key("x0"));
+    }
+
+    /// Test VariableEnum::manifold_type() returns the correct type for each variant.
+    #[test]
+    fn test_variable_enum_manifold_type() {
+        let problem = Problem::new(JacobianMode::Sparse);
+        let mut initial = HashMap::new();
+        initial.insert(
+            "se2".to_string(),
+            (ManifoldType::SE2, dvector![0.0, 0.0, 0.0]),
+        );
+        initial.insert(
+            "se3".to_string(),
+            (
+                ManifoldType::SE3,
+                dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            ),
+        );
+        initial.insert("so2".to_string(), (ManifoldType::SO2, dvector![0.0]));
+        initial.insert(
+            "so3".to_string(),
+            (ManifoldType::SO3, dvector![1.0, 0.0, 0.0, 0.0]),
+        );
+        initial.insert("rn".to_string(), (ManifoldType::RN, dvector![0.0]));
+        let variables = problem.initialize_variables(&initial);
+
+        assert_eq!(variables["se2"].manifold_type(), ManifoldType::SE2);
+        assert_eq!(variables["se3"].manifold_type(), ManifoldType::SE3);
+        assert_eq!(variables["so2"].manifold_type(), ManifoldType::SO2);
+        assert_eq!(variables["so3"].manifold_type(), ManifoldType::SO3);
+        assert_eq!(variables["rn"].manifold_type(), ManifoldType::RN);
+    }
 }

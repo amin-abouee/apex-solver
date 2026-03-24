@@ -998,3 +998,632 @@ pub fn create_optimizer_summary(
         rho,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::problem::VariableEnum;
+    use crate::core::variable::Variable;
+    use crate::factors::Factor;
+    use crate::linalg::JacobianMode;
+    use apex_manifolds::ManifoldType;
+    use apex_manifolds::rn::Rn;
+    use faer::Mat;
+    use faer::sparse::{SparseColMat, Triplet};
+    use nalgebra::{DMatrix, DVector, dvector};
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // -------------------------------------------------------------------------
+    // compute_cost
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_cost_known_value() {
+        // ||[1, 2]||² * 0.5 = (1 + 4) * 0.5 = 2.5
+        let r = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
+        let cost = compute_cost(&r);
+        assert!((cost - 2.5).abs() < 1e-12, "expected 2.5, got {cost}");
+    }
+
+    #[test]
+    fn test_compute_cost_zero_residual() {
+        let r = Mat::zeros(3, 1);
+        assert_eq!(compute_cost(&r), 0.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // compute_step_quality
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_step_quality_normal() {
+        // actual = 1.0-0.0 = 1.0, predicted = 2.0 → rho = 0.5
+        let rho = compute_step_quality(1.0, 0.0, 2.0);
+        assert!((rho - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn test_compute_step_quality_zero_predicted_positive_actual() {
+        // predicted ≈ 0, actual > 0 → 1.0
+        let rho = compute_step_quality(2.0, 1.0, 0.0);
+        assert_eq!(rho, 1.0);
+    }
+
+    #[test]
+    fn test_compute_step_quality_zero_predicted_nonpositive_actual() {
+        // predicted ≈ 0, actual ≤ 0 → 0.0
+        let rho = compute_step_quality(1.0, 2.0, 0.0); // actual = -1.0
+        assert_eq!(rho, 0.0);
+    }
+
+    #[test]
+    fn test_compute_step_quality_negative_reduction() {
+        // cost increased: actual = 1.0 - 2.0 = -1.0, predicted = 1.0 → -1.0
+        let rho = compute_step_quality(1.0, 2.0, 1.0);
+        assert!((rho - (-1.0)).abs() < 1e-12);
+    }
+
+    // -------------------------------------------------------------------------
+    // create_jacobi_scaling
+    // -------------------------------------------------------------------------
+
+    fn make_identity_jacobian(n: usize) -> SparseColMat<usize, f64> {
+        let triplets: Vec<Triplet<usize, usize, f64>> =
+            (0..n).map(|i| Triplet::new(i, i, 1.0)).collect();
+        SparseColMat::try_new_from_triplets(n, n, &triplets).unwrap_or_else(|_| {
+            let empty: Vec<Triplet<usize, usize, f64>> = vec![];
+            SparseColMat::try_new_from_triplets(0, 0, &empty)
+                .unwrap_or_else(|_| panic!("failed to create empty matrix"))
+        })
+    }
+
+    #[test]
+    fn test_create_jacobi_scaling_identity_jacobian() -> TestResult {
+        // For identity Jacobian each column has norm 1.0 → scaling = 1/(1+1) = 0.5
+        let jac = make_identity_jacobian(3);
+        let scaling = create_jacobi_scaling(&jac)?;
+        for i in 0..3 {
+            let val = scaling.get(i, i).copied().unwrap_or(0.0);
+            assert!(
+                (val - 0.5).abs() < 1e-12,
+                "col {i}: expected 0.5, got {val}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_create_jacobi_scaling_zero_column() -> TestResult {
+        // A zero column has norm 0 → scaling = 1/(1+0) = 1.0
+        let triplets = vec![Triplet::new(0_usize, 0_usize, 1.0_f64)];
+        let jac = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
+        let scaling = create_jacobi_scaling(&jac)?;
+        // col 0: norm=1 → 0.5; col 1: norm=0 → 1.0
+        let s0 = scaling.get(0, 0).copied().unwrap_or(0.0);
+        let s1 = scaling.get(1, 1).copied().unwrap_or(0.0);
+        assert!((s0 - 0.5).abs() < 1e-12);
+        assert!((s1 - 1.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // process_jacobian
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_process_jacobian_creates_at_iter0() -> TestResult {
+        let jac = make_identity_jacobian(2);
+        let mut cache: Option<SparseColMat<usize, f64>> = None;
+        let scaled = process_jacobian(&jac, &mut cache, 0)?;
+        assert!(cache.is_some(), "scaling should be cached after iter 0");
+        // Each diagonal entry should be scaled by 0.5
+        let s = scaled.get(0, 0).copied().unwrap_or(0.0);
+        assert!((s - 0.5).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_jacobian_reuses_at_iter1() -> TestResult {
+        let jac = make_identity_jacobian(2);
+        let mut cache: Option<SparseColMat<usize, f64>> = None;
+        // build cache at iter 0
+        process_jacobian(&jac, &mut cache, 0)?;
+        // now use cached at iter 1
+        let scaled = process_jacobian(&jac, &mut cache, 1)?;
+        let s = scaled.get(0, 0).copied().unwrap_or(0.0);
+        assert!((s - 0.5).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_process_jacobian_error_at_iter1_without_init() {
+        let jac = make_identity_jacobian(2);
+        let mut cache: Option<SparseColMat<usize, f64>> = None;
+        // skip iter 0 — should error
+        let result = process_jacobian(&jac, &mut cache, 1);
+        assert!(result.is_err(), "should fail without prior iter=0 call");
+    }
+
+    // -------------------------------------------------------------------------
+    // compute_parameter_norm
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_compute_parameter_norm_two_variables() {
+        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
+        vars.insert(
+            "a".into(),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![3.0]))),
+        );
+        vars.insert(
+            "b".into(),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![4.0]))),
+        );
+        let norm = compute_parameter_norm(&vars);
+        // sqrt(3² + 4²) = 5.0
+        assert!((norm - 5.0).abs() < 1e-12, "expected 5.0, got {norm}");
+    }
+
+    #[test]
+    fn test_compute_parameter_norm_empty() {
+        let vars: HashMap<String, VariableEnum> = HashMap::new();
+        assert_eq!(compute_parameter_norm(&vars), 0.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // apply_parameter_step / apply_negative_parameter_step
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_parameter_step_advances_variable() {
+        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
+        vars.insert(
+            "x".into(),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![0.0]))),
+        );
+        let order = vec!["x".to_string()];
+        let step = Mat::from_fn(1, 1, |_, _| 3.0);
+        let norm = apply_parameter_step(&mut vars, step.as_ref(), &order);
+        assert!((norm - 3.0).abs() < 1e-12);
+        let val = vars["x"].to_vector()[0];
+        assert!((val - 3.0).abs() < 1e-12, "expected 3.0, got {val}");
+    }
+
+    #[test]
+    fn test_apply_negative_parameter_step_reverts() {
+        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
+        vars.insert(
+            "x".into(),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![5.0]))),
+        );
+        let order = vec!["x".to_string()];
+        let step = Mat::from_fn(1, 1, |_, _| 2.0);
+        // apply +2 first
+        apply_parameter_step(&mut vars, step.as_ref(), &order);
+        assert!((vars["x"].to_vector()[0] - 7.0).abs() < 1e-12);
+        // then revert with -2
+        apply_negative_parameter_step(&mut vars, step.as_ref(), &order);
+        assert!((vars["x"].to_vector()[0] - 5.0).abs() < 1e-12);
+    }
+
+    // -------------------------------------------------------------------------
+    // check_convergence — all branches
+    // -------------------------------------------------------------------------
+
+    fn base_params() -> ConvergenceParams {
+        ConvergenceParams {
+            iteration: 1,
+            current_cost: 1.0,
+            new_cost: 0.9,
+            parameter_norm: 1.0,
+            parameter_update_norm: 1e-3,
+            gradient_norm: 1e-3,
+            elapsed: Duration::from_millis(10),
+            step_accepted: true,
+            max_iterations: 100,
+            gradient_tolerance: 1e-10,
+            parameter_tolerance: 1e-10,
+            cost_tolerance: 1e-10,
+            min_cost_threshold: None,
+            timeout: None,
+            trust_region_radius: None,
+            min_trust_region_radius: None,
+        }
+    }
+
+    #[test]
+    fn test_check_convergence_no_trigger() {
+        assert!(check_convergence(&base_params()).is_none());
+    }
+
+    #[test]
+    fn test_check_convergence_nan_cost() {
+        let mut p = base_params();
+        p.new_cost = f64::NAN;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::InvalidNumericalValues)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_inf_gradient() {
+        let mut p = base_params();
+        p.gradient_norm = f64::INFINITY;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::InvalidNumericalValues)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_timeout() {
+        let mut p = base_params();
+        p.timeout = Some(Duration::from_millis(5));
+        p.elapsed = Duration::from_millis(10);
+        assert_eq!(check_convergence(&p), Some(OptimizationStatus::Timeout));
+    }
+
+    #[test]
+    fn test_check_convergence_max_iterations() {
+        let mut p = base_params();
+        p.iteration = 100;
+        p.max_iterations = 100;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::MaxIterationsReached)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_gradient_tolerance() {
+        let mut p = base_params();
+        p.step_accepted = true;
+        p.gradient_norm = 1e-12;
+        p.gradient_tolerance = 1e-10;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::GradientToleranceReached)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_parameter_tolerance() {
+        let mut p = base_params();
+        p.step_accepted = true;
+        p.gradient_norm = 1.0; // above tolerance
+        p.parameter_update_norm = 1e-20;
+        p.parameter_tolerance = 1e-8;
+        p.parameter_norm = 1.0;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::ParameterToleranceReached)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_cost_tolerance() {
+        let mut p = base_params();
+        p.step_accepted = true;
+        p.gradient_norm = 1.0; // above
+        p.parameter_update_norm = 1.0; // above
+        p.current_cost = 1.0;
+        p.new_cost = 1.0 - 1e-15; // nearly no change
+        p.cost_tolerance = 1e-10;
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::CostToleranceReached)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_min_cost_threshold() {
+        let mut p = base_params();
+        p.step_accepted = true;
+        p.gradient_norm = 1.0;
+        p.parameter_update_norm = 1.0;
+        p.current_cost = 1.0;
+        p.new_cost = 1.0 - 0.5; // big change — cost tol not triggered
+        p.cost_tolerance = 1e-10;
+        p.min_cost_threshold = Some(1.0); // new_cost=0.5 < 1.0 → trigger
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::MinCostThresholdReached)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_trust_region_too_small() {
+        let mut p = base_params();
+        p.step_accepted = true;
+        p.gradient_norm = 1.0;
+        p.parameter_update_norm = 1.0;
+        p.current_cost = 1.0;
+        p.new_cost = 0.5;
+        p.cost_tolerance = 1e-10;
+        p.trust_region_radius = Some(1e-40);
+        p.min_trust_region_radius = Some(1e-32);
+        assert_eq!(
+            check_convergence(&p),
+            Some(OptimizationStatus::TrustRegionRadiusTooSmall)
+        );
+    }
+
+    #[test]
+    fn test_check_convergence_step_not_accepted_skips_criteria() {
+        // With step_accepted=false, gradient/parameter/cost tol should NOT fire
+        let mut p = base_params();
+        p.step_accepted = false;
+        p.gradient_norm = 0.0; // would trigger gradient tol if accepted
+        p.parameter_update_norm = 0.0;
+        p.new_cost = 0.0;
+        assert!(check_convergence(&p).is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // create_linear_solver
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_create_linear_solver_cholesky() {
+        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseCholesky);
+        // just verify it's constructable and callable without panic
+        let _ = solver.get_hessian();
+    }
+
+    #[test]
+    fn test_create_linear_solver_qr() {
+        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseQR);
+        let _ = solver.get_hessian();
+    }
+
+    #[test]
+    fn test_create_linear_solver_fallback_for_schur() {
+        // SparseSchurComplement is special; falls back to Cholesky in create_linear_solver
+        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseSchurComplement);
+        let _ = solver.get_hessian();
+    }
+
+    // -------------------------------------------------------------------------
+    // Display impls
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_optimizer_type_display() {
+        assert_eq!(
+            format!("{}", OptimizerType::LevenbergMarquardt),
+            "Levenberg-Marquardt"
+        );
+        assert_eq!(format!("{}", OptimizerType::GaussNewton), "Gauss-Newton");
+        assert_eq!(format!("{}", OptimizerType::DogLeg), "Dog Leg");
+    }
+
+    #[test]
+    fn test_optimization_status_display() {
+        assert_eq!(format!("{}", OptimizationStatus::Converged), "Converged");
+        assert_eq!(
+            format!("{}", OptimizationStatus::MaxIterationsReached),
+            "Maximum iterations reached"
+        );
+        assert_eq!(format!("{}", OptimizationStatus::Timeout), "Timeout");
+        assert_eq!(
+            format!("{}", OptimizationStatus::InvalidNumericalValues),
+            "Invalid numerical values (NaN/Inf) detected"
+        );
+        assert!(format!("{}", OptimizationStatus::Failed("oops".into())).contains("oops"));
+    }
+
+    #[test]
+    fn test_optimizer_error_variants() {
+        let e1 = OptimizerError::TrustRegionFailure {
+            radius: 1e-40,
+            min_radius: 1e-32,
+        };
+        assert!(e1.to_string().contains("Trust region radius"));
+
+        let e2 = OptimizerError::DampingFailure {
+            damping: 1e13,
+            max_damping: 1e12,
+        };
+        assert!(e2.to_string().contains("Damping parameter"));
+
+        let e3 = OptimizerError::CostIncrease {
+            old_cost: 1.0,
+            new_cost: 2.0,
+        };
+        assert!(e3.to_string().contains("Cost increased"));
+
+        let e4 = OptimizerError::LinearSolveFailed("singular".into());
+        assert!(e4.to_string().contains("singular"));
+
+        let e5 = OptimizerError::EmptyProblem;
+        assert!(e5.to_string().contains("no variables"));
+
+        let e6 = OptimizerError::NoResidualBlocks;
+        assert!(e6.to_string().contains("residual blocks"));
+    }
+
+    // -------------------------------------------------------------------------
+    // IterationStats print (smoke tests — no panic)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_iteration_stats_print_header_no_panic() {
+        IterationStats::print_header();
+    }
+
+    #[test]
+    fn test_iteration_stats_print_line_no_panic() {
+        let stats = IterationStats {
+            iteration: 1,
+            cost: 1.5,
+            cost_change: -0.5,
+            gradient_norm: 1e-3,
+            step_norm: 1e-4,
+            tr_ratio: 0.8,
+            tr_radius: 1e3,
+            ls_iter: 0,
+            iter_time_ms: 2.5,
+            total_time_ms: 10.0,
+            accepted: true,
+        };
+        stats.print_line();
+    }
+
+    // -------------------------------------------------------------------------
+    // build_solver_result
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_build_solver_result_fields() -> TestResult {
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "x".into(),
+            VariableEnum::Rn(Variable::new(Rn::new(dvector![3.0]))),
+        );
+        let state = InitializedState {
+            variables,
+            variable_index_map: HashMap::new(),
+            sorted_vars: vec!["x".to_string()],
+            symbolic_structure: None,
+            total_dof: 1,
+            current_cost: 0.1,
+            initial_cost: 5.0,
+        };
+        let result = build_solver_result(
+            OptimizationStatus::CostToleranceReached,
+            10,
+            state,
+            Duration::from_millis(50),
+            1e-5,
+            1e-6,
+            15,
+            10,
+            None,
+        );
+        assert_eq!(result.status, OptimizationStatus::CostToleranceReached);
+        assert_eq!(result.iterations, 10);
+        assert!((result.initial_cost - 5.0).abs() < 1e-12);
+        assert!((result.final_cost - 0.1).abs() < 1e-12);
+        let ci = result
+            .convergence_info
+            .as_ref()
+            .ok_or("convergence_info is None")?;
+        assert_eq!(ci.cost_evaluations, 15);
+        assert_eq!(ci.jacobian_evaluations, 10);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // create_optimizer_summary
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_create_optimizer_summary_averages() {
+        let summary = create_optimizer_summary(
+            "TestOptimizer",
+            10.0,
+            1.0,
+            4,
+            Some(3),
+            Some(1),
+            2.0,
+            0.1,
+            3.0,
+            0.05,
+            9.0, // total_cost_reduction
+            Duration::from_millis(400),
+            vec![],
+            OptimizationStatus::CostToleranceReached,
+            Some(1e-3),
+            None,
+            Some(0.8),
+        );
+        // average_cost_reduction = 9.0 / 4 = 2.25
+        assert!((summary.average_cost_reduction - 2.25).abs() < 1e-10);
+        // average_time_per_iteration = 400ms / 4 = 100ms
+        assert_eq!(
+            summary.average_time_per_iteration,
+            Duration::from_millis(100)
+        );
+        assert_eq!(summary.optimizer_name, "TestOptimizer");
+        assert_eq!(summary.successful_steps, Some(3));
+    }
+
+    #[test]
+    fn test_create_optimizer_summary_zero_iterations() {
+        let summary = create_optimizer_summary(
+            "Test",
+            1.0,
+            1.0,
+            0, // zero iterations
+            None,
+            None,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            Duration::from_secs(0),
+            vec![],
+            OptimizationStatus::MaxIterationsReached,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(summary.average_cost_reduction, 0.0);
+        assert_eq!(summary.average_time_per_iteration, Duration::from_secs(0));
+    }
+
+    // -------------------------------------------------------------------------
+    // Simple Factor for integration tests in mod.rs
+    // -------------------------------------------------------------------------
+
+    /// Linear factor: r = x - target, J = [[1.0]]
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            let residual = dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // initialize_optimization_state (smoke test)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_initialize_optimization_state() -> TestResult {
+        use crate::core::problem::Problem;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut initial_values: HashMap<String, (ManifoldType, DVector<f64>)> = HashMap::new();
+        initial_values.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
+        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+
+        let state = initialize_optimization_state(&problem, &initial_values)?;
+        assert_eq!(state.total_dof, 1);
+        assert!(state.initial_cost > 0.0);
+        assert!(state.sorted_vars.contains(&"x".to_string()));
+        Ok(())
+    }
+}
