@@ -1420,20 +1420,6 @@ mod tests {
         }
     }
 
-    // T3: Accumulated Error Tests
-    //
-    // NOTE: These tests demonstrate EXPECTED numerical drift in long composition chains.
-    // This is NOT a bug! Each quaternion multiplication introduces rounding errors that
-    // accumulate multiplicatively through the chain.
-    //
-    // Real SLAM systems (ORB-SLAM3, GTSAM, Cartographer) handle this by:
-    // - Periodic re-normalization of quaternions
-    // - Using manifold optimization instead of pure composition
-    // - Bundle adjustment to correct accumulated drift
-    //
-    // The tolerances here (1e-6 for 1000 steps) are REALISTIC and document the actual
-    // numerical behavior of composition chains.
-
     #[test]
     fn test_so3_accumulated_error_small_rotations() {
         // Compose 1000 small rotations, verify final result
@@ -1564,5 +1550,188 @@ mod tests {
                 "SO3 exp-log round-trip failed for angle = {angle}"
             );
         }
+    }
+
+    #[test]
+    fn test_so3_display() {
+        let r = SO3::identity();
+        let s = format!("{r}");
+        assert!(!s.is_empty(), "Display should produce output");
+    }
+
+    #[test]
+    fn test_so3_accessors_xyzw() {
+        let r = SO3::from_axis_angle(&Vector3::z(), std::f64::consts::FRAC_PI_2);
+        let _ = r.x();
+        let _ = r.y();
+        let _ = r.z();
+        let _ = r.w();
+        let q = r.to_quaternion();
+        let q2 = r.quat();
+        assert!((q.w - q2.w).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so3_set_quaternion_and_coeffs() {
+        // coeffs() returns [w, x, y, z] and set_quaternion takes [w, x, y, z]
+        let r_orig = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let orig_coeffs = r_orig.coeffs();
+        assert_eq!(orig_coeffs.len(), 4);
+
+        // Round-trip: read coeffs, set them back, read again
+        let mut r2 = SO3::identity();
+        r2.set_quaternion(&orig_coeffs);
+        let c2 = r2.coeffs();
+        for i in 0..4 {
+            assert!(
+                (c2[i] - orig_coeffs[i]).abs() < 1e-9,
+                "coeffs[{i}] mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn test_so3_from_scaled_axis_constructor() {
+        let v = Vector3::new(0.1, 0.2, 0.3);
+        let r = SO3::from_scaled_axis(v);
+        assert!(r.is_valid(1e-6));
+    }
+
+    #[test]
+    fn test_so3_from_axis_angle_constructor() {
+        let axis = Vector3::x();
+        let r = SO3::from_axis_angle(&axis, std::f64::consts::FRAC_PI_4);
+        assert!(r.is_valid(1e-6));
+    }
+
+    #[test]
+    fn test_so3_tangent_axis_angle_accessors() {
+        let t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+
+        // axis_angle() returns Vector3<f64>
+        let av = t.axis_angle();
+        assert!((av.norm() - t.angle()).abs() < 1e-10);
+
+        // axis() returns normalized Vector3
+        let ax = t.axis();
+        assert!((ax.norm() - 1.0).abs() < 1e-9);
+
+        // let _ = t.x();
+        // let _ = t.y();
+        // let _ = t.z();
+
+        let c = t.coeffs();
+        assert_eq!(c.len(), 3);
+
+        // ang() returns Vector3<f64>
+        let ang = t.ang();
+        assert!((ang.norm() - t.angle()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so3_right_jacobian_inv() {
+        use crate::Tangent;
+        let t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+        let jr_inv = t.right_jacobian_inv();
+        assert_eq!(jr_inv.nrows(), 3);
+        assert_eq!(jr_inv.ncols(), 3);
+
+        let jr = t.right_jacobian();
+        let product = jr_inv * jr;
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product[(i, j)] - expected).abs() < 1e-4,
+                    "product[{i},{j}] = {} != {expected}",
+                    product[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_so3_left_jacobian_inv() {
+        use crate::Tangent;
+        let t = SO3Tangent::new(Vector3::new(0.1, 0.2, 0.3));
+        let jl_inv = t.left_jacobian_inv();
+        assert_eq!(jl_inv.nrows(), 3);
+
+        let jl = t.left_jacobian();
+        let product = jl_inv * jl;
+        for i in 0..3 {
+            for j in 0..3 {
+                let expected = if i == j { 1.0 } else { 0.0 };
+                assert!(
+                    (product[(i, j)] - expected).abs() < 1e-4,
+                    "product[{i},{j}] = {} != {expected}",
+                    product[(i, j)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_so3_tangent_normalized() {
+        use crate::Tangent;
+        let t = SO3Tangent::new(Vector3::new(0.0, 0.0, 3.0));
+        let tn = t.normalized();
+        assert!((tn.angle() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_so3_tangent_is_zero() {
+        use crate::Tangent;
+        let zero = SO3Tangent::new(Vector3::zeros());
+        assert!(zero.is_zero(1e-9));
+        let nonzero = SO3Tangent::new(Vector3::new(0.1, 0.0, 0.0));
+        assert!(!nonzero.is_zero(1e-9));
+    }
+
+    #[test]
+    fn test_so3_inverse_with_jacobian() {
+        use crate::LieGroup;
+        let r = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let mut jac = Matrix3::zeros();
+        let inv = r.inverse(Some(&mut jac));
+        assert!(inv.is_valid(1e-6));
+        assert!(jac[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn test_so3_compose_with_jacobians() {
+        use crate::LieGroup;
+        let r1 = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let r2 = SO3::from_euler_angles(0.4, 0.1, 0.2);
+        let mut j_self = Matrix3::zeros();
+        let mut j_other = Matrix3::zeros();
+        let result = r1.compose(&r2, Some(&mut j_self), Some(&mut j_other));
+        assert!(result.is_valid(1e-6));
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_other[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn test_so3_zero_jacobian() {
+        use crate::LieGroup;
+        let zj = SO3::zero_jacobian();
+        for i in 0..3 {
+            for j in 0..3 {
+                assert!(zj[(i, j)].abs() < 1e-10);
+            }
+        }
+    }
+
+    #[test]
+    fn test_so3_act_with_jacobians() {
+        use crate::LieGroup;
+        let r = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let v = Vector3::new(1.0, 0.0, 0.0);
+        let mut j_self = Matrix3::zeros();
+        let mut j_vec = Matrix3::zeros();
+        let result = r.act(&v, Some(&mut j_self), Some(&mut j_vec));
+        assert!(result.norm() > 0.0);
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_vec[(0, 0)].is_finite());
     }
 }
