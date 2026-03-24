@@ -1819,9 +1819,10 @@ mod tests {
     fn test_log_residual_to_file() -> TestResult {
         let problem = Problem::new(JacobianMode::Sparse);
         let residual = nalgebra::dvector![1.0, 2.0, 3.0];
-        let path = "/tmp/apex_test_residual.txt";
-        problem.log_residual_to_file(&residual, path)?;
-        assert!(std::path::Path::new(path).exists());
+        let path = std::env::temp_dir().join("apex_test_residual.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_residual_to_file(&residual, path_str)?;
+        assert!(path.exists());
         Ok(())
     }
 
@@ -1835,9 +1836,10 @@ mod tests {
             (ManifoldType::SE2, dvector![1.0, 2.0, 0.3]),
         );
         let variables = problem.initialize_variables(&initial);
-        let path = "/tmp/apex_test_variables.txt";
-        problem.log_variables_to_file(&variables, path)?;
-        assert!(std::path::Path::new(path).exists());
+        let path = std::env::temp_dir().join("apex_test_variables.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_variables_to_file(&variables, path_str)?;
+        assert!(path.exists());
         Ok(())
     }
 
@@ -1849,9 +1851,10 @@ mod tests {
         let triplets = vec![faer::sparse::Triplet::new(0usize, 0usize, 1.0f64)];
         let jacobian =
             SparseColMat::try_new_from_triplets(1, 1, &triplets).map_err(|e| format!("{e:?}"))?;
-        let path = "/tmp/apex_test_jacobian.txt";
-        problem.log_sparse_jacobian_to_file(&jacobian, path)?;
-        assert!(std::path::Path::new(path).exists());
+        let path = std::env::temp_dir().join("apex_test_jacobian.txt");
+        let path_str = path.to_str().ok_or("temp path is not valid UTF-8")?;
+        problem.log_sparse_jacobian_to_file(&jacobian, path_str)?;
+        assert!(path.exists());
         Ok(())
     }
 
