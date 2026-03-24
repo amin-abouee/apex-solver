@@ -781,10 +781,6 @@ mod tests {
         assert!((cross_via_skew - cross_direct).norm() < 1e-10);
     }
 
-    // -------------------------------------------------------------------------
-    // PinholeParams::validate() error paths
-    // -------------------------------------------------------------------------
-
     #[test]
     fn test_pinhole_validate_negative_focal_length() {
         let result = PinholeParams::new(-1.0, 300.0, 320.0, 240.0);
@@ -815,10 +811,6 @@ mod tests {
         let result = PinholeParams::new(300.0, 300.0, f64::NAN, 240.0);
         assert!(result.is_err(), "NaN cx should fail validation");
     }
-
-    // -------------------------------------------------------------------------
-    // DistortionModel::validate() branches
-    // -------------------------------------------------------------------------
 
     #[test]
     fn test_distortion_none_is_valid() {
@@ -925,10 +917,6 @@ mod tests {
         assert!(d.validate().is_err(), "alpha = 0 should fail");
     }
 
-    // -------------------------------------------------------------------------
-    // validate_point_in_front()
-    // -------------------------------------------------------------------------
-
     #[test]
     fn test_validate_point_in_front_valid_z() {
         assert!(
@@ -950,10 +938,6 @@ mod tests {
         // z = 0 < sqrt(EPSILON) ≈ 1.49e-8, should fail
         assert!(validate_point_in_front(0.0).is_err(), "z = 0 should fail");
     }
-
-    // -------------------------------------------------------------------------
-    // project_batch() default implementation
-    // -------------------------------------------------------------------------
 
     #[test]
     fn test_project_batch_default_impl() -> TestResult {
@@ -984,10 +968,6 @@ mod tests {
         );
         Ok(())
     }
-
-    // -------------------------------------------------------------------------
-    // CameraModelError Display strings
-    // -------------------------------------------------------------------------
 
     #[test]
     fn test_camera_model_error_display_focal_length_not_positive() {
