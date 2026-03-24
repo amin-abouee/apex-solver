@@ -13,6 +13,7 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, UcmCamera};
 use apex_manifolds::LieGroup;
+use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
@@ -160,7 +161,7 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
     // 6. Build Optimization Problem
     // ============================================================================
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add one projection factor per camera
     // Each factor observes ALL landmarks from its viewpoint
@@ -358,7 +359,7 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
     let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
 
     // Build problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);

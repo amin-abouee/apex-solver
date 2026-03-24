@@ -15,12 +15,19 @@
 //!
 //! # With specific optimization type:
 //! cargo run --release --bin bundle_adjustment -- problem.txt --type bundle-adjustment
+//!
+//! # With visualization (requires visualization feature):
+//! cargo run --release --features visualization --bin bundle_adjustment -- path/to/problem.txt --with-visualizer
+//!
+//! # With limited points and visualization:
+//! cargo run --release --features visualization --bin bundle_adjustment -- problem.txt -n 1000 --with-visualizer
 //! ```
 //!
 //! # Camera Parameterization
 //!
 //! Uses ProjectionFactor with SE3 poses and BALPinholeCameraStrict camera model.
 
+use apex_solver::JacobianMode;
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::{BalDataset, BalLoader};
 use apex_solver::apex_manifolds::ManifoldType;
@@ -80,9 +87,19 @@ enum OptimizationType {
 #[command(name = "bundle_adjustment")]
 #[command(about = "Bundle adjustment optimization for BAL datasets")]
 struct Args {
-    /// BAL file path (required, positional)
+    /// BAL file path (required, positional).
+    /// If the file does not exist, provide --cameras and --points to auto-download it
+    /// from the dataset registry (the dataset name is inferred from the parent directory).
     #[arg(value_name = "FILE")]
     file: PathBuf,
+
+    /// Number of cameras in the problem (used for auto-download if FILE is missing)
+    #[arg(long)]
+    cameras: Option<u32>,
+
+    /// Number of points in the problem (used for auto-download if FILE is missing)
+    #[arg(long)]
+    points: Option<u32>,
 
     /// Limit number of points (for testing)
     #[arg(short = 'n', long)]
@@ -94,11 +111,17 @@ struct Args {
 
     /// Optimization type
     #[arg(short = 't', long, value_enum, default_value = "self-calibration")]
-    r#type: OptimizationType,
+    optimization_type: OptimizationType,
 
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Enable real-time Rerun visualization
+    /// (Requires the `visualization` feature to be enabled)
+    #[arg(long)]
+    #[cfg(feature = "visualization")]
+    with_visualizer: bool,
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -110,15 +133,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("APEX-SOLVER BUNDLE ADJUSTMENT");
     info!("");
 
-    // Validate file exists
-    if !args.file.exists() {
-        return Err(format!("File not found: {}", args.file.display()).into());
-    }
+    // Resolve file: download on demand if missing and --cameras/--points are provided
+    let file_path = if args.file.exists() {
+        args.file.clone()
+    } else if let (Some(cameras), Some(points)) = (args.cameras, args.points) {
+        // Infer dataset name from the parent directory (e.g. data/bundle_adjustment/ladybug/...)
+        let dataset_name = args
+            .file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "Cannot infer dataset name from path '{}'. \
+                     Ensure the path has the form data/bundle_adjustment/<name>/problem-…txt",
+                    args.file.display()
+                )
+            })?;
+        info!(
+            "File not found — downloading {dataset_name}/problem-{cameras}-{points} from registry …"
+        );
+        apex_solver::apex_io::ensure_ba_dataset(dataset_name, cameras, points)
+            .map_err(|e| format!("Auto-download failed: {e}"))?
+    } else {
+        return Err(format!(
+            "File not found: {}. Provide --cameras and --points to download it automatically.",
+            args.file.display()
+        )
+        .into());
+    };
 
     // Load BAL dataset
-    info!("Loading BAL dataset: {}", args.file.display());
+    info!("Loading BAL dataset: {}", file_path.display());
     let start_load = Instant::now();
-    let dataset = BalLoader::load(args.file.to_string_lossy().as_ref())?;
+    let dataset = BalLoader::load(file_path.to_string_lossy().as_ref())?;
     let load_time = start_load.elapsed();
 
     let num_points_to_use = args.num_points.unwrap_or(dataset.points.len());
@@ -132,13 +180,19 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("  Load time: {:?}", load_time);
     info!("");
 
+    #[cfg(feature = "visualization")]
+    let with_visualizer = args.with_visualizer;
+    #[cfg(not(feature = "visualization"))]
+    let with_visualizer = false;
+
     // Run bundle adjustment
     run_bundle_adjustment(
         &dataset,
         num_points_to_use,
         args.solver.into(),
-        args.r#type,
+        args.optimization_type,
         args.verbose,
+        with_visualizer,
     )
 }
 
@@ -154,18 +208,20 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 }
 
 /// Run bundle adjustment with specified solver and optimization type
+#[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
     solver_variant: SchurVariant,
     opt_type: OptimizationType,
     verbose: bool,
+    with_visualizer: bool,
 ) -> Result<(), Box<dyn Error>> {
     use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
     };
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Add cameras as SE3 poses + intrinsic variables
@@ -253,6 +309,23 @@ fn run_bundle_adjustment(
     info!("  Preconditioner: {:?}", config.schur_preconditioner);
 
     let mut solver = LevenbergMarquardt::with_config(config);
+
+    #[cfg(feature = "visualization")]
+    if with_visualizer {
+        use apex_solver::observers::RerunObserver;
+        use apex_solver::observers::visualization::VisualizationConfig;
+        let config = VisualizationConfig::for_bundle_adjustment()
+            .with_camera_frustum_scale(0.1)
+            .with_initial_landmark_color([255, 255, 255])
+            .with_optimized_landmark_color([255, 255, 255]);
+        match RerunObserver::with_config(true, None, config) {
+            Ok(observer) => {
+                solver.add_observer(observer);
+                info!("Rerun visualization enabled for bundle adjustment");
+            }
+            Err(e) => tracing::warn!("Failed to create Rerun observer: {}", e),
+        }
+    }
 
     // Print diagnostic info
     let num_cameras = dataset.cameras.len();

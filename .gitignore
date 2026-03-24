@@ -44,3 +44,6 @@ __cmake*
 
 # macOS system files
 **/.DS_Store
+
+# Dataset files — managed by download_datasets, not committed to git
+data/

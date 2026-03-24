@@ -6,7 +6,7 @@ use faer::{
 };
 use std::ops::Mul;
 
-use crate::linalg::{LinAlgError, LinAlgResult, SparseLinearSolver};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
@@ -63,7 +63,7 @@ impl SparseCholeskySolver {
     pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
         // Ensure covariance matrix is computed first
         if self.covariance_matrix.is_none() {
-            self.compute_covariance_matrix();
+            LinearSolver::<SparseMode>::compute_covariance_matrix(self);
         }
 
         // Return None if hessian is not available (solver not initialized)
@@ -98,7 +98,7 @@ impl Default for SparseCholeskySolver {
         Self::new()
     }
 }
-impl SparseLinearSolver for SparseCholeskySolver {
+impl LinearSolver<SparseMode> for SparseCholeskySolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
@@ -311,7 +311,8 @@ mod tests {
         let mut solver = SparseCholeskySolver::new();
         let (jacobian, residuals) = create_test_data()?;
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let solution =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert_eq!(solution.nrows(), 3);
         assert_eq!(solution.ncols(), 1);
 
@@ -327,11 +328,13 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        let sol1 = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let sol1 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
-        let sol2 = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let sol2 =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Results should be identical
         for i in 0..sol1.nrows() {
@@ -347,7 +350,12 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
         let lambda = 0.1;
 
-        let solution = solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
+        let solution = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda,
+        )?;
         assert_eq!(solution.nrows(), 3);
         assert_eq!(solution.ncols(), 1);
         Ok(())
@@ -362,8 +370,18 @@ mod tests {
         let lambda1 = 0.01;
         let lambda2 = 1.0;
 
-        let sol1 = solver.solve_augmented_equation(&residuals, &jacobian, lambda1)?;
-        let sol2 = solver.solve_augmented_equation(&residuals, &jacobian, lambda2)?;
+        let sol1 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda1,
+        )?;
+        let sol2 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            lambda2,
+        )?;
 
         // Solutions should be different due to different regularization
         let mut different = false;
@@ -395,7 +413,11 @@ mod tests {
         let singular_jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
 
-        let result = solver.solve_normal_equation(&residuals, &singular_jacobian);
+        let result = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut solver,
+            &residuals,
+            &singular_jacobian,
+        );
         // Without regularization, singular matrices should fail
         assert!(result.is_err(), "Singular matrix should return Err");
         Ok(())
@@ -409,7 +431,11 @@ mod tests {
         let empty_jacobian = SparseColMat::try_new_from_triplets(0, 0, &[])?;
         let empty_residuals = Mat::zeros(0, 1);
 
-        let result = solver.solve_normal_equation(&empty_residuals, &empty_jacobian);
+        let result = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut solver,
+            &empty_residuals,
+            &empty_jacobian,
+        );
         if let Ok(solution) = result {
             assert_eq!(solution.nrows(), 0);
         }
@@ -431,7 +457,8 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| -((i + 1) as f64)); // [-1, -2]
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let solution =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         // Expected solution should be [1, 2] since J^T * J = I and J^T * (-r) = [1, 2]
         assert!((solution[(0, 0)] - 1.0).abs() < TOLERANCE);
         assert!((solution[(1, 0)] - 2.0).abs() < TOLERANCE);
@@ -455,10 +482,10 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Now compute covariance matrix
-        let cov_matrix = solver.compute_covariance_matrix();
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
@@ -493,7 +520,7 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve to set up factorizer and hessian
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Compute covariance matrix first (this also computes standard errors)
         solver.compute_standard_errors();
@@ -538,9 +565,9 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        let cov_matrix = solver.compute_covariance_matrix();
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
 
         if let Some(cov) = cov_matrix {
@@ -561,10 +588,10 @@ mod tests {
         let (jacobian, residuals) = create_test_data()?;
 
         // First solve
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // First covariance computation
-        solver.compute_covariance_matrix();
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(solver.covariance_matrix.is_some());
 
         // Get pointer to first computation
@@ -572,7 +599,7 @@ mod tests {
             let cov1_ptr = cov1.as_ptr();
 
             // Second covariance computation should return cached result
-            solver.compute_covariance_matrix();
+            LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
             assert!(solver.covariance_matrix.is_some());
 
             // Get pointer to second computation
@@ -596,7 +623,7 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
         let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
 
-        solver.solve_normal_equation(&residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Verify that we have a factorizer and hessian
         assert!(solver.factorizer.is_some());
@@ -624,7 +651,8 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(3, 3, &triplets)?;
         let residuals = Mat::from_fn(3, 1, |i, _| -((i + 1) as f64)); // [-1, -2, -3]
 
-        let solution = solver.solve_normal_equation(&residuals, &jacobian)?;
+        let solution =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         // Expected solution should be [1, 2, 3] since H = I and g = [1, 2, 3]
         for i in 0..3 {
             let expected = (i + 1) as f64;
@@ -637,7 +665,7 @@ mod tests {
         }
 
         // Covariance should be identity matrix (inverse of identity)
-        let cov_matrix = solver.compute_covariance_matrix();
+        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
         assert!(cov_matrix.is_some());
         if let Some(cov) = cov_matrix {
             for i in 0..3 {
@@ -655,5 +683,107 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    /// Test hessian() getter returns None before solve and Some after
+    #[test]
+    fn test_cholesky_hessian_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(solver.hessian().is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(solver.hessian().is_some());
+        Ok(())
+    }
+
+    /// Test gradient() getter returns None before solve and Some after
+    #[test]
+    fn test_cholesky_gradient_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(solver.gradient().is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(solver.gradient().is_some());
+        Ok(())
+    }
+
+    /// Test reset_covariance() clears the cached covariance
+    #[test]
+    fn test_cholesky_reset_covariance() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals) = create_test_data()?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
+        assert!(solver.covariance_matrix.is_some());
+
+        solver.reset_covariance();
+        assert!(solver.covariance_matrix.is_none());
+        assert!(solver.standard_errors.is_none());
+        Ok(())
+    }
+
+    /// Test get_hessian() trait method returns Some after solve
+    #[test]
+    fn test_cholesky_get_hessian_trait() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_some());
+        Ok(())
+    }
+
+    /// Test get_gradient() trait method returns Some after solve
+    #[test]
+    fn test_cholesky_get_gradient_trait() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_none());
+
+        let (jacobian, residuals) = create_test_data()?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_some());
+        Ok(())
+    }
+
+    /// Test get_covariance_matrix() getter matches compute result
+    #[test]
+    fn test_cholesky_get_covariance_matrix_getter() -> TestResult {
+        let mut solver = SparseCholeskySolver::new();
+        let (jacobian, residuals) = create_test_data()?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
+
+        let via_getter = LinearSolver::<SparseMode>::get_covariance_matrix(&solver);
+        assert!(via_getter.is_some());
+
+        if let Some(cov) = via_getter {
+            assert_eq!(cov.nrows(), 3);
+            assert_eq!(cov.ncols(), 3);
+        }
+        Ok(())
+    }
+
+    /// Test that `compute_standard_errors()` returns `None` when called before any solve.
+    ///
+    /// Covers the early-return `?` at the `let hessian = self.hessian.as_ref()?;` line:
+    /// a freshly-created solver has no hessian, so the method returns `None`.
+    #[test]
+    fn test_compute_standard_errors_before_solve_returns_none() {
+        let mut solver = SparseCholeskySolver::new();
+        // No solve has been performed → hessian is None → should return None
+        let result = solver.compute_standard_errors();
+        assert!(
+            result.is_none(),
+            "compute_standard_errors on uninitialized solver (no hessian) should return None"
+        );
     }
 }

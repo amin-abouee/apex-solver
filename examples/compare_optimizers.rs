@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{info, warn};
 
-use apex_solver::apex_io::{G2oLoader, GraphLoader};
+use apex_solver::JacobianMode;
+use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -145,7 +147,7 @@ fn test_se3_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE3)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/odometry/{}.g2o", dataset_name);
+    let file_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
@@ -175,7 +177,7 @@ fn test_se3_dataset(
     }
 
     // Create problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
@@ -215,8 +217,12 @@ fn test_se3_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
+    let symbolic_structure = build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )?;
 
     let (residual, _) = problem.compute_residual_and_jacobian_sparse(
         &variables,
@@ -285,7 +291,7 @@ fn test_se2_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE2)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/odometry/{}.g2o", dataset_name);
+    let file_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
@@ -313,7 +319,7 @@ fn test_se2_dataset(
     }
 
     // Create problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add prior factor on first vertex to handle gauge freedom
     // This prevents rank-deficient Hessian and improves convergence for all optimizers
@@ -353,8 +359,12 @@ fn test_se2_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure =
-        problem.build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)?;
+    let symbolic_structure = build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )?;
 
     let (residual, _) = problem.compute_residual_and_jacobian_sparse(
         &variables,

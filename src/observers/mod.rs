@@ -38,10 +38,11 @@
 //! use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
 //! use apex_solver::observers::OptObserver;
 //! # use apex_solver::core::problem::Problem;
+//! # use apex_solver::JacobianMode;
 //! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
@@ -65,6 +66,7 @@
 //! # use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
 //! # use apex_solver::core::problem::{Problem, VariableEnum};
 //! # use apex_solver::observers::OptObserver;
+//! # use apex_solver::JacobianMode;
 //! # use std::collections::HashMap;
 //!
 //! // Custom observer that logs to CSV
@@ -80,7 +82,7 @@
 //! }
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //! let mut solver = LevenbergMarquardt::new();
 //!
@@ -131,11 +133,7 @@ pub use visualization::{RerunObserver, VisualizationConfig, VisualizationMode};
 
 // Re-export conversion traits for ergonomic use
 #[cfg(feature = "visualization")]
-pub use conversions::{
-    CollectRerunArrows2D, CollectRerunArrows3D, CollectRerunPoints2D, CollectRerunPoints3D,
-    ToRerunArrows2D, ToRerunArrows3D, ToRerunPoints2D, ToRerunPoints3D, ToRerunTransform3D,
-    ToRerunTransform3DFrom2D, ToRerunVec2D, ToRerunVec3D,
-};
+pub use conversions::{CollectRerun2D, CollectRerun3D, RerunConvert2D, RerunConvert3D};
 
 use crate::core::problem::VariableEnum;
 use faer::Mat;
@@ -670,5 +668,174 @@ mod tests {
         })?;
         assert_eq!(*guard2, vec![5]);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // ObserverError Display — one per variant
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_observer_error_rerun_initialization_display() {
+        let e = ObserverError::RerunInitialization("init fail".into());
+        assert!(e.to_string().contains("init fail"));
+    }
+
+    #[test]
+    fn test_observer_error_viewer_spawn_failed_display() {
+        let e = ObserverError::ViewerSpawnFailed("spawn fail".into());
+        assert!(e.to_string().contains("spawn fail"));
+    }
+
+    #[test]
+    fn test_observer_error_recording_save_failed_display() {
+        let e = ObserverError::RecordingSaveFailed {
+            path: "/tmp/out.rrd".into(),
+            reason: "disk full".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("/tmp/out.rrd"), "{s}");
+        assert!(s.contains("disk full"), "{s}");
+    }
+
+    #[test]
+    fn test_observer_error_logging_failed_display() {
+        let e = ObserverError::LoggingFailed {
+            entity_path: "world/points".into(),
+            reason: "timeout".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("world/points"), "{s}");
+        assert!(s.contains("timeout"), "{s}");
+    }
+
+    #[test]
+    fn test_observer_error_matrix_visualization_failed_display() {
+        let e = ObserverError::MatrixVisualizationFailed("bad dims".into());
+        assert!(e.to_string().contains("bad dims"));
+    }
+
+    #[test]
+    fn test_observer_error_tensor_conversion_failed_display() {
+        let e = ObserverError::TensorConversionFailed("nan values".into());
+        assert!(e.to_string().contains("nan values"));
+    }
+
+    #[test]
+    fn test_observer_error_invalid_state_display() {
+        let e = ObserverError::InvalidState("stream closed".into());
+        assert!(e.to_string().contains("stream closed"));
+    }
+
+    #[test]
+    fn test_observer_error_mutex_poisoned_display() {
+        let e = ObserverError::MutexPoisoned {
+            context: "on_step".into(),
+            reason: "thread panicked".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("on_step"), "{s}");
+        assert!(s.contains("thread panicked"), "{s}");
+    }
+
+    // -------------------------------------------------------------------------
+    // log() / log_with_source() return self
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_observer_error_log_returns_self() {
+        let e = ObserverError::InvalidState("log_test".into());
+        let returned = e.log();
+        assert!(returned.to_string().contains("log_test"));
+    }
+
+    #[test]
+    fn test_observer_error_log_with_source_returns_self() {
+        let e = ObserverError::MatrixVisualizationFailed("src_test".into());
+        let source = std::io::Error::other("src");
+        let returned = e.log_with_source(source);
+        assert!(returned.to_string().contains("src_test"));
+    }
+
+    // -------------------------------------------------------------------------
+    // OptObserverVec — set_iteration_metrics, set_matrix_data, notify_complete
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_set_iteration_metrics_no_panic() {
+        let mut observers = OptObserverVec::new();
+        observers.add(TestObserver {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        // Should not panic whether empty or not
+        observers.set_iteration_metrics(1.5, 1e-3, Some(1e-4), 0.01, Some(0.9));
+    }
+
+    #[test]
+    fn test_set_iteration_metrics_empty_no_panic() {
+        let observers = OptObserverVec::new();
+        observers.set_iteration_metrics(0.0, 0.0, None, 0.0, None);
+    }
+
+    #[test]
+    fn test_set_matrix_data_no_panic() {
+        let mut observers = OptObserverVec::new();
+        observers.add(TestObserver {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        });
+        // Pass None for both hessian and gradient
+        observers.set_matrix_data(None, None);
+    }
+
+    // Observer that counts on_optimization_complete calls
+    #[derive(Clone)]
+    struct CompleteObserver {
+        complete_calls: Arc<Mutex<usize>>,
+    }
+
+    impl OptObserver for CompleteObserver {
+        fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {}
+
+        fn on_optimization_complete(
+            &self,
+            _values: &HashMap<String, VariableEnum>,
+            _iterations: usize,
+        ) {
+            if let Ok(mut guard) = self.complete_calls.lock() {
+                *guard += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn test_notify_complete_calls_on_optimization_complete() {
+        let complete_calls = Arc::new(Mutex::new(0usize));
+        let observer = CompleteObserver {
+            complete_calls: complete_calls.clone(),
+        };
+
+        let mut observers = OptObserverVec::new();
+        observers.add(observer);
+        observers.notify_complete(&HashMap::new(), 10);
+
+        let count = *complete_calls.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_notify_complete_empty_no_panic() {
+        let observers = OptObserverVec::new();
+        observers.notify_complete(&HashMap::new(), 5);
+    }
+
+    #[test]
+    fn test_default_trait_methods_no_panic() {
+        // TestObserver only overrides on_step; the default impls are exercised here
+        let observer = TestObserver {
+            calls: Arc::new(Mutex::new(Vec::new())),
+        };
+        // Default implementations should be no-ops
+        observer.set_iteration_metrics(1.0, 1e-3, None, 0.0, None);
+        observer.set_matrix_data(None, None);
+        observer.on_optimization_complete(&HashMap::new(), 5);
     }
 }

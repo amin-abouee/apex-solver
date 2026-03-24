@@ -36,7 +36,7 @@
 //! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new();
+//! # let problem = Problem::new(JacobianMode::Sparse);
 //! # let initial_values = HashMap::new();
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
@@ -73,7 +73,7 @@ use apex_manifolds::{LieGroup, ManifoldType};
 use faer::Mat;
 use faer::sparse;
 use nalgebra::DVector;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use tracing::{info, warn};
 
@@ -173,8 +173,12 @@ pub struct VisualizationConfig {
     // === SE2 Pose Settings ===
     /// Radius for SE2 pose markers (default: 0.5)
     pub se2_pose_radius: f32,
+    /// Half-size for SE2 pose box markers (default: 0.3)
+    pub se2_box_half_size: f32,
     /// Color for initial SE2 poses RGB (default: blue [100, 150, 255])
     pub initial_se2_color: [u8; 3],
+    /// Color for optimized SE2 poses RGB (default: green [50, 200, 100])
+    pub optimized_se2_color: [u8; 3],
 
     // === Matrix Visualization Settings ===
     /// Target size for Hessian downsampling (default: 100)
@@ -213,7 +217,9 @@ impl Default for VisualizationConfig {
 
             // SE2 pose settings
             se2_pose_radius: 0.5,
-            initial_se2_color: [100, 150, 255], // Blue
+            se2_box_half_size: 0.3,
+            initial_se2_color: [100, 150, 255],  // Blue
+            optimized_se2_color: [50, 200, 100], // Green
 
             // Matrix visualization
             hessian_downsample_size: 100,
@@ -313,9 +319,21 @@ impl VisualizationConfig {
         self
     }
 
+    /// Set SE2 pose box half-size.
+    pub fn with_se2_box_half_size(mut self, half_size: f32) -> Self {
+        self.se2_box_half_size = half_size;
+        self
+    }
+
     /// Set color for initial SE2 poses (RGB).
     pub fn with_initial_se2_color(mut self, rgb: [u8; 3]) -> Self {
         self.initial_se2_color = rgb;
+        self
+    }
+
+    /// Set color for optimized SE2 poses (RGB).
+    pub fn with_optimized_se2_color(mut self, rgb: [u8; 3]) -> Self {
+        self.optimized_se2_color = rgb;
         self
     }
 
@@ -396,6 +414,7 @@ impl VisualizationConfig {
         Self::default()
             .with_invert_camera_poses(true)
             .with_show_se2_poses(false)
+            .with_camera_frustum_scale(0.3)
     }
 
     /// Create a configuration optimized for pose graph optimization.
@@ -454,6 +473,8 @@ pub struct RerunObserver {
     // Cached initial positions for displacement visualization
     initial_camera_positions: RefCell<HashMap<String, [f32; 3]>>,
     initial_landmark_positions: RefCell<HashMap<String, [f32; 3]>>,
+    // Whether the initial state has been logged (before any optimization updates)
+    initial_state_logged: Cell<bool>,
 }
 
 /// Internal metrics tracked across iterations.
@@ -602,6 +623,7 @@ impl RerunObserver {
             config,
             initial_camera_positions: RefCell::new(HashMap::new()),
             initial_landmark_positions: RefCell::new(HashMap::new()),
+            initial_state_logged: Cell::new(false),
         })
     }
 
@@ -762,7 +784,8 @@ impl RerunObserver {
                     &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
                         self.config.camera_fov,
                         self.config.camera_aspect_ratio,
-                    ),
+                    )
+                    .with_image_plane_distance(self.config.camera_frustum_scale),
                 )
                 .map_err(|e| {
                     ObserverError::LoggingFailed {
@@ -930,7 +953,8 @@ impl RerunObserver {
                         &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
                             self.config.camera_fov,
                             self.config.camera_aspect_ratio,
-                        ),
+                        )
+                        .with_image_plane_distance(self.config.camera_frustum_scale),
                     )
                     .map_err(|e| {
                         ObserverError::LoggingFailed {
@@ -1011,7 +1035,10 @@ impl RerunObserver {
 
         // Collect final 3D landmarks for batch logging
         let mut final_landmark_positions: Vec<[f32; 3]> = Vec::new();
+        // Collect final SE2 positions for batch logging
+        let mut final_se2_positions: Vec<[f32; 2]> = Vec::new();
         let mut camera_count = 0;
+        let mut se2_count = 0;
 
         for (var_name, var) in values {
             match var {
@@ -1057,7 +1084,8 @@ impl RerunObserver {
                         &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
                             self.config.camera_fov,
                             self.config.camera_aspect_ratio,
-                        ),
+                        )
+                        .with_image_plane_distance(self.config.camera_frustum_scale),
                     )
                     .map_err(|e| {
                         ObserverError::LoggingFailed {
@@ -1068,6 +1096,10 @@ impl RerunObserver {
                     })?;
 
                     camera_count += 1;
+                }
+                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+                    final_se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
+                    se2_count += 1;
                 }
                 VariableEnum::Rn(v) if self.config.show_landmarks => {
                     // Handle 3D landmarks (Rn with dimension 3)
@@ -1109,11 +1141,36 @@ impl RerunObserver {
             })?;
         }
 
+        // Batch log all final SE2 poses as 2D boxes
+        if self.config.show_se2_poses && !final_se2_positions.is_empty() {
+            let color = self.config.optimized_se2_color;
+            let hs = self.config.se2_box_half_size;
+            let half_sizes: Vec<[f32; 2]> = vec![[hs, hs]; final_se2_positions.len()];
+            rec.log(
+                "final_graph/se2_poses",
+                &rerun::archetypes::Boxes2D::from_centers_and_half_sizes(
+                    final_se2_positions,
+                    half_sizes,
+                )
+                .with_colors([rerun::components::Color::from_rgb(
+                    color[0], color[1], color[2],
+                )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "final_graph/se2_poses".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
         info!(
-            "Logged final BA state after {} iterations: {} cameras, {} landmarks",
+            "Logged final state after {} iterations: {} cameras, {} landmarks, {} SE2 poses",
             iterations,
             camera_count,
-            final_landmark_positions.len()
+            final_landmark_positions.len(),
+            se2_count
         );
 
         // Log displacement statistics
@@ -1349,6 +1406,130 @@ impl RerunObserver {
     }
 
     /// Log manifold states (SE2/SE3 poses and Rn 3D landmarks).
+    /// Log the initial state of all variables before any optimization updates.
+    ///
+    /// Logs SE3 poses as `Transform3D` + `Pinhole` under `initial_graph/cameras/`,
+    /// SE2 poses as `Boxes2D` under `initial_graph/se2_poses`,
+    /// and Rn landmarks as `Points3D` under `initial_graph/landmarks`.
+    fn log_initial_state(&self, variables: &HashMap<String, VariableEnum>) -> ObserverResult<()> {
+        let rec = self.rec.as_ref().ok_or_else(|| {
+            ObserverError::InvalidState("Recording stream not initialized".to_string())
+        })?;
+        rec.set_time_sequence("iteration", 0_i64);
+
+        let mut se2_positions: Vec<[f32; 2]> = Vec::new();
+        let mut landmark_positions: Vec<[f32; 3]> = Vec::new();
+
+        for (var_name, var) in variables {
+            match var {
+                VariableEnum::SE3(v) if self.config.show_cameras => {
+                    let pose = if self.config.invert_camera_poses {
+                        v.value.inverse(None)
+                    } else {
+                        v.value.clone()
+                    };
+
+                    let trans = pose.translation();
+                    let rot = pose.rotation_quaternion();
+
+                    let position = rerun::external::glam::Vec3::new(
+                        trans.x as f32,
+                        trans.y as f32,
+                        trans.z as f32,
+                    );
+
+                    let nq = rot.as_ref();
+                    let rotation = rerun::external::glam::Quat::from_xyzw(
+                        nq.i as f32,
+                        nq.j as f32,
+                        nq.k as f32,
+                        nq.w as f32,
+                    );
+
+                    let transform =
+                        rerun::Transform3D::from_translation_rotation(position, rotation);
+
+                    let entity_path = format!("initial_graph/cameras/{}", var_name);
+                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                        ObserverError::LoggingFailed {
+                            entity_path: entity_path.clone(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?;
+
+                    rec.log(
+                        entity_path.as_str(),
+                        &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
+                            self.config.camera_fov,
+                            self.config.camera_aspect_ratio,
+                        )
+                        .with_image_plane_distance(self.config.camera_frustum_scale),
+                    )
+                    .map_err(|e| {
+                        ObserverError::LoggingFailed {
+                            entity_path: entity_path.clone(),
+                            reason: format!("{}", e),
+                        }
+                        .log_with_source(e)
+                    })?;
+                }
+                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+                    se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
+                }
+                VariableEnum::Rn(v) if self.config.show_landmarks => {
+                    let data = v.value.data();
+                    if data.len() == 3 {
+                        landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if self.config.show_landmarks && !landmark_positions.is_empty() {
+            let color = self.config.initial_landmark_color;
+            rec.log(
+                "initial_graph/landmarks",
+                &rerun::archetypes::Points3D::new(landmark_positions)
+                    .with_radii([self.config.landmark_point_size])
+                    .with_colors([rerun::components::Color::from_rgb(
+                        color[0], color[1], color[2],
+                    )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "initial_graph/landmarks".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
+        if self.config.show_se2_poses && !se2_positions.is_empty() {
+            let color = self.config.initial_se2_color;
+            let hs = self.config.se2_box_half_size;
+            let half_sizes: Vec<[f32; 2]> = vec![[hs, hs]; se2_positions.len()];
+            rec.log(
+                "initial_graph/se2_poses",
+                &rerun::archetypes::Boxes2D::from_centers_and_half_sizes(se2_positions, half_sizes)
+                    .with_colors([rerun::components::Color::from_rgb(
+                        color[0], color[1], color[2],
+                    )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "initial_graph/se2_poses".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
+        self.initial_state_logged.set(true);
+        Ok(())
+    }
+
     fn log_manifolds(
         &self,
         iteration: usize,
@@ -1361,6 +1542,8 @@ impl RerunObserver {
 
         // Collect 3D landmarks for batch logging (much more efficient for large point clouds)
         let mut landmark_positions: Vec<[f32; 3]> = Vec::new();
+        // Collect SE2 positions for batch logging
+        let mut se2_positions: Vec<[f32; 2]> = Vec::new();
 
         for (var_name, var) in variables {
             match var {
@@ -1406,7 +1589,8 @@ impl RerunObserver {
                         &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
                             self.config.camera_fov,
                             self.config.camera_aspect_ratio,
-                        ),
+                        )
+                        .with_image_plane_distance(self.config.camera_frustum_scale),
                     )
                     .map_err(|e| {
                         ObserverError::LoggingFailed {
@@ -1417,23 +1601,7 @@ impl RerunObserver {
                     })?;
                 }
                 VariableEnum::SE2(v) if self.config.show_se2_poses => {
-                    let x = v.value.x();
-                    let y = v.value.y();
-
-                    let position = rerun::external::glam::Vec3::new(x as f32, y as f32, 0.0);
-                    let rotation = rerun::external::glam::Quat::IDENTITY;
-
-                    let transform =
-                        rerun::Transform3D::from_translation_rotation(position, rotation);
-
-                    let entity_path = format!("optimized_graph/se2_poses/{}", var_name);
-                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
+                    se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
                 }
                 VariableEnum::Rn(v) if self.config.show_landmarks => {
                     // Handle 3D landmarks (Rn with dimension 3)
@@ -1463,6 +1631,27 @@ impl RerunObserver {
             .map_err(|e| {
                 ObserverError::LoggingFailed {
                     entity_path: "optimized_graph/landmarks".to_string(),
+                    reason: format!("{}", e),
+                }
+                .log_with_source(e)
+            })?;
+        }
+
+        // Batch log all SE2 poses as 2D boxes
+        if self.config.show_se2_poses && !se2_positions.is_empty() {
+            let color = self.config.optimized_se2_color;
+            let hs = self.config.se2_box_half_size;
+            let half_sizes: Vec<[f32; 2]> = vec![[hs, hs]; se2_positions.len()];
+            rec.log(
+                "optimized_graph/se2_poses",
+                &rerun::archetypes::Boxes2D::from_centers_and_half_sizes(se2_positions, half_sizes)
+                    .with_colors([rerun::components::Color::from_rgb(
+                        color[0], color[1], color[2],
+                    )]),
+            )
+            .map_err(|e| {
+                ObserverError::LoggingFailed {
+                    entity_path: "optimized_graph/se2_poses".to_string(),
                     reason: format!("{}", e),
                 }
                 .log_with_source(e)
@@ -1627,6 +1816,13 @@ impl OptObserver for RerunObserver {
             return;
         }
 
+        // Log initial state once before any optimization updates
+        if !self.initial_state_logged.get() {
+            if let Err(e) = self.log_initial_state(values) {
+                let _ = e.log();
+            }
+        }
+
         let metrics = self.iteration_metrics.borrow();
 
         // Always log scalar metrics (plots) - they're lightweight and useful
@@ -1686,6 +1882,7 @@ impl Default for RerunObserver {
             config: VisualizationConfig::default(),
             initial_camera_positions: RefCell::new(HashMap::new()),
             initial_landmark_positions: RefCell::new(HashMap::new()),
+            initial_state_logged: Cell::new(false),
         })
     }
 }

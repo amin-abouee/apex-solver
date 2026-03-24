@@ -46,7 +46,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
-use apex_io::BalLoader;
+use apex_io::{BalLoader, utils::DatasetRegistry};
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use apex_solver::ManifoldType;
@@ -55,7 +55,7 @@ use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
 use apex_solver::init_logger;
-use apex_solver::linalg::{LinearSolverType, SchurPreconditioner, SchurVariant};
+use apex_solver::linalg::{JacobianMode, LinearSolverType, SchurPreconditioner, SchurVariant};
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -73,24 +73,26 @@ struct DatasetConfig {
 
 /// Get all datasets to benchmark
 fn get_datasets() -> Vec<DatasetConfig> {
-    vec![
-        DatasetConfig {
-            name: "Ladybug".to_string(),
-            path: "data/bundle_adjustment/Ladybug/problem-1723-156502-pre.txt".to_string(),
-        },
-        DatasetConfig {
-            name: "Trafalgar".to_string(),
-            path: "data/bundle_adjustment/Trafalgar/problem-257-65132-pre.txt".to_string(),
-        },
-        DatasetConfig {
-            name: "Dubrovnik".to_string(),
-            path: "data/bundle_adjustment/Dubrovnik/problem-356-226730-pre.txt".to_string(),
-        },
-        DatasetConfig {
-            name: "Venice".to_string(),
-            path: "data/bundle_adjustment/Venice/problem-1778-993923-pre.txt".to_string(),
-        },
-    ]
+    let registry =
+        DatasetRegistry::load().unwrap_or_else(|e| panic!("failed to load dataset registry: {e}"));
+    // (registry_key, display_name, cameras, points)
+    let specs = [
+        ("ladybug", "Ladybug", 1723u32, 156502u32),
+        ("trafalgar", "Trafalgar", 257u32, 65132u32),
+        ("dubrovnik", "Dubrovnik", 356u32, 226730u32),
+        ("venice", "Venice", 1778u32, 993923u32),
+    ];
+    specs
+        .iter()
+        .filter_map(|(key, display, cameras, points)| {
+            registry
+                .ba_path(key, *cameras, *points)
+                .map(|p| DatasetConfig {
+                    name: display.to_string(),
+                    path: p.to_string_lossy().into_owned(),
+                })
+        })
+        .collect()
 }
 
 /// Bundle Adjustment Benchmark Result
@@ -194,7 +196,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
             );
             return BABenchmarkResult::failed(
                 dataset_name,
-                "Apex-Iterative",
+                "Apex-Solver",
                 "Rust",
                 &format!("TIMEOUT ({} minutes)", timeout_mins),
             );
@@ -203,7 +205,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
         // Check if thread completed
         if handle.is_finished() {
             return handle.join().unwrap_or_else(|_| {
-                BABenchmarkResult::failed(dataset_name, "Apex-Iterative", "Rust", "Thread panicked")
+                BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", "Thread panicked")
             });
         }
 
@@ -220,12 +222,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         Ok(d) => d,
         Err(e) => {
             error!("Failed to load BAL dataset: {}", e);
-            return BABenchmarkResult::failed(
-                dataset_name,
-                "Apex-Iterative",
-                "Rust",
-                &e.to_string(),
-            );
+            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
         }
     };
 
@@ -239,7 +236,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
 
     // Setup problem
     info!("Building optimization problem...");
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     // Helper function to convert axis-angle to SO3
@@ -363,12 +360,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
-            return BABenchmarkResult::failed(
-                dataset_name,
-                "Apex-Iterative",
-                "Rust",
-                &e.to_string(),
-            );
+            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
         }
     };
     let elapsed_seconds = start.elapsed().as_secs_f64();
@@ -400,7 +392,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
 
     BABenchmarkResult::success(
         dataset_name,
-        "Apex-Iterative",
+        "Apex-Solver",
         "Rust",
         dataset.cameras.len(),
         dataset.points.len(),

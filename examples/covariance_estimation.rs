@@ -13,7 +13,7 @@
 
 use apex_manifolds::se2::SE2;
 use apex_solver::{
-    ManifoldType,
+    JacobianMode, ManifoldType,
     core::problem::Problem,
     factors::BetweenFactor,
     init_logger,
@@ -31,7 +31,7 @@ fn main() {
     info!("Covariance Estimation Example\n");
 
     // Create a simple 2D pose graph with 4 poses forming a chain
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     info!("Creating pose graph with 4 SE2 poses...");
 

@@ -29,26 +29,26 @@
 //! ## Usage Example
 //!
 //! ```no_run
-//! # use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::StructureAware;
 //! # use std::collections::HashMap;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! # let variables = HashMap::new();
 //! # let variable_index_map = HashMap::new();
-//! use apex_solver::linalg::{SchurSolverAdapter, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::StructureAware;
 //!
-//! let mut solver = SchurSolverAdapter::new_with_structure_and_config(
-//!     &variables,
-//!     &variable_index_map,
-//!     SchurVariant::Iterative, // Implicit Schur with PCG
-//!     SchurPreconditioner::SchurJacobi, // Recommended for PCG
-//! )?;
+//! let mut solver = SparseSchurComplementSolver::new()
+//!     .with_variant(SchurVariant::Iterative) // Implicit Schur with PCG
+//!     .with_preconditioner(SchurPreconditioner::SchurJacobi); // Recommended for PCG
+//! solver.initialize_structure(&variables, &variable_index_map)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use super::explicit_schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
 use crate::core::problem::VariableEnum;
-use crate::linalg::{LinAlgError, LinAlgResult, StructuredSparseLinearSolver};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::{DMatrix, DVector, Matrix3};
@@ -952,7 +952,7 @@ impl Default for IterativeSchurSolver {
     }
 }
 
-impl StructuredSparseLinearSolver for IterativeSchurSolver {
+impl StructureAware for IterativeSchurSolver {
     fn initialize_structure(
         &mut self,
         variables: &HashMap<String, VariableEnum>,
@@ -1005,7 +1005,9 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
         self.block_structure = Some(structure);
         Ok(())
     }
+}
 
+impl LinearSolver<SparseMode> for IterativeSchurSolver {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
@@ -1094,6 +1096,72 @@ impl StructuredSparseLinearSolver for IterativeSchurSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::variable::Variable;
+    use apex_manifolds::{rn, se3};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    type TestSetup = (
+        HashMap<String, VariableEnum>,
+        HashMap<String, usize>,
+        SparseColMat<usize, f64>,
+        faer::Mat<f64>,
+    );
+
+    /// Build the same 2-camera + 3-landmark test setup used in explicit_schur tests.
+    /// Jacobian: 36 rows × 21 cols  (H_cc = 3·I₁₂, H_pp = 4·I₃ — positive definite)
+    fn create_schur_test_setup() -> Result<TestSetup, Box<dyn std::error::Error>> {
+        let se3_id = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let pt_zero = DVector::from_vec(vec![0.0, 0.0, 0.0]);
+
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "cam_0".to_string(),
+            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
+        );
+        variables.insert(
+            "cam_1".to_string(),
+            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
+        );
+        variables.insert(
+            "pt_0".to_string(),
+            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
+        );
+        variables.insert(
+            "pt_1".to_string(),
+            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
+        );
+        variables.insert(
+            "pt_2".to_string(),
+            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
+        );
+
+        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
+        variable_index_map.insert("cam_0".to_string(), 0);
+        variable_index_map.insert("cam_1".to_string(), 6);
+        variable_index_map.insert("pt_0".to_string(), 12);
+        variable_index_map.insert("pt_1".to_string(), 15);
+        variable_index_map.insert("pt_2".to_string(), 18);
+
+        // Jacobian: 2 cameras × 3 landmarks × 6 rows_per_obs = 36 rows, 21 cols
+        let cam_cols = [0usize, 6];
+        let lm_cols = [12usize, 15, 18];
+        let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        for (ci, &cam_col) in cam_cols.iter().enumerate() {
+            for (li, &lm_col) in lm_cols.iter().enumerate() {
+                let row_base = (ci * 3 + li) * 6;
+                for k in 0..6 {
+                    triplets.push(Triplet::new(row_base + k, cam_col + k, 1.0));
+                    triplets.push(Triplet::new(row_base + k, lm_col + (k % 3), 1.0));
+                }
+            }
+        }
+
+        let jacobian = SparseColMat::try_new_from_triplets(36, 21, &triplets)?;
+        let residuals = faer::Mat::from_fn(36, 1, |i, _| (i % 5) as f64 * 0.1);
+
+        Ok((variables, variable_index_map, jacobian, residuals))
+    }
 
     #[test]
     fn test_iterative_schur_creation() {
@@ -1122,6 +1190,360 @@ mod tests {
         assert_eq!(
             solver.preconditioner_type,
             SchurPreconditioner::BlockDiagonal
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // New tests for uncovered code paths
+    // -------------------------------------------------------------------------
+
+    /// Test Default impl equals new()
+    #[test]
+    fn test_iterative_schur_default() {
+        let solver = IterativeSchurSolver::default();
+        assert_eq!(solver.max_cg_iterations, 500);
+        assert_eq!(solver.cg_tolerance, 1e-9);
+        assert!(solver.block_structure.is_none());
+        assert!(solver.hessian.is_none());
+        assert!(solver.landmark_block_inverses.is_empty());
+    }
+
+    /// Test initialize_structure() partitions 2 cameras + 3 landmarks
+    #[test]
+    fn test_iterative_schur_initialize_structure() -> TestResult {
+        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::new();
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let bs = solver
+            .block_structure
+            .as_ref()
+            .ok_or("block_structure is None")?;
+        assert_eq!(bs.camera_blocks.len(), 2);
+        assert_eq!(bs.landmark_blocks.len(), 3);
+        assert_eq!(bs.camera_dof, 12);
+        assert_eq!(bs.landmark_dof, 9);
+        Ok(())
+    }
+
+    /// Test full solve_normal_equation pipeline
+    #[test]
+    fn test_iterative_schur_solve_normal_equation() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(delta.nrows(), 21);
+        assert_eq!(delta.ncols(), 1);
+        Ok(())
+    }
+
+    /// Test solve_augmented_equation (LM damping) pipeline
+    #[test]
+    fn test_iterative_schur_solve_augmented_equation() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let delta = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &residuals,
+            &jacobian,
+            0.1,
+        )?;
+        assert_eq!(delta.nrows(), 21);
+        Ok(())
+    }
+
+    /// Test get_hessian() and get_gradient() after solve
+    #[test]
+    fn test_iterative_schur_get_hessian_gradient() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
+        assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_none());
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        let h = LinearSolver::<SparseMode>::get_hessian(&solver);
+        let g = LinearSolver::<SparseMode>::get_gradient(&solver);
+        assert!(h.is_some());
+        assert!(g.is_some());
+        let h = h.ok_or("hessian is None")?;
+        let g = g.ok_or("gradient is None")?;
+        assert_eq!(h.nrows(), 21);
+        assert_eq!(g.nrows(), 21);
+        Ok(())
+    }
+
+    /// Test landmark_block_inverses populated after solve
+    #[test]
+    fn test_iterative_schur_invert_landmark_blocks() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        // Should have one 3×3 inverse per landmark (3 landmarks)
+        assert_eq!(solver.landmark_block_inverses.len(), 3);
+        Ok(())
+    }
+
+    /// Test visibility index populated after solve
+    #[test]
+    fn test_iterative_schur_build_visibility_index() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        // 2 cameras should each have visibility to some landmarks
+        assert_eq!(solver.camera_to_landmark_visibility.len(), 2);
+        for cam_visibility in &solver.camera_to_landmark_visibility {
+            assert!(!cam_visibility.is_empty());
+        }
+        Ok(())
+    }
+
+    /// Test workspace buffers are allocated after solve
+    #[test]
+    fn test_iterative_schur_workspace_init() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        assert_eq!(solver.workspace_lm.len(), 9); // landmark DOF
+        assert_eq!(solver.workspace_cam.len(), 12); // camera DOF
+        Ok(())
+    }
+
+    /// Test BlockDiagonal preconditioner path
+    #[test]
+    fn test_iterative_schur_block_diagonal_preconditioner() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver =
+            IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::BlockDiagonal);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(delta.nrows(), 21);
+        Ok(())
+    }
+
+    /// Test SchurJacobi preconditioner path
+    #[test]
+    fn test_iterative_schur_schur_jacobi_preconditioner() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver =
+            IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::SchurJacobi);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(delta.nrows(), 21);
+        Ok(())
+    }
+
+    /// Test None preconditioner path
+    #[test]
+    fn test_iterative_schur_no_preconditioner() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::None);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(delta.nrows(), 21);
+        Ok(())
+    }
+
+    /// Test two solves with different λ produce different updates
+    #[test]
+    fn test_iterative_schur_augmented_lambda_effect() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+
+        let mut s1 = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        s1.initialize_structure(&variables, &variable_index_map)?;
+        let d1 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut s1, &residuals, &jacobian, 0.001,
+        )?;
+
+        let mut s2 = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        s2.initialize_structure(&variables, &variable_index_map)?;
+        let d2 = LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut s2, &residuals, &jacobian, 100.0,
+        )?;
+
+        let norm_diff: f64 = (0..21).map(|i| (d1[(i, 0)] - d2[(i, 0)]).powi(2)).sum();
+        assert!(
+            norm_diff > 1e-10,
+            "Different λ should yield different updates"
+        );
+        Ok(())
+    }
+
+    /// Test solve without initialize_structure returns error
+    #[test]
+    fn test_iterative_schur_solve_without_init_returns_error() -> TestResult {
+        let triplets: Vec<Triplet<usize, usize, f64>> = vec![Triplet::new(0, 0, 1.0)];
+        let jacobian =
+            SparseColMat::try_new_from_triplets(1, 1, &triplets).map_err(|e| format!("{e:?}"))?;
+        let residuals = faer::Mat::from_fn(1, 1, |_, _| 1.0);
+        let mut solver = IterativeSchurSolver::new();
+
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // New tests for previously uncovered code paths
+    // -------------------------------------------------------------------------
+
+    /// Test apply_landmark_inverse applies the cached block inverses correctly.
+    #[test]
+    fn test_apply_landmark_inverse() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+        // Run a solve to populate landmark_block_inverses
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        // Input vector - landmark DOF (9 for 3 landmarks × 3)
+        let input = faer::Mat::from_fn(9, 1, |i, _| (i + 1) as f64);
+        let mut output = faer::Mat::zeros(9, 1);
+        solver.apply_landmark_inverse(&input, &mut output)?;
+
+        // The output should be non-zero (since the landmark blocks are non-trivial)
+        let norm: f64 = (0..9).map(|i| output[(i, 0)].powi(2)).sum::<f64>().sqrt();
+        assert!(
+            norm > 0.0,
+            "apply_landmark_inverse should produce non-zero output"
+        );
+        Ok(())
+    }
+
+    /// Test extract_camera_landmark_transpose_mvp produces a landmark-DOF output.
+    #[test]
+    fn test_extract_camera_landmark_transpose_mvp() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        let hessian = solver.hessian.as_ref().ok_or("hessian is None")?;
+
+        // Camera-DOF input vector (12 entries for 2 cameras × 6 DOF)
+        let x = faer::Mat::from_fn(12, 1, |i, _| (i as f64) * 0.1);
+        let result = solver.extract_camera_landmark_transpose_mvp(hessian, &x)?;
+
+        // Result should have landmark DOF = 9 rows
+        assert_eq!(result.nrows(), 9);
+        assert_eq!(result.ncols(), 1);
+        Ok(())
+    }
+
+    /// Test extract_camera_landmark_mvp produces a camera-DOF output.
+    #[test]
+    fn test_extract_camera_landmark_mvp() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        let hessian = solver.hessian.as_ref().ok_or("hessian is None")?;
+
+        // Landmark-DOF input vector (9 entries for 3 landmarks × 3 DOF)
+        let x = faer::Mat::from_fn(9, 1, |i, _| (i as f64) * 0.1);
+        let result = solver.extract_camera_landmark_mvp(hessian, &x)?;
+
+        // Result should have camera DOF = 12 rows
+        assert_eq!(result.nrows(), 12);
+        assert_eq!(result.ncols(), 1);
+        Ok(())
+    }
+
+    /// Test apply_block_preconditioner produces correct-dimensional output.
+    #[test]
+    fn test_apply_block_preconditioner() -> TestResult {
+        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let mut solver =
+            IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::BlockDiagonal);
+        solver.initialize_structure(&variables, &variable_index_map)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+
+        // Compute the block preconditioner blocks
+        let precond_blocks = solver.compute_block_preconditioner()?;
+        // Should have one block per camera (2 cameras)
+        assert_eq!(precond_blocks.len(), 2);
+
+        // Apply to a camera-DOF residual vector
+        let r = faer::Mat::from_fn(12, 1, |i, _| (i + 1) as f64);
+        let z = solver.apply_block_preconditioner(&r, &precond_blocks)?;
+        assert_eq!(z.nrows(), 12);
+        assert_eq!(z.ncols(), 1);
+
+        // The output should be non-zero
+        let norm: f64 = (0..12).map(|i| z[(i, 0)].powi(2)).sum::<f64>().sqrt();
+        assert!(norm > 0.0, "Preconditioned vector should be non-zero");
+        Ok(())
+    }
+
+    /// Test initialize_structure returns Err when no camera variables are present.
+    #[test]
+    fn test_implicit_initialize_structure_no_cameras_returns_error() {
+        use crate::core::variable::Variable;
+        use apex_manifolds::rn;
+        use nalgebra::DVector;
+
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "pt_0".to_string(),
+            VariableEnum::Rn(Variable::new(rn::Rn::from(DVector::zeros(3)))),
+        );
+        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
+        variable_index_map.insert("pt_0".to_string(), 0);
+
+        let mut solver = IterativeSchurSolver::new();
+        let result = solver.initialize_structure(&variables, &variable_index_map);
+        assert!(
+            result.is_err(),
+            "Expected Err when no camera variables present"
+        );
+    }
+
+    /// Test initialize_structure returns Err when no landmark variables are present.
+    #[test]
+    fn test_implicit_initialize_structure_no_landmarks_returns_error() {
+        use crate::core::variable::Variable;
+        use apex_manifolds::se3;
+        use nalgebra::DVector;
+
+        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
+        variables.insert(
+            "cam_0".to_string(),
+            VariableEnum::SE3(Variable::new(se3::SE3::from(DVector::from_vec(vec![
+                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ])))),
+        );
+        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
+        variable_index_map.insert("cam_0".to_string(), 0);
+
+        let mut solver = IterativeSchurSolver::new();
+        let result = solver.initialize_structure(&variables, &variable_index_map);
+        assert!(
+            result.is_err(),
+            "Expected Err when no landmark variables present"
         );
     }
 }

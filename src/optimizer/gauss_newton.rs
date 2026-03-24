@@ -70,11 +70,13 @@
 //! ```no_run
 //! use apex_solver::optimizer::GaussNewton;
 //! use apex_solver::core::problem::Problem;
+//! use apex_solver::JacobianMode;
 //! use std::collections::HashMap;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # type TestResult = Result<(), Box<dyn std::error::Error>>;
+//! # fn main() -> TestResult {
 //! // Create optimization problem
-//! let mut problem = Problem::new();
+//! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
 //! // Set up initial parameter values
@@ -118,11 +120,14 @@
 use crate::{core::problem, error, linalg, optimizer};
 use apex_manifolds as manifold;
 
-use faer::sparse;
 use std::{collections, time};
 use tracing::debug;
 
-use crate::optimizer::IterationStats;
+use crate::linalg::{
+    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
+    SparseCholeskySolver, SparseMode, SparseQRSolver,
+};
+use crate::optimizer::{AssemblyBackend, IterationStats};
 
 /// Configuration parameters for the Gauss-Newton optimizer.
 ///
@@ -408,10 +413,12 @@ struct CostEvaluation {
 /// ```no_run
 /// use apex_solver::optimizer::GaussNewton;
 /// use apex_solver::core::problem::Problem;
+/// use apex_solver::JacobianMode;
 /// use std::collections::HashMap;
 ///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let mut problem = Problem::new();
+/// # type TestResult = Result<(), Box<dyn std::error::Error>>;
+/// # fn main() -> TestResult {
+/// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
 /// let initial_values = HashMap::new();
@@ -430,7 +437,7 @@ struct CostEvaluation {
 /// - [`DogLeg`](crate::optimizer::DogLeg) - For trust region control
 pub struct GaussNewton {
     config: GaussNewtonConfig,
-    jacobi_scaling: Option<sparse::SparseColMat<usize, f64>>,
+    jacobi_scaling: Option<Vec<f64>>,
     observers: optimizer::OptObserverVec,
 }
 
@@ -479,34 +486,39 @@ impl GaussNewton {
         self.observers.add(observer);
     }
 
-    /// Compute Gauss-Newton step by solving the normal equations
-    fn compute_gauss_newton_step(
+    /// Compute Gauss-Newton step by solving the normal equations (generic over assembly mode).
+    fn compute_step_generic<M: AssemblyBackend>(
         &self,
         residuals: &faer::Mat<f64>,
-        scaled_jacobian: &sparse::SparseColMat<usize, f64>,
-        linear_solver: &mut Box<dyn linalg::SparseLinearSolver>,
-    ) -> Option<StepResult> {
+        scaled_jacobian: &M::Jacobian,
+        linear_solver: &mut dyn LinearSolver<M>,
+    ) -> Result<StepResult, optimizer::OptimizerError> {
         // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
-        // Use min_diagonal for numerical stability (tiny regularization)
         let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
             .solve_normal_equation(&residuals_owned, scaled_jacobian)
-            .ok()?;
+            .map_err(|e| {
+                optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
+            })?;
 
         // Get gradient from the solver (J^T * r)
-        let gradient = linear_solver.get_gradient()?;
-        // Compute gradient norm for convergence check
+        let gradient = linear_solver.get_gradient().ok_or_else(|| {
+            optimizer::OptimizerError::NumericalInstability("Gradient not available".into()).log()
+        })?;
         let gradient_norm = gradient.norm_l2();
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
-            let scaling = self.jacobi_scaling.as_ref()?;
-            &scaled_step * scaling
+            let scaling = self
+                .jacobi_scaling
+                .as_ref()
+                .ok_or_else(|| optimizer::OptimizerError::JacobiScalingNotInitialized.log())?;
+            M::apply_inverse_scaling(&scaled_step, scaling)
         } else {
             scaled_step
         };
 
-        Some(StepResult {
+        Ok(StepResult {
             step,
             gradient_norm,
         })
@@ -542,13 +554,15 @@ impl GaussNewton {
         })
     }
 
-    pub fn optimize(
+    /// Run optimization using the specified assembly mode and linear solver.
+    fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &problem::Problem,
         initial_params: &collections::HashMap<
             String,
             (manifold::ManifoldType, nalgebra::DVector<f64>),
         >,
+        linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<
         optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
         error::ApexSolverError,
@@ -560,9 +574,6 @@ impl GaussNewton {
 
         // Initialize optimization state
         let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
-
-        // Create linear solver
-        let mut linear_solver = optimizer::create_linear_solver(&self.config.linear_solver_type);
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
@@ -584,35 +595,31 @@ impl GaussNewton {
         // Main optimization loop
         loop {
             let iter_start = time::Instant::now();
-            // Evaluate residuals and Jacobian
-            let (residuals, jacobian) = problem.compute_residual_and_jacobian_sparse(
+
+            // Evaluate residuals and Jacobian using the assembly mode
+            let (residuals, jacobian) = M::assemble(
+                problem,
                 &state.variables,
                 &state.variable_index_map,
-                &state.symbolic_structure,
+                state.symbolic_structure.as_ref(),
+                state.total_dof,
             )?;
             jacobian_evaluations += 1;
 
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
-                optimizer::process_jacobian(&jacobian, &mut self.jacobi_scaling, iteration)?
+                optimizer::process_jacobian_generic::<M>(
+                    &jacobian,
+                    &mut self.jacobi_scaling,
+                    iteration,
+                )?
             } else {
                 jacobian
             };
 
             // Compute Gauss-Newton step
-            let step_result = match self.compute_gauss_newton_step(
-                &residuals,
-                &scaled_jacobian,
-                &mut linear_solver,
-            ) {
-                Some(result) => result,
-                None => {
-                    return Err(optimizer::OptimizerError::LinearSolveFailed(
-                        "Linear solver failed to solve Gauss-Newton system".to_string(),
-                    )
-                    .into());
-                }
-            };
+            let step_result =
+                self.compute_step_generic::<M>(&residuals, &scaled_jacobian, linear_solver)?;
 
             // Update tracking variables
             max_gradient_norm = max_gradient_norm.max(step_result.gradient_norm);
@@ -630,7 +637,6 @@ impl GaussNewton {
             total_cost_reduction += cost_eval.cost_reduction;
 
             // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
-            // This eliminates ~2-5ms overhead per iteration for non-debug optimization
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let iter_elapsed_ms = iter_start.elapsed().as_secs_f64() * 1000.0;
                 let total_elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
@@ -656,7 +662,7 @@ impl GaussNewton {
             previous_cost = state.current_cost;
 
             // Notify all observers with current state
-            optimizer::notify_observers(
+            optimizer::notify_observers_generic::<M>(
                 &mut self.observers,
                 &state.variables,
                 iteration,
@@ -665,7 +671,7 @@ impl GaussNewton {
                 None, // Gauss-Newton doesn't use damping
                 step_norm,
                 None, // Gauss-Newton doesn't use step quality
-                linear_solver.as_ref(),
+                linear_solver,
             );
 
             // Compute parameter norm for convergence check
@@ -717,8 +723,8 @@ impl GaussNewton {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances(
-                        &mut linear_solver,
+                    problem.compute_and_set_covariances_generic::<M>(
+                        linear_solver,
                         &mut state.variables,
                         &state.variable_index_map,
                     )
@@ -742,16 +748,47 @@ impl GaussNewton {
             iteration += 1;
         }
     }
+
+    /// Run optimization, automatically selecting sparse or dense path based on config.
+    pub fn optimize(
+        &mut self,
+        problem: &problem::Problem,
+        initial_params: &collections::HashMap<
+            String,
+            (manifold::ManifoldType, nalgebra::DVector<f64>),
+        >,
+    ) -> Result<
+        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
+        error::ApexSolverError,
+    > {
+        match problem.jacobian_mode {
+            JacobianMode::Dense => match self.config.linear_solver_type {
+                LinearSolverType::DenseQR => {
+                    let mut solver = DenseQRSolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    let mut solver = DenseCholeskySolver::new();
+                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                }
+            },
+            JacobianMode::Sparse => match self.config.linear_solver_type {
+                linalg::LinearSolverType::SparseQR => {
+                    let mut solver = SparseQRSolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+                _ => {
+                    // SparseCholesky (default), SparseSchurComplement or DenseCholesky with
+                    // sparse mode → SparseCholeskySolver
+                    let mut solver = SparseCholeskySolver::new();
+                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                }
+            },
+        }
+    }
 }
 
-impl optimizer::Solver for GaussNewton {
-    type Config = GaussNewtonConfig;
-    type Error = error::ApexSolverError;
-
-    fn new() -> Self {
-        Self::default()
-    }
-
+impl optimizer::Optimizer for GaussNewton {
     fn optimize(
         &mut self,
         problem: &problem::Problem,
@@ -761,7 +798,7 @@ impl optimizer::Solver for GaussNewton {
         >,
     ) -> Result<
         optimizer::SolverResult<std::collections::HashMap<String, problem::VariableEnum>>,
-        Self::Error,
+        crate::error::ApexSolverError,
     > {
         self.optimize(problem, initial_params)
     }
@@ -769,10 +806,12 @@ impl optimizer::Solver for GaussNewton {
 
 #[cfg(test)]
 mod tests {
-    use crate::{core::problem, factors, optimizer};
+    use crate::{core::problem, factors, linalg::JacobianMode, optimizer};
     use apex_manifolds as manifold;
     use nalgebra::dvector;
     use std::collections;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
     /// Demonstrates extensibility - custom factors can be defined outside of factors.rs
@@ -841,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn test_rosenbrock_optimization() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_rosenbrock_optimization() -> TestResult {
         // Rosenbrock function test:
         // Minimize: r1² + r2² where
         //   r1 = 10(x2 - x1²)
@@ -849,7 +888,7 @@ mod tests {
         // Starting point: [-1.2, 1.0]
         // Expected minimum: [1.0, 1.0]
 
-        let mut problem = problem::Problem::new();
+        let mut problem = problem::Problem::new(JacobianMode::Sparse);
         let mut initial_values = collections::HashMap::new();
 
         // Add variables using Rn manifold (Euclidean space)
@@ -915,5 +954,236 @@ mod tests {
             result.final_cost
         );
         Ok(())
+    }
+
+    /// Trivial factor: r = x - target, J = [[1.0]]
+    struct LinearFactor {
+        target: f64,
+    }
+
+    impl factors::Factor for LinearFactor {
+        fn linearize(
+            &self,
+            params: &[nalgebra::DVector<f64>],
+            compute_jacobian: bool,
+        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+            let residual = nalgebra::dvector![params[0][0] - self.target];
+            let jacobian = if compute_jacobian {
+                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
+            } else {
+                None
+            };
+            (residual, jacobian)
+        }
+
+        fn get_dimension(&self) -> usize {
+            1
+        }
+    }
+
+    fn rosenbrock_problem() -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x1".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
+        );
+        init.insert(
+            "x2".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
+        );
+        prob.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
+        prob.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        (prob, init)
+    }
+
+    fn linear_problem(
+        start: f64,
+    ) -> (
+        problem::Problem,
+        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
+    ) {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let mut init = collections::HashMap::new();
+        init.insert(
+            "x".to_string(),
+            (manifold::ManifoldType::RN, nalgebra::dvector![start]),
+        );
+        prob.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        (prob, init)
+    }
+
+    // -------------------------------------------------------------------------
+    // GaussNewtonConfig builder tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_gn_config_default() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::default();
+        assert_eq!(cfg.max_iterations, 50);
+        assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
+        assert!(!cfg.use_jacobi_scaling);
+        assert!(!cfg.compute_covariances);
+    }
+
+    #[test]
+    fn test_gn_config_builders() {
+        use crate::linalg::LinearSolverType;
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_max_iterations(15)
+            .with_cost_tolerance(1e-5)
+            .with_parameter_tolerance(1e-6)
+            .with_gradient_tolerance(1e-7)
+            .with_jacobi_scaling(true)
+            .with_min_diagonal(1e-8)
+            .with_min_cost_threshold(1e-10)
+            .with_compute_covariances(true)
+            .with_linear_solver_type(LinearSolverType::SparseQR);
+        assert_eq!(cfg.max_iterations, 15);
+        assert!((cfg.cost_tolerance - 1e-5).abs() < 1e-20);
+        assert!(cfg.use_jacobi_scaling);
+        assert!(cfg.min_cost_threshold.is_some());
+        assert!(cfg.compute_covariances);
+        assert!(matches!(cfg.linear_solver_type, LinearSolverType::SparseQR));
+    }
+
+    #[test]
+    fn test_gn_print_configuration_no_panic() {
+        optimizer::gauss_newton::GaussNewtonConfig::default().print_configuration();
+    }
+
+    #[test]
+    fn test_gn_default_equals_new() {
+        let _a = optimizer::GaussNewton::new();
+        let _b = optimizer::GaussNewton::default();
+    }
+
+    #[test]
+    fn test_gn_with_config_method() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(3);
+        let _solver = optimizer::GaussNewton::with_config(cfg);
+    }
+
+    // -------------------------------------------------------------------------
+    // Convergence termination paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_gn_max_iterations_termination() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(2);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MaxIterationsReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_gradient_tolerance_convergence() -> TestResult {
+        let (problem, initial_values) = linear_problem(1.0);
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_gradient_tolerance(1e3)
+            .with_cost_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::GradientToleranceReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_cost_tolerance_convergence() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_cost_tolerance(1e2) // very loose
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(matches!(
+            result.status,
+            optimizer::OptimizationStatus::CostToleranceReached
+                | optimizer::OptimizationStatus::GradientToleranceReached
+                | optimizer::OptimizationStatus::ParameterToleranceReached
+                | optimizer::OptimizationStatus::Converged
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_qr_solver() -> TestResult {
+        use crate::linalg::LinearSolverType;
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_linear_solver_type(LinearSolverType::SparseQR)
+            .with_max_iterations(100);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_jacobi_scaling_enabled() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_jacobi_scaling(true)
+            .with_max_iterations(100);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.final_cost < 1e-6);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_min_cost_threshold() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_min_cost_threshold(1e10)
+            .with_cost_tolerance(1e-20)
+            .with_gradient_tolerance(1e-20)
+            .with_parameter_tolerance(1e-20);
+        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::MinCostThresholdReached
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_result_fields() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = optimizer::GaussNewton::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.initial_cost > result.final_cost);
+        assert!(result.iterations > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_convergence_info_populated() -> TestResult {
+        let (problem, initial_values) = rosenbrock_problem();
+        let mut solver = optimizer::GaussNewton::new();
+        let result = solver.optimize(&problem, &initial_values)?;
+        assert!(result.convergence_info.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn test_gn_timeout_config() {
+        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+            .with_timeout(std::time::Duration::from_secs(60));
+        assert!(cfg.timeout.is_some());
     }
 }

@@ -27,7 +27,8 @@
 //!
 //! The Rerun viewer will open automatically showing optimization progress.
 
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
+use apex_solver::JacobianMode;
+use apex_solver::apex_io::{DatasetRegistry, G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::BetweenFactor;
@@ -125,9 +126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args = Args::parse();
 
-    // Construct dataset path
-    let dataset_path = format!("data/odometry/{}.g2o", args.dataset);
-    info!("Loading dataset: {}", dataset_path);
+    // Resolve dataset path from registry (handles 2d/3d subdirectory automatically)
+    let dataset_path = DatasetRegistry::load()?
+        .odometry_path(&args.dataset)
+        .ok_or_else(|| format!("Dataset '{}' not found in registry. Use the dataset name (e.g. 'sphere2500', 'intel').", args.dataset))?;
+    info!("Loading dataset: {}", dataset_path.display());
 
     // Load graph from G2O file
     let graph = G2oLoader::load(&dataset_path)?;
@@ -179,7 +182,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     }
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add all SE3 edges as between factors
     for edge in &graph.edges_se3 {
@@ -297,7 +300,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     use apex_solver::factors::BetweenFactor;
 
     // Create optimization problem
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Add all SE2 edges as between factors
     for edge in &graph.edges_se2 {

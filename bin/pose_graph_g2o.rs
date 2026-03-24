@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
+use apex_solver::JacobianMode;
+use apex_solver::apex_io::{
+    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
+};
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
@@ -10,6 +13,7 @@ use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::{Problem, VariableEnum};
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linearizer;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -327,7 +331,7 @@ fn test_se2_dataset(
     };
 
     let load_start = Instant::now();
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
     let load_time = load_start.elapsed();
 
@@ -359,7 +363,7 @@ fn test_se2_dataset(
     }
 
     let setup_start = Instant::now();
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
@@ -458,15 +462,19 @@ fn test_se2_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .map_err(|e| {
-            apex_solver::core::CoreError::SymbolicStructure(format!(
-                "Failed to build symbolic structure for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )
+    .map_err(|e| {
+        apex_solver::core::CoreError::SymbolicStructure(format!(
+            "Failed to build symbolic structure for dataset {}",
+            dataset_name
+        ))
+        .log_with_source(e)
+    })?;
 
     let (residual, _jacobian) = problem
         .compute_residual_and_jacobian_sparse(
@@ -505,6 +513,23 @@ fn test_se2_dataset(
         }
     };
 
+    /// Helper macro to optionally attach a Rerun observer to a solver.
+    macro_rules! attach_visualizer {
+        ($solver:expr, $args:expr) => {
+            #[cfg(feature = "visualization")]
+            if $args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        $solver.add_observer(observer);
+                        info!("Rerun visualization enabled");
+                    }
+                    Err(e) => warn!("Failed to create Rerun observer: {}", e),
+                }
+            }
+        };
+    }
+
     let opt_start = Instant::now();
     let result = match optimizer_name {
         "GN" => {
@@ -515,6 +540,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = GaussNewton::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
@@ -525,6 +551,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = DogLeg::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
@@ -535,6 +562,7 @@ fn test_se2_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = LevenbergMarquardt::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
     };
@@ -693,7 +721,7 @@ fn test_se3_dataset(
         ),
     };
 
-    let dataset_path = format!("data/odometry/{}.g2o", dataset_name);
+    let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
 
     let num_vertices = graph.vertices_se3.len();
@@ -716,7 +744,7 @@ fn test_se3_dataset(
         .into());
     }
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
     let mut initial_values = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
@@ -811,15 +839,19 @@ fn test_se3_dataset(
         col_offset += variables[var_name].get_size();
     }
 
-    let symbolic_structure = problem
-        .build_symbolic_structure(&variables, &variable_name_to_col_idx_dict, col_offset)
-        .map_err(|e| {
-            apex_solver::core::CoreError::SymbolicStructure(format!(
-                "Failed to build symbolic structure for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
+    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
+        &problem,
+        &variables,
+        &variable_name_to_col_idx_dict,
+        col_offset,
+    )
+    .map_err(|e| {
+        apex_solver::core::CoreError::SymbolicStructure(format!(
+            "Failed to build symbolic structure for dataset {}",
+            dataset_name
+        ))
+        .log_with_source(e)
+    })?;
 
     let (residual, _jacobian) = problem
         .compute_residual_and_jacobian_sparse(
@@ -855,6 +887,23 @@ fn test_se3_dataset(
         }
     };
 
+    /// Helper macro to optionally attach a Rerun observer to a solver.
+    macro_rules! attach_visualizer {
+        ($solver:expr, $args:expr) => {
+            #[cfg(feature = "visualization")]
+            if $args.with_visualizer {
+                use apex_solver::observers::RerunObserver;
+                match RerunObserver::new(true) {
+                    Ok(observer) => {
+                        $solver.add_observer(observer);
+                        info!("Rerun visualization enabled");
+                    }
+                    Err(e) => warn!("Failed to create Rerun observer: {}", e),
+                }
+            }
+        };
+    }
+
     let opt_start = Instant::now();
     let result = match optimizer_name {
         "GN" => {
@@ -865,6 +914,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = GaussNewton::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         "DL" => {
@@ -875,6 +925,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = DogLeg::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
         _ => {
@@ -885,6 +936,7 @@ fn test_se3_dataset(
                 .with_gradient_tolerance(1e-10);
 
             let mut solver = LevenbergMarquardt::with_config(config);
+            attach_visualizer!(solver, args);
             solver.optimize(&problem, &initial_values)?
         }
     };

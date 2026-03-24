@@ -13,6 +13,7 @@
 
 use apex_camera_models::{CameraModel, DistortionModel, FovCamera, PinholeParams};
 use apex_manifolds::LieGroup;
+use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
@@ -139,7 +140,7 @@ fn test_fov_multi_camera_calibration_200_points() -> TestResult {
     // 6. Build Optimization Problem
     // ============================================================================
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);
@@ -320,7 +321,7 @@ fn test_fov_3_cameras_calibration() -> TestResult {
     let true_intrinsics = [200.0, 200.0, 300.0, 200.0, 0.8];
     let noisy_intrinsics = perturb_intrinsics(&true_intrinsics, 0.02, 300);
 
-    let mut problem = Problem::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);

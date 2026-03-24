@@ -8,7 +8,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v1.2.0)
+## Key Features (v1.2.1)
 
 - **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
 - **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
@@ -126,6 +126,28 @@ apex-solver/                # workspace root = apex-solver crate
 
 **Low-level Dependencies**:
 - **`faer`** / **`nalgebra`**: High-performance linear algebra backends
+
+---
+
+## 📂 Data Files (Git LFS)
+
+The benchmark datasets in `data/` are stored with [Git LFS](https://git-lfs.com/).
+After cloning, pull the actual data files:
+
+```bash
+# Install Git LFS (once per machine)
+git lfs install
+
+# Download all data files
+git lfs pull
+```
+
+Without this step, the `.g2o` files will be empty LFS pointer stubs, causing
+`Graph Statistics: Vertices: 0, Edges: 0` errors when running the binaries.
+
+Available datasets:
+- **SE2** (2D): `intel`, `M3500`, `mit`, `ring`
+- **SE3** (3D): `sphere2500`, `parking-garage`, `torus3D`, `cubicle`
 
 ---
 
@@ -393,7 +415,8 @@ Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously. See t
 use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardt;
+use apex_solver::core::loss_functions::HuberLoss;
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 // Use any camera model from apex-camera-models crate
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -411,7 +434,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
               &format!("landmark_{}", obs.point_id),
               &format!("intrinsics_{}", obs.camera_id)],
             Box::new(projection_factor),
-            Some(Box::new(HuberLoss::new(1.0))),
+            Some(Box::new(HuberLoss::new(1.0)?)),
         );
     }
     
@@ -421,7 +444,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     
     // Configure solver with Schur complement (best for BA)
-    let mut solver = LevenbergMarquardt::for_bundle_adjustment();
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    let mut solver = LevenbergMarquardt::with_config(config);
     let result = solver.optimize(&problem, &initial_values)?;
     
     Ok(())
@@ -545,9 +569,12 @@ let result = solver.optimize(&problem, &initial_values)?;
 **Run Examples**:
 ```bash
 # Enable visualization feature and run
-cargo run --release --bin optimize_3d_graph -- --dataset sphere2500 --with-visualizer
-cargo run --release --bin optimize_2d_graph -- --dataset intel --with-visualizer
+cargo run --release --features visualization --bin pose_graph_g2o -- --dataset sphere2500 --with-visualizer
+cargo run --release --features visualization --bin pose_graph_g2o -- --dataset intel --with-visualizer
 ```
+
+> **Note:** The data files (e.g., `sphere2500.g2o`) need to be pulled using Git LFS. 
+> See [📂 Data Files (Git LFS)](#-data-files-git-lfs) for instructions.
 
 Zero overhead when disabled (feature-gated).
 
