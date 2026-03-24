@@ -3,7 +3,7 @@ use std::time::Instant;
 use tracing::{info, warn};
 
 use apex_solver::JacobianMode;
-use apex_solver::apex_io::{G2oLoader, GraphLoader};
+use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
@@ -147,7 +147,7 @@ fn test_se3_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE3)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/odometry/{}.g2o", dataset_name);
+    let file_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
@@ -291,7 +291,7 @@ fn test_se2_dataset(
 ) -> Result<(), Box<dyn std::error::Error>> {
     info!("TESTING {} (SE2)", dataset_name.to_uppercase());
 
-    let file_path = format!("data/odometry/{}.g2o", dataset_name);
+    let file_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
     let graph = match G2oLoader::load(&file_path) {
         Ok(g) => g,
         Err(e) => {
