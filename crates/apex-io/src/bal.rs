@@ -400,3 +400,382 @@ impl BalLoader {
         Ok(points)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// Writes a minimal BAL file: 1 camera, 1 point, 1 observation.
+    fn write_minimal_bal() -> Result<NamedTempFile, Box<dyn std::error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?; // header
+        writeln!(f, "0 0 -123.456 456.789")?; // observation
+        // Camera params (9 values, one per line): rx ry rz tx ty tz f k1 k2
+        for v in [0.1f64, 0.2, 0.3, 0.4, 0.5, 0.6, 500.0, -0.1, 0.05] {
+            writeln!(f, "{v}")?;
+        }
+        // Point coords (3 values, one per line): x y z
+        for v in [1.0f64, 2.0, 3.0] {
+            writeln!(f, "{v}")?;
+        }
+        f.flush()?;
+        Ok(f)
+    }
+
+    /// Writes a BAL file with a custom focal length value (all other params are zeros).
+    fn write_bal_with_focal(focal: f64) -> Result<NamedTempFile, Box<dyn std::error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 0.0 0.0")?; // observation
+        // Camera params: rx ry rz tx ty tz f k1 k2
+        for v in [0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, focal, 0.0, 0.0] {
+            writeln!(f, "{v}")?;
+        }
+        // Point coords
+        for v in [0.0f64, 0.0, 0.0] {
+            writeln!(f, "{v}")?;
+        }
+        f.flush()?;
+        Ok(f)
+    }
+
+    #[test]
+    fn test_load_minimal_dataset() -> TestResult {
+        let f = write_minimal_bal()?;
+        let ds = BalLoader::load(f.path())?;
+        assert_eq!(ds.cameras.len(), 1);
+        assert_eq!(ds.points.len(), 1);
+        assert_eq!(ds.observations.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_camera_values() -> TestResult {
+        let f = write_minimal_bal()?;
+        let ds = BalLoader::load(f.path())?;
+        let cam = &ds.cameras[0];
+        assert!((cam.rotation.x - 0.1).abs() < 1e-12);
+        assert!((cam.rotation.y - 0.2).abs() < 1e-12);
+        assert!((cam.rotation.z - 0.3).abs() < 1e-12);
+        assert!((cam.translation.x - 0.4).abs() < 1e-12);
+        assert!((cam.translation.y - 0.5).abs() < 1e-12);
+        assert!((cam.translation.z - 0.6).abs() < 1e-12);
+        assert!((cam.focal_length - 500.0).abs() < 1e-12);
+        assert!((cam.k1 - (-0.1)).abs() < 1e-12);
+        assert!((cam.k2 - 0.05).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_observation_values() -> TestResult {
+        let f = write_minimal_bal()?;
+        let ds = BalLoader::load(f.path())?;
+        let obs = &ds.observations[0];
+        assert_eq!(obs.camera_index, 0);
+        assert_eq!(obs.point_index, 0);
+        assert!((obs.x - (-123.456)).abs() < 1e-10);
+        assert!((obs.y - 456.789).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_point_values() -> TestResult {
+        let f = write_minimal_bal()?;
+        let ds = BalLoader::load(f.path())?;
+        let pt = &ds.points[0];
+        assert!((pt.position.x - 1.0).abs() < 1e-12);
+        assert!((pt.position.y - 2.0).abs() < 1e-12);
+        assert!((pt.position.z - 3.0).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_focal_length_negative_uses_default() -> TestResult {
+        let f = write_bal_with_focal(-100.0)?;
+        let ds = BalLoader::load(f.path())?;
+        assert!(
+            (ds.cameras[0].focal_length - DEFAULT_FOCAL_LENGTH).abs() < 1e-12,
+            "negative focal length should be replaced with DEFAULT_FOCAL_LENGTH"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_focal_length_zero_uses_default() -> TestResult {
+        let f = write_bal_with_focal(0.0)?;
+        let ds = BalLoader::load(f.path())?;
+        assert!(
+            (ds.cameras[0].focal_length - DEFAULT_FOCAL_LENGTH).abs() < 1e-12,
+            "zero focal length should be replaced with DEFAULT_FOCAL_LENGTH"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_normalize_focal_length_positive_preserved() -> TestResult {
+        let f = write_bal_with_focal(300.0)?;
+        let ds = BalLoader::load(f.path())?;
+        assert!(
+            (ds.cameras[0].focal_length - 300.0).abs() < 1e-12,
+            "positive focal length should be preserved"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let result = BalLoader::load("/nonexistent/path/file.bal");
+        assert!(result.is_err(), "loading a missing file should return Err");
+    }
+
+    #[test]
+    fn test_load_empty_file() -> TestResult {
+        let f = NamedTempFile::new()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "empty file should fail (missing header)");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_header_wrong_field_count() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1")?; // only 2 fields, need 3
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "header with 2 fields should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_header_invalid_number() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 abc 1")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "non-numeric header field should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_truncated_observations() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 2")?; // claims 2 observations
+        writeln!(f, "0 0 1.0 1.0")?; // only 1 provided
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "truncated observation block should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_truncated_cameras() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 1.0 1.0")?; // observation
+        // Only 5 of the 9 required camera params
+        for v in [0.0f64, 0.0, 0.0, 0.0, 0.0] {
+            writeln!(f, "{v}")?;
+        }
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "truncated camera block should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_multiple_cameras_and_points() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "2 2 3")?; // 2 cameras, 2 points, 3 observations
+        writeln!(f, "0 0 1.0 1.0")?;
+        writeln!(f, "0 1 2.0 2.0")?;
+        writeln!(f, "1 0 3.0 3.0")?;
+        // Camera 0
+        for v in [0.0f64; 9] {
+            writeln!(f, "{v}")?;
+        }
+        // Camera 1
+        for _ in 0..8 {
+            writeln!(f, "0.0")?;
+        }
+        writeln!(f, "200.0")?; // focal_length = 200
+        // Point 0
+        for v in [1.0f64, 2.0, 3.0] {
+            writeln!(f, "{v}")?;
+        }
+        // Point 1
+        for v in [4.0f64, 5.0, 6.0] {
+            writeln!(f, "{v}")?;
+        }
+        f.flush()?;
+        let ds = BalLoader::load(f.path())?;
+        assert_eq!(ds.cameras.len(), 2);
+        assert_eq!(ds.points.len(), 2);
+        assert_eq!(ds.observations.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_observation_invalid_number() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 bad_x 1.0")?; // bad x coordinate
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            result.is_err(),
+            "invalid observation coordinate should fail"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_header additional error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_header_invalid_num_cameras() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "bad 1 1")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid num_cameras should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_header_invalid_num_observations() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 bad")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid num_observations should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_observations additional error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_observation_missing_fields() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 1.0")?; // only 2 fields, need 4
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::MissingFields { .. })),
+            "observation with too few fields should return MissingFields"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_observation_invalid_camera_index() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "bad 0 1.0 2.0")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid camera_index in observation should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_observation_invalid_point_index() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 bad 1.0 2.0")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid point_index in observation should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_observation_invalid_y() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 1.0 bad")?;
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid y in observation should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // parse_cameras and parse_points additional error paths
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_load_camera_invalid_parameter() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 1.0 1.0")?; // observation
+        writeln!(f, "bad")?; // invalid first camera parameter (rx)
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid camera parameter should return InvalidNumber"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_truncated_points() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 1.0 1.0")?; // observation
+        // Full camera block
+        for v in [0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 500.0, 0.0, 0.0] {
+            writeln!(f, "{v}")?;
+        }
+        // Only 2 of 3 point coordinates
+        writeln!(f, "1.0")?;
+        writeln!(f, "2.0")?;
+        // missing z
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(result.is_err(), "truncated point block should fail");
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_point_invalid_coordinate() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        writeln!(f, "1 1 1")?;
+        writeln!(f, "0 0 1.0 1.0")?; // observation
+        // Full camera block
+        for v in [0.0f64, 0.0, 0.0, 0.0, 0.0, 0.0, 500.0, 0.0, 0.0] {
+            writeln!(f, "{v}")?;
+        }
+        writeln!(f, "bad")?; // invalid point x
+        f.flush()?;
+        let result = BalLoader::load(f.path());
+        assert!(
+            matches!(result, Err(IoError::InvalidNumber { .. })),
+            "invalid point coordinate should return InvalidNumber"
+        );
+        Ok(())
+    }
+}
