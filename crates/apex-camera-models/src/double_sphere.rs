@@ -1015,4 +1015,182 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn test_debug_format() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let s = format!("{:?}", camera);
+        assert!(
+            s.contains("DoubleSphere"),
+            "Debug output should contain 'DoubleSphere', got: {s}"
+        );
+        assert!(
+            s.contains("300"),
+            "Debug output should contain focal length, got: {s}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_camera_to_fixed_array() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let arr: [f64; 6] = (&camera).into();
+        assert_eq!(arr[0], 300.0); // fx
+        assert_eq!(arr[1], 300.0); // fy
+        assert_eq!(arr[2], 320.0); // cx
+        assert_eq!(arr[3], 240.0); // cy
+        assert!((arr[4] - (-0.2)).abs() < 1e-15); // xi
+        assert!((arr[5] - 0.6).abs() < 1e-15); // alpha
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_fixed_array_to_camera() {
+        let arr = [300.0f64, 300.0, 320.0, 240.0, -0.2, 0.6];
+        let camera = DoubleSphereCamera::from(arr);
+        assert_eq!(camera.pinhole.fx, 300.0);
+        let (xi, alpha) = camera.distortion_params();
+        assert!((xi - (-0.2)).abs() < 1e-15);
+        assert!((alpha - 0.6).abs() < 1e-15);
+    }
+
+    #[test]
+    fn test_try_from_params_valid() -> TestResult {
+        let params = [300.0f64, 300.0, 320.0, 240.0, -0.2, 0.6];
+        let camera = try_from_params(&params)?;
+        assert_eq!(camera.pinhole.fx, 300.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_try_from_params_too_few() {
+        let params = [300.0f64, 300.0, 320.0];
+        let result = try_from_params(&params);
+        assert!(result.is_err(), "Should fail with fewer than 6 params");
+    }
+
+    #[test]
+    fn test_try_from_params_invalid_alpha() {
+        let params = [300.0f64, 300.0, 320.0, 240.0, 0.0, 0.0]; // alpha = 0 is invalid
+        let result = try_from_params(&params);
+        assert!(result.is_err(), "Should fail with alpha = 0 (must be > 0)");
+    }
+
+    #[test]
+    fn test_get_pinhole_params() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 301.0, 320.0, 241.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let p = camera.get_pinhole_params();
+        assert_eq!(p.fx, 300.0);
+        assert_eq!(p.fy, 301.0);
+        assert_eq!(p.cx, 320.0);
+        assert_eq!(p.cy, 241.0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_distortion() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let d = camera.get_distortion();
+        assert_eq!(
+            d,
+            DistortionModel::DoubleSphere {
+                xi: -0.2,
+                alpha: 0.6
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_model_name() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: -0.2,
+            alpha: 0.6,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        assert_eq!(camera.get_model_name(), "double_sphere");
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_params_invalid_alpha_zero() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: 0.0,
+            alpha: 0.0,
+        };
+        let result = DoubleSphereCamera::new(pinhole, distortion);
+        assert!(result.is_err(), "alpha = 0 should be invalid");
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_params_invalid_xi_out_of_range() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: 2.0,
+            alpha: 0.6,
+        };
+        let result = DoubleSphereCamera::new(pinhole, distortion);
+        assert!(result.is_err(), "xi = 2.0 should be invalid");
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_params_invalid_focal_length() {
+        let pinhole = PinholeParams {
+            fx: -1.0,
+            fy: 300.0,
+            cx: 320.0,
+            cy: 240.0,
+        };
+        let distortion = DistortionModel::DoubleSphere {
+            xi: 0.0,
+            alpha: 0.6,
+        };
+        let result = DoubleSphereCamera::new(pinhole, distortion);
+        assert!(result.is_err(), "negative focal length should be invalid");
+    }
+
+    #[test]
+    fn test_unproject_outside_image_returns_error() -> TestResult {
+        // check_unprojection_condition reads distortion_params() as (alpha, _),
+        // where distortion_params() returns (xi, alpha). So the condition triggers
+        // when xi > 0.5 and r² > 1/(2*xi - 1).
+        // With xi=0.6: threshold = 1/(2*0.6-1) = 5.0.
+        // Use fx=fy=1, cx=cy=0 so mx=u, my=v.  u=3 → r²=9 > 5.0 ✓
+        let pinhole = PinholeParams::new(1.0, 1.0, 0.0, 0.0)?;
+        let distortion = DistortionModel::DoubleSphere {
+            xi: 0.6,
+            alpha: 0.9,
+        };
+        let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+        let result = camera.unproject(&Vector2::new(3.0, 0.0));
+        assert!(
+            result.is_err(),
+            "Point with r² > threshold should return PointOutsideImage"
+        );
+        Ok(())
+    }
 }
