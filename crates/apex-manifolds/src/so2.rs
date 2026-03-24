@@ -571,8 +571,6 @@ mod tests {
         assert!(expected.norm() < 1e-10); // Should be zero for SO(2)
     }
 
-    // T1: Numerical Jacobian Verification Tests
-
     #[test]
     fn test_so2_right_jacobian_numerical() {
         let epsilon = 1e-7;
@@ -645,5 +643,166 @@ mod tests {
         let product_left = jl * jl_inv;
 
         assert!((product_left[(0, 0)] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_display() {
+        let r = SO2::from_angle(0.5);
+        let s = format!("{r}");
+        assert!(!s.is_empty(), "Display should produce output, got: {s}");
+
+        let t = SO2Tangent::new(1.2);
+        let st = format!("{t}");
+        assert!(
+            !st.is_empty(),
+            "Tangent Display should produce output, got: {st}"
+        );
+    }
+
+    #[test]
+    fn test_so2_from_dvector_and_back() {
+        let angle = 1.0f64;
+        let v = DVector::from_vec(vec![angle]);
+        let r = SO2::from(v);
+        // The From<DVector> implementation treats data[0] as angle
+        let back: DVector<f64> = DVector::from(r);
+        assert_eq!(back.len(), 1);
+        // angle should be preserved (modulo wrapping)
+        assert!((back[0] - angle).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_so2_tangent_from_dvector_and_back() {
+        let v = DVector::from_vec(vec![0.7f64]);
+        let t = SO2Tangent::from(v);
+        let v2: DVector<f64> = DVector::from(t);
+        assert!((v2[0] - 0.7).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_rotation_matrix() {
+        let r = SO2::from_angle(0.0);
+        let mat = r.rotation_matrix();
+        assert!((mat[(0, 0)] - 1.0).abs() < 1e-10);
+        assert!(mat[(0, 1)].abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_complex_angle_accessors() {
+        let angle = std::f64::consts::FRAC_PI_4;
+        let r = SO2::from_angle(angle);
+        let c = r.complex();
+        assert!((c.re - angle.cos()).abs() < 1e-9);
+        assert!((c.im - angle.sin()).abs() < 1e-9);
+        assert!((r.angle() - angle).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_so2_normalize_is_valid() {
+        let mut r = SO2::from_angle(0.3);
+        r.normalize();
+        assert!(r.is_valid(1e-6));
+    }
+
+    #[test]
+    fn test_so2_tangent_normalized() {
+        let t_pos = SO2Tangent::new(3.0);
+        let tn = t_pos.normalized();
+        assert!((tn.angle() - 1.0).abs() < 1e-9);
+
+        let t_neg = SO2Tangent::new(-2.0);
+        let tn_neg = t_neg.normalized();
+        assert!((tn_neg.angle() - (-1.0)).abs() < 1e-9);
+
+        let t_zero = SO2Tangent::new(0.0);
+        let tn_zero = t_zero.normalized();
+        assert!((tn_zero.angle()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_so2_tangent_is_zero() {
+        let zero = SO2Tangent::new(0.0);
+        assert!(zero.is_zero(1e-9));
+        let nonzero = SO2Tangent::new(0.1);
+        assert!(!nonzero.is_zero(1e-9));
+    }
+
+    #[test]
+    fn test_so2_random() {
+        let r = SO2::random();
+        assert!(r.is_valid(1e-6));
+
+        let t = SO2Tangent::random();
+        let _ = t; // just verify it doesn't panic
+    }
+
+    #[test]
+    fn test_so2_adjoint_zero_jacobian_identity() {
+        let r = SO2::from_angle(0.5);
+        let adj = r.adjoint();
+        assert!((adj[0] - 1.0).abs() < 1e-10);
+
+        let zj = SO2::zero_jacobian();
+        assert!(zj[0].abs() < 1e-10);
+
+        let ji = SO2::jacobian_identity();
+        assert!((ji[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_compose_with_jacobians() {
+        let r1 = SO2::from_angle(0.3);
+        let r2 = SO2::from_angle(0.2);
+        let mut j_self = Matrix1::zeros();
+        let mut j_other = Matrix1::zeros();
+        let result = r1.compose(&r2, Some(&mut j_self), Some(&mut j_other));
+        assert!(result.is_valid(1e-9));
+        assert!(j_self[0].is_finite());
+        assert!(j_other[0].is_finite());
+    }
+
+    #[test]
+    fn test_so2_log_with_jacobian() {
+        let r = SO2::from_angle(0.5);
+        let mut jac = Matrix1::zeros();
+        let t = r.log(Some(&mut jac));
+        assert!((t.angle() - 0.5).abs() < 1e-9);
+        assert!((jac[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_inverse_with_jacobian() {
+        let r = SO2::from_angle(0.4);
+        let mut jac = Matrix1::zeros();
+        let inv = r.inverse(Some(&mut jac));
+        assert!(inv.is_valid(1e-9));
+        assert!(jac[0].is_finite());
+    }
+
+    #[test]
+    fn test_so2_tangent_hat() {
+        let t = SO2Tangent::new(1.0);
+        let hat = t.hat();
+        // hat should be skew-symmetric: [[0, -theta], [theta, 0]]
+        assert!(hat[(0, 0)].abs() < 1e-10);
+        assert!((hat[(1, 0)] - 1.0).abs() < 1e-10);
+        assert!((hat[(0, 1)] - (-1.0)).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_tangent_exp_with_jacobian() {
+        use crate::Tangent;
+        let t = SO2Tangent::new(0.3);
+        let mut jac = Matrix1::zeros();
+        let r = t.exp(Some(&mut jac));
+        assert!(r.is_valid(1e-9));
+        assert!((jac[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_so2_tangent_zero() {
+        use crate::Tangent;
+        let zero = SO2Tangent::zero();
+        assert!(zero.is_zero(1e-9));
     }
 }

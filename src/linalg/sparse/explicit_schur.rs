@@ -253,13 +253,7 @@ impl SparseSchurComplementSolver {
                 LinAlgError::InvalidInput(format!("Variable {} not found in index map", name))
             })?;
             let size = variable.get_size();
-            let manifold_type = match variable {
-                VariableEnum::SE3(_) => ManifoldType::SE3,
-                VariableEnum::SE2(_) => ManifoldType::SE2,
-                VariableEnum::SO3(_) => ManifoldType::SO3,
-                VariableEnum::SO2(_) => ManifoldType::SO2,
-                VariableEnum::Rn(_) => ManifoldType::RN,
-            };
+            let manifold_type = variable.manifold_type();
 
             // Use name-based classification via SchurOrdering
             if self.ordering.should_eliminate(name, &manifold_type, size) {

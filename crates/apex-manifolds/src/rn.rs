@@ -1042,8 +1042,6 @@ mod tests {
         assert!((jac4d - DMatrix::identity(4, 4)).norm() < 1e-10);
     }
 
-    // T3: Accumulated Error Tests
-
     #[test]
     fn test_rn_addition_chain() {
         // Add same vector 1000 times
@@ -1057,8 +1055,6 @@ mod tests {
         let expected = Rn::new(DVector::from_vec(vec![1.0, -2.0, 3.0]));
         assert!((accumulated.to_vector() - expected.to_vector()).norm() < 1e-10);
     }
-
-    // T2: Edge Case Tests
 
     #[test]
     #[should_panic(expected = "Rn elements must have the same dimension")]
@@ -1105,5 +1101,205 @@ mod tests {
     #[test]
     fn test_rn_tangent_is_dynamic() {
         assert!(RnTangent::is_dynamic());
+    }
+
+    #[test]
+    fn test_rn_display_format() {
+        let rn = Rn::new(DVector::from_vec(vec![1.0, 2.0, 3.0]));
+        let s = format!("{rn}");
+        assert!(
+            s.contains("1") && s.contains("2") && s.contains("3"),
+            "got: {s}"
+        );
+
+        let t = RnTangent::new(DVector::from_vec(vec![4.0, 5.0]));
+        let st = format!("{t}");
+        assert!(st.contains("4") && st.contains("5"), "got: {st}");
+    }
+
+    #[test]
+    fn test_rn_from_dvector_and_back() {
+        let v = DVector::from_vec(vec![1.0, 2.0, 3.0]);
+        let rn: Rn = Rn::from(v.clone());
+        let v2: DVector<f64> = DVector::from(rn);
+        assert_eq!(v, v2);
+    }
+
+    #[test]
+    fn test_rn_tangent_from_vec_and_back() {
+        let v = vec![4.0f64, 5.0];
+        let t = RnTangent::from_vec(v.clone());
+        let v2 = t.to_vector();
+        assert!((v2[0] - v[0]).abs() < 1e-10);
+        assert!((v2[1] - v[1]).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rn_from_slice_from_vec() {
+        let rn = Rn::from_slice(&[1.0, 2.0, 3.0]);
+        assert_eq!(rn.dim(), 3);
+        assert!((rn.component(0) - 1.0).abs() < 1e-10);
+
+        let rn2 = Rn::from_vec(vec![4.0, 5.0]);
+        assert_eq!(rn2.dim(), 2);
+
+        let t = RnTangent::from_slice(&[1.0, 2.0]);
+        assert_eq!(t.dim(), 2);
+        let t2 = RnTangent::from_vec(vec![3.0, 4.0]);
+        assert_eq!(t2.dim(), 2);
+    }
+
+    #[test]
+    fn test_rn_accessors() {
+        let mut rn = Rn::from_slice(&[1.0, 2.0, 3.0]);
+        assert_eq!(rn.data().len(), 3);
+        assert_eq!(rn.dim(), 3);
+        assert!((rn.component(1) - 2.0).abs() < 1e-10);
+        rn.set_component(1, 99.0);
+        assert!((rn.component(1) - 99.0).abs() < 1e-10);
+        let rn2 = Rn::from_slice(&[3.0, 4.0]);
+        assert!((rn2.norm() - 5.0).abs() < 1e-10);
+        assert!((rn2.norm_squared() - 25.0).abs() < 1e-10);
+        let v = rn2.to_vector();
+        assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn test_rn_tangent_accessors() {
+        let mut t = RnTangent::from_slice(&[3.0, 4.0]);
+        assert_eq!(t.data().len(), 2);
+        assert_eq!(t.dim(), 2);
+        assert!((t.component(0) - 3.0).abs() < 1e-10);
+        t.set_component(0, 10.0);
+        assert!((t.component(0) - 10.0).abs() < 1e-10);
+
+        let t2 = RnTangent::from_slice(&[3.0, 4.0]);
+        assert!((t2.norm() - 5.0).abs() < 1e-10);
+        assert!((t2.norm_squared() - 25.0).abs() < 1e-10);
+
+        let v = t2.to_vector();
+        assert_eq!(v.len(), 2);
+
+        let t3 = RnTangent::from_vector(DVector::from_vec(vec![1.0, 2.0]));
+        assert_eq!(t3.dim(), 2);
+    }
+
+    #[test]
+    fn test_rn_vee_adjoint() {
+        let rn = Rn::from_slice(&[1.0, 2.0, 3.0]);
+        let t = rn.vee();
+        assert_eq!(t.dim(), 3);
+
+        let adj = rn.adjoint();
+        assert_eq!(adj.nrows(), 3);
+        assert_eq!(adj.ncols(), 3);
+    }
+
+    #[test]
+    fn test_rn_tangent_hat_small_adj_lie_bracket() {
+        let t = RnTangent::from_slice(&[1.0, 2.0, 3.0]);
+        let hat = t.hat();
+        assert!(hat.nrows() > 0);
+
+        let sadj = t.small_adj();
+        assert!(sadj.nrows() > 0);
+
+        let t2 = RnTangent::from_slice(&[0.5, 1.0, 1.5]);
+        let bracket = t.lie_bracket(&t2);
+        assert_eq!(bracket.dim(), 3);
+        for i in 0..3 {
+            assert!(bracket.component(i).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn test_rn_tangent_generator_normalize_normalized() {
+        // normalize in-place
+        let mut t2 = RnTangent::from_slice(&[3.0, 4.0]);
+        t2.normalize();
+        assert!((t2.norm() - 1.0).abs() < 1e-9);
+
+        // normalized (returns new)
+        let t3 = RnTangent::from_slice(&[0.0, 5.0]);
+        let t3n = t3.normalized();
+        assert!((t3n.norm() - 1.0).abs() < 1e-9);
+
+        // generator via instance method
+        let t_gen = RnTangent::from_slice(&[0.0, 0.0]);
+        let gen0 = t_gen.generator(0);
+        // generator returns a DMatrix with 1.0 at (0,0)
+        assert!((gen0[(0, 0)] - 1.0).abs() < 1e-10);
+
+        let t4 = RnTangent::from_slice(&[1.0, 2.0]);
+        assert!(t4.is_approx(&t4, 1e-9));
+    }
+
+    #[test]
+    fn test_rn_tangent_is_zero() {
+        let zero = RnTangent::from_slice(&[0.0, 0.0, 0.0]);
+        assert!(zero.is_zero(1e-9));
+
+        let nonzero = RnTangent::from_slice(&[0.1, 0.0, 0.0]);
+        assert!(!nonzero.is_zero(1e-9));
+    }
+
+    #[test]
+    fn test_rn_factory_methods() {
+        let id = Rn::identity_with_dim(3);
+        assert_eq!(id.dim(), 3);
+
+        let z = Rn::zeros(4);
+        assert_eq!(z.dim(), 4);
+        for i in 0..4 {
+            assert!(z.component(i).abs() < 1e-10);
+        }
+
+        let o = Rn::ones(3);
+        for i in 0..3 {
+            assert!((o.component(i) - 1.0).abs() < 1e-10);
+        }
+
+        let r = Rn::random_with_dim(5);
+        assert_eq!(r.dim(), 5);
+
+        let ji = Rn::jacobian_identity_with_dim(3);
+        assert_eq!(ji.nrows(), 3);
+        assert_eq!(ji.ncols(), 3);
+    }
+
+    #[test]
+    fn test_rn_tangent_factory_methods() {
+        let zwd = RnTangent::zero_with_dim(4);
+        assert_eq!(zwd.dim(), 4);
+
+        let z = RnTangent::zeros(3);
+        for i in 0..3 {
+            assert!(z.component(i).abs() < 1e-10);
+        }
+
+        let o = RnTangent::ones(3);
+        for i in 0..3 {
+            assert!((o.component(i) - 1.0).abs() < 1e-10);
+        }
+
+        let r = RnTangent::random_with_dim(5);
+        assert_eq!(r.dim(), 5);
+    }
+
+    #[test]
+    fn test_rn_slerp() {
+        let a = Rn::from_slice(&[0.0, 0.0]);
+        let b = Rn::from_slice(&[4.0, 0.0]);
+        let mid = a.slerp(&b, 0.5);
+        assert!((mid.component(0) - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_rn_normalize_is_valid() {
+        let mut rn = Rn::from_slice(&[1.0, 2.0]);
+        rn.normalize();
+        assert!(rn.is_valid(1e-9));
+        // After normalize, it should have unit norm
+        assert!((rn.norm() - 1.0).abs() < 1e-9);
     }
 }

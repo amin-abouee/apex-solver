@@ -3,7 +3,9 @@
 //! This module provides manifold representations commonly used in computer vision and robotics:
 //! - **SE(3)**: Special Euclidean group (rigid body transformations)
 //! - **SO(3)**: Special Orthogonal group (rotations)
-//! - **Sim(3)**: Similarity transformations
+//! - **Sim(3)**: Similarity transformations (rotation + translation + scale)
+//! - **SGal(3)**: Special Galilean group (rotation + translation + velocity + time)
+//! - **SE_2(3)**: Extended Special Euclidean group (rotation + translation + velocity)
 //! - **SE(2)**: Rigid transformations in 2D
 //! - **SO(2)**: Rotations in 2D
 //!
@@ -16,6 +18,9 @@
 //! 3-sphere      | S³,.   | 4   | 3   | q ∈ H             | q*q = 1         | θ/2 ∈ Hp          | θ ∈ R³                | q = exp(uθ/2)      | q₁q₂  | qxq*
 //! Rotation      | SO(3),.| 9   | 3   | R                 | RᵀR = I         | [θ]x ∈ so(3)      | [θ] ∈ R³              | R = exp([θ]x)      | R₁R₂  | Rx
 //! Rigid motion  | SE(3),.| 16  | 6   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(3)       | [v̂] ∈ R⁶              | Exp([v̂])           | M₁M₂  | Rx+t
+//! Similarity    | Sim(3),.| 16 | 7   | M = [sR t; 0 1]   | RᵀR=I, s>0     | [v̂] ∈ sim(3)      | [ρ,θ,σ] ∈ R⁷          | Exp([v̂])           | M₁M₂  | sRx+t
+//! Galilean      | SGal(3),.| 25| 10  | (R,t,v,s)         | RᵀR = I         | [v̂] ∈ sgal(3)     | [ρ,ν,θ,s] ∈ R¹⁰       | Exp([v̂])           | M₁M₂  | Rx+t+sv
+//! Extended pose | SE_2(3),.| 25| 9   | (R,t,v)           | RᵀR = I         | [v̂] ∈ se_2_3      | [ρ,θ,ν] ∈ R⁹          | Exp([v̂])           | M₁M₂  | Rx+t
 //!
 //! The design is inspired by the [manif](https://github.com/artivis/manif) C++ library
 //! and provides:
@@ -57,7 +62,10 @@ pub const SMALL_ANGLE_THRESHOLD: f64 = 1e-10;
 
 pub mod rn;
 pub mod se2;
+pub mod se23;
 pub mod se3;
+pub mod sgal3;
+pub mod sim3;
 pub mod so2;
 pub mod so3;
 
@@ -83,6 +91,9 @@ pub enum ManifoldType {
     RN,
     SE2,
     SE3,
+    SE23,
+    SGal3,
+    Sim3,
     SO2,
     SO3,
 }
@@ -541,4 +552,364 @@ pub trait Interpolatable: LieGroup {
 
     /// Spherical linear interpolation (when applicable).
     fn slerp(&self, other: &Self, t: f64) -> Self;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::LieGroup;
+    use crate::Tangent;
+    use crate::so2::{SO2, SO2Tangent};
+    use crate::so3::{SO3, SO3Tangent};
+    use crate::{ManifoldError, ManifoldType};
+    use nalgebra::Matrix1;
+
+    fn make_so2(angle: f64) -> SO2 {
+        SO2::from_angle(angle)
+    }
+
+    fn make_so2_tangent(angle: f64) -> SO2Tangent {
+        SO2Tangent::new(angle)
+    }
+
+    #[test]
+    fn manifold_error_display_invalid_tangent_dimension() {
+        let e = ManifoldError::InvalidTangentDimension {
+            expected: 3,
+            actual: 6,
+        };
+        let s = e.to_string();
+        assert!(s.contains("3"), "got: {s}");
+        assert!(s.contains("6"), "got: {s}");
+    }
+
+    #[test]
+    fn manifold_error_display_numerical_instability() {
+        let e = ManifoldError::NumericalInstability("singularity".to_string());
+        assert!(e.to_string().contains("singularity"));
+    }
+
+    #[test]
+    fn manifold_error_display_invalid_element() {
+        let e = ManifoldError::InvalidElement("bad quaternion".to_string());
+        assert!(e.to_string().contains("bad quaternion"));
+    }
+
+    #[test]
+    fn manifold_error_display_dimension_mismatch() {
+        let e = ManifoldError::DimensionMismatch {
+            expected: 4,
+            actual: 3,
+        };
+        let s = e.to_string();
+        assert!(s.contains("4") && s.contains("3"), "got: {s}");
+    }
+
+    #[test]
+    fn manifold_error_display_invalid_number() {
+        let e = ManifoldError::InvalidNumber;
+        assert!(!e.to_string().is_empty());
+    }
+
+    #[test]
+    fn manifold_error_display_normalization_failed() {
+        let e = ManifoldError::NormalizationFailed("zero vector".to_string());
+        assert!(e.to_string().contains("zero vector"));
+    }
+
+    #[test]
+    fn manifold_error_is_std_error() {
+        let e = ManifoldError::InvalidNumber;
+        let _: &dyn std::error::Error = &e;
+    }
+
+    #[test]
+    fn manifold_type_variants_are_distinct() {
+        let types = [
+            ManifoldType::RN,
+            ManifoldType::SE2,
+            ManifoldType::SE3,
+            ManifoldType::SE23,
+            ManifoldType::SGal3,
+            ManifoldType::Sim3,
+            ManifoldType::SO2,
+            ManifoldType::SO3,
+        ];
+        assert_eq!(types.len(), 8);
+        assert_eq!(ManifoldType::SO3, ManifoldType::SO3);
+        assert_ne!(ManifoldType::SO2, ManifoldType::SO3);
+    }
+
+    #[test]
+    fn default_right_plus_no_jacobians() {
+        let g = make_so2(0.3);
+        let t = make_so2_tangent(0.1);
+        let result = g.right_plus(&t, None, None);
+        assert!(result.is_valid(1e-9));
+    }
+
+    #[test]
+    fn default_right_plus_with_jacobians() {
+        let g = make_so2(0.3);
+        let t = make_so2_tangent(0.1);
+        let mut j_self = Matrix1::zeros();
+        let mut j_tan = Matrix1::zeros();
+        let result = g.right_plus(&t, Some(&mut j_self), Some(&mut j_tan));
+        assert!(result.is_valid(1e-9));
+        assert!(j_tan[0].is_finite());
+    }
+
+    #[test]
+    fn default_right_minus_no_jacobians() {
+        let g1 = make_so2(0.5);
+        let g2 = make_so2(0.2);
+        let _t = g1.right_minus(&g2, None, None);
+    }
+
+    #[test]
+    fn default_right_minus_with_jacobians() {
+        let g1 = make_so2(0.5);
+        let g2 = make_so2(0.2);
+        let mut j_self = Matrix1::zeros();
+        let mut j_other = Matrix1::zeros();
+        let _t = g1.right_minus(&g2, Some(&mut j_self), Some(&mut j_other));
+        assert!(j_self[0].is_finite());
+        assert!(j_other[0].is_finite());
+    }
+
+    #[test]
+    fn default_left_plus_no_jacobians() {
+        let g = make_so2(0.3);
+        let t = make_so2_tangent(0.1);
+        let result = g.left_plus(&t, None, None);
+        assert!(result.is_valid(1e-9));
+    }
+
+    #[test]
+    fn default_left_plus_with_jacobians() {
+        let g = make_so2(0.3);
+        let t = make_so2_tangent(0.1);
+        let mut j_tan = Matrix1::zeros();
+        let mut j_self = Matrix1::zeros();
+        let result = g.left_plus(&t, Some(&mut j_tan), Some(&mut j_self));
+        assert!(result.is_valid(1e-9));
+        assert!(j_tan[0].is_finite());
+        assert!(j_self[0].is_finite());
+    }
+
+    #[test]
+    fn default_left_minus_no_jacobians() {
+        let g1 = make_so2(0.5);
+        let g2 = make_so2(0.2);
+        let _t = g1.left_minus(&g2, None, None);
+    }
+
+    #[test]
+    fn default_left_minus_with_jacobians() {
+        let g1 = make_so2(0.5);
+        let g2 = make_so2(0.2);
+        let mut j_self = Matrix1::zeros();
+        let mut j_other = Matrix1::zeros();
+        let _t = g1.left_minus(&g2, Some(&mut j_self), Some(&mut j_other));
+        assert!(j_self[0].is_finite());
+        assert!(j_other[0].is_finite());
+    }
+
+    #[test]
+    fn default_plus_delegates_to_right_plus() {
+        let g = make_so2(0.3);
+        let t = make_so2_tangent(0.1);
+        let r1 = g.plus(&t, None, None);
+        let r2 = g.right_plus(&t, None, None);
+        assert!(r1.is_approx(&r2, 1e-9));
+    }
+
+    #[test]
+    fn default_minus_delegates_to_right_minus() {
+        let g1 = make_so2(0.5);
+        let g2 = make_so2(0.2);
+        let t1 = g1.minus(&g2, None, None);
+        let t2 = g1.right_minus(&g2, None, None);
+        assert!(t1.is_approx(&t2, 1e-9));
+    }
+
+    #[test]
+    fn default_between_no_jacobians() {
+        let g1 = make_so2(0.3);
+        let g2 = make_so2(0.7);
+        let b = g1.between(&g2, None, None);
+        assert!(b.is_valid(1e-9));
+    }
+
+    #[test]
+    fn default_between_with_jacobians() {
+        let g1 = make_so2(0.3);
+        let g2 = make_so2(0.7);
+        let mut j_self = Matrix1::zeros();
+        let mut j_other = Matrix1::zeros();
+        let b = g1.between(&g2, Some(&mut j_self), Some(&mut j_other));
+        assert!(b.is_valid(1e-9));
+        assert!(j_self[0].is_finite());
+        assert!(j_other[0].is_finite());
+    }
+
+    #[test]
+    fn default_tangent_dim_returns_dof() {
+        let g = make_so2(0.0);
+        assert_eq!(g.tangent_dim(), 1); // SO2 has 1 DOF
+    }
+
+    #[test]
+    fn tangent_is_dynamic_false_for_so2() {
+        assert!(!SO2Tangent::is_dynamic());
+    }
+
+    #[test]
+    fn manifold_error_clone_and_partial_eq() {
+        let e = ManifoldError::InvalidTangentDimension {
+            expected: 1,
+            actual: 2,
+        };
+        let e2 = e.clone();
+        assert_eq!(e, e2);
+
+        let e3 = ManifoldError::NumericalInstability("x".to_string());
+        let e4 = e3.clone();
+        assert_eq!(e3, e4);
+
+        let e5 = ManifoldError::InvalidElement("y".to_string());
+        let e6 = e5.clone();
+        assert_eq!(e5, e6);
+
+        let e7 = ManifoldError::DimensionMismatch {
+            expected: 3,
+            actual: 4,
+        };
+        let e8 = e7.clone();
+        assert_eq!(e7, e8);
+
+        let e9 = ManifoldError::InvalidNumber;
+        let e10 = e9.clone();
+        assert_eq!(e9, e10);
+
+        let e11 = ManifoldError::NormalizationFailed("z".to_string());
+        let e12 = e11.clone();
+        assert_eq!(e11, e12);
+    }
+
+    #[test]
+    fn manifold_type_clone_and_eq() {
+        let all_types = [
+            ManifoldType::RN,
+            ManifoldType::SE2,
+            ManifoldType::SE3,
+            ManifoldType::SE23,
+            ManifoldType::SGal3,
+            ManifoldType::Sim3,
+            ManifoldType::SO2,
+            ManifoldType::SO3,
+        ];
+        for t in &all_types {
+            let t2 = t.clone();
+            assert_eq!(t, &t2);
+        }
+        // Ensure different variants are not equal
+        assert_ne!(ManifoldType::RN, ManifoldType::SE2);
+        assert_ne!(ManifoldType::SE2, ManifoldType::SE3);
+        assert_ne!(ManifoldType::SE3, ManifoldType::SE23);
+        assert_ne!(ManifoldType::SE23, ManifoldType::SGal3);
+        assert_ne!(ManifoldType::SGal3, ManifoldType::Sim3);
+        assert_ne!(ManifoldType::Sim3, ManifoldType::SO2);
+        assert_ne!(ManifoldType::SO2, ManifoldType::SO3);
+    }
+
+    #[test]
+    fn manifold_type_debug() {
+        let s = format!("{:?}", ManifoldType::RN);
+        assert!(!s.is_empty());
+        let s2 = format!("{:?}", ManifoldType::SE23);
+        assert!(!s2.is_empty());
+        let s3 = format!("{:?}", ManifoldType::SGal3);
+        assert!(!s3.is_empty());
+        let s4 = format!("{:?}", ManifoldType::Sim3);
+        assert!(!s4.is_empty());
+    }
+
+    #[test]
+    fn manifold_error_debug() {
+        let e = ManifoldError::InvalidNumber;
+        let s = format!("{e:?}");
+        assert!(!s.is_empty());
+    }
+
+    // Test SO3-based defaults to exercise more code paths
+
+    #[test]
+    fn so3_default_right_plus_with_jacobians() {
+        use crate::LieGroup;
+        let r = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let t = SO3Tangent::new(nalgebra::Vector3::new(0.05, 0.0, 0.0));
+        let mut j_self = nalgebra::Matrix3::zeros();
+        let mut j_tan = nalgebra::Matrix3::zeros();
+        let result = r.right_plus(&t, Some(&mut j_self), Some(&mut j_tan));
+        assert!(result.is_valid(1e-6));
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_tan[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_default_left_plus_with_jacobians() {
+        use crate::LieGroup;
+        let r = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let t = SO3Tangent::new(nalgebra::Vector3::new(0.05, 0.0, 0.0));
+        let mut j_tan = nalgebra::Matrix3::zeros();
+        let mut j_self = nalgebra::Matrix3::zeros();
+        let result = r.left_plus(&t, Some(&mut j_tan), Some(&mut j_self));
+        assert!(result.is_valid(1e-6));
+        assert!(j_tan[(0, 0)].is_finite());
+        assert!(j_self[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_default_right_minus_with_jacobians() {
+        use crate::LieGroup;
+        let r1 = SO3::from_euler_angles(0.3, 0.1, 0.2);
+        let r2 = SO3::from_euler_angles(0.1, 0.0, 0.1);
+        let mut j_self = nalgebra::Matrix3::zeros();
+        let mut j_other = nalgebra::Matrix3::zeros();
+        let _t = r1.right_minus(&r2, Some(&mut j_self), Some(&mut j_other));
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_other[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_default_left_minus_with_jacobians() {
+        use crate::LieGroup;
+        let r1 = SO3::from_euler_angles(0.3, 0.1, 0.2);
+        let r2 = SO3::from_euler_angles(0.1, 0.0, 0.1);
+        let mut j_self = nalgebra::Matrix3::zeros();
+        let mut j_other = nalgebra::Matrix3::zeros();
+        let _t = r1.left_minus(&r2, Some(&mut j_self), Some(&mut j_other));
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_other[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_default_between_with_jacobians() {
+        use crate::LieGroup;
+        let r1 = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let r2 = SO3::from_euler_angles(0.4, 0.1, 0.2);
+        let mut j_self = nalgebra::Matrix3::zeros();
+        let mut j_other = nalgebra::Matrix3::zeros();
+        let b = r1.between(&r2, Some(&mut j_self), Some(&mut j_other));
+        assert!(b.is_valid(1e-6));
+        assert!(j_self[(0, 0)].is_finite());
+        assert!(j_other[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_default_tangent_dim() {
+        use crate::LieGroup;
+        let r = SO3::identity();
+        assert_eq!(r.tangent_dim(), 3);
+    }
 }

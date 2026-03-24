@@ -3,7 +3,7 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 use apex_solver::JacobianMode;
-use apex_solver::apex_io::{G2oLoader, GraphLoader};
+use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
@@ -728,15 +728,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut all_results = Vec::new();
 
     // Benchmark SE3 datasets (all available 3D pose graphs)
-    let se3_datasets = vec![
-        ("data/odometry/sphere2500.g2o", "sphere2500"),
-        ("data/odometry/parking-garage.g2o", "parking-garage"),
-        ("data/odometry/torus3D.g2o", "torus3D"),
+    let se3_datasets: Vec<(String, &str)> = vec![
+        (
+            format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D),
+            "sphere2500",
+        ),
+        (
+            format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D),
+            "parking-garage",
+        ),
+        (format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D), "torus3D"),
     ];
 
     for (path, name) in &se3_datasets {
-        if std::path::Path::new(path).exists() {
-            match benchmark_dataset_se3(path, name, &args) {
+        if std::path::Path::new(path.as_str()).exists() {
+            match benchmark_dataset_se3(path.as_str(), name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
                 Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }
@@ -746,19 +752,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Benchmark SE2 datasets (all available 2D pose graphs)
-    let se2_datasets = vec![
-        ("data/odometry/intel.g2o", "intel"),
-        ("data/odometry/mit.g2o", "mit"),
-        ("data/odometry/M3500.g2o", "M3500"),
-        ("data/odometry/manhattanOlson3500.g2o", "manhattan"),
-        ("data/odometry/city10000.g2o", "city10000"),
-        ("data/odometry/ring.g2o", "ring"),
-        ("data/odometry/ringCity.g2o", "ringCity"),
+    let se2_datasets: Vec<(String, &str)> = vec![
+        (format!("{}/intel.g2o", ODOMETRY_DATA_DIR_2D), "intel"),
+        (format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D), "mit"),
+        (format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D), "M3500"),
+        (
+            format!("{}/manhattanOlson3500.g2o", ODOMETRY_DATA_DIR_2D),
+            "manhattan",
+        ),
+        (
+            format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D),
+            "city10000",
+        ),
+        (format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D), "ring"),
+        (format!("{}/ringCity.g2o", ODOMETRY_DATA_DIR_2D), "ringCity"),
     ];
 
     for (path, name) in &se2_datasets {
-        if std::path::Path::new(path).exists() {
-            match benchmark_dataset_se2(path, name, &args) {
+        if std::path::Path::new(path.as_str()).exists() {
+            match benchmark_dataset_se2(path.as_str(), name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
                 Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }

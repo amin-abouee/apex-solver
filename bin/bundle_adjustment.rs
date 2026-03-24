@@ -87,9 +87,19 @@ enum OptimizationType {
 #[command(name = "bundle_adjustment")]
 #[command(about = "Bundle adjustment optimization for BAL datasets")]
 struct Args {
-    /// BAL file path (required, positional)
+    /// BAL file path (required, positional).
+    /// If the file does not exist, provide --cameras and --points to auto-download it
+    /// from the dataset registry (the dataset name is inferred from the parent directory).
     #[arg(value_name = "FILE")]
     file: PathBuf,
+
+    /// Number of cameras in the problem (used for auto-download if FILE is missing)
+    #[arg(long)]
+    cameras: Option<u32>,
+
+    /// Number of points in the problem (used for auto-download if FILE is missing)
+    #[arg(long)]
+    points: Option<u32>,
 
     /// Limit number of points (for testing)
     #[arg(short = 'n', long)]
@@ -123,15 +133,40 @@ fn main() -> Result<(), Box<dyn Error>> {
     info!("APEX-SOLVER BUNDLE ADJUSTMENT");
     info!("");
 
-    // Validate file exists
-    if !args.file.exists() {
-        return Err(format!("File not found: {}", args.file.display()).into());
-    }
+    // Resolve file: download on demand if missing and --cameras/--points are provided
+    let file_path = if args.file.exists() {
+        args.file.clone()
+    } else if let (Some(cameras), Some(points)) = (args.cameras, args.points) {
+        // Infer dataset name from the parent directory (e.g. data/bundle_adjustment/ladybug/...)
+        let dataset_name = args
+            .file
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| {
+                format!(
+                    "Cannot infer dataset name from path '{}'. \
+                     Ensure the path has the form data/bundle_adjustment/<name>/problem-…txt",
+                    args.file.display()
+                )
+            })?;
+        info!(
+            "File not found — downloading {dataset_name}/problem-{cameras}-{points} from registry …"
+        );
+        apex_solver::apex_io::ensure_ba_dataset(dataset_name, cameras, points)
+            .map_err(|e| format!("Auto-download failed: {e}"))?
+    } else {
+        return Err(format!(
+            "File not found: {}. Provide --cameras and --points to download it automatically.",
+            args.file.display()
+        )
+        .into());
+    };
 
     // Load BAL dataset
-    info!("Loading BAL dataset: {}", args.file.display());
+    info!("Loading BAL dataset: {}", file_path.display());
     let start_load = Instant::now();
-    let dataset = BalLoader::load(args.file.to_string_lossy().as_ref())?;
+    let dataset = BalLoader::load(file_path.to_string_lossy().as_ref())?;
     let load_time = start_load.elapsed();
 
     let num_points_to_use = args.num_points.unwrap_or(dataset.points.len());
