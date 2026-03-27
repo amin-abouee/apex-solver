@@ -129,25 +129,30 @@ apex-solver/                # workspace root = apex-solver crate
 
 ---
 
-## 📂 Data Files (Git LFS)
+## 📂 Datasets
 
-The benchmark datasets in `data/` are stored with [Git LFS](https://git-lfs.com/).
-After cloning, pull the actual data files:
+Datasets are downloaded on demand using the built-in `download_datasets` tool in the `apex-io` crate. No Git LFS required.
 
 ```bash
-# Install Git LFS (once per machine)
-git lfs install
+# List all available datasets and selection numbers
+cargo run --release -p apex-io --bin download_datasets -- --list
 
-# Download all data files
-git lfs pull
+# Download benchmark datasets (all odometry g2o + largest from each BA dataset)
+cargo run --release -p apex-io --bin download_datasets -- --select 10
+
+# Download all odometry g2o datasets (2D + 3D)
+cargo run --release -p apex-io --bin download_datasets -- --select 3
+
+# Interactive mode (prompts for selection)
+cargo run --release -p apex-io --bin download_datasets
 ```
 
-Without this step, the `.g2o` files will be empty LFS pointer stubs, causing
-`Graph Statistics: Vertices: 0, Edges: 0` errors when running the binaries.
+Datasets are saved to `data/odometry/` (g2o files) and `data/bundle_adjustment/` (BAL format).
 
 Available datasets:
-- **SE2** (2D): `intel`, `M3500`, `mit`, `ring`
-- **SE3** (3D): `sphere2500`, `parking-garage`, `torus3D`, `cubicle`
+- **Pose Graph SE2** (2D): `M3500`, `mit`, `city10000`, `ring`
+- **Pose Graph SE3** (3D): `sphere2500`, `parking-garage`, `torus3D`, `cubicle`
+- **Bundle Adjustment** (UW BAL): `ladybug`, `trafalgar`, `dubrovnik`, `venice`, `final`
 
 ---
 
@@ -573,8 +578,8 @@ cargo run --release --features visualization --bin pose_graph_g2o -- --dataset s
 cargo run --release --features visualization --bin pose_graph_g2o -- --dataset intel --with-visualizer
 ```
 
-> **Note:** The data files (e.g., `sphere2500.g2o`) need to be pulled using Git LFS. 
-> See [📂 Data Files (Git LFS)](#-data-files-git-lfs) for instructions.
+> **Note:** The data files (e.g., `sphere2500.g2o`) must be downloaded first.
+> See [📂 Datasets](#-datasets) — run `cargo run --release -p apex-io --bin download_datasets -- --select 10` to get all benchmark datasets.
 
 Zero overhead when disabled (feature-gated).
 
