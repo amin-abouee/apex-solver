@@ -1,6 +1,7 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
 use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
+use std::convert::TryFrom;
 use std::marker::PhantomData;
 use tracing::warn;
 
@@ -302,7 +303,7 @@ where
 impl<CAM, OP> Factor for ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
-    for<'a> CAM: From<&'a [f64]>,
+    for<'a> CAM: TryFrom<&'a [f64]>,
     OP: OptimizationConfig,
 {
     fn linearize(
@@ -345,7 +346,7 @@ where
         let camera: CAM = if OP::INTRINSIC {
             params
                 .get(param_idx)
-                .map(|p| <CAM as From<&[f64]>>::from(p.as_slice()))
+                .and_then(|p| CAM::try_from(p.as_slice()).ok())
                 .unwrap_or_else(|| self.camera.clone())
         } else {
             self.camera.clone()
