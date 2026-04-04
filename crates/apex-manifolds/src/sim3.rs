@@ -410,6 +410,9 @@ impl Sim3 {
     /// Compute the inverse of the V matrix for Sim(3) logarithm.
     fn compute_v_inv(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let v = Sim3Tangent::v_matrix(theta, sigma);
+        // SAFETY: V is non-singular for all valid Sim(3) elements (non-zero scale).
+        // The identity fallback is only reached in degenerate near-zero-scale cases,
+        // which are outside the valid domain of Sim(3).
         v.try_inverse().unwrap_or(Matrix3::identity())
     }
 }
@@ -659,6 +662,8 @@ impl Tangent<Sim3> for Sim3Tangent {
 
     /// Inverse of right Jacobian.
     fn right_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
+        // SAFETY: The right Jacobian is non-singular for valid Sim(3) tangent elements.
+        // Identity fallback only occurs at degenerate inputs outside the valid domain.
         self.right_jacobian()
             .try_inverse()
             .unwrap_or(Matrix7::identity())
@@ -666,6 +671,8 @@ impl Tangent<Sim3> for Sim3Tangent {
 
     /// Inverse of left Jacobian.
     fn left_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
+        // SAFETY: The left Jacobian is non-singular for valid Sim(3) tangent elements.
+        // Identity fallback only occurs at degenerate inputs outside the valid domain.
         self.left_jacobian()
             .try_inverse()
             .unwrap_or(Matrix7::identity())
