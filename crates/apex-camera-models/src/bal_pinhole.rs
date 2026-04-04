@@ -81,6 +81,7 @@ impl BALPinholeCameraStrict {
     /// let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
+    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -121,6 +122,7 @@ impl BALPinholeCameraStrict {
     /// # Errors
     ///
     /// Returns [`CameraModelError`] if the focal length is invalid (e.g., negative).
+    #[must_use]
     pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };
@@ -186,23 +188,24 @@ impl From<&BALPinholeCameraStrict> for [f64; 3] {
 ///
 /// Expected parameter order: [f, k1, k2]
 ///
-/// # Panics
-///
-/// Panics if the slice has fewer than 3 elements or if validation fails.
-impl From<&[f64]> for BALPinholeCameraStrict {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 3,
-            "BALPinholeCameraStrict requires exactly 3 parameters, got {}",
-            params.len()
-        );
-        Self {
+/// Returns an error if the slice has fewer than 3 elements.
+impl TryFrom<&[f64]> for BALPinholeCameraStrict {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 3 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "BALPinholeCameraStrict requires at least 3 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             f: params[0],
             distortion: DistortionModel::Radial {
                 k1: params[1],
                 k2: params[2],
             },
-        }
+        })
     }
 }
 
@@ -225,21 +228,14 @@ impl From<[f64; 3]> for BALPinholeCameraStrict {
 
 /// Creates a `BALPinholeCameraStrict` from a parameter slice with validation.
 ///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
+/// Returns a `Result` instead of panicking on invalid input.
 ///
 /// # Errors
 ///
 /// Returns `CameraModelError::InvalidParams` if fewer than 3 parameters are provided.
 /// Returns validation errors if focal length is non-positive or parameters are non-finite.
 pub fn try_from_params(params: &[f64]) -> Result<BALPinholeCameraStrict, CameraModelError> {
-    if params.len() < 3 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "BALPinholeCameraStrict requires at least 3 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = BALPinholeCameraStrict::from(params);
+    let camera = BALPinholeCameraStrict::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -866,7 +862,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 0.1, 0.01];
-        let camera2 = BALPinholeCameraStrict::from(&params_slice[..]);
+        let camera2 = BALPinholeCameraStrict::try_from(&params_slice[..]).unwrap();
         let (cam2_k1, cam2_k2) = camera2.distortion_params();
         assert_eq!(camera2.f, 450.0);
         assert_eq!(cam2_k1, 0.1);

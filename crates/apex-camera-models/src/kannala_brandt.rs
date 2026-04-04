@@ -66,6 +66,7 @@ impl KannalaBrandtCamera {
     /// # Errors
     ///
     /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::KannalaBrandt`].
+    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -288,14 +289,17 @@ impl From<&KannalaBrandtCamera> for [f64; 8] {
 /// # Panics
 ///
 /// Panics if the slice has fewer than 8 elements.
-impl From<&[f64]> for KannalaBrandtCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 8,
-            "KannalaBrandtCamera requires at least 8 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for KannalaBrandtCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 8 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "KannalaBrandtCamera requires at least 8 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -308,7 +312,7 @@ impl From<&[f64]> for KannalaBrandtCamera {
                 k3: params[6],
                 k4: params[7],
             },
-        }
+        })
     }
 }
 
@@ -346,13 +350,7 @@ impl From<[f64; 8]> for KannalaBrandtCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 8 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
 pub fn try_from_params(params: &[f64]) -> Result<KannalaBrandtCamera, CameraModelError> {
-    if params.len() < 8 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "KannalaBrandtCamera requires at least 8 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = KannalaBrandtCamera::from(params);
+    let camera = KannalaBrandtCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -1035,7 +1033,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [350.0, 350.0, 330.0, 250.0, 0.2, 0.02, 0.002, 0.0002];
-        let camera2 = KannalaBrandtCamera::from(&params_slice[..]);
+        let camera2 = KannalaBrandtCamera::try_from(&params_slice[..]).unwrap();
         assert_eq!(camera2.pinhole.fx, 350.0);
         assert_eq!(camera2.pinhole.fy, 350.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

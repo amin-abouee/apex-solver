@@ -66,6 +66,7 @@ impl FovCamera {
     /// # Errors
     ///
     /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::FOV`].
+    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -231,14 +232,17 @@ impl From<&FovCamera> for [f64; 5] {
 /// # Panics
 ///
 /// Panics if the slice has fewer than 5 elements.
-impl From<&[f64]> for FovCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 5,
-            "FovCamera requires at least 5 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for FovCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 5 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "FovCamera requires at least 5 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -246,7 +250,7 @@ impl From<&[f64]> for FovCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::FOV { w: params[4] },
-        }
+        })
     }
 }
 
@@ -279,13 +283,7 @@ impl From<[f64; 5]> for FovCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 5 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or w is out of range.
 pub fn try_from_params(params: &[f64]) -> Result<FovCamera, CameraModelError> {
-    if params.len() < 5 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "FovCamera requires at least 5 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = FovCamera::from(params);
+    let camera = FovCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -877,7 +875,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 460.0, 330.0, 250.0, 2.0];
-        let camera2 = FovCamera::from(&params_slice[..]);
+        let camera2 = FovCamera::try_from(&params_slice[..]).unwrap();
         assert_eq!(camera2.pinhole.fx, 450.0);
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

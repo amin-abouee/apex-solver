@@ -79,6 +79,7 @@ impl DoubleSphereCamera {
     /// let camera = DoubleSphereCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
+    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -266,14 +267,17 @@ impl From<&DoubleSphereCamera> for [f64; 6] {
 /// # Parameter Order
 ///
 /// params = [fx, fy, cx, cy, xi, alpha]
-impl From<&[f64]> for DoubleSphereCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "DoubleSphereCamera requires at least 6 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for DoubleSphereCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 6 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "DoubleSphereCamera requires at least 6 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -284,7 +288,7 @@ impl From<&[f64]> for DoubleSphereCamera {
                 xi: params[4],
                 alpha: params[5],
             },
-        }
+        })
     }
 }
 
@@ -320,13 +324,7 @@ impl From<[f64; 6]> for DoubleSphereCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or xi/alpha are out of range.
 pub fn try_from_params(params: &[f64]) -> Result<DoubleSphereCamera, CameraModelError> {
-    if params.len() < 6 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "DoubleSphereCamera requires at least 6 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = DoubleSphereCamera::from(params);
+    let camera = DoubleSphereCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
