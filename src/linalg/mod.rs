@@ -204,7 +204,7 @@ pub trait LinearSolver<M: LinearizationMode> {
 ///
 /// Given the full covariance matrix H^{-1} (inverse of information matrix),
 /// this function extracts the diagonal blocks corresponding to each individual variable.
-pub fn extract_variable_covariances(
+pub(crate) fn extract_variable_covariances(
     full_covariance: &Mat<f64>,
     variables: &HashMap<String, VariableEnum>,
     variable_index_map: &HashMap<String, usize>,
