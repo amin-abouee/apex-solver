@@ -66,8 +66,16 @@ impl Factor for HomogeneousPointFactor {
         params: &[DVector<f64>],
         compute_jacobian: bool,
     ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-        debug_assert_eq!(params.len(), 1, "HomogeneousPointFactor expects 1 parameter block");
-        debug_assert_eq!(params[0].len(), 4, "params[0] must be homogeneous point (4D)");
+        debug_assert_eq!(
+            params.len(),
+            1,
+            "HomogeneousPointFactor expects 1 parameter block"
+        );
+        debug_assert_eq!(
+            params[0].len(),
+            4,
+            "params[0] must be homogeneous point (4D)"
+        );
 
         let hp = &params[0];
         let w = hp[3];
@@ -100,7 +108,8 @@ impl Factor for HomogeneousPointFactor {
         let inv_w = 1.0 / w;
         let mut j_raw = SMatrix::<f64, 3, 4>::zeros();
         // First 3 cols: -I₃/w
-        j_raw.fixed_view_mut::<3, 3>(0, 0)
+        j_raw
+            .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&(-Matrix3::identity() * inv_w));
         // Last col: p_est/w = hp[0:3]/w²
         j_raw[(0, 3)] = p_est[0] * inv_w;
@@ -176,11 +185,7 @@ mod tests {
         let hp = dvector![2.0, -1.5, 4.0, 0.8];
         let measurement = Vector3::new(1.0, 2.0, 3.0);
 
-        let sqrt_info = SMatrix::<f64, 3, 3>::new(
-            1.0, 0.1, 0.0,
-            0.0, 2.0, 0.05,
-            0.0, 0.0, 0.5,
-        );
+        let sqrt_info = SMatrix::<f64, 3, 3>::new(1.0, 0.1, 0.0, 0.0, 2.0, 0.05, 0.0, 0.0, 0.5);
         let factor = HomogeneousPointFactor::new(measurement, sqrt_info);
 
         let (r0, jac_opt) = factor.linearize(&[hp.clone()], true);
@@ -210,8 +215,7 @@ mod tests {
 
     #[test]
     fn dimension_is_three() {
-        let factor =
-            HomogeneousPointFactor::new_isotropic(Vector3::zeros(), 1.0);
+        let factor = HomogeneousPointFactor::new_isotropic(Vector3::zeros(), 1.0);
         assert_eq!(factor.get_dimension(), 3);
     }
 }
