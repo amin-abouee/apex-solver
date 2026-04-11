@@ -274,7 +274,10 @@ mod tests {
         };
         let mut cloned = prior.clone();
         cloned.data[0] = 99.0;
-        assert_eq!(prior.data[0], 1.0, "Original should not be affected by clone mutation");
+        assert_eq!(
+            prior.data[0], 1.0,
+            "Original should not be affected by clone mutation"
+        );
     }
 
     #[test]
