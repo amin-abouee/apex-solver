@@ -29,6 +29,4 @@ pub mod types;
 pub use combined_imu_factor::CombinedImuFactor;
 pub use imu_factor::ImuFactor;
 pub use preintegration::ImuPreintegration;
-pub use types::{
-    ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt,
-};
+pub use types::{ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt};

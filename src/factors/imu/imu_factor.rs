@@ -25,8 +25,8 @@
 //! ```
 
 use apex_manifolds::LieGroup;
-use apex_manifolds::se23::{SE23, SE23Tangent};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::se23::{SE23, SE23Tangent};
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use super::preintegration::ImuPreintegration;
@@ -181,21 +181,31 @@ impl Factor for ImuFactor {
 
         // J_gc_pose (9×6): SE3 tangent (ρ,θ) → SE23 tangent at gc_state_i
         let mut j_gc_pose = SMatrix::<f64, 9, 6>::zeros();
-        j_gc_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&Matrix3::identity()); // ρ → ρ
-        j_gc_pose.fixed_view_mut::<3, 3>(3, 3).copy_from(&Matrix3::identity()); // θ → θ
+        j_gc_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&Matrix3::identity()); // ρ → ρ
+        j_gc_pose
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&Matrix3::identity()); // θ → θ
         // ν = 0
 
         // J_gc_vel (9×3): world-frame δv_i → SE23 tangent at gc_state_i
         let r_i_t = r_i.transpose();
         let r_j_t = r_j.transpose();
         let mut j_gc_vel = SMatrix::<f64, 9, 3>::zeros();
-        j_gc_vel.fixed_view_mut::<3, 3>(0, 0).copy_from(&(r_i_t * dt)); // ρ = R_iᵀ δv dt
-        j_gc_vel.fixed_view_mut::<3, 3>(6, 0).copy_from(&r_i_t);        // ν = R_iᵀ δv
+        j_gc_vel
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(r_i_t * dt)); // ρ = R_iᵀ δv dt
+        j_gc_vel.fixed_view_mut::<3, 3>(6, 0).copy_from(&r_i_t); // ν = R_iᵀ δv
 
         // J_stj_pose (9×6): SE3 tangent (ρ,θ) → SE23 tangent at state_j
         let mut j_stj_pose = SMatrix::<f64, 9, 6>::zeros();
-        j_stj_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&Matrix3::identity());
-        j_stj_pose.fixed_view_mut::<3, 3>(3, 3).copy_from(&Matrix3::identity());
+        j_stj_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&Matrix3::identity());
+        j_stj_pose
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&Matrix3::identity());
 
         // J_stj_vel (9×3): world-frame δv_j → SE23 tangent at state_j
         let mut j_stj_vel = SMatrix::<f64, 9, 3>::zeros();
@@ -203,13 +213,23 @@ impl Factor for ImuFactor {
 
         // Bias correction Jacobians
         let mut j_corr_bg = SMatrix::<f64, 9, 3>::zeros();
-        j_corr_bg.fixed_view_mut::<3, 3>(0, 0).copy_from(preint.dp_db_g());       // ρ
-        j_corr_bg.fixed_view_mut::<3, 3>(3, 0).copy_from(&(-preint.dalpha_db_g())); // θ
-        j_corr_bg.fixed_view_mut::<3, 3>(6, 0).copy_from(preint.dv_db_g());       // ν
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(preint.dp_db_g()); // ρ
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(3, 0)
+            .copy_from(&(-preint.dalpha_db_g())); // θ
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(preint.dv_db_g()); // ν
 
         let mut j_corr_ba = SMatrix::<f64, 9, 3>::zeros();
-        j_corr_ba.fixed_view_mut::<3, 3>(0, 0).copy_from(&(-preint.c_doubleintegral())); // ρ
-        j_corr_ba.fixed_view_mut::<3, 3>(6, 0).copy_from(&(-preint.c_integral()));       // ν
+        j_corr_ba
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(-preint.c_doubleintegral())); // ρ
+        j_corr_ba
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&(-preint.c_integral())); // ν
 
         // d(r_kin)/d(correction) = jac_rm_dc · jac_rp_tangent
         let j_rkin_dc = jac_rm_dc * jac_rp_tangent;
@@ -221,12 +241,24 @@ impl Factor for ImuFactor {
 
         let d_pred_gc = jac_rm_pred * jac_pred_wrt_gc;
 
-        j_kin.fixed_view_mut::<9, 6>(0, 0).copy_from(&(d_pred_gc * j_gc_pose));    // pose_i
-        j_kin.fixed_view_mut::<9, 3>(0, 6).copy_from(&(d_pred_gc * j_gc_vel));     // v_i
-        j_kin.fixed_view_mut::<9, 3>(0, 9).copy_from(&(j_rkin_dc * j_corr_bg));    // bg_i
-        j_kin.fixed_view_mut::<9, 3>(0, 12).copy_from(&(j_rkin_dc * j_corr_ba));   // ba_i
-        j_kin.fixed_view_mut::<9, 6>(0, 15).copy_from(&(jac_rm_pred * j_stj_pose)); // pose_j
-        j_kin.fixed_view_mut::<9, 3>(0, 21).copy_from(&(jac_rm_pred * j_stj_vel)); // v_j
+        j_kin
+            .fixed_view_mut::<9, 6>(0, 0)
+            .copy_from(&(d_pred_gc * j_gc_pose)); // pose_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 6)
+            .copy_from(&(d_pred_gc * j_gc_vel)); // v_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 9)
+            .copy_from(&(j_rkin_dc * j_corr_bg)); // bg_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 12)
+            .copy_from(&(j_rkin_dc * j_corr_ba)); // ba_i
+        j_kin
+            .fixed_view_mut::<9, 6>(0, 15)
+            .copy_from(&(jac_rm_pred * j_stj_pose)); // pose_j
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 21)
+            .copy_from(&(jac_rm_pred * j_stj_vel)); // v_j
         // bg_j, ba_j: r_kin does not depend on sb_j (columns 24..30 = 0)
 
         // ── Assemble full 15×30 Jacobian ──────────────────────────────────
@@ -234,12 +266,20 @@ impl Factor for ImuFactor {
         j_full.fixed_view_mut::<9, 30>(0, 0).copy_from(&j_kin);
 
         // r_bg = b_g_i − b_g_j  (rows 9..12)
-        j_full.fixed_view_mut::<3, 3>(9, 9).copy_from(&Matrix3::identity());   // d/d(bg_i)
-        j_full.fixed_view_mut::<3, 3>(9, 24).copy_from(&(-Matrix3::identity())); // d/d(bg_j)
+        j_full
+            .fixed_view_mut::<3, 3>(9, 9)
+            .copy_from(&Matrix3::identity()); // d/d(bg_i)
+        j_full
+            .fixed_view_mut::<3, 3>(9, 24)
+            .copy_from(&(-Matrix3::identity())); // d/d(bg_j)
 
         // r_ba = b_a_i − b_a_j  (rows 12..15)
-        j_full.fixed_view_mut::<3, 3>(12, 12).copy_from(&Matrix3::identity());   // d/d(ba_i)
-        j_full.fixed_view_mut::<3, 3>(12, 27).copy_from(&(-Matrix3::identity())); // d/d(ba_j)
+        j_full
+            .fixed_view_mut::<3, 3>(12, 12)
+            .copy_from(&Matrix3::identity()); // d/d(ba_i)
+        j_full
+            .fixed_view_mut::<3, 3>(12, 27)
+            .copy_from(&(-Matrix3::identity())); // d/d(ba_j)
 
         let j_weighted = sqrt_info * j_full;
         let jac_dmat = DMatrix::from_iterator(15, 30, j_weighted.iter().copied());
@@ -402,7 +442,10 @@ mod tests {
         }
 
         let kin_norm = residual.rows(0, 9).norm();
-        assert!(kin_norm < 1.0, "kinematic residual too large: {kin_norm:.4}");
+        assert!(
+            kin_norm < 1.0,
+            "kinematic residual too large: {kin_norm:.4}"
+        );
     }
 
     // ── Test 3: finite-difference Jacobian verification ───────────────────

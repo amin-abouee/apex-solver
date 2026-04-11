@@ -29,8 +29,8 @@
 //! ```
 
 use apex_manifolds::LieGroup;
-use apex_manifolds::se23::{SE23, SE23Tangent};
 use apex_manifolds::se3::SE3;
+use apex_manifolds::se23::{SE23, SE23Tangent};
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use super::preintegration::ImuPreintegration;
@@ -88,7 +88,11 @@ impl Factor for CombinedImuFactor {
         params: &[DVector<f64>],
         compute_jacobian: bool,
     ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-        debug_assert_eq!(params.len(), 6, "CombinedImuFactor expects 6 parameter blocks");
+        debug_assert_eq!(
+            params.len(),
+            6,
+            "CombinedImuFactor expects 6 parameter blocks"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 3, "params[1] must be velocity (3D)");
         debug_assert_eq!(params[2].len(), 6, "params[2] must be IMU bias (6D)");
@@ -196,20 +200,30 @@ impl Factor for CombinedImuFactor {
 
         // J_gc_pose (9×6): SE3 tangent → SE23 tangent at gc_state_i
         let mut j_gc_pose = SMatrix::<f64, 9, 6>::zeros();
-        j_gc_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&Matrix3::identity()); // ρ → ρ
-        j_gc_pose.fixed_view_mut::<3, 3>(3, 3).copy_from(&Matrix3::identity()); // θ → θ
+        j_gc_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&Matrix3::identity()); // ρ → ρ
+        j_gc_pose
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&Matrix3::identity()); // θ → θ
 
         // J_gc_vel (9×3): world-frame δv_i → SE23 tangent at gc_state_i
         let r_i_t = r_i.transpose();
         let r_j_t = r_j.transpose();
         let mut j_gc_vel = SMatrix::<f64, 9, 3>::zeros();
-        j_gc_vel.fixed_view_mut::<3, 3>(0, 0).copy_from(&(r_i_t * dt)); // ρ = R_iᵀ δv dt
-        j_gc_vel.fixed_view_mut::<3, 3>(6, 0).copy_from(&r_i_t);        // ν = R_iᵀ δv
+        j_gc_vel
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(r_i_t * dt)); // ρ = R_iᵀ δv dt
+        j_gc_vel.fixed_view_mut::<3, 3>(6, 0).copy_from(&r_i_t); // ν = R_iᵀ δv
 
         // J_stj_pose (9×6): SE3 tangent → SE23 tangent at state_j
         let mut j_stj_pose = SMatrix::<f64, 9, 6>::zeros();
-        j_stj_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&Matrix3::identity());
-        j_stj_pose.fixed_view_mut::<3, 3>(3, 3).copy_from(&Matrix3::identity());
+        j_stj_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&Matrix3::identity());
+        j_stj_pose
+            .fixed_view_mut::<3, 3>(3, 3)
+            .copy_from(&Matrix3::identity());
 
         // J_stj_vel (9×3): world-frame δv_j → SE23 tangent at state_j
         let mut j_stj_vel = SMatrix::<f64, 9, 3>::zeros();
@@ -217,13 +231,23 @@ impl Factor for CombinedImuFactor {
 
         // Bias correction Jacobians (9×3 each)
         let mut j_corr_bg = SMatrix::<f64, 9, 3>::zeros();
-        j_corr_bg.fixed_view_mut::<3, 3>(0, 0).copy_from(preint.dp_db_g());
-        j_corr_bg.fixed_view_mut::<3, 3>(3, 0).copy_from(&(-preint.dalpha_db_g()));
-        j_corr_bg.fixed_view_mut::<3, 3>(6, 0).copy_from(preint.dv_db_g());
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(preint.dp_db_g());
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(3, 0)
+            .copy_from(&(-preint.dalpha_db_g()));
+        j_corr_bg
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(preint.dv_db_g());
 
         let mut j_corr_ba = SMatrix::<f64, 9, 3>::zeros();
-        j_corr_ba.fixed_view_mut::<3, 3>(0, 0).copy_from(&(-preint.c_doubleintegral()));
-        j_corr_ba.fixed_view_mut::<3, 3>(6, 0).copy_from(&(-preint.c_integral()));
+        j_corr_ba
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(-preint.c_doubleintegral()));
+        j_corr_ba
+            .fixed_view_mut::<3, 3>(6, 0)
+            .copy_from(&(-preint.c_integral()));
 
         let j_rkin_dc = jac_rm_dc * jac_rp_tangent;
 
@@ -234,12 +258,24 @@ impl Factor for CombinedImuFactor {
 
         let d_pred_gc = jac_rm_pred * jac_pred_wrt_gc;
 
-        j_kin.fixed_view_mut::<9, 6>(0, 0).copy_from(&(d_pred_gc * j_gc_pose));     // pose_i
-        j_kin.fixed_view_mut::<9, 3>(0, 6).copy_from(&(d_pred_gc * j_gc_vel));      // vel_i
-        j_kin.fixed_view_mut::<9, 3>(0, 9).copy_from(&(j_rkin_dc * j_corr_bg));     // bg_i
-        j_kin.fixed_view_mut::<9, 3>(0, 12).copy_from(&(j_rkin_dc * j_corr_ba));    // ba_i
-        j_kin.fixed_view_mut::<9, 6>(0, 15).copy_from(&(jac_rm_pred * j_stj_pose)); // pose_j
-        j_kin.fixed_view_mut::<9, 3>(0, 21).copy_from(&(jac_rm_pred * j_stj_vel));  // vel_j
+        j_kin
+            .fixed_view_mut::<9, 6>(0, 0)
+            .copy_from(&(d_pred_gc * j_gc_pose)); // pose_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 6)
+            .copy_from(&(d_pred_gc * j_gc_vel)); // vel_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 9)
+            .copy_from(&(j_rkin_dc * j_corr_bg)); // bg_i
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 12)
+            .copy_from(&(j_rkin_dc * j_corr_ba)); // ba_i
+        j_kin
+            .fixed_view_mut::<9, 6>(0, 15)
+            .copy_from(&(jac_rm_pred * j_stj_pose)); // pose_j
+        j_kin
+            .fixed_view_mut::<9, 3>(0, 21)
+            .copy_from(&(jac_rm_pred * j_stj_vel)); // vel_j
         // bg_j, ba_j: r_kin does not depend on sb_j (cols 24..30 = 0)
 
         // ── Assemble full 15×30 Jacobian ──────────────────────────────────
@@ -247,12 +283,20 @@ impl Factor for CombinedImuFactor {
         j_full.fixed_view_mut::<9, 30>(0, 0).copy_from(&j_kin);
 
         // r_bg = b_g_i − b_g_j   (rows 9..12)
-        j_full.fixed_view_mut::<3, 3>(9, 9).copy_from(&Matrix3::identity());    // d/d(bg_i)
-        j_full.fixed_view_mut::<3, 3>(9, 24).copy_from(&(-Matrix3::identity())); // d/d(bg_j)
+        j_full
+            .fixed_view_mut::<3, 3>(9, 9)
+            .copy_from(&Matrix3::identity()); // d/d(bg_i)
+        j_full
+            .fixed_view_mut::<3, 3>(9, 24)
+            .copy_from(&(-Matrix3::identity())); // d/d(bg_j)
 
         // r_ba = b_a_i − b_a_j   (rows 12..15)
-        j_full.fixed_view_mut::<3, 3>(12, 12).copy_from(&Matrix3::identity());   // d/d(ba_i)
-        j_full.fixed_view_mut::<3, 3>(12, 27).copy_from(&(-Matrix3::identity())); // d/d(ba_j)
+        j_full
+            .fixed_view_mut::<3, 3>(12, 12)
+            .copy_from(&Matrix3::identity()); // d/d(ba_i)
+        j_full
+            .fixed_view_mut::<3, 3>(12, 27)
+            .copy_from(&(-Matrix3::identity())); // d/d(ba_j)
 
         let j_weighted = sqrt_info * j_full;
         let jac_dmat = DMatrix::from_iterator(15, 30, j_weighted.iter().copied());
@@ -280,8 +324,9 @@ mod tests {
     use nalgebra::Vector3;
 
     use super::super::preintegration::ImuPreintegration;
-    use super::super::types::{ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias,
-        SpeedAndBiasExt};
+    use super::super::types::{
+        ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt,
+    };
 
     fn euroc_params() -> ImuParameters {
         ImuParameters {
@@ -295,7 +340,13 @@ mod tests {
     }
 
     fn make_meas(t: f64, gyr: Vector3<f64>, acc: Vector3<f64>) -> ImuMeasurement {
-        ImuMeasurement::new(t, ImuSensorReadings { gyroscopes: gyr, accelerometers: acc })
+        ImuMeasurement::new(
+            t,
+            ImuSensorReadings {
+                gyroscopes: gyr,
+                accelerometers: acc,
+            },
+        )
     }
 
     /// Build SpeedAndBias and split into the three CombinedImuFactor blocks.
@@ -337,7 +388,13 @@ mod tests {
         let t1 = (n - 1) as f64 * dt_step;
 
         let measurements: Vec<_> = (0..n)
-            .map(|i| make_meas(i as f64 * dt_step, Vector3::zeros(), Vector3::new(0.0, 0.0, g)))
+            .map(|i| {
+                make_meas(
+                    i as f64 * dt_step,
+                    Vector3::zeros(),
+                    Vector3::new(0.0, 0.0, g),
+                )
+            })
             .collect();
 
         let preint = ImuPreintegration::new(measurements, params_imu, 0.0, t1, &sb);
@@ -345,8 +402,12 @@ mod tests {
 
         let (pose, vel, bias) = identity_blocks();
         let params = vec![
-            pose.clone(), vel.clone(), bias.clone(),
-            pose.clone(), vel.clone(), bias.clone(),
+            pose.clone(),
+            vel.clone(),
+            bias.clone(),
+            pose.clone(),
+            vel.clone(),
+            bias.clone(),
         ];
         let (residual, _) = factor.linearize(&params, false);
 
@@ -355,7 +416,10 @@ mod tests {
         }
 
         let sqrt_info = factor.preintegration().square_root_information();
-        assert!(sqrt_info.iter().all(|v| v.is_finite()), "sqrt_info non-finite");
+        assert!(
+            sqrt_info.iter().all(|v| v.is_finite()),
+            "sqrt_info non-finite"
+        );
     }
 
     // ── Test 2: near-zero residual for propagated states ─────────────────
@@ -413,7 +477,10 @@ mod tests {
         }
 
         let kin_norm = residual.rows(0, 9).norm();
-        assert!(kin_norm < 1.0, "kinematic residual too large: {kin_norm:.4}");
+        assert!(
+            kin_norm < 1.0,
+            "kinematic residual too large: {kin_norm:.4}"
+        );
     }
 
     // ── Test 3: finite-difference Jacobian verification ───────────────────
@@ -484,7 +551,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_pose_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, col)], fd[row]
+                    jac[(row, col)],
+                    fd[row]
                 );
             }
         }
@@ -500,7 +568,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_vel_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, 6 + col)], fd[row]
+                    jac[(row, 6 + col)],
+                    fd[row]
                 );
             }
         }
@@ -516,7 +585,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_bias_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, 9 + col)], fd[row]
+                    jac[(row, 9 + col)],
+                    fd[row]
                 );
             }
         }
@@ -534,7 +604,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_pose_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, 15 + col)], fd[row]
+                    jac[(row, 15 + col)],
+                    fd[row]
                 );
             }
         }
@@ -550,7 +621,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_vel_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, 21 + col)], fd[row]
+                    jac[(row, 21 + col)],
+                    fd[row]
                 );
             }
         }
@@ -566,7 +638,8 @@ mod tests {
                 assert!(
                     err < TOL,
                     "J_bias_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
-                    jac[(row, 24 + col)], fd[row]
+                    jac[(row, 24 + col)],
+                    fd[row]
                 );
             }
         }

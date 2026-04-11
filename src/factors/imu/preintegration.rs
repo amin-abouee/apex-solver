@@ -690,7 +690,10 @@ mod tests {
         split.append(&second_half, t1, &sb);
 
         let angle_diff = (one_shot.delta_q().inverse() * split.delta_q()).angle();
-        assert!(angle_diff < 1e-10, "rotation mismatch after append: {angle_diff}");
+        assert!(
+            angle_diff < 1e-10,
+            "rotation mismatch after append: {angle_diff}"
+        );
 
         let p_diff = (one_shot.acc_doubleintegral() - split.acc_doubleintegral()).norm();
         assert!(p_diff < 1e-12, "position integral mismatch: {p_diff}");
