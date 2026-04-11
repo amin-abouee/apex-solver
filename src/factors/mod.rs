@@ -53,7 +53,29 @@ pub mod between_factor;
 pub mod prior_factor;
 pub mod projection_factor;
 
+// IMU factors
+pub mod imu;
+
+// GPS factors
+pub mod gps_factor;
+
+// Vision / landmark factors
+pub mod bearing_factor;
+pub mod depth_factor;
+pub mod essential_matrix_factor;
+pub mod homogeneous_point_factor;
+
+// LiDAR / ICP factors
+pub mod icp_factor;
+
+pub use bearing_factor::BearingFactor;
 pub use between_factor::BetweenFactor;
+pub use depth_factor::{DepthFactor, OneSidedDepthFactor};
+pub use essential_matrix_factor::EssentialMatrixFactor;
+pub use gps_factor::{GpsAsyncFactor, GpsFactor};
+pub use homogeneous_point_factor::HomogeneousPointFactor;
+pub use icp_factor::{DistanceField, IcpFactor};
+pub use imu::{CombinedImuFactor, ImuFactor, ImuPreintegration};
 pub use prior_factor::PriorFactor;
 pub use projection_factor::ProjectionFactor;
 
