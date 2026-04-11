@@ -29,8 +29,8 @@ use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use apex_manifolds::se3::SE3;
 
-use crate::factors::imu::helpers::cross_matrix;
 use crate::factors::Factor;
+use crate::factors::imu::helpers::cross_matrix;
 
 /// Compute an orthonormal basis (3×2) for the tangent plane at unit vector `n`.
 ///
@@ -70,10 +70,7 @@ impl BearingFactor {
     /// # Arguments
     /// * `measured_bearing` — unit vector in body frame (will be normalized)
     /// * `sqrt_information` — 2×2 square-root information matrix
-    pub fn new(
-        measured_bearing: Vector3<f64>,
-        sqrt_information: SMatrix<f64, 2, 2>,
-    ) -> Self {
+    pub fn new(measured_bearing: Vector3<f64>, sqrt_information: SMatrix<f64, 2, 2>) -> Self {
         let n = measured_bearing.normalize();
         let basis = tangent_basis(&n);
         Self {
@@ -159,10 +156,22 @@ impl Factor for BearingFactor {
         // Common prefix: sqrt_info · E^T · dn/dp_body  (2×3)
         let prefix = self.sqrt_information * self.tangent_basis.transpose() * dn_dp;
 
-        // J_T_i (2×6): prefix * [-I₃ | -[p_body]×]
+        // J_T_i (2×6): prefix * [-I₃ | +[p_body]×]
+        //
+        // Right perturbation: T_i → T_i · Exp([δρ, δθ])
+        //   t_i → t_i + R_i · δρ
+        //   R_i → R_i · Exp(δθ)  →  R_i^T → Exp(−δθ) · R_i^T ≈ (I − [δθ]×) · R_i^T
+        //
+        // p_body = R_i^T · (p_j − t_i)
+        // δp_body = (I − [δθ]×) · R_i^T · (p_j − t_i − R_i · δρ)
+        //         ≈ p_body − δρ − [δθ]× · p_body
+        //         = p_body − δρ + [p_body]× · δθ
+        //
+        //   ∂p_body/∂δρ = −I₃
+        //   ∂p_body/∂δθ = +[p_body]×   (note: positive!)
         let p_body_hat = cross_matrix(&p_body);
         let j_rho = -prefix; // 2×3
-        let j_theta = -prefix * p_body_hat; // 2×3
+        let j_theta = prefix * p_body_hat; // 2×3  (positive sign)
 
         // J_p_j (2×3): prefix * R_iᵀ
         let j_pj = prefix * r_i.transpose(); // 2×3
@@ -198,10 +207,7 @@ mod tests {
     }
 
     /// Compute the body-frame bearing from pose to point.
-    fn compute_bearing(
-        pose: &DVector<f64>,
-        point: &Vector3<f64>,
-    ) -> Vector3<f64> {
+    fn compute_bearing(pose: &DVector<f64>, point: &Vector3<f64>) -> Vector3<f64> {
         let t_i = SE3::from(pose.clone());
         let r_i = t_i.rotation_so3().rotation_matrix();
         let t_pos = t_i.translation();
