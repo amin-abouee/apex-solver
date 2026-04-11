@@ -31,8 +31,8 @@ use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
 use apex_manifolds::se3::SE3;
 
-use crate::factors::imu::helpers::cross_matrix;
 use crate::factors::Factor;
+use crate::factors::imu::helpers::cross_matrix;
 
 /// Trait for querying a distance/occupancy field.
 ///
@@ -132,49 +132,62 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
             return (residual, None);
         }
 
-        // ── Jacobians (from OKVIS SubmapIcpError.cpp) ─────────────────────────
+        // ── Jacobians (right SE3 perturbation, apex-solver convention) ─────────
         //
         // de/dp_A = sqrt_info * grad / grad_norm   (1×3)
         //
-        // Using right perturbation of T_WA:
-        //   t_WA → t_WA + C_WA · δρ_A
-        //   C_WA → C_WA · (I + [δθ_A]×)
+        // p_A = C_WA^T * (p_W - t_WA),  p_W = C_WB * p_B + t_WB
         //
-        //   p_A = C_WA^T * (p_W - t_WA)
-        //       → (I - [δθ_A]×) * C_WA^T * (p_W - t_WA - C_WA*δρ_A)
-        //       ≈ p_A - δρ_A + [δθ_A]× * p_A    (wait, OKVIS derivation...)
+        // ── Right perturbation of T_WA: T_WA → T_WA · Exp([δρ, δθ]) ──────────
+        //   t_WA → t_WA + C_WA · δρ
+        //   C_WA → C_WA · Exp(δθ)  →  C_WA^T → Exp(−δθ) · C_WA^T ≈ (I−[δθ]×)·C_WA^T
         //
-        //   Actually from OKVIS code directly:
-        //   dp_A/dT_WA = [-C_WA^T | C_WA^T * [p_W - t_WA]×]
-        //              = [-C_WA^T | C_WA^T * [C_WB*p_B + t_WB - t_WA]×]
+        //   p_A_new = (I − [δθ]×) · C_WA^T · (p_W − t_WA − C_WA · δρ)
+        //           ≈ p_A − [δθ]× · p_A − δρ
+        //           = p_A − δρ + [p_A]× · δθ
         //
-        // For T_WB:
-        //   dp_A/dT_WB = [C_WA^T | -C_WA^T * [C_WB*p_B]×]
+        //   ∂p_A/∂δρ = −I₃
+        //   ∂p_A/∂δθ = +[p_A]×
+        //
+        // ── Right perturbation of T_WB: T_WB → T_WB · Exp([δρ, δθ]) ──────────
+        //   t_WB → t_WB + C_WB · δρ
+        //   C_WB → C_WB · Exp(δθ)
+        //
+        //   p_W_new = C_WB · (I + [δθ]×) · p_B + t_WB + C_WB · δρ
+        //           ≈ p_W + C_WB · [δθ]× · p_B + C_WB · δρ
+        //
+        //   δp_A = C_WA^T · (C_WB · [δθ]× · p_B + C_WB · δρ)
+        //        = C_WA^T · C_WB · δρ + C_WA^T · C_WB · [δθ]× · p_B
+        //
+        //   Using [a]× · b = −[b]× · a:
+        //   C_WA^T · C_WB · [δθ]× · p_B = −C_WA^T · C_WB · [p_B]× · δθ
+        //
+        //   ∂p_A/∂δρ = C_WA^T · C_WB
+        //   ∂p_A/∂δθ = −C_WA^T · C_WB · [p_B]×
 
         let de_dp_a: SMatrix<f64, 1, 3> =
             SMatrix::<f64, 1, 3>::from_iterator((sqrt_info * gradient / grad_norm).iter().copied());
 
         let c_wa_t = c_wa.transpose();
-        let diff = p_w - t_wa_pos; // C_WB*p_B + t_WB - t_WA
+        let c_wa_t_c_wb = c_wa_t * c_wb;
 
-        // dp_A/dT_WA (3×6)
+        // dp_A/dT_WA (3×6): [-I | [p_A]×]
         let mut dpa_dtwa = SMatrix::<f64, 3, 6>::zeros();
         dpa_dtwa
             .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(-c_wa_t));
+            .copy_from(&(-Matrix3::identity()));
         dpa_dtwa
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(c_wa_t * cross_matrix(&diff)));
+            .copy_from(&cross_matrix(&p_a));
 
-        // dp_A/dT_WB (3×6)
-        let c_wb_pb = c_wb * self.point_b;
+        // dp_A/dT_WB (3×6): [C_WA^T·C_WB | -C_WA^T·C_WB·[p_B]×]
         let mut dpa_dtwb = SMatrix::<f64, 3, 6>::zeros();
         dpa_dtwb
             .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&c_wa_t);
+            .copy_from(&c_wa_t_c_wb);
         dpa_dtwb
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_wa_t * cross_matrix(&c_wb_pb)));
+            .copy_from(&(-c_wa_t_c_wb * cross_matrix(&self.point_b)));
 
         // Chain rule
         let j_twa: SMatrix<f64, 1, 6> = de_dp_a * dpa_dtwa;
