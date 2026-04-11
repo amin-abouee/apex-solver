@@ -37,10 +37,10 @@
 use apex_manifolds::se3::SE3;
 use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
 
+use crate::factors::Factor;
 use crate::factors::imu::helpers::cross_matrix;
 use crate::factors::imu::preintegration::ImuPreintegration;
 use crate::factors::imu::types::{SpeedAndBias, SpeedAndBiasExt};
-use crate::factors::Factor;
 
 /// GPS synchronous factor: connects `T_WS` (robot pose) and `T_GW`
 /// (GPS-to-world) to a 3D GPS position measurement.
@@ -599,8 +599,7 @@ mod tests {
 
         // Propagated position (gravity-only IMU ⟹ Δp_body ≈ 0, delta_R = I)
         let delta_p_body = *preint.acc_doubleintegral();
-        let delta_r: nalgebra::Matrix3<f64> =
-            preint.delta_q().to_rotation_matrix().into_inner();
+        let delta_r: nalgebra::Matrix3<f64> = preint.delta_q().to_rotation_matrix().into_inner();
         let c_ws_k: nalgebra::Matrix3<f64> = q_ws.to_rotation_matrix().into_inner();
         let p_propagated = t_ws_pos + v_k * dt + c_ws_k * delta_p_body;
         let c_ws_g = c_ws_k * delta_r;
@@ -654,8 +653,7 @@ mod tests {
 
         // Build measurement from ground truth
         let delta_p_body = *preint.acc_doubleintegral();
-        let delta_r: nalgebra::Matrix3<f64> =
-            preint.delta_q().to_rotation_matrix().into_inner();
+        let delta_r: nalgebra::Matrix3<f64> = preint.delta_q().to_rotation_matrix().into_inner();
         let p_propagated = t_ws_pos + v_k * dt + c_ws_k * delta_p_body;
         let c_ws_g = c_ws_k * delta_r;
         let t_antenna_w = p_propagated + c_ws_g * r_sa;
@@ -668,9 +666,8 @@ mod tests {
         sb_vec[1] = v_k.y;
         sb_vec[2] = v_k.z;
 
-        let make_factor = || {
-            GpsAsyncFactor::new_isotropic(measurement, r_sa, 0.5, make_preint(dt, v_k))
-        };
+        let make_factor =
+            || GpsAsyncFactor::new_isotropic(measurement, r_sa, 0.5, make_preint(dt, v_k));
 
         let factor = make_factor();
         let nominal = vec![pose_ws.clone(), sb_vec.clone(), pose_gw.clone()];
