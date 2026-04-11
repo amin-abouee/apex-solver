@@ -30,11 +30,11 @@
 
 use nalgebra::{DMatrix, DVector, Matrix3, Matrix6, SMatrix, Vector3};
 
-use apex_manifolds::se3::SE3;
 use apex_manifolds::LieGroup;
+use apex_manifolds::se3::SE3;
 
-use crate::factors::imu::helpers::cross_matrix;
 use crate::factors::Factor;
+use crate::factors::imu::helpers::cross_matrix;
 
 /// Essential matrix factor for epipolar constraints.
 ///
@@ -115,9 +115,14 @@ impl Factor for EssentialMatrixFactor {
         let t_1 = SE3::from(params[0].clone());
         let t_2 = SE3::from(params[1].clone());
 
-        // Relative pose: T_rel = T_1^{-1} * T_2
-        let t_1_inv = t_1.inverse(None);
-        let t_rel = t_1_inv.compose(&t_2, None, None);
+        // Relative pose for epipolar geometry: T_rel = T_2^{-1} * T_1
+        //
+        // For point P, p₁ = R₁ᵀ(P − t₁), p₂ = R₂ᵀ(P − t₂).
+        // The relation p₂ = R_rel·p₁ + t_rel needs:
+        //   R_rel = R₂ᵀ·R₁,  t_rel = R₂ᵀ·(t₁ − t₂)
+        // which comes from T_rel = T_2^{-1} * T_1.
+        let t_2_inv = t_2.inverse(None);
+        let t_rel = t_2_inv.compose(&t_1, None, None);
 
         let r_rel: Matrix3<f64> = t_rel.rotation_so3().rotation_matrix();
         let t_rel_vec: Vector3<f64> = t_rel.translation();
@@ -155,17 +160,16 @@ impl Factor for EssentialMatrixFactor {
         //        = x2^T · E · (-[x1]× · δθ)
         //   So: de_k/d(δθ) = -x2^T · E · [x1]×   (1×3)
         //
-        // Chain to T_1 and T_2 (right perturbation):
-        //   T_rel = T_1^{-1} · T_2
+        // Chain to T_1 and T_2 via T_rel = T_2^{-1} · T_1 (right perturbation):
+        //
         //   Under T_1 → T_1 · Exp(δ_1):
-        //     T_1^{-1} → Exp(-δ_1) · T_1^{-1}
-        //     T_rel → Exp(-δ_1) · T_rel
-        //     Right perturbation of T_rel: δ_rel = -Adj(T_rel^{-1}) · δ_1
-        //     So: d(δ_rel)/d(δ_1) = -Adj(T_rel^{-1})
+        //     T_rel → T_2^{-1} · T_1 · Exp(δ_1) = T_rel · Exp(δ_1)
+        //     So: d(δ_rel)/d(δ_1) = I_6
         //
         //   Under T_2 → T_2 · Exp(δ_2):
-        //     T_rel → T_1^{-1} · T_2 · Exp(δ_2) = T_rel · Exp(δ_2)
-        //     So: d(δ_rel)/d(δ_2) = I_6
+        //     T_2^{-1} → Exp(−δ_2) · T_2^{-1}
+        //     T_rel → Exp(−δ_2) · T_rel  →  δ_rel = −Adj(T_rel^{-1}) · δ_2
+        //     So: d(δ_rel)/d(δ_2) = −Adj(T_rel^{-1})
 
         let t_rel_inv = t_rel.inverse(None);
         let adj_rel_inv: Matrix6<f64> = t_rel_inv.adjoint();
@@ -193,10 +197,10 @@ impl Factor for EssentialMatrixFactor {
                 .fixed_view_mut::<1, 3>(0, 3)
                 .copy_from(&de_dtheta_row);
 
-            // Chain to T_1: J_T1 = w * de_drel * (-Adj(T_rel^{-1}))
-            let j_t1 = w * de_drel * (-adj_rel_inv);
-            // Chain to T_2: J_T2 = w * de_drel
-            let j_t2 = w * de_drel;
+            // Chain to T_1: J_T1 = w * de_drel (d(δ_rel)/d(δ_1) = I)
+            let j_t1 = w * de_drel;
+            // Chain to T_2: J_T2 = w * de_drel * (−Adj(T_rel^{-1}))
+            let j_t2 = w * de_drel * (-adj_rel_inv);
 
             for col in 0..6 {
                 jac[(k, col)] = j_t1[(0, col)];
@@ -358,8 +362,7 @@ mod tests {
             tan[col] = EPS;
             let mut p = nominal.clone();
             p[0] = perturb_se3(&t_1, &tan);
-            let factor2 =
-                EssentialMatrixFactor::new(c1.clone(), c2_noisy.clone(), weights.clone());
+            let factor2 = EssentialMatrixFactor::new(c1.clone(), c2_noisy.clone(), weights.clone());
             let (r_pert, _) = factor2.linearize(&p, false);
             let fd = (&r_pert - &r0) / EPS;
             for row in 0..n {
@@ -379,8 +382,7 @@ mod tests {
             tan[col] = EPS;
             let mut p = nominal.clone();
             p[1] = perturb_se3(&t_2, &tan);
-            let factor2 =
-                EssentialMatrixFactor::new(c1.clone(), c2_noisy.clone(), weights.clone());
+            let factor2 = EssentialMatrixFactor::new(c1.clone(), c2_noisy.clone(), weights.clone());
             let (r_pert, _) = factor2.linearize(&p, false);
             let fd = (&r_pert - &r0) / EPS;
             for row in 0..n {
