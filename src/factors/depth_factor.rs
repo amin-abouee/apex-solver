@@ -27,13 +27,13 @@
 //!
 //! Derived from OKVIS `DepthError.hpp`, using right SE3 perturbation model.
 
-use nalgebra::{DMatrix, DVector, Matrix4, SMatrix, Vector3, Vector4};
+use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, SMatrix, Vector3, Vector4};
 
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
-use crate::factors::imu::helpers::cross_matrix;
 use crate::factors::Factor;
+use crate::factors::imu::helpers::cross_matrix;
 
 /// Depth constraint factor with compile-time one-sided toggle.
 ///
@@ -86,7 +86,11 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
     ) -> (DVector<f64>, Option<DMatrix<f64>>) {
         debug_assert_eq!(params.len(), 3, "DepthFactor expects 3 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
-        debug_assert_eq!(params[1].len(), 4, "params[1] must be homogeneous point (4D)");
+        debug_assert_eq!(
+            params[1].len(),
+            4,
+            "params[1] must be homogeneous point (4D)"
+        );
         debug_assert_eq!(params[2].len(), 7, "params[2] must be SE3 (7D)");
 
         let t_ws = SE3::from(params[0].clone());
@@ -129,74 +133,89 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
             return (residual, None);
         }
 
-        // ── Jacobians (from OKVIS DepthError.hpp) ─────────────────────────────
+        // ── Jacobians (right SE3 perturbation, apex-solver convention) ──────────
+        //
+        // residual = sqrt_info * (z_depth − depth)
+        // depth    = hp_C[2] / hp_C[3]
         //
         // Jh_weighted = [0, 0, sqrt_info/hp_C[3], 0]  (1×4, selects z-row)
         //
-        // For T_WS (right perturbation):
-        //   p = hp_W[0:3] - t_WS_W * hp_W[3]
-        //   J_pose(4×6) = [C_SW * hp_W[3]  |  -C_SW * [p]×]  (top 3 rows)
-        //   J_T_WS = Jh_weighted * T_CS * J_pose  (1×6)
+        // d(residual)/d(param) = −Jh_weighted · d(hp_C)/d(param)
         //
-        // For hp_W:
-        //   J_hp_W = -Jh_weighted * T_CW  (1×4)
+        // ── Right perturbation of T_WS ────────────────────────────────────────
+        //   T_WS → T_WS · Exp([δρ, δθ])
+        //   t_WS → t_WS + C_WS · δρ,  C_WS → C_WS · Exp(δθ)
+        //   C_SW → Exp(−δθ) · C_SW ≈ (I − [δθ]×) · C_SW
         //
-        // For T_SC (right perturbation):
-        //   p2 = hp_S[0:3] - t_SC_S * hp_S[3]
-        //   J_extr(4×6) = [C_CS * hp_S[3]  |  -C_CS * [p2]×]
-        //   J_T_SC = Jh_weighted * J_extr  (1×6)
-
-        let c_ws = t_ws.rotation_so3().rotation_matrix();
-        let c_sw = c_ws.transpose();
-        let t_ws_w = t_ws.translation();
-
-        let c_sc = t_sc.rotation_so3().rotation_matrix();
-        let c_cs = c_sc.transpose();
-        let t_sc_s = t_sc.translation();
+        //   hp_S[0:3] = C_SW · (hp_W[0:3] − t_WS · hp_W[3])
+        //   δhp_S[0:3] = −[δθ]× · hp_S[0:3] − δρ · hp_W[3]
+        //              = +[hp_S[0:3]]× · δθ − I · δρ · hp_W[3]
+        //
+        //   4×6 J_pose:  rows 0:3, col 0:3 = −I · hp_W[3]
+        //                rows 0:3, col 3:6 = +[hp_S[0:3]]×
+        //
+        //   J_T_WS = −Jh_weighted · T_CS · J_pose   (1×6)
+        //
+        // ── hp_W (Euclidean, no manifold) ────────────────────────────────────
+        //   hp_C = T_CS · T_SW · hp_W
+        //   d(hp_C)/d(hp_W) = T_CW
+        //   J_hp_W = −Jh_weighted · T_CW             (1×4)
+        //
+        // ── Right perturbation of T_SC ────────────────────────────────────────
+        //   hp_C[0:3] = C_CS · (hp_S[0:3] − t_SC · hp_S[3])
+        //   Under right perturbation of T_SC (same derivation as T_WS with hp_S):
+        //   4×6 J_extr: rows 0:3, col 0:3 = −I · hp_S[3]
+        //               rows 0:3, col 3:6 = +[hp_C[0:3]]×
+        //
+        //   J_T_SC = −Jh_weighted · J_extr            (1×6)
 
         // Jh_weighted (1×4 row vector)
-        let jh = SMatrix::<f64, 1, 4>::from_row_slice(&[
+        let jh =
+            SMatrix::<f64, 1, 4>::from_row_slice(&[0.0, 0.0, self.sqrt_information / hp_c[3], 0.0]);
+
+        // ── J_T_WS (1×6) ─────────────────────────────────────────────────────
+        let hp_s_vec = Vector3::new(hp_s[0], hp_s[1], hp_s[2]);
+        let mut j_pose = SMatrix::<f64, 4, 6>::zeros();
+        // ∂hp_S[0:3]/∂δρ = −I · hp_W[3]
+        j_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&(-Matrix3::identity() * hp_w[3]));
+        // ∂hp_S[0:3]/∂δθ = [hp_S[0:3]]×
+        j_pose
+            .fixed_view_mut::<3, 3>(0, 3)
+            .copy_from(&cross_matrix(&hp_s_vec));
+
+        let j_t_ws: SMatrix<f64, 1, 6> = -jh * t_cs * j_pose;
+
+        // ── J_hp_W (1×4) ─────────────────────────────────────────────────────
+        //
+        // When hp_W[3] is perturbed, hp_C[3] also changes (unlike pose perturbations).
+        // Need full quotient rule: d(depth)/d(hp_C) = [0, 0, 1/hp_C[3], -depth/hp_C[3]]
+        //
+        // J_hp_W = -sqrt_info * d(depth)/d(hp_C) * d(hp_C)/d(hp_W)
+        //        = -sqrt_info * [0, 0, 1/hp_C[3], -depth/hp_C[3]] * T_CW
+        let t_cw: Matrix4<f64> = t_cs * t_sw;
+        let jh_full = SMatrix::<f64, 1, 4>::from_row_slice(&[
             0.0,
             0.0,
             self.sqrt_information / hp_c[3],
-            0.0,
+            -self.sqrt_information * depth / hp_c[3],
         ]);
-
-        // ── J_T_WS (1×6) ─────────────────────────────────────────────────────
-        let p = Vector3::new(
-            hp_w[0] - t_ws_w[0] * hp_w[3],
-            hp_w[1] - t_ws_w[1] * hp_w[3],
-            hp_w[2] - t_ws_w[2] * hp_w[3],
-        );
-        let mut j_pose = SMatrix::<f64, 4, 6>::zeros();
-        j_pose
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(c_sw * hp_w[3]));
-        j_pose
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_sw * cross_matrix(&p)));
-
-        let j_t_ws: SMatrix<f64, 1, 6> = jh * t_cs * j_pose;
-
-        // ── J_hp_W (1×4) ─────────────────────────────────────────────────────
-        let t_cw: Matrix4<f64> = t_cs * t_sw;
-        let j_hp_w: SMatrix<f64, 1, 4> = -jh * t_cw;
+        let j_hp_w: SMatrix<f64, 1, 4> = -jh_full * t_cw;
 
         // ── J_T_SC (1×6) ─────────────────────────────────────────────────────
-        let p2 = Vector3::new(
-            hp_s[0] - t_sc_s[0] * hp_s[3],
-            hp_s[1] - t_sc_s[1] * hp_s[3],
-            hp_s[2] - t_sc_s[2] * hp_s[3],
-        );
+        let hp_c_vec = Vector3::new(hp_c[0], hp_c[1], hp_c[2]);
         let mut j_extr = SMatrix::<f64, 4, 6>::zeros();
+        // ∂hp_C[0:3]/∂δρ_SC = −I · hp_S[3]
         j_extr
             .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&(c_cs * hp_s[3]));
+            .copy_from(&(-Matrix3::identity() * hp_s[3]));
+        // ∂hp_C[0:3]/∂δθ_SC = [hp_C[0:3]]×
         j_extr
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_cs * cross_matrix(&p2)));
+            .copy_from(&cross_matrix(&hp_c_vec));
 
-        let j_t_sc: SMatrix<f64, 1, 6> = jh * j_extr;
+        let j_t_sc: SMatrix<f64, 1, 6> = -jh * j_extr;
 
         // Assemble full 1×16 Jacobian: [J_T_WS(6) | J_hp_W(4) | J_T_SC(6)]
         let mut j_full = SMatrix::<f64, 1, 16>::zeros();
@@ -266,11 +285,7 @@ mod tests {
         let factor = RegularDepthFactor::new_from_stdev(depth, 0.5);
         let (r, _) = factor.linearize(&[pose_ws, hp_w, pose_sc], false);
 
-        assert!(
-            r[0].abs() < 1e-10,
-            "residual = {} should be zero",
-            r[0]
-        );
+        assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
     }
 
     // ── Test 2: one-sided ignores depth > measurement ───────────────────────
