@@ -729,8 +729,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = UcmCamera::from(params_plus.as_slice());
-            let cam_minus = UcmCamera::from(params_minus.as_slice());
+            let cam_plus = UcmCamera::from(<[f64; 5]>::try_from(params_plus.as_slice())?);
+            let cam_minus = UcmCamera::from(<[f64; 5]>::try_from(params_minus.as_slice())?);
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -776,7 +776,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 460.0, 330.0, 250.0, 0.8];
-        let camera2 = UcmCamera::try_from(&params_slice[..]).unwrap();
+        let camera2 = UcmCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 450.0);
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
