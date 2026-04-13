@@ -2,7 +2,7 @@
 
 use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::metadata::BagMetadata;
-use crate::rosbag::storage::{create_storage_reader, StorageReader};
+use crate::rosbag::storage::{StorageReader, create_storage_reader};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -96,7 +96,6 @@ impl Reader {
         storage.open()?;
 
         // Get actual topics from the storage (may be more complete than metadata)
-        #[cfg(feature = "rosbag-sqlite")]
         if let Some(sqlite_storage) = storage
             .as_any()
             .downcast_ref::<crate::rosbag::storage::sqlite::SqliteReader>()
@@ -113,7 +112,6 @@ impl Reader {
             }
         }
 
-        #[cfg(feature = "rosbag-mcap")]
         if let Some(mcap_storage) = storage
             .as_any()
             .downcast_ref::<crate::rosbag::storage::mcap::McapStorageReader>()

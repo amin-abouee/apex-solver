@@ -357,7 +357,10 @@ pub struct McapWriter {
 
 impl McapWriter {
     /// Create a new MCAP writer
-    pub fn new(path: &Path, compression_mode: crate::rosbag::types::CompressionMode) -> Result<Self> {
+    pub fn new(
+        path: &Path,
+        compression_mode: crate::rosbag::types::CompressionMode,
+    ) -> Result<Self> {
         let file_name = path
             .file_name()
             .ok_or_else(|| BagError::writer("bag path has no file name component"))?
@@ -435,7 +438,11 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
         Ok(())
     }
 
-    fn add_connection(&mut self, connection: &Connection, _offered_qos_profiles: &str) -> Result<()> {
+    fn add_connection(
+        &mut self,
+        connection: &Connection,
+        _offered_qos_profiles: &str,
+    ) -> Result<()> {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }

@@ -7,11 +7,8 @@ use crate::rosbag::types::{
 use std::collections::HashMap;
 use std::path::Path;
 
-#[cfg(feature = "rosbag-sqlite")]
-pub mod sqlite;
-
-#[cfg(feature = "rosbag-mcap")]
 pub mod mcap;
+pub mod sqlite;
 
 /// Trait for storage backend implementations (reading)
 pub trait StorageReader {
@@ -71,7 +68,7 @@ pub trait StorageWriter: std::any::Any {
 
     /// Add a connection (topic) to the storage
     fn add_connection(&mut self, connection: &Connection, offered_qos_profiles: &str)
-        -> Result<()>;
+    -> Result<()>;
 
     /// Write a single message to the storage
     fn write(&mut self, connection: &Connection, timestamp: u64, data: &[u8]) -> Result<()>;
@@ -99,18 +96,8 @@ pub fn create_storage_reader(
     #[allow(unused_variables)] connections: Vec<Connection>,
 ) -> Result<Box<dyn StorageReader>> {
     match storage_id {
-        #[cfg(feature = "rosbag-sqlite")]
         "sqlite3" => Ok(Box::new(sqlite::SqliteReader::new(paths, connections)?)),
-        #[cfg(not(feature = "rosbag-sqlite"))]
-        "sqlite3" => Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-            format: "sqlite3 (feature not enabled)".to_string(),
-        }),
-        #[cfg(feature = "rosbag-mcap")]
         "mcap" => Ok(Box::new(mcap::McapStorageReader::new(paths, connections)?)),
-        #[cfg(not(feature = "rosbag-mcap"))]
-        "mcap" => Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-            format: "mcap (feature not enabled)".to_string(),
-        }),
         "" => {
             // Auto-detect storage format from file extensions when storage_identifier is empty
             let has_db3 = paths
@@ -121,27 +108,9 @@ pub fn create_storage_reader(
                 .any(|path| path.extension().is_some_and(|ext| ext == "mcap"));
 
             if has_db3 {
-                #[cfg(feature = "rosbag-sqlite")]
-                {
-                    Ok(Box::new(sqlite::SqliteReader::new(paths, connections)?))
-                }
-                #[cfg(not(feature = "rosbag-sqlite"))]
-                {
-                    Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-                        format: "sqlite3 (feature not enabled)".to_string(),
-                    })
-                }
+                Ok(Box::new(sqlite::SqliteReader::new(paths, connections)?))
             } else if has_mcap {
-                #[cfg(feature = "rosbag-mcap")]
-                {
-                    Ok(Box::new(mcap::McapStorageReader::new(paths, connections)?))
-                }
-                #[cfg(not(feature = "rosbag-mcap"))]
-                {
-                    Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-                        format: "mcap (feature not enabled)".to_string(),
-                    })
-                }
+                Ok(Box::new(mcap::McapStorageReader::new(paths, connections)?))
             } else {
                 Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
                     format: "unknown (no .db3 or .mcap files found)".to_string(),
@@ -161,17 +130,7 @@ pub fn create_storage_writer(
     compression_mode: CompressionMode,
 ) -> Result<Box<dyn StorageWriter>> {
     match storage_plugin {
-        #[cfg(feature = "rosbag-sqlite")]
         StoragePlugin::Sqlite3 => Ok(Box::new(sqlite::SqliteWriter::new(path, compression_mode)?)),
-        #[cfg(not(feature = "rosbag-sqlite"))]
-        StoragePlugin::Sqlite3 => Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-            format: "sqlite3 (feature not enabled)".to_string(),
-        }),
-        #[cfg(feature = "rosbag-mcap")]
         StoragePlugin::Mcap => Ok(Box::new(mcap::McapWriter::new(path, compression_mode)?)),
-        #[cfg(not(feature = "rosbag-mcap"))]
-        StoragePlugin::Mcap => Err(crate::rosbag::error::BagError::UnsupportedStorageFormat {
-            format: "mcap (feature not enabled)".to_string(),
-        }),
     }
 }

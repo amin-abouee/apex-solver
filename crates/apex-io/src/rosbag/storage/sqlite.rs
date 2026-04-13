@@ -257,8 +257,7 @@ impl StorageReader for SqliteReader {
             }
 
             let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
                 let topic_id: i32 = row.get(0)?;
                 let timestamp: i64 = row.get(1)?;
@@ -332,8 +331,7 @@ impl StorageReader for SqliteReader {
             }
 
             let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
                 let topic_id: i32 = row.get(0)?;
                 let timestamp: i64 = row.get(1)?;
@@ -398,8 +396,7 @@ impl StorageReader for SqliteReader {
             }
 
             let mut stmt = db_conn.prepare(&query)?;
-            let param_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
+            let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
             let message_rows = stmt.query_map(param_refs.as_slice(), |row| {
                 let topic_id: i32 = row.get(0)?;
                 let timestamp: i64 = row.get(1)?;
@@ -506,7 +503,10 @@ pub struct SqliteWriter {
 
 impl SqliteWriter {
     /// Create a new SQLite writer
-    pub fn new(path: &Path, compression_mode: crate::rosbag::types::CompressionMode) -> Result<Self> {
+    pub fn new(
+        path: &Path,
+        compression_mode: crate::rosbag::types::CompressionMode,
+    ) -> Result<Self> {
         if compression_mode == crate::rosbag::types::CompressionMode::Storage {
             return Err(BagError::writer(
                 "SQLite3 writer does not support storage-side compression",
@@ -699,9 +699,10 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
                 tx.prepare("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?;
 
             for (connection, timestamp, data) in messages {
-                let topic_id = self.topic_id_map.get(&connection.topic).ok_or_else(|| {
-                    BagError::connection_not_found(&connection.topic)
-                })?;
+                let topic_id = self
+                    .topic_id_map
+                    .get(&connection.topic)
+                    .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
 
                 stmt.execute((topic_id, *timestamp as i64, data))?;
             }

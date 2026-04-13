@@ -2,7 +2,7 @@
 
 use crate::rosbag::error::{BagError, Result};
 use crate::rosbag::metadata::{BagFileInformation, BagMetadata};
-use crate::rosbag::storage::{create_storage_writer, StorageWriter};
+use crate::rosbag::storage::{StorageWriter, create_storage_writer};
 use crate::rosbag::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, QosProfile, StoragePlugin,
 };
@@ -93,21 +93,17 @@ impl Writer {
     }
 
     /// Set compression for the bag
-    pub fn set_compression(&mut self, mode: CompressionMode, format: CompressionFormat) -> Result<()> {
+    pub fn set_compression(
+        &mut self,
+        mode: CompressionMode,
+        format: CompressionFormat,
+    ) -> Result<()> {
         if self.is_open {
             return Err(BagError::BagAlreadyOpen);
         }
 
         self.compression_mode = mode;
         self.compression_format = format;
-
-        #[cfg(not(feature = "rosbag-compression"))]
-        if format == CompressionFormat::Zstd {
-            return Err(BagError::UnsupportedCompressionFormat {
-                format: "zstd (feature not enabled)".to_string(),
-            });
-        }
-
         Ok(())
     }
 
@@ -118,7 +114,11 @@ impl Writer {
     }
 
     /// Configure message buffer settings for performance optimization
-    pub fn configure_buffer(&mut self, buffer_size_mb: usize, batch_threshold: usize) -> Result<()> {
+    pub fn configure_buffer(
+        &mut self,
+        buffer_size_mb: usize,
+        batch_threshold: usize,
+    ) -> Result<()> {
         if self.is_open {
             return Err(BagError::BagAlreadyOpen);
         }
@@ -246,16 +246,9 @@ impl Writer {
 
         let final_data = match self.compression_mode {
             CompressionMode::Message => {
-                #[cfg(feature = "rosbag-compression")]
-                {
-                    if self.compression_format == CompressionFormat::Zstd {
-                        zstd::encode_all(data, 0)?
-                    } else {
-                        data.to_vec()
-                    }
-                }
-                #[cfg(not(feature = "rosbag-compression"))]
-                {
+                if self.compression_format == CompressionFormat::Zstd {
+                    zstd::encode_all(data, 0)?
+                } else {
                     data.to_vec()
                 }
             }
@@ -412,41 +405,30 @@ impl Writer {
 
     /// Compress storage file (for file-level compression)
     fn compress_storage_file(&self) -> Result<()> {
-        #[cfg(feature = "rosbag-compression")]
-        {
-            let bag_file_name = self
-                .bag_path
-                .file_name()
-                .ok_or_else(|| BagError::writer("bag path has no file name component"))?
-                .to_string_lossy();
+        let bag_file_name = self
+            .bag_path
+            .file_name()
+            .ok_or_else(|| BagError::writer("bag path has no file name component"))?
+            .to_string_lossy();
 
-            let storage_file = match self.storage_plugin {
-                StoragePlugin::Sqlite3 => self.bag_path.join(format!("{bag_file_name}.db3")),
-                StoragePlugin::Mcap => self.bag_path.join(format!("{bag_file_name}.mcap")),
-            };
+        let storage_file = match self.storage_plugin {
+            StoragePlugin::Sqlite3 => self.bag_path.join(format!("{bag_file_name}.db3")),
+            StoragePlugin::Mcap => self.bag_path.join(format!("{bag_file_name}.mcap")),
+        };
 
-            let ext = storage_file
-                .extension()
-                .ok_or_else(|| BagError::writer("storage file has no extension"))?
-                .to_string_lossy();
+        let ext = storage_file
+            .extension()
+            .ok_or_else(|| BagError::writer("storage file has no extension"))?
+            .to_string_lossy();
 
-            let compressed_file =
-                storage_file.with_extension(format!("{}.{}", ext, self.compression_format.as_str()));
+        let compressed_file =
+            storage_file.with_extension(format!("{}.{}", ext, self.compression_format.as_str()));
 
-            let input_data = std::fs::read(&storage_file)?;
-            let compressed_data = zstd::encode_all(input_data.as_slice(), 0)?;
-            std::fs::write(&compressed_file, compressed_data)?;
-            std::fs::remove_file(&storage_file)?;
-        }
+        let input_data = std::fs::read(&storage_file)?;
+        let compressed_data = zstd::encode_all(input_data.as_slice(), 0)?;
+        std::fs::write(&compressed_file, compressed_data)?;
+        std::fs::remove_file(&storage_file)?;
 
-        #[cfg(not(feature = "rosbag-compression"))]
-        {
-            return Err(BagError::UnsupportedCompressionFormat {
-                format: "zstd (feature not enabled)".to_string(),
-            });
-        }
-
-        #[allow(unreachable_code)]
         Ok(())
     }
 
@@ -594,10 +576,7 @@ mod tests {
         let mut writer = Writer::new(&bag_path, None, None).unwrap();
 
         let result = writer.set_compression(CompressionMode::Message, CompressionFormat::Zstd);
-        #[cfg(feature = "rosbag-compression")]
         assert!(result.is_ok());
-        #[cfg(not(feature = "rosbag-compression"))]
-        assert!(result.is_err());
 
         writer.open().unwrap();
 
@@ -643,14 +622,20 @@ mod tests {
             .add_connection(
                 "/test_topic".to_string(),
                 "std_msgs/msg/String".to_string(),
-                None, None, None, None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
         let result = writer.add_connection(
             "/test_topic".to_string(),
             "std_msgs/msg/String".to_string(),
-            None, None, None, None,
+            None,
+            None,
+            None,
+            None,
         );
 
         assert!(result.is_err());
@@ -672,7 +657,10 @@ mod tests {
             .add_connection(
                 "/test_topic".to_string(),
                 "std_msgs/msg/String".to_string(),
-                None, None, None, None,
+                None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 

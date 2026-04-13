@@ -24,7 +24,6 @@ pub enum BagError {
     YamlParse(#[from] serde_yaml::Error),
 
     /// Database error when reading SQLite files
-    #[cfg(feature = "rosbag-sqlite")]
     #[error("Database error: {0}")]
     Database(#[from] rusqlite::Error),
 
