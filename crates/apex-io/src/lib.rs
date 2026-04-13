@@ -22,7 +22,6 @@ pub mod logger;
 pub mod toro;
 pub mod utils;
 
-#[cfg(feature = "rosbag")]
 pub mod rosbag;
 
 pub use logger::init_logger;

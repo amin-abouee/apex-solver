@@ -22,27 +22,22 @@ path = "bin/download_datasets.rs"
 [[bin]]
 name = "bag_info"
 path = "bin/bag_info.rs"
-required-features = ["rosbag"]
 
 [[bin]]
 name = "bag_filter"
 path = "bin/bag_filter.rs"
-required-features = ["rosbag-sqlite"]
 
 [[bin]]
 name = "extract_topic_data"
 path = "bin/extract_topic_data.rs"
-required-features = ["rosbag-sqlite"]
 
 [[bin]]
 name = "write_dummy_bag"
 path = "bin/write_dummy_bag.rs"
-required-features = ["rosbag-sqlite"]
 
 [[test]]
 name = "rosbag_integration_tests"
 path = "tests/rosbag_integration_tests.rs"
-required-features = ["rosbag"]
 
 [dependencies]
 apex-manifolds.workspace = true
@@ -60,15 +55,15 @@ ureq.workspace = true
 bzip2.workspace = true
 toml.workspace = true
 
-# rosbag optional dependencies
-serde_yaml = { workspace = true, optional = true }
-byteorder  = { workspace = true, optional = true }
-bytes      = { workspace = true, optional = true }
-hex        = { workspace = true, optional = true }
-image      = { workspace = true, optional = true }
-rusqlite   = { workspace = true, optional = true }
-zstd       = { workspace = true, optional = true }
-mcap       = { workspace = true, optional = true }
+# ROS2 bag dependencies
+serde_yaml.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+hex.workspace = true
+image.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+mcap.workspace = true
 
 [dependencies.rerun]
 workspace = true
@@ -76,11 +71,7 @@ optional = true
 
 [features]
 default = []
-visualization      = ["dep:rerun"]
-rosbag             = ["dep:serde_yaml", "dep:byteorder", "dep:bytes", "dep:hex", "dep:image"]
-rosbag-sqlite      = ["rosbag", "dep:rusqlite"]
-rosbag-mcap        = ["rosbag", "dep:mcap"]
-rosbag-compression = ["rosbag", "dep:zstd"]
+visualization = ["dep:rerun"]
 
 [dev-dependencies]
 tempfile.workspace = true

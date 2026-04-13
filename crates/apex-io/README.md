@@ -99,6 +99,8 @@ z
 apex-io = "0.1.0"
 ```
 
+ROS2 bag support is built-in — no extra features needed.
+
 For visualization features (Rerun integration):
 
 ```toml
@@ -420,20 +422,6 @@ The optional `rosbag` module supports reading and writing ROS2 bag files in
 SQLite3 and MCAP storage formats, fully compatible with the Python
 [rosbags](https://gitlab.com/ternaris/rosbags) library.
 
-### Enabling ROS2 Bag Features
-
-| Feature | What it enables |
-|---------|----------------|
-| `rosbag` | Core reader/writer API (no storage backend) |
-| `rosbag-sqlite` | SQLite3 storage backend (includes `rosbag`) |
-| `rosbag-mcap` | MCAP storage backend (includes `rosbag`) |
-| `rosbag-compression` | zstd compression support (includes `rosbag`) |
-
-```toml
-[dependencies]
-apex-io = { version = "0.1.0", features = ["rosbag-sqlite"] }
-```
-
 ### Quick Start
 
 ```rust
@@ -485,18 +473,18 @@ println!("Messages: {}", metadata.message_count());
 
 ```bash
 # Inspect a bag (reads only metadata.yaml — very fast)
-cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
+cargo run -p apex-io --bin bag_info -- <bag_path>
 
 # Filter/copy a bag (by topic, time range, or storage format)
-cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \
+cargo run -p apex-io --bin bag_filter -- \
     <input> <output> --topics /camera/image_raw,/imu/data
 
 # Extract topic data to CSV or PNG images
-cargo run -p apex-io --features rosbag-sqlite --bin extract_topic_data -- \
+cargo run -p apex-io --bin extract_topic_data -- \
     <bag_path> <topic_name> <output_folder>
 
 # Write a demo bag with 29 supported message types
-cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- [output_path]
+cargo run -p apex-io --bin write_dummy_bag -- [output_path]
 ```
 
 ### Supported Capabilities
@@ -523,14 +511,14 @@ cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- [output_p
 | `serde`, `serde_json` | Serialization support |
 | `chrono` | Timestamps in file headers |
 | `rerun` | Visualization (optional) |
-| `serde_yaml` | YAML metadata parsing (rosbag, optional) |
-| `byteorder` | CDR byte-order handling (rosbag, optional) |
-| `bytes` | Efficient byte buffer (rosbag, optional) |
-| `hex` | Hex encoding for diagnostics (rosbag, optional) |
-| `image` | PNG export for image topics (rosbag, optional) |
-| `rusqlite` | SQLite3 storage backend (rosbag-sqlite, optional) |
-| `zstd` | Compression support (rosbag-compression, optional) |
-| `mcap` | MCAP storage backend (rosbag-mcap, optional) |
+| `serde_yaml` | YAML metadata parsing for ROS2 bags |
+| `byteorder` | CDR byte-order handling |
+| `bytes` | Efficient byte buffer |
+| `hex` | Hex encoding for diagnostics |
+| `image` | PNG export for image topics |
+| `rusqlite` | SQLite3 storage backend |
+| `zstd` | Compression support |
+| `mcap` | MCAP storage backend |
 
 ## References
 
