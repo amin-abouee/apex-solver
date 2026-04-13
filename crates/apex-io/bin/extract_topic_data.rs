@@ -20,7 +20,7 @@
 use apex_io::rosbag::cdr::CdrDeserializer;
 use apex_io::rosbag::messages::{FromCdr, Imu};
 use apex_io::rosbag::{Message, Reader};
-use image::{save_buffer, ColorType};
+use image::{ColorType, save_buffer};
 use std::env;
 use std::fs;
 use std::io::Write;
@@ -411,16 +411,14 @@ fn extract_message_to_csv(
         }
         "std_msgs/msg/String" => {
             if message.data.len() >= 4 {
-                let str_len =
-                    u32::from_le_bytes([
-                        message.data[0],
-                        message.data[1],
-                        message.data[2],
-                        message.data[3],
-                    ]) as usize;
+                let str_len = u32::from_le_bytes([
+                    message.data[0],
+                    message.data[1],
+                    message.data[2],
+                    message.data[3],
+                ]) as usize;
                 if message.data.len() >= 4 + str_len {
-                    let string_data =
-                        String::from_utf8_lossy(&message.data[4..4 + str_len]);
+                    let string_data = String::from_utf8_lossy(&message.data[4..4 + str_len]);
                     headers.push("data".to_string());
                     values.push(format!("\"{}\"", string_data.replace('"', "\"\"")));
                 }
@@ -428,13 +426,12 @@ fn extract_message_to_csv(
         }
         "std_msgs/msg/Int32" => {
             if message.data.len() >= 4 {
-                let value =
-                    i32::from_le_bytes([
-                        message.data[0],
-                        message.data[1],
-                        message.data[2],
-                        message.data[3],
-                    ]);
+                let value = i32::from_le_bytes([
+                    message.data[0],
+                    message.data[1],
+                    message.data[2],
+                    message.data[3],
+                ]);
                 headers.push("data".to_string());
                 values.push(value.to_string());
             }
@@ -526,7 +523,12 @@ fn extract_pose_message(
             "orientation_z".to_string(),
             "orientation_w".to_string(),
         ]);
-        values.extend_from_slice(&[qx.to_string(), qy.to_string(), qz.to_string(), qw.to_string()]);
+        values.extend_from_slice(&[
+            qx.to_string(),
+            qy.to_string(),
+            qz.to_string(),
+            qw.to_string(),
+        ]);
     }
     Ok(())
 }
@@ -568,8 +570,8 @@ fn extract_imu_message(
     headers: &mut Vec<String>,
     values: &mut Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut deserializer =
-        CdrDeserializer::new(data).map_err(|e| format!("Failed to create CDR deserializer: {e}"))?;
+    let mut deserializer = CdrDeserializer::new(data)
+        .map_err(|e| format!("Failed to create CDR deserializer: {e}"))?;
     let imu =
         Imu::from_cdr(&mut deserializer).map_err(|e| format!("Failed to deserialize IMU: {e}"))?;
     headers.extend_from_slice(&[

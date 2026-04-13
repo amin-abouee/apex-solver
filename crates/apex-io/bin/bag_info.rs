@@ -11,7 +11,7 @@
 //!
 //! Usage: cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
 
-use apex_io::rosbag::{read_bag_metadata_fast, ReaderError};
+use apex_io::rosbag::{ReaderError, read_bag_metadata_fast};
 use chrono::TimeZone;
 use std::env;
 use std::path::Path;

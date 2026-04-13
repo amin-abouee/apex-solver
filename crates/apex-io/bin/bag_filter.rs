@@ -136,7 +136,7 @@ fn main() -> Result<()> {
         other => {
             return Err(
                 format!("Unsupported storage plugin: '{other}'. Use 'sqlite3' or 'mcap'").into(),
-            )
+            );
         }
     };
 
@@ -145,12 +145,10 @@ fn main() -> Result<()> {
         "file" => CompressionMode::File,
         "message" => CompressionMode::Message,
         "storage" => CompressionMode::Storage,
-        other => {
-            return Err(format!(
-                "Unsupported compression mode: '{other}'. Use 'none', 'file', 'message', or 'storage'"
-            )
-            .into())
-        }
+        other => return Err(format!(
+            "Unsupported compression mode: '{other}'. Use 'none', 'file', 'message', or 'storage'"
+        )
+        .into()),
     };
 
     let compression_format = match args.compression_format.as_str() {
@@ -159,7 +157,7 @@ fn main() -> Result<()> {
         other => {
             return Err(
                 format!("Unsupported compression format: '{other}'. Use 'none' or 'zstd'").into(),
-            )
+            );
         }
     };
 
