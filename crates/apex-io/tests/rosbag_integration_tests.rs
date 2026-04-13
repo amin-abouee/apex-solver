@@ -3,14 +3,14 @@
 //! Validates reading ROS2 bag files in SQLite3 and MCAP formats against reference
 //! data extracted from the Python rosbags library.
 
-#[cfg(feature = "rosbag-sqlite")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use apex_io::rosbag::Reader;
-#[cfg(feature = "rosbag-sqlite")]
+
 use std::collections::HashMap;
 
-#[cfg(feature = "rosbag-sqlite")]
 const SQLITE3_BAG_PATH: &str = "tests/test_bags/test_bag_sqlite3";
-#[cfg(feature = "rosbag-mcap")]
+
 const MCAP_BAG_PATH: &str = "tests/test_bags/test_bag_mcap";
 
 // ---------------------------------------------------------------------------
@@ -18,7 +18,7 @@ const MCAP_BAG_PATH: &str = "tests/test_bags/test_bag_mcap";
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "rosbag-sqlite")]
+
 struct ReferenceMessage {
     topic: &'static str,
     msgtype: &'static str,
@@ -27,14 +27,14 @@ struct ReferenceMessage {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "rosbag-sqlite")]
+
 struct ReferenceTopic {
     topic: &'static str,
     msgtype: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(feature = "rosbag-sqlite")]
+
 struct ExpectedBagMetadata {
     message_count: u64,
     topic_count: usize,
@@ -45,7 +45,6 @@ struct ExpectedBagMetadata {
 // Reference data (extracted from Python rosbags library)
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "rosbag-sqlite")]
 fn get_sqlite3_reference_data() -> (
     ExpectedBagMetadata,
     Vec<ReferenceTopic>,
@@ -106,7 +105,6 @@ fn get_sqlite3_reference_data() -> (
 // Validation helpers
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "rosbag-sqlite")]
 fn validate_bag_metadata(reader: &Reader, expected: &ExpectedBagMetadata) -> Result<(), String> {
     let metadata = reader.metadata().ok_or("Failed to get metadata")?;
     let info = metadata.info();
@@ -137,11 +135,9 @@ fn validate_bag_metadata(reader: &Reader, expected: &ExpectedBagMetadata) -> Res
     Ok(())
 }
 
-#[cfg(feature = "rosbag-sqlite")]
 fn validate_topics(reader: &Reader, expected_topics: &[ReferenceTopic]) -> Result<(), String> {
     let connections = reader.connections();
-    let topic_map: HashMap<String, _> =
-        connections.iter().map(|c| (c.topic.clone(), c)).collect();
+    let topic_map: HashMap<String, _> = connections.iter().map(|c| (c.topic.clone(), c)).collect();
 
     for expected_topic in expected_topics {
         match topic_map.get(expected_topic.topic) {
@@ -166,7 +162,6 @@ fn validate_topics(reader: &Reader, expected_topics: &[ReferenceTopic]) -> Resul
     Ok(())
 }
 
-#[cfg(feature = "rosbag-sqlite")]
 fn validate_messages(
     reader: &mut Reader,
     expected_messages: &[ReferenceMessage],
@@ -225,8 +220,6 @@ fn validate_messages(
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_read_sqlite3_bag() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -246,8 +239,6 @@ fn test_read_sqlite3_bag() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_sqlite3_message_validation() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -257,8 +248,6 @@ fn test_sqlite3_message_validation() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_message_filtering_by_topic() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -287,8 +276,6 @@ fn test_message_filtering_by_topic() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_message_filtering_by_timestamp() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -321,8 +308,6 @@ fn test_message_filtering_by_timestamp() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_specific_message_types() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -371,8 +356,6 @@ fn test_specific_message_types() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_comprehensive_message_type_coverage() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -408,8 +391,6 @@ fn test_comprehensive_message_type_coverage() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-sqlite")]
-#[allow(clippy::unwrap_used)]
 fn test_all_messages_readable() {
     let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
     reader.open().expect("Failed to open bag");
@@ -433,7 +414,10 @@ fn test_all_messages_readable() {
         message_count += 1;
     }
 
-    assert_eq!(message_count, 188, "Expected 188 messages, got {message_count}");
+    assert_eq!(
+        message_count, 188,
+        "Expected 188 messages, got {message_count}"
+    );
     assert_eq!(
         topics_seen.len(),
         94,
@@ -447,8 +431,6 @@ fn test_all_messages_readable() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(feature = "rosbag-mcap")]
-#[allow(clippy::unwrap_used)]
 fn test_read_mcap_bag() {
     use apex_io::rosbag::Reader;
 
@@ -468,8 +450,6 @@ fn test_read_mcap_bag() {
 }
 
 #[test]
-#[cfg(feature = "rosbag-mcap")]
-#[allow(clippy::unwrap_used)]
 fn test_mcap_message_validation() {
     use apex_io::rosbag::Reader;
 
@@ -480,7 +460,10 @@ fn test_mcap_message_validation() {
     for message_result in reader.messages().expect("Failed to get messages") {
         let message = message_result.expect("Failed to read message");
         assert!(!message.data.is_empty(), "Message data should not be empty");
-        assert!(!message.topic.is_empty(), "Message topic should not be empty");
+        assert!(
+            !message.topic.is_empty(),
+            "Message topic should not be empty"
+        );
         message_count += 1;
     }
     assert!(message_count > 0, "Should have read some messages");
@@ -492,17 +475,13 @@ fn test_mcap_message_validation() {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg(all(feature = "rosbag-mcap", feature = "rosbag-sqlite"))]
-#[allow(clippy::unwrap_used)]
 fn test_bag_format_consistency() {
     use apex_io::rosbag::Reader;
 
-    let mut sqlite_reader =
-        Reader::new(SQLITE3_BAG_PATH).expect("Failed to create SQLite reader");
+    let mut sqlite_reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create SQLite reader");
     sqlite_reader.open().expect("Failed to open SQLite bag");
 
-    let mut mcap_reader =
-        Reader::new(MCAP_BAG_PATH).expect("Failed to create MCAP reader");
+    let mut mcap_reader = Reader::new(MCAP_BAG_PATH).expect("Failed to create MCAP reader");
     mcap_reader.open().expect("Failed to open MCAP bag");
 
     let sqlite_connections = sqlite_reader.connections();
