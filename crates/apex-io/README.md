@@ -1,6 +1,6 @@
 # apex-io
 
-High-performance file I/O for pose graphs (G2O, TORO) and bundle adjustment (BAL) with SE2/SE3 support.
+High-performance file I/O for robotics data — pose graphs (G2O, TORO), bundle adjustment (BAL), and ROS2 bag files (SQLite3 and MCAP).
 
 ## Overview
 
@@ -414,6 +414,102 @@ let pos_3d: Vec3 = vertex_se2.to_rerun_position_3d(scale, height);
 let (position, rotation): (Vec3, Quat) = vertex_se3.to_rerun_transform(scale);
 ```
 
+## ROS2 Bag Support
+
+The optional `rosbag` module supports reading and writing ROS2 bag files in
+SQLite3 and MCAP storage formats, fully compatible with the Python
+[rosbags](https://gitlab.com/ternaris/rosbags) library.
+
+### Enabling ROS2 Bag Features
+
+| Feature | What it enables |
+|---------|----------------|
+| `rosbag` | Core reader/writer API (no storage backend) |
+| `rosbag-sqlite` | SQLite3 storage backend (includes `rosbag`) |
+| `rosbag-mcap` | MCAP storage backend (includes `rosbag`) |
+| `rosbag-compression` | zstd compression support (includes `rosbag`) |
+
+```toml
+[dependencies]
+apex-io = { version = "0.1.0", features = ["rosbag-sqlite"] }
+```
+
+### Quick Start
+
+```rust
+use apex_io::rosbag::Reader;
+
+let mut reader = Reader::new("path/to/bag")?;
+reader.open()?;
+
+println!("Duration:  {:.2}s", reader.duration() as f64 / 1e9);
+println!("Topics:    {}", reader.topics().len());
+println!("Messages:  {}", reader.message_count());
+
+for msg in reader.messages()? {
+    let msg = msg?;
+    println!("  {} @ {} ns ({} bytes)",
+        msg.connection.topic, msg.timestamp, msg.data.len());
+}
+```
+
+### Writing a Bag
+
+```rust
+use apex_io::rosbag::{Writer, StoragePlugin};
+
+let mut writer = Writer::new("output_bag", None, Some(StoragePlugin::Sqlite3))?;
+writer.open()?;
+
+let conn = writer.add_connection(
+    "/my_topic".to_string(),
+    "std_msgs/msg/String".to_string(),
+    None, None, None, None,
+)?;
+
+writer.write(&conn, 1_000_000_000u64, b"hello")?;
+writer.close()?;
+```
+
+### Fast Metadata Reading
+
+```rust
+use apex_io::rosbag::read_bag_metadata_fast;
+
+let metadata = read_bag_metadata_fast("path/to/bag")?;
+println!("Duration: {:.2}s", metadata.duration() as f64 / 1e9);
+println!("Messages: {}", metadata.message_count());
+```
+
+### Utility Binaries
+
+```bash
+# Inspect a bag (reads only metadata.yaml — very fast)
+cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
+
+# Filter/copy a bag (by topic, time range, or storage format)
+cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \
+    <input> <output> --topics /camera/image_raw,/imu/data
+
+# Extract topic data to CSV or PNG images
+cargo run -p apex-io --features rosbag-sqlite --bin extract_topic_data -- \
+    <bag_path> <topic_name> <output_folder>
+
+# Write a demo bag with 29 supported message types
+cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- [output_path]
+```
+
+### Supported Capabilities
+
+- **94+ ROS2 message types** with CDR deserialization (`geometry_msgs`,
+  `sensor_msgs`, `nav_msgs`, `std_msgs`, `tf2_msgs`, …)
+- **SQLite3 and MCAP** storage formats
+- **zstd compression** (file-level and message-level)
+- **Topic and time-range filtering**
+- **High-performance raw copy** mode (no deserialization overhead)
+- **Batch read** API for bulk operations
+- **Cross-compatible** with the Python rosbags library
+
 ## Dependencies
 
 | Dependency | Purpose |
@@ -427,6 +523,14 @@ let (position, rotation): (Vec3, Quat) = vertex_se3.to_rerun_transform(scale);
 | `serde`, `serde_json` | Serialization support |
 | `chrono` | Timestamps in file headers |
 | `rerun` | Visualization (optional) |
+| `serde_yaml` | YAML metadata parsing (rosbag, optional) |
+| `byteorder` | CDR byte-order handling (rosbag, optional) |
+| `bytes` | Efficient byte buffer (rosbag, optional) |
+| `hex` | Hex encoding for diagnostics (rosbag, optional) |
+| `image` | PNG export for image topics (rosbag, optional) |
+| `rusqlite` | SQLite3 storage backend (rosbag-sqlite, optional) |
+| `zstd` | Compression support (rosbag-compression, optional) |
+| `mcap` | MCAP storage backend (rosbag-mcap, optional) |
 
 ## References
 
