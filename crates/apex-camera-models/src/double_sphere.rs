@@ -79,7 +79,6 @@ impl DoubleSphereCamera {
     /// let camera = DoubleSphereCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -882,8 +881,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = DoubleSphereCamera::from(params_plus.as_slice());
-            let cam_minus = DoubleSphereCamera::from(params_minus.as_slice());
+            let cam_plus = DoubleSphereCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = DoubleSphereCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;

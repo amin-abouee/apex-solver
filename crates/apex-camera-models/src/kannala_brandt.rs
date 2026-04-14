@@ -66,7 +66,6 @@ impl KannalaBrandtCamera {
     /// # Errors
     ///
     /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::KannalaBrandt`].
-    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -980,8 +979,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = KannalaBrandtCamera::from(params_plus.as_slice());
-            let cam_minus = KannalaBrandtCamera::from(params_minus.as_slice());
+            let cam_plus = KannalaBrandtCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = KannalaBrandtCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;

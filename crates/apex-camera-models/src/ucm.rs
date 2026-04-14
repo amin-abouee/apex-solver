@@ -62,7 +62,6 @@ impl UcmCamera {
     /// # Errors
     ///
     /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::UCM`].
-    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -729,8 +728,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = UcmCamera::from(params_plus.as_slice());
-            let cam_minus = UcmCamera::from(params_minus.as_slice());
+            let cam_plus = UcmCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = UcmCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;

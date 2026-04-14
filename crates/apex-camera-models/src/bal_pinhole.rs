@@ -81,7 +81,6 @@ impl BALPinholeCameraStrict {
     /// let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -122,7 +121,6 @@ impl BALPinholeCameraStrict {
     /// # Errors
     ///
     /// Returns [`CameraModelError`] if the focal length is invalid (e.g., negative).
-    #[must_use]
     pub fn new_no_distortion(f: f64) -> Result<Self, CameraModelError> {
         let pinhole = PinholeParams::new(f, f, 0.0, 0.0)?;
         let distortion = DistortionModel::Radial { k1: 0.0, k2: 0.0 };

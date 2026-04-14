@@ -81,7 +81,6 @@ impl PinholeCamera {
     /// let camera = PinholeCamera::new(pinhole, distortion)?;
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
-    #[must_use]
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,

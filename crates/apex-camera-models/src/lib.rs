@@ -159,7 +159,6 @@ pub struct PinholeParams {
 
 impl PinholeParams {
     /// Create new pinhole parameters with validation.
-    #[must_use]
     pub fn new(fx: f64, fy: f64, cx: f64, cy: f64) -> Result<Self, CameraModelError> {
         let params = Self { fx, fy, cx, cy };
         params.validate()?;
@@ -167,7 +166,6 @@ impl PinholeParams {
     }
 
     /// Validate pinhole parameters.
-    #[must_use]
     pub fn validate(&self) -> Result<(), CameraModelError> {
         if self.fx <= 0.0 || self.fy <= 0.0 {
             return Err(CameraModelError::FocalLengthNotPositive {
@@ -253,7 +251,6 @@ fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
 
 impl DistortionModel {
     /// Validate distortion parameters for the given model variant.
-    #[must_use]
     pub fn validate(&self) -> Result<(), CameraModelError> {
         match self {
             DistortionModel::None => Ok(()),
@@ -359,7 +356,6 @@ impl DistortionModel {
 /// z > √ε ≈ 1.49 × 10^-8
 /// ```
 /// where ε is machine epsilon for f64 (≈ 2.22 × 10^-16).
-#[must_use]
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
     if z < f64::EPSILON.sqrt() {
         return Err(CameraModelError::PointAtCameraCenter);
