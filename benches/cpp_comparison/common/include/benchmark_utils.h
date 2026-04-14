@@ -4,7 +4,6 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <sstream>
 #include <string>
 
 namespace benchmark_utils {
@@ -33,7 +32,7 @@ struct BenchmarkResult {
     std::string manifold;
     int vertices = 0;
     int edges = 0;
-    
+
     // Dual metrics: both chi-squared (information-weighted) and unweighted
     double initial_chi2 = 0.0;    // Initial chi-squared cost (r^T * Omega * r)
     double final_chi2 = 0.0;      // Final chi-squared cost
@@ -41,7 +40,7 @@ struct BenchmarkResult {
     double final_cost = 0.0;      // Final unweighted cost
     double improvement_pct = 0.0; // Improvement based on unweighted cost
     double chi2_improvement_pct = 0.0; // Improvement based on chi-squared
-    
+
     double time_ms = 0.0;
     int iterations = 0;
     std::string status;
@@ -70,7 +69,7 @@ inline void print_result(const BenchmarkResult& result) {
 }
 
 // Write multiple benchmark results to CSV with both metrics
-inline bool WriteResultsToCSV(const std::string& output_file, 
+inline bool WriteResultsToCSV(const std::string& output_file,
                                const std::vector<BenchmarkResult>& results) {
     std::ofstream ofs(output_file);
     if (!ofs) {
@@ -92,7 +91,7 @@ inline bool WriteResultsToCSV(const std::string& output_file,
             << result.language << ","
             << result.vertices << ","
             << result.edges << ","
-            << std::fixed << std::setprecision(6) 
+            << std::fixed << std::setprecision(6)
             << result.initial_chi2 << ","
             << result.final_chi2 << ","
             << result.chi2_improvement_pct << ","

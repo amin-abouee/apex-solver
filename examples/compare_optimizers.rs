@@ -230,8 +230,8 @@ fn test_se3_dataset(
         &symbolic_structure,
     )?;
 
-    // Compute initial cost using faer's norm
-    let init_cost = residual.as_ref().squared_norm_l2();
+    // Compute initial cost: 0.5 * ||r||² to match the solver's cost convention
+    let init_cost = 0.5 * residual.as_ref().squared_norm_l2();
 
     info!("Initial cost: {:.6e}", init_cost);
 
@@ -372,8 +372,8 @@ fn test_se2_dataset(
         &symbolic_structure,
     )?;
 
-    // Compute initial cost using faer's norm
-    let init_cost = residual.as_ref().squared_norm_l2();
+    // Compute initial cost: 0.5 * ||r||² to match the solver's cost convention
+    let init_cost = 0.5 * residual.as_ref().squared_norm_l2();
 
     info!("Initial cost: {:.6e}", init_cost);
 
