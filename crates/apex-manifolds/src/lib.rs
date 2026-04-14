@@ -305,11 +305,11 @@ pub trait LieGroup: Clone + PartialEq {
         let result = result_group.log(None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = -result.left_jacobian_inv();
+            *jac_self = result.right_jacobian_inv();
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = result.right_jacobian_inv();
+            *jac_other = -result.left_jacobian_inv();
         }
 
         result
