@@ -1104,8 +1104,7 @@ impl DogLeg {
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
         let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_residual_norm = new_residual.norm_l2();
-        let new_cost = new_residual_norm * new_residual_norm;
+        let new_cost = optimizer::compute_cost(&new_residual);
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
