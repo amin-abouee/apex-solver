@@ -860,7 +860,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 0.1, 0.01];
-        let camera2 = BALPinholeCameraStrict::try_from(&params_slice[..]).unwrap();
+        let camera2 = BALPinholeCameraStrict::try_from(&params_slice[..])?;
         let (cam2_k1, cam2_k2) = camera2.distortion_params();
         assert_eq!(camera2.f, 450.0);
         assert_eq!(cam2_k1, 0.1);

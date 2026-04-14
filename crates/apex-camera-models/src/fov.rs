@@ -874,7 +874,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 460.0, 330.0, 250.0, 2.0];
-        let camera2 = FovCamera::try_from(&params_slice[..]).unwrap();
+        let camera2 = FovCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 450.0);
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

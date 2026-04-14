@@ -1052,7 +1052,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [350.0, 350.0, 330.0, 250.0, 0.2, 0.02, 0.002, 0.003, 0.002];
-        let camera2 = RadTanCamera::try_from(&params_slice[..]).unwrap();
+        let camera2 = RadTanCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 350.0);
         assert_eq!(camera2.pinhole.fy, 350.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

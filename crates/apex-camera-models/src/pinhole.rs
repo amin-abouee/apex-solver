@@ -469,12 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn test_pinhole_from_params() {
+    fn test_pinhole_from_params() -> TestResult {
         let params = vec![600.0, 600.0, 320.0, 240.0];
-        let camera = PinholeCamera::try_from(params.as_slice()).unwrap();
+        let camera = PinholeCamera::try_from(params.as_slice())?;
         assert_eq!(camera.pinhole.fx, 600.0);
         let params_vec: DVector<f64> = (&camera).into();
         assert_eq!(params_vec, DVector::from_vec(params));
+        Ok(())
     }
 
     #[test]
@@ -610,8 +611,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = PinholeCamera::try_from(params_plus.as_slice()).unwrap();
-            let cam_minus = PinholeCamera::try_from(params_minus.as_slice()).unwrap();
+            let cam_plus = PinholeCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = PinholeCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
