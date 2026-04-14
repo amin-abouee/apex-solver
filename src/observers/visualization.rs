@@ -30,7 +30,7 @@
 //! ## Basic Usage
 //!
 //! ```no_run
-//! use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
+//! use apex_solver::{JacobianMode, LevenbergMarquardt, LevenbergMarquardtConfig};
 //! use apex_solver::observers::RerunObserver;
 //! # use apex_solver::core::problem::Problem;
 //! # use std::collections::HashMap;

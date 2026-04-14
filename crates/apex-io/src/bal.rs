@@ -143,6 +143,8 @@ impl BalLoader {
         })?;
 
         // Memory-map file for performance (following g2o.rs pattern)
+        // SAFETY: The file is opened read-only and the handle remains valid for the
+        // lifetime of `mmap`. No other thread modifies the file during this scope.
         let mmap = unsafe {
             memmap2::Mmap::map(&file).map_err(|e| {
                 IoError::Io(e).log_with_source("Failed to memory-map BAL file".to_string())

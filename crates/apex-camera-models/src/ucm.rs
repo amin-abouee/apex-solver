@@ -240,14 +240,17 @@ impl From<&UcmCamera> for [f64; 5] {
 /// # Panics
 ///
 /// Panics if the slice has fewer than 5 elements.
-impl From<&[f64]> for UcmCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 5,
-            "UcmCamera requires at least 5 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for UcmCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 5 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "UcmCamera requires at least 5 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -255,7 +258,7 @@ impl From<&[f64]> for UcmCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::UCM { alpha: params[4] },
-        }
+        })
     }
 }
 
@@ -288,13 +291,7 @@ impl From<[f64; 5]> for UcmCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 5 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or alpha is out of range.
 pub fn try_from_params(params: &[f64]) -> Result<UcmCamera, CameraModelError> {
-    if params.len() < 5 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "UcmCamera requires at least 5 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = UcmCamera::from(params);
+    let camera = UcmCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -731,8 +728,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = UcmCamera::from(params_plus.as_slice());
-            let cam_minus = UcmCamera::from(params_minus.as_slice());
+            let cam_plus = UcmCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = UcmCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -778,7 +775,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 460.0, 330.0, 250.0, 0.8];
-        let camera2 = UcmCamera::from(&params_slice[..]);
+        let camera2 = UcmCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 450.0);
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

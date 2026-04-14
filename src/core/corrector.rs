@@ -249,8 +249,8 @@ impl Corrector {
         // Reference: Ceres Solver corrector.cc
         // https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/corrector.cc
 
-        let r_rtj = residual * residual.transpose() * jacobian.clone();
-        *jacobian = (jacobian.clone() - r_rtj * self.alpha_sq_norm) * self.sqrt_rho1;
+        let r_rtj = residual * residual.transpose() * &*jacobian;
+        *jacobian = (&*jacobian - r_rtj * self.alpha_sq_norm) * self.sqrt_rho1;
     }
 
     /// Apply correction to the residual vector.
