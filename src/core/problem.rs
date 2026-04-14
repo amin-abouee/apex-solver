@@ -596,7 +596,6 @@ impl Problem {
         block_id
     }
 
-    #[must_use]
     pub fn remove_residual_block(&mut self, block_id: usize) -> Option<ResidualBlock> {
         if let Some(residual_block) = self.residual_blocks.remove(&block_id) {
             self.total_residual_dimension -= residual_block.factor.get_dimension();

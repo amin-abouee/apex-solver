@@ -338,7 +338,6 @@ impl HuberLoss {
     /// # }
     /// # example().unwrap();
     /// ```
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -471,7 +470,6 @@ impl CauchyLoss {
     /// # }
     /// # example().unwrap();
     /// ```
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -575,7 +573,6 @@ impl FairLoss {
     /// # Returns
     ///
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -664,7 +661,6 @@ impl GemanMcClureLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -747,7 +743,6 @@ impl WelschLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -838,7 +833,6 @@ impl TukeyBiweightLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -939,7 +933,6 @@ impl AndrewsWaveLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -1029,7 +1022,6 @@ impl RamsayEaLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter a (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -1126,7 +1118,6 @@ impl TrimmedMeanLoss {
     /// # Arguments
     ///
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(
@@ -1206,7 +1197,6 @@ impl LpNormLoss {
     /// # Arguments
     ///
     /// * `p` - The norm parameter (0 < p ≤ 2 for practical use)
-    #[must_use]
     pub fn new(p: f64) -> ApexSolverResult<Self> {
         if p <= 0.0 {
             return Err(CoreError::InvalidInput("p must be positive".to_string()).into());
@@ -1310,7 +1300,6 @@ impl BarronGeneralLoss {
     ///
     /// * `alpha` - The shape parameter (controls robustness)
     /// * `scale` - The scale parameter c (must be positive)
-    #[must_use]
     pub fn new(alpha: f64, scale: f64) -> ApexSolverResult<Self> {
         if scale <= 0.0 {
             return Err(CoreError::InvalidInput("scale must be positive".to_string()).into());
@@ -1439,7 +1428,6 @@ impl TDistributionLoss {
     /// - ν = 5.0: Default, good balance between robustness and efficiency
     /// - ν = 3.0-4.0: More robust to outliers
     /// - ν = 10.0: Less aggressive, closer to Gaussian
-    #[must_use]
     pub fn new(nu: f64) -> ApexSolverResult<Self> {
         if nu <= 0.0 {
             return Err(
@@ -1557,7 +1545,6 @@ impl AdaptiveBarronLoss {
     /// # Recommended Defaults
     ///
     /// - α = 0.0, c = 1.0: General-purpose robust loss
-    #[must_use]
     pub fn new(alpha: f64, scale: f64) -> ApexSolverResult<Self> {
         Ok(AdaptiveBarronLoss {
             inner: BarronGeneralLoss::new(alpha, scale)?,

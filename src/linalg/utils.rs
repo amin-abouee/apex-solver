@@ -36,8 +36,7 @@ pub fn sparse_to_dense(sparse: &SparseColMat<usize, f64>) -> Mat<f64> {
 ///
 /// # Arguments
 /// * `dense` — Dense matrix to convert
-/// * `threshold` — Values with absolute value below this are treated as zero (default: 1e-15)
-#[must_use]
+/// * `threshold` — Values with absolute value below this are treated as zero (default: 1e-15
 pub fn dense_to_sparse(dense: &Mat<f64>, threshold: f64) -> LinAlgResult<SparseColMat<usize, f64>> {
     let nrows = dense.nrows();
     let ncols = dense.ncols();

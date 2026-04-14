@@ -103,14 +103,12 @@ pub enum LinAlgError {
 
 impl LinAlgError {
     /// Log the error with tracing::error and return self for chaining
-    #[must_use]
     pub fn log(self) -> Self {
         error!("{}", self);
         self
     }
 
     /// Log the error with the original source error from a third-party library
-    #[must_use]
     pub fn log_with_source<E: Debug>(self, source_error: E) -> Self {
         error!("{} | Source: {:?}", self, source_error);
         self
