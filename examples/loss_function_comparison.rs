@@ -323,7 +323,8 @@ fn benchmark_dataset_se3(
                 &symbolic_structure,
             )?;
 
-            let initial_cost = residual.as_ref().squared_norm_l2();
+            // 0.5 * ||r||² to match the solver's cost convention
+            let initial_cost = 0.5 * residual.as_ref().squared_norm_l2();
 
             // Run optimization
             match run_optimization(
@@ -514,7 +515,8 @@ fn benchmark_dataset_se2(
                 &symbolic_structure,
             )?;
 
-            let initial_cost = residual.as_ref().squared_norm_l2();
+            // 0.5 * ||r||² to match the solver's cost convention
+            let initial_cost = 0.5 * residual.as_ref().squared_norm_l2();
 
             match run_optimization(
                 &problem,
