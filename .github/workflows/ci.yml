@@ -43,11 +43,14 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-      - name: Run Clippy
+      - name: Check compilation (all crates)
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run Clippy (all crates)
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-      - name: Run tests
-        run: cargo test --workspace --release --verbose
+      - name: Run tests (all crates)
+        run: cargo test --workspace --all-features --release --verbose
 
       - name: Check visualization examples compile
         run: cargo check --examples --features visualization
