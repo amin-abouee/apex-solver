@@ -230,7 +230,7 @@ impl From<DVector<f64>> for SO3 {
 
 impl From<SO3> for DVector<f64> {
     fn from(so3: SO3) -> Self {
-        DVector::from_vec(so3.coeffs().to_vec())
+        DVector::<f64>::from_vec(vec![so3.x(), so3.y(), so3.z(), so3.w()])
     }
 }
 
@@ -1733,5 +1733,15 @@ mod tests {
         assert!(result.norm() > 0.0);
         assert!(j_self[(0, 0)].is_finite());
         assert!(j_vec[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn test_bijective_from_dvector() {
+        let dv_expected = ::nalgebra::dvector![0.5, 0.5, 0.5, 0.5]; // norm 1
+        let so3_expected = SO3::from(dv_expected.clone());
+        let dv_actual = DVector::<f64>::from(so3_expected.clone());
+        let so3_actual = SO3::from(dv_actual.clone());
+        assert_eq!(dv_expected, dv_actual);
+        assert!(so3_expected == so3_actual);
     }
 }
