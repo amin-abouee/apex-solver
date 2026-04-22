@@ -35,6 +35,16 @@ path = "bin/extract_topic_data.rs"
 name = "write_dummy_bag"
 path = "bin/write_dummy_bag.rs"
 
+[[bin]]
+name = "dds_listener"
+path = "bin/dds_listener.rs"
+required-features = ["dds"]
+
+[[bin]]
+name = "dds_multi_listener"
+path = "bin/dds_multi_listener.rs"
+required-features = ["dds"]
+
 [[test]]
 name = "rosbag_integration_tests"
 path = "tests/rosbag_integration_tests.rs"
@@ -69,9 +79,22 @@ mcap.workspace = true
 workspace = true
 optional = true
 
+[dependencies.rustdds]
+workspace = true
+optional = true
+
+[dependencies.tokio]
+workspace = true
+optional = true
+
+[dependencies.futures]
+workspace = true
+optional = true
+
 [features]
 default = []
 visualization = ["dep:rerun"]
+dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
 
 [dev-dependencies]
 tempfile.workspace = true
