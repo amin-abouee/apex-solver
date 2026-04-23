@@ -66,6 +66,7 @@
 //! ```
 
 use crate::core::problem::VariableEnum;
+use crate::error::ErrorLogging;
 use crate::observers::{ObserverError, ObserverResult, OptObserver};
 use apex_io as io;
 use apex_manifolds::se3::SE3;
