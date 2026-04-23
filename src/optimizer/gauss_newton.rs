@@ -117,8 +117,8 @@
 //! - Madsen, K., Nielsen, H. B., & Tingleff, O. (2004). *Methods for Non-Linear Least Squares Problems* (2nd ed.).
 //! - Björck, Å. (1996). *Numerical Methods for Least Squares Problems*. SIAM.
 
-use crate::{core::problem, error, linalg, optimizer};
 use crate::error::ErrorLogging;
+use crate::{core::problem, error, linalg, optimizer};
 use apex_manifolds as manifold;
 
 use std::{collections, time};

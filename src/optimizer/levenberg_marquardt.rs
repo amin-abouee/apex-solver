@@ -147,8 +147,8 @@
 //! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
 use crate::core::problem::{Problem, VariableEnum};
-use crate::error::ErrorLogging;
 use crate::error;
+use crate::error::ErrorLogging;
 use crate::linalg::{
     DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
     SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver,
