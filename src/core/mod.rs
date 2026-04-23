@@ -71,9 +71,7 @@ impl From<crate::linearizer::LinearizerError> for CoreError {
             crate::linearizer::LinearizerError::FactorLinearization(msg) => {
                 CoreError::FactorLinearization(msg)
             }
-            crate::linearizer::LinearizerError::InvalidInput(msg) => {
-                CoreError::InvalidInput(msg)
-            }
+            crate::linearizer::LinearizerError::InvalidInput(msg) => CoreError::InvalidInput(msg),
         }
     }
 }

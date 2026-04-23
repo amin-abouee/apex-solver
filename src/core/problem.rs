@@ -101,11 +101,11 @@ use tracing::warn;
 
 use crate::error::ErrorLogging;
 use crate::{
+    core::CoreResult,
     core::{
         CoreError, corrector::Corrector, loss_functions::LossFunction,
         residual_block::ResidualBlock, variable::Variable,
     },
-    core::CoreResult,
     factors::Factor,
     linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
 };

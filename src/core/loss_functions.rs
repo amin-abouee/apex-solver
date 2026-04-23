@@ -339,9 +339,9 @@ impl HuberLoss {
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(HuberLoss {
             scale,
@@ -471,9 +471,9 @@ impl CauchyLoss {
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         let scale2 = scale * scale;
         Ok(CauchyLoss {
@@ -574,9 +574,9 @@ impl FairLoss {
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(FairLoss { scale })
     }
@@ -662,9 +662,9 @@ impl GemanMcClureLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         let scale2 = scale * scale;
         Ok(GemanMcClureLoss { c: 1.0 / scale2 })
@@ -744,9 +744,9 @@ impl WelschLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         let scale2 = scale * scale;
         Ok(WelschLoss {
@@ -834,9 +834,9 @@ impl TukeyBiweightLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(TukeyBiweightLoss {
             scale,
@@ -934,9 +934,9 @@ impl AndrewsWaveLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(AndrewsWaveLoss {
             scale,
@@ -1023,9 +1023,9 @@ impl RamsayEaLoss {
     /// * `scale` - The scale parameter a (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(RamsayEaLoss {
             scale,
@@ -1119,9 +1119,9 @@ impl TrimmedMeanLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("scale needs to be larger than zero".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "scale needs to be larger than zero".to_string(),
+            ));
         }
         Ok(TrimmedMeanLoss {
             scale2: scale * scale,
@@ -1301,7 +1301,9 @@ impl BarronGeneralLoss {
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(alpha: f64, scale: f64) -> CoreResult<Self> {
         if scale <= 0.0 {
-            return Err(CoreError::InvalidInput("scale must be positive".to_string()));
+            return Err(CoreError::InvalidInput(
+                "scale must be positive".to_string(),
+            ));
         }
         Ok(BarronGeneralLoss {
             alpha,
@@ -1429,9 +1431,9 @@ impl TDistributionLoss {
     /// - ν = 10.0: Less aggressive, closer to Gaussian
     pub fn new(nu: f64) -> CoreResult<Self> {
         if nu <= 0.0 {
-            return Err(
-                CoreError::InvalidInput("degrees of freedom must be positive".to_string()),
-            );
+            return Err(CoreError::InvalidInput(
+                "degrees of freedom must be positive".to_string(),
+            ));
         }
         Ok(TDistributionLoss {
             nu,

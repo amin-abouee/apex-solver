@@ -69,10 +69,10 @@
 
 use nalgebra::{DMatrix, DVector};
 
-use crate::error::ErrorLogging;
 use crate::core::{
     CoreError, CoreResult, corrector::Corrector, loss_functions::LossFunction, variable::Variable,
 };
+use crate::error::ErrorLogging;
 use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
 
