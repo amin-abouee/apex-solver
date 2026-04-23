@@ -94,107 +94,6 @@ impl DdsSubscriber {
     }
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::rosbag::types::{QosDurability, QosReliability};
-
-    #[test]
-    fn ros2_to_dds_topic_strips_leading_slash() {
-        assert_eq!(DdsSubscriber::ros2_to_dds_topic("/imu"), "rt/imu");
-    }
-
-    #[test]
-    fn ros2_to_dds_topic_no_slash() {
-        assert_eq!(DdsSubscriber::ros2_to_dds_topic("imu"), "rt/imu");
-    }
-
-    #[test]
-    fn ros2_to_dds_topic_already_prefixed() {
-        assert_eq!(DdsSubscriber::ros2_to_dds_topic("rt/imu"), "rt/imu");
-    }
-
-    #[test]
-    fn ros2_to_dds_topic_nested_path() {
-        assert_eq!(
-            DdsSubscriber::ros2_to_dds_topic("/camera/image_raw"),
-            "rt/camera/image_raw"
-        );
-    }
-
-    #[test]
-    fn ros2_to_dds_topic_empty_string() {
-        assert_eq!(DdsSubscriber::ros2_to_dds_topic(""), "rt/");
-    }
-
-    #[test]
-    fn ros2_type_to_dds_type_three_part() {
-        assert_eq!(
-            DdsSubscriber::ros2_type_to_dds_type("sensor_msgs/msg/Imu"),
-            "sensor_msgs::msg::dds_::Imu_"
-        );
-    }
-
-    #[test]
-    fn ros2_type_to_dds_type_geometry_msgs() {
-        assert_eq!(
-            DdsSubscriber::ros2_type_to_dds_type("geometry_msgs/msg/PointStamped"),
-            "geometry_msgs::msg::dds_::PointStamped_"
-        );
-    }
-
-    #[test]
-    fn ros2_type_to_dds_type_non_three_part_passthrough() {
-        assert_eq!(
-            DdsSubscriber::ros2_type_to_dds_type("custom_type"),
-            "custom_type"
-        );
-    }
-
-    #[test]
-    fn ros2_type_to_dds_type_two_part_passthrough() {
-        assert_eq!(
-            DdsSubscriber::ros2_type_to_dds_type("sensor_msgs/Imu"),
-            "sensor_msgs/Imu"
-        );
-    }
-
-    #[test]
-    fn subscriber_new_rejects_empty_topic() {
-        let config = DdsSubscriberConfig {
-            topic: String::new(),
-            ..Default::default()
-        };
-        assert!(matches!(
-            DdsSubscriber::new(config),
-            Err(DdsError::InvalidTopicName { .. })
-        ));
-    }
-
-    #[test]
-    fn subscriber_new_accepts_valid_config() {
-        let config = DdsSubscriberConfig {
-            topic: "/imu".to_string(),
-            message_type: "sensor_msgs/msg/Imu".to_string(),
-            ..Default::default()
-        };
-        assert!(DdsSubscriber::new(config).is_ok());
-    }
-
-    #[test]
-    fn subscriber_config_default_values() {
-        let config = DdsSubscriberConfig::default();
-        assert_eq!(config.domain_id, 0);
-        assert_eq!(config.channel_capacity, 4096);
-        assert_eq!(config.history_depth, 10);
-        assert!(config.topic.is_empty());
-        assert!(config.message_type.is_empty());
-        assert!(matches!(config.reliability, QosReliability::BestEffort));
-        assert!(matches!(config.durability, QosDurability::Volatile));
-    }
-}
-
 fn run_reader_loop(
     config: DdsSubscriberConfig,
     dds_topic_name: String,
@@ -210,7 +109,7 @@ fn run_reader_loop(
         .history(history)
         .build();
 
-    let participant = DomainParticipant::new(config.domain_id.into())
+    let participant = DomainParticipant::new(config.domain_id)
         .map_err(|e| DdsError::ParticipantCreation(e.to_string()))?;
 
     let dds_type_name = DdsSubscriber::ros2_type_to_dds_type(&config.message_type);
@@ -315,4 +214,105 @@ fn run_reader_loop(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::rosbag::types::{QosDurability, QosReliability};
+
+    #[test]
+    fn ros2_to_dds_topic_strips_leading_slash() {
+        assert_eq!(DdsSubscriber::ros2_to_dds_topic("/imu"), "rt/imu");
+    }
+
+    #[test]
+    fn ros2_to_dds_topic_no_slash() {
+        assert_eq!(DdsSubscriber::ros2_to_dds_topic("imu"), "rt/imu");
+    }
+
+    #[test]
+    fn ros2_to_dds_topic_already_prefixed() {
+        assert_eq!(DdsSubscriber::ros2_to_dds_topic("rt/imu"), "rt/imu");
+    }
+
+    #[test]
+    fn ros2_to_dds_topic_nested_path() {
+        assert_eq!(
+            DdsSubscriber::ros2_to_dds_topic("/camera/image_raw"),
+            "rt/camera/image_raw"
+        );
+    }
+
+    #[test]
+    fn ros2_to_dds_topic_empty_string() {
+        assert_eq!(DdsSubscriber::ros2_to_dds_topic(""), "rt/");
+    }
+
+    #[test]
+    fn ros2_type_to_dds_type_three_part() {
+        assert_eq!(
+            DdsSubscriber::ros2_type_to_dds_type("sensor_msgs/msg/Imu"),
+            "sensor_msgs::msg::dds_::Imu_"
+        );
+    }
+
+    #[test]
+    fn ros2_type_to_dds_type_geometry_msgs() {
+        assert_eq!(
+            DdsSubscriber::ros2_type_to_dds_type("geometry_msgs/msg/PointStamped"),
+            "geometry_msgs::msg::dds_::PointStamped_"
+        );
+    }
+
+    #[test]
+    fn ros2_type_to_dds_type_non_three_part_passthrough() {
+        assert_eq!(
+            DdsSubscriber::ros2_type_to_dds_type("custom_type"),
+            "custom_type"
+        );
+    }
+
+    #[test]
+    fn ros2_type_to_dds_type_two_part_passthrough() {
+        assert_eq!(
+            DdsSubscriber::ros2_type_to_dds_type("sensor_msgs/Imu"),
+            "sensor_msgs/Imu"
+        );
+    }
+
+    #[test]
+    fn subscriber_new_rejects_empty_topic() {
+        let config = DdsSubscriberConfig {
+            topic: String::new(),
+            ..Default::default()
+        };
+        assert!(matches!(
+            DdsSubscriber::new(config),
+            Err(DdsError::InvalidTopicName { .. })
+        ));
+    }
+
+    #[test]
+    fn subscriber_new_accepts_valid_config() {
+        let config = DdsSubscriberConfig {
+            topic: "/imu".to_string(),
+            message_type: "sensor_msgs/msg/Imu".to_string(),
+            ..Default::default()
+        };
+        assert!(DdsSubscriber::new(config).is_ok());
+    }
+
+    #[test]
+    fn subscriber_config_default_values() {
+        let config = DdsSubscriberConfig::default();
+        assert_eq!(config.domain_id, 0);
+        assert_eq!(config.channel_capacity, 4096);
+        assert_eq!(config.history_depth, 10);
+        assert!(config.topic.is_empty());
+        assert!(config.message_type.is_empty());
+        assert!(matches!(config.reliability, QosReliability::BestEffort));
+        assert!(matches!(config.durability, QosDurability::Volatile));
+    }
 }

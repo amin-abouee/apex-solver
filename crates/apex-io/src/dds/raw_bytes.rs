@@ -1,7 +1,4 @@
-use rustdds::{
-    RepresentationIdentifier,
-    dds::adapters::no_key,
-};
+use rustdds::{RepresentationIdentifier, dds::adapters::no_key};
 
 /// Raw CDR payload bytes including the 4-byte encapsulation header.
 ///
@@ -115,7 +112,8 @@ mod tests {
 
     #[test]
     fn supported_encodings_contains_all_four() {
-        let supported = <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::supported_encodings();
+        let supported =
+            <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::supported_encodings();
         assert!(supported.contains(&RepresentationIdentifier::CDR_LE));
         assert!(supported.contains(&RepresentationIdentifier::CDR_BE));
         assert!(supported.contains(&RepresentationIdentifier::PL_CDR_LE));
@@ -125,7 +123,9 @@ mod tests {
     #[test]
     fn transform_decoded_is_identity() {
         let raw = RawBytes(vec![1, 2, 3]);
-        let out = <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::transform_decoded(raw.clone());
+        let out = <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::transform_decoded(
+            raw.clone(),
+        );
         assert_eq!(out.0, raw.0);
     }
 }

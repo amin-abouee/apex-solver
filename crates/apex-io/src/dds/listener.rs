@@ -64,155 +64,6 @@ fn extract_header_stamp(data: &[u8]) -> Option<f64> {
     Some(sec as f64 + nsec as f64 / 1_000_000_000.0)
 }
 
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use crate::rosbag::types::{
-        Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
-    };
-
-    fn make_raw_message(topic: &str, msg_type: &str, timestamp_ns: u64, raw: Vec<u8>) -> RawMessage {
-        RawMessage {
-            connection: Connection {
-                id: 1,
-                topic: topic.to_string(),
-                message_type: msg_type.to_string(),
-                message_definition: MessageDefinition::default(),
-                type_description_hash: String::new(),
-                message_count: 0,
-                serialization_format: "cdr".to_string(),
-                offered_qos_profiles: Vec::new(),
-            },
-            timestamp: timestamp_ns,
-            raw_data: raw,
-        }
-    }
-
-    // ── extract_header_stamp ─────────────────────────────────────────────────
-
-    #[test]
-    fn extract_header_stamp_too_short_returns_none() {
-        assert!(extract_header_stamp(&[0x00, 0x01, 0x00]).is_none());
-        assert!(extract_header_stamp(&[]).is_none());
-    }
-
-    #[test]
-    fn extract_header_stamp_le_correct_value() {
-        // byte[1] = 0x01 → LE; sec at [4..8], nsec at [8..12]
-        let mut data = [0u8; 12];
-        data[1] = 0x01; // LE
-        data[4..8].copy_from_slice(&10i32.to_le_bytes()); // sec = 10
-        data[8..12].copy_from_slice(&500_000_000u32.to_le_bytes()); // nsec = 0.5s
-        let result = extract_header_stamp(&data).unwrap();
-        let expected = 10.0 + 0.5;
-        assert!((result - expected).abs() < 1e-9);
-    }
-
-    #[test]
-    fn extract_header_stamp_be_correct_value() {
-        let mut data = [0u8; 12];
-        data[1] = 0x00; // BE
-        data[4..8].copy_from_slice(&5i32.to_be_bytes()); // sec = 5
-        data[8..12].copy_from_slice(&0u32.to_be_bytes()); // nsec = 0
-        let result = extract_header_stamp(&data).unwrap();
-        assert!((result - 5.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn extract_header_stamp_zero_returns_some_zero() {
-        let data = [0u8; 12];
-        let result = extract_header_stamp(&data).unwrap();
-        assert!((result - 0.0).abs() < 1e-9);
-    }
-
-    // ── ReceivedMessage::from_raw ─────────────────────────────────────────────
-
-    #[test]
-    fn received_message_recv_timestamp_conversion() {
-        let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 1_000_000_000, vec![0u8; 12]);
-        let msg = ReceivedMessage::from_raw(raw);
-        assert!((msg.recv_timestamp_s - 1.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn received_message_bytes_equals_raw_data_len() {
-        let payload = vec![0x00u8; 20];
-        let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 0, payload.clone());
-        let msg = ReceivedMessage::from_raw(raw);
-        assert_eq!(msg.bytes, 20);
-        assert_eq!(msg.raw_data, payload);
-    }
-
-    #[test]
-    fn received_message_topic_and_type_forwarded() {
-        let raw = make_raw_message("/cam", "sensor_msgs/msg/Image", 0, vec![]);
-        let msg = ReceivedMessage::from_raw(raw);
-        assert_eq!(msg.topic, "/cam");
-        assert_eq!(msg.message_type, "sensor_msgs/msg/Image");
-    }
-
-    #[test]
-    fn received_message_no_header_stamp_on_short_payload() {
-        let raw = make_raw_message("/topic", "std_msgs/msg/String", 0, vec![0u8; 3]);
-        let msg = ReceivedMessage::from_raw(raw);
-        assert!(msg.msg_timestamp_s.is_none());
-    }
-
-    // ── DdsListener ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn listener_new_stores_domain_id() {
-        let listener = DdsListener::new(42);
-        assert_eq!(listener.domain_id, 42);
-    }
-
-    #[test]
-    fn listener_new_empty_subscriptions() {
-        let listener = DdsListener::new(0);
-        assert!(listener.subscriptions.is_empty());
-    }
-
-    #[test]
-    fn listener_new_default_channel_capacity() {
-        let listener = DdsListener::new(0);
-        assert_eq!(listener.channel_capacity, 4096);
-    }
-
-    #[test]
-    fn listener_subscribe_grows_subscriptions() {
-        let listener = DdsListener::new(0)
-            .subscribe("/imu", "sensor_msgs/msg/Imu", |_: ReceivedMessage| {})
-            .subscribe("/gps", "sensor_msgs/msg/NavSatFix", |_: ReceivedMessage| {});
-        assert_eq!(listener.subscriptions.len(), 2);
-    }
-
-    #[test]
-    fn listener_subscribe_sets_config_fields() {
-        let listener = DdsListener::new(7)
-            .subscribe("/cam", "sensor_msgs/msg/Image", |_: ReceivedMessage| {});
-        let sub = &listener.subscriptions[0];
-        assert_eq!(sub.config.topic, "/cam");
-        assert_eq!(sub.config.message_type, "sensor_msgs/msg/Image");
-        assert_eq!(sub.config.domain_id, 7);
-        assert!(matches!(sub.config.reliability, QosReliability::BestEffort));
-        assert!(matches!(sub.config.durability, QosDurability::Volatile));
-    }
-
-    #[tokio::test]
-    async fn listener_spin_for_returns_immediately_with_no_subscriptions() {
-        DdsListener::new(0)
-            .spin_for(std::time::Duration::from_millis(1))
-            .await;
-    }
-
-    #[tokio::test]
-    async fn listener_spin_returns_immediately_with_no_subscriptions() {
-        // spin() → run(None) → returns immediately when handles is empty
-        DdsListener::new(0).spin().await;
-    }
-}
-
 // ── DdsListener ───────────────────────────────────────────────────────────────
 
 struct Subscription {
@@ -357,5 +208,150 @@ impl DdsListener {
         for handle in handles {
             handle.abort();
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::rosbag::types::{
+        Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
+    };
+
+    fn make_raw_message(
+        topic: &str,
+        msg_type: &str,
+        timestamp_ns: u64,
+        raw: Vec<u8>,
+    ) -> RawMessage {
+        RawMessage {
+            connection: Connection {
+                id: 1,
+                topic: topic.to_string(),
+                message_type: msg_type.to_string(),
+                message_definition: MessageDefinition::default(),
+                type_description_hash: String::new(),
+                message_count: 0,
+                serialization_format: "cdr".to_string(),
+                offered_qos_profiles: Vec::new(),
+            },
+            timestamp: timestamp_ns,
+            raw_data: raw,
+        }
+    }
+
+    #[test]
+    fn extract_header_stamp_too_short_returns_none() {
+        assert!(extract_header_stamp(&[0x00, 0x01, 0x00]).is_none());
+        assert!(extract_header_stamp(&[]).is_none());
+    }
+
+    #[test]
+    fn extract_header_stamp_le_correct_value() {
+        let mut data = [0u8; 12];
+        data[1] = 0x01;
+        data[4..8].copy_from_slice(&10i32.to_le_bytes());
+        data[8..12].copy_from_slice(&500_000_000u32.to_le_bytes());
+        let result = extract_header_stamp(&data).unwrap();
+        assert!((result - 10.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extract_header_stamp_be_correct_value() {
+        let mut data = [0u8; 12];
+        data[1] = 0x00;
+        data[4..8].copy_from_slice(&5i32.to_be_bytes());
+        data[8..12].copy_from_slice(&0u32.to_be_bytes());
+        let result = extract_header_stamp(&data).unwrap();
+        assert!((result - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extract_header_stamp_zero_returns_some_zero() {
+        let data = [0u8; 12];
+        let result = extract_header_stamp(&data).unwrap();
+        assert!((result - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn received_message_recv_timestamp_conversion() {
+        let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 1_000_000_000, vec![0u8; 12]);
+        let msg = ReceivedMessage::from_raw(raw);
+        assert!((msg.recv_timestamp_s - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn received_message_bytes_equals_raw_data_len() {
+        let payload = vec![0x00u8; 20];
+        let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 0, payload.clone());
+        let msg = ReceivedMessage::from_raw(raw);
+        assert_eq!(msg.bytes, 20);
+        assert_eq!(msg.raw_data, payload);
+    }
+
+    #[test]
+    fn received_message_topic_and_type_forwarded() {
+        let raw = make_raw_message("/cam", "sensor_msgs/msg/Image", 0, vec![]);
+        let msg = ReceivedMessage::from_raw(raw);
+        assert_eq!(msg.topic, "/cam");
+        assert_eq!(msg.message_type, "sensor_msgs/msg/Image");
+    }
+
+    #[test]
+    fn received_message_no_header_stamp_on_short_payload() {
+        let raw = make_raw_message("/topic", "std_msgs/msg/String", 0, vec![0u8; 3]);
+        let msg = ReceivedMessage::from_raw(raw);
+        assert!(msg.msg_timestamp_s.is_none());
+    }
+
+    #[test]
+    fn listener_new_stores_domain_id() {
+        let listener = DdsListener::new(42);
+        assert_eq!(listener.domain_id, 42);
+    }
+
+    #[test]
+    fn listener_new_empty_subscriptions() {
+        let listener = DdsListener::new(0);
+        assert!(listener.subscriptions.is_empty());
+    }
+
+    #[test]
+    fn listener_new_default_channel_capacity() {
+        let listener = DdsListener::new(0);
+        assert_eq!(listener.channel_capacity, 4096);
+    }
+
+    #[test]
+    fn listener_subscribe_grows_subscriptions() {
+        let listener = DdsListener::new(0)
+            .subscribe("/imu", "sensor_msgs/msg/Imu", |_: ReceivedMessage| {})
+            .subscribe("/gps", "sensor_msgs/msg/NavSatFix", |_: ReceivedMessage| {});
+        assert_eq!(listener.subscriptions.len(), 2);
+    }
+
+    #[test]
+    fn listener_subscribe_sets_config_fields() {
+        let listener =
+            DdsListener::new(7).subscribe("/cam", "sensor_msgs/msg/Image", |_: ReceivedMessage| {});
+        let sub = &listener.subscriptions[0];
+        assert_eq!(sub.config.topic, "/cam");
+        assert_eq!(sub.config.message_type, "sensor_msgs/msg/Image");
+        assert_eq!(sub.config.domain_id, 7);
+        assert!(matches!(sub.config.reliability, QosReliability::BestEffort));
+        assert!(matches!(sub.config.durability, QosDurability::Volatile));
+    }
+
+    #[tokio::test]
+    async fn listener_spin_for_returns_immediately_with_no_subscriptions() {
+        DdsListener::new(0)
+            .spin_for(std::time::Duration::from_millis(1))
+            .await;
+    }
+
+    #[tokio::test]
+    async fn listener_spin_returns_immediately_with_no_subscriptions() {
+        DdsListener::new(0).spin().await;
     }
 }
