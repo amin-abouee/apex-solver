@@ -34,9 +34,10 @@ use faer::sparse::{SparseColMat, Triplet};
 use faer::{Col, Mat};
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
-use tracing::error;
+
 
 use crate::core::problem::{Problem, VariableEnum};
+use crate::error::ErrorLogging;
 use crate::{
     core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
@@ -82,56 +83,6 @@ pub enum LinearizerError {
     /// Invalid input (e.g., SparseMode requires symbolic structure)
     #[error("Invalid input: {0}")]
     InvalidInput(String),
-}
-
-impl LinearizerError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the linearizer module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::linearizer::LinearizerError;
-    /// # fn operation() -> Result<(), LinearizerError> { Ok(()) }
-    /// # fn example() -> Result<(), LinearizerError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error for debugging context
-    ///
-    /// This method logs both the `LinearizerError` and the underlying error
-    /// from external libraries or internal operations.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error (must implement Debug)
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::linearizer::LinearizerError;
-    /// # fn matrix_operation() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), LinearizerError> {
-    /// matrix_operation()
-    ///     .map_err(|e| {
-    ///         LinearizerError::SymbolicStructure(
-    ///             "Failed to build sparse matrix structure".to_string()
-    ///         )
-    ///         .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for linearizer module operations

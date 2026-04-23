@@ -13,6 +13,7 @@ use faer::{Col, Mat};
 use rayon::prelude::*;
 
 use crate::linearizer::{LinearizerError, LinearizerResult};
+use crate::error::ErrorLogging;
 
 use super::super::linearize_block;
 use crate::core::problem::{Problem, VariableEnum};
