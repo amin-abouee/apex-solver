@@ -7,7 +7,6 @@
 //! - Dog Leg algorithm
 
 use crate::core::problem::{Problem, VariableEnum};
-use crate::error;
 use crate::linalg::{
     self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
@@ -97,8 +96,27 @@ pub enum OptimizerError {
     NumericalInstability(String),
 
     /// Linear algebra operation failed
+    ///
+    /// **Convention**: When a `LinAlgError` occurs during optimization, it wraps
+    /// here via `?` to preserve optimizer context. This ensures the error
+    /// propagates as `ApexSolverError::Optimizer(OptimizerError::LinAlg(...))`
+    /// at the API level, not `ApexSolverError::LinearAlgebra(...)`.
     #[error("Linear algebra error: {0}")]
     LinAlg(#[from] linalg::LinAlgError),
+
+    /// Core module error (problem construction, factor linearization)
+    ///
+    /// Wraps errors from the core module that occur during optimization,
+    /// such as symbolic structure failures or parallel computation errors.
+    #[error("Core error: {0}")]
+    Core(#[from] crate::core::CoreError),
+
+    /// Linearizer error (Jacobian assembly, symbolic structure)
+    ///
+    /// Wraps errors from the linearizer module that occur during optimization,
+    /// such as symbolic structure failures or variable mapping errors.
+    #[error("Linearizer error: {0}")]
+    Linearizer(#[from] crate::linearizer::LinearizerError),
 
     /// Problem has no variables to optimize
     #[error("Problem has no variables to optimize")]
@@ -552,7 +570,7 @@ pub fn process_jacobian(
 pub fn initialize_optimization_state(
     problem: &Problem,
     initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-) -> Result<InitializedState, error::ApexSolverError> {
+) -> OptimizerResult<InitializedState> {
     let variables = problem.initialize_variables(initial_params);
 
     let mut variable_index_map = HashMap::new();
