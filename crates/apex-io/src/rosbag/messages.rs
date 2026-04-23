@@ -915,6 +915,568 @@ impl FromCdr for Duration {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    // ── CDR byte-sequence builders ────────────────────────────────────────
+
+    fn le_header() -> Vec<u8> {
+        vec![0x00, 0x01, 0x00, 0x00]
+    }
+
+    fn push_u32_le(buf: &mut Vec<u8>, v: u32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_i32_le(buf: &mut Vec<u8>, v: i32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_f64_le(buf: &mut Vec<u8>, v: f64) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_f32_le(buf: &mut Vec<u8>, v: f32) {
+        buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    fn push_string(buf: &mut Vec<u8>, s: &str) {
+        let with_null = format!("{s}\0");
+        push_u32_le(buf, with_null.len() as u32);
+        buf.extend_from_slice(with_null.as_bytes());
+    }
+
+    fn push_empty_string(buf: &mut Vec<u8>) {
+        push_u32_le(buf, 0);
+    }
+
+    // align buf to `align` bytes (padding from header start)
+    fn align_to(buf: &mut Vec<u8>, align: usize) {
+        while buf.len() % align != 0 {
+            buf.push(0x00);
+        }
+    }
+
+    // ── Time ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn time_from_cdr() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 1000);
+        push_u32_le(&mut data, 500_000_000);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let t = Time::from_cdr(&mut d).unwrap();
+        assert_eq!(t.sec, 1000);
+        assert_eq!(t.nanosec, 500_000_000);
+    }
+
+    #[test]
+    fn time_from_cdr_zero() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let t = Time::from_cdr(&mut d).unwrap();
+        assert_eq!(t.sec, 0);
+        assert_eq!(t.nanosec, 0);
+    }
+
+    // ── Header ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn header_from_cdr_empty_frame_id() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 10); // stamp.sec
+        push_u32_le(&mut data, 0);  // stamp.nanosec
+        push_empty_string(&mut data); // frame_id = ""
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let h = Header::from_cdr(&mut d).unwrap();
+        assert_eq!(h.stamp.sec, 10);
+        assert_eq!(h.stamp.nanosec, 0);
+        assert_eq!(h.frame_id, "");
+    }
+
+    #[test]
+    fn header_from_cdr_with_frame_id() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 5);   // sec
+        push_u32_le(&mut data, 100); // nanosec
+        push_string(&mut data, "map");
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let h = Header::from_cdr(&mut d).unwrap();
+        assert_eq!(h.stamp.sec, 5);
+        assert_eq!(h.frame_id, "map");
+    }
+
+    // ── Vector3 ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn vector3_from_cdr() {
+        let mut data = le_header();
+        push_f64_le(&mut data, 1.0);
+        push_f64_le(&mut data, 2.0);
+        push_f64_le(&mut data, 3.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let v = Vector3::from_cdr(&mut d).unwrap();
+        assert!((v.x - 1.0).abs() < 1e-12);
+        assert!((v.y - 2.0).abs() < 1e-12);
+        assert!((v.z - 3.0).abs() < 1e-12);
+    }
+
+    // ── Quaternion ───────────────────────────────────────────────────────
+
+    #[test]
+    fn quaternion_from_cdr_identity() {
+        let mut data = le_header();
+        push_f64_le(&mut data, 0.0); // x
+        push_f64_le(&mut data, 0.0); // y
+        push_f64_le(&mut data, 0.0); // z
+        push_f64_le(&mut data, 1.0); // w
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let q = Quaternion::from_cdr(&mut d).unwrap();
+        assert!((q.w - 1.0).abs() < 1e-12);
+        assert!((q.x - 0.0).abs() < 1e-12);
+    }
+
+    // ── Point ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn point_from_cdr() {
+        let mut data = le_header();
+        push_f64_le(&mut data, -1.5);
+        push_f64_le(&mut data, 2.5);
+        push_f64_le(&mut data, 0.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let p = Point::from_cdr(&mut d).unwrap();
+        assert!((p.x - (-1.5)).abs() < 1e-12);
+        assert!((p.y - 2.5).abs() < 1e-12);
+    }
+
+    // ── Pose ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn pose_from_cdr() {
+        let mut data = le_header();
+        // position
+        push_f64_le(&mut data, 1.0);
+        push_f64_le(&mut data, 2.0);
+        push_f64_le(&mut data, 3.0);
+        // orientation
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 1.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let pose = Pose::from_cdr(&mut d).unwrap();
+        assert!((pose.position.x - 1.0).abs() < 1e-12);
+        assert!((pose.orientation.w - 1.0).abs() < 1e-12);
+    }
+
+    // ── Transform ────────────────────────────────────────────────────────
+
+    #[test]
+    fn transform_from_cdr() {
+        let mut data = le_header();
+        // translation
+        push_f64_le(&mut data, 5.0);
+        push_f64_le(&mut data, 6.0);
+        push_f64_le(&mut data, 7.0);
+        // rotation
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 1.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let t = Transform::from_cdr(&mut d).unwrap();
+        assert!((t.translation.x - 5.0).abs() < 1e-12);
+        assert!((t.rotation.w - 1.0).abs() < 1e-12);
+    }
+
+    // ── NavSatStatus ─────────────────────────────────────────────────────
+
+    #[test]
+    fn nav_sat_status_from_cdr() {
+        let mut data = le_header();
+        data.push(2u8); // status = 2 (i8)
+        data.push(0x00); // align u16 to 2
+        data.extend_from_slice(&3u16.to_le_bytes()); // service = 3
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let s = NavSatStatus::from_cdr(&mut d).unwrap();
+        assert_eq!(s.status, 2);
+        assert_eq!(s.service, 3);
+    }
+
+    // ── StdString ────────────────────────────────────────────────────────
+
+    #[test]
+    fn std_string_from_cdr() {
+        let mut data = le_header();
+        push_string(&mut data, "hello world");
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let s = StdString::from_cdr(&mut d).unwrap();
+        assert_eq!(s.data, "hello world");
+    }
+
+    // ── Duration ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn duration_from_cdr() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 10);
+        push_u32_le(&mut data, 999);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let dur = Duration::from_cdr(&mut d).unwrap();
+        assert_eq!(dur.sec, 10);
+        assert_eq!(dur.nanosec, 999);
+    }
+
+    // ── Twist ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn twist_from_cdr() {
+        let mut data = le_header();
+        // linear
+        push_f64_le(&mut data, 1.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        // angular
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.5);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let t = Twist::from_cdr(&mut d).unwrap();
+        assert!((t.linear.x - 1.0).abs() < 1e-12);
+        assert!((t.angular.z - 0.5).abs() < 1e-12);
+    }
+
+    // ── Point32 / ColorRGBA ──────────────────────────────────────────────
+
+    #[test]
+    fn point32_from_cdr() {
+        let mut data = le_header();
+        push_f32_le(&mut data, 1.0f32);
+        push_f32_le(&mut data, 2.0f32);
+        push_f32_le(&mut data, 3.0f32);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let p = Point32::from_cdr(&mut d).unwrap();
+        assert!((p.x - 1.0f32).abs() < 1e-6);
+    }
+
+    #[test]
+    fn color_rgba_from_cdr() {
+        let mut data = le_header();
+        push_f32_le(&mut data, 1.0f32);
+        push_f32_le(&mut data, 0.5f32);
+        push_f32_le(&mut data, 0.0f32);
+        push_f32_le(&mut data, 0.8f32);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let c = ColorRGBA::from_cdr(&mut d).unwrap();
+        assert!((c.r - 1.0f32).abs() < 1e-6);
+        assert!((c.a - 0.8f32).abs() < 1e-6);
+    }
+
+    // ── Image ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn image_from_cdr() {
+        let mut data = le_header();
+        // header: sec=1, nanosec=0, frame_id=""
+        push_i32_le(&mut data, 1);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data); // frame_id
+        // height=2, width=3
+        push_u32_le(&mut data, 2);
+        push_u32_le(&mut data, 3);
+        // encoding="rgb8\0" (5 bytes)
+        push_string(&mut data, "rgb8");
+        // is_bigendian=0
+        data.push(0u8);
+        // step: align to 4
+        align_to(&mut data, 4);
+        push_u32_le(&mut data, 9); // step = width * 3
+        // data: 6 bytes
+        push_u32_le(&mut data, 6);
+        data.extend_from_slice(&[1u8, 2, 3, 4, 5, 6]);
+
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let img = Image::from_cdr(&mut d).unwrap();
+        assert_eq!(img.height, 2);
+        assert_eq!(img.width, 3);
+        assert_eq!(img.encoding, "rgb8");
+        assert_eq!(img.is_bigendian, 0);
+        assert_eq!(img.step, 9);
+        assert_eq!(img.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    // ── PointCloud2 ──────────────────────────────────────────────────────
+
+    #[test]
+    fn point_cloud2_from_cdr_empty_fields() {
+        let mut data = le_header();
+        // header: sec=0, nanosec=0, frame_id=""
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data);
+        // height=1, width=0
+        push_u32_le(&mut data, 1);
+        push_u32_le(&mut data, 0);
+        // fields: sequence length=0
+        push_u32_le(&mut data, 0);
+        // is_bigendian
+        data.push(0u8);
+        // point_step: align to 4
+        align_to(&mut data, 4);
+        push_u32_le(&mut data, 0);
+        // row_step
+        push_u32_le(&mut data, 0);
+        // data: empty
+        push_u32_le(&mut data, 0);
+        // is_dense
+        data.push(0u8);
+
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let pc = PointCloud2::from_cdr(&mut d).unwrap();
+        assert_eq!(pc.height, 1);
+        assert_eq!(pc.width, 0);
+        assert!(pc.fields.is_empty());
+        assert!(pc.data.is_empty());
+    }
+
+    // ── PointField ───────────────────────────────────────────────────────
+
+    #[test]
+    fn point_field_from_cdr() {
+        let mut data = le_header();
+        push_string(&mut data, "x");
+        // offset: align to 4 from current position
+        align_to(&mut data, 4);
+        push_u32_le(&mut data, 0);  // offset
+        data.push(7u8);             // datatype = FLOAT32
+        // count: align to 4
+        align_to(&mut data, 4);
+        push_u32_le(&mut data, 1);  // count
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let pf = PointField::from_cdr(&mut d).unwrap();
+        assert_eq!(pf.name, "x");
+        assert_eq!(pf.offset, 0);
+        assert_eq!(pf.datatype, 7);
+        assert_eq!(pf.count, 1);
+    }
+
+    // ── TwistWithCovariance ──────────────────────────────────────────────
+
+    #[test]
+    fn twist_with_covariance_from_cdr() {
+        let mut data = le_header();
+        // Twist: 6 f64 = 48 bytes
+        for _ in 0..6 {
+            push_f64_le(&mut data, 0.0);
+        }
+        // Covariance: 36 f64 = 288 bytes
+        for _ in 0..36 {
+            push_f64_le(&mut data, 0.0);
+        }
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let twc = TwistWithCovariance::from_cdr(&mut d).unwrap();
+        assert!((twc.covariance[0] - 0.0).abs() < 1e-12);
+    }
+
+    // ── TransformStamped ─────────────────────────────────────────────────
+
+    #[test]
+    fn transform_stamped_from_cdr() {
+        let mut data = le_header();
+        // header: sec, nanosec, empty frame_id
+        push_i32_le(&mut data, 1);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data);
+        // child_frame_id
+        push_string(&mut data, "base_link");
+        // transform: translation (3 f64) + rotation (4 f64)
+        for _ in 0..3 {
+            push_f64_le(&mut data, 0.0);
+        }
+        push_f64_le(&mut data, 0.0); // x
+        push_f64_le(&mut data, 0.0); // y
+        push_f64_le(&mut data, 0.0); // z
+        push_f64_le(&mut data, 1.0); // w
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let ts = TransformStamped::from_cdr(&mut d).unwrap();
+        assert_eq!(ts.child_frame_id, "base_link");
+        assert!((ts.transform.rotation.w - 1.0).abs() < 1e-12);
+    }
+
+    // ── Imu ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn imu_from_cdr_with_full_buffer() {
+        // 324 bytes total: CDR header + enough zeros for the full Imu
+        let mut data = vec![0u8; 324];
+        data[1] = 0x01; // LE
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        // IMU parsing skips to pos 28, reads quaternion + covariance + vectors
+        // Just check it doesn't panic/crash
+        let _ = Imu::from_cdr(&mut d); // may succeed or fail gracefully
+    }
+
+    // ── PointStamped ─────────────────────────────────────────────────────
+
+    #[test]
+    fn point_stamped_from_cdr() {
+        let mut data = le_header();
+        // header: sec=0, nanosec=0, frame_id=""
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data); // pos = 16 after header
+        // pad to 28 (12 bytes)
+        data.extend_from_slice(&[0u8; 12]);
+        // Point x, y, z
+        push_f64_le(&mut data, 3.0);
+        push_f64_le(&mut data, 4.0);
+        push_f64_le(&mut data, 5.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let ps = PointStamped::from_cdr(&mut d).unwrap();
+        assert!((ps.point.x - 3.0).abs() < 1e-12);
+        assert!((ps.point.y - 4.0).abs() < 1e-12);
+    }
+
+    // ── NavSatFix ────────────────────────────────────────────────────────
+
+    #[test]
+    fn nav_sat_fix_from_cdr() {
+        let mut data = le_header();
+        // header: sec, nanosec, empty frame_id = 16 bytes
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data); // pos = 16
+        // skip to 20 (4 bytes)
+        data.extend_from_slice(&[0u8; 4]); // pos = 20
+        // latitude, longitude, altitude
+        push_f64_le(&mut data, 37.5);
+        push_f64_le(&mut data, -122.0);
+        push_f64_le(&mut data, 100.0);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let fix = NavSatFix::from_cdr(&mut d).unwrap();
+        assert!((fix.latitude - 37.5).abs() < 1e-9);
+        assert!((fix.longitude - (-122.0)).abs() < 1e-9);
+    }
+
+    // ── PoseWithCovariance / PoseWithCovarianceStamped ───────────────────
+
+    #[test]
+    fn pose_with_covariance_from_cdr() {
+        // Give a large zero buffer so the heuristic parser has room
+        let mut data = vec![0u8; 400];
+        data[1] = 0x01; // LE
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let _ = PoseWithCovariance::from_cdr(&mut d); // check no panic
+    }
+
+    #[test]
+    fn pose_with_covariance_stamped_from_cdr() {
+        let mut data = vec![0u8; 400];
+        data[1] = 0x01;
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let _ = PoseWithCovarianceStamped::from_cdr(&mut d);
+    }
+
+    // ── Odometry ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn odometry_from_cdr() {
+        let mut data = vec![0u8; 600];
+        data[1] = 0x01;
+        // Put a plausible quaternion at various offsets so the heuristic finds it
+        let w_bytes = 1.0f64.to_le_bytes();
+        // Try offset 84 (7 f64 * 8 + 28 header+skip = 84)
+        let off = 84;
+        if off + 8 <= data.len() {
+            data[off..off + 8].copy_from_slice(&w_bytes);
+        }
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let _ = Odometry::from_cdr(&mut d);
+    }
+
+    // ── deserialize_message dispatch ─────────────────────────────────────
+
+    #[test]
+    fn deserialize_message_unknown_type_returns_err() {
+        let data = vec![0x00u8, 0x01, 0x00, 0x00];
+        let result = deserialize_message(&data, "unknown_pkg/msg/Unknown");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_message_too_short_returns_err() {
+        let result = deserialize_message(&[0x00, 0x01], "sensor_msgs/msg/Imu");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_point_stamped() {
+        // Build minimal valid PointStamped CDR
+        let mut data = le_header();
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data);
+        data.extend_from_slice(&[0u8; 12]); // pad to 28
+        push_f64_le(&mut data, 1.0);
+        push_f64_le(&mut data, 2.0);
+        push_f64_le(&mut data, 3.0);
+        let result = deserialize_message(&data, "geometry_msgs/msg/PointStamped");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_nav_sat_fix() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data);
+        data.extend_from_slice(&[0u8; 4]); // pad to 20
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        push_f64_le(&mut data, 0.0);
+        let result = deserialize_message(&data, "sensor_msgs/msg/NavSatFix");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_transform_stamped() {
+        let mut data = le_header();
+        push_i32_le(&mut data, 0);
+        push_u32_le(&mut data, 0);
+        push_empty_string(&mut data);
+        push_empty_string(&mut data); // child_frame_id
+        for _ in 0..7 { push_f64_le(&mut data, 0.0); }
+        let result = deserialize_message(&data, "geometry_msgs/msg/TransformStamped");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_odometry() {
+        let mut data = vec![0u8; 600];
+        data[1] = 0x01;
+        let _ = deserialize_message(&data, "nav_msgs/msg/Odometry");
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_pose_with_covariance_stamped() {
+        let mut data = vec![0u8; 400];
+        data[1] = 0x01;
+        let _ = deserialize_message(&data, "geometry_msgs/msg/PoseWithCovarianceStamped");
+    }
+
+    #[test]
+    fn deserialize_message_dispatches_imu() {
+        let mut data = vec![0u8; 324];
+        data[1] = 0x01;
+        let _ = deserialize_message(&data, "sensor_msgs/msg/Imu");
+    }
+}
+
 /// Deserialize a message from CDR data based on its type name
 pub fn deserialize_message(data: &[u8], message_type: &str) -> Result<Box<dyn std::fmt::Debug>> {
     let mut deserializer = CdrDeserializer::new(data)?;
