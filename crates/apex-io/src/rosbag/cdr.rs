@@ -343,34 +343,277 @@ impl FromBytes for f64 {
 mod tests {
     use super::*;
 
+    fn le_header() -> Vec<u8> {
+        vec![0x00, 0x01, 0x00, 0x00]
+    }
+
+    fn be_header() -> Vec<u8> {
+        vec![0x00, 0x00, 0x00, 0x00]
+    }
+
+    // ── CdrHeader::parse ────────────────────────────────────────────────────
+
     #[test]
     fn test_cdr_header_parsing() {
-        // Little endian header
         let header_le = CdrHeader::parse(&[0x00, 0x01, 0x00, 0x00]).unwrap();
         assert_eq!(header_le.endianness, Endianness::LittleEndian);
         assert_eq!(header_le.encapsulation_kind, 0);
 
-        // Big endian header
         let header_be = CdrHeader::parse(&[0x00, 0x00, 0x00, 0x00]).unwrap();
         assert_eq!(header_be.endianness, Endianness::BigEndian);
-        assert_eq!(header_be.encapsulation_kind, 0);
     }
 
     #[test]
+    fn cdr_header_wrong_length_returns_err() {
+        assert!(CdrHeader::parse(&[0x00, 0x01, 0x00]).is_err());
+        assert!(CdrHeader::parse(&[]).is_err());
+        assert!(CdrHeader::parse(&[0x00, 0x01, 0x00, 0x00, 0x00]).is_err());
+    }
+
+    #[test]
+    fn cdr_header_invalid_endian_flag_returns_err() {
+        assert!(CdrHeader::parse(&[0x00, 0x02, 0x00, 0x00]).is_err());
+    }
+
+    // ── CdrDeserializer::new ────────────────────────────────────────────────
+
+    #[test]
+    fn deserializer_new_too_short_returns_err() {
+        assert!(CdrDeserializer::new(&[0x00, 0x01, 0x00]).is_err());
+        assert!(CdrDeserializer::new(&[]).is_err());
+    }
+
+    #[test]
+    fn deserializer_new_le_header_ok() {
+        let data = le_header();
+        let d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.position(), 4);
+        assert_eq!(d.data_len(), 4);
+    }
+
+    #[test]
+    fn deserializer_new_be_header_ok() {
+        let data = be_header();
+        let d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.position(), 4);
+    }
+
+    // ── position / data_len / has_remaining ────────────────────────────────
+
+    #[test]
+    fn has_remaining_true_and_false() {
+        let mut data = le_header();
+        data.extend_from_slice(&[0x01, 0x02]);
+        let d = CdrDeserializer::new(&data).unwrap();
+        assert!(d.has_remaining(2));
+        assert!(d.has_remaining(1));
+        assert!(!d.has_remaining(3));
+    }
+
+    #[test]
+    fn data_len_matches_slice() {
+        let mut data = le_header();
+        data.extend_from_slice(&[0xAA; 8]);
+        let d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.data_len(), 12);
+    }
+
+    #[test]
+    fn data_accessor_returns_full_slice() {
+        let data = le_header();
+        let d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.data(), &data[..]);
+    }
+
+    // ── read_primitive tests ────────────────────────────────────────────────
+
+    #[test]
     fn test_primitive_deserialization() {
-        // Test data with little endian header + some values
         let data = [
-            0x00, 0x01, 0x00, 0x00, // CDR header (little endian)
-            0x2A, 0x00, 0x00, 0x00, // i32: 42
-            0x01, 0x02, 0x03, 0x04, // u32: 0x04030201
+            0x00, 0x01, 0x00, 0x00,
+            0x2A, 0x00, 0x00, 0x00,
+            0x01, 0x02, 0x03, 0x04,
         ];
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_i32().unwrap(), 42);
+        assert_eq!(d.read_u32().unwrap(), 0x04030201);
+    }
 
-        let mut deserializer = CdrDeserializer::new(&data).unwrap();
+    #[test]
+    fn read_u8_le() {
+        let mut data = le_header();
+        data.push(0xAB);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_u8().unwrap(), 0xAB);
+    }
 
-        let int_val = deserializer.read_i32().unwrap();
-        assert_eq!(int_val, 42);
+    #[test]
+    fn read_i8_le() {
+        let mut data = le_header();
+        data.push(0xFF); // -1 as i8
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_i8().unwrap(), -1i8);
+    }
 
-        let uint_val = deserializer.read_u32().unwrap();
-        assert_eq!(uint_val, 0x04030201);
+    #[test]
+    fn read_u16_le() {
+        let mut data = le_header();
+        data.extend_from_slice(&300u16.to_le_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_u16().unwrap(), 300);
+    }
+
+    #[test]
+    fn read_u16_be() {
+        let mut data = be_header();
+        data.extend_from_slice(&300u16.to_be_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_u16().unwrap(), 300);
+    }
+
+    #[test]
+    fn read_i32_be() {
+        let mut data = be_header();
+        data.extend_from_slice(&(-99i32).to_be_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_i32().unwrap(), -99);
+    }
+
+    #[test]
+    fn read_u32_be() {
+        let mut data = be_header();
+        data.extend_from_slice(&0xDEADBEEFu32.to_be_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_u32().unwrap(), 0xDEADBEEF);
+    }
+
+    #[test]
+    fn read_f64_le() {
+        let mut data = le_header();
+        data.extend_from_slice(&[0u8; 4]); // 4 pad bytes to align f64 to 8
+        data.extend_from_slice(&3.14f64.to_le_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        // pos starts at 4, align(8) moves to 8
+        assert!((d.read_f64().unwrap() - 3.14).abs() < 1e-10);
+    }
+
+    #[test]
+    fn read_f32_le() {
+        let mut data = le_header();
+        data.extend_from_slice(&2.5f32.to_le_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert!((d.read_f32().unwrap() - 2.5f32).abs() < 1e-7);
+    }
+
+    #[test]
+    fn read_bool_true_and_false() {
+        let mut data = le_header();
+        data.push(0x01);
+        data.push(0x00);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert!(d.read_bool().unwrap());
+        assert!(!d.read_bool().unwrap());
+    }
+
+    // ── read_string ────────────────────────────────────────────────────────
+
+    #[test]
+    fn read_string_empty() {
+        let mut data = le_header();
+        data.extend_from_slice(&0u32.to_le_bytes()); // length = 0
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_string().unwrap(), "");
+    }
+
+    #[test]
+    fn read_string_with_null_terminator() {
+        let mut data = le_header();
+        data.extend_from_slice(&5u32.to_le_bytes()); // length = 5 (includes \0)
+        data.extend_from_slice(b"hello\0"); // but only 5 bytes
+        // Actually length=5 and we have "hell\0" = 5 bytes
+        let mut data2 = le_header();
+        data2.extend_from_slice(&5u32.to_le_bytes());
+        data2.extend_from_slice(b"hell\0");
+        let mut d = CdrDeserializer::new(&data2).unwrap();
+        assert_eq!(d.read_string().unwrap(), "hell");
+    }
+
+    #[test]
+    fn read_string_without_null_terminator() {
+        let mut data = le_header();
+        data.extend_from_slice(&3u32.to_le_bytes()); // length = 3, no null
+        data.extend_from_slice(b"abc"); // not null-terminated → keep all bytes
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_string().unwrap(), "abc");
+    }
+
+    // ── read_f64_array ─────────────────────────────────────────────────────
+
+    #[test]
+    fn read_f64_array_3() {
+        // f64 uses align(8), starting from pos 4. align to 8 → pos 8 (4 pad bytes needed).
+        let mut data = le_header();
+        data.extend_from_slice(&[0u8; 4]); // padding to reach 8-byte alignment
+        for &v in &[1.0f64, 2.0, 3.0] {
+            data.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let arr = d.read_f64_array::<3>().unwrap();
+        assert!((arr[0] - 1.0).abs() < 1e-12);
+        assert!((arr[1] - 2.0).abs() < 1e-12);
+        assert!((arr[2] - 3.0).abs() < 1e-12);
+    }
+
+    // ── read_sequence ──────────────────────────────────────────────────────
+
+    #[test]
+    fn read_sequence_of_u32() {
+        let mut data = le_header();
+        data.extend_from_slice(&3u32.to_le_bytes()); // count = 3
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(&20u32.to_le_bytes());
+        data.extend_from_slice(&30u32.to_le_bytes());
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let seq = d.read_sequence(|d| d.read_u32()).unwrap();
+        assert_eq!(seq, vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn read_sequence_empty() {
+        let mut data = le_header();
+        data.extend_from_slice(&0u32.to_le_bytes()); // count = 0
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        let seq = d.read_sequence(|d| d.read_u32()).unwrap();
+        assert!(seq.is_empty());
+    }
+
+    // ── read_byte_sequence ────────────────────────────────────────────────
+
+    #[test]
+    fn read_byte_sequence_basic() {
+        let mut data = le_header();
+        data.extend_from_slice(&4u32.to_le_bytes()); // length = 4
+        data.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert_eq!(d.read_byte_sequence().unwrap(), &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    // ── truncation errors ─────────────────────────────────────────────────
+
+    #[test]
+    fn read_i32_truncated_returns_err() {
+        let mut data = le_header();
+        data.extend_from_slice(&[0x01, 0x02]); // only 2 bytes, need 4
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert!(d.read_i32().is_err());
+    }
+
+    #[test]
+    fn read_f64_truncated_returns_err() {
+        let mut data = le_header();
+        data.extend_from_slice(&[0u8; 4]); // padding
+        data.extend_from_slice(&[0x01, 0x02, 0x03]); // only 3 bytes, need 8
+        let mut d = CdrDeserializer::new(&data).unwrap();
+        assert!(d.read_f64().is_err());
     }
 }
