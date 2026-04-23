@@ -112,6 +112,98 @@ pub enum ApexSolverError {
 // Module-specific errors are automatically converted via #[from] attributes above
 // No manual From implementations needed - thiserror handles it!
 
+/// Trait for error logging with chaining support.
+///
+/// Provides `log()` and `log_with_source()` methods for all error types in the
+/// apex-solver library. Implemented as a blanket trait for any type that implements
+/// `Display`, so all error enums (`CoreError`, `LinAlgError`, `OptimizerError`,
+/// `FactorError`, `LinearizerError`, `ObserverError`, `ApexSolverError`) get these
+/// methods automatically without per-type boilerplate.
+///
+/// # Example
+///
+/// ```no_run
+/// use apex_solver::error::ErrorLogging;
+/// use apex_solver::core::CoreError;
+///
+/// fn operation() -> Result<(), CoreError> { Ok(()) }
+///
+/// fn example() -> Result<(), CoreError> {
+///     // Log and propagate — .log() returns self for chaining with ?
+///     operation()
+///         .map_err(|e| e.log())?;
+///     Ok(())
+/// }
+/// ```
+///
+/// # Logging with source context
+///
+/// ```no_run
+/// use apex_solver::error::ErrorLogging;
+/// use apex_solver::linalg::LinAlgError;
+///
+/// fn matrix_op() -> Result<(), std::io::Error> { Ok(()) }
+///
+/// fn example() -> Result<(), LinAlgError> {
+///     matrix_op()
+///         .map_err(|e| {
+///             LinAlgError::SingularMatrix("matrix is singular".to_string())
+///                 .log_with_source(e)
+///         })?;
+///     Ok(())
+/// }
+/// ```
+pub trait ErrorLogging: Sized + std::fmt::Display {
+    /// Log the error with `tracing::error` and return self for chaining.
+    ///
+    /// This is equivalent to `tracing::error!("{}", self); self` but allows
+    /// method chaining with `?` via `.map_err(|e| e.log())`.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::core::CoreError;
+    /// use apex_solver::error::ErrorLogging;
+    ///
+    /// let e = CoreError::Variable("missing key".to_string());
+    /// let returned = e.log();
+    /// assert_eq!(returned.to_string(), "Variable error: missing key");
+    /// ```
+    fn log(self) -> Self {
+        tracing::error!("{}", self);
+        self
+    }
+
+    /// Log the error with an additional source error for debugging context.
+    ///
+    /// Logs both the error and the underlying source error (from a third-party
+    /// library or internal operation), providing full debugging context.
+    ///
+    /// # Arguments
+    ///
+    /// * `source_error` — The original error (must implement `Debug`)
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::linalg::LinAlgError;
+    /// use apex_solver::error::ErrorLogging;
+    ///
+    /// let source = std::io::Error::other("disk full");
+    /// let e = LinAlgError::FactorizationFailed("LU decomposition failed".to_string());
+    /// let returned = e.log_with_source(source);
+    /// assert_eq!(returned.to_string(), "Matrix factorization failed: LU decomposition failed");
+    /// ```
+    fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
+        tracing::error!("{} | Source: {:?}", self, source_error);
+        self
+    }
+}
+
+// Blanket implementation: any type that implements Display gets ErrorLogging for free.
+// This eliminates the need for per-error-type log()/log_with_source() methods.
+impl<T: std::fmt::Display> ErrorLogging for T {}
+
 impl ApexSolverError {
     /// Get the full error chain as a string for logging and debugging.
     ///
