@@ -5,7 +5,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use apex_io::rosbag::Reader;
+use apex_io::rosbag::{Reader, Writer};
+use apex_io::rosbag::types::{CompressionMode, CompressionFormat, MessageDefinition, StoragePlugin};
+use tempfile::tempdir;
 
 use std::collections::HashMap;
 
@@ -514,4 +516,472 @@ fn test_bag_format_consistency() {
             "Message type mismatch for topic '{topic}'"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — Writer
+// ---------------------------------------------------------------------------
+
+fn make_test_connection(
+    writer: &mut Writer,
+    topic: &str,
+    msgtype: &str,
+) -> apex_io::rosbag::Connection {
+    writer
+        .add_connection(
+            topic.to_string(),
+            msgtype.to_string(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("add_connection failed")
+}
+
+#[test]
+fn test_writer_roundtrip_sqlite3() {
+    let dir = tempdir().expect("tempdir");
+    let bag_path = dir.path().join("roundtrip_bag");
+
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))
+        .expect("Writer::new");
+    writer.open().expect("open");
+
+    let conn = make_test_connection(&mut writer, "/test/string", "std_msgs/msg/String");
+
+    let payload = vec![0x00u8, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, b'h', b'e', b'l', b'l', b'o', 0x00];
+    writer.write(&conn, 1_000_000_000, &payload).expect("write");
+    writer.write(&conn, 2_000_000_000, &payload).expect("write");
+    writer.close().expect("close");
+
+    let mut reader = Reader::new(&bag_path).expect("Reader::new");
+    reader.open().expect("open reader");
+    assert!(reader.is_open());
+
+    let count = reader
+        .messages()
+        .expect("messages")
+        .filter_map(|r| r.ok())
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn test_writer_duplicate_connection_returns_err() {
+    let dir = tempdir().expect("tempdir");
+    let bag_path = dir.path().join("dup_conn_bag");
+
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))
+        .expect("Writer::new");
+    writer.open().expect("open");
+
+    make_test_connection(&mut writer, "/imu", "sensor_msgs/msg/Imu");
+    let result = writer.add_connection(
+        "/imu".to_string(),
+        "sensor_msgs/msg/Imu".to_string(),
+        None,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_writer_batch_write_produces_same_output() {
+    let dir = tempdir().expect("tempdir");
+    let bag_seq = dir.path().join("bag_seq");
+    let bag_batch = dir.path().join("bag_batch");
+
+    let payload = vec![0x00u8, 0x01, 0x00, 0x00, 0x01];
+    let n = 50usize;
+
+    // Sequential write
+    {
+        let mut w = Writer::new(&bag_seq, None, Some(StoragePlugin::Sqlite3)).unwrap();
+        w.open().unwrap();
+        let conn = make_test_connection(&mut w, "/data", "std_msgs/msg/String");
+        for i in 0..n {
+            w.write(&conn, i as u64 * 1000, &payload).unwrap();
+        }
+        w.close().unwrap();
+    }
+
+    // Batch write
+    {
+        let mut w = Writer::new(&bag_batch, None, Some(StoragePlugin::Sqlite3)).unwrap();
+        w.open().unwrap();
+        let conn = make_test_connection(&mut w, "/data", "std_msgs/msg/String");
+        let msgs: Vec<(apex_io::rosbag::Connection, u64, Vec<u8>)> = (0..n)
+            .map(|i| (conn.clone(), i as u64 * 1000, payload.clone()))
+            .collect();
+        w.write_raw_messages_batch(&msgs).unwrap();
+        w.close().unwrap();
+    }
+
+    let count_seq = {
+        let mut r = Reader::new(&bag_seq).unwrap();
+        r.open().unwrap();
+        r.messages().unwrap().filter_map(|m| m.ok()).count()
+    };
+    let count_batch = {
+        let mut r = Reader::new(&bag_batch).unwrap();
+        r.open().unwrap();
+        r.messages().unwrap().filter_map(|m| m.ok()).count()
+    };
+
+    assert_eq!(count_seq, n);
+    assert_eq!(count_batch, n);
+}
+
+#[test]
+fn test_messages_filtered_single_topic() {
+    let dir = tempdir().expect("tempdir");
+    let bag_path = dir.path().join("filtered_bag");
+
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3)).unwrap();
+    writer.open().unwrap();
+
+    let conn_a = make_test_connection(&mut writer, "/topic_a", "std_msgs/msg/String");
+    let conn_b = make_test_connection(&mut writer, "/topic_b", "std_msgs/msg/String");
+
+    let payload = vec![0x00u8, 0x01, 0x00, 0x00, 0x01];
+    for i in 0..3u64 {
+        writer.write(&conn_a, i * 1000, &payload).unwrap();
+        writer.write(&conn_b, i * 1000 + 500, &payload).unwrap();
+    }
+    writer.close().unwrap();
+
+    let mut reader = Reader::new(&bag_path).unwrap();
+    reader.open().unwrap();
+
+    let a_conns: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/topic_a")
+        .cloned()
+        .collect();
+
+    let count_a = reader
+        .messages_filtered(Some(&a_conns), None, None)
+        .unwrap()
+        .filter_map(|m| m.ok())
+        .inspect(|m| assert_eq!(m.topic, "/topic_a"))
+        .count();
+
+    assert_eq!(count_a, 3);
+}
+
+#[test]
+fn test_raw_messages_batch_returns_correct_count() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
+    reader.open().expect("Failed to open bag");
+
+    let batch = reader
+        .read_raw_messages_batch(None, None, None)
+        .expect("Failed to read batch");
+
+    assert_eq!(batch.len(), 188);
+    for msg in &batch {
+        assert!(!msg.raw_data.is_empty());
+        assert!(msg.timestamp > 0);
+    }
+}
+
+#[test]
+fn test_raw_messages_iter_matches_batch() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
+    reader.open().expect("Failed to open bag");
+
+    let iter_count = reader
+        .raw_messages()
+        .expect("raw_messages")
+        .filter_map(|r| r.ok())
+        .count();
+
+    let batch_count = reader
+        .read_raw_messages_batch(None, None, None)
+        .expect("batch")
+        .len();
+
+    assert_eq!(iter_count, batch_count);
+}
+
+#[test]
+fn test_reader_timestamps_are_ordered() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
+    reader.open().expect("Failed to open bag");
+
+    let timestamps: Vec<u64> = reader
+        .messages()
+        .expect("messages")
+        .filter_map(|r| r.ok())
+        .map(|m| m.timestamp)
+        .collect();
+
+    let mut sorted = timestamps.clone();
+    sorted.sort_unstable();
+    assert_eq!(timestamps, sorted, "Messages should be in timestamp order");
+}
+
+#[test]
+fn test_reader_metadata_duration_and_times() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("Failed to create reader");
+    reader.open().expect("Failed to open bag");
+
+    assert!(reader.duration() > 0);
+    assert!(reader.start_time() > 0);
+    assert!(reader.end_time() >= reader.start_time());
+    assert_eq!(reader.message_count(), 188);
+}
+
+#[test]
+fn test_writer_set_compression_after_open_fails() {
+    let dir = tempdir().expect("tempdir");
+    let bag_path = dir.path().join("comp_test");
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3)).unwrap();
+    writer.open().unwrap();
+    let result = writer.set_compression(CompressionMode::File, CompressionFormat::Zstd);
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tests — read_bag_metadata_fast
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_read_bag_metadata_fast_sqlite3() {
+    let meta = apex_io::rosbag::read_bag_metadata_fast(SQLITE3_BAG_PATH)
+        .expect("should read metadata");
+    assert_eq!(meta.message_count(), 188);
+    assert!(meta.duration() > 0);
+}
+
+#[test]
+fn test_read_bag_metadata_fast_mcap() {
+    let meta = apex_io::rosbag::read_bag_metadata_fast(MCAP_BAG_PATH)
+        .expect("should read metadata");
+    assert_eq!(meta.message_count(), 188);
+}
+
+#[test]
+fn test_read_bag_metadata_fast_missing_returns_err() {
+    let result = apex_io::rosbag::read_bag_metadata_fast("/nonexistent/path/to/bag");
+    assert!(result.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Tests — MCAP storage reader additional coverage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_mcap_messages_filtered_by_connection() {
+    use apex_io::rosbag::Reader;
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+
+    let conns: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/test/std_msgs/string")
+        .cloned()
+        .collect();
+
+    assert_eq!(conns.len(), 1);
+    let count = reader
+        .messages_filtered(Some(&conns), None, None)
+        .expect("filtered messages")
+        .filter_map(|r| r.ok())
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn test_mcap_messages_filtered_by_time() {
+    use apex_io::rosbag::Reader;
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+
+    let start = reader.start_time();
+    let mid = start + reader.duration() / 2;
+
+    let count_half = reader
+        .messages_filtered(None, Some(start), Some(mid))
+        .expect("filtered")
+        .filter_map(|r| r.ok())
+        .count();
+
+    assert!(count_half > 0);
+    assert!(count_half < 188);
+}
+
+#[test]
+fn test_mcap_raw_messages_filtered_by_connection() {
+    use apex_io::rosbag::Reader;
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+
+    let conns: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/test/std_msgs/string")
+        .cloned()
+        .collect();
+
+    let count = reader
+        .raw_messages_filtered(Some(&conns), None, None)
+        .expect("raw filtered")
+        .filter_map(|r| r.ok())
+        .count();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn test_mcap_raw_messages_batch_with_filter() {
+    use apex_io::rosbag::Reader;
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+
+    let conns: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/test/std_msgs/string")
+        .cloned()
+        .collect();
+
+    let batch = reader
+        .read_raw_messages_batch(Some(&conns), None, None)
+        .expect("batch");
+    assert_eq!(batch.len(), 2);
+}
+
+#[test]
+fn test_reader_raw_messages_filtered_by_time() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+
+    let start = reader.start_time();
+    let mid = start + reader.duration() / 2;
+
+    let batch = reader
+        .read_raw_messages_batch(None, Some(start), Some(mid))
+        .expect("batch");
+    assert!(batch.len() > 0);
+    assert!(batch.len() < 188);
+}
+
+#[test]
+fn test_reader_close_and_reopen() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    assert!(reader.is_open());
+    reader.close().expect("close");
+    assert!(!reader.is_open());
+    reader.open().expect("reopen");
+    assert!(reader.is_open());
+}
+
+#[test]
+fn test_writer_mcap_roundtrip() {
+    let dir = tempdir().expect("tempdir");
+    let bag_path = dir.path().join("mcap_roundtrip");
+
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Mcap)).expect("writer");
+    writer.open().expect("open");
+    let conn = make_test_connection(&mut writer, "/test/mcap", "std_msgs/msg/String");
+    let payload = vec![0x00u8, 0x01, 0x00, 0x00, 0x01];
+    writer.write(&conn, 1_000_000, &payload).expect("write");
+    writer.close().expect("close");
+
+    // Bag directory and metadata should exist
+    assert!(bag_path.join("metadata.yaml").exists());
+}
+
+#[test]
+fn test_mcap_raw_messages_iteration() {
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let count = reader
+        .raw_messages()
+        .expect("raw_messages")
+        .filter_map(|r| r.ok())
+        .count();
+    assert_eq!(count, 188);
+}
+
+#[test]
+fn test_mcap_read_raw_messages_batch() {
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let batch = reader
+        .read_raw_messages_batch(None, None, None)
+        .expect("batch");
+    assert_eq!(batch.len(), 188);
+    for msg in &batch {
+        assert!(!msg.connection.topic.is_empty());
+        assert!(msg.timestamp > 0);
+    }
+}
+
+#[test]
+fn test_mcap_raw_messages_timestamps_ordered() {
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let msgs: Vec<_> = reader
+        .raw_messages()
+        .expect("raw_messages")
+        .filter_map(|r| r.ok())
+        .collect();
+    let timestamps: Vec<u64> = msgs.iter().map(|m| m.timestamp).collect();
+    for w in timestamps.windows(2) {
+        assert!(w[0] <= w[1], "timestamps should be non-decreasing");
+    }
+}
+
+#[test]
+fn test_mcap_raw_messages_filtered_by_time_range() {
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let start = reader.start_time();
+    let mid = start + reader.duration() / 2;
+    let half = reader
+        .raw_messages_filtered(None, Some(start), Some(mid))
+        .expect("filtered")
+        .filter_map(|r| r.ok())
+        .count();
+    assert!(half > 0 && half < 188);
+}
+
+#[test]
+fn test_reader_connections_accessor() {
+    let mut reader = Reader::new(SQLITE3_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let conns = reader.connections();
+    assert!(!conns.is_empty());
+    assert_eq!(conns.len(), 94);
+}
+
+#[test]
+fn test_reader_metadata_accessor() {
+    let reader = Reader::new(SQLITE3_BAG_PATH).expect("reader");
+    let meta = reader.metadata();
+    assert!(meta.is_some());
+    assert!(meta.unwrap().message_count() > 0);
+}
+
+#[test]
+fn test_reader_read_raw_messages_batch_mcap() {
+    let mut reader = Reader::new(MCAP_BAG_PATH).expect("reader");
+    reader.open().expect("open");
+    let conns: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/test/std_msgs/string")
+        .cloned()
+        .collect();
+    let batch = reader
+        .read_raw_messages_batch(Some(&conns), None, None)
+        .expect("batch");
+    assert_eq!(batch.len(), 2);
 }
