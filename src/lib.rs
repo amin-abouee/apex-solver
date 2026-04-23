@@ -39,7 +39,7 @@ pub mod camera_models {
 
 // Re-export commonly used types from workspace crates
 pub use apex_camera_models::{
-    CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera, PinholeCamera,
+    CameraModelError, CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera, PinholeCamera,
     RadTanCamera, UcmCamera,
 };
 
