@@ -705,4 +705,45 @@ mod tests {
         assert_eq!(graph.vertices_se2.len(), 2);
         Ok(())
     }
+
+    #[test]
+    fn test_io_error_log_returns_self() {
+        let err = IoError::UnsupportedFormat("xyz".to_string());
+        let returned = err.log();
+        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn test_io_error_log_with_source() {
+        let err = IoError::UnsupportedFormat("abc".to_string());
+        let source = std::io::Error::new(std::io::ErrorKind::Other, "source");
+        let returned = err.log_with_source(source);
+        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn test_vertex_se2_theta() {
+        use std::f64::consts::PI;
+        let v = VertexSE2::new(0, 1.0, 2.0, PI / 4.0);
+        assert!((v.theta() - PI / 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_se3_new() {
+        let t = Vector3::new(1.0, 2.0, 3.0);
+        let r = UnitQuaternion::identity();
+        let info = Matrix6::identity();
+        let e = EdgeSE3::new(0, 1, t, r, info);
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+    }
+
+    #[test]
+    fn test_vertex_se3_new() {
+        let t = Vector3::new(1.0, 2.0, 3.0);
+        let r = UnitQuaternion::identity();
+        let v = VertexSE3::new(5, t, r);
+        assert_eq!(v.id, 5);
+        assert!((v.translation() - t).norm() < 1e-10);
+    }
 }
