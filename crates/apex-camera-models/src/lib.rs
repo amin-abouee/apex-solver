@@ -695,7 +695,7 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
 /// [-vy   vx    0 ]
 /// ```
 #[inline]
-pub fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
+pub(crate) fn skew_symmetric(v: &Vector3<f64>) -> Matrix3<f64> {
     Matrix3::new(0.0, -v.z, v.y, v.z, 0.0, -v.x, -v.y, v.x, 0.0)
 }
 

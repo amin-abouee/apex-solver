@@ -254,14 +254,17 @@ impl From<&EucmCamera> for [f64; 6] {
 /// # Panics
 ///
 /// Panics if the slice has fewer than 6 elements.
-impl From<&[f64]> for EucmCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "EucmCamera requires at least 6 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for EucmCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 6 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "EucmCamera requires at least 6 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -272,7 +275,7 @@ impl From<&[f64]> for EucmCamera {
                 alpha: params[4],
                 beta: params[5],
             },
-        }
+        })
     }
 }
 
@@ -308,13 +311,7 @@ impl From<[f64; 6]> for EucmCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or alpha/beta are out of range.
 pub fn try_from_params(params: &[f64]) -> Result<EucmCamera, CameraModelError> {
-    if params.len() < 6 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "EucmCamera requires at least 6 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = EucmCamera::from(params);
+    let camera = EucmCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -837,8 +834,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = EucmCamera::from(params_plus.as_slice());
-            let cam_minus = EucmCamera::from(params_minus.as_slice());
+            let cam_plus = EucmCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = EucmCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -886,7 +883,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [450.0, 460.0, 330.0, 250.0, 0.8, 1.8];
-        let camera2 = EucmCamera::from(&params_slice[..]);
+        let camera2 = EucmCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 450.0);
         assert_eq!(camera2.pinhole.fy, 460.0);
         assert_eq!(camera2.pinhole.cx, 330.0);

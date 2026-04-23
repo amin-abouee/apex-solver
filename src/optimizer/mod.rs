@@ -137,7 +137,6 @@ impl OptimizerError {
     /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
     pub fn log(self) -> Self {
         error!("{}", self);
         self
@@ -165,7 +164,6 @@ impl OptimizerError {
     /// # Ok(())
     /// # }
     /// ```
-    #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
         error!("{} | Source: {:?}", self, source_error);
         self

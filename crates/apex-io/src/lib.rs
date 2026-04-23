@@ -83,14 +83,12 @@ pub enum IoError {
 
 impl IoError {
     /// Log the error using tracing::error and return self for chaining
-    #[must_use]
     pub fn log(self) -> Self {
         error!("{}", self);
         self
     }
 
     /// Log the error with source error information using tracing::error and return self for chaining
-    #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
         error!("{} | Source: {:?}", self, source_error);
         self

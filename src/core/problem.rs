@@ -184,52 +184,52 @@ impl VariableEnum {
     pub fn apply_tangent_step(&mut self, step_slice: MatRef<f64>) {
         match self {
             VariableEnum::SE3(var) => {
-                let mut step_data: Vec<f64> = (0..6).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(6, |i, _| step_slice[(i, 0)]);
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 6 {
                         step_data[fixed_idx] = 0.0;
                     }
                 }
-                let tangent = se3::SE3Tangent::from(DVector::from_vec(step_data));
+                let tangent = se3::SE3Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::SE2(var) => {
-                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(3, |i, _| step_slice[(i, 0)]);
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 3 {
                         step_data[fixed_idx] = 0.0;
                     }
                 }
-                let tangent = se2::SE2Tangent::from(DVector::from_vec(step_data));
+                let tangent = se2::SE2Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::SO3(var) => {
-                let mut step_data: Vec<f64> = (0..3).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(3, |i, _| step_slice[(i, 0)]);
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 3 {
                         step_data[fixed_idx] = 0.0;
                     }
                 }
-                let tangent = so3::SO3Tangent::from(DVector::from_vec(step_data));
+                let tangent = so3::SO3Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::SO2(var) => {
-                let mut step_data: Vec<f64> = (0..1).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(1, |i, _| step_slice[(i, 0)]);
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < 1 {
                         step_data[fixed_idx] = 0.0;
                     }
                 }
-                let tangent = so2::SO2Tangent::from(DVector::from_vec(step_data));
+                let tangent = so2::SO2Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::SE23(var) => {
                 // SE_2(3) has 9 DOF in tangent space
-                let mut step_data: Vec<f64> = (0..9).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(9, |i, _| step_slice[(i, 0)]);
 
                 // Enforce fixed indices: zero out step components for fixed DOF
                 for &fixed_idx in &var.fixed_indices {
@@ -238,14 +238,13 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = DVector::from_vec(step_data);
-                let tangent = se23::SE23Tangent::from(step_dvector);
+                let tangent = se23::SE23Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::SGal3(var) => {
                 // SGal(3) has 10 DOF in tangent space
-                let mut step_data: Vec<f64> = (0..10).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(10, |i, _| step_slice[(i, 0)]);
 
                 // Enforce fixed indices: zero out step components for fixed DOF
                 for &fixed_idx in &var.fixed_indices {
@@ -254,14 +253,13 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = DVector::from_vec(step_data);
-                let tangent = sgal3::SGal3Tangent::from(step_dvector);
+                let tangent = sgal3::SGal3Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::Sim3(var) => {
                 // Sim(3) has 7 DOF in tangent space
-                let mut step_data: Vec<f64> = (0..7).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(7, |i, _| step_slice[(i, 0)]);
 
                 // Enforce fixed indices: zero out step components for fixed DOF
                 for &fixed_idx in &var.fixed_indices {
@@ -270,20 +268,19 @@ impl VariableEnum {
                     }
                 }
 
-                let step_dvector = DVector::from_vec(step_data);
-                let tangent = sim3::Sim3Tangent::from(step_dvector);
+                let tangent = sim3::Sim3Tangent::from(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
             VariableEnum::Rn(var) => {
                 let size = var.get_size();
-                let mut step_data: Vec<f64> = (0..size).map(|i| step_slice[(i, 0)]).collect();
+                let mut step_data = DVector::from_fn(size, |i, _| step_slice[(i, 0)]);
                 for &fixed_idx in &var.fixed_indices {
                     if fixed_idx < size {
                         step_data[fixed_idx] = 0.0;
                     }
                 }
-                let tangent = rn::RnTangent::new(DVector::from_vec(step_data));
+                let tangent = rn::RnTangent::new(step_data);
                 let new_value = var.plus(&tangent);
                 var.set_value(new_value);
             }
@@ -466,14 +463,14 @@ impl VariableEnum {
 /// ```
 pub struct Problem {
     /// Total dimension of the stacked residual vector (sum of all residual block dimensions)
-    pub total_residual_dimension: usize,
+    pub(crate) total_residual_dimension: usize,
 
     /// Controls which Jacobian assembly strategy is used (sparse or dense).
     ///
     /// Set via `Problem::new(JacobianMode::Sparse)` (sparse, default) or
     /// `Problem::new(JacobianMode::Dense)` (dense).
     /// The optimizer reads this field to select the assembly path.
-    pub jacobian_mode: JacobianMode,
+    pub(crate) jacobian_mode: JacobianMode,
 
     /// Counter for assigning unique IDs to residual blocks
     residual_id_count: usize,
@@ -483,11 +480,11 @@ pub struct Problem {
 
     /// Variables with fixed indices (e.g., fix first pose's x,y coordinates)
     /// Maps variable name -> set of indices to fix
-    pub fixed_variable_indexes: HashMap<String, HashSet<usize>>,
+    pub(crate) fixed_variable_indexes: HashMap<String, HashSet<usize>>,
 
     /// Variable bounds (box constraints on individual DOF)
     /// Maps variable name -> (index -> (lower_bound, upper_bound))
-    pub variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
+    pub(crate) variable_bounds: HashMap<String, HashMap<usize, (f64, f64)>>,
 }
 impl Default for Problem {
     fn default() -> Self {
@@ -515,7 +512,7 @@ impl Problem {
     ///
     /// // Dense (for small-to-medium problems)
     /// let dense_problem = Problem::new(JacobianMode::Dense);
-    /// assert_eq!(dense_problem.jacobian_mode, JacobianMode::Dense);
+    /// assert_eq!(dense_problem.num_residual_blocks(), 0);
     /// ```
     pub fn new(jacobian_mode: JacobianMode) -> Self {
         Self {

@@ -137,21 +137,22 @@ impl From<&PinholeCamera> for [f64; 4] {
 
 /// Create PinholeCamera from parameter slice.
 ///
-/// # Panics
-///
-/// Panics if the slice has fewer than 4 elements.
+/// Returns an error if the slice has fewer than 4 elements.
 ///
 /// # Parameter Order
 ///
 /// params = [fx, fy, cx, cy]
-impl From<&[f64]> for PinholeCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 4,
-            "PinholeCamera requires at least 4 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for PinholeCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 4 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "PinholeCamera requires at least 4 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -159,7 +160,7 @@ impl From<&[f64]> for PinholeCamera {
                 cy: params[3],
             },
             distortion: DistortionModel::None,
-        }
+        })
     }
 }
 
@@ -192,13 +193,7 @@ impl From<[f64; 4]> for PinholeCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 4 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
 pub fn try_from_params(params: &[f64]) -> Result<PinholeCamera, CameraModelError> {
-    if params.len() < 4 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "PinholeCamera requires at least 4 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = PinholeCamera::from(params);
+    let camera = PinholeCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -474,12 +469,13 @@ mod tests {
     }
 
     #[test]
-    fn test_pinhole_from_params() {
+    fn test_pinhole_from_params() -> TestResult {
         let params = vec![600.0, 600.0, 320.0, 240.0];
-        let camera = PinholeCamera::from(params.as_slice());
+        let camera = PinholeCamera::try_from(params.as_slice())?;
         assert_eq!(camera.pinhole.fx, 600.0);
         let params_vec: DVector<f64> = (&camera).into();
         assert_eq!(params_vec, DVector::from_vec(params));
+        Ok(())
     }
 
     #[test]
@@ -615,8 +611,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = PinholeCamera::from(params_plus.as_slice());
-            let cam_minus = PinholeCamera::from(params_minus.as_slice());
+            let cam_plus = PinholeCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = PinholeCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;

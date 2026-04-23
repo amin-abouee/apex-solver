@@ -266,14 +266,17 @@ impl From<&DoubleSphereCamera> for [f64; 6] {
 /// # Parameter Order
 ///
 /// params = [fx, fy, cx, cy, xi, alpha]
-impl From<&[f64]> for DoubleSphereCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 6,
-            "DoubleSphereCamera requires at least 6 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for DoubleSphereCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 6 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "DoubleSphereCamera requires at least 6 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -284,7 +287,7 @@ impl From<&[f64]> for DoubleSphereCamera {
                 xi: params[4],
                 alpha: params[5],
             },
-        }
+        })
     }
 }
 
@@ -320,13 +323,7 @@ impl From<[f64; 6]> for DoubleSphereCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or xi/alpha are out of range.
 pub fn try_from_params(params: &[f64]) -> Result<DoubleSphereCamera, CameraModelError> {
-    if params.len() < 6 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "DoubleSphereCamera requires at least 6 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = DoubleSphereCamera::from(params);
+    let camera = DoubleSphereCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -884,8 +881,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = DoubleSphereCamera::from(params_plus.as_slice());
-            let cam_minus = DoubleSphereCamera::from(params_minus.as_slice());
+            let cam_plus = DoubleSphereCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = DoubleSphereCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;

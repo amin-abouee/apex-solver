@@ -498,7 +498,7 @@ impl IterativeSchurSolver {
                 let visible_landmarks = if cam_idx < visibility.len() {
                     &visibility[cam_idx]
                 } else {
-                    &Vec::new() as &Vec<usize>
+                    &[] as &[usize]
                 };
 
                 for &lm_block_idx in visible_landmarks {

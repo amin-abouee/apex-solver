@@ -370,12 +370,12 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     info!("Iterations: {}", result.iterations);
     info!("Time: {:.2} seconds", elapsed_seconds);
 
-    // Compute initial and final RMSE from solver costs
-    // Cost = sum of squared residuals, RMSE = sqrt(cost / num_observations)
+    // Compute initial and final RMSE from solver costs.
+    // Solver cost = 0.5 * sum ||r_i||², so MSE = mean ||r_i||² = 2 * cost / n.
     let num_obs = dataset.observations.len() as f64;
-    let initial_mse = result.initial_cost / num_obs;
+    let initial_mse = 2.0 * result.initial_cost / num_obs;
     let initial_rmse = initial_mse.sqrt();
-    let final_mse = result.final_cost / num_obs;
+    let final_mse = 2.0 * result.final_cost / num_obs;
     let final_rmse = final_mse.sqrt();
 
     info!("Metrics:");

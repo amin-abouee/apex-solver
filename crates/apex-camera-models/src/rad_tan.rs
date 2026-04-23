@@ -261,14 +261,17 @@ impl From<&RadTanCamera> for [f64; 9] {
 /// # Panics
 ///
 /// Panics if the slice has fewer than 9 elements.
-impl From<&[f64]> for RadTanCamera {
-    fn from(params: &[f64]) -> Self {
-        assert!(
-            params.len() >= 9,
-            "RadTanCamera requires at least 9 parameters, got {}",
-            params.len()
-        );
-        Self {
+impl TryFrom<&[f64]> for RadTanCamera {
+    type Error = CameraModelError;
+
+    fn try_from(params: &[f64]) -> Result<Self, Self::Error> {
+        if params.len() < 9 {
+            return Err(CameraModelError::InvalidParams(format!(
+                "RadTanCamera requires at least 9 parameters, got {}",
+                params.len()
+            )));
+        }
+        Ok(Self {
             pinhole: PinholeParams {
                 fx: params[0],
                 fy: params[1],
@@ -282,7 +285,7 @@ impl From<&[f64]> for RadTanCamera {
                 p2: params[7],
                 k3: params[8],
             },
-        }
+        })
     }
 }
 
@@ -321,13 +324,7 @@ impl From<[f64; 9]> for RadTanCamera {
 /// Returns `CameraModelError::InvalidParams` if fewer than 9 parameters are provided.
 /// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
 pub fn try_from_params(params: &[f64]) -> Result<RadTanCamera, CameraModelError> {
-    if params.len() < 9 {
-        return Err(CameraModelError::InvalidParams(format!(
-            "RadTanCamera requires at least 9 parameters, got {}",
-            params.len()
-        )));
-    }
-    let camera = RadTanCamera::from(params);
+    let camera = RadTanCamera::try_from(params)?;
     camera.validate_params()?;
     Ok(camera)
 }
@@ -997,8 +994,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = RadTanCamera::from(params_plus.as_slice());
-            let cam_minus = RadTanCamera::from(params_minus.as_slice());
+            let cam_plus = RadTanCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = RadTanCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -1055,7 +1052,7 @@ mod tests {
 
         // Test conversion from slice
         let params_slice = [350.0, 350.0, 330.0, 250.0, 0.2, 0.02, 0.002, 0.003, 0.002];
-        let camera2 = RadTanCamera::from(&params_slice[..]);
+        let camera2 = RadTanCamera::try_from(&params_slice[..])?;
         assert_eq!(camera2.pinhole.fx, 350.0);
         assert_eq!(camera2.pinhole.fy, 350.0);
         assert_eq!(camera2.pinhole.cx, 330.0);
