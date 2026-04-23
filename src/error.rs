@@ -419,7 +419,9 @@ mod tests {
     #[test]
     fn test_error_chain_linalg_through_optimizer() -> TestResult {
         let result = solver_optimize();
-        let err = result.expect_err("solver_optimize should fail with LinAlgError");
+        let Err(err) = result else {
+            return Err("solver_optimize should fail with LinAlgError".into());
+        };
 
         assert!(
             matches!(err, ApexSolverError::Optimizer(OptimizerError::LinAlg(_))),
@@ -435,14 +437,20 @@ mod tests {
         );
 
         let compact = err.chain_compact();
-        assert!(compact.contains("→"), "compact chain should contain →: {}", compact);
+        assert!(
+            compact.contains("→"),
+            "compact chain should contain →: {}",
+            compact
+        );
         Ok(())
     }
 
     #[test]
     fn test_error_chain_core_through_optimizer() -> TestResult {
         let result = solver_optimize_with_core_error();
-        let err = result.expect_err("should fail with CoreError");
+        let Err(err) = result else {
+            return Err("should fail with CoreError".into());
+        };
 
         assert!(
             matches!(err, ApexSolverError::Optimizer(OptimizerError::Core(_))),
@@ -462,10 +470,15 @@ mod tests {
     #[test]
     fn test_error_chain_factor_direct() -> TestResult {
         let result = solver_optimize_with_factor_error();
-        let err = result.expect_err("should fail with FactorError");
+        let Err(err) = result else {
+            return Err("should fail with FactorError".into());
+        };
 
         assert!(
-            matches!(err, ApexSolverError::Factor(FactorError::InvalidDimension { .. })),
+            matches!(
+                err,
+                ApexSolverError::Factor(FactorError::InvalidDimension { .. })
+            ),
             "Expected Factor::InvalidDimension, got {:?}",
             err
         );
@@ -504,7 +517,10 @@ mod tests {
         let opt_err: OptimizerError = core_err.into();
         let apex_err: ApexSolverError = opt_err.into();
         assert!(
-            matches!(apex_err, ApexSolverError::Optimizer(OptimizerError::Core(_))),
+            matches!(
+                apex_err,
+                ApexSolverError::Optimizer(OptimizerError::Core(_))
+            ),
             "Expected Optimizer::Core variant for CoreError through OptimizerError"
         );
         Ok(())
@@ -532,7 +548,11 @@ mod tests {
         );
 
         let compact = apex_err.chain_compact();
-        assert!(compact.contains("Rerun") || compact.contains("connect failed"), "compact: {}", compact);
+        assert!(
+            compact.contains("Rerun") || compact.contains("connect failed"),
+            "compact: {}",
+            compact
+        );
         Ok(())
     }
 
@@ -556,16 +576,34 @@ mod tests {
             CoreError::Variable("var".into()).into(),
             OptimizerError::EmptyProblem.into(),
             LinAlgError::SingularMatrix("sing".into()).into(),
-            ManifoldError::DimensionMismatch { expected: 1, actual: 2 }.into(),
+            ManifoldError::DimensionMismatch {
+                expected: 1,
+                actual: 2,
+            }
+            .into(),
             ObserverError::InvalidState("bad".into()).into(),
-            FactorError::InvalidDimension { expected: 3, actual: 2 }.into(),
+            FactorError::InvalidDimension {
+                expected: 3,
+                actual: 2,
+            }
+            .into(),
             LinearizerError::SymbolicStructure("sym_err".into()).into(),
-            CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 }.into(),
+            CameraModelError::PointBehindCamera {
+                z: -0.5,
+                min_z: 1e-6,
+            }
+            .into(),
         ];
 
         for err in &errors {
-            assert!(!err.to_string().is_empty(), "Error Display should not be empty");
-            assert!(!err.chain_compact().is_empty(), "chain_compact should not be empty");
+            assert!(
+                !err.to_string().is_empty(),
+                "Error Display should not be empty"
+            );
+            assert!(
+                !err.chain_compact().is_empty(),
+                "chain_compact should not be empty"
+            );
         }
         Ok(())
     }
@@ -580,7 +618,11 @@ mod tests {
         );
 
         let compact = apex_err.chain_compact();
-        assert!(compact.contains("sparse build failed"), "compact: {}", compact);
+        assert!(
+            compact.contains("sparse build failed"),
+            "compact: {}",
+            compact
+        );
         Ok(())
     }
 
@@ -590,7 +632,10 @@ mod tests {
         let core_err: CoreError = lin_err.into();
         let apex_err: ApexSolverError = core_err.into();
         assert!(
-            matches!(apex_err, ApexSolverError::Core(CoreError::ParallelComputation(_))),
+            matches!(
+                apex_err,
+                ApexSolverError::Core(CoreError::ParallelComputation(_))
+            ),
             "Expected Core::ParallelComputation variant for LinearizerError through CoreError, got {:?}",
             apex_err
         );
@@ -603,7 +648,10 @@ mod tests {
         let opt_err: OptimizerError = lin_err.into();
         let apex_err: ApexSolverError = opt_err.into();
         assert!(
-            matches!(apex_err, ApexSolverError::Optimizer(OptimizerError::Linearizer(_))),
+            matches!(
+                apex_err,
+                ApexSolverError::Optimizer(OptimizerError::Linearizer(_))
+            ),
             "Expected Optimizer::Linearizer variant for LinearizerError through OptimizerError, got {:?}",
             apex_err
         );
@@ -613,7 +661,9 @@ mod tests {
     #[test]
     fn test_bubble_up_from_linalg_to_optimizer_to_api() -> TestResult {
         let result = solver_optimize();
-        let err = result.expect_err("should propagate LinAlgError through OptimizerError");
+        let Err(err) = result else {
+            return Err("should propagate LinAlgError through OptimizerError".into());
+        };
 
         assert!(
             matches!(err, ApexSolverError::Optimizer(OptimizerError::LinAlg(_))),
@@ -633,7 +683,9 @@ mod tests {
     #[test]
     fn test_bubble_up_from_core_to_optimizer_to_api() -> TestResult {
         let result = solver_optimize_with_core_error();
-        let err = result.expect_err("should propagate CoreError through OptimizerError");
+        let Err(err) = result else {
+            return Err("should propagate CoreError through OptimizerError".into());
+        };
 
         assert!(
             matches!(err, ApexSolverError::Optimizer(OptimizerError::Core(_))),
@@ -656,7 +708,10 @@ mod tests {
 
     #[test]
     fn test_camera_error_point_behind_camera_direct() -> TestResult {
-        let cam_err = CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 };
+        let cam_err = CameraModelError::PointBehindCamera {
+            z: -0.5,
+            min_z: 1e-6,
+        };
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -665,13 +720,20 @@ mod tests {
         );
         let compact = apex_err.chain_compact();
         assert!(compact.contains("behind camera"), "compact: {}", compact);
-        assert!(compact.contains("z=-0.5"), "compact should preserve structured field z: {}", compact);
+        assert!(
+            compact.contains("z=-0.5"),
+            "compact should preserve structured field z: {}",
+            compact
+        );
         Ok(())
     }
 
     #[test]
     fn test_camera_error_focal_length_preserves_fields() -> TestResult {
-        let cam_err = CameraModelError::FocalLengthNotPositive { fx: -1.0, fy: 500.0 };
+        let cam_err = CameraModelError::FocalLengthNotPositive {
+            fx: -1.0,
+            fy: 500.0,
+        };
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -686,7 +748,10 @@ mod tests {
 
     #[test]
     fn test_camera_error_numerical_preserves_fields() -> TestResult {
-        let cam_err = CameraModelError::DenominatorTooSmall { denom: 1e-15, threshold: 1e-6 };
+        let cam_err = CameraModelError::DenominatorTooSmall {
+            denom: 1e-15,
+            threshold: 1e-6,
+        };
         let apex_err: ApexSolverError = cam_err.into();
         assert!(
             matches!(apex_err, ApexSolverError::Camera(_)),
@@ -695,7 +760,11 @@ mod tests {
         );
         let msg = apex_err.to_string();
         assert!(msg.contains("denom"), "msg: {}", msg);
-        assert!(msg.contains("threshold"), "msg should contain threshold: {}", msg);
+        assert!(
+            msg.contains("threshold"),
+            "msg should contain threshold: {}",
+            msg
+        );
         Ok(())
     }
 
@@ -722,24 +791,64 @@ mod tests {
     #[test]
     fn test_camera_error_all_variants_accessible() -> TestResult {
         let errors: Vec<ApexSolverError> = vec![
-            CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 }.into(),
+            CameraModelError::PointBehindCamera {
+                z: -0.5,
+                min_z: 1e-6,
+            }
+            .into(),
             CameraModelError::PointAtCameraCenter.into(),
             CameraModelError::ProjectionOutOfBounds.into(),
             CameraModelError::PointOutsideImage { x: 100.0, y: 200.0 }.into(),
-            CameraModelError::DenominatorTooSmall { denom: 1e-15, threshold: 1e-6 }.into(),
-            CameraModelError::NumericalError { operation: "unproject".to_string(), details: "convergence failed".to_string() }.into(),
-            CameraModelError::FocalLengthNotPositive { fx: -1.0, fy: 500.0 }.into(),
-            CameraModelError::FocalLengthNotFinite { fx: f64::INFINITY, fy: 500.0 }.into(),
-            CameraModelError::PrincipalPointNotFinite { cx: f64::NAN, cy: 240.0 }.into(),
-            CameraModelError::DistortionNotFinite { name: "k1".to_string(), value: f64::NAN }.into(),
-            CameraModelError::ParameterOutOfRange { param: "alpha".to_string(), value: 1.5, min: 0.0, max: 1.0 }.into(),
+            CameraModelError::DenominatorTooSmall {
+                denom: 1e-15,
+                threshold: 1e-6,
+            }
+            .into(),
+            CameraModelError::NumericalError {
+                operation: "unproject".to_string(),
+                details: "convergence failed".to_string(),
+            }
+            .into(),
+            CameraModelError::FocalLengthNotPositive {
+                fx: -1.0,
+                fy: 500.0,
+            }
+            .into(),
+            CameraModelError::FocalLengthNotFinite {
+                fx: f64::INFINITY,
+                fy: 500.0,
+            }
+            .into(),
+            CameraModelError::PrincipalPointNotFinite {
+                cx: f64::NAN,
+                cy: 240.0,
+            }
+            .into(),
+            CameraModelError::DistortionNotFinite {
+                name: "k1".to_string(),
+                value: f64::NAN,
+            }
+            .into(),
+            CameraModelError::ParameterOutOfRange {
+                param: "alpha".to_string(),
+                value: 1.5,
+                min: 0.0,
+                max: 1.0,
+            }
+            .into(),
             CameraModelError::InvalidParams("bad".to_string()).into(),
         ];
 
         for err in &errors {
             assert!(matches!(err, ApexSolverError::Camera(_)));
-            assert!(!err.to_string().is_empty(), "Error Display should not be empty");
-            assert!(!err.chain_compact().is_empty(), "chain_compact should not be empty");
+            assert!(
+                !err.to_string().is_empty(),
+                "Error Display should not be empty"
+            );
+            assert!(
+                !err.chain_compact().is_empty(),
+                "chain_compact should not be empty"
+            );
         }
         Ok(())
     }
