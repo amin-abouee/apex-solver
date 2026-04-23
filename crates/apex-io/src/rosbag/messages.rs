@@ -915,6 +915,41 @@ impl FromCdr for Duration {
     }
 }
 
+/// Deserialize a message from CDR data based on its type name
+pub fn deserialize_message(data: &[u8], message_type: &str) -> Result<Box<dyn std::fmt::Debug>> {
+    let mut deserializer = CdrDeserializer::new(data)?;
+
+    match message_type {
+        "sensor_msgs/msg/Imu" => {
+            let msg = Imu::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        "geometry_msgs/msg/TransformStamped" => {
+            let msg = TransformStamped::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        "geometry_msgs/msg/PoseWithCovarianceStamped" => {
+            let msg = PoseWithCovarianceStamped::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        "geometry_msgs/msg/PointStamped" => {
+            let msg = PointStamped::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        "sensor_msgs/msg/NavSatFix" => {
+            let msg = NavSatFix::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        "nav_msgs/msg/Odometry" => {
+            let msg = Odometry::from_cdr(&mut deserializer)?;
+            Ok(Box::new(msg))
+        }
+        _ => Err(crate::rosbag::error::ReaderError::generic(format!(
+            "Unsupported message type: {message_type}"
+        ))),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -989,7 +1024,7 @@ mod tests {
     fn header_from_cdr_empty_frame_id() {
         let mut data = le_header();
         push_i32_le(&mut data, 10); // stamp.sec
-        push_u32_le(&mut data, 0);  // stamp.nanosec
+        push_u32_le(&mut data, 0); // stamp.nanosec
         push_empty_string(&mut data); // frame_id = ""
         let mut d = CdrDeserializer::new(&data).unwrap();
         let h = Header::from_cdr(&mut d).unwrap();
@@ -1001,7 +1036,7 @@ mod tests {
     #[test]
     fn header_from_cdr_with_frame_id() {
         let mut data = le_header();
-        push_i32_le(&mut data, 5);   // sec
+        push_i32_le(&mut data, 5); // sec
         push_u32_le(&mut data, 100); // nanosec
         push_string(&mut data, "map");
         let mut d = CdrDeserializer::new(&data).unwrap();
@@ -1252,11 +1287,11 @@ mod tests {
         push_string(&mut data, "x");
         // offset: align to 4 from current position
         align_to(&mut data, 4);
-        push_u32_le(&mut data, 0);  // offset
-        data.push(7u8);             // datatype = FLOAT32
+        push_u32_le(&mut data, 0); // offset
+        data.push(7u8); // datatype = FLOAT32
         // count: align to 4
         align_to(&mut data, 4);
-        push_u32_le(&mut data, 1);  // count
+        push_u32_le(&mut data, 1); // count
         let mut d = CdrDeserializer::new(&data).unwrap();
         let pf = PointField::from_cdr(&mut d).unwrap();
         assert_eq!(pf.name, "x");
@@ -1450,7 +1485,9 @@ mod tests {
         push_u32_le(&mut data, 0);
         push_empty_string(&mut data);
         push_empty_string(&mut data); // child_frame_id
-        for _ in 0..7 { push_f64_le(&mut data, 0.0); }
+        for _ in 0..7 {
+            push_f64_le(&mut data, 0.0);
+        }
         let result = deserialize_message(&data, "geometry_msgs/msg/TransformStamped");
         assert!(result.is_ok());
     }
@@ -1474,40 +1511,5 @@ mod tests {
         let mut data = vec![0u8; 324];
         data[1] = 0x01;
         let _ = deserialize_message(&data, "sensor_msgs/msg/Imu");
-    }
-}
-
-/// Deserialize a message from CDR data based on its type name
-pub fn deserialize_message(data: &[u8], message_type: &str) -> Result<Box<dyn std::fmt::Debug>> {
-    let mut deserializer = CdrDeserializer::new(data)?;
-
-    match message_type {
-        "sensor_msgs/msg/Imu" => {
-            let msg = Imu::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        "geometry_msgs/msg/TransformStamped" => {
-            let msg = TransformStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        "geometry_msgs/msg/PoseWithCovarianceStamped" => {
-            let msg = PoseWithCovarianceStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        "geometry_msgs/msg/PointStamped" => {
-            let msg = PointStamped::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        "sensor_msgs/msg/NavSatFix" => {
-            let msg = NavSatFix::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        "nav_msgs/msg/Odometry" => {
-            let msg = Odometry::from_cdr(&mut deserializer)?;
-            Ok(Box::new(msg))
-        }
-        _ => Err(crate::rosbag::error::ReaderError::generic(format!(
-            "Unsupported message type: {message_type}"
-        ))),
     }
 }

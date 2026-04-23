@@ -430,9 +430,7 @@ mod tests {
     #[test]
     fn test_primitive_deserialization() {
         let data = [
-            0x00, 0x01, 0x00, 0x00,
-            0x2A, 0x00, 0x00, 0x00,
-            0x01, 0x02, 0x03, 0x04,
+            0x00, 0x01, 0x00, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 0x04,
         ];
         let mut d = CdrDeserializer::new(&data).unwrap();
         assert_eq!(d.read_i32().unwrap(), 42);
@@ -491,10 +489,10 @@ mod tests {
     fn read_f64_le() {
         let mut data = le_header();
         data.extend_from_slice(&[0u8; 4]); // 4 pad bytes to align f64 to 8
-        data.extend_from_slice(&3.14f64.to_le_bytes());
+        data.extend_from_slice(&1.5f64.to_le_bytes());
         let mut d = CdrDeserializer::new(&data).unwrap();
         // pos starts at 4, align(8) moves to 8
-        assert!((d.read_f64().unwrap() - 3.14).abs() < 1e-10);
+        assert!((d.read_f64().unwrap() - 1.5).abs() < 1e-10);
     }
 
     #[test]

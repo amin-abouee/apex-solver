@@ -226,6 +226,7 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_metadata_yaml(
         version: u32,
         storage_id: &str,
@@ -400,7 +401,10 @@ mod tests {
     fn from_file_missing_path_returns_err() {
         let result = BagMetadata::from_file("/nonexistent/path/metadata.yaml");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ReaderError::MetadataNotFound { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            ReaderError::MetadataNotFound { .. }
+        ));
     }
 
     #[test]
@@ -433,7 +437,10 @@ mod tests {
         let yaml_modified = yaml.replace(".db3", ".bag");
         let meta: BagMetadata = serde_yaml::from_str(&yaml_modified).unwrap();
         let result = meta.validate();
-        assert!(matches!(result, Err(ReaderError::UnsupportedStorageFormat { .. })));
+        assert!(matches!(
+            result,
+            Err(ReaderError::UnsupportedStorageFormat { .. })
+        ));
     }
 
     #[test]
