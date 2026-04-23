@@ -237,6 +237,12 @@ pub enum DistortionModel {
     ///
     /// Two-parameter fisheye model with improved wide-angle accuracy.
     DoubleSphere { xi: f64, alpha: f64 },
+
+    /// NVIDIA f-theta fisheye model (4 polynomial coefficients)
+    ///
+    /// Maps angle θ to image-plane radius via `f(θ) = k₁θ + k₂θ² + k₃θ³ + k₄θ⁴`.
+    /// k₁ acts as the nominal focal length (pixels per radian at small angles).
+    FTheta { k1: f64, k2: f64, k3: f64, k4: f64 },
 }
 
 fn check_finite(name: &str, value: f64) -> Result<(), CameraModelError> {
@@ -331,6 +337,14 @@ impl DistortionModel {
                 }
                 Ok(())
             }
+            DistortionModel::FTheta { k1, k2, k3, k4 } => {
+                if !k1.is_finite() || *k1 <= 0.0 {
+                    return Err(CameraModelError::FocalLengthNotPositive { fx: *k1, fy: *k1 });
+                }
+                check_finite("k2", *k2)?;
+                check_finite("k3", *k3)?;
+                check_finite("k4", *k4)
+            }
         }
     }
 }
@@ -369,6 +383,7 @@ pub mod bal_pinhole;
 pub mod double_sphere;
 pub mod eucm;
 pub mod fov;
+pub mod ftheta;
 pub mod kannala_brandt;
 pub mod pinhole;
 pub mod rad_tan;
@@ -379,6 +394,7 @@ pub use bal_pinhole::BALPinholeCameraStrict;
 pub use double_sphere::DoubleSphereCamera;
 pub use eucm::EucmCamera;
 pub use fov::FovCamera;
+pub use ftheta::FThetaCamera;
 pub use kannala_brandt::KannalaBrandtCamera;
 pub use pinhole::PinholeCamera;
 pub use rad_tan::RadTanCamera;
