@@ -206,7 +206,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let bag_path = dir.path().join("batch_bag");
         std::fs::create_dir_all(&bag_path).unwrap();
-        let mut writer = create_storage_writer(StoragePlugin::Sqlite3, &bag_path, CompressionMode::None).unwrap();
+        let mut writer =
+            create_storage_writer(StoragePlugin::Sqlite3, &bag_path, CompressionMode::None)
+                .unwrap();
         writer.open().unwrap();
 
         let conn = Connection {
