@@ -141,7 +141,6 @@ use faer::sparse;
 use std::collections::HashMap;
 use thiserror::Error;
 
-
 /// Observer-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
 pub enum ObserverError {
