@@ -15,8 +15,8 @@ use faer::{
 };
 use rayon::prelude::*;
 
-use crate::linearizer::{LinearizerError, LinearizerResult};
 use crate::error::ErrorLogging;
+use crate::linearizer::{LinearizerError, LinearizerResult};
 
 use super::super::linearize_block;
 use crate::core::problem::{Problem, VariableEnum};
@@ -95,8 +95,10 @@ pub fn build_symbolic_structure(
         &indices,
     )
     .map_err(|e| {
-        LinearizerError::SymbolicStructure("Failed to build symbolic sparse matrix structure".to_string())
-            .log_with_source(e)
+        LinearizerError::SymbolicStructure(
+            "Failed to build symbolic sparse matrix structure".to_string(),
+        )
+        .log_with_source(e)
     })?;
 
     Ok(SymbolicStructure { pattern, order })
@@ -152,8 +154,10 @@ pub fn assemble_sparse(
 
     let total_residual = Arc::try_unwrap(total_residual)
         .map_err(|_| {
-            LinearizerError::ParallelComputation("Failed to unwrap Arc for total residual".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for total residual".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
@@ -170,8 +174,10 @@ pub fn assemble_sparse(
         jacobian_values.as_slice(),
     )
     .map_err(|e| {
-        LinearizerError::SymbolicStructure("Failed to create sparse Jacobian from argsort".to_string())
-            .log_with_source(e)
+        LinearizerError::SymbolicStructure(
+            "Failed to create sparse Jacobian from argsort".to_string(),
+        )
+        .log_with_source(e)
     })?;
 
     Ok((residual_faer, jacobian_sparse))

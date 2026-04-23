@@ -35,7 +35,6 @@ use faer::{Col, Mat};
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 
-
 use crate::core::problem::{Problem, VariableEnum};
 use crate::error::ErrorLogging;
 use crate::{
@@ -155,8 +154,10 @@ pub(crate) fn linearize_block(
     // Write residual into shared accumulator
     {
         let mut total_residual = total_residual.lock().map_err(|e| {
-            LinearizerError::ParallelComputation("Failed to acquire lock on total residual".to_string())
-                .log_with_source(e)
+            LinearizerError::ParallelComputation(
+                "Failed to acquire lock on total residual".to_string(),
+            )
+            .log_with_source(e)
         })?;
 
         let mut total_residual_mut = total_residual.as_mut();
@@ -220,9 +221,7 @@ impl AssemblyBackend for SparseMode {
         _total_dof: usize,
     ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let sym = symbolic_structure.ok_or_else(|| {
-            LinearizerError::InvalidInput(
-                "SparseMode requires symbolic structure".to_string(),
-            )
+            LinearizerError::InvalidInput("SparseMode requires symbolic structure".to_string())
         })?;
         crate::linearizer::cpu::sparse::assemble_sparse(problem, variables, variable_index_map, sym)
     }

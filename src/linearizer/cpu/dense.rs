@@ -12,8 +12,8 @@ use std::{
 use faer::{Col, Mat};
 use rayon::prelude::*;
 
-use crate::linearizer::{LinearizerError, LinearizerResult};
 use crate::error::ErrorLogging;
+use crate::linearizer::{LinearizerError, LinearizerResult};
 
 use super::super::linearize_block;
 use crate::core::problem::{Problem, VariableEnum};
@@ -83,8 +83,10 @@ pub fn assemble_dense(
 
     let total_residual = Arc::try_unwrap(total_residual)
         .map_err(|_| {
-            LinearizerError::ParallelComputation("Failed to unwrap Arc for total residual".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for total residual".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
@@ -96,8 +98,10 @@ pub fn assemble_dense(
 
     let jacobian_dense = Arc::try_unwrap(jacobian_dense)
         .map_err(|_| {
-            LinearizerError::ParallelComputation("Failed to unwrap Arc for dense Jacobian".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for dense Jacobian".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
