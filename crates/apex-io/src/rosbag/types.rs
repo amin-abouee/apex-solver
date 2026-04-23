@@ -270,3 +270,70 @@ impl StoragePlugin {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn connection_msgtype_alias() {
+        let conn = Connection {
+            id: 1,
+            topic: "/imu".to_string(),
+            message_type: "sensor_msgs/msg/Imu".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 42,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert_eq!(conn.msgtype(), "sensor_msgs/msg/Imu");
+        assert_eq!(conn.msgcount(), 42);
+    }
+
+    #[test]
+    fn compression_mode_as_str() {
+        assert_eq!(CompressionMode::None.as_str(), "");
+        assert_eq!(CompressionMode::Message.as_str(), "message");
+        assert_eq!(CompressionMode::File.as_str(), "file");
+        assert_eq!(CompressionMode::Storage.as_str(), "storage");
+    }
+
+    #[test]
+    fn compression_format_as_str() {
+        assert_eq!(CompressionFormat::None.as_str(), "");
+        assert_eq!(CompressionFormat::Zstd.as_str(), "zstd");
+    }
+
+    #[test]
+    fn storage_plugin_as_str() {
+        assert_eq!(StoragePlugin::Sqlite3.as_str(), "sqlite3");
+        assert_eq!(StoragePlugin::Mcap.as_str(), "mcap");
+    }
+
+    #[test]
+    fn qos_profile_default_uses_system_default() {
+        let qos = QosProfile::default();
+        assert!(matches!(qos.history, QosHistory::SystemDefault));
+        assert!(matches!(qos.reliability, QosReliability::SystemDefault));
+        assert!(matches!(qos.durability, QosDurability::SystemDefault));
+        assert!(matches!(qos.liveliness, QosLiveliness::SystemDefault));
+        assert_eq!(qos.depth, 0);
+        assert!(!qos.avoid_ros_namespace_conventions);
+    }
+
+    #[test]
+    fn message_definition_default_is_none_format() {
+        let def = MessageDefinition::default();
+        assert!(matches!(def.format, MessageDefinitionFormat::None));
+        assert!(def.data.is_empty());
+    }
+
+    #[test]
+    fn qos_time_default_is_zero() {
+        let t = QosTime::default();
+        assert_eq!(t.sec, 0);
+        assert_eq!(t.nsec, 0);
+    }
+}
