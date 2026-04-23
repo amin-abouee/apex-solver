@@ -726,4 +726,20 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn test_load_invalid_utf8_returns_err() {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(&[0xFF, 0xFE, 0x80, 0x00, 0xAB]).unwrap();
+        let result = ToroLoader::load(f.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_write_to_nonexistent_dir_returns_err() {
+        let mut graph = Graph::new();
+        graph.vertices_se2.insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        let result = ToroLoader::write(&graph, "/nonexistent_dir_xyz/output.toro");
+        assert!(result.is_err());
+    }
 }
