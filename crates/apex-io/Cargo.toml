@@ -36,11 +36,6 @@ name = "write_dummy_bag"
 path = "bin/write_dummy_bag.rs"
 
 [[bin]]
-name = "dds_listener"
-path = "bin/dds_listener.rs"
-required-features = ["dds"]
-
-[[bin]]
 name = "dds_multi_listener"
 path = "bin/dds_multi_listener.rs"
 required-features = ["dds"]
