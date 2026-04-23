@@ -51,8 +51,8 @@
 //! use apex_solver::core::corrector::Corrector;
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use nalgebra::{DVector, DMatrix};
-//! # use apex_solver::error::ApexSolverResult;
-//! # fn example() -> ApexSolverResult<()> {
+//! # use apex_solver::core::CoreResult;
+//! # fn example() -> CoreResult<()> {
 //!
 //! // Create a robust loss function
 //! let loss = HuberLoss::new(1.0)?;
@@ -127,8 +127,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let residual = DVector::from_vec(vec![1.0, 2.0, 3.0]);
@@ -210,8 +210,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::{DVector, DMatrix};
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let residual = DVector::from_vec(vec![2.0, 1.0]);
@@ -274,8 +274,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let mut residual = DVector::from_vec(vec![2.0, 3.0, 1.0]);
