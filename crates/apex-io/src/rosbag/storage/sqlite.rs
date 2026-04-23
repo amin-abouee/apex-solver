@@ -418,7 +418,7 @@ impl StorageReader for SqliteReader {
             }
         }
 
-        all_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        all_messages.sort_by_key(|a| a.timestamp);
 
         Ok(all_messages)
     }
