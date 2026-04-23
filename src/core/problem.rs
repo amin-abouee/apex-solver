@@ -99,6 +99,7 @@ use nalgebra::DVector;
 use rayon::prelude::*;
 use tracing::warn;
 
+use crate::error::ErrorLogging;
 use crate::{
     core::{
         CoreError, corrector::Corrector, loss_functions::LossFunction,
