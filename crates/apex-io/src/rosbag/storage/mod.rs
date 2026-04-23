@@ -134,3 +134,99 @@ pub fn create_storage_writer(
         StoragePlugin::Mcap => Ok(Box::new(mcap::McapWriter::new(path, compression_mode)?)),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn create_storage_reader_sqlite3_identifier() {
+        let path = PathBuf::from("test.db3");
+        let result = create_storage_reader("sqlite3", vec![path.as_path()], vec![]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_storage_reader_mcap_identifier() {
+        let path = PathBuf::from("test.mcap");
+        let result = create_storage_reader("mcap", vec![path.as_path()], vec![]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_storage_reader_unknown_identifier_returns_err() {
+        let path = PathBuf::from("test.hdf5");
+        let result = create_storage_reader("hdf5", vec![path.as_path()], vec![]);
+        assert!(matches!(
+            result,
+            Err(crate::rosbag::error::BagError::UnsupportedStorageFormat { .. })
+        ));
+    }
+
+    #[test]
+    fn create_storage_reader_auto_detect_db3() {
+        let path = PathBuf::from("autodetect.db3");
+        let result = create_storage_reader("", vec![path.as_path()], vec![]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_storage_reader_auto_detect_mcap() {
+        let path = PathBuf::from("autodetect.mcap");
+        let result = create_storage_reader("", vec![path.as_path()], vec![]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_storage_reader_auto_detect_no_known_extension_returns_err() {
+        let path = PathBuf::from("unknown.xyz");
+        let result = create_storage_reader("", vec![path.as_path()], vec![]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_storage_writer_sqlite3_plugin() {
+        let path = PathBuf::from("/tmp/test_writer_sqlite3.db3");
+        let result = create_storage_writer(StoragePlugin::Sqlite3, &path, CompressionMode::None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn create_storage_writer_mcap_plugin() {
+        let path = PathBuf::from("/tmp/test_writer_mcap.mcap");
+        let result = create_storage_writer(StoragePlugin::Mcap, &path, CompressionMode::None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn storage_writer_write_batch_default_impl() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("batch_bag");
+        std::fs::create_dir_all(&bag_path).unwrap();
+        let mut writer = create_storage_writer(StoragePlugin::Sqlite3, &bag_path, CompressionMode::None).unwrap();
+        writer.open().unwrap();
+
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        writer.add_msgtype(&conn).unwrap();
+        writer.add_connection(&conn, "").unwrap();
+
+        let msgs: Vec<(Connection, u64, Vec<u8>)> = vec![
+            (conn.clone(), 100, vec![0x00, 0x01, 0x00, 0x00, 0x01]),
+            (conn.clone(), 200, vec![0x00, 0x01, 0x00, 0x00, 0x02]),
+        ];
+        writer.write_batch(&msgs).unwrap();
+        assert!(writer.is_open());
+    }
+}
