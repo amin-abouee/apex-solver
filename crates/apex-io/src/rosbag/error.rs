@@ -190,3 +190,101 @@ impl BagError {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_factory_creates_generic_variant() {
+        let err = BagError::generic("something went wrong");
+        assert!(err.to_string().contains("something went wrong"));
+        assert!(matches!(err, BagError::Generic { .. }));
+    }
+
+    #[test]
+    fn writer_factory_creates_writer_variant() {
+        let err = BagError::writer("disk full");
+        assert!(err.to_string().contains("disk full"));
+        assert!(matches!(err, BagError::Writer { .. }));
+    }
+
+    #[test]
+    fn compression_factory_creates_compression_variant() {
+        let err = BagError::compression("zstd failed");
+        assert!(matches!(err, BagError::Compression(_)));
+        assert!(err.to_string().contains("zstd failed"));
+    }
+
+    #[test]
+    fn invalid_message_data_factory() {
+        let err = BagError::invalid_message_data("truncated buffer");
+        assert!(matches!(err, BagError::InvalidMessageData { .. }));
+        assert!(err.to_string().contains("truncated buffer"));
+    }
+
+    #[test]
+    fn cdr_deserialization_factory_includes_position() {
+        let err = BagError::cdr_deserialization("bad bytes", 42, 100);
+        let s = err.to_string();
+        assert!(s.contains("42"));
+        assert!(s.contains("100"));
+        assert!(s.contains("bad bytes"));
+    }
+
+    #[test]
+    fn message_type_not_found_factory() {
+        let err = BagError::message_type_not_found("sensor_msgs/msg/Imu");
+        assert!(matches!(err, BagError::MessageTypeNotFound { .. }));
+        assert!(err.to_string().contains("sensor_msgs/msg/Imu"));
+    }
+
+    #[test]
+    fn schema_validation_factory() {
+        let err = BagError::schema_validation("missing field");
+        assert!(matches!(err, BagError::SchemaValidation { .. }));
+        assert!(err.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn connection_not_found_factory() {
+        let err = BagError::connection_not_found("/imu");
+        assert!(matches!(err, BagError::ConnectionNotFound { .. }));
+        assert!(err.to_string().contains("/imu"));
+    }
+
+    #[test]
+    fn connection_already_exists_factory() {
+        let err = BagError::connection_already_exists("/cam");
+        assert!(matches!(err, BagError::ConnectionAlreadyExists { .. }));
+        assert!(err.to_string().contains("/cam"));
+    }
+
+    #[test]
+    fn invalid_qos_profile_factory() {
+        let err = BagError::invalid_qos_profile("bad depth");
+        assert!(matches!(err, BagError::InvalidQosProfile { .. }));
+        assert!(err.to_string().contains("bad depth"));
+    }
+
+    #[test]
+    fn bag_not_open_display() {
+        let err = BagError::BagNotOpen;
+        assert!(err.to_string().contains("not open"));
+    }
+
+    #[test]
+    fn unsupported_version_display() {
+        let err = BagError::UnsupportedVersion { version: 99 };
+        assert!(err.to_string().contains("99"));
+    }
+
+    #[test]
+    fn unsupported_storage_format_display() {
+        let err = BagError::UnsupportedStorageFormat {
+            format: "hdf5".to_string(),
+        };
+        assert!(err.to_string().contains("hdf5"));
+    }
+}
