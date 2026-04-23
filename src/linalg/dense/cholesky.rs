@@ -4,6 +4,7 @@ use faer::{
 };
 
 use crate::linalg::{DenseMode, LinAlgError, LinAlgResult, LinearSolver};
+use crate::error::ErrorLogging;
 
 /// Dense Cholesky (LLT) linear solver for CPU.
 ///

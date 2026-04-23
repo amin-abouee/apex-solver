@@ -4,6 +4,7 @@ use faer::{
 };
 
 use crate::linalg::{LinAlgError, LinAlgResult};
+use crate::error::ErrorLogging;
 
 /// Convert a sparse CSC matrix to a dense matrix.
 ///

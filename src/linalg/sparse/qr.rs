@@ -7,6 +7,7 @@ use faer::{
 use std::ops::Mul;
 
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
+use crate::error::ErrorLogging;
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
