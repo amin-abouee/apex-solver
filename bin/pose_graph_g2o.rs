@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use apex_solver::JacobianMode;
 use apex_solver::ErrorLogging;
+use apex_solver::JacobianMode;
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
 };
