@@ -3,8 +3,8 @@ use faer::{
     linalg::solvers::{Llt, LltError, Solve},
 };
 
-use crate::linalg::{DenseMode, LinAlgError, LinAlgResult, LinearSolver};
 use crate::error::ErrorLogging;
+use crate::linalg::{DenseMode, LinAlgError, LinAlgResult, LinearSolver};
 
 /// Dense Cholesky (LLT) linear solver for CPU.
 ///

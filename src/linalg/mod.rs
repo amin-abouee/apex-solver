@@ -216,8 +216,8 @@ pub(crate) fn extract_variable_covariances(
 mod tests {
     use super::*;
     use crate::core::problem::VariableEnum;
-    use crate::error::ErrorLogging;
     use crate::core::variable::Variable;
+    use crate::error::ErrorLogging;
     use apex_manifolds::rn::Rn;
     use faer::Mat;
     use nalgebra::dvector;
