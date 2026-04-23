@@ -364,4 +364,64 @@ rosbag2_bagfile_information:
         assert_eq!(reader.duration(), 1000000000);
         assert_eq!(reader.message_count(), 10);
     }
+
+    const SQLITE3_BAG: &str = "tests/test_bags/test_bag_sqlite3";
+
+    #[test]
+    fn test_reader_topics() {
+        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
+        reader.open().unwrap();
+        let topics = reader.topics();
+        assert!(!topics.is_empty());
+        assert_eq!(topics.len(), 94);
+    }
+
+    #[test]
+    fn test_reader_start_end_time() {
+        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
+        reader.open().unwrap();
+        assert!(reader.start_time() > 0);
+        assert!(reader.end_time() > reader.start_time());
+    }
+
+    #[test]
+    fn test_reader_raw_messages_filtered_by_connection() {
+        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
+        reader.open().unwrap();
+        let conns: Vec<_> = reader
+            .connections()
+            .iter()
+            .filter(|c| c.topic == "/test/std_msgs/string")
+            .cloned()
+            .collect();
+        let count = reader
+            .raw_messages_filtered(Some(&conns), None, None)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .count();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_reader_messages_without_open_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let metadata_path = temp_dir.path().join("metadata.yaml");
+        fs::write(&metadata_path, create_test_metadata()).unwrap();
+        let db_path = temp_dir.path().join("test.db3");
+        fs::write(&db_path, b"").unwrap();
+        let reader = Reader::new(temp_dir.path()).unwrap();
+        // Not opened → storage is None → messages() should return Err
+        assert!(reader.messages().is_err());
+    }
+
+    #[test]
+    fn test_reader_raw_messages_without_open_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let metadata_path = temp_dir.path().join("metadata.yaml");
+        fs::write(&metadata_path, create_test_metadata()).unwrap();
+        let db_path = temp_dir.path().join("test.db3");
+        fs::write(&db_path, b"").unwrap();
+        let reader = Reader::new(temp_dir.path()).unwrap();
+        assert!(reader.raw_messages().is_err());
+    }
 }
