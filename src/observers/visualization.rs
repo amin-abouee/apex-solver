@@ -964,17 +964,11 @@ impl RerunObserver {
                         .log_with_source(e)
                     })?;
                 }
-                ManifoldType::RN if self.config.show_landmarks => {
-                    // Handle 3D landmarks (Rn with dimension 3)
-                    if data.len() == 3 {
-                        let pos = [data[0] as f32, data[1] as f32, data[2] as f32];
-                        landmark_positions.push(pos);
-                        landmark_names.push(var_name.clone());
-
-                        // Cache the initial landmark position for displacement calculation
-                        landmark_cache.insert(var_name.clone(), pos);
-                    }
-                    // Skip non-3D Rn variables (e.g., camera intrinsics)
+                ManifoldType::RN if self.config.show_landmarks && data.len() == 3 => {
+                    let pos = [data[0] as f32, data[1] as f32, data[2] as f32];
+                    landmark_positions.push(pos);
+                    landmark_names.push(var_name.clone());
+                    landmark_cache.insert(var_name.clone(), pos);
                 }
                 _ => {
                     // Skip other manifold types (SE2, SO2, SO3) or disabled types
