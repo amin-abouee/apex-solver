@@ -5,8 +5,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use apex_io::rosbag::types::{CompressionFormat, CompressionMode, StoragePlugin};
 use apex_io::rosbag::{Reader, Writer};
-use apex_io::rosbag::types::{CompressionMode, CompressionFormat, MessageDefinition, StoragePlugin};
 use tempfile::tempdir;
 
 use std::collections::HashMap;
@@ -544,13 +544,15 @@ fn test_writer_roundtrip_sqlite3() {
     let dir = tempdir().expect("tempdir");
     let bag_path = dir.path().join("roundtrip_bag");
 
-    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))
-        .expect("Writer::new");
+    let mut writer =
+        Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3)).expect("Writer::new");
     writer.open().expect("open");
 
     let conn = make_test_connection(&mut writer, "/test/string", "std_msgs/msg/String");
 
-    let payload = vec![0x00u8, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, b'h', b'e', b'l', b'l', b'o', 0x00];
+    let payload = vec![
+        0x00u8, 0x01, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, b'h', b'e', b'l', b'l', b'o', 0x00,
+    ];
     writer.write(&conn, 1_000_000_000, &payload).expect("write");
     writer.write(&conn, 2_000_000_000, &payload).expect("write");
     writer.close().expect("close");
@@ -572,8 +574,8 @@ fn test_writer_duplicate_connection_returns_err() {
     let dir = tempdir().expect("tempdir");
     let bag_path = dir.path().join("dup_conn_bag");
 
-    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))
-        .expect("Writer::new");
+    let mut writer =
+        Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3)).expect("Writer::new");
     writer.open().expect("open");
 
     make_test_connection(&mut writer, "/imu", "sensor_msgs/msg/Imu");
@@ -752,16 +754,16 @@ fn test_writer_set_compression_after_open_fails() {
 
 #[test]
 fn test_read_bag_metadata_fast_sqlite3() {
-    let meta = apex_io::rosbag::read_bag_metadata_fast(SQLITE3_BAG_PATH)
-        .expect("should read metadata");
+    let meta =
+        apex_io::rosbag::read_bag_metadata_fast(SQLITE3_BAG_PATH).expect("should read metadata");
     assert_eq!(meta.message_count(), 188);
     assert!(meta.duration() > 0);
 }
 
 #[test]
 fn test_read_bag_metadata_fast_mcap() {
-    let meta = apex_io::rosbag::read_bag_metadata_fast(MCAP_BAG_PATH)
-        .expect("should read metadata");
+    let meta =
+        apex_io::rosbag::read_bag_metadata_fast(MCAP_BAG_PATH).expect("should read metadata");
     assert_eq!(meta.message_count(), 188);
 }
 
@@ -867,7 +869,7 @@ fn test_reader_raw_messages_filtered_by_time() {
     let batch = reader
         .read_raw_messages_batch(None, Some(start), Some(mid))
         .expect("batch");
-    assert!(batch.len() > 0);
+    assert!(!batch.is_empty());
     assert!(batch.len() < 188);
 }
 
