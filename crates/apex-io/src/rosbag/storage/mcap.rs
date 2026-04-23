@@ -495,6 +495,156 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
     }
 }
 
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::rosbag::storage::StorageWriter;
+    use crate::rosbag::types::{CompressionMode, MessageDefinition};
+    use tempfile::tempdir;
+
+    fn make_connection(topic: &str, msg_type: &str) -> Connection {
+        Connection {
+            id: 1,
+            topic: topic.to_string(),
+            message_type: msg_type.to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn mcap_reader_new_stores_paths() {
+        let path = std::path::PathBuf::from("test.mcap");
+        let reader = McapStorageReader::new(vec![path.as_path()], vec![]).unwrap();
+        assert!(!reader.is_open());
+    }
+
+    #[test]
+    fn mcap_writer_not_open_initially() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("test_bag");
+        let writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        assert!(!writer.is_open());
+    }
+
+    #[test]
+    fn mcap_writer_open_and_close() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("test_bag")).unwrap();
+        let bag_path = dir.path().join("test_bag");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        writer.open().unwrap();
+        assert!(writer.is_open());
+        writer.close(9, "{}").unwrap();
+        assert!(!writer.is_open());
+    }
+
+    #[test]
+    fn mcap_writer_double_open_returns_err() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bag2")).unwrap();
+        let bag_path = dir.path().join("bag2");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        writer.open().unwrap();
+        assert!(writer.open().is_err());
+    }
+
+    #[test]
+    fn mcap_writer_write_without_open_returns_err() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("bag3");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        let conn = make_connection("/test", "std_msgs/msg/String");
+        assert!(writer.write(&conn, 0, b"data").is_err());
+    }
+
+    #[test]
+    fn mcap_writer_add_msgtype_and_connection() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("bag4")).unwrap();
+        let bag_path = dir.path().join("bag4");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        writer.open().unwrap();
+        let conn = make_connection("/imu", "sensor_msgs/msg/Imu");
+        writer.add_msgtype(&conn).unwrap();
+        writer.add_connection(&conn, "").unwrap();
+        assert!(writer.is_open());
+    }
+
+    #[test]
+    fn mcap_reader_open_missing_file_returns_err() {
+        let path = std::path::PathBuf::from("/nonexistent/path/to.mcap");
+        let mut reader = McapStorageReader::new(vec![path.as_path()], vec![]).unwrap();
+        assert!(reader.open().is_err());
+    }
+
+    #[test]
+    fn mcap_reader_get_definitions_returns_empty() {
+        let path = std::path::PathBuf::from("test.mcap");
+        let reader = McapStorageReader::new(vec![path.as_path()], vec![]).unwrap();
+        let defs = reader.get_definitions().unwrap();
+        assert!(defs.is_empty());
+    }
+
+    #[test]
+    fn mcap_reader_as_any_returns_self() {
+        let path = std::path::PathBuf::from("test.mcap");
+        let reader = McapStorageReader::new(vec![path.as_path()], vec![]).unwrap();
+        let any = reader.as_any();
+        assert!(any.is::<McapStorageReader>());
+    }
+
+    #[test]
+    fn mcap_writer_as_any_returns_self() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("as_any_bag");
+        let writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        let any = <McapWriter as crate::rosbag::storage::StorageWriter>::as_any(&writer);
+        assert!(any.is::<McapWriter>());
+    }
+
+    #[test]
+    fn mcap_reader_close_when_not_open_ok() {
+        let path = std::path::PathBuf::from("test.mcap");
+        let mut reader = McapStorageReader::new(vec![path.as_path()], vec![]).unwrap();
+        // Close without opening should be a noop
+        reader.close().unwrap();
+        assert!(!reader.is_open());
+    }
+
+    #[test]
+    fn mcap_writer_add_msgtype_without_open_fails() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("closed_bag");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        let conn = make_connection("/imu", "sensor_msgs/msg/Imu");
+        assert!(writer.add_msgtype(&conn).is_err());
+    }
+
+    #[test]
+    fn mcap_writer_add_connection_without_open_fails() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("closed_bag2");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        let conn = make_connection("/imu", "sensor_msgs/msg/Imu");
+        assert!(writer.add_connection(&conn, "").is_err());
+    }
+
+    #[test]
+    fn mcap_writer_close_when_not_open_is_noop() {
+        let dir = tempdir().unwrap();
+        let bag_path = dir.path().join("noop_close");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None).unwrap();
+        // Close without opening should be a noop
+        writer.close(9, "{}").unwrap();
+        assert!(!writer.is_open());
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Schema {
     id: u64,
