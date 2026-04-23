@@ -262,6 +262,7 @@ impl ToroLoader {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{EdgeSE3, VertexSE3};
@@ -740,8 +741,12 @@ mod tests {
     #[test]
     fn test_write_to_nonexistent_dir_returns_err() {
         let mut graph = Graph::new();
-        graph.vertices_se2.insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
-        let result = ToroLoader::write(&graph, "/nonexistent_dir_xyz/output.toro");
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("deep").join("output.toro");
+        let result = ToroLoader::write(&graph, &path);
         assert!(result.is_err());
     }
 }

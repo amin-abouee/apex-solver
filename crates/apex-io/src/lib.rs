@@ -714,7 +714,7 @@ mod tests {
     #[test]
     fn test_io_error_log_with_source() {
         let err = IoError::UnsupportedFormat("abc".to_string());
-        let source = std::io::Error::new(std::io::ErrorKind::Other, "source");
+        let source = std::io::Error::other("source");
         let returned = err.log_with_source(source);
         assert!(matches!(returned, IoError::UnsupportedFormat(_)));
     }
