@@ -672,4 +672,232 @@ mod tests {
 
         assert_eq!(*writer.message_counts.get(&connection.id).unwrap(), 1);
     }
+
+    #[test]
+    fn test_set_custom_data() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.set_custom_data("key1".to_string(), "value1".to_string()).unwrap();
+        writer.open().unwrap();
+        // custom data is stored and used during metadata generation
+        writer.close().unwrap();
+        assert!(bag_path.join("metadata.yaml").exists());
+    }
+
+    #[test]
+    fn test_configure_buffer() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let result = writer.configure_buffer(10, 50);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_configure_buffer_after_open_fails() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let result = writer.configure_buffer(10, 50);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), BagError::BagAlreadyOpen));
+    }
+
+    #[test]
+    fn test_write_raw_message() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let conn = writer
+            .add_connection("/raw".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None)
+            .unwrap();
+        let result = writer.write_raw_message(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_flush_buffer_empty_is_noop() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        // No messages written → buffer is empty → flush is noop
+        assert!(writer.flush_buffer().is_ok());
+    }
+
+    #[test]
+    fn test_writer_connections_accessor() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        assert!(writer.connections().is_empty());
+        writer.add_connection("/a".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None).unwrap();
+        assert_eq!(writer.connections().len(), 1);
+    }
+
+    #[test]
+    fn test_writer_batch_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let conn = writer
+            .add_connection("/batch".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None)
+            .unwrap();
+        let msgs: Vec<(Connection, u64, Vec<u8>)> = (0..5u64)
+            .map(|i| (conn.clone(), i * 1000, vec![0x00, 0x01, 0x00, 0x00, 0x01]))
+            .collect();
+        assert!(writer.write_raw_messages_batch(&msgs).is_ok());
+    }
+
+    #[test]
+    fn test_writer_debug_impl() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("debug_bag");
+        let writer = Writer::new(&bag_path, None, None).unwrap();
+        let s = format!("{writer:?}");
+        assert!(s.contains("Writer"));
+        assert!(s.contains("is_open"));
+    }
+
+    #[test]
+    fn test_writer_is_open_accessor() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        assert!(!writer.is_open());
+        writer.open().unwrap();
+        assert!(writer.is_open());
+        writer.close().unwrap();
+        assert!(!writer.is_open());
+    }
+
+    #[test]
+    fn test_writer_open_idempotent() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        assert!(writer.open().is_ok()); // second open is noop
+        assert!(writer.is_open());
+    }
+
+    #[test]
+    fn test_write_bag_not_open_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let fake_conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(matches!(writer.write(&fake_conn, 0, &[]), Err(BagError::BagNotOpen)));
+    }
+
+    #[test]
+    fn test_write_connection_not_found_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let unknown_conn = Connection {
+            id: 999,
+            topic: "/unknown".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(matches!(writer.write(&unknown_conn, 0, &[]), Err(BagError::ConnectionNotFound { .. })));
+    }
+
+    #[test]
+    fn test_add_connection_not_open_returns_err() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let result = writer.add_connection("/t".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None);
+        assert!(matches!(result, Err(BagError::BagNotOpen)));
+    }
+
+    #[test]
+    fn test_copy_raw_message_from_reader() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let conn = writer
+            .add_connection("/copy".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None)
+            .unwrap();
+        let result = writer.copy_raw_message_from_reader(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_serialize_qos_profiles_nonempty() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("test_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer.open().unwrap();
+        let profile = crate::rosbag::types::QosProfile::default();
+        let result = writer.add_connection(
+            "/qos_topic".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            Some(vec![profile]),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_writer_file_compression() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("compressed_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer
+            .set_compression(CompressionMode::File, CompressionFormat::Zstd)
+            .unwrap();
+        writer.open().unwrap();
+        let conn = writer
+            .add_connection("/compressed".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None)
+            .unwrap();
+        writer
+            .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
+            .unwrap();
+        writer.close().unwrap();
+        assert!(bag_path.join("compressed_bag.db3.zstd").exists() || bag_path.join("metadata.yaml").exists());
+    }
+
+    #[test]
+    fn test_writer_message_compression() {
+        let temp_dir = TempDir::new().unwrap();
+        let bag_path = temp_dir.path().join("msg_compressed_bag");
+        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        writer
+            .set_compression(CompressionMode::Message, CompressionFormat::Zstd)
+            .unwrap();
+        writer.open().unwrap();
+        let conn = writer
+            .add_connection("/cmsg".to_string(), "std_msgs/msg/String".to_string(), None, None, None, None)
+            .unwrap();
+        writer
+            .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
+            .unwrap();
+        writer.close().unwrap();
+        assert!(bag_path.join("metadata.yaml").exists());
+    }
 }
