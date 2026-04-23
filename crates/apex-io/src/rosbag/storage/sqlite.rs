@@ -728,6 +728,28 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::rosbag::storage::StorageReader;
+
+    const SQLITE3_BAG: &str = "tests/test_bags/test_bag_sqlite3";
+
+    fn open_test_reader() -> SqliteReader {
+        use crate::rosbag::metadata::BagMetadata;
+        let meta = BagMetadata::from_file(format!("{SQLITE3_BAG}/metadata.yaml")).unwrap();
+        let paths: Vec<std::path::PathBuf> = meta
+            .info()
+            .relative_file_paths
+            .iter()
+            .map(|p| std::path::PathBuf::from(SQLITE3_BAG).join(p))
+            .collect();
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+        let mut reader = SqliteReader::new(path_refs, vec![]).unwrap();
+        reader.open().unwrap();
+        // populate topic_connections from the database so message queries work
+        if let Ok(connections) = reader.get_topics_from_database() {
+            reader.topic_connections = connections;
+        }
+        reader
+    }
 
     #[test]
     fn test_sqlite_reader_creation() {
@@ -747,5 +769,91 @@ mod tests {
 
         reader.close().unwrap();
         assert!(!reader.is_open());
+    }
+
+    #[test]
+    fn sqlite_reader_get_definitions() {
+        let reader = open_test_reader();
+        let defs = reader.get_definitions().unwrap();
+        assert!(!defs.is_empty());
+    }
+
+    #[test]
+    fn sqlite_reader_as_any() {
+        let reader = open_test_reader();
+        let any = reader.as_any();
+        assert!(any.is::<SqliteReader>());
+    }
+
+    #[test]
+    fn sqlite_reader_raw_messages_unfiltered() {
+        let reader = open_test_reader();
+        let count = reader
+            .raw_messages()
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .count();
+        assert_eq!(count, 188);
+    }
+
+    #[test]
+    fn sqlite_reader_raw_messages_filtered_by_time() {
+        let reader = open_test_reader();
+        let all_msgs: Vec<_> = reader
+            .raw_messages()
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        let min_ts = all_msgs.iter().map(|m| m.timestamp).min().unwrap();
+        let max_ts = all_msgs.iter().map(|m| m.timestamp).max().unwrap();
+        let mid = (min_ts + max_ts) / 2;
+
+        let half_count = reader
+            .raw_messages_filtered(None, Some(min_ts), Some(mid))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .count();
+        assert!(half_count > 0 && half_count < 188);
+    }
+
+    #[test]
+    fn sqlite_reader_read_raw_messages_batch_full() {
+        let reader = open_test_reader();
+        let batch = reader.read_raw_messages_batch(None, None, None).unwrap();
+        assert_eq!(batch.len(), 188);
+    }
+
+    #[test]
+    fn sqlite_reader_messages_filtered_by_connection() {
+        use crate::rosbag::metadata::BagMetadata;
+        let meta = BagMetadata::from_file(format!("{SQLITE3_BAG}/metadata.yaml")).unwrap();
+        let paths: Vec<std::path::PathBuf> = meta
+            .info()
+            .relative_file_paths
+            .iter()
+            .map(|p| std::path::PathBuf::from(SQLITE3_BAG).join(p))
+            .collect();
+        let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
+
+        // Use apex_io Reader to get real connections
+        use crate::rosbag::reader::Reader;
+        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
+        reader.open().unwrap();
+        let conns: Vec<_> = reader
+            .connections()
+            .iter()
+            .filter(|c| c.topic == "/test/std_msgs/string")
+            .cloned()
+            .collect();
+
+        let mut sqlite_reader = SqliteReader::new(path_refs, conns.clone()).unwrap();
+        sqlite_reader.open().unwrap();
+
+        let count = sqlite_reader
+            .messages_filtered(Some(&conns), None, None)
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .count();
+        assert_eq!(count, 2);
     }
 }
