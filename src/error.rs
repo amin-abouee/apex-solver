@@ -41,6 +41,7 @@ use crate::{
     core::CoreError, factors::FactorError, linalg::LinAlgError, linearizer::LinearizerError,
     observers::ObserverError, optimizer::OptimizerError,
 };
+use apex_camera_models::CameraModelError;
 use apex_io::IoError;
 use apex_manifolds::ManifoldError;
 use std::error::Error as StdError;
@@ -80,10 +81,6 @@ pub enum ApexSolverError {
     Optimizer(#[from] OptimizerError),
 
     /// Linear algebra errors
-    ///
-    /// **Convention**: Direct `LinAlgError` conversion to `ApexSolverError` is for
-    /// standalone linalg usage (not through the optimizer). Errors from the optimizer
-    /// layer will appear as `ApexSolverError::Optimizer(OptimizerError::LinAlg(...))`.
     #[error(transparent)]
     LinearAlgebra(#[from] LinAlgError),
 
@@ -106,6 +103,10 @@ pub enum ApexSolverError {
     /// Linearizer errors (Jacobian assembly, symbolic structure)
     #[error(transparent)]
     Linearizer(#[from] LinearizerError),
+
+    /// Camera model errors (projection, parameter validation, etc.)
+    #[error(transparent)]
+    Camera(#[from] CameraModelError),
 }
 
 // Module-specific errors are automatically converted via #[from] attributes above
@@ -467,6 +468,7 @@ mod tests {
             ObserverError::InvalidState("bad".into()).into(),
             FactorError::InvalidDimension { expected: 3, actual: 2 }.into(),
             LinearizerError::SymbolicStructure("sym_err".into()).into(),
+            CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 }.into(),
         ];
 
         for err in &errors {
@@ -553,6 +555,100 @@ mod tests {
             "Chain should contain root cause: {}",
             source_chain
         );
+        Ok(())
+    }
+
+    // ========================================================================
+    // CameraModelError → ApexSolverError::Camera (transparent wrap)
+    // ========================================================================
+
+    #[test]
+    fn test_camera_error_point_behind_camera_direct() -> TestResult {
+        let cam_err = CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 };
+        let apex_err: ApexSolverError = cam_err.into();
+        assert!(
+            matches!(apex_err, ApexSolverError::Camera(_)),
+            "Expected Camera variant, got {:?}",
+            apex_err
+        );
+        let compact = apex_err.chain_compact();
+        assert!(compact.contains("behind camera"), "compact: {}", compact);
+        assert!(compact.contains("z=-0.5"), "compact should preserve structured field z: {}", compact);
+        Ok(())
+    }
+
+    #[test]
+    fn test_camera_error_focal_length_preserves_fields() -> TestResult {
+        let cam_err = CameraModelError::FocalLengthNotPositive { fx: -1.0, fy: 500.0 };
+        let apex_err: ApexSolverError = cam_err.into();
+        assert!(
+            matches!(apex_err, ApexSolverError::Camera(_)),
+            "Expected Camera variant, got {:?}",
+            apex_err
+        );
+        let msg = apex_err.to_string();
+        assert!(msg.contains("fx=-1"), "msg should contain fx: {}", msg);
+        assert!(msg.contains("fy=500"), "msg should contain fy: {}", msg);
+        Ok(())
+    }
+
+    #[test]
+    fn test_camera_error_numerical_preserves_fields() -> TestResult {
+        let cam_err = CameraModelError::DenominatorTooSmall { denom: 1e-15, threshold: 1e-6 };
+        let apex_err: ApexSolverError = cam_err.into();
+        assert!(
+            matches!(apex_err, ApexSolverError::Camera(_)),
+            "Expected Camera variant, got {:?}",
+            apex_err
+        );
+        let msg = apex_err.to_string();
+        assert!(msg.contains("denom"), "msg: {}", msg);
+        assert!(msg.contains("threshold"), "msg should contain threshold: {}", msg);
+        Ok(())
+    }
+
+    #[test]
+    fn test_camera_error_parameter_out_of_range() -> TestResult {
+        let cam_err = CameraModelError::ParameterOutOfRange {
+            param: "alpha".to_string(),
+            value: 1.5,
+            min: 0.0,
+            max: 1.0,
+        };
+        let apex_err: ApexSolverError = cam_err.into();
+        assert!(
+            matches!(apex_err, ApexSolverError::Camera(_)),
+            "Expected Camera variant, got {:?}",
+            apex_err
+        );
+        let msg = apex_err.to_string();
+        assert!(msg.contains("alpha"), "msg: {}", msg);
+        assert!(msg.contains("1.5"), "msg should preserve value: {}", msg);
+        Ok(())
+    }
+
+    #[test]
+    fn test_camera_error_all_variants_accessible() -> TestResult {
+        let errors: Vec<ApexSolverError> = vec![
+            CameraModelError::PointBehindCamera { z: -0.5, min_z: 1e-6 }.into(),
+            CameraModelError::PointAtCameraCenter.into(),
+            CameraModelError::ProjectionOutOfBounds.into(),
+            CameraModelError::PointOutsideImage { x: 100.0, y: 200.0 }.into(),
+            CameraModelError::DenominatorTooSmall { denom: 1e-15, threshold: 1e-6 }.into(),
+            CameraModelError::NumericalError { operation: "unproject".to_string(), details: "convergence failed".to_string() }.into(),
+            CameraModelError::FocalLengthNotPositive { fx: -1.0, fy: 500.0 }.into(),
+            CameraModelError::FocalLengthNotFinite { fx: f64::INFINITY, fy: 500.0 }.into(),
+            CameraModelError::PrincipalPointNotFinite { cx: f64::NAN, cy: 240.0 }.into(),
+            CameraModelError::DistortionNotFinite { name: "k1".to_string(), value: f64::NAN }.into(),
+            CameraModelError::ParameterOutOfRange { param: "alpha".to_string(), value: 1.5, min: 0.0, max: 1.0 }.into(),
+            CameraModelError::InvalidParams("bad".to_string()).into(),
+        ];
+
+        for err in &errors {
+            assert!(matches!(err, ApexSolverError::Camera(_)));
+            assert!(!err.to_string().is_empty(), "Error Display should not be empty");
+            assert!(!err.chain_compact().is_empty(), "chain_compact should not be empty");
+        }
         Ok(())
     }
 }
