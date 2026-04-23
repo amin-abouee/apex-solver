@@ -110,6 +110,26 @@ impl CoreError {
 /// Result type for core module operations
 pub type CoreResult<T> = Result<T, CoreError>;
 
+impl From<crate::linearizer::LinearizerError> for CoreError {
+    fn from(err: crate::linearizer::LinearizerError) -> Self {
+        match err {
+            crate::linearizer::LinearizerError::SymbolicStructure(msg) => {
+                CoreError::SymbolicStructure(msg)
+            }
+            crate::linearizer::LinearizerError::ParallelComputation(msg) => {
+                CoreError::ParallelComputation(msg)
+            }
+            crate::linearizer::LinearizerError::Variable(msg) => CoreError::Variable(msg),
+            crate::linearizer::LinearizerError::FactorLinearization(msg) => {
+                CoreError::FactorLinearization(msg)
+            }
+            crate::linearizer::LinearizerError::InvalidInput(msg) => {
+                CoreError::InvalidInput(msg)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
