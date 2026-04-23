@@ -7,6 +7,7 @@
 //! - Dog Leg algorithm
 
 use crate::core::problem::{Problem, VariableEnum};
+use crate::error::ErrorLogging;
 use crate::linalg::{
     self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
@@ -22,7 +23,7 @@ use std::{
     fmt::{Display, Formatter},
 };
 use thiserror::Error;
-use tracing::{debug, error};
+use tracing::debug;
 
 pub mod dog_leg;
 pub mod gauss_newton;
@@ -137,55 +138,6 @@ pub enum OptimizerError {
     /// Unknown or unsupported linear solver type
     #[error("Unknown linear solver type: {0}")]
     UnknownLinearSolver(String),
-}
-
-impl OptimizerError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the optimizer module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::optimizer::OptimizerError;
-    /// # fn operation() -> Result<(), OptimizerError> { Ok(()) }
-    /// # fn example() -> Result<(), OptimizerError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error from a third-party library
-    ///
-    /// This method logs both the OptimizerError and the underlying error
-    /// from external libraries. This provides full debugging context when
-    /// errors occur in third-party code.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error from the third-party library (must implement Debug)
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::optimizer::OptimizerError;
-    /// # fn sparse_matrix_op() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), OptimizerError> {
-    /// sparse_matrix_op()
-    ///     .map_err(|e| {
-    ///         OptimizerError::JacobiScalingCreation(e.to_string())
-    ///             .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for optimizer operations
