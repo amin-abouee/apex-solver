@@ -140,7 +140,6 @@ use faer::Mat;
 use faer::sparse;
 use std::collections::HashMap;
 use thiserror::Error;
-use tracing::error;
 
 /// Observer-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
@@ -176,58 +175,6 @@ pub enum ObserverError {
     /// Mutex was poisoned (thread panicked while holding lock)
     #[error("Mutex poisoned in {context}: {reason}")]
     MutexPoisoned { context: String, reason: String },
-}
-
-impl ObserverError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the observers module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::observers::ObserverError;
-    /// # fn operation() -> Result<(), ObserverError> { Ok(()) }
-    /// # fn example() -> Result<(), ObserverError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error from a third-party library
-    ///
-    /// This method logs both the ObserverError and the underlying error
-    /// from external libraries (e.g., Rerun's errors). This provides full
-    /// debugging context when errors occur in third-party code.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error from the third-party library (must implement Debug)
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use apex_solver::observers::ObserverError;
-    /// # fn rec_log() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), ObserverError> {
-    /// rec_log()
-    ///     .map_err(|e| {
-    ///         ObserverError::LoggingFailed {
-    ///             entity_path: "world/points".to_string(),
-    ///             reason: format!("{}", e)
-    ///         }
-    ///         .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for observer operations
@@ -569,6 +516,7 @@ impl OptObserverVec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorLogging;
     use std::sync::{Arc, Mutex};
 
     #[derive(Clone)]

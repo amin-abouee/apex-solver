@@ -15,10 +15,8 @@ use faer::{
 };
 use rayon::prelude::*;
 
-use crate::{
-    core::CoreError,
-    error::{ApexSolverError, ApexSolverResult},
-};
+use crate::error::ErrorLogging;
+use crate::linearizer::{LinearizerError, LinearizerResult};
 
 use super::super::linearize_block;
 use crate::core::problem::{Problem, VariableEnum};
@@ -58,7 +56,7 @@ pub fn build_symbolic_structure(
     variables: &HashMap<String, VariableEnum>,
     variable_index_map: &HashMap<String, usize>,
     total_dof: usize,
-) -> ApexSolverResult<SymbolicStructure> {
+) -> LinearizerResult<SymbolicStructure> {
     let mut indices = Vec::<Pair<usize, usize>>::new();
 
     problem
@@ -97,8 +95,10 @@ pub fn build_symbolic_structure(
         &indices,
     )
     .map_err(|e| {
-        CoreError::SymbolicStructure("Failed to build symbolic sparse matrix structure".to_string())
-            .log_with_source(e)
+        LinearizerError::SymbolicStructure(
+            "Failed to build symbolic sparse matrix structure".to_string(),
+        )
+        .log_with_source(e)
     })?;
 
     Ok(SymbolicStructure { pattern, order })
@@ -121,7 +121,7 @@ pub fn assemble_sparse(
     variables: &HashMap<String, VariableEnum>,
     variable_index_map: &HashMap<String, usize>,
     symbolic_structure: &SymbolicStructure,
-) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
     let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(
         problem.total_residual_dimension,
     )));
@@ -129,7 +129,7 @@ pub fn assemble_sparse(
     let total_nnz = symbolic_structure.pattern.compute_nnz();
 
     // Evaluate all blocks in parallel, collecting sparse Jacobian values
-    let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, ApexSolverError> = problem
+    let jacobian_blocks: Result<Vec<(usize, Vec<f64>)>, LinearizerError> = problem
         .residual_blocks()
         .par_iter()
         .map(|(_, residual_block)| {
@@ -154,12 +154,14 @@ pub fn assemble_sparse(
 
     let total_residual = Arc::try_unwrap(total_residual)
         .map_err(|_| {
-            CoreError::ParallelComputation("Failed to unwrap Arc for total residual".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for total residual".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
-            CoreError::ParallelComputation(
+            LinearizerError::ParallelComputation(
                 "Failed to extract mutex inner value for total residual".to_string(),
             )
             .log_with_source(e)
@@ -172,8 +174,10 @@ pub fn assemble_sparse(
         jacobian_values.as_slice(),
     )
     .map_err(|e| {
-        CoreError::SymbolicStructure("Failed to create sparse Jacobian from argsort".to_string())
-            .log_with_source(e)
+        LinearizerError::SymbolicStructure(
+            "Failed to create sparse Jacobian from argsort".to_string(),
+        )
+        .log_with_source(e)
     })?;
 
     Ok((residual_faer, jacobian_sparse))
@@ -188,7 +192,7 @@ fn scatter_sparse_block(
     variables: &HashMap<String, VariableEnum>,
     variable_index_map: &HashMap<String, usize>,
     total_residual: &Arc<Mutex<Col<f64>>>,
-) -> ApexSolverResult<Vec<f64>> {
+) -> LinearizerResult<Vec<f64>> {
     let block = linearize_block(residual_block, variables, total_residual)?;
 
     let mut local_jacobian_values = Vec::new();
@@ -205,12 +209,11 @@ fn scatter_sparse_block(
                 }
             }
         } else {
-            return Err(CoreError::Variable(format!(
+            return Err(LinearizerError::Variable(format!(
                 "Missing key {} in variable-to-column-index mapping",
                 var_key
             ))
-            .log()
-            .into());
+            .log());
         }
     }
 

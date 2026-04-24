@@ -9,7 +9,6 @@ use std::{
     fmt::{self, Debug, Display, Formatter},
 };
 use thiserror::Error;
-use tracing::error;
 
 pub use sparse::{
     IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
@@ -99,20 +98,6 @@ pub enum LinAlgError {
     /// Solver in invalid state (e.g., initialized incorrectly)
     #[error("Invalid solver state: {0}")]
     InvalidState(String),
-}
-
-impl LinAlgError {
-    /// Log the error with tracing::error and return self for chaining
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error from a third-party library
-    pub fn log_with_source<E: Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for linear algebra operations
@@ -232,6 +217,7 @@ mod tests {
     use super::*;
     use crate::core::problem::VariableEnum;
     use crate::core::variable::Variable;
+    use crate::error::ErrorLogging;
     use apex_manifolds::rn::Rn;
     use faer::Mat;
     use nalgebra::dvector;

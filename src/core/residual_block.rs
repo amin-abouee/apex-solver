@@ -37,8 +37,8 @@
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::SE2;
-//! # use apex_solver::error::ApexSolverResult;
-//! # fn example() -> ApexSolverResult<()> {
+//! # use apex_solver::core::CoreResult;
+//! # fn example() -> CoreResult<()> {
 //!
 //! // Create a between factor (measurement between two poses)
 //! let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
@@ -72,6 +72,7 @@ use nalgebra::{DMatrix, DVector};
 use crate::core::{
     CoreError, CoreResult, corrector::Corrector, loss_functions::LossFunction, variable::Variable,
 };
+use crate::error::ErrorLogging;
 use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
 
@@ -143,8 +144,8 @@ impl ResidualBlock {
     /// use apex_solver::factors::{Factor, BetweenFactor};
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use apex_solver::manifold::se2::SE2;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
     /// let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);

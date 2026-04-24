@@ -226,12 +226,9 @@ where
             // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
                 Ok(proj) => proj,
-                Err(_) => {
+                Err(cam_err) => {
                     if self.verbose_cheirality {
-                        warn!(
-                            "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
-                            i, p_cam.x, p_cam.y, p_cam.z
-                        );
+                        warn!("Invalid projection for point {}: {}", i, cam_err);
                     }
                     // Invalid projection: use zero residual (matches Ceres convention)
                     residuals[i * 2] = 0.0;

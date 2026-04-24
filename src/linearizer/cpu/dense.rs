@@ -12,10 +12,8 @@ use std::{
 use faer::{Col, Mat};
 use rayon::prelude::*;
 
-use crate::{
-    core::CoreError,
-    error::{ApexSolverError, ApexSolverResult},
-};
+use crate::error::ErrorLogging;
+use crate::linearizer::{LinearizerError, LinearizerResult};
 
 use super::super::linearize_block;
 use crate::core::problem::{Problem, VariableEnum};
@@ -36,7 +34,7 @@ pub fn assemble_dense(
     variables: &HashMap<String, VariableEnum>,
     variable_index_map: &HashMap<String, usize>,
     total_dof: usize,
-) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
+) -> LinearizerResult<(Mat<f64>, Mat<f64>)> {
     let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(
         problem.total_residual_dimension,
     )));
@@ -47,12 +45,12 @@ pub fn assemble_dense(
 
     // Evaluate all blocks in parallel
     problem.residual_blocks().par_iter().try_for_each(
-        |(_, residual_block)| -> Result<(), ApexSolverError> {
+        |(_, residual_block)| -> Result<(), LinearizerError> {
             let block = linearize_block(residual_block, variables, &total_residual)?;
 
             // Scatter Jacobian block into the dense matrix
             let mut jac_dense = jacobian_dense.lock().map_err(|e| {
-                CoreError::ParallelComputation(
+                LinearizerError::ParallelComputation(
                     "Failed to acquire lock on dense Jacobian".to_string(),
                 )
                 .log_with_source(e)
@@ -60,7 +58,7 @@ pub fn assemble_dense(
 
             for (i, var_key) in residual_block.variable_key_list.iter().enumerate() {
                 let col_offset = *variable_index_map.get(var_key).ok_or_else(|| {
-                    CoreError::Variable(format!(
+                    LinearizerError::Variable(format!(
                         "Missing key {} in variable-to-column-index mapping",
                         var_key
                     ))
@@ -85,12 +83,14 @@ pub fn assemble_dense(
 
     let total_residual = Arc::try_unwrap(total_residual)
         .map_err(|_| {
-            CoreError::ParallelComputation("Failed to unwrap Arc for total residual".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for total residual".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
-            CoreError::ParallelComputation(
+            LinearizerError::ParallelComputation(
                 "Failed to extract mutex inner value for total residual".to_string(),
             )
             .log_with_source(e)
@@ -98,12 +98,14 @@ pub fn assemble_dense(
 
     let jacobian_dense = Arc::try_unwrap(jacobian_dense)
         .map_err(|_| {
-            CoreError::ParallelComputation("Failed to unwrap Arc for dense Jacobian".to_string())
-                .log()
+            LinearizerError::ParallelComputation(
+                "Failed to unwrap Arc for dense Jacobian".to_string(),
+            )
+            .log()
         })?
         .into_inner()
         .map_err(|e| {
-            CoreError::ParallelComputation(
+            LinearizerError::ParallelComputation(
                 "Failed to extract mutex inner value for dense Jacobian".to_string(),
             )
             .log_with_source(e)

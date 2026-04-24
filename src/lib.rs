@@ -39,8 +39,8 @@ pub mod camera_models {
 
 // Re-export commonly used types from workspace crates
 pub use apex_camera_models::{
-    CameraModel, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera, PinholeCamera,
-    RadTanCamera, UcmCamera,
+    CameraModel, CameraModelError, DoubleSphereCamera, EucmCamera, FovCamera, KannalaBrandtCamera,
+    PinholeCamera, RadTanCamera, UcmCamera,
 };
 
 // Re-export optimization configuration types from factors module
@@ -65,7 +65,7 @@ pub mod optimizer;
 
 // Re-export core types
 pub use core::variable::Variable;
-pub use error::{ApexSolverError, ApexSolverResult};
+pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
 pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};

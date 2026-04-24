@@ -59,8 +59,8 @@
 //! use std::collections::HashMap;
 //! use apex_solver::manifold::se2::SE2;
 //! use apex_solver::JacobianMode;
-//! # use apex_solver::error::ApexSolverResult;
-//! # fn example() -> ApexSolverResult<()> {
+//! # use apex_solver::core::CoreResult;
+//! # fn example() -> CoreResult<()> {
 //!
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //!
@@ -99,12 +99,13 @@ use nalgebra::DVector;
 use rayon::prelude::*;
 use tracing::warn;
 
+use crate::error::ErrorLogging;
 use crate::{
+    core::CoreResult,
     core::{
         CoreError, corrector::Corrector, loss_functions::LossFunction,
         residual_block::ResidualBlock, variable::Variable,
     },
-    error::{ApexSolverError, ApexSolverResult},
     factors::Factor,
     linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
 };
@@ -549,8 +550,8 @@ impl Problem {
     /// use apex_solver::JacobianMode;
     /// use nalgebra::dvector;
     /// use apex_solver::manifold::se2::SE2;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let mut problem = Problem::new(JacobianMode::Sparse);
     ///
@@ -863,11 +864,11 @@ impl Problem {
     pub fn compute_residual_sparse(
         &self,
         variables: &HashMap<String, VariableEnum>,
-    ) -> ApexSolverResult<Mat<f64>> {
+    ) -> CoreResult<Mat<f64>> {
         let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(self.total_residual_dimension)));
 
         // Compute residuals in parallel (no Jacobian needed)
-        let result: Result<Vec<()>, ApexSolverError> = self
+        let result: Result<Vec<()>, CoreError> = self
             .residual_blocks
             .par_iter()
             .map(|(_, residual_block)| {
@@ -952,13 +953,13 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_sparce_matrix: &HashMap<String, usize>,
         symbolic_structure: &SymbolicStructure,
-    ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
-        crate::linearizer::cpu::sparse::assemble_sparse(
+    ) -> CoreResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+        Ok(crate::linearizer::cpu::sparse::assemble_sparse(
             self,
             variables,
             variable_index_sparce_matrix,
             symbolic_structure,
-        )
+        )?)
     }
 
     /// Compute residuals and dense Jacobian.
@@ -969,13 +970,13 @@ impl Problem {
         variables: &HashMap<String, VariableEnum>,
         variable_index_map: &HashMap<String, usize>,
         total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
-        crate::linearizer::cpu::dense::assemble_dense(
+    ) -> CoreResult<(Mat<f64>, Mat<f64>)> {
+        Ok(crate::linearizer::cpu::dense::assemble_dense(
             self,
             variables,
             variable_index_map,
             total_dof,
-        )
+        )?)
     }
 
     /// Compute only the residual for a single residual block (no Jacobian).
@@ -986,7 +987,7 @@ impl Problem {
         residual_block: &ResidualBlock,
         variables: &HashMap<String, VariableEnum>,
         total_residual: &Arc<Mutex<Col<f64>>>,
-    ) -> ApexSolverResult<()> {
+    ) -> CoreResult<()> {
         let mut param_vectors: Vec<DVector<f64>> = Vec::new();
 
         for var_key in &residual_block.variable_key_list {

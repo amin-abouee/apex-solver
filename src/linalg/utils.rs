@@ -3,6 +3,7 @@ use faer::{
     sparse::{SparseColMat, Triplet},
 };
 
+use crate::error::ErrorLogging;
 use crate::linalg::{LinAlgError, LinAlgResult};
 
 /// Convert a sparse CSC matrix to a dense matrix.

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
@@ -111,7 +112,7 @@ fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
                 .inverse(None)
                 .compose(&actual_relative, None, None);
 
-            let residual_tangent = error.log(None);
+            let residual_tangent = LieGroup::log(&error, None);
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
 
             // Chi-squared: r^T * Omega * r (information-weighted)
@@ -148,7 +149,7 @@ fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
                 .inverse(None)
                 .compose(&actual_relative, None, None);
 
-            let residual_tangent = error.log(None);
+            let residual_tangent = LieGroup::log(&error, None);
             let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
 
             // Chi-squared: r^T * Omega * r (information-weighted)

@@ -14,7 +14,6 @@ pub mod residual_block;
 pub mod variable;
 
 use thiserror::Error;
-use tracing::error;
 
 /// Core module error types for optimization problems and factors
 #[derive(Debug, Clone, Error)]
@@ -56,63 +55,31 @@ pub enum CoreError {
     InvalidInput(String),
 }
 
-impl CoreError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the core module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::core::CoreError;
-    /// # fn operation() -> Result<(), CoreError> { Ok(()) }
-    /// # fn example() -> Result<(), CoreError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error from a third-party library
-    ///
-    /// This method logs both the CoreError and the underlying error
-    /// from external libraries. This provides full debugging context when
-    /// errors occur in third-party code.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error from the third-party library (must implement Debug)
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::core::CoreError;
-    /// # fn matrix_operation() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), CoreError> {
-    /// matrix_operation()
-    ///     .map_err(|e| {
-    ///         CoreError::SymbolicStructure(
-    ///             "Failed to build sparse matrix structure".to_string()
-    ///         )
-    ///         .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
-}
-
 /// Result type for core module operations
 pub type CoreResult<T> = Result<T, CoreError>;
+
+impl From<crate::linearizer::LinearizerError> for CoreError {
+    fn from(err: crate::linearizer::LinearizerError) -> Self {
+        match err {
+            crate::linearizer::LinearizerError::SymbolicStructure(msg) => {
+                CoreError::SymbolicStructure(msg)
+            }
+            crate::linearizer::LinearizerError::ParallelComputation(msg) => {
+                CoreError::ParallelComputation(msg)
+            }
+            crate::linearizer::LinearizerError::Variable(msg) => CoreError::Variable(msg),
+            crate::linearizer::LinearizerError::FactorLinearization(msg) => {
+                CoreError::FactorLinearization(msg)
+            }
+            crate::linearizer::LinearizerError::InvalidInput(msg) => CoreError::InvalidInput(msg),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorLogging;
 
     // -------------------------------------------------------------------------
     // CoreError Display — one test per variant

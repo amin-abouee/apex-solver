@@ -46,7 +46,6 @@
 
 use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
-use tracing::error;
 
 // Pose factors
 pub mod between_factor;
@@ -129,55 +128,6 @@ pub enum FactorError {
     /// Numerical instability detected
     #[error("Numerical instability: {0}")]
     NumericalInstability(String),
-}
-
-impl FactorError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the factors module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::factors::FactorError;
-    /// # fn operation() -> Result<(), FactorError> { Ok(()) }
-    /// # fn example() -> Result<(), FactorError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error for debugging context
-    ///
-    /// This method logs both the FactorError and the underlying error
-    /// from external libraries or internal operations, providing full
-    /// debugging context when errors occur.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error (must implement Debug)
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::factors::FactorError;
-    /// # fn compute_jacobian() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), FactorError> {
-    /// compute_jacobian()
-    ///     .map_err(|e| {
-    ///         FactorError::JacobianFailed("Matrix computation failed".to_string())
-    ///             .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for factor operations
@@ -280,6 +230,7 @@ pub trait Factor: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorLogging;
     use nalgebra::{DMatrix, DVector, dvector};
 
     // -------------------------------------------------------------------------

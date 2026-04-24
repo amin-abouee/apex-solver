@@ -33,15 +33,59 @@ use std::{
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Col, Mat};
 use nalgebra::{DMatrix, DVector};
+use thiserror::Error;
 
 use crate::core::problem::{Problem, VariableEnum};
+use crate::error::ErrorLogging;
 use crate::{
-    core::{CoreError, corrector::Corrector, residual_block::ResidualBlock},
-    error::{ApexSolverError, ApexSolverResult},
+    core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
 };
 
 pub use cpu::sparse::SymbolicStructure;
+
+// ============================================================================
+// Linearizer error types
+// ============================================================================
+
+/// Linearizer-specific error types for Jacobian assembly and symbolic structure operations.
+///
+/// These errors occur during the linearization phase of optimization, where
+/// the nonlinear factor graph is converted into a linear system (residual vector
+/// and Jacobian matrix).
+///
+/// # Error Hierarchy
+///
+/// `LinearizerError` is a Layer C (deep/module) error. It propagates up through:
+/// - `CoreError::Linearizer(LinearizerError)` → for core module callers
+/// - `ApexSolverError::Linearizer(LinearizerError)` → for direct API callers
+///
+
+#[derive(Debug, Clone, Error)]
+pub enum LinearizerError {
+    /// Symbolic structure construction or usage failed
+    #[error("Symbolic structure error: {0}")]
+    SymbolicStructure(String),
+
+    /// Parallel computation error (thread/mutex failures during assembly)
+    #[error("Parallel computation error: {0}")]
+    ParallelComputation(String),
+
+    /// Variable key missing in index mapping during Jacobian scatter
+    #[error("Variable error: {0}")]
+    Variable(String),
+
+    /// Factor linearization returned no Jacobian when expected
+    #[error("Factor linearization failed: {0}")]
+    FactorLinearization(String),
+
+    /// Invalid input (e.g., SparseMode requires symbolic structure)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+}
+
+/// Result type for linearizer module operations
+pub type LinearizerResult<T> = Result<T, LinearizerError>;
 
 // ============================================================================
 // Block linearization (shared by sparse and dense paths)
@@ -74,7 +118,7 @@ pub(crate) fn linearize_block(
     residual_block: &ResidualBlock,
     variables: &HashMap<String, VariableEnum>,
     total_residual: &Arc<Mutex<Col<f64>>>,
-) -> ApexSolverResult<BlockLinearization> {
+) -> LinearizerResult<BlockLinearization> {
     let mut param_vectors: Vec<DVector<f64>> = Vec::new();
     let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
     let mut count_variable_local_idx: usize = 0;
@@ -90,7 +134,7 @@ pub(crate) fn linearize_block(
 
     let (mut res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
     let mut jac = jac_opt.ok_or_else(|| {
-        CoreError::FactorLinearization(
+        LinearizerError::FactorLinearization(
             "Factor returned None for Jacobian when compute_jacobian=true".to_string(),
         )
         .log()
@@ -110,8 +154,10 @@ pub(crate) fn linearize_block(
     // Write residual into shared accumulator
     {
         let mut total_residual = total_residual.lock().map_err(|e| {
-            CoreError::ParallelComputation("Failed to acquire lock on total residual".to_string())
-                .log_with_source(e)
+            LinearizerError::ParallelComputation(
+                "Failed to acquire lock on total residual".to_string(),
+            )
+            .log_with_source(e)
         })?;
 
         let mut total_residual_mut = total_residual.as_mut();
@@ -150,7 +196,7 @@ pub trait AssemblyBackend: LinearizationMode {
         variable_index_map: &HashMap<String, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, Self::Jacobian)>;
+    ) -> LinearizerResult<(Mat<f64>, Self::Jacobian)>;
 
     /// Compute column norms of the Jacobian (for Jacobi scaling).
     fn compute_column_norms(jacobian: &Self::Jacobian) -> Vec<f64>;
@@ -173,11 +219,9 @@ impl AssemblyBackend for SparseMode {
         variable_index_map: &HashMap<String, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         _total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+    ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let sym = symbolic_structure.ok_or_else(|| {
-            ApexSolverError::from(CoreError::InvalidInput(
-                "SparseMode requires symbolic structure".to_string(),
-            ))
+            LinearizerError::InvalidInput("SparseMode requires symbolic structure".to_string())
         })?;
         crate::linearizer::cpu::sparse::assemble_sparse(problem, variables, variable_index_map, sym)
     }
@@ -229,7 +273,7 @@ impl AssemblyBackend for DenseMode {
         variable_index_map: &HashMap<String, usize>,
         _symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
+    ) -> LinearizerResult<(Mat<f64>, Mat<f64>)> {
         crate::linearizer::cpu::dense::assemble_dense(
             problem,
             variables,
