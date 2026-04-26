@@ -1127,8 +1127,8 @@ mod tests {
 
         // Verify reprojection error
         for i in 0..valid {
-            let p3d = pts_3d.column(i).into_owned();
-            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let col = pts_3d.column(i);
+            let projected = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
             let err = ((projected.x - pts_2d[(0, i)]).powi(2)
                 + (projected.y - pts_2d[(1, i)]).powi(2))
             .sqrt();
