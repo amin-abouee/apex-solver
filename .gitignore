@@ -23,16 +23,11 @@ Cargo.lock
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-.cursor/
-.vscode/
-.claude/
 profiles/
 scripts/
 output/
 doc/*.md
 *.csv
-data_bk/
-CLAUDE.md
 cookbook
 deprecated
 
@@ -47,3 +42,11 @@ __cmake*
 
 # Dataset files — managed by download_datasets, not committed to git
 data/
+
+
+# Generated Agent files
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.claude/
+.opencode/
