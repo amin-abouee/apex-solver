@@ -891,8 +891,14 @@ mod tests {
         let camera = UcmCamera::new(pinhole, distortion)?;
         let p_cam = Vector3::new(0.3, 0.0, 1.0);
         let uv = camera.project(&p_cam)?;
-        assert!(uv.x > 320.0, "off-axis point should project right of principal point");
-        assert!((uv.y - 240.0).abs() < 1.0, "y should be close to cy for horizontal offset");
+        assert!(
+            uv.x > 320.0,
+            "off-axis point should project right of principal point"
+        );
+        assert!(
+            (uv.y - 240.0).abs() < 1.0,
+            "y should be close to cy for horizontal offset"
+        );
         Ok(())
     }
 
@@ -922,9 +928,15 @@ mod tests {
         let batch = camera.project_batch(&pts);
         for i in 0..3 {
             let col = pts.column(i);
-            let p = camera.project(&Vector3::new(col[0], col[1], col[2])).unwrap();
-            assert!((batch[(0, i)] - p.x).abs() < 1e-10, "batch u mismatch at col {i}");
-            assert!((batch[(1, i)] - p.y).abs() < 1e-10, "batch v mismatch at col {i}");
+            let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
+            assert!(
+                (batch[(0, i)] - p.x).abs() < 1e-10,
+                "batch u mismatch at col {i}"
+            );
+            assert!(
+                (batch[(1, i)] - p.y).abs() < 1e-10,
+                "batch v mismatch at col {i}"
+            );
         }
         Ok(())
     }
