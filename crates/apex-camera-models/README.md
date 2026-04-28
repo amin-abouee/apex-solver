@@ -44,12 +44,6 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Distortion: Radial (k1, k2, k3) + Tangential (p1, p2)
   - Use: Most standard cameras with lens distortion, OpenCV compatibility
 
-- **Equidistant**: Fisheye lens model
-  - Parameters: 8 (fx, fy, cx, cy, k1, k2, k3, k4)
-  - FOV: ~180°
-  - Distortion: Radial polynomial on angle θ
-  - Use: Fisheye lenses, wide-angle cameras
-
 - **Kannala-Brandt**: GoPro-style fisheye
   - Parameters: 8 (fx, fy, cx, cy, k1, k2, k3, k4)
   - FOV: ~180°
@@ -82,13 +76,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Projection: Consecutive projection onto two unit spheres
   - Use: Omnidirectional cameras, best accuracy for extreme FOV
 
-### Specialized Models
-
-- **Orthographic**: Orthographic projection
-  - Parameters: 4 (fx, fy, cx, cy)
-  - FOV: N/A
-  - Projection: Parallel rays (no perspective)
-  - Use: Telephoto lenses, orthographic rendering
+- **F-Theta (FTheta)**: NVIDIA-style polynomial fisheye used in automotive and robotics
+  - Parameters: 6 (cx, cy, k1, k2, k3, k4)
+  - FOV: Up to 220°
+  - Distortion: Polynomial f(θ) = k₁θ + k₂θ² + k₃θ³ + k₄θ⁴
+  - Note: No separate focal length — k₁ acts as pixels-per-radian
+  - Use: Automotive surround-view cameras, robotics fisheye, NVIDIA DriveWorks
 
 ## Camera Model Comparison
 
@@ -96,13 +89,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
 |-------|-----------|-----------|----------------|---------------------|------------------|
 | **Pinhole** | 4 | ~60° | None | Simple | Standard cameras, initial estimates |
 | **RadTan** | 9 | ~100° | Radial + Tangential | Medium | OpenCV calibration, most cameras |
-| **Equidistant** | 8 | ~180° | Radial polynomial | Medium | Fisheye lenses |
 | **Kannala-Brandt** | 8 | ~180° | Polynomial on θ | Complex | GoPro, action cameras |
 | **FOV** | 5 | Variable | Atan-based | Medium | SLAM with wide-angle |
 | **UCM** | 5 | >90° | Unified sphere | Medium | Catadioptric cameras |
 | **EUCM** | 6 | >180° | Extended unified | Medium | High-distortion fisheye |
 | **Double Sphere** | 6 | >180° | Two-sphere | Complex | Omnidirectional, best extreme FOV accuracy |
-| **Orthographic** | 4 | N/A | None | Simple | Telephoto, orthographic projection |
+| **F-Theta** | 6 | Up to 220° | Polynomial f(θ) | Complex | Automotive surround-view, NVIDIA DriveWorks |
 | **BAL Pinhole** | 6 | ~60° | Radial (k1, k2) | Simple | BAL datasets |
 | **BAL Pinhole Strict** | 3 | ~60° | Radial (k1, k2) | Simple | Bundler compatibility |
 
@@ -125,11 +117,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
 - Wide-angle: **FOV** or **UCM**
 
 **Wide FOV (120°-180°)**
-- Fisheye lenses: **Equidistant** or **Kannala-Brandt**
+- Fisheye lenses: **Kannala-Brandt**
 - Action cameras (GoPro): **Kannala-Brandt**
 - SLAM applications: **FOV**
 
-**Extreme FOV (>180°)**
+**Extreme FOV (>180°, up to 220°)**
+- Automotive/robotics surround-view: **F-Theta**
 - Omnidirectional: **EUCM** or **Double Sphere**
 - Best accuracy: **Double Sphere** (higher computational cost)
 - Good balance: **EUCM**
@@ -148,11 +141,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
 **Camera Calibration:**
 - Match your calibration tool:
   - OpenCV: **RadTan** or **Kannala-Brandt** (fisheye)
-  - Kalibr: **Equidistant** or **EUCM**
+  - Kalibr: **Kannala-Brandt** (called "equidistant" in Kalibr) or **EUCM**
   - Bundler/BAL: **BAL Pinhole Strict**
 
 **Robotics / Autonomous Vehicles:**
 - 360° cameras: **Double Sphere** or **EUCM**
+- Surround-view fisheye (automotive): **F-Theta** (NVIDIA DriveWorks)
 - Fisheye: **Kannala-Brandt**
 - Standard: **RadTan**
 
@@ -160,7 +154,7 @@ All models implement the `CameraModel` trait providing a unified interface for p
 
 ### Camera Coordinate System
 
-All camera models follow the standard computer vision convention:
+All camera models follow the standard computer vision convention RDF:
 - **X-axis**: Points right
 - **Y-axis**: Points down
 - **Z-axis**: Points forward (into the scene)
@@ -251,7 +245,7 @@ All camera models use a unified `CameraModelError` enum with structured variants
 
 ```toml
 [dependencies]
-apex-camera-models = "0.1.0"
+apex-camera-models = "0.2.0"
 ```
 
 ## Usage
@@ -269,6 +263,29 @@ match camera.project(&point_3d) {
     Ok(pixel) => println!("Projected to pixel: ({}, {})", pixel.x, pixel.y),
     Err(e) => println!("Projection failed: {}", e), // Shows actual values in error
 }
+```
+
+### F-Theta Projection (Automotive / Robotics)
+
+```rust
+use apex_camera_models::FThetaCamera;
+use nalgebra::Vector3;
+
+// Parameters: [cx, cy, k1, k2, k3, k4] — k1 acts as focal length (pixels/radian)
+let camera = FThetaCamera::from([640.0, 400.0, 800.0, -0.5, 0.1, -0.01]);
+
+// Can project points at extreme off-axis angles (e.g., >90°)
+let point_3d = Vector3::new(2.0, 0.0, 1.0); // ~63° off optical axis
+match camera.project(&point_3d) {
+    Ok(pixel) => println!("F-Theta projected to: ({:.1}, {:.1})", pixel.x, pixel.y),
+    Err(e) => println!("Projection failed: {}", e),
+}
+
+// Unproject a pixel back to a 3D ray (Newton-Raphson iteration)
+let pixel = nalgebra::Vector2::new(640.0, 400.0); // principal point
+let ray = camera.unproject(&pixel).unwrap();
+println!("Unprojected ray: ({:.3}, {:.3}, {:.3})", ray.x, ray.y, ray.z);
+// → (0.000, 0.000, 1.000)
 ```
 
 ### Parameter Validation
@@ -424,26 +441,71 @@ This crate's camera models are based on implementations and formulas from:
 
 ### Academic References
 
-- **Kannala & Brandt** (2006). "A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses". *IEEE TPAMI*.
-  - Foundation for Kannala-Brandt fisheye model
+#### Pinhole Camera
 
-- **Usenko et al.** (2018). "The Double Sphere Camera Model". *3DV*.
-  - Double Sphere omnidirectional model
+- **Hartley, R. & Zisserman, A.** (2003). *Multiple View Geometry in Computer Vision* (2nd ed.). Cambridge University Press. ISBN: 978-0521540513.
+  - Definitive textbook reference for the pinhole camera model, projective geometry, and bundle adjustment
 
-- **Mei & Rives** (2007). "Single View Point Omnidirectional Camera Calibration from Planar Grids". *ICRA*.
-  - Unified Camera Model (UCM) foundation
+#### Radial-Tangential (Brown-Conrady / RadTan)
 
-- **Khomutenko et al.** (2016). "An Enhanced Unified Camera Model". *RA-L*.
-  - Enhanced Unified Camera Model (EUCM)
+- **Conrady, A.E.** (1919). "Decentred Lens-Systems". *Monthly Notices of the Royal Astronomical Society*, 79(5), pp. 384–390. DOI: 10.1093/mnras/79.5.384
+  - Early formulation of decentered (tangential) lens distortion
 
-- **Brown, D.C.** (1966). "Decentering Distortion of Lenses". *Photogrammetric Engineering*.
-  - Radial-Tangential distortion model
+- **Brown, D.C.** (1966). "Decentering Distortion of Lenses". *Photogrammetric Engineering*, 32(3), pp. 444–462.
+  - Original formulation of radial and decentering distortion polynomials
 
-### Software References
+- **Brown, D.C.** (1971). "Close-Range Camera Calibration". *Photogrammetric Engineering*, 37(8), pp. 855–866.
+  - Extended calibration methodology; basis for the OpenCV distortion model
 
-- **OpenCV**: Reference implementation for RadTan and Kannala-Brandt models
-- **Kalibr**: Multi-camera calibration toolbox with Equidistant and EUCM support
-- **Ceres Solver**: Bundle adjustment examples and BAL dataset format
+#### Kannala-Brandt Fisheye
+
+- **Kannala, J. & Brandt, S.S.** (2006). "A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses". *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 28(8), pp. 1335–1340. DOI: 10.1109/TPAMI.2006.153
+  - Odd-order polynomial in incidence angle θ; also called "equidistant fisheye" in Kalibr/OpenCV
+
+#### FOV (Field-of-View)
+
+- **Devernay, F. & Faugeras, O.** (2001). "Straight Lines Have to Be Straight: Automatic Calibration and Removal of Distortion from Scenes of Structured Environments". *Machine Vision and Applications*, 13(1), pp. 14–24. DOI: 10.1007/PL00013269
+  - Introduces the atan-based FOV distortion model with single parameter ω
+
+#### UCM (Unified Camera Model)
+
+- **Geyer, C. & Daniilidis, K.** (2000). "A Unifying Theory for Central Panoramic Systems and Practical Implications". *ECCV 2000*, LNCS 1843, pp. 445–461. DOI: 10.1007/3-540-45053-X_29
+  - Theoretical foundation: projection via a unit sphere onto a perspective image plane
+
+- **Mei, C. & Rives, P.** (2007). "Single View Point Omnidirectional Camera Calibration from Planar Grids". *ICRA 2007*, pp. 3945–3950. DOI: 10.1109/ROBOT.2007.364084
+  - Practical calibration method and software implementation for UCM
+
+#### EUCM (Extended Unified Camera Model)
+
+- **Khomutenko, B., Garcia, G. & Martinet, P.** (2016). "An Enhanced Unified Camera Model". *IEEE Robotics and Automation Letters*, 1(1), pp. 137–144. DOI: 10.1109/LRA.2015.2502921
+  - Introduces the β parameter to the UCM, improving projection accuracy for high-distortion fisheyes
+
+#### Double Sphere
+
+- **Usenko, V., Demmel, N., Schubert, D., Stückler, J. & Cremers, D.** (2018). "The Double Sphere Camera Model". *International Conference on 3D Vision (3DV)*, pp. 552–560. DOI: 10.1109/3DV.2018.00069. arXiv:1807.08957
+  - Efficient closed-form projection model for cameras with FOV > 180° using two unit spheres
+
+#### F-Theta (Polynomial Fisheye)
+
+- **Scaramuzza, D., Martinelli, A. & Siegwart, R.** (2006). "A Flexible Technique for Accurate Omnidirectional Camera Calibration and Structure from Motion". *4th IEEE International Conference on Computer Vision Systems (ICVS)*, p. 45. DOI: 10.1109/ICVS.2006.3
+  - General polynomial calibration for omnidirectional cameras mapping angle θ to image radius
+
+- **Abraham, S. & Förstner, W.** (2005). "Fish-Eye-Stereo Calibration and Epipolar Rectification". *ISPRS Journal of Photogrammetry and Remote Sensing*, 59(5), pp. 278–288. DOI: 10.1016/j.isprsjprs.2005.03.001
+  - Polynomial fisheye model r = f(θ); direct mathematical precursor to the f-theta formulation
+
+#### BAL Pinhole / Bundler Format
+
+- **Snavely, N., Seitz, S.M. & Szeliski, R.** (2006). "Photo Tourism: Exploring Photo Collections in 3D". *ACM SIGGRAPH 2006*, ACM TOG 25(3), pp. 835–846. DOI: 10.1145/1179352.1141964
+  - Bundler reconstruction system; defines the (f, k1, k2) strict camera convention
+
+- **Agarwal, S., Snavely, N., Simon, I., Seitz, S.M. & Szeliski, R.** (2009). "Building Rome in a Day". *ICCV 2009*, pp. 72–79. DOI: 10.1109/ICCV.2009.5459148
+  - Large-scale bundle adjustment; defines the BAL dataset format with -Z looking direction
+
+#### Survey
+
+- **Yu, G. et al.** (2024). "A Survey on Camera Models for Image Formation". arXiv:2407.12405.
+  - Comprehensive survey of camera projection models with unified mathematical formulations and comparisons
+
 
 ## License
 

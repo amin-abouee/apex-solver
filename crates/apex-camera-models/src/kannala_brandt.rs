@@ -1174,4 +1174,96 @@ mod tests {
         }
         Ok(())
     }
+
+    #[test]
+    fn test_projection_off_axis() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.3, 0.0, 1.0);
+        let uv = camera.project(&p_cam)?;
+        assert!(
+            uv.x > 320.0,
+            "off-axis point should project right of principal point"
+        );
+        assert!(
+            (uv.y - 240.0).abs() < 1.0,
+            "y should be close to cy for horizontal offset"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unproject_center_pixel() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
+        let uv = Vector2::new(320.0, 240.0);
+        let ray = camera.unproject(&uv)?;
+        assert!(ray.x.abs() < 1e-6, "x should be ~0, got {}", ray.x);
+        assert!(ray.y.abs() < 1e-6, "y should be ~0, got {}", ray.y);
+        assert!((ray.z - 1.0).abs() < 1e-6, "z should be ~1, got {}", ray.z);
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_projection_matches_individual() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
+        let pts = Matrix3xX::from_columns(&[
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.3, 0.2, 1.5),
+            Vector3::new(-0.4, 0.1, 2.0),
+        ]);
+        let batch = camera.project_batch(&pts);
+        for i in 0..3 {
+            let col = pts.column(i);
+            let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
+            assert!(
+                (batch[(0, i)] - p.x).abs() < 1e-10,
+                "batch u mismatch at col {i}"
+            );
+            assert!(
+                (batch[(1, i)] - p.y).abs() < 1e-10,
+                "batch v mismatch at col {i}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_jacobian_dimensions() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::KannalaBrandt {
+            k1: 0.1,
+            k2: 0.01,
+            k3: 0.001,
+            k4: 0.0001,
+        };
+        let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.1, 0.2, 1.0);
+        let jac_point = camera.jacobian_point(&p_cam);
+        assert_eq!(jac_point.nrows(), 2);
+        assert_eq!(jac_point.ncols(), 3);
+        let jac_intr = camera.jacobian_intrinsics(&p_cam);
+        assert_eq!(jac_intr.nrows(), 2);
+        assert_eq!(jac_intr.ncols(), 8); // KannalaBrandtCamera::INTRINSIC_DIM = 8
+        Ok(())
+    }
 }
