@@ -224,7 +224,7 @@ impl SO3 {
 // Conversion traits for integration with generic Problem
 impl From<DVector<f64>> for SO3 {
     fn from(data: DVector<f64>) -> Self {
-        SO3::from_quaternion_coeffs(data[0], data[1], data[2], data[3])
+        SO3::from_quaternion_wxyz(data[0], data[1], data[2], data[3])
     }
 }
 
@@ -1733,5 +1733,35 @@ mod tests {
         assert!(result.norm() > 0.0);
         assert!(j_self[(0, 0)].is_finite());
         assert!(j_vec[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn test_from_dvector_wxyz() {
+        let dv = ::nalgebra::dvector![144., 96., 72., 83.] / 205.; // norm 1
+        let so3 = SO3::from(dv.clone());
+        assert_eq!(144. / 205., so3.w());
+        assert_eq!(96. / 205., so3.x());
+        assert_eq!(72. / 205., so3.y());
+        assert_eq!(83. / 205., so3.z());
+    }
+
+    #[test]
+    fn test_from_s03_wxyz() {
+        let so3 = SO3::from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.); // norm 1
+        let dv = DVector::<f64>::from(so3.clone());
+        assert_eq!(144. / 205., dv[0]);
+        assert_eq!(96. / 205., dv[1]);
+        assert_eq!(72. / 205., dv[2]);
+        assert_eq!(83. / 205., dv[3]);
+    }
+
+    #[test]
+    fn test_bijective_from_dvector() {
+        let dv_expected = ::nalgebra::dvector![144., 96., 72., 83.] / 205.; // norm 1
+        let so3_expected = SO3::from(dv_expected.clone());
+        let dv_actual = DVector::<f64>::from(so3_expected.clone());
+        let so3_actual = SO3::from(dv_actual.clone());
+        assert_eq!(dv_expected, dv_actual);
+        assert!(so3_expected == so3_actual);
     }
 }
