@@ -1316,7 +1316,7 @@ mod tests {
 
     #[test]
     fn test_bijective_rn_tangent() {
-        let tangent_expected = RnTangent::new(::nalgebra::dvector![1.,2.,3.]);
+        let tangent_expected = RnTangent::new(::nalgebra::dvector![1., 2., 3.]);
         let dv_expected = DVector::<f64>::from(tangent_expected.clone());
         let tangent_actual = RnTangent::from(dv_expected.clone());
         let dv_actual = DVector::<f64>::from(tangent_actual.clone());
