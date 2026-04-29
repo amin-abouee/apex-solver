@@ -16,7 +16,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.1.0" }
-apex-io = { path = "crates/apex-io", version = "0.1.0" }
+apex-io = { path = "crates/apex-io", version = "0.2.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.2.0" }
 
 # External dependencies (shared versions)
