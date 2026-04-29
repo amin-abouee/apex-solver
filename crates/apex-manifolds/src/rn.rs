@@ -61,6 +61,17 @@ pub struct RnTangent {
     /// Internal data: n-dimensional vector
     data: DVector<f64>,
 }
+impl From<DVector<f64>> for RnTangent {
+    fn from(data: DVector<f64>) -> Self {
+        RnTangent::new(data)
+    }
+}
+
+impl From<RnTangent> for DVector<f64> {
+    fn from(rn: RnTangent) -> Self {
+        rn.data
+    }
+}
 
 impl Display for RnTangent {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
@@ -1301,5 +1312,15 @@ mod tests {
         assert!(rn.is_valid(1e-9));
         // After normalize, it should have unit norm
         assert!((rn.norm() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_bijective_rn_tangent() {
+        let tangent_expected = RnTangent::new(::nalgebra::dvector![1., 2., 3.]);
+        let dv_expected = DVector::<f64>::from(tangent_expected.clone());
+        let tangent_actual = RnTangent::from(dv_expected.clone());
+        let dv_actual = DVector::<f64>::from(tangent_actual.clone());
+        assert!(tangent_expected == tangent_actual);
+        assert_eq!(dv_expected, dv_actual);
     }
 }
