@@ -20,8 +20,8 @@ pub struct McapStorageReader {
     topic_connections: Vec<Connection>,
     /// Whether the storage is currently open
     is_open: bool,
-    /// Memory-mapped MCAP files
-    mapped_files: Vec<memmap2::Mmap>,
+    /// Loaded MCAP file contents (read fully into memory; deref to `&[u8]`).
+    mapped_files: Vec<Box<[u8]>>,
 }
 
 impl McapStorageReader {
@@ -42,7 +42,7 @@ impl McapStorageReader {
         let mut topic_map: HashMap<String, (String, u64)> = HashMap::new();
 
         for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
+            let message_stream = MessageStream::new(mapped_file.as_ref()).map_err(|e| {
                 ReaderError::generic(format!("Failed to create message stream: {e}"))
             })?;
 
@@ -88,25 +88,17 @@ impl StorageReader for McapStorageReader {
         self.mapped_files.clear();
 
         for path in &self.mcap_paths {
-            let file = File::open(path).map_err(|e| {
-                ReaderError::generic(format!(
-                    "Failed to open MCAP file {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
+            let bytes: Box<[u8]> = std::fs::read(path)
+                .map_err(|e| {
+                    ReaderError::generic(format!(
+                        "Failed to read MCAP file {}: {}",
+                        path.display(),
+                        e
+                    ))
+                })?
+                .into_boxed_slice();
 
-            // SAFETY: The memory map is valid as long as the underlying file is not modified.
-            // We keep the file handle alive via `mapped_files`.
-            let mapped_file = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| {
-                ReaderError::generic(format!(
-                    "Failed to memory-map MCAP file {}: {}",
-                    path.display(),
-                    e
-                ))
-            })?;
-
-            self.mapped_files.push(mapped_file);
+            self.mapped_files.push(bytes);
         }
 
         self.is_open = true;
