@@ -1,5 +1,4 @@
 use crate::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
-use memmap2;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::{fs::File, io::Write, path::Path};
@@ -10,26 +9,11 @@ pub struct G2oLoader;
 impl GraphLoader for G2oLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
         let path_ref = path.as_ref();
-        let file = File::open(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to open G2O file: {:?}", path_ref))
-        })?;
-        // SAFETY: The file is opened read-only and the handle remains valid for the
-        // lifetime of `mmap`. No other thread modifies the file during this scope.
-        let mmap = unsafe {
-            memmap2::Mmap::map(&file).map_err(|e| {
-                IoError::Io(e)
-                    .log_with_source(format!("Failed to memory-map G2O file: {:?}", path_ref))
-            })?
-        };
-        let content = std::str::from_utf8(&mmap).map_err(|e| {
-            IoError::Parse {
-                line: 0,
-                message: format!("Invalid UTF-8: {e}"),
-            }
-            .log()
+        let content = std::fs::read_to_string(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to read G2O file: {:?}", path_ref))
         })?;
 
-        Self::parse_content(content)
+        Self::parse_content(&content)
     }
 
     fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
