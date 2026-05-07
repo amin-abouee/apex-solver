@@ -13,7 +13,7 @@ readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
 
-exclude = ["tests/", "benches/"]
+exclude = ["benches/"]
 
 [[bin]]
 name = "download_datasets"
