@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-29
+
+### Added
+- **Three new Lie group manifolds** in `apex-manifolds` (v0.2.0):
+  - `SE_2(3)` — extended pose with velocity for IMU preintegration (9 DOF)
+  - `SGal(3)` — special Galilean group for time-coupled inertial navigation (10 DOF)
+  - `Sim(3)` — similarity transforms with scale for monocular SLAM (7 DOF)
+- **`FThetaCamera`** in `apex-camera-models` (v0.2.0) — NVIDIA DriveWorks f-theta fisheye
+  model for 220° FOV surround-view cameras
+- **`jacobian_pose`** on `CameraModel` trait — analytic ∂(u,v)/∂ξ for all 10 camera models
+- **Comprehensive unit test suite** across all workspace crates:
+  - `apex-manifolds`: identity, compose, inverse, round-trip exp/log, numerical Jacobian
+    verification for all 8 manifolds
+  - `apex-camera-models`: projection/unprojection round-trip, Jacobian verification,
+    parameter validation, batch projection consistency for all 10 models
+  - `apex-solver`: extended integration tests and factor Jacobian checks
+
+### Changed
+- **SO(3) quaternion convention** aligned to w-first (Hamilton) `[qw, qx, qy, qz]` —
+  previously inconsistent between construction and serialization paths
+- **`TryFrom<&[f64]>`** replaces `From<&[f64]>` for all camera model structs — construction
+  is now fallible with structured `CameraModelError`
+- Sub-crate versions bumped: `apex-manifolds 0.2.0`, `apex-camera-models 0.2.0`
+- Workspace `Cargo.toml` dependencies updated to new sub-crate versions
+
+### Fixed
+- **SE(3) Q-matrix** sign error in `right_minus` Jacobian block
+- **SO(3) Jacobian inverse** numerical stability near θ = 0 and θ = π
+- **Sim(3) Jacobian and V-matrix** computations near degenerate scale values
+- **SGal(3) tangent space adjoint** representation
+
 ## [1.2.1] - 2026-03-07
 
 ### Fixed
