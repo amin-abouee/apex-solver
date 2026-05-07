@@ -48,9 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Binary instructions in README** - Fixed outdated command examples and added proper usage documentation for visualization features
 - **Git LFS setup** - Added clear instructions in README Quick Start section reminding users to pull data files using `git lfs pull` before running examples
 
-### Changed
-- Updated version to v1.2.1 in README
-
 ## [1.2.0] - 2026-02-22
 
 ### Changed
@@ -247,7 +244,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 - Competitive performance: 2-10x faster than Ceres on most datasets
 - Excellent cost reduction quality (>99% on well-conditioned problems)
 
-## [0.1.5] - 2024-XX-XX
+## [0.1.5] - 2025-11-03
 
 ### Added
 - **Camera Projection Factors** - 5 camera models for calibration and bundle adjustment
@@ -267,7 +264,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 ### Changed
 - **Code Quality Improvements** - Streamlined imports, renamed `Loss` trait to `LossFunction`, reduced Debug bounds
 
-## [0.1.4] - 2024-XX-XX
+## [0.1.4] - 2025.10.26
 
 ### Added
 - **15 Robust Loss Functions** - Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
@@ -281,7 +278,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 ### Changed
 - **Updated Defaults** - max_iterations: 50, cost_tolerance: 1e-6, gradient_tolerance: 1e-10
 
-## [0.1.3] - 2024-XX-XX
+## [0.1.3] - 2025.10.20
 
 ### Added
 - **Persistent symbolic factorization** - 10-15% performance boost via cached symbolic decomposition
