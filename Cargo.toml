@@ -15,16 +15,16 @@ homepage = "https://github.com/amin-abouee/apex-solver"
 rust-version = "1.85"
 
 [workspace.dependencies]
-apex-manifolds = { path = "crates/apex-manifolds", version = "0.1.0" }
+apex-manifolds = { path = "crates/apex-manifolds", version = "0.2.0" }
 apex-io = { path = "crates/apex-io", version = "0.2.0" }
 apex-camera-models = { path = "crates/apex-camera-models", version = "0.2.0" }
 
 # External dependencies (shared versions)
 nalgebra = { version = "0.33" }
 faer = { version = "0.24", features = ["sparse"] }
-rayon = "1.11"
+rayon = "1.12"
 thiserror = "2.0.18"
-rand = "0.9.2"
+rand = "0.9.4"
 memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -42,7 +42,7 @@ toml = "0.8"
 # rosbag optional dependencies
 serde_yaml = "0.9"
 byteorder  = "1.5"
-bytes      = "1.10"
+bytes      = "1.11"
 hex        = "0.4"
 image      = "0.24"
 rusqlite   = { version = "0.31", features = ["bundled"] }
