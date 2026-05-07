@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-04-29
+
+### Added
+- **Three new Lie group manifolds** in `apex-manifolds` (v0.2.0):
+  - `SE_2(3)` — extended pose with velocity for IMU preintegration (9 DOF)
+  - `SGal(3)` — special Galilean group for time-coupled inertial navigation (10 DOF)
+  - `Sim(3)` — similarity transforms with scale for monocular SLAM (7 DOF)
+- **`FThetaCamera`** in `apex-camera-models` (v0.2.0) — NVIDIA DriveWorks f-theta fisheye
+  model for 220° FOV surround-view cameras
+- **`jacobian_pose`** on `CameraModel` trait — analytic ∂(u,v)/∂ξ for all 10 camera models
+- **Comprehensive unit test suite** across all workspace crates:
+  - `apex-manifolds`: identity, compose, inverse, round-trip exp/log, numerical Jacobian
+    verification for all 8 manifolds
+  - `apex-camera-models`: projection/unprojection round-trip, Jacobian verification,
+    parameter validation, batch projection consistency for all 10 models
+  - `apex-solver`: extended integration tests and factor Jacobian checks
+
+### Changed
+- **SO(3) quaternion convention** aligned to w-first (Hamilton) `[qw, qx, qy, qz]` —
+  previously inconsistent between construction and serialization paths
+- **`TryFrom<&[f64]>`** replaces `From<&[f64]>` for all camera model structs — construction
+  is now fallible with structured `CameraModelError`
+- Sub-crate versions bumped: `apex-manifolds 0.2.0`, `apex-camera-models 0.2.0`
+- Workspace `Cargo.toml` dependencies updated to new sub-crate versions
+
+### Fixed
+- **SE(3) Q-matrix** sign error in `right_minus` Jacobian block
+- **SO(3) Jacobian inverse** numerical stability near θ = 0 and θ = π
+- **Sim(3) Jacobian and V-matrix** computations near degenerate scale values
+- **SGal(3) tangent space adjoint** representation
+
 ## [1.2.1] - 2026-03-07
 
 ### Fixed
@@ -16,9 +47,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Now displays both initial and optimized states
 - **Binary instructions in README** - Fixed outdated command examples and added proper usage documentation for visualization features
 - **Git LFS setup** - Added clear instructions in README Quick Start section reminding users to pull data files using `git lfs pull` before running examples
-
-### Changed
-- Updated version to v1.2.1 in README
 
 ## [1.2.0] - 2026-02-22
 
@@ -216,7 +244,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 - Competitive performance: 2-10x faster than Ceres on most datasets
 - Excellent cost reduction quality (>99% on well-conditioned problems)
 
-## [0.1.5] - 2024-XX-XX
+## [0.1.5] - 2025-11-03
 
 ### Added
 - **Camera Projection Factors** - 5 camera models for calibration and bundle adjustment
@@ -236,7 +264,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 ### Changed
 - **Code Quality Improvements** - Streamlined imports, renamed `Loss` trait to `LossFunction`, reduced Debug bounds
 
-## [0.1.4] - 2024-XX-XX
+## [0.1.4] - 2025.10.26
 
 ### Added
 - **15 Robust Loss Functions** - Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
@@ -250,7 +278,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 ### Changed
 - **Updated Defaults** - max_iterations: 50, cost_tolerance: 1e-6, gradient_tolerance: 1e-10
 
-## [0.1.3] - 2024-XX-XX
+## [0.1.3] - 2025.10.20
 
 ### Added
 - **Persistent symbolic factorization** - 10-15% performance boost via cached symbolic decomposition
