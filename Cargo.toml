@@ -25,7 +25,6 @@ faer = { version = "0.24", features = ["sparse"] }
 rayon = "1.12"
 thiserror = "2.0.18"
 rand = "0.9.4"
-memmap2 = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"

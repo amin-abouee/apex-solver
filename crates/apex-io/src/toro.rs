@@ -1,5 +1,4 @@
 use crate::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
-use memmap2::Mmap;
 use std::{fs, io::Write, path::Path};
 
 /// TORO format loader
@@ -8,26 +7,11 @@ pub struct ToroLoader;
 impl GraphLoader for ToroLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
         let path_ref = path.as_ref();
-        let file = fs::File::open(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to open TORO file: {:?}", path_ref))
-        })?;
-        // SAFETY: The file is opened read-only and the handle remains valid for the
-        // lifetime of `mmap`. No other thread modifies the file during this scope.
-        let mmap = unsafe {
-            Mmap::map(&file).map_err(|e| {
-                IoError::Io(e)
-                    .log_with_source(format!("Failed to memory-map TORO file: {:?}", path_ref))
-            })?
-        };
-        let content = std::str::from_utf8(&mmap).map_err(|e| {
-            IoError::Parse {
-                line: 0,
-                message: format!("Invalid UTF-8: {e}"),
-            }
-            .log()
+        let content = fs::read_to_string(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to read TORO file: {:?}", path_ref))
         })?;
 
-        Self::parse_content(content)
+        Self::parse_content(&content)
     }
 
     fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {

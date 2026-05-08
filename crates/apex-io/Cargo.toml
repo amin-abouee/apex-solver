@@ -47,7 +47,6 @@ path = "tests/rosbag_integration_tests.rs"
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
-memmap2.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
