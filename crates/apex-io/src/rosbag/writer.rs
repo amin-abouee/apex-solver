@@ -518,80 +518,86 @@ impl Drop for Writer {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use tempfile::TempDir;
 
     #[test]
-    fn test_writer_creation() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_creation() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
         let writer = Writer::new(&bag_path, None, None);
         assert!(writer.is_ok());
 
-        let writer = writer.unwrap();
+        let writer = writer?;
         assert!(!writer.is_open());
         assert_eq!(writer.version, Writer::VERSION_LATEST);
+        Ok(())
     }
 
     #[test]
-    fn test_writer_rejects_existing_path() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_rejects_existing_path() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("existing_bag");
-        std::fs::create_dir(&bag_path).unwrap();
+        std::fs::create_dir(&bag_path)?;
 
         let writer = Writer::new(&bag_path, None, None);
         assert!(writer.is_err());
         assert!(matches!(
-            writer.unwrap_err(),
+            writer.err().ok_or("expected error")?,
             BagError::BagAlreadyExists { .. }
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_writer_open_close() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_open_close() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         assert!(!writer.is_open());
 
-        writer.open().unwrap();
+        writer.open()?;
         assert!(writer.is_open());
 
-        writer.close().unwrap();
+        writer.close()?;
         assert!(!writer.is_open());
 
         assert!(bag_path.exists());
         assert!(bag_path.join("metadata.yaml").exists());
+        Ok(())
     }
 
     #[test]
-    fn test_set_compression() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_set_compression() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
 
         let result = writer.set_compression(CompressionMode::Message, CompressionFormat::Zstd);
         assert!(result.is_ok());
 
-        writer.open().unwrap();
+        writer.open()?;
 
         let result = writer.set_compression(CompressionMode::File, CompressionFormat::Zstd);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BagError::BagAlreadyOpen));
+        assert!(matches!(result.err().ok_or("expected error")?, BagError::BagAlreadyOpen));
+        Ok(())
     }
 
     #[test]
-    fn test_add_connection() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_add_connection() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
 
         let connection = writer
             .add_connection(
@@ -602,21 +608,22 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
 
         assert_eq!(connection.topic, "/test_topic");
         assert_eq!(connection.message_type, "std_msgs/msg/String");
         assert_eq!(connection.id, 1);
         assert_eq!(writer.connections().len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn test_duplicate_connection() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_duplicate_connection() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
 
         writer
             .add_connection(
@@ -627,7 +634,7 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
 
         let result = writer.add_connection(
             "/test_topic".to_string(),
@@ -640,18 +647,19 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.err().ok_or("expected error")?,
             BagError::ConnectionAlreadyExists { .. }
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_write_message() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_write_message() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
 
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
 
         let connection = writer
             .add_connection(
@@ -662,7 +670,7 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
 
         let test_data = b"Hello, ROS2!";
         let timestamp = 1_234_567_890_000_000_000;
@@ -670,49 +678,53 @@ mod tests {
         let result = writer.write(&connection, timestamp, test_data);
         assert!(result.is_ok());
 
-        assert_eq!(*writer.message_counts.get(&connection.id).unwrap(), 1);
+        assert_eq!(*writer.message_counts.get(&connection.id).ok_or("missing count")?, 1);
+        Ok(())
     }
 
     #[test]
-    fn test_set_custom_data() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_set_custom_data() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         writer
             .set_custom_data("key1".to_string(), "value1".to_string())
-            .unwrap();
-        writer.open().unwrap();
+            ?;
+        writer.open()?;
         // custom data is stored and used during metadata generation
-        writer.close().unwrap();
+        writer.close()?;
         assert!(bag_path.join("metadata.yaml").exists());
+        Ok(())
     }
 
     #[test]
-    fn test_configure_buffer() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_configure_buffer() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         let result = writer.configure_buffer(10, 50);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_configure_buffer_after_open_fails() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_configure_buffer_after_open_fails() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let result = writer.configure_buffer(10, 50);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BagError::BagAlreadyOpen));
+        assert!(matches!(result.err().ok_or("expected error")?, BagError::BagAlreadyOpen));
+        Ok(())
     }
 
     #[test]
-    fn test_write_raw_message() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_write_raw_message() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let conn = writer
             .add_connection(
                 "/raw".to_string(),
@@ -722,27 +734,29 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         let result = writer.write_raw_message(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_flush_buffer_empty_is_noop() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_flush_buffer_empty_is_noop() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         // No messages written → buffer is empty → flush is noop
         assert!(writer.flush_buffer().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_writer_connections_accessor() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_connections_accessor() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         assert!(writer.connections().is_empty());
         writer
             .add_connection(
@@ -753,16 +767,17 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         assert_eq!(writer.connections().len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn test_writer_batch_write() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_batch_write() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let conn = writer
             .add_connection(
                 "/batch".to_string(),
@@ -772,50 +787,54 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         let msgs: Vec<(Connection, u64, Vec<u8>)> = (0..5u64)
             .map(|i| (conn.clone(), i * 1000, vec![0x00, 0x01, 0x00, 0x00, 0x01]))
             .collect();
         assert!(writer.write_raw_messages_batch(&msgs).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_writer_debug_impl() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_debug_impl() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("debug_bag");
-        let writer = Writer::new(&bag_path, None, None).unwrap();
+        let writer = Writer::new(&bag_path, None, None)?;
         let s = format!("{writer:?}");
         assert!(s.contains("Writer"));
         assert!(s.contains("is_open"));
+        Ok(())
     }
 
     #[test]
-    fn test_writer_is_open_accessor() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_is_open_accessor() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         assert!(!writer.is_open());
-        writer.open().unwrap();
+        writer.open()?;
         assert!(writer.is_open());
-        writer.close().unwrap();
+        writer.close()?;
         assert!(!writer.is_open());
+        Ok(())
     }
 
     #[test]
-    fn test_writer_open_idempotent() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_open_idempotent() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         assert!(writer.open().is_ok()); // second open is noop
         assert!(writer.is_open());
+        Ok(())
     }
 
     #[test]
-    fn test_write_bag_not_open_returns_err() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_write_bag_not_open_returns_err() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         let fake_conn = Connection {
             id: 1,
             topic: "/test".to_string(),
@@ -830,14 +849,15 @@ mod tests {
             writer.write(&fake_conn, 0, &[]),
             Err(BagError::BagNotOpen)
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_write_connection_not_found_returns_err() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_write_connection_not_found_returns_err() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let unknown_conn = Connection {
             id: 999,
             topic: "/unknown".to_string(),
@@ -852,13 +872,14 @@ mod tests {
             writer.write(&unknown_conn, 0, &[]),
             Err(BagError::ConnectionNotFound { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn test_add_connection_not_open_returns_err() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_add_connection_not_open_returns_err() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         let result = writer.add_connection(
             "/t".to_string(),
             "std_msgs/msg/String".to_string(),
@@ -868,14 +889,15 @@ mod tests {
             None,
         );
         assert!(matches!(result, Err(BagError::BagNotOpen)));
+        Ok(())
     }
 
     #[test]
-    fn test_copy_raw_message_from_reader() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_copy_raw_message_from_reader() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let conn = writer
             .add_connection(
                 "/copy".to_string(),
@@ -885,18 +907,19 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         let result =
             writer.copy_raw_message_from_reader(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_serialize_qos_profiles_nonempty() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_serialize_qos_profiles_nonempty() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
-        writer.open().unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
+        writer.open()?;
         let profile = crate::rosbag::types::QosProfile::default();
         let result = writer.add_connection(
             "/qos_topic".to_string(),
@@ -907,17 +930,18 @@ mod tests {
             Some(vec![profile]),
         );
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn test_writer_file_compression() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_file_compression() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("compressed_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         writer
             .set_compression(CompressionMode::File, CompressionFormat::Zstd)
-            .unwrap();
-        writer.open().unwrap();
+            ?;
+        writer.open()?;
         let conn = writer
             .add_connection(
                 "/compressed".to_string(),
@@ -927,26 +951,27 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         writer
             .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
-            .unwrap();
-        writer.close().unwrap();
+            ?;
+        writer.close()?;
         assert!(
             bag_path.join("compressed_bag.db3.zstd").exists()
                 || bag_path.join("metadata.yaml").exists()
         );
+        Ok(())
     }
 
     #[test]
-    fn test_writer_message_compression() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_writer_message_compression() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("msg_compressed_bag");
-        let mut writer = Writer::new(&bag_path, None, None).unwrap();
+        let mut writer = Writer::new(&bag_path, None, None)?;
         writer
             .set_compression(CompressionMode::Message, CompressionFormat::Zstd)
-            .unwrap();
-        writer.open().unwrap();
+            ?;
+        writer.open()?;
         let conn = writer
             .add_connection(
                 "/cmsg".to_string(),
@@ -956,11 +981,12 @@ mod tests {
                 None,
                 None,
             )
-            .unwrap();
+            ?;
         writer
             .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
-            .unwrap();
-        writer.close().unwrap();
+            ?;
+        writer.close()?;
         assert!(bag_path.join("metadata.yaml").exists());
+        Ok(())
     }
 }

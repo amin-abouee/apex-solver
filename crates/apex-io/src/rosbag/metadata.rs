@@ -220,8 +220,10 @@ impl BagMetadata {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -261,193 +263,223 @@ mod tests {
         )
     }
 
-    fn write_temp_yaml(content: &str) -> NamedTempFile {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(content.as_bytes()).unwrap();
-        f
+    fn write_temp_yaml(content: &str) -> std::result::Result<NamedTempFile, Box<dyn std::error::Error>> {
+        let mut f = NamedTempFile::new()?;
+        f.write_all(content.as_bytes())?;
+        Ok(f)
     }
 
     // ── validate ────────────────────────────────────────────────────────────
 
     #[test]
-    fn validate_unsupported_version_returns_err() {
+    fn validate_unsupported_version_returns_err() -> TestResult {
         let yaml = make_metadata_yaml(10, "sqlite3", "", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
             Err(ReaderError::UnsupportedVersion { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_unsupported_storage_format_returns_err() {
+    fn validate_unsupported_storage_format_returns_err() -> TestResult {
         let yaml = make_metadata_yaml(9, "hdf5", "", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
             Err(ReaderError::UnsupportedStorageFormat { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_unsupported_compression_returns_err() {
+    fn validate_unsupported_compression_returns_err() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "lz4", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
             Err(ReaderError::UnsupportedCompressionFormat { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_unsupported_serialization_format_returns_err() {
+    fn validate_unsupported_serialization_format_returns_err() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "protobuf", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(matches!(
             meta.validate(),
             Err(ReaderError::UnsupportedSerializationFormat { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_valid_sqlite3_bag_ok() {
+    fn validate_valid_sqlite3_bag_ok() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 1000, 2000, 5);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn validate_valid_mcap_bag_ok() {
+    fn validate_valid_mcap_bag_ok() -> TestResult {
         let yaml = make_metadata_yaml(9, "mcap", "", "", "cdr", 1000, 2000, 5);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
+        Ok(())
     }
 
     #[test]
-    fn validate_zstd_compression_ok() {
+    fn validate_zstd_compression_ok() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(meta.validate().is_ok());
+        Ok(())
     }
 
     // ── accessors ───────────────────────────────────────────────────────────
 
     #[test]
-    fn duration_accessor() {
+    fn duration_accessor() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 12345, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.duration(), 12345);
+        Ok(())
     }
 
     #[test]
-    fn start_time_accessor() {
+    fn start_time_accessor() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 999_000_000, 1);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.start_time(), 999_000_000);
+        Ok(())
     }
 
     #[test]
-    fn end_time_equals_start_plus_duration_when_nonzero() {
+    fn end_time_equals_start_plus_duration_when_nonzero() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 5_000, 1_000, 1);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.end_time(), 6_000);
+        Ok(())
     }
 
     #[test]
-    fn end_time_zero_when_no_messages() {
+    fn end_time_zero_when_no_messages() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 5_000, 1_000, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.end_time(), 0);
+        Ok(())
     }
 
     #[test]
-    fn message_count_accessor() {
+    fn message_count_accessor() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 77);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.message_count(), 77);
+        Ok(())
     }
 
     #[test]
-    fn is_compressed_false_when_no_format() {
+    fn is_compressed_false_when_no_format() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(!meta.is_compressed());
+        Ok(())
     }
 
     #[test]
-    fn is_compressed_true_when_zstd() {
+    fn is_compressed_true_when_zstd() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "file", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(meta.is_compressed());
+        Ok(())
     }
 
     #[test]
-    fn compression_mode_none_when_empty() {
+    fn compression_mode_none_when_empty() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert!(meta.compression_mode().is_none());
+        Ok(())
     }
 
     #[test]
-    fn compression_mode_some_when_set() {
+    fn compression_mode_some_when_set() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "zstd", "FILE", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         assert_eq!(meta.compression_mode(), Some("FILE"));
+        Ok(())
     }
 
     // ── from_file ───────────────────────────────────────────────────────────
 
     #[test]
-    fn from_file_missing_path_returns_err() {
+    fn from_file_missing_path_returns_err() -> TestResult {
         let result = BagMetadata::from_file("/nonexistent/path/metadata.yaml");
         assert!(result.is_err());
         assert!(matches!(
-            result.unwrap_err(),
+            result.err().ok_or("expected error")?,
             ReaderError::MetadataNotFound { .. }
         ));
+        Ok(())
     }
 
     #[test]
-    fn from_file_valid_yaml_parses_ok() {
+    fn from_file_valid_yaml_parses_ok() -> TestResult {
         let yaml = make_metadata_yaml(9, "sqlite3", "", "", "cdr", 100, 200, 3);
-        let f = write_temp_yaml(&yaml);
-        let meta = BagMetadata::from_file(f.path()).unwrap();
+        let f = write_temp_yaml(&yaml)?;
+        let meta = BagMetadata::from_file(f.path())?;
         assert_eq!(meta.message_count(), 3);
         assert_eq!(meta.duration(), 100);
         assert_eq!(meta.start_time(), 200);
+        Ok(())
     }
 
     #[test]
-    fn from_file_malformed_yaml_returns_err() {
-        let f = write_temp_yaml("this: is: : not: valid yaml{{{{");
+    fn from_file_malformed_yaml_returns_err() -> TestResult {
+        let f = write_temp_yaml("this: is: : not: valid yaml{{{{")?;
         let result = BagMetadata::from_file(f.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn qos_profiles_field_default_is_empty_string() {
+    fn qos_profiles_field_default_is_empty_string() -> TestResult {
         let d = QosProfilesField::default();
         assert!(matches!(d, QosProfilesField::String(s) if s.is_empty()));
+        Ok(())
     }
 
     #[test]
-    fn validate_empty_storage_id_with_unknown_extension_returns_err() {
+    fn validate_empty_storage_id_with_unknown_extension_returns_err() -> TestResult {
         let yaml = make_metadata_yaml(9, "", "", "", "cdr", 0, 0, 0);
         // Replace the .db3 file path with an unknown extension
         let yaml_modified = yaml.replace(".db3", ".bag");
-        let meta: BagMetadata = serde_yaml::from_str(&yaml_modified).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml_modified)?;
         let result = meta.validate();
         assert!(matches!(
             result,
             Err(ReaderError::UnsupportedStorageFormat { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn validate_empty_storage_id_with_db3_extension_ok() {
+    fn validate_empty_storage_id_with_db3_extension_ok() -> TestResult {
         let yaml = make_metadata_yaml(9, "", "", "", "cdr", 0, 0, 0);
-        let meta: BagMetadata = serde_yaml::from_str(&yaml).unwrap();
+        let meta: BagMetadata = serde_yaml::from_str(&yaml)?;
         let result = meta.validate();
         assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn parse_invalid_yaml_returns_err() -> TestResult {
+        let f = write_temp_yaml("this: is: : not: valid yaml{{{{")?;
+        let result = BagMetadata::from_file(f.path());
+        assert!(result.is_err());
+        Ok(())
     }
 }

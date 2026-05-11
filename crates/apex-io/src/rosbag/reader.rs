@@ -301,8 +301,10 @@ impl Drop for Reader {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     use super::*;
     use std::fs;
     use tempfile::TempDir;
@@ -335,59 +337,64 @@ rosbag2_bagfile_information:
     }
 
     #[test]
-    fn test_reader_creation_with_missing_bag() {
+    fn test_reader_creation_with_missing_bag() -> TestResult {
         let result = Reader::new("/nonexistent/path");
         assert!(matches!(result, Err(ReaderError::BagNotFound { .. })));
+        Ok(())
     }
 
     #[test]
-    fn test_reader_creation_with_missing_metadata() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_reader_creation_with_missing_metadata() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let result = Reader::new(temp_dir.path());
         assert!(matches!(result, Err(ReaderError::MetadataNotFound { .. })));
+        Ok(())
     }
 
     #[test]
-    fn test_reader_creation_success() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_reader_creation_success() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let metadata_path = temp_dir.path().join("metadata.yaml");
-        fs::write(&metadata_path, create_test_metadata()).unwrap();
+        fs::write(&metadata_path, create_test_metadata())?;
 
         let db_path = temp_dir.path().join("test.db3");
-        fs::write(&db_path, b"").unwrap();
+        fs::write(&db_path, b"")?;
 
         let reader = Reader::new(temp_dir.path());
         assert!(reader.is_ok());
 
-        let reader = reader.unwrap();
+        let reader = reader?;
         assert!(!reader.is_open());
         assert_eq!(reader.duration(), 1000000000);
         assert_eq!(reader.message_count(), 10);
+        Ok(())
     }
 
     const SQLITE3_BAG: &str = "tests/test_bags/test_bag_sqlite3";
 
     #[test]
-    fn test_reader_topics() {
-        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
-        reader.open().unwrap();
+    fn test_reader_topics() -> TestResult {
+        let mut reader = Reader::new(SQLITE3_BAG)?;
+        reader.open()?;
         let topics = reader.topics();
         assert!(!topics.is_empty());
         assert_eq!(topics.len(), 94);
+        Ok(())
     }
 
     #[test]
-    fn test_reader_start_end_time() {
-        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
-        reader.open().unwrap();
+    fn test_reader_start_end_time() -> TestResult {
+        let mut reader = Reader::new(SQLITE3_BAG)?;
+        reader.open()?;
         assert!(reader.start_time() > 0);
         assert!(reader.end_time() > reader.start_time());
+        Ok(())
     }
 
     #[test]
-    fn test_reader_raw_messages_filtered_by_connection() {
-        let mut reader = Reader::new(SQLITE3_BAG).unwrap();
-        reader.open().unwrap();
+    fn test_reader_raw_messages_filtered_by_connection() -> TestResult {
+        let mut reader = Reader::new(SQLITE3_BAG)?;
+        reader.open()?;
         let conns: Vec<_> = reader
             .connections()
             .iter()
@@ -396,32 +403,35 @@ rosbag2_bagfile_information:
             .collect();
         let count = reader
             .raw_messages_filtered(Some(&conns), None, None)
-            .unwrap()
+            ?
             .filter_map(|r| r.ok())
             .count();
         assert_eq!(count, 2);
+        Ok(())
     }
 
     #[test]
-    fn test_reader_messages_without_open_returns_err() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_reader_messages_without_open_returns_err() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let metadata_path = temp_dir.path().join("metadata.yaml");
-        fs::write(&metadata_path, create_test_metadata()).unwrap();
+        fs::write(&metadata_path, create_test_metadata())?;
         let db_path = temp_dir.path().join("test.db3");
-        fs::write(&db_path, b"").unwrap();
-        let reader = Reader::new(temp_dir.path()).unwrap();
+        fs::write(&db_path, b"")?;
+        let reader = Reader::new(temp_dir.path())?;
         // Not opened → storage is None → messages() should return Err
         assert!(reader.messages().is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_reader_raw_messages_without_open_returns_err() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_reader_raw_messages_without_open_returns_err() -> TestResult {
+        let temp_dir = TempDir::new()?;
         let metadata_path = temp_dir.path().join("metadata.yaml");
-        fs::write(&metadata_path, create_test_metadata()).unwrap();
+        fs::write(&metadata_path, create_test_metadata())?;
         let db_path = temp_dir.path().join("test.db3");
-        fs::write(&db_path, b"").unwrap();
-        let reader = Reader::new(temp_dir.path()).unwrap();
+        fs::write(&db_path, b"")?;
+        let reader = Reader::new(temp_dir.path())?;
         assert!(reader.raw_messages().is_err());
+        Ok(())
     }
 }
