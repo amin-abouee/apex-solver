@@ -68,64 +68,67 @@ impl no_key::DefaultDecoder<RawBytes> for RawBytesAdapter {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use rustdds::dds::adapters::no_key::Decode;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn decode_cdr_le_prepends_le_header() {
+    fn decode_cdr_le_prepends_le_header() -> TestResult {
         let payload = b"hello";
         let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::CDR_LE)
-            .unwrap();
+            .decode_bytes(payload, RepresentationIdentifier::CDR_LE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x01, 0x00, 0x00]);
         assert_eq!(&decoded.0[4..], payload);
+        Ok(())
     }
 
     #[test]
-    fn decode_cdr_be_prepends_be_header() {
+    fn decode_cdr_be_prepends_be_header() -> TestResult {
         let payload = b"world";
         let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::CDR_BE)
-            .unwrap();
+            .decode_bytes(payload, RepresentationIdentifier::CDR_BE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x00, 0x00, 0x00]);
         assert_eq!(&decoded.0[4..], payload);
+        Ok(())
     }
 
     #[test]
-    fn decode_pl_cdr_le_prepends_le_header() {
+    fn decode_pl_cdr_le_prepends_le_header() -> TestResult {
         let payload = b"test";
         let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::PL_CDR_LE)
-            .unwrap();
+            .decode_bytes(payload, RepresentationIdentifier::PL_CDR_LE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x01, 0x00, 0x00]);
+        Ok(())
     }
 
     #[test]
-    fn decode_empty_payload_produces_only_header() {
+    fn decode_empty_payload_produces_only_header() -> TestResult {
         let decoded = RawBytesDecoder
-            .decode_bytes(&[], RepresentationIdentifier::CDR_LE)
-            .unwrap();
+            .decode_bytes(&[], RepresentationIdentifier::CDR_LE)?;
         assert_eq!(decoded.0.len(), 4);
+        Ok(())
     }
 
     #[test]
-    fn supported_encodings_contains_all_four() {
+    fn supported_encodings_contains_all_four() -> TestResult {
         let supported =
             <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::supported_encodings();
         assert!(supported.contains(&RepresentationIdentifier::CDR_LE));
         assert!(supported.contains(&RepresentationIdentifier::CDR_BE));
         assert!(supported.contains(&RepresentationIdentifier::PL_CDR_LE));
         assert!(supported.contains(&RepresentationIdentifier::PL_CDR_BE));
+        Ok(())
     }
 
     #[test]
-    fn transform_decoded_is_identity() {
+    fn transform_decoded_is_identity() -> TestResult {
         let raw = RawBytes(vec![1, 2, 3]);
         let out = <RawBytesAdapter as no_key::DeserializerAdapter<RawBytes>>::transform_decoded(
             raw.clone(),
         );
         assert_eq!(out.0, raw.0);
+        Ok(())
     }
 }

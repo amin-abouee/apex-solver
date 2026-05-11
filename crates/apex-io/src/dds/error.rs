@@ -30,7 +30,6 @@ pub enum DdsError {
 pub type Result<T> = std::result::Result<T, DdsError>;
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -26,7 +26,6 @@ pub fn to_dds_history(depth: i32) -> History {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::rosbag::types::{QosDurability, QosReliability};

@@ -217,7 +217,6 @@ fn run_reader_loop(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::rosbag::types::{QosDurability, QosReliability};

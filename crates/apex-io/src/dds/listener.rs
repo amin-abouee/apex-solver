@@ -212,12 +212,13 @@ impl DdsListener {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::rosbag::types::{
         Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
     };
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     fn make_raw_message(
         topic: &str,
@@ -242,97 +243,109 @@ mod tests {
     }
 
     #[test]
-    fn extract_header_stamp_too_short_returns_none() {
+    fn extract_header_stamp_too_short_returns_none() -> TestResult {
         assert!(extract_header_stamp(&[0x00, 0x01, 0x00]).is_none());
         assert!(extract_header_stamp(&[]).is_none());
+        Ok(())
     }
 
     #[test]
-    fn extract_header_stamp_le_correct_value() {
+    fn extract_header_stamp_le_correct_value() -> TestResult {
         let mut data = [0u8; 12];
         data[1] = 0x01;
         data[4..8].copy_from_slice(&10i32.to_le_bytes());
         data[8..12].copy_from_slice(&500_000_000u32.to_le_bytes());
-        let result = extract_header_stamp(&data).unwrap();
+        let result = extract_header_stamp(&data).ok_or("expected Some")?;
         assert!((result - 10.5).abs() < 1e-9);
+        Ok(())
     }
 
     #[test]
-    fn extract_header_stamp_be_correct_value() {
+    fn extract_header_stamp_be_correct_value() -> TestResult {
         let mut data = [0u8; 12];
         data[1] = 0x00;
         data[4..8].copy_from_slice(&5i32.to_be_bytes());
         data[8..12].copy_from_slice(&0u32.to_be_bytes());
-        let result = extract_header_stamp(&data).unwrap();
+        let result = extract_header_stamp(&data).ok_or("expected Some")?;
         assert!((result - 5.0).abs() < 1e-9);
+        Ok(())
     }
 
     #[test]
-    fn extract_header_stamp_zero_returns_some_zero() {
+    fn extract_header_stamp_zero_returns_some_zero() -> TestResult {
         let data = [0u8; 12];
-        let result = extract_header_stamp(&data).unwrap();
+        let result = extract_header_stamp(&data).ok_or("expected Some")?;
         assert!((result - 0.0).abs() < 1e-9);
+        Ok(())
     }
 
     #[test]
-    fn received_message_recv_timestamp_conversion() {
+    fn received_message_recv_timestamp_conversion() -> TestResult {
         let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 1_000_000_000, vec![0u8; 12]);
         let msg = ReceivedMessage::from_raw(raw);
         assert!((msg.recv_timestamp_s - 1.0).abs() < 1e-9);
+        Ok(())
     }
 
     #[test]
-    fn received_message_bytes_equals_raw_data_len() {
+    fn received_message_bytes_equals_raw_data_len() -> TestResult {
         let payload = vec![0x00u8; 20];
         let raw = make_raw_message("/imu", "sensor_msgs/msg/Imu", 0, payload.clone());
         let msg = ReceivedMessage::from_raw(raw);
         assert_eq!(msg.bytes, 20);
         assert_eq!(msg.raw_data, payload);
+        Ok(())
     }
 
     #[test]
-    fn received_message_topic_and_type_forwarded() {
+    fn received_message_topic_and_type_forwarded() -> TestResult {
         let raw = make_raw_message("/cam", "sensor_msgs/msg/Image", 0, vec![]);
         let msg = ReceivedMessage::from_raw(raw);
         assert_eq!(msg.topic, "/cam");
         assert_eq!(msg.message_type, "sensor_msgs/msg/Image");
+        Ok(())
     }
 
     #[test]
-    fn received_message_no_header_stamp_on_short_payload() {
+    fn received_message_no_header_stamp_on_short_payload() -> TestResult {
         let raw = make_raw_message("/topic", "std_msgs/msg/String", 0, vec![0u8; 3]);
         let msg = ReceivedMessage::from_raw(raw);
         assert!(msg.msg_timestamp_s.is_none());
+        Ok(())
     }
 
     #[test]
-    fn listener_new_stores_domain_id() {
+    fn listener_new_stores_domain_id() -> TestResult {
         let listener = DdsListener::new(42);
         assert_eq!(listener.domain_id, 42);
+        Ok(())
     }
 
     #[test]
-    fn listener_new_empty_subscriptions() {
+    fn listener_new_empty_subscriptions() -> TestResult {
         let listener = DdsListener::new(0);
         assert!(listener.subscriptions.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn listener_new_default_channel_capacity() {
+    fn listener_new_default_channel_capacity() -> TestResult {
         let listener = DdsListener::new(0);
         assert_eq!(listener.channel_capacity, 4096);
+        Ok(())
     }
 
     #[test]
-    fn listener_subscribe_grows_subscriptions() {
+    fn listener_subscribe_grows_subscriptions() -> TestResult {
         let listener = DdsListener::new(0)
             .subscribe("/imu", "sensor_msgs/msg/Imu", |_: ReceivedMessage| {})
             .subscribe("/gps", "sensor_msgs/msg/NavSatFix", |_: ReceivedMessage| {});
         assert_eq!(listener.subscriptions.len(), 2);
+        Ok(())
     }
 
     #[test]
-    fn listener_subscribe_sets_config_fields() {
+    fn listener_subscribe_sets_config_fields() -> TestResult {
         let listener =
             DdsListener::new(7).subscribe("/cam", "sensor_msgs/msg/Image", |_: ReceivedMessage| {});
         let sub = &listener.subscriptions[0];
@@ -341,6 +354,7 @@ mod tests {
         assert_eq!(sub.config.domain_id, 7);
         assert!(matches!(sub.config.reliability, QosReliability::BestEffort));
         assert!(matches!(sub.config.durability, QosDurability::Volatile));
+        Ok(())
     }
 
     #[tokio::test]
