@@ -136,80 +136,88 @@ pub fn create_storage_writer(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
     #[test]
-    fn create_storage_reader_sqlite3_identifier() {
+    fn create_storage_reader_sqlite3_identifier() -> TestResult {
         let path = PathBuf::from("test.db3");
         let result = create_storage_reader("sqlite3", vec![path.as_path()], vec![]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_reader_mcap_identifier() {
+    fn create_storage_reader_mcap_identifier() -> TestResult {
         let path = PathBuf::from("test.mcap");
         let result = create_storage_reader("mcap", vec![path.as_path()], vec![]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_reader_unknown_identifier_returns_err() {
+    fn create_storage_reader_unknown_identifier_returns_err() -> TestResult {
         let path = PathBuf::from("test.hdf5");
         let result = create_storage_reader("hdf5", vec![path.as_path()], vec![]);
         assert!(matches!(
             result,
             Err(crate::rosbag::error::BagError::UnsupportedStorageFormat { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn create_storage_reader_auto_detect_db3() {
+    fn create_storage_reader_auto_detect_db3() -> TestResult {
         let path = PathBuf::from("autodetect.db3");
         let result = create_storage_reader("", vec![path.as_path()], vec![]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_reader_auto_detect_mcap() {
+    fn create_storage_reader_auto_detect_mcap() -> TestResult {
         let path = PathBuf::from("autodetect.mcap");
         let result = create_storage_reader("", vec![path.as_path()], vec![]);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_reader_auto_detect_no_known_extension_returns_err() {
+    fn create_storage_reader_auto_detect_no_known_extension_returns_err() -> TestResult {
         let path = PathBuf::from("unknown.xyz");
         let result = create_storage_reader("", vec![path.as_path()], vec![]);
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_writer_sqlite3_plugin() {
+    fn create_storage_writer_sqlite3_plugin() -> TestResult {
         let path = PathBuf::from("/tmp/test_writer_sqlite3.db3");
         let result = create_storage_writer(StoragePlugin::Sqlite3, &path, CompressionMode::None);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn create_storage_writer_mcap_plugin() {
+    fn create_storage_writer_mcap_plugin() -> TestResult {
         let path = PathBuf::from("/tmp/test_writer_mcap.mcap");
         let result = create_storage_writer(StoragePlugin::Mcap, &path, CompressionMode::None);
         assert!(result.is_ok());
+        Ok(())
     }
 
     #[test]
-    fn storage_writer_write_batch_default_impl() {
+    fn storage_writer_write_batch_default_impl() -> TestResult {
         use tempfile::tempdir;
-        let dir = tempdir().unwrap();
+        let dir = tempdir()?;
         let bag_path = dir.path().join("batch_bag");
-        std::fs::create_dir_all(&bag_path).unwrap();
+        std::fs::create_dir_all(&bag_path)?;
         let mut writer =
-            create_storage_writer(StoragePlugin::Sqlite3, &bag_path, CompressionMode::None)
-                .unwrap();
-        writer.open().unwrap();
+            create_storage_writer(StoragePlugin::Sqlite3, &bag_path, CompressionMode::None)?;
+        writer.open()?;
 
         let conn = Connection {
             id: 1,
@@ -221,14 +229,15 @@ mod tests {
             serialization_format: "cdr".to_string(),
             offered_qos_profiles: Vec::new(),
         };
-        writer.add_msgtype(&conn).unwrap();
-        writer.add_connection(&conn, "").unwrap();
+        writer.add_msgtype(&conn)?;
+        writer.add_connection(&conn, "")?;
 
         let msgs: Vec<(Connection, u64, Vec<u8>)> = vec![
             (conn.clone(), 100, vec![0x00, 0x01, 0x00, 0x00, 0x01]),
             (conn.clone(), 200, vec![0x00, 0x01, 0x00, 0x00, 0x02]),
         ];
-        writer.write_batch(&msgs).unwrap();
+        writer.write_batch(&msgs)?;
         assert!(writer.is_open());
+        Ok(())
     }
 }
