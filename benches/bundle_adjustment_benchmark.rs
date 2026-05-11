@@ -284,8 +284,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     );
     for obs in &dataset.observations {
         let cam = &dataset.cameras[obs.camera_index];
-        #[allow(clippy::expect_used)]
-        let camera = BALPinholeCameraStrict::new(
+        let camera = match BALPinholeCameraStrict::new(
             PinholeParams {
                 fx: cam.focal_length,
                 fy: cam.focal_length,
@@ -296,8 +295,17 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
                 k1: cam.k1,
                 k2: cam.k2,
             },
-        )
-        .expect("Invalid camera parameters in dataset");
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return BABenchmarkResult::failed(
+                    dataset_name,
+                    "Apex-Solver",
+                    "Rust",
+                    &format!("Invalid camera parameters: {}", e),
+                );
+            }
+        };
 
         // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);

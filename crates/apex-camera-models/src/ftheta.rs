@@ -442,7 +442,6 @@ impl TryFrom<&[f64]> for FThetaCamera {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{JACOBIAN_TEST_TOLERANCE, NUMERICAL_DERIVATIVE_EPS, PROJECTION_TEST_TOLERANCE};

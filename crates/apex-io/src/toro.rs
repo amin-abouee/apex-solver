@@ -246,7 +246,6 @@ impl ToroLoader {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::{EdgeSE3, VertexSE3};
@@ -409,9 +408,10 @@ mod tests {
     }
 
     #[test]
-    fn test_load_nonexistent_file() {
+    fn test_load_nonexistent_file() -> TestResult {
         let result = ToroLoader::load("/no/such/file.graph");
         assert!(result.is_err(), "loading missing file should return Err");
+        Ok(())
     }
 
     #[test]
@@ -715,22 +715,24 @@ mod tests {
     }
 
     #[test]
-    fn test_load_invalid_utf8_returns_err() {
-        let mut f = NamedTempFile::new().unwrap();
-        f.write_all(&[0xFF, 0xFE, 0x80, 0x00, 0xAB]).unwrap();
+    fn test_load_invalid_utf8_returns_err() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        f.write_all(&[0xFF, 0xFE, 0x80, 0x00, 0xAB])?;
         let result = ToroLoader::load(f.path());
         assert!(result.is_err());
+        Ok(())
     }
 
     #[test]
-    fn test_write_to_nonexistent_dir_returns_err() {
+    fn test_write_to_nonexistent_dir_returns_err() -> TestResult {
         let mut graph = Graph::new();
         graph
             .vertices_se2
             .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir()?;
         let path = dir.path().join("nested").join("deep").join("output.toro");
         let result = ToroLoader::write(&graph, &path);
         assert!(result.is_err());
+        Ok(())
     }
 }
