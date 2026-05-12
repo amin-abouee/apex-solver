@@ -794,11 +794,7 @@ mod tests {
     #[test]
     fn sqlite_reader_raw_messages_unfiltered() -> TestResult {
         let reader = open_test_reader()?;
-        let count = reader
-            .raw_messages()
-            ?
-            .filter_map(|r| r.ok())
-            .count();
+        let count = reader.raw_messages()?.filter_map(|r| r.ok()).count();
         assert_eq!(count, 188);
         Ok(())
     }
@@ -806,18 +802,13 @@ mod tests {
     #[test]
     fn sqlite_reader_raw_messages_filtered_by_time() -> TestResult {
         let reader = open_test_reader()?;
-        let all_msgs: Vec<_> = reader
-            .raw_messages()
-            ?
-            .filter_map(|r| r.ok())
-            .collect();
+        let all_msgs: Vec<_> = reader.raw_messages()?.filter_map(|r| r.ok()).collect();
         let min_ts = all_msgs.iter().map(|m| m.timestamp).min().ok_or("empty")?;
         let max_ts = all_msgs.iter().map(|m| m.timestamp).max().ok_or("empty")?;
         let mid = (min_ts + max_ts) / 2;
 
         let half_count = reader
-            .raw_messages_filtered(None, Some(min_ts), Some(mid))
-            ?
+            .raw_messages_filtered(None, Some(min_ts), Some(mid))?
             .filter_map(|r| r.ok())
             .count();
         assert!(half_count > 0 && half_count < 188);
@@ -859,8 +850,7 @@ mod tests {
         sqlite_reader.open()?;
 
         let count = sqlite_reader
-            .messages_filtered(Some(&conns), None, None)
-            ?
+            .messages_filtered(Some(&conns), None, None)?
             .filter_map(|r| r.ok())
             .count();
         assert_eq!(count, 2);

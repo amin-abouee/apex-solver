@@ -402,8 +402,7 @@ rosbag2_bagfile_information:
             .cloned()
             .collect();
         let count = reader
-            .raw_messages_filtered(Some(&conns), None, None)
-            ?
+            .raw_messages_filtered(Some(&conns), None, None)?
             .filter_map(|r| r.ok())
             .count();
         assert_eq!(count, 2);

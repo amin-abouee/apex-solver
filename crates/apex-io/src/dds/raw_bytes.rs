@@ -77,8 +77,7 @@ mod tests {
     #[test]
     fn decode_cdr_le_prepends_le_header() -> TestResult {
         let payload = b"hello";
-        let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::CDR_LE)?;
+        let decoded = RawBytesDecoder.decode_bytes(payload, RepresentationIdentifier::CDR_LE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x01, 0x00, 0x00]);
         assert_eq!(&decoded.0[4..], payload);
         Ok(())
@@ -87,8 +86,7 @@ mod tests {
     #[test]
     fn decode_cdr_be_prepends_be_header() -> TestResult {
         let payload = b"world";
-        let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::CDR_BE)?;
+        let decoded = RawBytesDecoder.decode_bytes(payload, RepresentationIdentifier::CDR_BE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x00, 0x00, 0x00]);
         assert_eq!(&decoded.0[4..], payload);
         Ok(())
@@ -97,16 +95,14 @@ mod tests {
     #[test]
     fn decode_pl_cdr_le_prepends_le_header() -> TestResult {
         let payload = b"test";
-        let decoded = RawBytesDecoder
-            .decode_bytes(payload, RepresentationIdentifier::PL_CDR_LE)?;
+        let decoded = RawBytesDecoder.decode_bytes(payload, RepresentationIdentifier::PL_CDR_LE)?;
         assert_eq!(&decoded.0[..4], &[0x00, 0x01, 0x00, 0x00]);
         Ok(())
     }
 
     #[test]
     fn decode_empty_payload_produces_only_header() -> TestResult {
-        let decoded = RawBytesDecoder
-            .decode_bytes(&[], RepresentationIdentifier::CDR_LE)?;
+        let decoded = RawBytesDecoder.decode_bytes(&[], RepresentationIdentifier::CDR_LE)?;
         assert_eq!(decoded.0.len(), 4);
         Ok(())
     }

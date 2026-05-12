@@ -587,7 +587,10 @@ mod tests {
 
         let result = writer.set_compression(CompressionMode::File, CompressionFormat::Zstd);
         assert!(result.is_err());
-        assert!(matches!(result.err().ok_or("expected error")?, BagError::BagAlreadyOpen));
+        assert!(matches!(
+            result.err().ok_or("expected error")?,
+            BagError::BagAlreadyOpen
+        ));
         Ok(())
     }
 
@@ -599,16 +602,14 @@ mod tests {
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
 
-        let connection = writer
-            .add_connection(
-                "/test_topic".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        let connection = writer.add_connection(
+            "/test_topic".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
 
         assert_eq!(connection.topic, "/test_topic");
         assert_eq!(connection.message_type, "std_msgs/msg/String");
@@ -625,16 +626,14 @@ mod tests {
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
 
-        writer
-            .add_connection(
-                "/test_topic".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        writer.add_connection(
+            "/test_topic".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
 
         let result = writer.add_connection(
             "/test_topic".to_string(),
@@ -661,16 +660,14 @@ mod tests {
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
 
-        let connection = writer
-            .add_connection(
-                "/test_topic".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        let connection = writer.add_connection(
+            "/test_topic".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
 
         let test_data = b"Hello, ROS2!";
         let timestamp = 1_234_567_890_000_000_000;
@@ -678,7 +675,13 @@ mod tests {
         let result = writer.write(&connection, timestamp, test_data);
         assert!(result.is_ok());
 
-        assert_eq!(*writer.message_counts.get(&connection.id).ok_or("missing count")?, 1);
+        assert_eq!(
+            *writer
+                .message_counts
+                .get(&connection.id)
+                .ok_or("missing count")?,
+            1
+        );
         Ok(())
     }
 
@@ -687,9 +690,7 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("test_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
-        writer
-            .set_custom_data("key1".to_string(), "value1".to_string())
-            ?;
+        writer.set_custom_data("key1".to_string(), "value1".to_string())?;
         writer.open()?;
         // custom data is stored and used during metadata generation
         writer.close()?;
@@ -715,7 +716,10 @@ mod tests {
         writer.open()?;
         let result = writer.configure_buffer(10, 50);
         assert!(result.is_err());
-        assert!(matches!(result.err().ok_or("expected error")?, BagError::BagAlreadyOpen));
+        assert!(matches!(
+            result.err().ok_or("expected error")?,
+            BagError::BagAlreadyOpen
+        ));
         Ok(())
     }
 
@@ -725,16 +729,14 @@ mod tests {
         let bag_path = temp_dir.path().join("test_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
-        let conn = writer
-            .add_connection(
-                "/raw".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        let conn = writer.add_connection(
+            "/raw".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
         let result = writer.write_raw_message(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01]);
         assert!(result.is_ok());
         Ok(())
@@ -758,16 +760,14 @@ mod tests {
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
         assert!(writer.connections().is_empty());
-        writer
-            .add_connection(
-                "/a".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        writer.add_connection(
+            "/a".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
         assert_eq!(writer.connections().len(), 1);
         Ok(())
     }
@@ -778,16 +778,14 @@ mod tests {
         let bag_path = temp_dir.path().join("test_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
-        let conn = writer
-            .add_connection(
-                "/batch".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        let conn = writer.add_connection(
+            "/batch".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
         let msgs: Vec<(Connection, u64, Vec<u8>)> = (0..5u64)
             .map(|i| (conn.clone(), i * 1000, vec![0x00, 0x01, 0x00, 0x00, 0x01]))
             .collect();
@@ -898,16 +896,14 @@ mod tests {
         let bag_path = temp_dir.path().join("test_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
         writer.open()?;
-        let conn = writer
-            .add_connection(
-                "/copy".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
+        let conn = writer.add_connection(
+            "/copy".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
         let result =
             writer.copy_raw_message_from_reader(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00]);
         assert!(result.is_ok());
@@ -938,23 +934,17 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("compressed_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
-        writer
-            .set_compression(CompressionMode::File, CompressionFormat::Zstd)
-            ?;
+        writer.set_compression(CompressionMode::File, CompressionFormat::Zstd)?;
         writer.open()?;
-        let conn = writer
-            .add_connection(
-                "/compressed".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
-        writer
-            .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
-            ?;
+        let conn = writer.add_connection(
+            "/compressed".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        writer.write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])?;
         writer.close()?;
         assert!(
             bag_path.join("compressed_bag.db3.zstd").exists()
@@ -968,23 +958,17 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let bag_path = temp_dir.path().join("msg_compressed_bag");
         let mut writer = Writer::new(&bag_path, None, None)?;
-        writer
-            .set_compression(CompressionMode::Message, CompressionFormat::Zstd)
-            ?;
+        writer.set_compression(CompressionMode::Message, CompressionFormat::Zstd)?;
         writer.open()?;
-        let conn = writer
-            .add_connection(
-                "/cmsg".to_string(),
-                "std_msgs/msg/String".to_string(),
-                None,
-                None,
-                None,
-                None,
-            )
-            ?;
-        writer
-            .write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])
-            ?;
+        let conn = writer.add_connection(
+            "/cmsg".to_string(),
+            "std_msgs/msg/String".to_string(),
+            None,
+            None,
+            None,
+            None,
+        )?;
+        writer.write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00, 0x01])?;
         writer.close()?;
         assert!(bag_path.join("metadata.yaml").exists());
         Ok(())

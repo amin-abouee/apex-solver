@@ -263,7 +263,9 @@ mod tests {
         )
     }
 
-    fn write_temp_yaml(content: &str) -> std::result::Result<NamedTempFile, Box<dyn std::error::Error>> {
+    fn write_temp_yaml(
+        content: &str,
+    ) -> std::result::Result<NamedTempFile, Box<dyn std::error::Error>> {
         let mut f = NamedTempFile::new()?;
         f.write_all(content.as_bytes())?;
         Ok(f)
