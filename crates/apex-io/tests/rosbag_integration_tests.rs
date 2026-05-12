@@ -269,10 +269,7 @@ fn test_message_filtering_by_topic() -> TestResult {
     assert_eq!(filtered_connections.len(), 1);
 
     let mut message_count = 0;
-    for message_result in reader
-        .messages_filtered(Some(&filtered_connections), None, None)
-        ?
-    {
+    for message_result in reader.messages_filtered(Some(&filtered_connections), None, None)? {
         let message = message_result?;
         assert_eq!(message.topic, test_topic);
         message_count += 1;
@@ -288,8 +285,7 @@ fn test_message_filtering_by_timestamp() -> TestResult {
     reader.open()?;
 
     let mut all_timestamps: Vec<u64> = reader
-        .messages()
-        ?
+        .messages()?
         .filter_map(|r| r.ok())
         .map(|m| m.timestamp)
         .collect();
@@ -300,10 +296,7 @@ fn test_message_filtering_by_timestamp() -> TestResult {
     let mid_ts = (min_ts + max_ts) / 2;
 
     let mut count = 0;
-    for message_result in reader
-        .messages_filtered(None, Some(min_ts), Some(mid_ts))
-        ?
-    {
+    for message_result in reader.messages_filtered(None, Some(min_ts), Some(mid_ts))? {
         let message = message_result?;
         assert!(message.timestamp >= min_ts);
         assert!(message.timestamp <= mid_ts);
@@ -344,10 +337,7 @@ fn test_specific_message_types() -> TestResult {
         );
 
         let mut count = 0;
-        for result in reader
-            .messages_filtered(Some(&matching), None, None)
-            ?
-        {
+        for result in reader.messages_filtered(Some(&matching), None, None)? {
             let message = result?;
             assert!(
                 !message.data.is_empty(),
@@ -539,15 +529,14 @@ fn make_test_connection(
     topic: &str,
     msgtype: &str,
 ) -> std::result::Result<apex_io::rosbag::Connection, Box<dyn std::error::Error>> {
-    Ok(writer
-        .add_connection(
-            topic.to_string(),
-            msgtype.to_string(),
-            None,
-            None,
-            None,
-            None,
-        )?)
+    Ok(writer.add_connection(
+        topic.to_string(),
+        msgtype.to_string(),
+        None,
+        None,
+        None,
+        None,
+    )?)
 }
 
 #[test]
@@ -555,8 +544,7 @@ fn test_writer_roundtrip_sqlite3() -> TestResult {
     let dir = tempdir()?;
     let bag_path = dir.path().join("roundtrip_bag");
 
-    let mut writer =
-        Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))?;
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))?;
     writer.open()?;
 
     let conn = make_test_connection(&mut writer, "/test/string", "std_msgs/msg/String")?;
@@ -572,11 +560,7 @@ fn test_writer_roundtrip_sqlite3() -> TestResult {
     reader.open()?;
     assert!(reader.is_open());
 
-    let count = reader
-        .messages()
-        ?
-        .filter_map(|r| r.ok())
-        .count();
+    let count = reader.messages()?.filter_map(|r| r.ok()).count();
     assert_eq!(count, 2);
     Ok(())
 }
@@ -586,8 +570,7 @@ fn test_writer_duplicate_connection_returns_err() -> TestResult {
     let dir = tempdir()?;
     let bag_path = dir.path().join("dup_conn_bag");
 
-    let mut writer =
-        Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))?;
+    let mut writer = Writer::new(&bag_path, None, Some(StoragePlugin::Sqlite3))?;
     writer.open()?;
 
     make_test_connection(&mut writer, "/imu", "sensor_msgs/msg/Imu")?;
@@ -680,8 +663,7 @@ fn test_messages_filtered_single_topic() -> TestResult {
         .collect();
 
     let count_a = reader
-        .messages_filtered(Some(&a_conns), None, None)
-        ?
+        .messages_filtered(Some(&a_conns), None, None)?
         .filter_map(|m| m.ok())
         .inspect(|m| assert_eq!(m.topic, "/topic_a"))
         .count();
@@ -695,9 +677,7 @@ fn test_raw_messages_batch_returns_correct_count() -> TestResult {
     let mut reader = Reader::new(SQLITE3_BAG_PATH)?;
     reader.open()?;
 
-    let batch = reader
-        .read_raw_messages_batch(None, None, None)
-        ?;
+    let batch = reader.read_raw_messages_batch(None, None, None)?;
 
     assert_eq!(batch.len(), 188);
     for msg in &batch {
@@ -712,16 +692,9 @@ fn test_raw_messages_iter_matches_batch() -> TestResult {
     let mut reader = Reader::new(SQLITE3_BAG_PATH)?;
     reader.open()?;
 
-    let iter_count = reader
-        .raw_messages()
-        ?
-        .filter_map(|r| r.ok())
-        .count();
+    let iter_count = reader.raw_messages()?.filter_map(|r| r.ok()).count();
 
-    let batch_count = reader
-        .read_raw_messages_batch(None, None, None)
-        ?
-        .len();
+    let batch_count = reader.read_raw_messages_batch(None, None, None)?.len();
 
     assert_eq!(iter_count, batch_count);
     Ok(())
@@ -733,8 +706,7 @@ fn test_reader_timestamps_are_ordered() -> TestResult {
     reader.open()?;
 
     let timestamps: Vec<u64> = reader
-        .messages()
-        ?
+        .messages()?
         .filter_map(|r| r.ok())
         .map(|m| m.timestamp)
         .collect();
@@ -774,8 +746,7 @@ fn test_writer_set_compression_after_open_fails() -> TestResult {
 
 #[test]
 fn test_read_bag_metadata_fast_sqlite3() -> TestResult {
-    let meta =
-        apex_io::rosbag::read_bag_metadata_fast(SQLITE3_BAG_PATH)?;
+    let meta = apex_io::rosbag::read_bag_metadata_fast(SQLITE3_BAG_PATH)?;
     assert_eq!(meta.message_count(), 188);
     assert!(meta.duration() > 0);
     Ok(())
@@ -783,8 +754,7 @@ fn test_read_bag_metadata_fast_sqlite3() -> TestResult {
 
 #[test]
 fn test_read_bag_metadata_fast_mcap() -> TestResult {
-    let meta =
-        apex_io::rosbag::read_bag_metadata_fast(MCAP_BAG_PATH)?;
+    let meta = apex_io::rosbag::read_bag_metadata_fast(MCAP_BAG_PATH)?;
     assert_eq!(meta.message_count(), 188);
     Ok(())
 }
@@ -815,8 +785,7 @@ fn test_mcap_messages_filtered_by_connection() -> TestResult {
 
     assert_eq!(conns.len(), 1);
     let count = reader
-        .messages_filtered(Some(&conns), None, None)
-        ?
+        .messages_filtered(Some(&conns), None, None)?
         .filter_map(|r| r.ok())
         .count();
     assert_eq!(count, 2);
@@ -833,8 +802,7 @@ fn test_mcap_messages_filtered_by_time() -> TestResult {
     let mid = start + reader.duration() / 2;
 
     let count_half = reader
-        .messages_filtered(None, Some(start), Some(mid))
-        ?
+        .messages_filtered(None, Some(start), Some(mid))?
         .filter_map(|r| r.ok())
         .count();
 
@@ -857,8 +825,7 @@ fn test_mcap_raw_messages_filtered_by_connection() -> TestResult {
         .collect();
 
     let count = reader
-        .raw_messages_filtered(Some(&conns), None, None)
-        ?
+        .raw_messages_filtered(Some(&conns), None, None)?
         .filter_map(|r| r.ok())
         .count();
     assert_eq!(count, 2);
@@ -878,9 +845,7 @@ fn test_mcap_raw_messages_batch_with_filter() -> TestResult {
         .cloned()
         .collect();
 
-    let batch = reader
-        .read_raw_messages_batch(Some(&conns), None, None)
-        ?;
+    let batch = reader.read_raw_messages_batch(Some(&conns), None, None)?;
     assert_eq!(batch.len(), 2);
     Ok(())
 }
@@ -893,9 +858,7 @@ fn test_reader_raw_messages_filtered_by_time() -> TestResult {
     let start = reader.start_time();
     let mid = start + reader.duration() / 2;
 
-    let batch = reader
-        .read_raw_messages_batch(None, Some(start), Some(mid))
-        ?;
+    let batch = reader.read_raw_messages_batch(None, Some(start), Some(mid))?;
     assert!(!batch.is_empty());
     assert!(batch.len() < 188);
     Ok(())
@@ -934,11 +897,7 @@ fn test_writer_mcap_roundtrip() -> TestResult {
 fn test_mcap_raw_messages_iteration() -> TestResult {
     let mut reader = Reader::new(MCAP_BAG_PATH)?;
     reader.open()?;
-    let count = reader
-        .raw_messages()
-        ?
-        .filter_map(|r| r.ok())
-        .count();
+    let count = reader.raw_messages()?.filter_map(|r| r.ok()).count();
     assert_eq!(count, 188);
     Ok(())
 }
@@ -947,9 +906,7 @@ fn test_mcap_raw_messages_iteration() -> TestResult {
 fn test_mcap_read_raw_messages_batch() -> TestResult {
     let mut reader = Reader::new(MCAP_BAG_PATH)?;
     reader.open()?;
-    let batch = reader
-        .read_raw_messages_batch(None, None, None)
-        ?;
+    let batch = reader.read_raw_messages_batch(None, None, None)?;
     assert_eq!(batch.len(), 188);
     for msg in &batch {
         assert!(!msg.connection.topic.is_empty());
@@ -962,11 +919,7 @@ fn test_mcap_read_raw_messages_batch() -> TestResult {
 fn test_mcap_raw_messages_timestamps_ordered() -> TestResult {
     let mut reader = Reader::new(MCAP_BAG_PATH)?;
     reader.open()?;
-    let msgs: Vec<_> = reader
-        .raw_messages()
-        ?
-        .filter_map(|r| r.ok())
-        .collect();
+    let msgs: Vec<_> = reader.raw_messages()?.filter_map(|r| r.ok()).collect();
     let timestamps: Vec<u64> = msgs.iter().map(|m| m.timestamp).collect();
     for w in timestamps.windows(2) {
         assert!(w[0] <= w[1], "timestamps should be non-decreasing");
@@ -981,8 +934,7 @@ fn test_mcap_raw_messages_filtered_by_time_range() -> TestResult {
     let start = reader.start_time();
     let mid = start + reader.duration() / 2;
     let half = reader
-        .raw_messages_filtered(None, Some(start), Some(mid))
-        ?
+        .raw_messages_filtered(None, Some(start), Some(mid))?
         .filter_map(|r| r.ok())
         .count();
     assert!(half > 0 && half < 188);
@@ -1018,9 +970,7 @@ fn test_reader_read_raw_messages_batch_mcap() -> TestResult {
         .filter(|c| c.topic == "/test/std_msgs/string")
         .cloned()
         .collect();
-    let batch = reader
-        .read_raw_messages_batch(Some(&conns), None, None)
-        ?;
+    let batch = reader.read_raw_messages_batch(Some(&conns), None, None)?;
     assert_eq!(batch.len(), 2);
     Ok(())
 }
