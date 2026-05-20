@@ -16,6 +16,7 @@ use tracing::error;
 use apex_manifolds::{se2::SE2, se3::SE3};
 
 // Module declarations
+pub mod asl;
 pub mod bal;
 pub mod g2o;
 pub mod logger;
@@ -43,6 +44,8 @@ pub const ODOMETRY_DATA_DIR_3D: &str = "data/odometry/3d";
 pub const BUNDLE_ADJUSTMENT_DATA_DIR: &str = "data/bundle_adjustment";
 
 // Re-exports
+pub use asl::error::AslError;
+pub use asl::{AslDataset, AslReader, AslStream};
 pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;

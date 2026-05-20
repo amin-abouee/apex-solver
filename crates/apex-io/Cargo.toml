@@ -42,6 +42,10 @@ required-features = ["dds"]
 name = "rosbag_integration_tests"
 path = "tests/rosbag_integration_tests.rs"
 
+[[test]]
+name = "asl_integration_tests"
+path = "tests/asl_integration_tests.rs"
+
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
@@ -87,6 +91,7 @@ optional = true
 default = []
 visualization = ["dep:rerun"]
 dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
+asl-async = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile.workspace = true
