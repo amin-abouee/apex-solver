@@ -369,6 +369,19 @@ impl CameraModel for RadTanCamera {
         // Radial distortion: r' = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
+        // Domain guard: the radial polynomial must stay positive. When
+        // it crosses zero, x_distorted flips sign and the projection
+        // becomes geometrically meaningless (rays past the model's
+        // valid FoV). Calibration on data with wider FoV than rad_tan
+        // can represent would otherwise feed nonsense residuals to
+        // bundle adjustment.
+        if radial <= crate::GEOMETRIC_PRECISION {
+            return Err(CameraModelError::PointOutsideImage {
+                x: x_prime,
+                y: y_prime,
+            });
+        }
+
         // Tangential distortion
         let xy = x_prime * y_prime;
         let dx = 2.0 * p1 * xy + p2 * (r2 + 2.0 * x_prime * x_prime);
