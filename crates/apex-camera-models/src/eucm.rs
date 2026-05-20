@@ -122,12 +122,18 @@ impl EucmCamera {
     ///
     /// Returns `true` if the point satisfies the unprojection condition, `false` otherwise.
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
+        // Valid EUCM unprojection requires the radicand
+        //     1 − (2α − 1) · β · r²
+        // to stay non-negative (Usenko 2018, Eq. 41). Solving for r²:
+        //     r² ≤ 1 / ((2α − 1) · β)        when α > 0.5
         let (alpha, beta) = self.distortion_params();
-        let mut condition = true;
-        if alpha > 0.5 && r_squared > (1.0 / beta * (2.0 * alpha - 1.0)) {
-            condition = false;
+        if alpha > 0.5 {
+            let bound = 1.0 / ((2.0 * alpha - 1.0) * beta);
+            if r_squared > bound {
+                return false;
+            }
         }
-        condition
+        true
     }
 
     /// Performs linear estimation to initialize distortion parameters from point correspondences.
@@ -398,32 +404,30 @@ impl CameraModel for EucmCamera {
         let (alpha, beta) = self.distortion_params();
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
-
         let r2 = mx * mx + my * my;
-        let beta_r2 = beta * r2;
 
-        let gamma = 1.0 - alpha;
-        let gamma_sq = gamma * gamma;
-
-        let discriminant = beta_r2 * gamma_sq + gamma_sq;
-        if discriminant < 0.0 || !self.check_unprojection_condition(r2) {
+        if !self.check_unprojection_condition(r2) {
             return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
-        let sqrt_disc = discriminant.sqrt();
-        let denom = beta_r2 + 1.0;
-
-        if denom.abs() < crate::GEOMETRIC_PRECISION {
+        // EUCM closed-form inverse (Usenko et al., 3DV 2018, Eq. 41):
+        //   mz = (1 − β·α²·R²) / (α·√(1 − (2α−1)·β·R²) + (1−α))
+        //   bearing = normalize(mx, my, mz)
+        let mz_num = 1.0 - beta * alpha * alpha * r2;
+        let radicand = 1.0 - (2.0 * alpha - 1.0) * beta * r2;
+        if radicand < 0.0 {
+            return Err(CameraModelError::PointOutsideImage { x: u, y: v });
+        }
+        let mz_denom = alpha * radicand.sqrt() + (1.0 - alpha);
+        if mz_denom.abs() < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::NumericalError {
                 operation: "unprojection".to_string(),
                 details: "Division by near-zero in EUCM unprojection".to_string(),
             });
         }
 
-        let mz = (gamma * sqrt_disc) / denom;
-
-        let point3d = Vector3::new(mx, my, mz);
-        Ok(point3d.normalize())
+        let mz = mz_num / mz_denom;
+        Ok(Vector3::new(mx, my, mz).normalize())
     }
 
     /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
@@ -954,23 +958,33 @@ mod tests {
 
     #[test]
     fn test_project_unproject_round_trip() -> TestResult {
-        // Use points on the optical axis where unproject is exact
+        // Use (α, β) = (0.6, 1.1) so the β·(2α−1) factor in the closed-
+        // form inverse is non-zero — exposes inverse-formula bugs that
+        // would slip past the degenerate α = 0.5, β = 1.0 setting.
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
         let distortion = DistortionModel::EUCM {
-            alpha: 0.5,
-            beta: 1.0,
+            alpha: 0.6,
+            beta: 1.1,
         };
         let camera = EucmCamera::new(pinhole, distortion)?;
 
-        // On-axis point: unproject should be exact
-        let p_cam = Vector3::new(0.0, 0.0, 1.0);
-        let uv = camera.project(&p_cam)?;
-        let ray = camera.unproject(&uv)?;
-        let dot = ray.dot(&p_cam.normalize());
-        assert!(
-            (dot - 1.0).abs() < 1e-6,
-            "Round-trip failed for on-axis point: dot={dot}, expected ~1.0"
-        );
+        let test_points = [
+            Vector3::new(0.0, 0.0, 1.0), // optical axis
+            Vector3::new(0.1, 0.2, 1.0),
+            Vector3::new(-0.3, 0.1, 2.0),
+            Vector3::new(0.6, 0.0, 0.8),  // ~37° off-axis
+            Vector3::new(0.4, -0.5, 0.7), // mixed sign + periphery
+        ];
+
+        for p_cam in &test_points {
+            let uv = camera.project(p_cam)?;
+            let ray = camera.unproject(&uv)?;
+            let dot = ray.dot(&p_cam.normalize());
+            assert!(
+                (dot - 1.0).abs() < 1e-8,
+                "Round-trip failed: dot={dot}, expected ~1.0 (p_cam = {p_cam:?})"
+            );
+        }
 
         Ok(())
     }
