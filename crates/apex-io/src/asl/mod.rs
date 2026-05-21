@@ -18,12 +18,12 @@ pub struct AslStream {
 }
 
 impl AslStream {
-    /// Open a mav0 directory and stream camera 0.
+    /// Open a dataset root (or its `mav0/` sub-directory) and stream camera 0.
     pub fn open<P: AsRef<Path>>(mav0_path: P) -> Result<Self> {
         Self::open_camera(mav0_path, 0)
     }
 
-    /// Open a mav0 directory and stream the camera at `cam_idx`.
+    /// Open a dataset directory (or its `mav0/` sub-directory) and stream the camera at `cam_idx`.
     pub fn open_camera<P: AsRef<Path>>(mav0_path: P, cam_idx: usize) -> Result<Self> {
         let dataset = AslReader::load(mav0_path)?;
         if cam_idx >= dataset.cameras.len() {
@@ -122,7 +122,8 @@ pub struct AslReader;
 
 impl AslReader {
     pub fn load<P: AsRef<Path>>(mav0_path: P) -> Result<AslDataset> {
-        let mav0 = mav0_path.as_ref();
+        let mav0 = resolve_mav0(mav0_path.as_ref());
+        let mav0 = mav0.as_ref();
         if !mav0.is_dir() {
             return Err(AslError::InvalidMav0Directory {
                 path: mav0.to_path_buf(),
@@ -201,6 +202,22 @@ impl AslDataset {
                 total: cam.frames.len(),
             })?;
         Ok(frame.image_path.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Path resolution
+// ---------------------------------------------------------------------------
+
+/// If `path` contains a `mav0/` sub-directory, return that sub-directory.
+/// Otherwise return `path` unchanged, allowing callers to pass either the
+/// dataset root or the mav0 directory directly.
+fn resolve_mav0(path: &Path) -> std::borrow::Cow<'_, Path> {
+    let candidate = path.join("mav0");
+    if candidate.is_dir() {
+        std::borrow::Cow::Owned(candidate)
+    } else {
+        std::borrow::Cow::Borrowed(path)
     }
 }
 
