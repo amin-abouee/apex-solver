@@ -338,6 +338,76 @@ impl FromBytes for f64 {
     }
 }
 
+/// CDR serializer for writing binary message data (little-endian, basic encapsulation).
+///
+/// Writes the 4-byte CDR header `[0x00, 0x01, 0x00, 0x00]` on construction, then
+/// appends fields with the same alignment rules used by `CdrDeserializer`.
+pub struct CdrSerializer {
+    buf: Vec<u8>,
+}
+
+impl CdrSerializer {
+    /// Create a serializer pre-loaded with the little-endian CDR header.
+    pub fn new() -> Self {
+        let mut s = Self {
+            buf: Vec::with_capacity(64),
+        };
+        s.buf.extend_from_slice(&[0x00, 0x01, 0x00, 0x00]);
+        s
+    }
+
+    fn align(&mut self, n: usize) {
+        while self.buf.len() % n != 0 {
+            self.buf.push(0);
+        }
+    }
+
+    pub fn write_u8(&mut self, v: u8) {
+        self.buf.push(v);
+    }
+
+    pub fn write_i32(&mut self, v: i32) {
+        self.align(4);
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_u32(&mut self, v: u32) {
+        self.align(4);
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_f64(&mut self, v: f64) {
+        self.align(8);
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    /// Write a CDR string: `u32` length (including null terminator) + bytes + `\0`.
+    pub fn write_string(&mut self, s: &str) {
+        let len = s.len() as u32 + 1; // +1 for null terminator
+        self.write_u32(len);
+        self.buf.extend_from_slice(s.as_bytes());
+        self.buf.push(0);
+    }
+
+    /// Write a sequence of bytes (CDR `sequence<uint8>`): `u32` count + raw bytes.
+    pub fn write_byte_sequence(&mut self, bytes: &[u8]) {
+        self.write_u32(bytes.len() as u32);
+        self.buf.extend_from_slice(bytes);
+        // uint8 elements have 1-byte alignment — no padding needed
+    }
+
+    /// Consume the serializer and return the encoded bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
+impl Default for CdrSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
 

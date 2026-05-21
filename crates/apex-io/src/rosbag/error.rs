@@ -110,6 +110,26 @@ pub enum BagError {
     /// Generic error with custom message
     #[error("Bag error: {message}")]
     Generic { message: String },
+
+    /// ROS1 bag magic header missing or malformed
+    #[error("ROS1 bag magic invalid: expected `#ROSBAG V2.0`, got {found:?}")]
+    Ros1InvalidMagic { found: String },
+
+    /// ROS1 bag declares an unsupported version
+    #[error("ROS1 bag unsupported version: {found}")]
+    Ros1UnsupportedVersion { found: String },
+
+    /// Encountered an unknown ROS1 record op-code
+    #[error("ROS1 unknown record op-code: 0x{op:02x}")]
+    Ros1UnknownOpCode { op: u8 },
+
+    /// ROS1 index/chunk-info section is corrupt or inconsistent
+    #[error("ROS1 index corrupt: {reason}")]
+    Ros1IndexCorrupt { reason: String },
+
+    /// ROS1 record header is malformed (missing required field, truncated, etc.)
+    #[error("ROS1 record malformed: {reason}")]
+    Ros1MalformedRecord { reason: String },
 }
 
 /// Type alias for backwards compatibility

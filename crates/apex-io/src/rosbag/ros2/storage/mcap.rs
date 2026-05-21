@@ -4,7 +4,7 @@
 //! MCAP is a modern, efficient container format for multimodal log data.
 
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::storage::StorageReader;
+use super::StorageReader;
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
 use mcap::MessageStream;
 use std::collections::HashMap;

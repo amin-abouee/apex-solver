@@ -1,7 +1,7 @@
 //! SQLite3 storage backend implementation
 
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::storage::StorageReader;
+use super::StorageReader;
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
 };
@@ -730,7 +730,7 @@ mod tests {
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     use super::*;
-    use crate::rosbag::storage::StorageReader;
+    use super::StorageReader;
 
     const SQLITE3_BAG: &str = "tests/test_bags/test_bag_sqlite3";
 
@@ -836,7 +836,7 @@ mod tests {
         let path_refs: Vec<&std::path::Path> = paths.iter().map(|p| p.as_path()).collect();
 
         // Use apex_io Reader to get real connections
-        use crate::rosbag::reader::Reader;
+        use crate::rosbag::ros2::reader::Reader;
         let mut reader = Reader::new(SQLITE3_BAG)?;
         reader.open()?;
         let conns: Vec<_> = reader

@@ -1,8 +1,8 @@
 //! Main reader implementation for ROS2 bag files
 
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::metadata::BagMetadata;
-use crate::rosbag::storage::{StorageReader, create_storage_reader};
+use super::metadata::BagMetadata;
+use super::storage::{StorageReader, create_storage_reader};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -57,8 +57,8 @@ impl Reader {
             .enumerate()
             .map(|(idx, topic)| {
                 let qos_profiles = match &topic.topic_metadata.offered_qos_profiles {
-                    crate::rosbag::metadata::QosProfilesField::String(_) => Vec::new(),
-                    crate::rosbag::metadata::QosProfilesField::List(profiles) => profiles.clone(),
+                    super::metadata::QosProfilesField::String(_) => Vec::new(),
+                    super::metadata::QosProfilesField::List(profiles) => profiles.clone(),
                 };
 
                 Connection {
@@ -98,7 +98,7 @@ impl Reader {
         // Get actual topics from the storage (may be more complete than metadata)
         if let Some(sqlite_storage) = storage
             .as_any()
-            .downcast_ref::<crate::rosbag::storage::sqlite::SqliteReader>()
+            .downcast_ref::<super::storage::sqlite::SqliteReader>()
         {
             match sqlite_storage.get_topics_from_database() {
                 Ok(db_connections) => {
@@ -114,7 +114,7 @@ impl Reader {
 
         if let Some(mcap_storage) = storage
             .as_any()
-            .downcast_ref::<crate::rosbag::storage::mcap::McapStorageReader>()
+            .downcast_ref::<super::storage::mcap::McapStorageReader>()
         {
             match mcap_storage.get_topics_from_mcap() {
                 Ok(mcap_connections) => {
