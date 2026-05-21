@@ -1,6 +1,6 @@
-use crate::dds::error::{DdsError, Result};
-use crate::dds::qos_mapping::{to_dds_durability, to_dds_history, to_dds_reliability};
-use crate::dds::raw_bytes::{RawBytes, RawBytesAdapter};
+use super::error::{DdsError, Result};
+use super::qos_mapping::{to_dds_durability, to_dds_history, to_dds_reliability};
+use super::raw_bytes::{RawBytes, RawBytesAdapter};
 use crate::rosbag::types::{
     Connection, MessageDefinition, QosDurability, QosReliability, RawMessage,
 };
