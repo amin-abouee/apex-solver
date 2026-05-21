@@ -47,6 +47,7 @@ image      = "0.25"
 rusqlite   = { version = "0.31", features = ["bundled"] }
 zstd       = "0.13"
 mcap       = "0.8"
+lz4_flex   = { version = "0.11", default-features = false, features = ["std", "safe-decode", "safe-encode"] }
 
 # DDS support
 rustdds = "0.10"

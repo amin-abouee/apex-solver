@@ -26,7 +26,7 @@ pub mod utils;
 pub mod rosbag;
 
 #[cfg(feature = "dds")]
-pub mod dds;
+pub use rosbag::ros2::dds;
 
 pub use logger::init_logger;
 pub use utils::{DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset};
