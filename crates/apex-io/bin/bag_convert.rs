@@ -72,6 +72,8 @@ fn ros1_to_cdr_fn(ros1_type: &str) -> Option<ConvertFn> {
         "geometry_msgs/Pose" => Some(conv_pose_ros1_cdr),
         "geometry_msgs/PoseStamped" => Some(conv_pose_stamped_ros1_cdr),
         "sensor_msgs/Imu" => Some(conv_imu_ros1_cdr),
+        "sensor_msgs/Image" => Some(conv_image_ros1_cdr),
+        "sensor_msgs/CompressedImage" => Some(conv_compressed_image_ros1_cdr),
         _ => None,
     }
 }
@@ -85,6 +87,8 @@ fn cdr_to_ros1_fn(ros1_type: &str) -> Option<ConvertFn> {
         "geometry_msgs/Pose" => Some(conv_pose_cdr_ros1),
         "geometry_msgs/PoseStamped" => Some(conv_pose_stamped_cdr_ros1),
         "sensor_msgs/Imu" => Some(conv_imu_cdr_ros1),
+        "sensor_msgs/Image" => Some(conv_image_cdr_ros1),
+        "sensor_msgs/CompressedImage" => Some(conv_compressed_image_cdr_ros1),
         _ => None,
     }
 }
@@ -643,4 +647,54 @@ fn read_header_ros1(d: &mut CdrDeserializer<'_>) -> Option<ros1_msg::Header> {
         stamp_ns: sec as u64 * 1_000_000_000 + nanosec as u64,
         frame_id,
     })
+}
+
+fn conv_image_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = Ros1Deserializer::new(data);
+    let img = ros1_msg::Image::from_ros1(&mut d).ok()?;
+    let mut s = CdrSerializer::new();
+    write_header_cdr(&mut s, &img.header);
+    s.write_u32(img.height);
+    s.write_u32(img.width);
+    s.write_string(&img.encoding);
+    s.write_u8(img.is_bigendian);
+    s.write_u32(img.step);
+    s.write_byte_sequence(&img.data);
+    Some(s.into_bytes())
+}
+
+fn conv_image_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = CdrDeserializer::new(data).ok()?;
+    let header = read_header_ros1(&mut d)?;
+    let height = d.read_u32().ok()?;
+    let width = d.read_u32().ok()?;
+    let encoding = d.read_string().ok()?;
+    let is_bigendian = d.read_u8().ok()?;
+    let step = d.read_u32().ok()?;
+    let pixel_data = d.read_byte_sequence().ok()?;
+    let img = ros1_msg::Image { header, height, width, encoding, is_bigendian, step, data: pixel_data };
+    let mut s = Ros1Serializer::new();
+    img.to_ros1(&mut s);
+    Some(s.into_bytes())
+}
+
+fn conv_compressed_image_ros1_cdr(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = Ros1Deserializer::new(data);
+    let img = ros1_msg::CompressedImage::from_ros1(&mut d).ok()?;
+    let mut s = CdrSerializer::new();
+    write_header_cdr(&mut s, &img.header);
+    s.write_string(&img.format);
+    s.write_byte_sequence(&img.data);
+    Some(s.into_bytes())
+}
+
+fn conv_compressed_image_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
+    let mut d = CdrDeserializer::new(data).ok()?;
+    let header = read_header_ros1(&mut d)?;
+    let format = d.read_string().ok()?;
+    let pixel_data = d.read_byte_sequence().ok()?;
+    let img = ros1_msg::CompressedImage { header, format, data: pixel_data };
+    let mut s = Ros1Serializer::new();
+    img.to_ros1(&mut s);
+    Some(s.into_bytes())
 }
