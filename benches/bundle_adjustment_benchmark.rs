@@ -47,6 +47,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_io::{BalLoader, utils::DatasetRegistry};
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use apex_solver::ManifoldType;
@@ -55,7 +56,7 @@ use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
 use apex_solver::init_logger;
-use apex_solver::linalg::{JacobianMode, LinearSolverType, SchurPreconditioner, SchurVariant};
+use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -237,7 +238,6 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     // Setup problem
     info!("Building optimization problem...");
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
 
     // Helper function to convert axis-angle to SO3
     fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
@@ -250,30 +250,34 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         }
     }
 
+    let mut pose_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut intr_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
+
     // Add cameras as SE3 poses
-    for (i, cam) in dataset.cameras.iter().enumerate() {
-        // Convert axis-angle to SE3
+    for cam in &dataset.cameras {
         let axis_angle = Vector3::new(cam.rotation.x, cam.rotation.y, cam.rotation.z);
         let translation = Vector3::new(cam.translation.x, cam.translation.y, cam.translation.z);
         let so3 = axis_angle_to_so3(&axis_angle);
         let pose = SE3::from_translation_so3(translation, so3);
 
-        // Add SE3 pose variable (6 DOF)
-        let pose_name = format!("pose_{:04}", i);
-        initial_values.insert(pose_name, (ManifoldType::SE3, DVector::from(pose)));
+        let pose_key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        pose_keys.push(pose_key);
 
-        // Add intrinsics: [focal, k1, k2] (3 DOF) for SelfCalibration mode
-        let intrinsics_name = format!("intr_{:04}", i);
         let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
-        initial_values.insert(intrinsics_name, (ManifoldType::RN, intrinsics_vec));
+        let intr_key = problem.add_variable(ManifoldType::RN, intrinsics_vec);
+        intr_keys.push(intr_key);
     }
 
-    // Add landmarks as R3 variables
-    for (j, point) in dataset.points.iter().enumerate() {
-        let var_name = format!("pt_{:05}", j);
+    let mut pt_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.points.len());
+    for point in &dataset.points {
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
-        initial_values.insert(var_name, (ManifoldType::RN, point_vec));
+        let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
+        problem.mark_as_schur_landmark(pt_key);
+        pt_keys.push(pt_key);
     }
 
     // Add projection factors using ProjectionFactor with SE3 + BALPinholeCameraStrict
@@ -307,47 +311,30 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
             }
         };
 
-        // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
         let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
             ProjectionFactor::new(observations, camera);
 
-        let pose_name = format!("pose_{:04}", obs.camera_index);
-        let intr_name = format!("intr_{:04}", obs.camera_index);
-        let pt_name = format!("pt_{:05}", obs.point_index);
+        let pose_key = pose_keys[obs.camera_index];
+        let intr_key = intr_keys[obs.camera_index];
+        let pt_key = pt_keys[obs.point_index];
 
         // Use Huber loss (matching C++ implementations)
         let loss = match HuberLoss::new(1.0) {
             Ok(l) => Box::new(l),
             Err(_) => continue,
         };
-        problem.add_residual_block(
-            &[&pose_name, &pt_name, &intr_name],
-            Box::new(factor),
-            Some(loss),
-        );
+        problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
     info!("Fixing first camera pose for gauge freedom...");
     for dof in 0..6 {
-        problem.fix_variable("pose_0000", dof);
-    }
-    // Also fix first camera intrinsics
-    for dof in 0..3 {
-        problem.fix_variable("intr_0000", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
 
-    // Configure solver with Iterative Schur + Schur-Jacobi preconditioner
-    info!("Configuring solver...");
-    let config = LevenbergMarquardtConfig::new()
-        .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-        .with_max_iterations(50)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-8)
-        .with_damping(1e-3)
-        .with_schur_variant(SchurVariant::Iterative)
-        .with_schur_preconditioner(SchurPreconditioner::SchurJacobi);
+    // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
 
     info!("Solver configuration:");
     info!("  Mode: SelfCalibration (pose + landmarks + intrinsics)");
@@ -364,7 +351,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     // Optimize (timing excludes setup)
     info!("Starting optimization...");
     let start = Instant::now();
-    let result = match solver.optimize(&problem, &initial_values) {
+    let result = match solver.optimize(&mut problem) {
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
