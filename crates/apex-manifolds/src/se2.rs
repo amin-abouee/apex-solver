@@ -12,7 +12,7 @@
 
 use crate::{LieGroup, Tangent, so2::SO2};
 use nalgebra::{
-    Complex, DVector, Isometry2, Matrix2, Matrix3, Point2, Translation2, UnitComplex, Vector2,
+    Complex, Isometry2, Matrix2, Matrix3, Point2, SVector, Translation2, UnitComplex, Vector2,
     Vector3,
 };
 use std::{
@@ -22,13 +22,12 @@ use std::{
 
 /// SE(2) group element representing rigid body transformations in 2D.
 ///
-/// Represented as a combination of 2D rotation and Vector2 translation.
+/// Stored as a flat `SVector<f64, 3>` = [tx, ty, θ] for contiguous memory
+/// compatible with zero-copy faer views.
 #[derive(Clone, PartialEq)]
 pub struct SE2 {
-    /// Translation part as Vector2
-    translation: Vector2<f64>,
-    /// Rotation part as UnitComplex
-    rotation: UnitComplex<f64>,
+    /// Flat parameter storage: [tx, ty, θ]
+    params: SVector<f64, 3>,
 }
 
 impl Display for SE2 {
@@ -44,24 +43,6 @@ impl Display for SE2 {
     }
 }
 
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SE2 {
-    fn from(data: DVector<f64>) -> Self {
-        // Input order is [x, y, theta] to match G2O format
-        SE2::from_xy_angle(data[0], data[1], data[2])
-    }
-}
-
-impl From<SE2> for DVector<f64> {
-    fn from(se2: SE2) -> Self {
-        DVector::from_vec(vec![
-            se2.translation.x,    // x first
-            se2.translation.y,    // y second
-            se2.rotation.angle(), // theta third
-        ])
-    }
-}
-
 impl SE2 {
     /// Space dimension - dimension of the ambient space that the group acts on
     pub const DIM: usize = 2;
@@ -70,92 +51,86 @@ impl SE2 {
     pub const DOF: usize = 3;
 
     /// Representation size - size of the underlying data representation
-    pub const REP_SIZE: usize = 4;
+    pub const REP_SIZE: usize = 3;
+
+    #[inline]
+    fn unit_complex(&self) -> UnitComplex<f64> {
+        UnitComplex::from_angle(self.params[2])
+    }
+
+    #[inline]
+    fn from_parts(t: Vector2<f64>, theta: f64) -> Self {
+        SE2 {
+            params: SVector::<f64, 3>::new(t.x, t.y, theta),
+        }
+    }
 
     /// Get the identity element of the group.
-    ///
-    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
         SE2 {
-            translation: Vector2::zeros(),
-            rotation: UnitComplex::identity(),
+            params: SVector::<f64, 3>::new(0.0, 0.0, 0.0),
         }
     }
 
     /// Get the identity matrix for Jacobians.
-    ///
-    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
     pub fn jacobian_identity() -> Matrix3<f64> {
         Matrix3::<f64>::identity()
     }
 
     /// Create a new SE2 element from translation and rotation.
-    ///
-    /// # Arguments
-    /// * `translation` - Translation vector [x, y]
-    /// * `rotation` - Unit complex number representing rotation
     #[inline]
     pub fn new(translation: Vector2<f64>, rotation: UnitComplex<f64>) -> Self {
-        SE2 {
-            translation,
-            rotation,
-        }
+        SE2::from_parts(translation, rotation.angle())
     }
 
     /// Create SE2 from translation components and angle.
     pub fn from_xy_angle(x: f64, y: f64, theta: f64) -> Self {
-        let translation = Vector2::new(x, y);
-        let rotation = UnitComplex::from_angle(theta);
-        Self::new(translation, rotation)
+        SE2 {
+            params: SVector::<f64, 3>::new(x, y, theta),
+        }
     }
 
     /// Create SE2 from translation components and complex rotation.
     pub fn from_xy_complex(x: f64, y: f64, real: f64, imag: f64) -> Self {
-        let translation = Vector2::new(x, y);
-        let complex = Complex::new(real, imag);
-        let rotation = UnitComplex::from_complex(complex);
-        Self::new(translation, rotation)
+        let theta = UnitComplex::from_complex(Complex::new(real, imag)).angle();
+        SE2 {
+            params: SVector::<f64, 3>::new(x, y, theta),
+        }
     }
 
     /// Create SE2 directly from an Isometry2.
     pub fn from_isometry(isometry: Isometry2<f64>) -> Self {
-        SE2 {
-            translation: isometry.translation.vector,
-            rotation: isometry.rotation,
-        }
+        SE2::from_parts(isometry.translation.vector, isometry.rotation.angle())
     }
 
     /// Create SE2 from Vector2 and SO2 components.
     pub fn from_translation_so2(translation: Vector2<f64>, rotation: SO2) -> Self {
-        SE2 {
-            translation,
-            rotation: rotation.complex(),
-        }
+        SE2::from_parts(translation, rotation.complex().angle())
     }
 
     /// Get the translation part as a Vector2.
     pub fn translation(&self) -> Vector2<f64> {
-        self.translation
+        Vector2::new(self.params[0], self.params[1])
     }
 
     /// Get the rotation part as UnitComplex.
     pub fn rotation_complex(&self) -> UnitComplex<f64> {
-        self.rotation
+        self.unit_complex()
     }
 
     /// Get the rotation angle.
     pub fn rotation_angle(&self) -> f64 {
-        self.rotation.angle()
+        self.params[2]
     }
 
     /// Get the rotation part as SO2.
     pub fn rotation_so2(&self) -> SO2 {
-        SO2::new(self.rotation)
+        SO2::new(self.unit_complex())
     }
 
     /// Get as an Isometry2 (convenience method).
     pub fn isometry(&self) -> Isometry2<f64> {
-        Isometry2::from_parts(Translation2::from(self.translation), self.rotation)
+        Isometry2::from_parts(Translation2::from(self.translation()), self.unit_complex())
     }
 
     /// Get the transformation matrix (3x3 homogeneous matrix).
@@ -165,40 +140,42 @@ impl SE2 {
 
     /// Get the rotation matrix (2x2).
     pub fn rotation_matrix(&self) -> Matrix2<f64> {
-        self.rotation.to_rotation_matrix().into_inner()
+        self.unit_complex().to_rotation_matrix().into_inner()
     }
 
     /// Get the x component of translation.
     #[inline]
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.params[0]
     }
 
     /// Get the y component of translation.
     #[inline]
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.params[1]
     }
 
     /// Get the real part of the complex rotation.
     pub fn real(&self) -> f64 {
-        self.rotation.re
+        self.unit_complex().re
     }
 
     /// Get the imaginary part of the complex rotation.
     pub fn imag(&self) -> f64 {
-        self.rotation.im
+        self.unit_complex().im
     }
 
     /// Get the rotation angle in radians.
     #[inline]
     pub fn angle(&self) -> f64 {
-        self.rotation.angle()
+        self.params[2]
     }
 }
 
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SE2 {
+    const NAME: &'static str = "SE2";
+
     type TangentVector = SE2Tangent;
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
@@ -211,14 +188,14 @@ impl LieGroup for SE2 {
     /// # Notes
     /// For SE(2): g^{-1} = [R^T, -R^T * t; 0, 1]
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let rot_inv = self.rotation.inverse();
-        let trans_inv = -(rot_inv * self.translation);
+        let rot_inv = self.unit_complex().inverse();
+        let trans_inv = -(rot_inv * self.translation());
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        SE2::new(trans_inv, rot_inv)
+        SE2::from_parts(trans_inv, rot_inv.angle())
     }
 
     /// Composition of this and another SE2 element.
@@ -228,14 +205,14 @@ impl LieGroup for SE2 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let composed_rotation = self.rotation * other.rotation;
-        let composed_translation = self
-            .rotation
-            .transform_point(&Point2::from(other.translation))
+        let rot = self.unit_complex();
+        let composed_rotation = rot * other.unit_complex();
+        let composed_translation = rot
+            .transform_point(&Point2::from(other.translation()))
             .coords
-            + self.translation;
+            + self.translation();
 
-        let result = SE2::new(composed_translation, composed_rotation);
+        let result = SE2::from_parts(composed_translation, composed_rotation.angle());
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -290,9 +267,10 @@ impl LieGroup for SE2 {
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
         // For SE(2), we operate on 2D vectors but maintain 3D interface compatibility
+        let rot = self.unit_complex();
         let point2d = Vector2::new(vector.x, vector.y);
         let transformed_2d =
-            self.rotation.transform_point(&Point2::from(point2d)).coords + self.translation;
+            rot.transform_point(&Point2::from(point2d)).coords + self.translation();
         let result = Vector3::new(transformed_2d.x, transformed_2d.y, vector.z);
 
         if let Some(jac_self) = jacobian_self {
@@ -331,14 +309,13 @@ impl LieGroup for SE2 {
         use rand::Rng;
         let mut rng = rand::rng();
 
-        // Random translation in [-1, 1]²
-        let translation = Vector2::new(rng.random_range(-1.0..1.0), rng.random_range(-1.0..1.0));
-
-        // Random rotation
+        let x = rng.random_range(-1.0..1.0);
+        let y = rng.random_range(-1.0..1.0);
         let angle = rng.random_range(-std::f64::consts::PI..std::f64::consts::PI);
-        let rotation = UnitComplex::from_angle(angle);
 
-        SE2::new(translation, rotation)
+        SE2 {
+            params: SVector::<f64, 3>::new(x, y, angle),
+        }
     }
 
     fn jacobian_identity() -> Self::JacobianMatrix {
@@ -350,11 +327,26 @@ impl LieGroup for SE2 {
     }
 
     fn normalize(&mut self) {
-        self.rotation.renormalize();
+        self.params[2] = self.unit_complex().angle();
     }
 
-    fn is_valid(&self, tolerance: f64) -> bool {
-        (self.rotation.norm() - 1.0).abs() < tolerance
+    fn is_valid(&self, _tolerance: f64) -> bool {
+        self.params[2].is_finite()
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 3);
+        SE2 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     /// Vee operator: log(g)^∨.
@@ -396,27 +388,6 @@ impl fmt::Display for SE2Tangent {
             self.y(),
             self.angle()
         )
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SE2Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        // Input order is [x, y, theta] to match G2O format
-        // Internal storage is [x, y, theta]
-        SE2Tangent {
-            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
-        }
-    }
-}
-
-impl From<SE2Tangent> for DVector<f64> {
-    fn from(se2_tangent: SE2Tangent) -> Self {
-        DVector::from_vec(vec![
-            se2_tangent.data[0], // x first
-            se2_tangent.data[1], // y second
-            se2_tangent.data[2], // theta third
-        ])
     }
 }
 
@@ -707,6 +678,17 @@ impl Tangent<SE2> for SE2Tangent {
         }
     }
 
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 3);
+        SE2Tangent {
+            data: Vector3::from_column_slice(s),
+        }
+    }
+
     /// Small adjoint matrix for SE(2).
     ///
     /// For SE(2), the small adjoint involves the angular component.
@@ -925,7 +907,7 @@ mod tests {
     fn test_se2_manifold_properties() {
         assert_eq!(SE2::DIM, 2);
         assert_eq!(SE2::DOF, 3);
-        assert_eq!(SE2::REP_SIZE, 4);
+        assert_eq!(SE2::REP_SIZE, 3);
     }
 
     #[test]
@@ -1548,5 +1530,19 @@ mod tests {
                 "SE2 exp-log round-trip failed for angle = {angle}"
             );
         }
+    }
+
+    #[test]
+    fn se2_param_slice_round_trip() {
+        let g = SE2::random();
+        let recovered = SE2::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn se2_tangent_slice_round_trip() {
+        let t = SE2Tangent::random();
+        let recovered = SE2Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }
