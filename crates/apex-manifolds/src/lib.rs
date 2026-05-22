@@ -142,6 +142,9 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 /// - `JacobianMatrix`: Jacobian matrix type for this group
 /// - `LieAlgebra`: Matrix representation of the Lie algebra
 pub trait LieGroup: Clone + PartialEq {
+    /// Human-readable name for serialization and logging.
+    const NAME: &'static str;
+
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
 
@@ -250,6 +253,17 @@ pub trait LieGroup: Clone + PartialEq {
     /// * `other` - The other element to compare with
     /// * `tolerance` - The tolerance for the comparison
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool;
+
+    /// Returns the manifold parameters as a contiguous flat slice.
+    ///
+    /// Enables zero-copy faer views: `faer::col::from_slice(g.as_param_slice())`.
+    fn as_param_slice(&self) -> &[f64];
+
+    /// Mutably borrows the raw parameter storage for in-place retraction updates.
+    fn as_param_slice_mut(&mut self) -> &mut [f64];
+
+    /// Constructs from a raw parameter slice (same layout as `as_param_slice`).
+    fn from_param_slice(s: &[f64]) -> Self;
 
     // Manifold plus/minus operations
 
@@ -537,6 +551,12 @@ pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
 
     /// Return a unit tangent vector in the same direction.
     fn normalized(&self) -> Group::TangentVector;
+
+    /// Borrows the raw tangent data as a flat slice. Zero allocation.
+    fn as_slice(&self) -> &[f64];
+
+    /// Constructs from a raw slice (same layout as `as_slice`).
+    fn from_slice(s: &[f64]) -> Self;
 }
 
 /// Trait for Lie groups that support interpolation.
