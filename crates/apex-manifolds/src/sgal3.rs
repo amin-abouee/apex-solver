@@ -30,7 +30,7 @@ use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use nalgebra::{DVector, Matrix3, Quaternion, SMatrix, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -43,17 +43,11 @@ pub type Vector10<T> = SMatrix<T, 10, 1>;
 
 /// SGal(3) group element representing Galilean transformations.
 ///
-/// Represented as (rotation, translation, velocity, time).
+/// Stored as a flat `SVector<f64, 11>` = [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, time].
 #[derive(Clone, PartialEq)]
 pub struct SGal3 {
-    /// Rotation part as SO(3) element
-    rotation: SO3,
-    /// Translation part (position) as Vector3
-    translation: Vector3<f64>,
-    /// Velocity part as Vector3
-    velocity: Vector3<f64>,
-    /// Time parameter
-    time: f64,
+    /// Flat parameter storage: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, time]
+    params: SVector<f64, 11>,
 }
 
 impl Display for SGal3 {
@@ -80,13 +74,47 @@ impl SGal3 {
     /// Representation size - size of the underlying data representation
     pub const REP_SIZE: usize = 11;
 
+    #[inline]
+    fn translation_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[0], self.params[1], self.params[2])
+    }
+
+    #[inline]
+    fn velocity_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[7], self.params[8], self.params[9])
+    }
+
+    #[inline]
+    fn time_impl(&self) -> f64 {
+        self.params[10]
+    }
+
+    #[inline]
+    fn rotation_impl(&self) -> SO3 {
+        SO3::from_quaternion_wxyz(
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+        )
+    }
+
+    #[inline]
+    fn from_parts(t: Vector3<f64>, v: Vector3<f64>, time: f64, r: &SO3) -> Self {
+        let q = r.params();
+        SGal3 {
+            params: SVector::<f64, 11>::from([
+                t.x, t.y, t.z, q[0], q[1], q[2], q[3], v.x, v.y, v.z, time,
+            ]),
+        }
+    }
+
     /// Get the identity element of the group.
     pub fn identity() -> Self {
         SGal3 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
-            velocity: Vector3::zeros(),
-            time: 0.0,
+            params: SVector::<f64, 11>::from([
+                0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ]),
         }
     }
 
@@ -96,24 +124,13 @@ impl SGal3 {
     }
 
     /// Create a new SGal(3) element from components.
-    ///
-    /// # Arguments
-    /// * `translation` - Position vector [x, y, z]
-    /// * `velocity` - Velocity vector [vx, vy, vz]
-    /// * `rotation` - Unit quaternion representing rotation
-    /// * `time` - Time parameter
     pub fn new(
         translation: Vector3<f64>,
         velocity: Vector3<f64>,
         rotation: UnitQuaternion<f64>,
         time: f64,
     ) -> Self {
-        SGal3 {
-            rotation: SO3::new(rotation),
-            translation,
-            velocity,
-            time,
-        }
+        SGal3::from_parts(translation, velocity, time, &SO3::new(rotation))
     }
 
     /// Create SGal(3) from components.
@@ -123,145 +140,96 @@ impl SGal3 {
         rotation: SO3,
         time: f64,
     ) -> Self {
-        SGal3 {
-            rotation,
-            translation,
-            velocity,
-            time,
-        }
+        SGal3::from_parts(translation, velocity, time, &rotation)
     }
 
     /// Get the translation part as a Vector3.
     pub fn translation(&self) -> Vector3<f64> {
-        self.translation
+        self.translation_impl()
     }
-
     /// Get the velocity part as a Vector3.
     pub fn velocity(&self) -> Vector3<f64> {
-        self.velocity
+        self.velocity_impl()
     }
-
     /// Get the time parameter.
     pub fn time(&self) -> f64 {
-        self.time
+        self.time_impl()
     }
-
     /// Get the rotation part as SO3.
     pub fn rotation_so3(&self) -> SO3 {
-        self.rotation.clone()
+        self.rotation_impl()
     }
-
     /// Get the rotation part as a UnitQuaternion.
     pub fn rotation_quaternion(&self) -> UnitQuaternion<f64> {
-        self.rotation.quaternion()
+        self.rotation_impl().quaternion()
     }
 
     /// Get the x component of translation.
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.params[0]
     }
-
     /// Get the y component of translation.
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.params[1]
     }
-
     /// Get the z component of translation.
     pub fn z(&self) -> f64 {
-        self.translation.z
+        self.params[2]
     }
-
     /// Get the vx component of velocity.
     pub fn vx(&self) -> f64 {
-        self.velocity.x
+        self.params[7]
     }
-
     /// Get the vy component of velocity.
     pub fn vy(&self) -> f64 {
-        self.velocity.y
+        self.params[8]
     }
-
     /// Get the vz component of velocity.
     pub fn vz(&self) -> f64 {
-        self.velocity.z
+        self.params[9]
     }
 
     /// Get the rotation matrix (3x3).
     pub fn rotation_matrix(&self) -> Matrix3<f64> {
-        self.rotation.rotation_matrix()
+        self.rotation_impl().rotation_matrix()
     }
 
-    /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, s].
+    /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, time].
     pub fn coeffs(&self) -> [f64; 11] {
-        let q = self.rotation.quaternion();
         [
-            self.translation.x,
-            self.translation.y,
-            self.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            self.velocity.x,
-            self.velocity.y,
-            self.velocity.z,
-            self.time,
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+            self.params[7],
+            self.params[8],
+            self.params[9],
+            self.params[10],
         ]
     }
 
     /// Get the 5x5 homogeneous matrix representation.
-    ///
-    /// ```text
-    /// [ R   t   v ]
-    /// [ 0   1   s ]
-    /// [ 0   0   1 ]
-    /// ```
     pub fn matrix(&self) -> SMatrix<f64, 5, 5> {
         let mut mat = SMatrix::<f64, 5, 5>::identity();
         let rot = self.rotation_matrix();
         mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
-        mat[(0, 3)] = self.translation.x;
-        mat[(1, 3)] = self.translation.y;
-        mat[(2, 3)] = self.translation.z;
-        mat[(0, 4)] = self.velocity.x;
-        mat[(1, 4)] = self.velocity.y;
-        mat[(2, 4)] = self.velocity.z;
-        mat[(3, 4)] = self.time;
+        mat[(0, 3)] = self.params[0];
+        mat[(1, 3)] = self.params[1];
+        mat[(2, 3)] = self.params[2];
+        mat[(0, 4)] = self.params[7];
+        mat[(1, 4)] = self.params[8];
+        mat[(2, 4)] = self.params[9];
+        mat[(3, 4)] = self.params[10];
         mat
     }
 }
 
-impl From<DVector<f64>> for SGal3 {
-    fn from(data: DVector<f64>) -> Self {
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let q = Quaternion::new(data[3], data[4], data[5], data[6]);
-        let rotation = SO3::new(UnitQuaternion::from_quaternion(q));
-        let velocity = Vector3::new(data[7], data[8], data[9]);
-        let time = data[10];
-        SGal3::from_components(translation, velocity, rotation, time)
-    }
-}
-
-impl From<SGal3> for DVector<f64> {
-    fn from(sgal3: SGal3) -> Self {
-        let q = sgal3.rotation.quaternion();
-        DVector::from_vec(vec![
-            sgal3.translation.x,
-            sgal3.translation.y,
-            sgal3.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            sgal3.velocity.x,
-            sgal3.velocity.y,
-            sgal3.velocity.z,
-            sgal3.time,
-        ])
-    }
-}
-
 impl LieGroup for SGal3 {
+    const NAME: &'static str = "SGal3";
+
     type TangentVector = SGal3Tangent;
     type JacobianMatrix = Matrix10<f64>;
     type LieAlgebra = SMatrix<f64, 6, 6>;
@@ -270,16 +238,20 @@ impl LieGroup for SGal3 {
     ///
     /// For SGal(3): g^{-1} = (R^T, -R^T * (t - s*v), -R^T * v, -s)
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let rot_inv = self.rotation.inverse(None);
-        let trans_inv = -rot_inv.act(&(self.translation - self.time * self.velocity), None, None);
-        let vel_inv = -rot_inv.act(&self.velocity, None, None);
-        let time_inv = -self.time;
+        let rot = self.rotation_impl();
+        let rot_inv = rot.inverse(None);
+        let t = self.translation_impl();
+        let v = self.velocity_impl();
+        let s = self.time_impl();
+        let trans_inv = -rot_inv.act(&(t - s * v), None, None);
+        let vel_inv = -rot_inv.act(&v, None, None);
+        let time_inv = -s;
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        SGal3::from_components(trans_inv, vel_inv, rot_inv, time_inv)
+        SGal3::from_parts(trans_inv, vel_inv, time_inv, &rot_inv)
     }
 
     /// Composition of this and another SGal(3) element.
@@ -291,20 +263,22 @@ impl LieGroup for SGal3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let composed_rotation = self.rotation.compose(&other.rotation, None, None);
-        let composed_translation = self.rotation.act(
-            &(other.translation + self.time * other.velocity),
+        let rot = self.rotation_impl();
+        let s = self.time_impl();
+        let composed_rotation = rot.compose(&other.rotation_impl(), None, None);
+        let composed_translation = rot.act(
+            &(other.translation_impl() + s * other.velocity_impl()),
             None,
             None,
-        ) + self.translation;
-        let composed_velocity = self.rotation.act(&other.velocity, None, None) + self.velocity;
-        let composed_time = self.time + other.time;
+        ) + self.translation_impl();
+        let composed_velocity = rot.act(&other.velocity_impl(), None, None) + self.velocity_impl();
+        let composed_time = s + other.time_impl();
 
-        let result = SGal3::from_components(
+        let result = SGal3::from_parts(
             composed_translation,
             composed_velocity,
-            composed_rotation,
             composed_time,
+            &composed_rotation,
         );
 
         if let Some(jac_self) = jacobian_self {
@@ -320,18 +294,17 @@ impl LieGroup for SGal3 {
 
     /// Logarithmic map from SGal(3) to its tangent space.
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        let theta = self.rotation.log(None);
+        let theta = self.rotation_impl().log(None);
         let mut data = Vector10::zeros();
 
         let v_inv = theta.left_jacobian_inv();
-        let translation_vector = v_inv * self.translation;
-        let velocity_vector = v_inv * self.velocity;
+        let translation_vector = v_inv * self.translation_impl();
+        let velocity_vector = v_inv * self.velocity_impl();
 
-        // Order: [ρ, ν, θ, s]
         data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
         data.fixed_rows_mut::<3>(3).copy_from(&velocity_vector);
         data.fixed_rows_mut::<3>(6).copy_from(&theta.coeffs());
-        data[9] = self.time;
+        data[9] = self.time_impl();
 
         let result = SGal3Tangent { data };
 
@@ -348,86 +321,60 @@ impl LieGroup for SGal3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        let result =
-            self.rotation.act(vector, None, None) + self.translation + self.time * self.velocity;
+        let rot = self.rotation_impl();
+        let rotation_matrix = rot.rotation_matrix();
+        let velocity = self.velocity_impl();
+        let time = self.time_impl();
+        let result = rot.act(vector, None, None) + self.translation_impl() + time * velocity;
 
         if let Some(jac_self) = jacobian_self {
-            let rotation_matrix = self.rotation.rotation_matrix();
             jac_self
                 .fixed_view_mut::<3, 3>(0, 0)
                 .copy_from(&rotation_matrix);
             jac_self
                 .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(self.time * rotation_matrix));
+                .copy_from(&(time * rotation_matrix));
             jac_self
                 .fixed_view_mut::<3, 3>(0, 6)
                 .copy_from(&(-rotation_matrix * SO3Tangent::new(*vector).hat()));
-            jac_self
-                .fixed_view_mut::<3, 1>(0, 9)
-                .copy_from(&self.velocity);
+            jac_self.fixed_view_mut::<3, 1>(0, 9).copy_from(&velocity);
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            *jac_vector = self.rotation.rotation_matrix();
+            *jac_vector = rotation_matrix;
         }
 
         result
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        let rotation_matrix = self.rotation.rotation_matrix();
-        let translation = self.translation;
-        let velocity = self.velocity;
-        let time = self.time;
-        let mut adjoint_matrix = Matrix10::zeros();
+        let r = self.rotation_impl().rotation_matrix();
+        let rho = self.translation_impl();
+        let nu = self.velocity_impl();
+        let t = self.time_impl();
+        let mut adj = Matrix10::zeros();
 
-        // Block structure for SGal(3):
-        // [R    0    [t]×R    tv  ]
-        // [0    R    [v]×R     v  ]
-        // [0    0      R       0  ]
-        // [0    0      0       1  ]
+        // Tangent ordering [ρ, ν, θ, s] — per manif SGal3 source:
+        // Ad(g) = [ R   -t·R   [ρ-t·ν]×R   ν ]
+        //         [ 0    R     [ν]×R         0 ]
+        //         [ 0    0     R             0 ]
+        //         [ 0    0     0             1 ]
 
-        // Top-left: R
-        adjoint_matrix
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&rotation_matrix);
+        adj.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
+        adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&(-t * r));
+        adj.fixed_view_mut::<3, 3>(0, 6)
+            .copy_from(&(SO3Tangent::new(rho - t * nu).hat() * r));
+        adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&nu);
 
-        // (0,6): [t]× R
-        let block_06 = SO3Tangent::new(translation).hat() * rotation_matrix;
-        adjoint_matrix
-            .fixed_view_mut::<3, 3>(0, 6)
-            .copy_from(&block_06);
+        adj.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
+        adj.fixed_view_mut::<3, 3>(3, 6)
+            .copy_from(&(SO3Tangent::new(nu).hat() * r));
 
-        // (0,9): t*v
-        adjoint_matrix
-            .fixed_view_mut::<3, 1>(0, 9)
-            .copy_from(&(time * velocity));
+        adj.fixed_view_mut::<3, 3>(6, 6).copy_from(&r);
 
-        // (3,3): R
-        adjoint_matrix
-            .fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&rotation_matrix);
+        adj[(9, 9)] = 1.0;
 
-        // (3,6): [v]× R
-        let block_36 = SO3Tangent::new(velocity).hat() * rotation_matrix;
-        adjoint_matrix
-            .fixed_view_mut::<3, 3>(3, 6)
-            .copy_from(&block_36);
-
-        // (3,9): v
-        adjoint_matrix
-            .fixed_view_mut::<3, 1>(3, 9)
-            .copy_from(&velocity);
-
-        // (6,6): R
-        adjoint_matrix
-            .fixed_view_mut::<3, 3>(6, 6)
-            .copy_from(&rotation_matrix);
-
-        // (9,9): 1
-        adjoint_matrix[(9, 9)] = 1.0;
-
-        adjoint_matrix
+        adj
     }
 
     fn random() -> Self {
@@ -449,15 +396,36 @@ impl LieGroup for SGal3 {
         let rotation = SO3::random();
         let time = rng.random_range(-1.0..1.0);
 
-        SGal3::from_components(translation, velocity, rotation, time)
+        SGal3::from_parts(translation, velocity, time, &rotation)
     }
 
     fn normalize(&mut self) {
-        self.rotation.normalize();
+        let mut rot = self.rotation_impl();
+        rot.normalize();
+        let q = rot.params();
+        self.params[3] = q[0];
+        self.params[4] = q[1];
+        self.params[5] = q[2];
+        self.params[6] = q[3];
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        self.rotation.is_valid(tolerance)
+        self.rotation_impl().is_valid(tolerance)
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 11);
+        SGal3 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     fn vee(&self) -> Self::TangentVector {
@@ -504,20 +472,6 @@ impl fmt::Display for SGal3Tangent {
             "sgal3(rho: [{:.4}, {:.4}, {:.4}], nu: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}], s: {:.4})",
             rho.x, rho.y, rho.z, nu.x, nu.y, nu.z, theta.x, theta.y, theta.z, s
         )
-    }
-}
-
-impl From<DVector<f64>> for SGal3Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        SGal3Tangent {
-            data: Vector10::from_iterator(data_vector.iter().copied()),
-        }
-    }
-}
-
-impl From<SGal3Tangent> for DVector<f64> {
-    fn from(tangent: SGal3Tangent) -> Self {
-        DVector::from_vec(tangent.data.as_slice().to_vec())
     }
 }
 
@@ -636,7 +590,7 @@ impl Tangent<SGal3> for SGal3Tangent {
             *jac = self.right_jacobian();
         }
 
-        SGal3::from_components(translation, velocity, rotation, s)
+        SGal3::from_parts(translation, velocity, s, &rotation)
     }
 
     /// Right Jacobian for SGal(3).
@@ -804,6 +758,17 @@ impl Tangent<SGal3> for SGal3Tangent {
             SGal3Tangent::new(self.rho(), self.nu(), self.theta() / norm, self.s())
         } else {
             SGal3Tangent::new(self.rho(), self.nu(), Vector3::zeros(), self.s())
+        }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 10);
+        SGal3Tangent {
+            data: Vector10::from_column_slice(s),
         }
     }
 
@@ -1287,6 +1252,7 @@ mod tests {
         let sgal3 = SGal3::new(translation, velocity, rotation, time);
         let c = sgal3.coeffs();
 
+        // Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz, time]
         assert!((c[0] - 1.0).abs() < TOLERANCE);
         assert!((c[1] - 2.0).abs() < TOLERANCE);
         assert!((c[2] - 3.0).abs() < TOLERANCE);
@@ -1454,10 +1420,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sgal3_dvector_round_trip() {
+    fn test_sgal3_param_slice_round_trip() {
         let sgal3 = SGal3::random();
-        let dvec: DVector<f64> = sgal3.clone().into();
-        let recovered = SGal3::from(dvec);
+        let recovered = SGal3::from_param_slice(sgal3.as_param_slice());
         assert!(sgal3.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1566,15 +1531,14 @@ mod tests {
     }
 
     #[test]
-    fn test_sgal3_tangent_dvector_conversions() {
+    fn test_sgal3_tangent_slice_round_trip() {
         let tangent = SGal3Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(4.0, 5.0, 6.0),
             Vector3::new(0.1, 0.2, 0.3),
             0.5,
         );
-        let dvec: DVector<f64> = tangent.clone().into();
-        let recovered = SGal3Tangent::from(dvec);
+        let recovered = SGal3Tangent::from_slice(tangent.as_slice());
         assert!(tangent.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1696,5 +1660,19 @@ mod tests {
         let sgal3 = tangent.exp(None);
         let recovered = sgal3.log(None);
         assert!(tangent.is_approx(&recovered, TOLERANCE));
+    }
+
+    #[test]
+    fn sgal3_param_slice_round_trip() {
+        let g = SGal3::random();
+        let recovered = SGal3::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn sgal3_tangent_slice_round_trip() {
+        let t = SGal3Tangent::random();
+        let recovered = SGal3Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }
