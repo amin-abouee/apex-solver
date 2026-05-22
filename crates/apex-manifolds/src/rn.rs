@@ -180,6 +180,8 @@ impl Rn {
 }
 
 impl LieGroup for Rn {
+    const NAME: &'static str = "Rn";
+
     type TangentVector = RnTangent;
     type JacobianMatrix = DMatrix<f64>;
     type LieAlgebra = DMatrix<f64>;
@@ -324,6 +326,18 @@ impl LieGroup for Rn {
 
     fn is_valid(&self, _tolerance: f64) -> bool {
         self.data.iter().all(|x| x.is_finite())
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.data.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        Rn::from_slice(s)
     }
 
     /// Check if the element is approximately equal to another element.
@@ -673,6 +687,14 @@ impl Tangent<Rn> for RnTangent {
         let mut result = self.clone();
         result.normalize();
         result
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        RnTangent::from_slice(s)
     }
 }
 
@@ -1315,12 +1337,24 @@ mod tests {
     }
 
     #[test]
+    fn rn_param_slice_round_trip() {
+        let g = Rn::random_with_dim(4);
+        let recovered = Rn::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn rn_tangent_slice_round_trip() {
+        let t = RnTangent::from_slice(&[1.0, 2.0, 3.0]);
+        let recovered = RnTangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
     fn test_bijective_rn_tangent() {
-        let tangent_expected = RnTangent::new(::nalgebra::dvector![1., 2., 3.]);
-        let dv_expected = DVector::<f64>::from(tangent_expected.clone());
-        let tangent_actual = RnTangent::from(dv_expected.clone());
-        let dv_actual = DVector::<f64>::from(tangent_actual.clone());
-        assert!(tangent_expected == tangent_actual);
-        assert_eq!(dv_expected, dv_actual);
+        let tangent_expected = RnTangent::from_slice(&[1.0, 2.0, 3.0]);
+        let slice_expected = tangent_expected.as_slice();
+        let tangent_actual = RnTangent::from_slice(slice_expected);
+        assert!(tangent_expected.is_approx(&tangent_actual, 1e-14));
     }
 }
