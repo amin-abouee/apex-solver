@@ -33,11 +33,9 @@
 //! use apex_solver::{JacobianMode, LevenbergMarquardt, LevenbergMarquardtConfig};
 //! use apex_solver::observers::RerunObserver;
 //! # use apex_solver::core::problem::Problem;
-//! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new(JacobianMode::Sparse);
-//! # let initial_values = HashMap::new();
+//! # let mut problem = Problem::new(JacobianMode::Sparse);
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
 //! let mut solver = LevenbergMarquardt::with_config(config);
@@ -46,7 +44,7 @@
 //! let rerun_observer = RerunObserver::new(true)?;
 //! solver.add_observer(rerun_observer);
 //!
-//! let result = solver.optimize(&problem, &initial_values)?;
+//! let result = solver.optimize(&mut problem)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -65,15 +63,19 @@
 //! # }
 //! ```
 
-use crate::core::problem::VariableEnum;
+use crate::core::VarKey;
+use crate::core::variable::{ManifoldVariable, Variable};
 use crate::error::ErrorLogging;
 use crate::observers::{ObserverError, ObserverResult, OptObserver};
 use apex_io as io;
+use apex_manifolds::rn::Rn;
+use apex_manifolds::se2::SE2;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, ManifoldType};
 use faer::Mat;
 use faer::sparse;
 use nalgebra::DVector;
+use slotmap::SlotMap;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use tracing::{info, warn};
@@ -905,7 +907,7 @@ impl RerunObserver {
             match manifold_type {
                 ManifoldType::SE3 if self.config.show_cameras => {
                     // Parse SE3 from data vector
-                    let se3 = SE3::from(data.clone());
+                    let se3 = SE3::from_param_slice(data.as_slice());
 
                     // Apply pose inversion if configured (for BA: T_wc -> T_cw)
                     let pose = if self.config.invert_camera_poses {
@@ -1018,7 +1020,7 @@ impl RerunObserver {
     /// * `iterations` - Total number of iterations performed
     fn log_final_state(
         &self,
-        values: &HashMap<String, VariableEnum>,
+        values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         iterations: usize,
     ) -> ObserverResult<()> {
         let rec = self.rec.as_ref().ok_or_else(|| {
@@ -1035,9 +1037,10 @@ impl RerunObserver {
         let mut camera_count = 0;
         let mut se2_count = 0;
 
-        for (var_name, var) in values {
-            match var {
-                VariableEnum::SE3(v) if self.config.show_cameras => {
+        for (i, (_, var)) in values.iter().enumerate() {
+            let var_name = format!("var_{i}");
+            if self.config.show_cameras {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
                     // Apply pose inversion if configured (for BA: T_wc -> T_cw)
                     let pose = if self.config.invert_camera_poses {
                         v.value.inverse(None)
@@ -1092,11 +1095,15 @@ impl RerunObserver {
 
                     camera_count += 1;
                 }
-                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+            }
+            if self.config.show_se2_poses {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
                     final_se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
                     se2_count += 1;
                 }
-                VariableEnum::Rn(v) if self.config.show_landmarks => {
+            }
+            if self.config.show_landmarks {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
                     // Handle 3D landmarks (Rn with dimension 3)
                     let data = v.value.data();
                     if data.len() == 3 {
@@ -1106,9 +1113,6 @@ impl RerunObserver {
                             data[2] as f32,
                         ]);
                     }
-                }
-                _ => {
-                    // Skip other manifold types
                 }
             }
         }
@@ -1180,15 +1184,16 @@ impl RerunObserver {
     /// from their initial positions to their final optimized positions.
     fn log_displacement_statistics(
         &self,
-        values: &HashMap<String, VariableEnum>,
+        values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> ObserverResult<()> {
         let initial_cameras = self.initial_camera_positions.borrow();
         let initial_landmarks = self.initial_landmark_positions.borrow();
 
         // Calculate camera displacements
         let mut camera_displacements: Vec<f32> = Vec::new();
-        for (name, var) in values {
-            if let VariableEnum::SE3(v) = var {
+        for (i, (_, var)) in values.iter().enumerate() {
+            let name = format!("var_{i}");
+            if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
                 // Apply same pose inversion as in initial state
                 let pose = if self.config.invert_camera_poses {
                     v.value.inverse(None)
@@ -1196,7 +1201,7 @@ impl RerunObserver {
                     v.value.clone()
                 };
 
-                if let Some(initial_pos) = initial_cameras.get(name) {
+                if let Some(initial_pos) = initial_cameras.get(&name) {
                     let final_pos = pose.translation();
                     let dx = final_pos.x as f32 - initial_pos[0];
                     let dy = final_pos.y as f32 - initial_pos[1];
@@ -1209,11 +1214,12 @@ impl RerunObserver {
 
         // Calculate landmark displacements
         let mut landmark_displacements: Vec<f32> = Vec::new();
-        for (name, var) in values {
-            if let VariableEnum::Rn(v) = var {
+        for (i, (_, var)) in values.iter().enumerate() {
+            let name = format!("var_{i}");
+            if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
                 let data = v.value.data();
                 if data.len() == 3
-                    && let Some(initial_pos) = initial_landmarks.get(name)
+                    && let Some(initial_pos) = initial_landmarks.get(&name)
                 {
                     let dx = data[0] as f32 - initial_pos[0];
                     let dy = data[1] as f32 - initial_pos[1];
@@ -1406,7 +1412,10 @@ impl RerunObserver {
     /// Logs SE3 poses as `Transform3D` + `Pinhole` under `initial_graph/cameras/`,
     /// SE2 poses as `Boxes2D` under `initial_graph/se2_poses`,
     /// and Rn landmarks as `Points3D` under `initial_graph/landmarks`.
-    fn log_initial_state(&self, variables: &HashMap<String, VariableEnum>) -> ObserverResult<()> {
+    fn log_initial_state(
+        &self,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    ) -> ObserverResult<()> {
         let rec = self.rec.as_ref().ok_or_else(|| {
             ObserverError::InvalidState("Recording stream not initialized".to_string())
         })?;
@@ -1415,9 +1424,10 @@ impl RerunObserver {
         let mut se2_positions: Vec<[f32; 2]> = Vec::new();
         let mut landmark_positions: Vec<[f32; 3]> = Vec::new();
 
-        for (var_name, var) in variables {
-            match var {
-                VariableEnum::SE3(v) if self.config.show_cameras => {
+        for (i, (_, var)) in variables.iter().enumerate() {
+            let var_name = format!("var_{i}");
+            if self.config.show_cameras {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
                     let pose = if self.config.invert_camera_poses {
                         v.value.inverse(None)
                     } else {
@@ -1469,16 +1479,19 @@ impl RerunObserver {
                         .log_with_source(e)
                     })?;
                 }
-                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+            }
+            if self.config.show_se2_poses {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
                     se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
                 }
-                VariableEnum::Rn(v) if self.config.show_landmarks => {
+            }
+            if self.config.show_landmarks {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
                     let data = v.value.data();
                     if data.len() == 3 {
                         landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
                     }
                 }
-                _ => {}
             }
         }
 
@@ -1528,7 +1541,7 @@ impl RerunObserver {
     fn log_manifolds(
         &self,
         iteration: usize,
-        variables: &HashMap<String, VariableEnum>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> ObserverResult<()> {
         let rec = self.rec.as_ref().ok_or_else(|| {
             ObserverError::InvalidState("Recording stream not initialized".to_string())
@@ -1540,9 +1553,10 @@ impl RerunObserver {
         // Collect SE2 positions for batch logging
         let mut se2_positions: Vec<[f32; 2]> = Vec::new();
 
-        for (var_name, var) in variables {
-            match var {
-                VariableEnum::SE3(v) if self.config.show_cameras => {
+        for (i, (_, var)) in variables.iter().enumerate() {
+            let var_name = format!("var_{i}");
+            if self.config.show_cameras {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
                     // Apply pose inversion if configured (for BA: T_wc -> T_cw)
                     let pose = if self.config.invert_camera_poses {
                         v.value.inverse(None)
@@ -1595,19 +1609,20 @@ impl RerunObserver {
                         .log_with_source(e)
                     })?;
                 }
-                VariableEnum::SE2(v) if self.config.show_se2_poses => {
+            }
+            if self.config.show_se2_poses {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
                     se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
                 }
-                VariableEnum::Rn(v) if self.config.show_landmarks => {
+            }
+            if self.config.show_landmarks {
+                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
                     // Handle 3D landmarks (Rn with dimension 3)
                     let data = v.value.data();
                     if data.len() == 3 {
                         landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
                     }
                     // Skip non-3D Rn variables (e.g., camera intrinsics)
-                }
-                _ => {
-                    // Skip other manifold types (SO2, SO3) or disabled types
                 }
             }
         }
@@ -1806,7 +1821,7 @@ impl OptObserver for RerunObserver {
     ///
     /// * `values` - Current variable values (manifold states)
     /// * `iteration` - Current iteration number
-    fn on_step(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
+    fn on_step(&self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize) {
         if !self.is_enabled() {
             return;
         }
@@ -1856,7 +1871,11 @@ impl OptObserver for RerunObserver {
     ///
     /// * `values` - Final optimized variable values
     /// * `iterations` - Total number of iterations performed
-    fn on_optimization_complete(&self, values: &HashMap<String, VariableEnum>, iterations: usize) {
+    fn on_optimization_complete(
+        &self,
+        values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        iterations: usize,
+    ) {
         if !self.is_enabled() {
             return;
         }
@@ -1927,7 +1946,7 @@ mod tests {
     #[test]
     fn test_observer_trait() -> TestResult {
         let observer = RerunObserver::new(false)?;
-        let values = HashMap::new();
+        let values: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
 
         // Should not panic when disabled
         observer.on_step(&values, 0);
