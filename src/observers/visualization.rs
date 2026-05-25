@@ -867,29 +867,26 @@ impl RerunObserver {
     ///
     /// # Arguments
     ///
-    /// * `initial_values` - Initial variable values from problem setup
+    /// * `problem` - The optimization problem containing the initial variables
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use apex_solver::observers::RerunObserver;
-    /// use apex_solver::manifold::ManifoldType;
-    /// use nalgebra::DVector;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::problem::Problem;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let observer = RerunObserver::new_for_bundle_adjustment(true, None, true)?;
+    /// let mut problem = Problem::new(apex_solver::linalg::JacobianMode::Sparse);
+    /// // ... add variables and factors ...
     ///
-    /// let mut initial_values = HashMap::new();
-    /// // ... populate with camera poses and landmarks ...
-    ///
-    /// observer.log_initial_ba_state(&initial_values)?;
+    /// observer.log_initial_ba_state(&problem)?;
     /// # Ok(())
     /// # }
     /// ```
     pub fn log_initial_ba_state(
         &self,
-        initial_values: &HashMap<String, (ManifoldType, DVector<f64>)>,
+        problem: &crate::core::problem::Problem,
     ) -> ObserverResult<()> {
         let rec = self.rec.as_ref().ok_or_else(|| {
             ObserverError::InvalidState("Recording stream not initialized".to_string())
@@ -903,11 +900,12 @@ impl RerunObserver {
         let mut camera_cache = self.initial_camera_positions.borrow_mut();
         let mut landmark_cache = self.initial_landmark_positions.borrow_mut();
 
-        for (var_name, (manifold_type, data)) in initial_values {
-            match manifold_type {
-                ManifoldType::SE3 if self.config.show_cameras => {
-                    // Parse SE3 from data vector
-                    let se3 = SE3::from_param_slice(data.as_slice());
+        for (key, var) in problem.variables.iter() {
+            let var_name = format!("var_{:?}", key.data());
+            match var.manifold_type_name() {
+                "SE3" if self.config.show_cameras => {
+                    // Parse SE3 from parameter slice
+                    let se3 = SE3::from_param_slice(var.as_param_slice());
 
                     // Apply pose inversion if configured (for BA: T_wc -> T_cw)
                     let pose = if self.config.invert_camera_poses {
@@ -967,7 +965,8 @@ impl RerunObserver {
                         .log_with_source(e)
                     })?;
                 }
-                ManifoldType::RN if self.config.show_landmarks && data.len() == 3 => {
+                "Rn" if self.config.show_landmarks && var.dof() == 3 => {
+                    let data = var.as_param_slice();
                     let pos = [data[0] as f32, data[1] as f32, data[2] as f32];
                     landmark_positions.push(pos);
                     landmark_names.push(var_name.clone());

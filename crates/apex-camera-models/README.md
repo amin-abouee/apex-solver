@@ -352,51 +352,57 @@ For multi-camera systems where each camera may have different intrinsics:
 
 ```rust
 use apex_camera_models::{RadTanCamera, CameraModel, SelfCalibration};
+use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use std::collections::HashMap;
+use apex_solver::{JacobianMode, ManifoldType};
+use nalgebra::DVector;
 
 fn bundle_adjustment_per_camera_intrinsics() {
-    let mut problem = Problem::new();
-    let mut initial_values = HashMap::new();
-    
-    // Add variables for each camera's intrinsics separately
-    for camera_id in 0..num_cameras {
-        initial_values.insert(
-            format!("intrinsics_{}", camera_id),
-            (ManifoldType::RN, DVector::from_vec(vec![
-                cameras[camera_id].fx,
-                cameras[camera_id].fy,
-                cameras[camera_id].cx,
-                cameras[camera_id].cy,
-                cameras[camera_id].k1,
-                cameras[camera_id].k2,
-                cameras[camera_id].p1,
-                cameras[camera_id].p2,
-                cameras[camera_id].k3,
-            ]))
+    let mut problem = Problem::new(JacobianMode::Sparse);
+
+    // Add camera poses, landmarks, and per-camera intrinsics -- returns VarKey handles
+    let mut pose_keys = Vec::new();
+    let mut landmark_keys = Vec::new();
+    let mut intrinsics_keys = Vec::new();
+
+    for camera in &cameras {
+        let pose = problem.add_variable(ManifoldType::SE3, camera.initial_pose.clone());
+        let intr = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![
+                camera.fx, camera.fy, camera.cx, camera.cy,
+                camera.k1, camera.k2, camera.p1, camera.p2, camera.k3,
+            ]),
         );
+        pose_keys.push(pose);
+        intrinsics_keys.push(intr);
     }
-    
-    // Add projection factors linking pose + landmark + camera intrinsics
+
+    for landmark in &landmarks {
+        let pt = problem.add_variable(ManifoldType::RN, landmark.position.clone());
+        landmark_keys.push(pt);
+    }
+
+    // Add projection factors linking pose + landmark + camera intrinsics via VarKey
     for observation in &observations {
         let camera = RadTanCamera::from_params(&intrinsics[observation.camera_id]);
-        let factor: ProjectionFactor<RadTanCamera, SelfCalibration> = 
+        let factor: ProjectionFactor<RadTanCamera, SelfCalibration> =
             ProjectionFactor::new(measurements, camera);
-        
+
         problem.add_residual_block(
             &[
-                &format!("pose_{}", observation.camera_id),
-                &format!("landmark_{}", observation.point_id),
-                &format!("intrinsics_{}", observation.camera_id)
+                pose_keys[observation.camera_id],
+                landmark_keys[observation.point_id],
+                intrinsics_keys[observation.camera_id],
             ],
             Box::new(factor),
             Some(Box::new(HuberLoss::new(1.0))),
         );
     }
-    
+
     // Solve with Levenberg-Marquardt
     let mut solver = LevenbergMarquardt::for_bundle_adjustment();
-    let result = solver.optimize(&problem, &initial_values).unwrap();
+    let result = solver.optimize(&mut problem).unwrap();
 }
 ```
 
