@@ -10,72 +10,72 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 
 ## Key Features (v1.3.0)
 
-- **📷 Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
-- **🔧 Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
-- **🛡️ 15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
-- **📐 Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
-- **🚀 Three Optimization Algorithms**: Levenberg-Marquardt, Gauss-Newton, and Dog Leg with unified interface
-- **📌 Prior Factors & Fixed Variables**: Anchor poses with known values and constrain specific parameter indices
-- **📊 Uncertainty Quantification**: Covariance estimation for both Cholesky and QR solvers
-- **🎨 Real-time Visualization**: Integrated [Rerun](https://rerun.io/) support for live debugging of optimization progress
-- **📝 I/O**: Read and write G2O, Toro, BAL format files for seamless integration with SLAM ecosystems [apex-io](crates/apex-io/README.md)
-- **⚡ High Performance**: Sparse linear algebra with persistent symbolic factorization
-- **✅ Production-Grade**: Comprehensive error handling, structured tracing, integration test suite
+- **Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
+- **Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
+- **15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
+- **Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
+- **Three Optimization Algorithms**: Levenberg-Marquardt, Gauss-Newton, and Dog Leg with unified interface
+- **Prior Factors & Fixed Variables**: Anchor poses with known values and constrain specific parameter indices
+- **Uncertainty Quantification**: Covariance estimation for both Cholesky and QR solvers
+- **Real-time Visualization**: Integrated [Rerun](https://rerun.io/) support for live debugging of optimization progress
+- **I/O**: Read and write G2O, Toro, BAL format files for seamless integration with SLAM ecosystems [apex-io](crates/apex-io/README.md)
+- **High Performance**: Sparse linear algebra with persistent symbolic factorization
+- **Production-Grade**: Comprehensive error handling, structured tracing, integration test suite
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ```rust
-use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
-use apex_solver::{G2oLoader, LinearSolverType, ManifoldType};
+use apex_solver::factors::BetweenFactor;
+use apex_solver::{G2oLoader, JacobianMode, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
+use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load pose graph from G2O file
     let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
-    
+
     // Create optimization problem
-    let mut problem = Problem::new();
-    let mut initial_values = HashMap::new();
-    
-    // Add SE3 poses as variables
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let mut var_keys = HashMap::new();
+
+    // Add SE3 poses as variables -- returns stable VarKey handles
     for (&id, vertex) in &graph.vertices_se3 {
-        let var_name = format!("x{}", id);
         let quat = vertex.pose.rotation_quaternion();
         let trans = vertex.pose.translation();
         let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-        initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+        let key = problem.add_variable(ManifoldType::SE3, se3_data);
+        var_keys.insert(id, key);
     }
-    
-    // Add between factors (relative pose constraints)
+
+    // Add between factors (relative pose constraints) using VarKey handles
     for edge in &graph.edges_se3 {
-        let factor = BetweenFactor::new(edge.measurement.clone());
+        let k_from = var_keys[&edge.from];
+        let k_to = var_keys[&edge.to];
         problem.add_residual_block(
-            &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
-            Box::new(factor),
+            &[k_from, k_to],
+            Box::new(BetweenFactor::new(edge.measurement.clone())),
             None,  // Optional: add HuberLoss for robustness
         );
     }
-    
+
     // Configure and run optimizer
     let config = LevenbergMarquardtConfig::new()
-        .with_linear_solver_type(LinearSolverType::SparseCholesky)
         .with_max_iterations(100)
         .with_cost_tolerance(1e-6)
         .with_compute_covariances(true);  // Enable uncertainty estimation
-    
+
     let mut solver = LevenbergMarquardt::with_config(config);
-    let result = solver.optimize(&problem, &initial_values)?;
-    
+    let result = solver.optimize(&mut problem)?;
+
     println!("Status: {:?}", result.status);
     println!("Initial cost: {:.3e}", result.initial_cost);
     println!("Final cost: {:.3e}", result.final_cost);
     println!("Iterations: {}", result.iterations);
-    
+
     Ok(())
 }
 ```
@@ -90,7 +90,7 @@ Iterations: 5
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 The workspace root is the `apex-solver` crate. Sub-crates for manifolds, I/O, and camera models live in `crates/`:
 
@@ -129,7 +129,7 @@ apex-solver/                # workspace root = apex-solver crate
 
 ---
 
-## 📂 Datasets
+## Datasets
 
 Datasets are downloaded on demand using the built-in `download_datasets` tool in the `apex-io` crate. No Git LFS required.
 
@@ -156,7 +156,7 @@ Available datasets:
 
 ---
 
-## 📦 Workspace Crates
+## Workspace Crates
 
 Apex Solver is organized as a Cargo workspace with specialized sub-crates that can be used independently:
 
@@ -181,7 +181,7 @@ apex-io = "0.2.0"
 
 ---
 
-## 📊 Performance Benchmarks
+## Performance Benchmarks
 
 Detailed benchmark tables comparing apex-solver against Ceres, GTSAM, g2o, factrs, and
 tiny-solver on 8 pose-graph datasets (SE2/SE3) and 4 BAL bundle-adjustment datasets.
@@ -190,7 +190,7 @@ tiny-solver on 8 pose-graph datasets (SE2/SE3) and 4 BAL bundle-adjustment datas
 
 ---
 
-## 📊 Examples
+## Examples
 
 Usage examples covering pose graph optimization, custom factor implementation, and
 self-calibration bundle adjustment.
@@ -199,7 +199,7 @@ self-calibration bundle adjustment.
 
 ---
 
-## 🧮 Technical Implementation
+## Technical Implementation
 
 ### Robust Loss Functions
 
@@ -259,7 +259,7 @@ config.with_linear_solver_type(LinearSolverType::ImplicitSchur)  // For very lar
 
 ---
 
-## 🎨 Interactive Visualization
+## Interactive Visualization
 
 Real-time optimization debugging with integrated [Rerun](https://rerun.io/) visualization using the observer pattern:
 
@@ -278,7 +278,7 @@ let mut solver = LevenbergMarquardt::with_config(config);
     solver.add_observer(RerunObserver::new(true)?);  // true = spawn viewer
 }
 
-let result = solver.optimize(&problem, &initial_values)?;
+let result = solver.optimize(&mut problem)?;
 ```
 
 **Visualized Metrics**:
@@ -294,13 +294,13 @@ cargo run --release --features visualization --bin pose_graph_g2o -- --dataset i
 ```
 
 > **Note:** The data files (e.g., `sphere2500.g2o`) must be downloaded first.
-> See [📂 Datasets](#-datasets) — run `cargo run --release -p apex-io --bin download_datasets -- --select 10` to get all benchmark datasets.
+> See [Datasets](#datasets) — run `cargo run --release -p apex-io --bin download_datasets -- --select 10` to get all benchmark datasets.
 
 Zero overhead when disabled (feature-gated).
 
 ---
 
-## 🧠 Learning Resources
+## Learning Resources
 
 ### Computer Vision Background
 - [Multiple View Geometry](https://www.robots.ox.ac.uk/~vgg/hzbook/) (Hartley & Zisserman) - Mathematical foundations
@@ -319,7 +319,7 @@ Zero overhead when disabled (feature-gated).
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 Apex Solver draws inspiration and reference implementations from:
 
@@ -334,7 +334,7 @@ Apex Solver draws inspiration and reference implementations from:
 
 ---
 
-## 📜 License
+## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for details.
 
