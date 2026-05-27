@@ -622,4 +622,53 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn odometry_path_returns_none_for_unknown() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        assert!(registry.odometry_path("nonexistent_xyz").is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn odometry_by_category_empty_for_unknown() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entries = registry.odometry_by_category("4d");
+        assert!(entries.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn ba_problem_url_format_for_trafalgar() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let trafalgar = registry
+            .bundle_adjustment
+            .get("trafalgar")
+            .ok_or_else(|| io::Error::other("trafalgar dataset not found"))?;
+        let url = trafalgar.problem_url(21, 100);
+        assert!(url.contains("trafalgar"));
+        assert!(url.contains("problem-21-100-pre.txt.bz2"));
+        Ok(())
+    }
+
+    #[test]
+    fn ba_entry_largest_with_single_problem() {
+        let entry = BaEntry {
+            url_prefix: "https://example.com".to_string(),
+            problems: vec![[10, 20]],
+        };
+        assert_eq!(entry.largest(), Some([10, 20]));
+    }
+
+    #[test]
+    fn odometry_entry_fields_accessible() -> io::Result<()> {
+        let registry = DatasetRegistry::load()?;
+        let entry = registry
+            .odometry
+            .get("sphere2500")
+            .ok_or_else(|| io::Error::other("sphere2500 must exist"))?;
+        assert!(!entry.filename.is_empty());
+        assert!(!entry.category.is_empty());
+        Ok(())
+    }
 }
