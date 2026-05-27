@@ -263,17 +263,17 @@ fn download_largest_each_ba(
                 match decompress_and_cleanup(&compressed_path, &decompressed_path) {
                     Ok(()) => {
                         success_count += 1;
-                        info!("    OK ({size} bytes)");
+                        info!("OK ({size} bytes)");
                     }
                     Err(e) => {
                         fail_count += 1;
-                        info!("    DECOMPRESS FAILED: {e}");
+                        info!("DECOMPRESS FAILED: {e}");
                     }
                 }
             }
             Err(e) => {
                 fail_count += 1;
-                info!("    FAILED: {e}");
+                info!("FAILED: {e}");
             }
         }
     }
