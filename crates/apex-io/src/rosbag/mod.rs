@@ -96,10 +96,10 @@ pub use ros2::storage;
 pub use error::{BagError, ReaderError, Result, WriterResult};
 pub use ros2::metadata::{BagMetadata, TopicMetadata};
 pub use ros2::reader::Reader;
+pub use ros2::writer::Writer;
 pub use types::{
     CompressionFormat, CompressionMode, Connection, Message, StoragePlugin, TopicInfo,
 };
-pub use ros2::writer::Writer;
 
 pub use ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 

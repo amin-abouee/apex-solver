@@ -460,6 +460,7 @@ fn parse_ground_truth_csv(csv_path: &Path) -> Result<Vec<GroundTruthPose>> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
