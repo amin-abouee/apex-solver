@@ -10,13 +10,13 @@
 //! Usage:
 //!   cargo run -p apex-io --bin bag_convert -- <INPUT> <OUTPUT> [OPTIONS]
 
+use apex_io::rosbag::Reader as Ros2Reader;
+use apex_io::rosbag::Writer as Ros2Writer;
 use apex_io::rosbag::ros1::deserialize::Ros1Serializer;
 use apex_io::rosbag::ros1::messages as ros1_msg;
 use apex_io::rosbag::ros1::{Ros1Deserializer, Ros1Reader, Ros1Writer};
 use apex_io::rosbag::ros2::cdr::{CdrDeserializer, CdrSerializer};
 use apex_io::rosbag::types::{CompressionFormat, CompressionMode, Connection, StoragePlugin};
-use apex_io::rosbag::Writer as Ros2Writer;
-use apex_io::rosbag::{Reader as Ros2Reader};
 use clap::Parser;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -134,9 +134,9 @@ fn parse_compression(s: &str) -> Result<CompressionMode> {
         "none" => Ok(CompressionMode::None),
         "file" => Ok(CompressionMode::File),
         "message" => Ok(CompressionMode::Message),
-        other => Err(
-            format!("Unknown compression '{other}'. Use 'none', 'file', or 'message'").into(),
-        ),
+        other => {
+            Err(format!("Unknown compression '{other}'. Use 'none', 'file', or 'message'").into())
+        }
     }
 }
 
@@ -174,14 +174,19 @@ fn convert_ros1_to_ros2(args: &Args) -> Result<()> {
 
     let mut ros1 =
         Ros1Reader::new(&args.input).map_err(|e| format!("Cannot open input bag: {e}"))?;
-    ros1.open().map_err(|e| format!("Failed to open ROS1 bag: {e}"))?;
+    ros1.open()
+        .map_err(|e| format!("Failed to open ROS1 bag: {e}"))?;
 
     let connections = ros1.connections().to_vec();
 
     if args.list_topics {
         println!("Topics in ROS1 bag:");
         for c in &connections {
-            let support = if ros1_to_cdr_fn(&c.message_type).is_some() { "✓" } else { "✗ (unsupported)" };
+            let support = if ros1_to_cdr_fn(&c.message_type).is_some() {
+                "✓"
+            } else {
+                "✗ (unsupported)"
+            };
             println!("  {} ({}) {}", c.topic, c.message_type, support);
         }
         return Ok(());
@@ -216,7 +221,8 @@ fn convert_ros1_to_ros2(args: &Args) -> Result<()> {
         .map_err(|e| format!("Cannot create output bag: {e}"))?;
     ros2.set_compression(compression, CompressionFormat::None)?;
     ros2.configure_buffer(50, 500)?;
-    ros2.open().map_err(|e| format!("Failed to open ROS2 output: {e}"))?;
+    ros2.open()
+        .map_err(|e| format!("Failed to open ROS2 output: {e}"))?;
 
     // Register one writer connection per supported topic
     let mut conn_map: HashMap<u32, Connection> = HashMap::new();
@@ -266,14 +272,19 @@ fn convert_ros1_to_ros2(args: &Args) -> Result<()> {
             .map_err(|e| format!("Final batch write failed: {e}"))?;
     }
 
-    ros2.close().map_err(|e| format!("Failed to close output: {e}"))?;
+    ros2.close()
+        .map_err(|e| format!("Failed to close output: {e}"))?;
     drop(ros1); // Ros1Reader has no explicit close()
 
     if skipped > 0 {
         eprintln!("WARN: {skipped} messages failed conversion (malformed data?)");
     }
     if args.verbose {
-        println!("Converted {converted} messages in {:?} (total {:?})", t1.elapsed(), t0.elapsed());
+        println!(
+            "Converted {converted} messages in {:?} (total {:?})",
+            t1.elapsed(),
+            t0.elapsed()
+        );
     } else {
         println!(
             "Done: {converted} messages → {} ({})",
@@ -291,7 +302,8 @@ fn convert_ros2_to_ros1(args: &Args) -> Result<()> {
 
     let mut ros2 =
         Ros2Reader::new(&args.input).map_err(|e| format!("Cannot open input bag: {e}"))?;
-    ros2.open().map_err(|e| format!("Failed to open ROS2 bag: {e}"))?;
+    ros2.open()
+        .map_err(|e| format!("Failed to open ROS2 bag: {e}"))?;
 
     let connections = ros2.connections().to_vec();
 
@@ -299,7 +311,11 @@ fn convert_ros2_to_ros1(args: &Args) -> Result<()> {
         println!("Topics in ROS2 bag:");
         for c in &connections {
             let ros1_type = ros2_type_to_ros1(&c.message_type);
-            let support = if cdr_to_ros1_fn(&ros1_type).is_some() { "✓" } else { "✗ (unsupported)" };
+            let support = if cdr_to_ros1_fn(&ros1_type).is_some() {
+                "✓"
+            } else {
+                "✗ (unsupported)"
+            };
             println!("  {} ({}) {}", c.topic, c.message_type, support);
         }
         return Ok(());
@@ -327,9 +343,10 @@ fn convert_ros2_to_ros1(args: &Args) -> Result<()> {
         return Ok(());
     }
 
-    let mut ros1 = Ros1Writer::new(&args.output)
-        .map_err(|e| format!("Cannot create output .bag: {e}"))?;
-    ros1.open().map_err(|e| format!("Failed to open ROS1 output: {e}"))?;
+    let mut ros1 =
+        Ros1Writer::new(&args.output).map_err(|e| format!("Cannot create output .bag: {e}"))?;
+    ros1.open()
+        .map_err(|e| format!("Failed to open ROS1 output: {e}"))?;
 
     // Register one writer connection per supported topic
     let mut conn_map: HashMap<u32, Connection> = HashMap::new();
@@ -377,14 +394,20 @@ fn convert_ros2_to_ros1(args: &Args) -> Result<()> {
         }
     }
 
-    ros1.close().map_err(|e| format!("Failed to close output: {e}"))?;
-    ros2.close().map_err(|e| format!("Failed to close input: {e}"))?;
+    ros1.close()
+        .map_err(|e| format!("Failed to close output: {e}"))?;
+    ros2.close()
+        .map_err(|e| format!("Failed to close input: {e}"))?;
 
     if skipped > 0 {
         eprintln!("WARN: {skipped} messages failed conversion (malformed data?)");
     }
     if args.verbose {
-        println!("Converted {converted} messages in {:?} (total {:?})", t1.elapsed(), t0.elapsed());
+        println!(
+            "Converted {converted} messages in {:?} (total {:?})",
+            t1.elapsed(),
+            t0.elapsed()
+        );
     } else {
         println!("Done: {converted} messages → {}", args.output.display());
     }
@@ -672,7 +695,15 @@ fn conv_image_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
     let is_bigendian = d.read_u8().ok()?;
     let step = d.read_u32().ok()?;
     let pixel_data = d.read_byte_sequence().ok()?;
-    let img = ros1_msg::Image { header, height, width, encoding, is_bigendian, step, data: pixel_data };
+    let img = ros1_msg::Image {
+        header,
+        height,
+        width,
+        encoding,
+        is_bigendian,
+        step,
+        data: pixel_data,
+    };
     let mut s = Ros1Serializer::new();
     img.to_ros1(&mut s);
     Some(s.into_bytes())
@@ -693,7 +724,11 @@ fn conv_compressed_image_cdr_ros1(data: &[u8]) -> Option<Vec<u8>> {
     let header = read_header_ros1(&mut d)?;
     let format = d.read_string().ok()?;
     let pixel_data = d.read_byte_sequence().ok()?;
-    let img = ros1_msg::CompressedImage { header, format, data: pixel_data };
+    let img = ros1_msg::CompressedImage {
+        header,
+        format,
+        data: pixel_data,
+    };
     let mut s = Ros1Serializer::new();
     img.to_ros1(&mut s);
     Some(s.into_bytes())
