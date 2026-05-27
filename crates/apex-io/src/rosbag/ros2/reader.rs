@@ -1,8 +1,8 @@
 //! Main reader implementation for ROS2 bag files
 
-use crate::rosbag::error::{BagError, ReaderError, Result};
 use super::metadata::BagMetadata;
 use super::storage::{StorageReader, create_storage_reader};
+use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

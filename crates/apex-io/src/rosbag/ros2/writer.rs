@@ -1,8 +1,8 @@
 //! Main writer implementation for ROS2 bag files
 
-use crate::rosbag::error::{BagError, Result};
 use super::metadata::{BagFileInformation, BagMetadata};
 use super::storage::{StorageWriter, create_storage_writer};
+use crate::rosbag::error::{BagError, Result};
 use crate::rosbag::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, QosProfile, StoragePlugin,
 };

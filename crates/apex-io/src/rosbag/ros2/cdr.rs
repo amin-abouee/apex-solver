@@ -714,4 +714,142 @@ mod tests {
         assert!(d.read_f64().is_err());
         Ok(())
     }
+
+    // ── CdrSerializer tests ──────────────────────────────────────────────
+
+    #[test]
+    fn serializer_new_has_cdr_header() {
+        let s = CdrSerializer::new();
+        let bytes = s.into_bytes();
+        assert_eq!(&bytes[0..4], &[0x00, 0x01, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn serializer_default_matches_new() {
+        let a = CdrSerializer::new().into_bytes();
+        let b = CdrSerializer::default().into_bytes();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn serializer_write_u8() {
+        let mut s = CdrSerializer::new();
+        s.write_u8(0xAB);
+        let bytes = s.into_bytes();
+        assert_eq!(bytes[4], 0xAB);
+    }
+
+    #[test]
+    fn serializer_write_i32_with_alignment() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_u8(1);
+        s.write_i32(-42);
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_u8()?, 1);
+        assert_eq!(d.read_i32()?, -42);
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_u32_with_alignment() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_u8(0xFF);
+        s.write_u32(0xDEADBEEF);
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_u8()?, 0xFF);
+        assert_eq!(d.read_u32()?, 0xDEADBEEF);
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_f64_with_alignment() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_u8(1);
+        s.write_f64(123.456);
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_u8()?, 1);
+        assert!((d.read_f64()? - 123.456).abs() < 1e-10);
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_string_with_null() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_string("hello");
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_string()?, "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_string_empty() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_string("");
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_string()?, "");
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_byte_sequence() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_byte_sequence(&[0xAA, 0xBB, 0xCC]);
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_byte_sequence()?, &[0xAA, 0xBB, 0xCC]);
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_write_byte_sequence_empty() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_byte_sequence(&[]);
+        let bytes = s.into_bytes();
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert!(d.read_byte_sequence()?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_multiple_primitives_round_trip() -> TestResult {
+        let mut s = CdrSerializer::new();
+        s.write_u8(42);
+        s.write_i32(-100);
+        s.write_u32(999);
+        s.write_f64(123.456);
+        s.write_string("test");
+        let bytes = s.into_bytes();
+
+        let mut d = CdrDeserializer::new(&bytes)?;
+        assert_eq!(d.read_u8()?, 42);
+        assert_eq!(d.read_i32()?, -100);
+        assert_eq!(d.read_u32()?, 999);
+        assert!((d.read_f64()? - 123.456).abs() < 1e-10);
+        assert_eq!(d.read_string()?, "test");
+        Ok(())
+    }
+
+    #[test]
+    fn read_f32_truncated_returns_err() -> TestResult {
+        let mut data = le_header();
+        data.extend_from_slice(&[0x01, 0x02]);
+        let mut d = CdrDeserializer::new(&data)?;
+        assert!(d.read_f32().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn read_byte_sequence_truncated_returns_err() -> TestResult {
+        let mut data = le_header();
+        data.extend_from_slice(&10u32.to_le_bytes());
+        data.extend_from_slice(&[0x01, 0x02]);
+        let mut d = CdrDeserializer::new(&data)?;
+        assert!(d.read_byte_sequence().is_err());
+        Ok(())
+    }
 }

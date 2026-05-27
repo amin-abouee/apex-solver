@@ -4,8 +4,8 @@ pub mod cdr;
 pub mod messages;
 pub mod metadata;
 pub mod reader;
-pub mod writer;
 pub mod storage;
+pub mod writer;
 
 #[cfg(feature = "dds")]
 pub mod dds;
