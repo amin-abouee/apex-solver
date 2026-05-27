@@ -50,7 +50,7 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
       - name: Run tests (all crates)
-        run: cargo test --workspace --all-features --release --verbose
+        run: cargo test --workspace --all-features --release
 
       - name: Check visualization examples compile
         run: cargo check --examples --features visualization
