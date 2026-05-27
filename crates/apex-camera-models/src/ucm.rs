@@ -386,8 +386,10 @@ impl CameraModel for UcmCamera {
             return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
+        // Mei xi-sphere inverse: bx = mx·f, by = my·f, bz = f − ξ
+        // with f = (ξ + √(1 + (1−ξ²)·R²)) / (1 + R²).
         let num = xi + (1.0 + (1.0 - xi * xi) * r_squared).sqrt();
-        let denom = 1.0 - r_squared;
+        let denom = 1.0 + r_squared;
 
         if denom < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::PointOutsideImage { x: u, y: v });
@@ -840,14 +842,22 @@ mod tests {
 
     #[test]
     fn test_project_unproject_round_trip() -> TestResult {
+        // Use α = 0.6 so the (1 − ξ²)·R² term in the unprojection is
+        // non-zero — this catches sign-of-denominator regressions that
+        // pass at the degenerate α = 0.5.
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let distortion = DistortionModel::UCM { alpha: 0.6 };
         let camera = UcmCamera::new(pinhole, distortion)?;
 
+        // Include off-axis bearings that reach the fisheye periphery
+        // (around 60° from optical axis), where the round-trip error
+        // dominates if the inverse formula is wrong.
         let test_points = [
             Vector3::new(0.1, 0.2, 1.0),
             Vector3::new(-0.3, 0.1, 2.0),
             Vector3::new(0.05, -0.1, 0.5),
+            Vector3::new(0.6, 0.0, 0.8),
+            Vector3::new(0.4, -0.5, 0.7),
         ];
 
         for p_cam in &test_points {
@@ -855,8 +865,8 @@ mod tests {
             let ray = camera.unproject(&uv)?;
             let dot = ray.dot(&p_cam.normalize());
             assert!(
-                (dot - 1.0).abs() < 1e-4,
-                "Round-trip failed: dot={dot}, expected ~1.0"
+                (dot - 1.0).abs() < 1e-8,
+                "Round-trip failed: dot={dot}, expected ~1.0 (p_cam = {p_cam:?})"
             );
         }
 
