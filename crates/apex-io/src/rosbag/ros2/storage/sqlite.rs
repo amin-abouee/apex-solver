@@ -1,7 +1,7 @@
 //! SQLite3 storage backend implementation
 
-use crate::rosbag::error::{BagError, ReaderError, Result};
 use super::StorageReader;
+use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
 };
@@ -729,8 +729,9 @@ mod tests {
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
-    use super::*;
     use super::StorageReader;
+    use super::*;
+    use crate::rosbag::storage::StorageWriter;
 
     const SQLITE3_BAG: &str = "tests/test_bags/test_bag_sqlite3";
 
@@ -854,6 +855,219 @@ mod tests {
             .filter_map(|r| r.ok())
             .count();
         assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_new_creates_writer() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let writer = SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        assert!(!writer.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_open_close_cycle() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+        assert!(writer.is_open());
+        writer.close(9, "{}")?;
+        assert!(!writer.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_double_open_errors() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+        assert!(writer.open().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_add_msgtype_and_connection() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+
+        writer.add_msgtype(&conn)?;
+        writer.add_connection(&conn, "")?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_write_message() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+
+        writer.add_msgtype(&conn)?;
+        writer.add_connection(&conn, "")?;
+        writer.write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00])?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_write_batch() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+
+        let conn = Connection {
+            id: 1,
+            topic: "/batch".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+
+        writer.add_msgtype(&conn)?;
+        writer.add_connection(&conn, "")?;
+
+        let msgs: Vec<(Connection, u64, Vec<u8>)> = vec![
+            (conn.clone(), 100, vec![0x00, 0x01, 0x00, 0x00]),
+            (conn.clone(), 200, vec![0x00, 0x01, 0x00, 0x00]),
+        ];
+        writer.write_batch(&msgs)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_write_batch_empty_is_noop() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+        let empty: Vec<(Connection, u64, Vec<u8>)> = vec![];
+        writer.write_batch(&empty)?;
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_write_without_open_errors() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(writer.write(&conn, 0, &[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_add_msgtype_without_open_errors() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(writer.add_msgtype(&conn).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_add_connection_without_open_errors() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        let conn = Connection {
+            id: 1,
+            topic: "/test".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(writer.add_connection(&conn, "").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_as_any_returns_self() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let writer = SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        let any = <SqliteWriter as crate::rosbag::storage::StorageWriter>::as_any(&writer);
+        assert!(any.is::<SqliteWriter>());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_close_when_not_open_is_noop() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.close(9, "{}")?;
+        assert!(!writer.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_writer_write_unknown_connection_errors() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let mut writer =
+            SqliteWriter::new(dir.path(), crate::rosbag::types::CompressionMode::None)?;
+        writer.open()?;
+        let unknown_conn = Connection {
+            id: 999,
+            topic: "/unknown".to_string(),
+            message_type: "std_msgs/msg/String".to_string(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".to_string(),
+            offered_qos_profiles: Vec::new(),
+        };
+        assert!(writer.write(&unknown_conn, 0, &[]).is_err());
         Ok(())
     }
 }
