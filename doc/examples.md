@@ -3,34 +3,37 @@
 ## Example 1: Basic Pose Graph Optimization
 
 ```rust
-use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
-use apex_solver::{G2oLoader, ManifoldType};
+use apex_solver::{G2oLoader, JacobianMode, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
+use std::collections::HashMap;
 
 // Load pose graph
 let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
 
 // Build optimization problem
-let mut problem = Problem::new();
-let mut initial_values = HashMap::new();
+let mut problem = Problem::new(JacobianMode::Sparse);
+let mut var_keys = HashMap::new();
 
-// Add SE3 poses as variables
+// Add SE3 poses as variables -- returns stable VarKey handles
 for (&id, vertex) in &graph.vertices_se3 {
     let quat = vertex.pose.rotation_quaternion();
     let trans = vertex.pose.translation();
-    initial_values.insert(
-        format!("x{}", id),
-        (ManifoldType::SE3, dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k])
+    let key = problem.add_variable(
+        ManifoldType::SE3,
+        dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k],
     );
+    var_keys.insert(id, key);
 }
 
-// Add between factors
+// Add between factors using VarKey handles
 for edge in &graph.edges_se3 {
+    let k_from = var_keys[&edge.from];
+    let k_to = var_keys[&edge.to];
     problem.add_residual_block(
-        &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
+        &[k_from, k_to],
         Box::new(BetweenFactor::new(edge.measurement.clone())),
         None,
     );
@@ -42,7 +45,7 @@ let config = LevenbergMarquardtConfig::new()
     .with_cost_tolerance(1e-6);
 
 let mut solver = LevenbergMarquardt::with_config(config);
-let result = solver.optimize(&problem, &initial_values)?;
+let result = solver.optimize(&mut problem)?;
 
 println!("Optimized {} poses in {} iterations",
     result.parameters.len(), result.iterations);
@@ -103,10 +106,11 @@ impl Factor for MyRangeFactor {
 }
 
 // Use in optimization
+let point_key = problem.add_variable(ManifoldType::Rn, dvector![1.0, 1.0]);
 problem.add_residual_block(
-    &["point"],
+    &[point_key],
     Box::new(MyRangeFactor { measurement: 5.0, information: 1.0 }),
-    None
+    None,
 );
 ```
 
@@ -119,27 +123,41 @@ Optimize camera poses, 3D landmarks, AND camera intrinsics simultaneously. See t
 model documentation.
 
 ```rust
-use std::collections::HashMap;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
-// Use any camera model from apex-camera-models crate
+use apex_solver::{JacobianMode, ManifoldType};
+use nalgebra::dvector;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut problem = Problem::new();
-    let mut initial_values = HashMap::new();
+    let mut problem = Problem::new(JacobianMode::Sparse);
 
-    // Add camera poses (SE3), 3D landmarks, and per-camera intrinsics
-    // See apex-camera-models documentation for camera model options
+    // Add camera poses (SE3), 3D landmarks (Rn), and per-camera intrinsics (Rn)
+    // -- returns stable VarKey handles for each variable
+    let mut pose_keys = Vec::new();
+    let mut landmark_keys = Vec::new();
+    let mut intrinsics_keys = Vec::new();
 
-    // Add projection factors with compile-time optimization config
-    // ProjectionFactor<CameraModel, OptConfig> links poses + landmarks + intrinsics
+    for camera in &cameras {
+        let pose = problem.add_variable(ManifoldType::SE3, camera.initial_pose.clone());
+        let intr = problem.add_variable(ManifoldType::RN, camera.initial_intrinsics.clone());
+        pose_keys.push(pose);
+        intrinsics_keys.push(intr);
+    }
+
+    for landmark in &landmarks {
+        let pt = problem.add_variable(ManifoldType::RN, landmark.position.clone());
+        landmark_keys.push(pt);
+    }
+
+    // Add projection factors linking pose + landmark + intrinsics via VarKey handles
     for observation in &observations {
+        let pose = pose_keys[observation.camera_id];
+        let landmark = landmark_keys[observation.point_id];
+        let intrinsics = intrinsics_keys[observation.camera_id];
         problem.add_residual_block(
-            &[&format!("pose_{}", obs.camera_id),
-              &format!("landmark_{}", obs.point_id),
-              &format!("intrinsics_{}", obs.camera_id)],
+            &[pose, landmark, intrinsics],
             Box::new(projection_factor),
             Some(Box::new(HuberLoss::new(1.0)?)),
         );
@@ -147,13 +165,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Fix first camera for gauge freedom
     for dof in 0..6 {
-        problem.fix_variable("pose_0000", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
 
     // Configure solver with Schur complement (best for BA)
     let config = LevenbergMarquardtConfig::for_bundle_adjustment();
     let mut solver = LevenbergMarquardt::with_config(config);
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
 
     Ok(())
 }

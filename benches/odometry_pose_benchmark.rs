@@ -45,7 +45,6 @@
 //! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
 //! - factrs/tiny-solver: Use their default gauge freedom handling
 
-use std::collections::HashMap;
 use std::hint::black_box;
 use std::panic;
 use std::path::{Path, PathBuf};
@@ -55,6 +54,7 @@ use tracing::{info, warn};
 
 // apex-solver imports
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
+use apex_manifolds::Tangent;
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
@@ -137,7 +137,7 @@ fn compute_se2_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
                 .compose(&actual_relative, None, None);
 
             let residual_tangent = error.log(None);
-            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let residual_vec = nalgebra::DVector::from_column_slice(residual_tangent.as_slice());
 
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
@@ -182,7 +182,7 @@ fn compute_se3_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
                 .compose(&actual_relative, None, None);
 
             let residual_tangent = error.log(None);
-            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let residual_vec = nalgebra::DVector::from_column_slice(residual_tangent.as_slice());
 
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
@@ -463,40 +463,30 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         }
     };
 
-    // Compute initial cost using unified cost function
     let initial_cost = compute_se2_cost_metrics(&graph);
 
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    let mut var_keys: std::collections::HashMap<usize, apex_solver::core::VarKey> =
+        std::collections::HashMap::new();
 
-    // Add vertices
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se2.get(&id) {
-            let var_name = format!("x{}", id);
             let se2_data = dvector![vertex.x(), vertex.y(), vertex.theta()];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+            let key = problem.add_variable(ManifoldType::SE2, se2_data);
+            var_keys.insert(id, key);
         }
     }
 
-    // Add between factors with L2 loss (matches optimize_2d_graph.rs default)
     for edge in &graph.edges_se2 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-        let between_factor = BetweenFactor::new(edge.measurement.clone());
-        problem.add_residual_block(
-            &[&id0, &id1],
-            Box::new(between_factor),
-            Some(Box::new(L2Loss)),
-        );
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            let between_factor = BetweenFactor::new(edge.measurement.clone());
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), Some(Box::new(L2Loss)));
+        }
     }
 
-    // Optimize with production-grade configuration matching optimize_2d_graph.rs
-    // - Max iterations: 150 (sufficient for SE2 convergence)
-    // - Cost/param tolerance: 1e-4 (balanced accuracy vs speed)
-    // - Gradient tolerance: 1e-10 (early-exit on gradient convergence, saves iterations)
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(150)
         .with_cost_tolerance(1e-4)
@@ -506,27 +496,19 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    // Start timing immediately before optimization (excludes problem setup overhead)
-    // This matches the timing approach in optimize_2d_graph.rs for fair comparison
     let start_time = Instant::now();
-    match solver.optimize(&problem, &initial_values) {
+    match solver.optimize(&mut problem) {
         Ok(result) => {
             let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
-            // Update graph with optimized values
-            for (var_name, var_enum) in &result.parameters {
-                if let Some(id_str) = var_name.strip_prefix("x")
-                    && let Ok(id) = id_str.parse::<usize>()
-                    && let Some(vertex) = graph.vertices_se2.get_mut(&id)
-                {
-                    let val = var_enum.to_vector();
+            for (&id, &key) in &var_keys {
+                if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
+                    let val = result.parameters[key].to_dvector();
                     vertex.pose = SE2::from_xy_angle(val[0], val[1], val[2]);
                 }
             }
 
-            // Compute final cost using unified cost function
             let final_cost = compute_se2_cost_metrics(&graph);
-
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,
@@ -551,47 +533,32 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         }
     };
 
-    // Compute initial cost using unified cost function
     let initial_cost = compute_se3_cost_metrics(&graph);
 
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    let mut var_keys: std::collections::HashMap<usize, apex_solver::core::VarKey> =
+        std::collections::HashMap::new();
 
-    // Add vertices
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se3.get(&id) {
-            let var_name = format!("x{}", id);
             let quat = vertex.rotation();
             let trans = vertex.translation();
             let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+            let key = problem.add_variable(ManifoldType::SE3, se3_data);
+            var_keys.insert(id, key);
         }
     }
 
-    // Add between factors with L2 loss (matches optimize_3d_graph.rs default)
     for edge in &graph.edges_se3 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-        let between_factor = BetweenFactor::new(edge.measurement.clone());
-        problem.add_residual_block(
-            &[&id0, &id1],
-            Box::new(between_factor),
-            Some(Box::new(L2Loss)),
-        );
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            let between_factor = BetweenFactor::new(edge.measurement.clone());
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), Some(Box::new(L2Loss)));
+        }
     }
 
-    // NO gauge freedom handling for SE3 + LM (matches optimize_3d_graph.rs)
-    // Unlike SE2, the 3D optimizer does NOT fix variables or add prior factors for LM
-    // LM's built-in damping (λI) handles the rank-deficient Hessian naturally
-    // This allows the optimizer to find better solutions with fewer iterations
-
-    // Optimize with production-grade configuration matching optimize_3d_graph.rs
-    // - Max iterations: 100 (sufficient for SE3 convergence)
-    // - Cost/param tolerance: 1e-4 (balanced accuracy vs speed)
-    // - Gradient tolerance: 1e-12 (tighter than SE3 due to SE3 complexity, enables early-exit)
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(100)
         .with_cost_tolerance(1e-4)
@@ -601,30 +568,22 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
-    // Start timing immediately before optimization (excludes problem setup overhead)
-    // This matches the timing approach in optimize_3d_graph.rs for fair comparison
     let start_time = Instant::now();
-    match solver.optimize(&problem, &initial_values) {
+    match solver.optimize(&mut problem) {
         Ok(result) => {
             let elapsed_ms = start_time.elapsed().as_secs_f64() * 1000.0;
 
-            // Update graph with optimized values
-            for (var_name, var_enum) in &result.parameters {
-                if let Some(id_str) = var_name.strip_prefix("x")
-                    && let Ok(id) = id_str.parse::<usize>()
-                    && let Some(vertex) = graph.vertices_se3.get_mut(&id)
-                {
+            for (&id, &key) in &var_keys {
+                if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
                     use nalgebra::{Quaternion, Vector3};
-                    let val = var_enum.to_vector();
+                    let val = result.parameters[key].to_dvector();
                     let translation = Vector3::new(val[0], val[1], val[2]);
                     let rotation = Quaternion::new(val[3], val[4], val[5], val[6]);
                     vertex.pose = SE3::from_translation_quaternion(translation, rotation);
                 }
             }
 
-            // Compute final cost using unified cost function
             let final_cost = compute_se3_cost_metrics(&graph);
-
             let converged = is_converged(&result.status);
             BenchmarkResult::success(
                 dataset.name,

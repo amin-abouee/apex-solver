@@ -6,17 +6,17 @@
 //! - Gauss-Newton algorithm
 //! - Dog Leg algorithm
 
-use crate::core::problem::{Problem, VariableEnum};
+use crate::core::VarKey;
+use crate::core::problem::Problem;
+use crate::core::variable::ManifoldVariable;
 use crate::error::ErrorLogging;
 use crate::linalg::{
     self, JacobianMode, LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::linearizer::SymbolicStructure;
-use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{Mat, MatRef};
-use nalgebra::DVector;
-use std::collections::HashMap;
+use slotmap::{SecondaryMap, SlotMap};
 use std::time::{self, Duration};
 use std::{
     fmt,
@@ -265,12 +265,16 @@ pub struct SolverResult<T> {
     /// Per-variable covariance matrices (uncertainty estimation)
     ///
     /// This is `None` if covariance computation was not enabled in the solver configuration.
-    /// When present, it contains a mapping from variable names to their covariance matrices
+    /// When present, it contains a mapping from variable keys to their covariance matrices
     /// in tangent space. For example, for SE3 variables this would be 6×6 matrices.
     ///
     /// Enable covariance computation by setting `compute_covariances: true` in the optimizer config.
-    pub covariances: Option<HashMap<String, Mat<f64>>>,
+    pub covariances: Option<SecondaryMap<VarKey, Mat<f64>>>,
 }
+
+/// Type alias for the result returned by all optimizer `optimize()` calls.
+pub type OptimizeResult =
+    Result<SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>>, crate::error::ApexSolverError>;
 
 /// Unified optimizer interface. Object-safe — `Box<dyn Optimizer>` is valid.
 ///
@@ -281,11 +285,7 @@ pub struct SolverResult<T> {
 /// for direct (non-polymorphic) usage.
 pub trait Optimizer {
     /// Optimize the problem to minimize the cost function.
-    fn optimize(
-        &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::error::ApexSolverError>;
+    fn optimize(&mut self, problem: &mut Problem) -> OptimizeResult;
 }
 
 /// Apply parameter update step to all variables.
@@ -307,26 +307,31 @@ pub trait Optimizer {
 /// how many elements it occupies in the step vector.
 ///
 pub fn apply_parameter_step(
-    variables: &mut HashMap<String, VariableEnum>,
+    variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
-    variable_order: &[String],
+    variable_order: &[VarKey],
 ) -> f64 {
     let mut step_offset = 0;
 
-    for var_name in variable_order {
-        if let Some(var) = variables.get_mut(var_name) {
-            let var_size = var.get_size();
+    // SmallVec-backed buffer: inline for the common case (DOF ≤ 16, covering
+    // SE3/SO3/SE2/SO2 and small RN), spills to heap only for large RN
+    // variables. Mirrors the `[0f64; 16]` buffer pattern used inside
+    // `Variable::apply_tangent_step`.
+    let mut step_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    for &var_key in variable_order {
+        if let Some(var) = variables.get_mut(var_key) {
+            let var_size = var.dof();
             let var_step = step.subrows(step_offset, var_size);
-
-            // Delegate to VariableEnum's apply_tangent_step method
-            // This handles all manifold types (SE2, SE3, SO2, SO3, Rn)
-            var.apply_tangent_step(var_step);
-
+            step_buf.clear();
+            step_buf.resize(var_size, 0.0);
+            for i in 0..var_size {
+                step_buf[i] = var_step[(i, 0)];
+            }
+            var.apply_tangent_step(&step_buf);
             step_offset += var_size;
         }
     }
 
-    // Compute and return step norm for convergence checking
     step.norm_l2()
 }
 
@@ -341,17 +346,14 @@ pub fn apply_parameter_step(
 /// * `variable_order` - Ordered list of variable names (defines indexing into step vector)
 ///
 pub fn apply_negative_parameter_step(
-    variables: &mut HashMap<String, VariableEnum>,
+    variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     step: MatRef<f64>,
-    variable_order: &[String],
+    variable_order: &[VarKey],
 ) {
-    // Create a negated version of the step vector
     let mut negative_step = Mat::zeros(step.nrows(), 1);
     for i in 0..step.nrows() {
         negative_step[(i, 0)] = -step[(i, 0)];
     }
-
-    // Apply the negative step using the standard apply_parameter_step function
     apply_parameter_step(variables, negative_step.as_ref(), variable_order);
 }
 
@@ -445,9 +447,9 @@ impl IterationStats {
 
 /// Result of optimization state initialization, shared by all optimizers.
 pub struct InitializedState {
-    pub variables: HashMap<String, VariableEnum>,
-    pub variable_index_map: HashMap<String, usize>,
-    pub sorted_vars: Vec<String>,
+    pub variables: SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    pub variable_index_map: SecondaryMap<VarKey, usize>,
+    pub sorted_vars: Vec<VarKey>,
     pub symbolic_structure: Option<SymbolicStructure>,
     pub total_dof: usize,
     pub current_cost: f64,
@@ -455,13 +457,10 @@ pub struct InitializedState {
 }
 
 /// Compute total parameter vector norm ||x|| across all variables.
-pub fn compute_parameter_norm(variables: &HashMap<String, VariableEnum>) -> f64 {
+pub fn compute_parameter_norm(variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>) -> f64 {
     variables
         .values()
-        .map(|v| {
-            let vec = v.to_vector();
-            vec.norm_squared()
-        })
+        .map(|v| v.as_param_slice().iter().map(|x| x * x).sum::<f64>())
         .sum::<f64>()
         .sqrt()
 }
@@ -519,21 +518,24 @@ pub fn process_jacobian(
 /// 4. Compute initial cost
 ///
 /// The assembly mode is determined by `problem.jacobian_mode`.
-pub fn initialize_optimization_state(
-    problem: &Problem,
-    initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-) -> OptimizerResult<InitializedState> {
-    let variables = problem.initialize_variables(initial_params);
+pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<InitializedState> {
+    let mut variables = problem.variables.clone();
+    problem.apply_constraints_to_variables(&mut variables);
 
-    let mut variable_index_map = HashMap::new();
+    let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
     let mut col_offset = 0;
-    let mut sorted_vars: Vec<String> = variables.keys().cloned().collect();
-    sorted_vars.sort();
+    let mut sorted_vars: Vec<VarKey> = variables.keys().collect();
+    // Sort by current column offset for deterministic ordering
+    sorted_vars.sort_by_key(|k| variable_index_map.get(*k).copied().unwrap_or(usize::MAX));
 
-    for var_name in &sorted_vars {
-        variable_index_map.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
+    for &var_key in &sorted_vars {
+        variable_index_map.insert(var_key, col_offset);
+        col_offset += variables[var_key].dof();
     }
+
+    // Rebuild sorted_vars in correct column order now that index map is built
+    let mut sorted_vars: Vec<VarKey> = variables.keys().collect();
+    sorted_vars.sort_by_key(|k| variable_index_map[*k]);
 
     let total_dof = col_offset;
 
@@ -698,7 +700,7 @@ pub fn create_linear_solver(
 #[allow(clippy::too_many_arguments)]
 pub fn notify_observers(
     observers: &mut OptObserverVec,
-    variables: &HashMap<String, VariableEnum>,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     iteration: usize,
     cost: f64,
     gradient_norm: f64,
@@ -727,7 +729,7 @@ pub fn notify_observers(
 #[allow(clippy::too_many_arguments)]
 pub fn notify_observers_generic<M: AssemblyBackend>(
     observers: &mut OptObserverVec,
-    variables: &HashMap<String, VariableEnum>,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     iteration: usize,
     cost: f64,
     gradient_norm: f64,
@@ -775,14 +777,14 @@ pub fn build_solver_result(
     final_parameter_update_norm: f64,
     cost_evaluations: usize,
     jacobian_evaluations: usize,
-    covariances: Option<HashMap<String, Mat<f64>>>,
-) -> SolverResult<HashMap<String, VariableEnum>> {
+    covariances: Option<SecondaryMap<VarKey, Mat<f64>>>,
+) -> SolverResult<SlotMap<VarKey, Box<dyn ManifoldVariable>>> {
     SolverResult {
         status,
         iterations,
         initial_cost: state.initial_cost,
         final_cost: state.current_cost,
-        parameters: state.variables.into_iter().collect(),
+        parameters: state.variables,
         elapsed_time: elapsed,
         convergence_info: Some(ConvergenceInfo {
             final_gradient_norm,
@@ -970,16 +972,17 @@ pub fn create_optimizer_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::problem::VariableEnum;
-    use crate::core::variable::Variable;
+    use crate::core::VarKey;
+    use crate::core::variable::{ManifoldVariable, Variable};
     use crate::factors::Factor;
     use crate::linalg::JacobianMode;
     use apex_manifolds::ManifoldType;
     use apex_manifolds::rn::Rn;
     use faer::Mat;
+    use faer::prelude::ReborrowMut;
     use faer::sparse::{SparseColMat, Triplet};
-    use nalgebra::{DMatrix, DVector, dvector};
-    use std::collections::HashMap;
+    use nalgebra::dvector;
+    use slotmap::{SecondaryMap, SlotMap};
     use std::time::Duration;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1121,15 +1124,9 @@ mod tests {
 
     #[test]
     fn test_compute_parameter_norm_two_variables() {
-        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
-        vars.insert(
-            "a".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![3.0]))),
-        );
-        vars.insert(
-            "b".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![4.0]))),
-        );
+        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        vars.insert(Box::new(Variable::new(Rn::new(dvector![3.0]))));
+        vars.insert(Box::new(Variable::new(Rn::new(dvector![4.0]))));
         let norm = compute_parameter_norm(&vars);
         // sqrt(3² + 4²) = 5.0
         assert!((norm - 5.0).abs() < 1e-12, "expected 5.0, got {norm}");
@@ -1137,7 +1134,7 @@ mod tests {
 
     #[test]
     fn test_compute_parameter_norm_empty() {
-        let vars: HashMap<String, VariableEnum> = HashMap::new();
+        let vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
         assert_eq!(compute_parameter_norm(&vars), 0.0);
     }
 
@@ -1147,34 +1144,26 @@ mod tests {
 
     #[test]
     fn test_apply_parameter_step_advances_variable() {
-        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
-        vars.insert(
-            "x".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![0.0]))),
-        );
-        let order = vec!["x".to_string()];
+        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![0.0]))));
+        let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 3.0);
         let norm = apply_parameter_step(&mut vars, step.as_ref(), &order);
         assert!((norm - 3.0).abs() < 1e-12);
-        let val = vars["x"].to_vector()[0];
+        let val = vars[k].as_param_slice()[0];
         assert!((val - 3.0).abs() < 1e-12, "expected 3.0, got {val}");
     }
 
     #[test]
     fn test_apply_negative_parameter_step_reverts() {
-        let mut vars: HashMap<String, VariableEnum> = HashMap::new();
-        vars.insert(
-            "x".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![5.0]))),
-        );
-        let order = vec!["x".to_string()];
+        let mut vars: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let k = vars.insert(Box::new(Variable::new(Rn::new(dvector![5.0]))));
+        let order = vec![k];
         let step = Mat::from_fn(1, 1, |_, _| 2.0);
-        // apply +2 first
         apply_parameter_step(&mut vars, step.as_ref(), &order);
-        assert!((vars["x"].to_vector()[0] - 7.0).abs() < 1e-12);
-        // then revert with -2
+        assert!((vars[k].as_param_slice()[0] - 7.0).abs() < 1e-12);
         apply_negative_parameter_step(&mut vars, step.as_ref(), &order);
-        assert!((vars["x"].to_vector()[0] - 5.0).abs() < 1e-12);
+        assert!((vars[k].as_param_slice()[0] - 5.0).abs() < 1e-12);
     }
 
     // -------------------------------------------------------------------------
@@ -1447,15 +1436,12 @@ mod tests {
 
     #[test]
     fn test_build_solver_result_fields() -> TestResult {
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "x".into(),
-            VariableEnum::Rn(Variable::new(Rn::new(dvector![3.0]))),
-        );
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let k = variables.insert(Box::new(Variable::new(Rn::new(dvector![3.0]))));
         let state = InitializedState {
             variables,
-            variable_index_map: HashMap::new(),
-            sorted_vars: vec!["x".to_string()],
+            variable_index_map: SecondaryMap::new(),
+            sorted_vars: vec![k],
             symbolic_structure: None,
             total_dof: 1,
             current_cost: 0.1,
@@ -1558,20 +1544,20 @@ mod tests {
     impl Factor for LinearFactor {
         fn linearize(
             &self,
-            params: &[DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-            let residual = dvector![params[0][0] - self.target];
-            let jacobian = if compute_jacobian {
-                Some(DMatrix::from_element(1, 1, 1.0))
-            } else {
-                None
-            };
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
         }
     }
 
@@ -1584,14 +1570,13 @@ mod tests {
         use crate::core::problem::Problem;
 
         let mut problem = Problem::new(JacobianMode::Sparse);
-        let mut initial_values: HashMap<String, (ManifoldType, DVector<f64>)> = HashMap::new();
-        initial_values.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
-        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
 
-        let state = initialize_optimization_state(&problem, &initial_values)?;
+        let state = initialize_optimization_state(&mut problem)?;
         assert_eq!(state.total_dof, 1);
         assert!(state.initial_cost > 0.0);
-        assert!(state.sorted_vars.contains(&"x".to_string()));
+        assert!(state.sorted_vars.contains(&k));
         Ok(())
     }
 }

@@ -2,24 +2,21 @@ use std::collections::HashMap;
 use std::time::Instant;
 use tracing::{info, warn};
 
-use apex_solver::apex_io::{G2oLoader, GraphLoader};
+use apex_solver::apex_io::{G2oLoader, Graph, GraphLoader};
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
-use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{LevenbergMarquardt, OptimizationStatus};
 use apex_solver::{JacobianMode, LinearSolverType};
 use clap::Parser;
 use nalgebra::dvector;
 
-type InitialValues = HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>;
-type BuildResult = Result<(Problem, InitialValues), Box<dyn std::error::Error>>;
-
 #[derive(Parser)]
-#[command(about = "Compare all 4 linear solvers (Sparse/Dense × Cholesky/QR) on any G2O dataset")]
+#[command(about = "Compare all 4 linear solvers (Sparse/Dense x Cholesky/QR) on any G2O dataset")]
 struct Args {
     /// Path to a G2O dataset file (SE2 or SE3)
     path: String,
@@ -43,40 +40,8 @@ struct RunResult {
     status: &'static str,
 }
 
-/// Evaluate the sparse Jacobian once to obtain NNZ and density.
-/// Returns (nrows, ncols, nnz, density_pct).
-fn jacobian_stats(problem: &Problem, initial_values: &InitialValues) -> (usize, usize, usize, f64) {
-    let variables = problem.initialize_variables(initial_values);
-
-    let mut col_idx = HashMap::new();
-    let mut offset = 0usize;
-    let mut sorted: Vec<_> = variables.keys().cloned().collect();
-    sorted.sort();
-    for name in &sorted {
-        col_idx.insert(name.clone(), offset);
-        offset += variables[name].get_size();
-    }
-
-    let Ok(sym) = build_symbolic_structure(problem, &variables, &col_idx, offset) else {
-        return (0, 0, 0, 0.0);
-    };
-
-    let Ok((_, jacobian)) =
-        problem.compute_residual_and_jacobian_sparse(&variables, &col_idx, &sym)
-    else {
-        return (0, 0, 0, 0.0);
-    };
-
-    let nrows = jacobian.nrows();
-    let ncols = jacobian.ncols();
-    let nnz = jacobian.compute_nnz();
-    let sparsity = (1.0 - nnz as f64 / (nrows * ncols) as f64) * 100.0;
-    (nrows, ncols, nnz, sparsity)
-}
-
 fn run_solver(
-    problem: &Problem,
-    initial_values: &InitialValues,
+    problem: &mut Problem,
     solver_type: LinearSolverType,
     solver_name: &'static str,
     args: &Args,
@@ -89,7 +54,7 @@ fn run_solver(
     let mut solver = LevenbergMarquardt::with_config(config);
 
     let start = Instant::now();
-    let result = match solver.optimize(problem, initial_values) {
+    let result = match solver.optimize(problem) {
         Ok(r) => r,
         Err(e) => {
             warn!("{} failed: {}", solver_name, e);
@@ -122,12 +87,12 @@ fn run_solver(
 
 fn print_table(results: &[RunResult]) {
     let w = 110;
-    info!("{}", "─".repeat(w));
+    info!("{}", "-".repeat(w));
     info!(
         "{:<18} | {:>12} | {:>12} | {:>11} | {:>5} | {:>8} | {:<12}",
-        "Solver", "Init χ²", "Final χ²", "Improvement", "Iters", "Time(ms)", "Status"
+        "Solver", "Init chi2", "Final chi2", "Improvement", "Iters", "Time(ms)", "Status"
     );
-    info!("{}", "─".repeat(w));
+    info!("{}", "-".repeat(w));
     for r in results {
         info!(
             "{:<18} | {:>12.4e} | {:>12.4e} | {:>10.2}% | {:>5} | {:>8} | {:<12}",
@@ -140,11 +105,16 @@ fn print_table(results: &[RunResult]) {
             r.status
         );
     }
-    info!("{}", "─".repeat(w));
+    info!("{}", "-".repeat(w));
 }
 
-fn build_se3_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
-    let mut initial_values = InitialValues::new();
+fn build_se3_problem(
+    graph: &Graph,
+    mode: JacobianMode,
+) -> Result<Problem, Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(mode);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
+
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
 
@@ -152,17 +122,13 @@ fn build_se3_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) ->
         if let Some(v) = graph.vertices_se3.get(&id) {
             let q = v.pose.rotation_quaternion();
             let t = v.pose.translation();
-            initial_values.insert(
-                format!("x{id}"),
-                (
-                    ManifoldType::SE3,
-                    dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
-                ),
+            let key = problem.add_variable(
+                ManifoldType::SE3,
+                dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
             );
+            var_keys.insert(id, key);
         }
     }
-
-    let mut problem = Problem::new(mode);
 
     if let Some(&first_id) = vertex_ids.first()
         && let Some(v) = graph.vertices_se3.get(&first_id)
@@ -173,42 +139,42 @@ fn build_se3_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) ->
             data: dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
         };
         let loss = HuberLoss::new(1.0)?;
-        problem.add_residual_block(
-            &[&format!("x{first_id}")],
-            Box::new(prior),
-            Some(Box::new(loss)),
-        );
+        let first_key = var_keys[&first_id];
+        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));
     }
 
     for edge in &graph.edges_se3 {
-        problem.add_residual_block(
-            &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
-            Box::new(BetweenFactor::new(edge.measurement.clone())),
-            None,
-        );
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(
+                &[k0, k1],
+                Box::new(BetweenFactor::new(edge.measurement.clone())),
+                None,
+            );
+        }
     }
 
-    Ok((problem, initial_values))
+    Ok(problem)
 }
 
-fn build_se2_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) -> BuildResult {
-    let mut initial_values = InitialValues::new();
+fn build_se2_problem(
+    graph: &Graph,
+    mode: JacobianMode,
+) -> Result<Problem, Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(mode);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
+
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
         if let Some(v) = graph.vertices_se2.get(&id) {
-            initial_values.insert(
-                format!("x{id}"),
-                (
-                    ManifoldType::SE2,
-                    dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
-                ),
+            let key = problem.add_variable(
+                ManifoldType::SE2,
+                dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
             );
+            var_keys.insert(id, key);
         }
     }
-
-    let mut problem = Problem::new(mode);
 
     if let Some(&first_id) = vertex_ids.first()
         && let Some(v) = graph.vertices_se2.get(&first_id)
@@ -217,22 +183,21 @@ fn build_se2_problem(graph: &apex_solver::apex_io::Graph, mode: JacobianMode) ->
             data: dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
         };
         let loss = HuberLoss::new(1.0)?;
-        problem.add_residual_block(
-            &[&format!("x{first_id}")],
-            Box::new(prior),
-            Some(Box::new(loss)),
-        );
+        let first_key = var_keys[&first_id];
+        problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));
     }
 
     for edge in &graph.edges_se2 {
-        problem.add_residual_block(
-            &[&format!("x{}", edge.from), &format!("x{}", edge.to)],
-            Box::new(BetweenFactor::new(edge.measurement.clone())),
-            None,
-        );
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(
+                &[k0, k1],
+                Box::new(BetweenFactor::new(edge.measurement.clone())),
+                None,
+            );
+        }
     }
 
-    Ok((problem, initial_values))
+    Ok(problem)
 }
 
 fn main() {
@@ -259,55 +224,21 @@ fn main() {
         .and_then(|s| s.to_str())
         .unwrap_or(&args.path);
 
-    info!("APEX-SOLVER — LINEAR SOLVER COMPARISON");
+    info!("APEX-SOLVER - LINEAR SOLVER COMPARISON");
     info!("Dataset : {} ({})", dataset_name, manifold_label);
     info!("Problem : {} vertices, {} edges", vertices, edges);
     info!(
         "Config  : max_iter={}, cost_tol={:.0e}",
         args.max_iterations, args.cost_tolerance
     );
-
-    // Build sparse and dense problems
-    let build_sparse = if is_se3 {
-        build_se3_problem(&graph, JacobianMode::Sparse)
-    } else {
-        build_se2_problem(&graph, JacobianMode::Sparse)
-    };
-    let (sparse_problem, sparse_init) = match build_sparse {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!("Failed to build sparse problem: {e}");
-            std::process::exit(1);
-        }
-    };
-    let build_dense = if is_se3 {
-        build_se3_problem(&graph, JacobianMode::Dense)
-    } else {
-        build_se2_problem(&graph, JacobianMode::Dense)
-    };
-    let (dense_problem, dense_init) = match build_dense {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!("Failed to build dense problem: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    // Compute and print Jacobian density (from sparse problem)
-    let (jac_rows, jac_cols, nnz, sparsity_pct) = jacobian_stats(&sparse_problem, &sparse_init);
-    info!(
-        "Jacobian: {}×{} | NNZ: {} | Sparsity: {:.4}%",
-        jac_rows, jac_cols, nnz, sparsity_pct
-    );
+    info!("");
 
     if vertices > 500 {
         warn!(
-            "Large problem ({} vertices) — dense solvers may be slow",
+            "Large problem ({} vertices) - dense solvers may be slow",
             vertices
         );
     }
-
-    info!("");
 
     const SOLVERS: &[(&str, LinearSolverType, bool)] = &[
         ("Sparse Cholesky", LinearSolverType::SparseCholesky, false),
@@ -318,13 +249,30 @@ fn main() {
 
     let mut results = Vec::new();
     for &(name, solver_type, use_dense) in SOLVERS {
-        info!("Running {}…", name);
-        let (problem, init) = if use_dense {
-            (&dense_problem, &dense_init)
+        info!("Running {}...", name);
+        let mode = if use_dense {
+            JacobianMode::Dense
         } else {
-            (&sparse_problem, &sparse_init)
+            JacobianMode::Sparse
         };
-        if let Some(r) = run_solver(problem, init, solver_type, name, &args) {
+        let mut problem = if is_se3 {
+            match build_se3_problem(&graph, mode) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to build problem for {}: {}", name, e);
+                    continue;
+                }
+            }
+        } else {
+            match build_se2_problem(&graph, mode) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Failed to build problem for {}: {}", name, e);
+                    continue;
+                }
+            }
+        };
+        if let Some(r) = run_solver(&mut problem, solver_type, name, &args) {
             results.push(r);
         }
     }

@@ -15,13 +15,13 @@ use apex_camera_models::{CameraModel, DistortionModel, PinholeCamera, PinholePar
 use apex_manifolds::LieGroup;
 use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
+use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2};
-use std::collections::HashMap;
 
 mod camera_test_utils;
 use camera_test_utils::*;
@@ -142,50 +142,38 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
 
     let mut problem = Problem::new(JacobianMode::Sparse);
 
+    // Add variables first (poses, landmarks, intrinsics)
+    let pose_keys: Vec<VarKey> = noisy_poses
+        .iter()
+        .map(|pose| {
+            problem.add_variable(
+                ManifoldType::SE3,
+                DVector::from_column_slice(pose.as_param_slice()),
+            )
+        })
+        .collect();
+    let landmarks_key = problem.add_variable(ManifoldType::RN, flatten_landmarks(&noisy_landmarks));
+    let intrinsics_key = problem.add_variable(
+        ManifoldType::RN,
+        DVector::from_vec(noisy_intrinsics.clone()),
+    );
+
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);
 
         let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
             ProjectionFactor::new(obs_matrix, true_camera);
 
-        let pose_name = format!("pose_{}", cam_idx);
-
         problem.add_residual_block(
-            &[&pose_name, "landmarks", "intrinsics"],
+            &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
         );
     }
 
     for dof in 0..6 {
-        problem.fix_variable("pose_0", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
-
-    // ============================================================================
-    // 7. Initialize Variables with Noisy Values
-    // ============================================================================
-
-    let mut initial_values = HashMap::new();
-
-    for (i, pose) in noisy_poses.iter().enumerate() {
-        initial_values.insert(
-            format!("pose_{}", i),
-            (ManifoldType::SE3, pose.clone().into()),
-        );
-    }
-
-    initial_values.insert(
-        "landmarks".to_string(),
-        (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
-    );
-
-    initial_values.insert(
-        "intrinsics".to_string(),
-        (
-            ManifoldType::RN,
-            DVector::from_vec(noisy_intrinsics.clone()),
-        ),
-    );
 
     // ============================================================================
     // 8. Configure and Run Optimization
@@ -199,7 +187,7 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
         .with_damping(1e-3);
 
     let mut solver = LevenbergMarquardt::with_config(config);
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
 
     // ============================================================================
     // 9. Verify Convergence
@@ -248,11 +236,7 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
     // 12. Verify Intrinsic Parameter Recovery
     // ============================================================================
 
-    let final_intrinsics = result
-        .parameters
-        .get("intrinsics")
-        .ok_or("Missing intrinsics in result")?
-        .to_vector();
+    let final_intrinsics = result.parameters[intrinsics_key].to_dvector();
 
     let param_names = ["fx", "fy", "cx", "cy"];
 
@@ -323,40 +307,35 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
 
     let mut problem = Problem::new(JacobianMode::Sparse);
 
+    // Add variables first
+    let pose_keys: Vec<VarKey> = noisy_poses
+        .iter()
+        .map(|pose| {
+            problem.add_variable(
+                ManifoldType::SE3,
+                DVector::from_column_slice(pose.as_param_slice()),
+            )
+        })
+        .collect();
+    let landmarks_key = problem.add_variable(ManifoldType::RN, flatten_landmarks(&noisy_landmarks));
+    let intrinsics_key =
+        problem.add_variable(ManifoldType::RN, DVector::from_vec(noisy_intrinsics));
+
     for (cam_idx, observations) in all_observations.iter().enumerate() {
         let obs_matrix = Matrix2xX::from_columns(observations);
         let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
             ProjectionFactor::new(obs_matrix, true_camera);
 
         problem.add_residual_block(
-            &[&format!("pose_{}", cam_idx), "landmarks", "intrinsics"],
+            &[pose_keys[cam_idx], landmarks_key, intrinsics_key],
             Box::new(factor),
             None,
         );
     }
 
     for dof in 0..6 {
-        problem.fix_variable("pose_0", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
-
-    let mut initial_values = HashMap::new();
-
-    for (i, pose) in noisy_poses.iter().enumerate() {
-        initial_values.insert(
-            format!("pose_{}", i),
-            (ManifoldType::SE3, pose.clone().into()),
-        );
-    }
-
-    initial_values.insert(
-        "landmarks".to_string(),
-        (ManifoldType::RN, flatten_landmarks(&noisy_landmarks)),
-    );
-
-    initial_values.insert(
-        "intrinsics".to_string(),
-        (ManifoldType::RN, DVector::from_vec(noisy_intrinsics)),
-    );
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(100)
@@ -365,7 +344,7 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
         .with_damping(1e-3);
 
     let mut solver = LevenbergMarquardt::with_config(config);
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
 
     assert!(
         matches!(

@@ -33,7 +33,7 @@ use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use nalgebra::{DVector, Matrix3, Matrix4, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Matrix4, SMatrix, SVector, UnitQuaternion, Vector3};
 
 // Type aliases for Sim(3) - 7 DOF
 type Vector7<T> = SVector<T, 7>;
@@ -45,15 +45,11 @@ use std::{
 
 /// Sim(3) group element representing similarity transformations in 3D.
 ///
-/// Represented as (rotation, translation, scale).
+/// Stored as a flat `SVector<f64, 8>` = [tx, ty, tz, qw, qx, qy, qz, scale].
 #[derive(Clone, PartialEq)]
 pub struct Sim3 {
-    /// Rotation part as SO(3) element
-    rotation: SO3,
-    /// Translation part as Vector3
-    translation: Vector3<f64>,
-    /// Scale factor (positive real number)
-    scale: f64,
+    /// Flat parameter storage: [tx, ty, tz, qw, qx, qy, qz, scale]
+    params: SVector<f64, 8>,
 }
 
 impl Display for Sim3 {
@@ -79,12 +75,38 @@ impl Sim3 {
     /// Representation size - size of the underlying data representation
     pub const REP_SIZE: usize = 8;
 
+    #[inline]
+    fn translation_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[0], self.params[1], self.params[2])
+    }
+
+    #[inline]
+    fn rotation_impl(&self) -> SO3 {
+        SO3::from_quaternion_wxyz(
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+        )
+    }
+
+    #[inline]
+    fn scale_impl(&self) -> f64 {
+        self.params[7]
+    }
+
+    #[inline]
+    fn from_parts(t: Vector3<f64>, r: &SO3, scale: f64) -> Self {
+        let q = r.params();
+        Sim3 {
+            params: SVector::<f64, 8>::from([t.x, t.y, t.z, q[0], q[1], q[2], q[3], scale]),
+        }
+    }
+
     /// Get the identity element of the group.
     pub fn identity() -> Self {
         Sim3 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
-            scale: 1.0,
+            params: SVector::<f64, 8>::from([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
         }
     }
 
@@ -101,125 +123,92 @@ impl Sim3 {
     /// * `scale` - Scale factor (must be positive)
     pub fn new(translation: Vector3<f64>, rotation: UnitQuaternion<f64>, scale: f64) -> Self {
         assert!(scale > 0.0, "Scale must be positive");
-        Sim3 {
-            rotation: SO3::new(rotation),
-            translation,
-            scale,
-        }
+        Sim3::from_parts(translation, &SO3::new(rotation), scale)
     }
 
     /// Create Sim(3) from components.
     pub fn from_components(translation: Vector3<f64>, rotation: SO3, scale: f64) -> Self {
         assert!(scale > 0.0, "Scale must be positive");
-        Sim3 {
-            rotation,
-            translation,
-            scale,
-        }
+        Sim3::from_parts(translation, &rotation, scale)
     }
 
     /// Get the translation part as a Vector3.
     pub fn translation(&self) -> Vector3<f64> {
-        self.translation
+        self.translation_impl()
     }
 
     /// Get the scale factor.
     pub fn scale(&self) -> f64 {
-        self.scale
+        self.scale_impl()
     }
 
     /// Get the rotation part as SO3.
     pub fn rotation_so3(&self) -> SO3 {
-        self.rotation.clone()
+        self.rotation_impl()
     }
 
     /// Get the rotation part as a UnitQuaternion.
     pub fn rotation_quaternion(&self) -> UnitQuaternion<f64> {
-        self.rotation.quaternion()
+        self.rotation_impl().quaternion()
     }
 
     /// Get the rotation matrix (3x3).
     pub fn rotation_matrix(&self) -> Matrix3<f64> {
-        self.rotation.rotation_matrix()
+        self.rotation_impl().rotation_matrix()
     }
 
     /// Get the 4x4 homogeneous transformation matrix.
     pub fn matrix(&self) -> Matrix4<f64> {
         let mut mat = Matrix4::identity();
         let rot_mat = self.rotation_matrix();
+        let scale = self.scale_impl();
 
-        // Top-left 3x3: s*R
         for i in 0..3 {
             for j in 0..3 {
-                mat[(i, j)] = self.scale * rot_mat[(i, j)];
+                mat[(i, j)] = scale * rot_mat[(i, j)];
             }
         }
 
-        // Top-right 3x1: t
-        mat[(0, 3)] = self.translation.x;
-        mat[(1, 3)] = self.translation.y;
-        mat[(2, 3)] = self.translation.z;
+        mat[(0, 3)] = self.params[0];
+        mat[(1, 3)] = self.params[1];
+        mat[(2, 3)] = self.params[2];
 
         mat
     }
 
     /// Get the x component of translation.
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.params[0]
     }
 
     /// Get the y component of translation.
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.params[1]
     }
 
     /// Get the z component of translation.
     pub fn z(&self) -> f64 {
-        self.translation.z
+        self.params[2]
     }
 
     /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, s].
     pub fn coeffs(&self) -> [f64; 8] {
-        let q = self.rotation.quaternion();
         [
-            self.translation.x,
-            self.translation.y,
-            self.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            self.scale,
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+            self.params[7],
         ]
     }
 }
 
-impl From<DVector<f64>> for Sim3 {
-    fn from(data: DVector<f64>) -> Self {
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let rotation = SO3::from_quaternion_wxyz(data[3], data[4], data[5], data[6]);
-        let scale = data[7];
-        Sim3::from_components(translation, rotation, scale)
-    }
-}
-
-impl From<Sim3> for DVector<f64> {
-    fn from(sim3: Sim3) -> Self {
-        let q = sim3.rotation.quaternion();
-        DVector::from_vec(vec![
-            sim3.translation.x,
-            sim3.translation.y,
-            sim3.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            sim3.scale,
-        ])
-    }
-}
-
 impl LieGroup for Sim3 {
+    const NAME: &'static str = "Sim3";
+
     type TangentVector = Sim3Tangent;
     type JacobianMatrix = Matrix7<f64>;
     type LieAlgebra = Matrix4<f64>;
@@ -228,15 +217,16 @@ impl LieGroup for Sim3 {
     ///
     /// For Sim(3): g^{-1} = (R^T, -R^T * t / s, 1/s)
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let rot_inv = self.rotation.inverse(None);
-        let scale_inv = 1.0 / self.scale;
-        let trans_inv = -rot_inv.act(&self.translation, None, None) * scale_inv;
+        let rot = self.rotation_impl();
+        let rot_inv = rot.inverse(None);
+        let scale_inv = 1.0 / self.scale_impl();
+        let trans_inv = -rot_inv.act(&self.translation_impl(), None, None) * scale_inv;
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        Sim3::from_components(trans_inv, rot_inv, scale_inv)
+        Sim3::from_parts(trans_inv, &rot_inv, scale_inv)
     }
 
     /// Composition of this and another Sim(3) element.
@@ -248,12 +238,14 @@ impl LieGroup for Sim3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let composed_rotation = self.rotation.compose(&other.rotation, None, None);
+        let rot = self.rotation_impl();
+        let scale = self.scale_impl();
+        let composed_rotation = rot.compose(&other.rotation_impl(), None, None);
         let composed_translation =
-            self.scale * self.rotation.act(&other.translation, None, None) + self.translation;
-        let composed_scale = self.scale * other.scale;
+            scale * rot.act(&other.translation_impl(), None, None) + self.translation_impl();
+        let composed_scale = scale * other.scale_impl();
 
-        let result = Sim3::from_components(composed_translation, composed_rotation, composed_scale);
+        let result = Sim3::from_parts(composed_translation, &composed_rotation, composed_scale);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -268,15 +260,15 @@ impl LieGroup for Sim3 {
 
     /// Logarithmic map from Sim(3) to its tangent space.
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        let theta = self.rotation.log(None);
-        let sigma = self.scale.ln();
+        let theta = self.rotation_impl().log(None);
+        let sigma = self.scale_impl().ln();
         let mut data = Vector7::zeros();
 
         // Compute the V^{-1} matrix for Sim(3)
         // V^{-1} = J_l^{-1}(θ) * (I - σ/2 * [θ]× + ...)
         let theta_tangent = SO3Tangent::new(theta.coeffs());
         let v_inv = Self::compute_v_inv(&theta_tangent, sigma);
-        let translation_vector = v_inv * self.translation;
+        let translation_vector = v_inv * self.translation_impl();
 
         data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
@@ -297,39 +289,38 @@ impl LieGroup for Sim3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        let result = self.scale * self.rotation.act(vector, None, None) + self.translation;
+        let rot = self.rotation_impl();
+        let scale = self.scale_impl();
+        let rotation_matrix = rot.rotation_matrix();
+        let result = scale * rot.act(vector, None, None) + self.translation_impl();
 
         if let Some(jac_self) = jacobian_self {
-            let rotation_matrix = self.rotation.rotation_matrix();
-            let rotated_vector = self.rotation.act(vector, None, None);
+            let rotated_vector = rot.act(vector, None, None);
 
-            // Jacobian w.r.t. translation
             jac_self
                 .fixed_view_mut::<3, 3>(0, 0)
                 .copy_from(&Matrix3::identity());
 
-            // Jacobian w.r.t. rotation
             jac_self
                 .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(-self.scale * rotation_matrix * SO3Tangent::new(*vector).hat()));
+                .copy_from(&(-scale * rotation_matrix * SO3Tangent::new(*vector).hat()));
 
-            // Jacobian w.r.t. scale
             jac_self
                 .fixed_view_mut::<3, 1>(0, 6)
                 .copy_from(&rotated_vector);
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            *jac_vector = self.scale * self.rotation.rotation_matrix();
+            *jac_vector = scale * rotation_matrix;
         }
 
         result
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        let rotation_matrix = self.rotation.rotation_matrix();
-        let translation = self.translation;
-        let scale = self.scale;
+        let rotation_matrix = self.rotation_impl().rotation_matrix();
+        let translation = self.translation_impl();
+        let scale = self.scale_impl();
         let mut adjoint_matrix = Matrix7::zeros();
 
         // Block structure for Sim(3):
@@ -372,18 +363,39 @@ impl LieGroup for Sim3 {
         let rotation = SO3::random();
         let scale = rng.random_range(0.5..2.0);
 
-        Sim3::from_components(translation, rotation, scale)
+        Sim3::from_parts(translation, &rotation, scale)
     }
 
     fn normalize(&mut self) {
-        self.rotation.normalize();
-        if self.scale <= 0.0 {
-            self.scale = 1.0;
+        let mut rot = self.rotation_impl();
+        rot.normalize();
+        let q = rot.params();
+        self.params[3] = q[0];
+        self.params[4] = q[1];
+        self.params[5] = q[2];
+        self.params[6] = q[3];
+        if self.params[7] <= 0.0 {
+            self.params[7] = 1.0;
         }
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        self.rotation.is_valid(tolerance) && self.scale > 0.0
+        self.rotation_impl().is_valid(tolerance) && self.params[7] > 0.0
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 8);
+        Sim3 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     fn vee(&self) -> Self::TangentVector {
@@ -439,20 +451,6 @@ impl fmt::Display for Sim3Tangent {
             "sim3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}], sigma: {:.4})",
             rho.x, rho.y, rho.z, theta.x, theta.y, theta.z, sigma
         )
-    }
-}
-
-impl From<DVector<f64>> for Sim3Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        Sim3Tangent {
-            data: Vector7::from_iterator(data_vector.iter().copied()),
-        }
-    }
-}
-
-impl From<Sim3Tangent> for DVector<f64> {
-    fn from(tangent: Sim3Tangent) -> Self {
-        DVector::from_vec(tangent.data.as_slice().to_vec())
     }
 }
 
@@ -742,6 +740,17 @@ impl Tangent<Sim3> for Sim3Tangent {
             Sim3Tangent::new(self.rho(), self.theta() / norm, self.sigma())
         } else {
             Sim3Tangent::new(self.rho(), Vector3::zeros(), self.sigma())
+        }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 7);
+        Sim3Tangent {
+            data: Vector7::from_column_slice(s),
         }
     }
 
@@ -1315,10 +1324,9 @@ mod tests {
     }
 
     #[test]
-    fn test_sim3_dvector_round_trip() {
+    fn test_sim3_param_slice_round_trip() {
         let sim3 = Sim3::random();
-        let dvec: DVector<f64> = sim3.clone().into();
-        let recovered: Sim3 = dvec.into();
+        let recovered = Sim3::from_param_slice(sim3.as_param_slice());
         assert!(sim3.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1396,14 +1404,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sim3_tangent_dvector_conversions() {
+    fn test_sim3_tangent_slice_round_trip() {
         let tangent = Sim3Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.1, 0.2, 0.3),
             0.5,
         );
-        let dvec: DVector<f64> = tangent.clone().into();
-        let recovered = Sim3Tangent::from(dvec);
+        let recovered = Sim3Tangent::from_slice(tangent.as_slice());
         assert!(tangent.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1541,5 +1548,19 @@ mod tests {
             "V(0,σ) should equal (e^σ-1)/σ * I, error = {}",
             (v - expected).norm()
         );
+    }
+
+    #[test]
+    fn sim3_param_slice_round_trip() {
+        let g = Sim3::random();
+        let recovered = Sim3::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn sim3_tangent_slice_round_trip() {
+        let t = Sim3Tangent::random();
+        let recovered = Sim3Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }

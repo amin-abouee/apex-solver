@@ -3,13 +3,15 @@ use std::time::Instant;
 use tracing::{error, info, warn};
 
 use apex_solver::JacobianMode;
-use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
+use apex_solver::apex_io::{
+    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
+};
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger;
-use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -60,8 +62,8 @@ struct BenchmarkResult {
 }
 
 fn print_summary_table(results: &[BenchmarkResult]) {
-    info!("\n{}", "=".repeat(170));
-    info!("=== ROBUST LOSS FUNCTION BENCHMARK RESULTS ===\n");
+    info!("{}", "=".repeat(170));
+    info!("=== ROBUST LOSS FUNCTION BENCHMARK RESULTS ===");
 
     info!(
         "{:<12} | {:<4} | {:<10} | {:<18} | {:<5} | {:<4} | {:<5} | {:<12} | {:<12} | {:<10} | {:<5} | {:<8} | {:<10}",
@@ -111,12 +113,10 @@ fn write_csv(
     use std::io::Write;
 
     let mut file = File::create(filepath)?;
-
     writeln!(
         file,
         "dataset,manifold,optimizer,loss_function,scale_param,vertices,edges,initial_cost,final_cost,improvement,iterations,time_ms,status"
     )?;
-
     for result in results {
         writeln!(
             file,
@@ -136,20 +136,116 @@ fn write_csv(
             result.status
         )?;
     }
-
-    info!("\n✓ Results written to: {}", filepath);
+    info!("Results written to: {}", filepath);
     Ok(())
 }
 
+fn make_loss(
+    name: &str,
+    scale: f64,
+) -> Result<Option<Box<dyn LossFunction + Send>>, Box<dyn std::error::Error>> {
+    let loss: Box<dyn LossFunction + Send> = match name {
+        "L2" => Box::new(L2Loss),
+        "L1" => Box::new(L1Loss),
+        "Huber" => Box::new(HuberLoss::new(scale)?),
+        "Cauchy" => Box::new(CauchyLoss::new(scale)?),
+        "Fair" => Box::new(FairLoss::new(scale)?),
+        "Welsch" => Box::new(WelschLoss::new(scale)?),
+        "Tukey" => Box::new(TukeyBiweightLoss::new(scale)?),
+        "GemanMcClure" => Box::new(GemanMcClureLoss::new(scale)?),
+        "Andrews" => Box::new(AndrewsWaveLoss::new(scale)?),
+        "Ramsay" => Box::new(RamsayEaLoss::new(scale)?),
+        "TrimmedMean" => Box::new(TrimmedMeanLoss::new(scale)?),
+        "Lp(1.5)" => Box::new(LpNormLoss::new(scale)?),
+        "Barron(a=0)" => Box::new(BarronGeneralLoss::new(0.0, scale)?),
+        "Barron(a=1)" => Box::new(BarronGeneralLoss::new(1.0, scale)?),
+        "Barron(a=-2)" => Box::new(BarronGeneralLoss::new(-2.0, scale)?),
+        "TDist(v=5)" => Box::new(TDistributionLoss::new(scale)?),
+        "AdaptiveBarron" => Box::new(AdaptiveBarronLoss::new(0.0, scale)?),
+        _ => return Ok(None),
+    };
+    Ok(Some(loss))
+}
+
+fn build_se3_problem(
+    graph: &Graph,
+    loss_name: &str,
+    scale: f64,
+) -> Result<(Problem, HashMap<usize, VarKey>), Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
+
+    let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
+    vertex_ids.sort();
+
+    for &id in &vertex_ids {
+        if let Some(vertex) = graph.vertices_se3.get(&id) {
+            let quat = vertex.pose.rotation_quaternion();
+            let trans = vertex.pose.translation();
+            let key = problem.add_variable(
+                ManifoldType::SE3,
+                dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k],
+            );
+            var_keys.insert(id, key);
+        }
+    }
+
+    for edge in &graph.edges_se3 {
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            let loss = make_loss(loss_name, scale)?;
+            problem.add_residual_block(
+                &[k0, k1],
+                Box::new(BetweenFactor::new(edge.measurement.clone())),
+                loss,
+            );
+        }
+    }
+
+    Ok((problem, var_keys))
+}
+
+fn build_se2_problem(
+    graph: &Graph,
+    loss_name: &str,
+    scale: f64,
+) -> Result<(Problem, HashMap<usize, VarKey>), Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
+
+    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
+    vertex_ids.sort();
+
+    for &id in &vertex_ids {
+        if let Some(vertex) = graph.vertices_se2.get(&id) {
+            let trans = vertex.pose.translation();
+            let angle = vertex.pose.rotation_angle();
+            let key = problem.add_variable(ManifoldType::SE2, dvector![trans.x, trans.y, angle]);
+            var_keys.insert(id, key);
+        }
+    }
+
+    for edge in &graph.edges_se2 {
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            let loss = make_loss(loss_name, scale)?;
+            problem.add_residual_block(
+                &[k0, k1],
+                Box::new(BetweenFactor::new(edge.measurement.clone())),
+                loss,
+            );
+        }
+    }
+
+    Ok((problem, var_keys))
+}
+
+#[allow(clippy::type_complexity)]
 fn run_optimization(
-    problem: &Problem,
-    initial_values: &HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
+    problem: &mut Problem,
     optimizer_name: &str,
     max_iterations: usize,
     cost_tolerance: f64,
     parameter_tolerance: f64,
-    _verbose: bool,
-) -> Result<(f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
+) -> Result<(f64, f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     let result = match optimizer_name {
@@ -159,7 +255,7 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tolerance)
                 .with_parameter_tolerance(parameter_tolerance);
             let mut solver = LevenbergMarquardt::with_config(config);
-            solver.optimize(problem, initial_values)?
+            solver.optimize(problem)?
         }
         "GN" => {
             let config = GaussNewtonConfig::new()
@@ -167,7 +263,7 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tolerance)
                 .with_parameter_tolerance(parameter_tolerance);
             let mut solver = GaussNewton::with_config(config);
-            solver.optimize(problem, initial_values)?
+            solver.optimize(problem)?
         }
         "DL" => {
             let config = DogLegConfig::new()
@@ -175,15 +271,40 @@ fn run_optimization(
                 .with_cost_tolerance(cost_tolerance)
                 .with_parameter_tolerance(parameter_tolerance);
             let mut solver = DogLeg::with_config(config);
-            solver.optimize(problem, initial_values)?
+            solver.optimize(problem)?
         }
         _ => unreachable!(),
     };
 
     let elapsed = start.elapsed().as_millis();
-
-    Ok((result.final_cost, result.iterations, result.status, elapsed))
+    Ok((
+        result.initial_cost,
+        result.final_cost,
+        result.iterations,
+        result.status,
+        elapsed,
+    ))
 }
+
+const LOSS_CONFIGS: &[(&str, f64)] = &[
+    ("L2", 1.0),
+    ("L1", 1.0),
+    ("Huber", 1.345),
+    ("Cauchy", 2.3849),
+    ("Fair", 1.3999),
+    ("Welsch", 2.9846),
+    ("Tukey", 4.6851),
+    ("GemanMcClure", 1.0),
+    ("Andrews", 1.339),
+    ("Ramsay", 0.3),
+    ("TrimmedMean", 2.0),
+    ("Lp(1.5)", 1.5),
+    ("Barron(a=0)", 1.0),
+    ("Barron(a=1)", 1.0),
+    ("Barron(a=-2)", 1.0),
+    ("TDist(v=5)", 5.0),
+    ("AdaptiveBarron", 1.0),
+];
 
 fn benchmark_dataset_se3(
     graph_path: &str,
@@ -191,175 +312,54 @@ fn benchmark_dataset_se3(
     args: &Args,
 ) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
     info!("Loading SE3 dataset: {}", dataset_name);
-
     let graph = G2oLoader::load(graph_path)?;
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
+    info!("Loaded {} vertices, {} edges", num_vertices, num_edges);
 
-    info!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
-
-    // Create initial values from graph vertices
-    let mut initial_values = HashMap::new();
-    let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
-    vertex_ids.sort();
-
-    for &id in &vertex_ids {
-        if let Some(vertex) = graph.vertices_se3.get(&id) {
-            let var_name = format!("x{}", id);
-            let quat = vertex.pose.rotation_quaternion();
-            let trans = vertex.pose.translation();
-            let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
-        }
-    }
-
-    // Define ALL 14 loss functions to test
-    let loss_configs: Vec<(&str, f64, Box<dyn LossFunction + Send>)> = vec![
-        ("L2", 1.0, Box::new(L2Loss)),
-        ("L1", 1.0, Box::new(L1Loss)),
-        ("Huber", 1.345, Box::new(HuberLoss::new(1.345)?)),
-        ("Cauchy", 2.3849, Box::new(CauchyLoss::new(2.3849)?)),
-        ("Fair", 1.3999, Box::new(FairLoss::new(1.3999)?)),
-        ("Welsch", 2.9846, Box::new(WelschLoss::new(2.9846)?)),
-        ("Tukey", 4.6851, Box::new(TukeyBiweightLoss::new(4.6851)?)),
-        ("GemanMcClure", 1.0, Box::new(GemanMcClureLoss::new(1.0)?)),
-        ("Andrews", 1.339, Box::new(AndrewsWaveLoss::new(1.339)?)),
-        ("Ramsay", 0.3, Box::new(RamsayEaLoss::new(0.3)?)),
-        ("TrimmedMean", 2.0, Box::new(TrimmedMeanLoss::new(2.0)?)),
-        ("Lp(1.5)", 1.5, Box::new(LpNormLoss::new(1.5)?)),
-        (
-            "Barron(α=0)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(0.0, 1.0)?),
-        ),
-        (
-            "Barron(α=1)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(1.0, 1.0)?),
-        ),
-        (
-            "Barron(α=-2)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(-2.0, 1.0)?),
-        ),
-        (
-            "TDistribution(ν=5)",
-            5.0,
-            Box::new(TDistributionLoss::new(5.0)?),
-        ),
-        (
-            "AdaptiveBarron",
-            1.0,
-            Box::new(AdaptiveBarronLoss::new(0.0, 1.0)?),
-        ),
-    ];
-
-    let optimizers = vec!["LM", "GN", "DL"];
+    let optimizers = ["LM", "GN", "DL"];
     let mut results = Vec::new();
 
-    // Test each (optimizer, loss_function) combination
     for optimizer_name in &optimizers {
         info!("--- Testing Optimizer: {} ---", optimizer_name);
 
-        for &(loss_name, scale, _) in &loss_configs {
+        for &(loss_name, scale) in LOSS_CONFIGS {
             info!("  Testing {} (scale={:.4})...", loss_name, scale);
 
-            let scale_value = scale;
-            // Build problem with this loss function
-            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (mut problem, _) = build_se3_problem(&graph, loss_name, scale)?;
 
-            for edge in &graph.edges_se3 {
-                let id0 = format!("x{}", edge.from);
-                let id1 = format!("x{}", edge.to);
-                let factor = BetweenFactor::new(edge.measurement.clone());
-
-                // Clone the loss function for this edge
-                let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
-                    "L2" => Some(Box::new(L2Loss)),
-                    "L1" => Some(Box::new(L1Loss)),
-                    "Huber" => Some(Box::new(HuberLoss::new(scale_value)?)),
-                    "Cauchy" => Some(Box::new(CauchyLoss::new(scale_value)?)),
-                    "Fair" => Some(Box::new(FairLoss::new(scale_value)?)),
-                    "Welsch" => Some(Box::new(WelschLoss::new(scale_value)?)),
-                    "Tukey" => Some(Box::new(TukeyBiweightLoss::new(scale_value)?)),
-                    "GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(scale_value)?)),
-                    "Andrews" => Some(Box::new(AndrewsWaveLoss::new(scale_value)?)),
-                    "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value)?)),
-                    "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value)?)),
-                    "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value)?)),
-                    "Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?)),
-                    "Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?)),
-                    "Barron(α=-2)" => Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?)),
-                    "TDistribution(ν=5)" => Some(Box::new(TDistributionLoss::new(scale_value)?)),
-                    "AdaptiveBarron" => Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?)),
-                    _ => None,
-                };
-
-                problem.add_residual_block(&[&id0, &id1], Box::new(factor), loss_clone);
-            }
-
-            // Compute initial cost
-            let variables = problem.initialize_variables(&initial_values);
-            let mut variable_name_to_col_idx_dict = HashMap::new();
-            let mut col_offset = 0;
-            let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-            sorted_vars.sort();
-
-            for var_name in &sorted_vars {
-                variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-                col_offset += variables[var_name].get_size();
-            }
-
-            let symbolic_structure = build_symbolic_structure(
-                &problem,
-                &variables,
-                &variable_name_to_col_idx_dict,
-                col_offset,
-            )?;
-
-            let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_name_to_col_idx_dict,
-                &symbolic_structure,
-            )?;
-
-            // 0.5 * ||r||² to match the solver's cost convention
-            let initial_cost = 0.5 * residual.as_ref().squared_norm_l2();
-
-            // Run optimization
             match run_optimization(
-                &problem,
-                &initial_values,
+                &mut problem,
                 optimizer_name,
                 args.max_iterations,
                 args.cost_tolerance,
                 args.parameter_tolerance,
-                args.verbose,
             ) {
-                Ok((final_cost, iterations, status, time_ms)) => {
+                Ok((initial_cost, final_cost, iterations, status, time_ms)) => {
                     let improvement = if initial_cost > 0.0 {
                         ((initial_cost - final_cost) / initial_cost) * 100.0
                     } else {
                         0.0
                     };
-
                     let status_str = match status {
                         OptimizationStatus::Converged => "CONVERGED",
                         OptimizationStatus::MaxIterationsReached => "MAX_ITERS",
                         _ => "OTHER",
                     };
 
-                    info!(
-                        "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
-                        initial_cost, final_cost, improvement, iterations, time_ms, status_str
-                    );
+                    if args.verbose {
+                        info!(
+                            "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
+                            initial_cost, final_cost, improvement, iterations, time_ms, status_str
+                        );
+                    }
 
                     results.push(BenchmarkResult {
                         dataset: dataset_name.to_string(),
                         manifold: "SE3".to_string(),
                         optimizer: optimizer_name.to_string(),
                         loss_function: loss_name.to_string(),
-                        scale_param: scale_value,
+                        scale_param: scale,
                         vertices: num_vertices,
                         edges: num_edges,
                         initial_cost,
@@ -386,171 +386,54 @@ fn benchmark_dataset_se2(
     args: &Args,
 ) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
     info!("Loading SE2 dataset: {}", dataset_name);
-
     let graph = G2oLoader::load(graph_path)?;
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
+    info!("Loaded {} vertices, {} edges", num_vertices, num_edges);
 
-    info!("✓ Loaded {} vertices, {} edges", num_vertices, num_edges);
-
-    // Create initial values
-    let mut initial_values = HashMap::new();
-    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
-    vertex_ids.sort();
-
-    for &id in &vertex_ids {
-        if let Some(vertex) = graph.vertices_se2.get(&id) {
-            let var_name = format!("x{}", id);
-            let trans = vertex.pose.translation();
-            let angle = vertex.pose.rotation_angle();
-            let se2_data = dvector![trans.x, trans.y, angle];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
-        }
-    }
-
-    // Define ALL 14 loss functions to test
-    let loss_configs: Vec<(&str, f64, Box<dyn LossFunction + Send>)> = vec![
-        ("L2", 1.0, Box::new(L2Loss)),
-        ("L1", 1.0, Box::new(L1Loss)),
-        ("Huber", 1.345, Box::new(HuberLoss::new(1.345)?)),
-        ("Cauchy", 2.3849, Box::new(CauchyLoss::new(2.3849)?)),
-        ("Fair", 1.3999, Box::new(FairLoss::new(1.3999)?)),
-        ("Welsch", 2.9846, Box::new(WelschLoss::new(2.9846)?)),
-        ("Tukey", 4.6851, Box::new(TukeyBiweightLoss::new(4.6851)?)),
-        ("GemanMcClure", 1.0, Box::new(GemanMcClureLoss::new(1.0)?)),
-        ("Andrews", 1.339, Box::new(AndrewsWaveLoss::new(1.339)?)),
-        ("Ramsay", 0.3, Box::new(RamsayEaLoss::new(0.3)?)),
-        ("TrimmedMean", 2.0, Box::new(TrimmedMeanLoss::new(2.0)?)),
-        ("Lp(1.5)", 1.5, Box::new(LpNormLoss::new(1.5)?)),
-        (
-            "Barron(α=0)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(0.0, 1.0)?),
-        ),
-        (
-            "Barron(α=1)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(1.0, 1.0)?),
-        ),
-        (
-            "Barron(α=-2)",
-            1.0,
-            Box::new(BarronGeneralLoss::new(-2.0, 1.0)?),
-        ),
-        (
-            "TDistribution(ν=5)",
-            5.0,
-            Box::new(TDistributionLoss::new(5.0)?),
-        ),
-        (
-            "AdaptiveBarron",
-            1.0,
-            Box::new(AdaptiveBarronLoss::new(0.0, 1.0)?),
-        ),
-    ];
-
-    let optimizers = vec!["LM", "GN", "DL"];
+    let optimizers = ["LM", "GN", "DL"];
     let mut results = Vec::new();
 
     for optimizer_name in &optimizers {
         info!("--- Testing Optimizer: {} ---", optimizer_name);
 
-        for &(loss_name, scale, _) in &loss_configs {
+        for &(loss_name, scale) in LOSS_CONFIGS {
             info!("  Testing {} (scale={:.4})...", loss_name, scale);
 
-            let scale_value = scale;
-            let mut problem = Problem::new(JacobianMode::Sparse);
-
-            for edge in &graph.edges_se2 {
-                let id0 = format!("x{}", edge.from);
-                let id1 = format!("x{}", edge.to);
-                let factor = BetweenFactor::new(edge.measurement.clone());
-
-                let loss_clone: Option<Box<dyn LossFunction + Send>> = match loss_name {
-                    "L2" => Some(Box::new(L2Loss)),
-                    "L1" => Some(Box::new(L1Loss)),
-                    "Huber" => Some(Box::new(HuberLoss::new(scale_value)?)),
-                    "Cauchy" => Some(Box::new(CauchyLoss::new(scale_value)?)),
-                    "Fair" => Some(Box::new(FairLoss::new(scale_value)?)),
-                    "Welsch" => Some(Box::new(WelschLoss::new(scale_value)?)),
-                    "Tukey" => Some(Box::new(TukeyBiweightLoss::new(scale_value)?)),
-                    "GemanMcClure" => Some(Box::new(GemanMcClureLoss::new(scale_value)?)),
-                    "Andrews" => Some(Box::new(AndrewsWaveLoss::new(scale_value)?)),
-                    "Ramsay" => Some(Box::new(RamsayEaLoss::new(scale_value)?)),
-                    "TrimmedMean" => Some(Box::new(TrimmedMeanLoss::new(scale_value)?)),
-                    "Lp(1.5)" => Some(Box::new(LpNormLoss::new(scale_value)?)),
-                    "Barron(α=0)" => Some(Box::new(BarronGeneralLoss::new(0.0, scale_value)?)),
-                    "Barron(α=1)" => Some(Box::new(BarronGeneralLoss::new(1.0, scale_value)?)),
-                    "Barron(α=-2)" => Some(Box::new(BarronGeneralLoss::new(-2.0, scale_value)?)),
-                    "TDistribution(ν=5)" => Some(Box::new(TDistributionLoss::new(scale_value)?)),
-                    "AdaptiveBarron" => Some(Box::new(AdaptiveBarronLoss::new(0.0, scale_value)?)),
-                    _ => None,
-                };
-
-                problem.add_residual_block(&[&id0, &id1], Box::new(factor), loss_clone);
-            }
-
-            // Compute initial cost
-            let variables = problem.initialize_variables(&initial_values);
-            let mut variable_name_to_col_idx_dict = HashMap::new();
-            let mut col_offset = 0;
-            let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-            sorted_vars.sort();
-
-            for var_name in &sorted_vars {
-                variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-                col_offset += variables[var_name].get_size();
-            }
-
-            let symbolic_structure = build_symbolic_structure(
-                &problem,
-                &variables,
-                &variable_name_to_col_idx_dict,
-                col_offset,
-            )?;
-
-            let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-                &variables,
-                &variable_name_to_col_idx_dict,
-                &symbolic_structure,
-            )?;
-
-            // 0.5 * ||r||² to match the solver's cost convention
-            let initial_cost = 0.5 * residual.as_ref().squared_norm_l2();
+            let (mut problem, _) = build_se2_problem(&graph, loss_name, scale)?;
 
             match run_optimization(
-                &problem,
-                &initial_values,
+                &mut problem,
                 optimizer_name,
                 args.max_iterations,
                 args.cost_tolerance,
                 args.parameter_tolerance,
-                args.verbose,
             ) {
-                Ok((final_cost, iterations, status, time_ms)) => {
+                Ok((initial_cost, final_cost, iterations, status, time_ms)) => {
                     let improvement = if initial_cost > 0.0 {
                         ((initial_cost - final_cost) / initial_cost) * 100.0
                     } else {
                         0.0
                     };
-
                     let status_str = match status {
                         OptimizationStatus::Converged => "CONVERGED",
                         OptimizationStatus::MaxIterationsReached => "MAX_ITERS",
                         _ => "OTHER",
                     };
 
-                    info!(
-                        "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
-                        initial_cost, final_cost, improvement, iterations, time_ms, status_str
-                    );
+                    if args.verbose {
+                        info!(
+                            "    Init: {:.4e}, Final: {:.4e}, Improv: {:.2}%, Iters: {}, Time: {}ms [{}]",
+                            initial_cost, final_cost, improvement, iterations, time_ms, status_str
+                        );
+                    }
 
                     results.push(BenchmarkResult {
                         dataset: dataset_name.to_string(),
                         manifold: "SE2".to_string(),
                         optimizer: optimizer_name.to_string(),
                         loss_function: loss_name.to_string(),
-                        scale_param: scale_value,
+                        scale_param: scale,
                         vertices: num_vertices,
                         edges: num_edges,
                         initial_cost,
@@ -562,7 +445,7 @@ fn benchmark_dataset_se2(
                     });
                 }
                 Err(e) => {
-                    error!("    ✗{}", e);
+                    error!("    {}", e);
                 }
             }
         }
@@ -572,37 +455,37 @@ fn benchmark_dataset_se2(
 }
 
 fn print_analysis(results: &[BenchmarkResult]) {
-    info!("\n{}", "=".repeat(80));
+    info!("{}", "=".repeat(80));
     info!("=== ANALYSIS AND RECOMMENDATIONS ===");
     info!("{}", "=".repeat(80));
 
-    // Group by dataset
-    let datasets: std::collections::HashSet<String> =
-        results.iter().map(|r| r.dataset.clone()).collect();
-    let mut datasets_vec: Vec<String> = datasets.into_iter().collect();
+    let mut datasets_vec: Vec<String> = results
+        .iter()
+        .map(|r| r.dataset.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
     datasets_vec.sort();
 
     for dataset in &datasets_vec {
-        info!("\n📊 Dataset: {}", dataset);
+        info!("Dataset: {}", dataset);
 
-        // Find best converged result for this dataset
         let converged: Vec<&BenchmarkResult> = results
             .iter()
             .filter(|r| r.dataset == *dataset && r.status == "CONVERGED")
             .collect();
 
         if converged.is_empty() {
-            info!("  ⚠ No converged results");
+            info!("  No converged results");
             continue;
         }
 
-        // Best by final cost
         if let Some(best) = converged
             .iter()
             .min_by(|a, b| a.final_cost.total_cmp(&b.final_cost))
         {
             info!(
-                "  ✓ Best Overall: {} + {} (cost: {:.4e}, {:.1}% improv, {} iters, {}ms)",
+                "  Best Overall: {} + {} (cost: {:.4e}, {:.1}% improv, {} iters, {}ms)",
                 best.optimizer,
                 best.loss_function,
                 best.final_cost,
@@ -612,66 +495,35 @@ fn print_analysis(results: &[BenchmarkResult]) {
             );
         }
 
-        // Best per optimizer
         for opt in &["LM", "GN", "DL"] {
-            let opt_results: Vec<&&BenchmarkResult> =
-                converged.iter().filter(|r| r.optimizer == *opt).collect();
-
+            let opt_results: Vec<_> = converged.iter().filter(|r| r.optimizer == *opt).collect();
             if let Some(best) = opt_results
                 .iter()
                 .min_by(|a, b| a.final_cost.total_cmp(&b.final_cost))
             {
                 info!(
-                    "  ✓ Best {}: {} (cost: {:.4e}, {} iters)",
+                    "  Best {}: {} (cost: {:.4e}, {} iters)",
                     opt, best.loss_function, best.final_cost, best.iterations
                 );
             }
         }
-
-        // Convergence rate per loss function
-        info!("\n  Convergence Rates:");
-        let loss_funcs: std::collections::HashSet<String> =
-            converged.iter().map(|r| r.loss_function.clone()).collect();
-
-        for loss in loss_funcs {
-            let total = results
-                .iter()
-                .filter(|r| r.dataset == *dataset && r.loss_function == loss)
-                .count();
-            let conv = results
-                .iter()
-                .filter(|r| {
-                    r.dataset == *dataset && r.loss_function == loss && r.status == "CONVERGED"
-                })
-                .count();
-            let rate = (conv as f64 / total as f64) * 100.0;
-            info!("    {:<18}: {:>3}/{} ({:.0}%)", loss, conv, total, rate);
-        }
     }
 
-    // Overall recommendation
-    info!("\n{}", "=".repeat(80));
-    info!("🎯 RECOMMENDED DEFAULTS");
     info!("{}", "=".repeat(80));
+    info!("RECOMMENDED DEFAULTS");
 
-    let _converged_all: Vec<&BenchmarkResult> =
-        results.iter().filter(|r| r.status == "CONVERGED").collect();
-
-    // Count convergence by loss function across all datasets
     let mut loss_stats: HashMap<String, (usize, usize, f64)> = HashMap::new();
-
     for result in results {
         let entry = loss_stats
             .entry(result.loss_function.clone())
             .or_insert((0, 0, 0.0));
-        entry.0 += 1; // total runs
+        entry.0 += 1;
         if result.status == "CONVERGED" {
-            entry.1 += 1; // converged runs
-            entry.2 += result.improvement; // sum of improvements
+            entry.1 += 1;
+            entry.2 += result.improvement;
         }
     }
 
-    info!("\nLoss Function Performance Summary:");
     info!(
         "{:<18} | {:>12} | {:>12} | {:>15}",
         "Loss Function", "Conv Rate", "Avg Improv", "Recommendation"
@@ -692,9 +544,8 @@ fn print_analysis(results: &[BenchmarkResult]) {
         } else {
             0.0
         };
-
         let recommendation = if conv_rate >= 95.0 && avg_improv >= 95.0 {
-            "★ Excellent"
+            "Excellent"
         } else if conv_rate >= 80.0 && avg_improv >= 90.0 {
             "Good"
         } else if conv_rate >= 70.0 {
@@ -702,35 +553,22 @@ fn print_analysis(results: &[BenchmarkResult]) {
         } else {
             "Poor"
         };
-
         info!(
             "{:<18} | {:>11.0}% | {:>11.1}% | {:>15}",
             loss, conv_rate, avg_improv, recommendation
         );
     }
-
-    info!("   Default Recommendation: Huber (scale=1.345)");
-    info!("   Rationale: Convex, reliable convergence, good robustness");
-    info!("   For Heavy Outliers: Cauchy or Welsch");
-    info!("   Rationale: Stronger outlier suppression, still reliable");
-    info!("   For Clean Data: L2");
-    info!("   Rationale: Fastest, optimal for Gaussian noise\n");
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-
-    // Initialize logger with INFO level
     init_logger();
 
-    info!("╔═══════════════════════════════════════════════════════════════╗");
-    info!("║     ROBUST LOSS FUNCTION COMPARISON BENCHMARK                 ║");
-    info!("╚═══════════════════════════════════════════════════════════════╝");
+    info!("ROBUST LOSS FUNCTION COMPARISON BENCHMARK");
 
     let mut all_results = Vec::new();
 
-    // Benchmark SE3 datasets (all available 3D pose graphs)
-    let se3_datasets: Vec<(String, &str)> = vec![
+    for (path, name) in &[
         (
             format!("{}/sphere2500.g2o", ODOMETRY_DATA_DIR_3D),
             "sphere2500",
@@ -739,59 +577,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("{}/parking-garage.g2o", ODOMETRY_DATA_DIR_3D),
             "parking-garage",
         ),
-        (format!("{}/torus3D.g2o", ODOMETRY_DATA_DIR_3D), "torus3D"),
-    ];
-
-    for (path, name) in &se3_datasets {
+    ] {
         if std::path::Path::new(path.as_str()).exists() {
             match benchmark_dataset_se3(path.as_str(), name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
                 Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }
         } else {
-            warn!("⚠ Skipping {} (file not found)", name);
+            warn!("Skipping {} (file not found)", name);
         }
     }
 
-    // Benchmark SE2 datasets (all available 2D pose graphs)
-    let se2_datasets: Vec<(String, &str)> = vec![
+    for (path, name) in &[
         (format!("{}/intel.g2o", ODOMETRY_DATA_DIR_2D), "intel"),
         (format!("{}/mit.g2o", ODOMETRY_DATA_DIR_2D), "mit"),
-        (format!("{}/M3500.g2o", ODOMETRY_DATA_DIR_2D), "M3500"),
-        (
-            format!("{}/manhattanOlson3500.g2o", ODOMETRY_DATA_DIR_2D),
-            "manhattan",
-        ),
-        (
-            format!("{}/city10000.g2o", ODOMETRY_DATA_DIR_2D),
-            "city10000",
-        ),
         (format!("{}/ring.g2o", ODOMETRY_DATA_DIR_2D), "ring"),
-        (format!("{}/ringCity.g2o", ODOMETRY_DATA_DIR_2D), "ringCity"),
-    ];
-
-    for (path, name) in &se2_datasets {
+    ] {
         if std::path::Path::new(path.as_str()).exists() {
             match benchmark_dataset_se2(path.as_str(), name, &args) {
                 Ok(mut results) => all_results.append(&mut results),
                 Err(e) => warn!("Failed to benchmark {}: {}", name, e),
             }
         } else {
-            info!("⚠ Skipping {} (file not found)", name);
+            info!("Skipping {} (file not found)", name);
         }
     }
 
-    // Print results
     if !all_results.is_empty() {
         print_summary_table(&all_results);
-
         if let Some(output_path) = &args.output {
             write_csv(&all_results, output_path)?;
         }
-
         print_analysis(&all_results);
     } else {
-        info!("\n⚠ No results to display");
+        info!("No results to display");
     }
 
     Ok(())

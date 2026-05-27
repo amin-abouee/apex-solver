@@ -13,7 +13,15 @@ pub mod problem;
 pub mod residual_block;
 pub mod variable;
 
+use slotmap::new_key_type;
 use thiserror::Error;
+
+new_key_type! {
+    /// Stable generational handle for a variable in the Problem.
+    pub struct VarKey;
+    /// Stable generational handle for a residual block (factor) in the Problem.
+    pub struct FactorKey;
+}
 
 /// Core module error types for optimization problems and factors
 #[derive(Debug, Clone, Error)]
