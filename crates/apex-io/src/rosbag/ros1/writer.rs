@@ -512,4 +512,121 @@ mod tests {
         assert!(matches!(r, Err(BagError::BagAlreadyExists { .. })));
         Ok(())
     }
+
+    #[test]
+    fn is_open_accessor() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("accessor.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        assert!(!w.is_open());
+        w.open()?;
+        assert!(w.is_open());
+        w.close()?;
+        assert!(!w.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn set_compression_after_open_errors() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("comp.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        w.open()?;
+        let result = w.set_compression(Ros1Compression::Bz2);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn set_chunk_threshold_after_open_errors() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("thresh.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        w.open()?;
+        let result = w.set_chunk_threshold(1024);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn write_before_open_errors() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("noopen.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        let conn = Connection {
+            id: 0,
+            topic: "/test".into(),
+            message_type: "std_msgs/String".into(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "ros1".into(),
+            offered_qos_profiles: Vec::new(),
+        };
+        let result = w.write(&conn, 0, &[]);
+        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        Ok(())
+    }
+
+    #[test]
+    fn add_connection_before_open_errors() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("noopen2.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        let result = w.add_connection("/t", "std_msgs/String", "md5", "", false);
+        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        Ok(())
+    }
+
+    #[test]
+    fn close_when_not_open_is_noop() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("noop.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        assert!(w.close().is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn write_unknown_connection_errors() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unknown.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        w.open()?;
+        let fake_conn = Connection {
+            id: 999,
+            topic: "/fake".into(),
+            message_type: "std_msgs/String".into(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "ros1".into(),
+            offered_qos_profiles: Vec::new(),
+        };
+        let result = w.write(&fake_conn, 0, &[]);
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn full_write_read_cycle() -> Result<()> {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("cycle.bag");
+        let mut w = Ros1Writer::new(&path)?;
+        w.open()?;
+        let conn = w.add_connection("/imu", "sensor_msgs/Imu", "md5sum", "def", false)?;
+        w.write(&conn, 1_000_000_000, &[1, 2, 3])?;
+        w.write(&conn, 2_000_000_000, &[4, 5, 6])?;
+        w.close()?;
+
+        let mut r = crate::rosbag::ros1::Ros1Reader::new(&path)?;
+        r.open()?;
+        assert_eq!(r.message_count(), 2);
+        assert_eq!(r.connections().len(), 1);
+        assert!(!r.topics().is_empty());
+        assert!(r.start_time() > 0);
+        assert!(r.end_time() >= r.start_time());
+        assert!(r.duration() > 0);
+        Ok(())
+    }
 }

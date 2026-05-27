@@ -467,4 +467,52 @@ mod tests {
         let r = Ros1Reader::new("/nonexistent/path.bag");
         assert!(matches!(r, Err(BagError::BagNotFound { .. })));
     }
+
+    #[test]
+    fn accessors_before_open_return_defaults() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bag");
+        std::fs::write(&path, b"dummy").unwrap();
+        let r = Ros1Reader::new(&path)?;
+        assert!(r.connections().is_empty());
+        assert!(r.topics().is_empty());
+        assert_eq!(r.duration(), 0);
+        assert_eq!(r.start_time(), u64::MAX);
+        assert_eq!(r.end_time(), 0);
+        assert_eq!(r.message_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn raw_messages_filtered_before_open_errors() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bag");
+        std::fs::write(&path, b"dummy").unwrap();
+        let mut r = Ros1Reader::new(&path)?;
+        let result = r.raw_messages_filtered(None, None, None);
+        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        Ok(())
+    }
+
+    #[test]
+    fn messages_filtered_before_open_errors() -> Result<()> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bag");
+        std::fs::write(&path, b"dummy").unwrap();
+        let mut r = Ros1Reader::new(&path)?;
+        let result = r.messages_filtered(None, None, None);
+        assert!(matches!(result, Err(BagError::BagNotOpen)));
+        Ok(())
+    }
+
+    #[test]
+    fn index_entry_timestamp_ns_or_self() {
+        let entry = IndexEntry {
+            conn_id: 0,
+            time_ns: 12345,
+            chunk_pos: 0,
+            offset: 0,
+        };
+        assert_eq!(entry.timestamp_ns_or_self(12345), 12345);
+    }
 }

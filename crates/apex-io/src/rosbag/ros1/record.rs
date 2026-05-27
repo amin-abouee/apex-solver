@@ -312,4 +312,127 @@ mod tests {
             Err(BagError::Ros1MalformedRecord { .. })
         ));
     }
+
+    #[test]
+    fn put_u8_get_u8_round_trip() -> Result<()> {
+        let mut h = RecordHeader::new();
+        h.put_u8("flag", 0xAB);
+        assert_eq!(h.get_u8("flag")?, 0xAB);
+        Ok(())
+    }
+
+    #[test]
+    fn get_u8_wrong_size_errors() {
+        let mut h = RecordHeader::new();
+        h.put_u32("big", 42);
+        assert!(matches!(
+            h.get_u8("big"),
+            Err(BagError::Ros1MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn get_str_valid_utf8() -> Result<()> {
+        let mut h = RecordHeader::new();
+        h.put_str("name", "hello");
+        assert_eq!(h.get_str("name")?, "hello");
+        Ok(())
+    }
+
+    #[test]
+    fn get_str_invalid_utf8_errors() {
+        let mut h = RecordHeader::new();
+        h.put("bad", vec![0xFF, 0xFE]);
+        assert!(matches!(
+            h.get_str("bad"),
+            Err(BagError::Ros1MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn get_u32_wrong_size_errors() {
+        let mut h = RecordHeader::new();
+        h.put_u8("small", 1);
+        assert!(matches!(
+            h.get_u32("small"),
+            Err(BagError::Ros1MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn get_u64_wrong_size_errors() {
+        let mut h = RecordHeader::new();
+        h.put_u32("half", 1);
+        assert!(matches!(
+            h.get_u64("half"),
+            Err(BagError::Ros1MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn get_time_nanos_round_trip() -> Result<()> {
+        let mut h = RecordHeader::new();
+        h.put_time("stamp", 100, 500);
+        assert_eq!(h.get_time_nanos("stamp")?, 100 * 1_000_000_000 + 500);
+        Ok(())
+    }
+
+    #[test]
+    fn get_time_nanos_wrong_size_errors() {
+        let mut h = RecordHeader::new();
+        h.put_u32("short_time", 1);
+        assert!(matches!(
+            h.get_time_nanos("short_time"),
+            Err(BagError::Ros1MalformedRecord { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_header_truncated_field_length() {
+        let bad = vec![0x01, 0x00];
+        assert!(parse_header(&bad).is_err());
+    }
+
+    #[test]
+    fn parse_header_truncated_field_data() {
+        let mut bad = Vec::new();
+        bad.extend_from_slice(&100u32.to_le_bytes());
+        bad.extend_from_slice(&[0x01, 0x02]);
+        assert!(parse_header(&bad).is_err());
+    }
+
+    #[test]
+    fn put_op_and_op_round_trip() -> Result<()> {
+        let mut h = RecordHeader::new();
+        h.put_op(OpCode::ChunkInfo);
+        assert_eq!(h.op()?, OpCode::ChunkInfo);
+        Ok(())
+    }
+
+    #[test]
+    fn op_unknown_op_code_errors() {
+        let mut h = RecordHeader::new();
+        h.put_u8("op", 0xFF);
+        assert!(matches!(
+            h.op(),
+            Err(BagError::Ros1UnknownOpCode { op: 0xFF })
+        ));
+    }
+
+    #[test]
+    fn encode_deterministic_order() {
+        let mut h1 = RecordHeader::new();
+        h1.put_str("b", "2").put_str("a", "1");
+
+        let mut h2 = RecordHeader::new();
+        h2.put_str("a", "1").put_str("b", "2");
+
+        assert_eq!(h1.encode(), h2.encode());
+    }
+
+    #[test]
+    fn get_optional_field_returns_none() {
+        let h = RecordHeader::new();
+        assert!(h.get("nonexistent").is_none());
+    }
 }

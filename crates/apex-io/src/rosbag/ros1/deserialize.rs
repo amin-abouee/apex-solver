@@ -304,8 +304,247 @@ mod tests {
     }
 
     #[test]
-    fn truncated_buffer_errors() {
+    fn truncated_buffer_error() {
         let mut d = Ros1Deserializer::new(&[0u8; 2]);
         assert!(d.read_u32().is_err());
+    }
+
+    #[test]
+    fn position_accessor() {
+        let d = Ros1Deserializer::new(&[0u8; 8]);
+        assert_eq!(d.position(), 0);
+        assert_eq!(d.remaining(), 8);
+    }
+
+    #[test]
+    fn position_advances_after_read() -> Result<()> {
+        let mut d = Ros1Deserializer::new(&[0u8; 8]);
+        d.read_u32()?;
+        assert_eq!(d.position(), 4);
+        assert_eq!(d.remaining(), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn bool_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_bool(true);
+        s.write_bool(false);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert!(d.read_bool()?);
+        assert!(!d.read_bool()?);
+        Ok(())
+    }
+
+    #[test]
+    fn i8_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_i8(-42);
+        s.write_i8(127);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert_eq!(d.read_i8()?, -42);
+        assert_eq!(d.read_i8()?, 127);
+        Ok(())
+    }
+
+    #[test]
+    fn u16_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_u16(0);
+        s.write_u16(65535);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert_eq!(d.read_u16()?, 0);
+        assert_eq!(d.read_u16()?, 65535);
+        Ok(())
+    }
+
+    #[test]
+    fn i16_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_i16(-32768);
+        s.write_i16(32767);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert_eq!(d.read_i16()?, -32768);
+        assert_eq!(d.read_i16()?, 32767);
+        Ok(())
+    }
+
+    #[test]
+    fn i64_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_i64(i64::MIN);
+        s.write_i64(i64::MAX);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert_eq!(d.read_i64()?, i64::MIN);
+        assert_eq!(d.read_i64()?, i64::MAX);
+        Ok(())
+    }
+
+    #[test]
+    fn f32_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_f32(std::f32::consts::PI);
+        s.write_f32(-0.0);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert!((d.read_f32()? - std::f32::consts::PI).abs() < 1e-6);
+        assert_eq!(d.read_f32()?, -0.0);
+        Ok(())
+    }
+
+    #[test]
+    fn read_array_fixed_length() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_f64(1.0);
+        s.write_f64(2.0);
+        s.write_f64(3.0);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        let arr = d.read_array(3, |d| d.read_f64())?;
+        assert_eq!(arr, vec![1.0, 2.0, 3.0]);
+        assert_eq!(d.remaining(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn read_array_empty() -> Result<()> {
+        let d_bytes: &[u8] = &[];
+        let mut d = Ros1Deserializer::new(d_bytes);
+        let arr: Vec<f64> = d.read_array(0, |d| d.read_f64())?;
+        assert!(arr.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_bytes(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        let result = d.read_bytes()?;
+        assert_eq!(result, vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        Ok(())
+    }
+
+    #[test]
+    fn bytes_empty_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_bytes(&[]);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        let result = d.read_bytes()?;
+        assert!(result.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn serializer_default_matches_new() {
+        let a = Ros1Serializer::new();
+        let b = Ros1Serializer::default();
+        assert_eq!(a.into_bytes(), b.into_bytes());
+    }
+
+    #[test]
+    fn serializer_as_slice() {
+        let mut s = Ros1Serializer::new();
+        s.write_u8(42);
+        assert_eq!(s.as_slice(), &[42]);
+    }
+
+    #[test]
+    fn read_bool_truncated_error() {
+        let mut d = Ros1Deserializer::new(&[]);
+        assert!(d.read_bool().is_err());
+    }
+
+    #[test]
+    fn read_string_truncated_error() {
+        let mut s = Ros1Serializer::new();
+        s.write_u32(100);
+        let bytes = s.into_bytes();
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert!(d.read_string().is_err());
+    }
+
+    #[test]
+    fn read_bytes_truncated_error() {
+        let mut s = Ros1Serializer::new();
+        s.write_u32(100);
+        let bytes = s.into_bytes();
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert!(d.read_bytes().is_err());
+    }
+
+    #[test]
+    fn read_seq_empty() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_u32(0);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        let v: Vec<u32> = d.read_seq(|d| d.read_u32())?;
+        assert!(v.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn write_seq_empty() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        let empty: Vec<f64> = vec![];
+        s.write_seq(&empty, |s, v| s.write_f64(*v));
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        let v = d.read_seq(|d| d.read_f64())?;
+        assert!(v.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn all_primitives_combined_round_trip() -> Result<()> {
+        let mut s = Ros1Serializer::new();
+        s.write_bool(true);
+        s.write_i8(-1);
+        s.write_u16(1000);
+        s.write_i16(-1000);
+        s.write_u32(123456);
+        s.write_i32(-123456);
+        s.write_u64(u64::MAX);
+        s.write_i64(i64::MIN);
+        s.write_f32(2.5);
+        s.write_f64(3.14);
+        s.write_string("test");
+        s.write_bytes(&[1, 2, 3]);
+        let bytes = s.into_bytes();
+
+        let mut d = Ros1Deserializer::new(&bytes);
+        assert!(d.read_bool()?);
+        assert_eq!(d.read_i8()?, -1);
+        assert_eq!(d.read_u16()?, 1000);
+        assert_eq!(d.read_i16()?, -1000);
+        assert_eq!(d.read_u32()?, 123456);
+        assert_eq!(d.read_i32()?, -123456);
+        assert_eq!(d.read_u64()?, u64::MAX);
+        assert_eq!(d.read_i64()?, i64::MIN);
+        assert!((d.read_f32()? - 2.5).abs() < 1e-6);
+        assert!((d.read_f64()? - 3.14).abs() < 1e-12);
+        assert_eq!(d.read_string()?, "test");
+        assert_eq!(d.read_bytes()?, vec![1, 2, 3]);
+        assert_eq!(d.remaining(), 0);
+        Ok(())
     }
 }

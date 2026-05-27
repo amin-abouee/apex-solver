@@ -372,4 +372,188 @@ mod tests {
         assert_eq!(PoseStamped::from_ros1(&mut d)?, ps);
         Ok(())
     }
+
+    #[test]
+    fn header_round_trip() -> Result<()> {
+        let h = Header {
+            seq: 42,
+            stamp_ns: 1_000_000_000,
+            frame_id: "base_link".into(),
+        };
+        let mut s = Ros1Serializer::new();
+        h.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Header::from_ros1(&mut d)?, h);
+        Ok(())
+    }
+
+    #[test]
+    fn vector3_round_trip() -> Result<()> {
+        let v = Vector3 {
+            x: 1.5,
+            y: -2.5,
+            z: 3.0,
+        };
+        let mut s = Ros1Serializer::new();
+        v.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Vector3::from_ros1(&mut d)?, v);
+        Ok(())
+    }
+
+    #[test]
+    fn point_round_trip() -> Result<()> {
+        let p = Point {
+            x: -1.0,
+            y: 0.0,
+            z: 100.0,
+        };
+        let mut s = Ros1Serializer::new();
+        p.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Point::from_ros1(&mut d)?, p);
+        Ok(())
+    }
+
+    #[test]
+    fn quaternion_round_trip() -> Result<()> {
+        let q = Quaternion {
+            x: 0.0,
+            y: 0.707,
+            z: 0.0,
+            w: 0.707,
+        };
+        let mut s = Ros1Serializer::new();
+        q.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Quaternion::from_ros1(&mut d)?, q);
+        Ok(())
+    }
+
+    #[test]
+    fn quaternion_default_is_identity() {
+        let q = Quaternion::default();
+        assert_eq!(q.w, 1.0);
+        assert_eq!(q.x, 0.0);
+        assert_eq!(q.y, 0.0);
+        assert_eq!(q.z, 0.0);
+    }
+
+    #[test]
+    fn pose_round_trip() -> Result<()> {
+        let p = Pose {
+            position: Point {
+                x: 1.0,
+                y: 2.0,
+                z: 3.0,
+            },
+            orientation: Quaternion::default(),
+        };
+        let mut s = Ros1Serializer::new();
+        p.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Pose::from_ros1(&mut d)?, p);
+        Ok(())
+    }
+
+    #[test]
+    fn string_msg_round_trip() -> Result<()> {
+        let msg = StringMsg {
+            data: "hello world".into(),
+        };
+        let mut s = Ros1Serializer::new();
+        msg.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(StringMsg::from_ros1(&mut d)?, msg);
+        Ok(())
+    }
+
+    #[test]
+    fn string_msg_empty_round_trip() -> Result<()> {
+        let msg = StringMsg { data: "".into() };
+        let mut s = Ros1Serializer::new();
+        msg.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(StringMsg::from_ros1(&mut d)?, msg);
+        Ok(())
+    }
+
+    #[test]
+    fn image_round_trip() -> Result<()> {
+        let img = Image {
+            header: Header {
+                seq: 1,
+                stamp_ns: 1_000_000_000,
+                frame_id: "camera".into(),
+            },
+            height: 480,
+            width: 640,
+            encoding: "rgb8".into(),
+            is_bigendian: 0,
+            step: 1920,
+            data: vec![0xFF; 100],
+        };
+        let mut s = Ros1Serializer::new();
+        img.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Image::from_ros1(&mut d)?, img);
+        Ok(())
+    }
+
+    #[test]
+    fn image_empty_data_round_trip() -> Result<()> {
+        let img = Image {
+            header: Header::default(),
+            height: 0,
+            width: 0,
+            encoding: "".into(),
+            is_bigendian: 0,
+            step: 0,
+            data: vec![],
+        };
+        let mut s = Ros1Serializer::new();
+        img.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(Image::from_ros1(&mut d)?, img);
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_image_round_trip() -> Result<()> {
+        let img = CompressedImage {
+            header: Header {
+                seq: 5,
+                stamp_ns: 2_000_000_000,
+                frame_id: "cam".into(),
+            },
+            format: "jpeg".into(),
+            data: vec![0xFF, 0xD8, 0xFF, 0xE0],
+        };
+        let mut s = Ros1Serializer::new();
+        img.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(CompressedImage::from_ros1(&mut d)?, img);
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_image_empty_data_round_trip() -> Result<()> {
+        let img = CompressedImage {
+            header: Header::default(),
+            format: "".into(),
+            data: vec![],
+        };
+        let mut s = Ros1Serializer::new();
+        img.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(CompressedImage::from_ros1(&mut d)?, img);
+        Ok(())
+    }
+
+    #[test]
+    fn imu_default_has_identity_orientation() {
+        let imu = Imu::default();
+        assert_eq!(imu.orientation.w, 1.0);
+        assert_eq!(imu.orientation.x, 0.0);
+    }
 }
