@@ -152,18 +152,14 @@
 //! use apex_solver::optimizer::DogLeg;
 //! use apex_solver::core::problem::Problem;
 //! use apex_solver::JacobianMode;
-//! use std::collections::HashMap;
 //!
 //! # type TestResult = Result<(), Box<dyn std::error::Error>>;
 //! # fn main() -> TestResult {
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
-//! let initial_values = HashMap::new();
-//! // ... initialize parameters ...
-//!
 //! let mut solver = DogLeg::new();
-//! let result = solver.optimize(&problem, &initial_values)?;
+//! let result = solver.optimize(&mut problem)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -196,9 +192,7 @@
 //! - Ceres Solver: http://ceres-solver.org/ - Google's C++ nonlinear least squares library
 
 use crate::{core::problem, error, linalg, optimizer};
-use apex_manifolds as manifold;
-
-use std::{collections, fmt, time};
+use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
@@ -668,18 +662,14 @@ struct StepEvaluation {
 /// use apex_solver::optimizer::DogLeg;
 /// use apex_solver::core::problem::Problem;
 /// use apex_solver::JacobianMode;
-/// use std::collections::HashMap;
 ///
 /// # type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// # fn main() -> TestResult {
 /// let mut problem = Problem::new(JacobianMode::Sparse);
 /// // ... add factors to problem ...
 ///
-/// let initial_values = HashMap::new();
-/// // ... initialize parameters ...
-///
 /// let mut solver = DogLeg::new();
-/// let result = solver.optimize(&problem, &initial_values)?;
+/// let result = solver.optimize(&mut problem)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -754,12 +744,13 @@ impl DogLeg {
     /// ```no_run
     /// use apex_solver::optimizer::DogLeg;
     /// # use apex_solver::optimizer::OptObserver;
-    /// # use std::collections::HashMap;
-    /// # use apex_solver::core::problem::VariableEnum;
+    /// # use apex_solver::core::VarKey;
+    /// # use apex_solver::core::variable::ManifoldVariable;
+    /// # use slotmap::SlotMap;
     ///
     /// # struct MyObserver;
     /// # impl OptObserver for MyObserver {
-    /// #     fn on_step(&self, _: &HashMap<String, VariableEnum>, _: usize) {}
+    /// #     fn on_step(&self, _: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _: usize) {}
     /// # }
     /// let mut solver = DogLeg::new();
     /// solver.add_observer(MyObserver);
@@ -1142,16 +1133,9 @@ impl DogLeg {
     /// Run optimization using the specified assembly mode and linear solver.
     fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
+        problem: &mut problem::Problem,
         linear_solver: &mut dyn LinearSolver<M>,
-    ) -> Result<
-        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        error::ApexSolverError,
-    > {
+    ) -> optimizer::OptimizeResult {
         let start_time = time::Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1;
@@ -1159,7 +1143,7 @@ impl DogLeg {
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
 
-        let mut state = optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut state = optimizer::initialize_optimization_state(problem)?;
 
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
@@ -1354,38 +1338,28 @@ impl DogLeg {
     }
 
     /// Run optimization, automatically selecting sparse or dense path based on config.
-    pub fn optimize(
-        &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        error::ApexSolverError,
-    > {
+    pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
                 LinearSolverType::DenseQR => {
                     let mut solver = DenseQRSolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
                 _ => {
                     let mut solver = DenseCholeskySolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
                 _ => {
                     // SparseCholesky (default), SparseSchurComplement or DenseCholesky with
                     // sparse mode → SparseCholeskySolver
                     let mut solver = SparseCholeskySolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
             },
         }
@@ -1393,18 +1367,8 @@ impl DogLeg {
 }
 
 impl optimizer::Optimizer for DogLeg {
-    fn optimize(
-        &mut self,
-        problem: &problem::Problem,
-        initial_params: &collections::HashMap<
-            String,
-            (manifold::ManifoldType, nalgebra::DVector<f64>),
-        >,
-    ) -> Result<
-        optimizer::SolverResult<collections::HashMap<String, problem::VariableEnum>>,
-        crate::error::ApexSolverError,
-    > {
-        self.optimize(problem, initial_params)
+    fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
+        self.optimize(problem)
     }
 }
 
@@ -1413,6 +1377,7 @@ mod tests {
     use super::*;
     use crate::factors;
     use apex_manifolds as manifold;
+    use faer::prelude::ReborrowMut;
     use nalgebra;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1425,30 +1390,23 @@ mod tests {
     impl factors::Factor for RosenbrockFactor1 {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
             let x1 = params[0][0];
             let x2 = params[1][0];
-
-            // Residual: r1 = 10(x2 - x1²)
-            let residual = nalgebra::dvector![10.0 * (x2 - x1 * x1)];
-
-            // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-            let jacobian = if compute_jacobian {
-                let mut jac = nalgebra::DMatrix::zeros(1, 2);
-                jac[(0, 0)] = -20.0 * x1;
-                jac[(0, 1)] = 10.0;
-                Some(jac)
-            } else {
-                None
-            };
-
-            (residual, jacobian)
+            residual[0] = 10.0 * (x2 - x1 * x1);
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = -20.0 * x1;
+                *jac.rb_mut().get_mut(0, 1) = 10.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 2)
         }
     }
 
@@ -1460,26 +1418,20 @@ mod tests {
     impl factors::Factor for RosenbrockFactor2 {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
-            let x1 = params[0][0];
-
-            // Residual: r2 = 1 - x1
-            let residual = nalgebra::dvector![1.0 - x1];
-
-            // Jacobian: ∂r2/∂x1 = -1
-            let jacobian = if compute_jacobian {
-                Some(nalgebra::DMatrix::from_element(1, 1, -1.0))
-            } else {
-                None
-            };
-
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = 1.0 - params[0][0];
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = -1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
         }
     }
 
@@ -1493,21 +1445,12 @@ mod tests {
         // Expected minimum: [1.0, 1.0]
 
         let mut problem = problem::Problem::new(JacobianMode::Sparse);
-        let mut initial_values = collections::HashMap::new();
-
-        // Add variables using Rn manifold (Euclidean space)
-        initial_values.insert(
-            "x1".to_string(),
-            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
-        );
-        initial_values.insert(
-            "x2".to_string(),
-            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
-        );
+        let x1 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![-1.2]);
+        let x2 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![1.0]);
 
         // Add custom factors (demonstrates extensibility!)
-        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
         // Configure Dog Leg optimizer with appropriate trust region
         let config = DogLegConfig::new()
@@ -1518,19 +1461,11 @@ mod tests {
             .with_trust_region_radius(10.0); // Start with larger trust region
 
         let mut solver = DogLeg::with_config(config);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
 
         // Extract final values
-        let x1_final = result
-            .parameters
-            .get("x1")
-            .ok_or("x1 not found")?
-            .to_vector()[0];
-        let x2_final = result
-            .parameters
-            .get("x2")
-            .ok_or("x2 not found")?
-            .to_vector()[0];
+        let x1_final = result.parameters[x1].as_param_slice()[0];
+        let x2_final = result.parameters[x2].as_param_slice()[0];
 
         // Verify convergence to [1.0, 1.0]
         assert!(
@@ -1569,56 +1504,37 @@ mod tests {
     impl factors::Factor for LinearFactor {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
-            let residual = nalgebra::dvector![params[0][0] - self.target];
-            let jacobian = if compute_jacobian {
-                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
-            } else {
-                None
-            };
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
         }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
     }
 
-    fn rosenbrock_problem() -> (
-        problem::Problem,
-        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn rosenbrock_problem() -> problem::Problem {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
-        let mut init = collections::HashMap::new();
-        init.insert(
-            "x1".to_string(),
-            (manifold::ManifoldType::RN, nalgebra::dvector![-1.2]),
-        );
-        init.insert(
-            "x2".to_string(),
-            (manifold::ManifoldType::RN, nalgebra::dvector![1.0]),
-        );
-        prob.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        prob.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
-        (prob, init)
+        let x1 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![-1.2]);
+        let x2 = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![1.0]);
+        prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        prob
     }
 
-    fn linear_problem(
-        start: f64,
-    ) -> (
-        problem::Problem,
-        collections::HashMap<String, (manifold::ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn linear_problem(start: f64) -> problem::Problem {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
-        let mut init = collections::HashMap::new();
-        init.insert(
-            "x".to_string(),
-            (manifold::ManifoldType::RN, nalgebra::dvector![start]),
-        );
-        prob.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
-        (prob, init)
+        let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
+        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
+        prob
     }
 
     // -------------------------------------------------------------------------
@@ -1688,10 +1604,10 @@ mod tests {
 
     #[test]
     fn test_dl_max_iterations_termination() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new().with_max_iterations(2);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
             optimizer::OptimizationStatus::MaxIterationsReached
@@ -1702,13 +1618,13 @@ mod tests {
 
     #[test]
     fn test_dl_gradient_tolerance_convergence() -> TestResult {
-        let (problem, initial_values) = linear_problem(1.0);
+        let mut problem = linear_problem(1.0);
         let cfg = DogLegConfig::new()
             .with_gradient_tolerance(1e3)
             .with_cost_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
             optimizer::OptimizationStatus::GradientToleranceReached
@@ -1718,13 +1634,13 @@ mod tests {
 
     #[test]
     fn test_dl_cost_tolerance_convergence() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_cost_tolerance(1e2) // very loose
             .with_gradient_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(matches!(
             result.status,
             optimizer::OptimizationStatus::CostToleranceReached
@@ -1738,12 +1654,12 @@ mod tests {
     #[test]
     fn test_dl_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
     }
@@ -1751,26 +1667,26 @@ mod tests {
     #[test]
     fn test_dl_jacobi_scaling_disabled() -> TestResult {
         // DogLeg has Jacobi scaling ON by default; test with it explicitly disabled
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_jacobi_scaling(false)
             .with_max_iterations(100);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
     }
 
     #[test]
     fn test_dl_min_cost_threshold() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_min_cost_threshold(1e10)
             .with_cost_tolerance(1e-20)
             .with_gradient_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
             optimizer::OptimizationStatus::MinCostThresholdReached
@@ -1780,24 +1696,24 @@ mod tests {
 
     #[test]
     fn test_dl_trust_region_radius_in_config() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_trust_region_radius(0.1) // small initial radius
             .with_max_iterations(200);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.iterations > 0);
         Ok(())
     }
 
     #[test]
     fn test_dl_step_reuse_config() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = DogLegConfig::new()
             .with_step_reuse(true)
             .with_max_iterations(100);
         let mut solver = DogLeg::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
     }
@@ -1821,9 +1737,9 @@ mod tests {
 
     #[test]
     fn test_dl_result_fields() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let mut solver = DogLeg::new();
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.initial_cost > result.final_cost);
         assert!(result.iterations > 0);
         assert!(result.convergence_info.is_some());

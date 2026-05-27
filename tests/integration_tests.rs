@@ -34,6 +34,7 @@
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::JacobianMode;
 use apex_solver::ManifoldType;
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
@@ -81,7 +82,7 @@ fn run_se3_optimization(
 
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
 
     // Add SE3 vertices as variables
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
@@ -89,11 +90,11 @@ fn run_se3_optimization(
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se3.get(&id) {
-            let var_name = format!("x{}", id);
             let quat = vertex.pose.rotation_quaternion();
             let trans = vertex.pose.translation();
             let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+            let key = problem.add_variable(ManifoldType::SE3, se3_data);
+            var_keys.insert(id, key);
         }
     }
 
@@ -102,7 +103,6 @@ fn run_se3_optimization(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
     {
-        let var_name = format!("x{}", first_id);
         let quat = first_vertex.pose.rotation_quaternion();
         let trans = first_vertex.pose.translation();
         let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
@@ -111,8 +111,9 @@ fn run_se3_optimization(
             data: prior_value.clone(),
         };
         let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_keys[&first_id];
         problem.add_residual_block(
-            &[&var_name],
+            &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
@@ -120,12 +121,11 @@ fn run_se3_optimization(
 
     // Add SE3 between factors
     for edge in &graph.edges_se3 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
         let relative_pose = edge.measurement.clone();
-
         let between_factor = BetweenFactor::new(relative_pose);
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None);
+        }
     }
 
     // Configure and run Levenberg-Marquardt optimizer
@@ -138,7 +138,7 @@ fn run_se3_optimization(
     let mut solver = LevenbergMarquardt::with_config(config);
 
     let start_time = Instant::now();
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
     let elapsed_time = start_time.elapsed();
 
     // Calculate improvement percentage
@@ -195,7 +195,7 @@ fn run_se2_optimization(
 
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
 
     // Add SE2 vertices as variables
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
@@ -203,10 +203,10 @@ fn run_se2_optimization(
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se2.get(&id) {
-            let var_name = format!("x{}", id);
             let pose = &vertex.pose;
             let se2_data = dvector![pose.x(), pose.y(), pose.angle()];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+            let key = problem.add_variable(ManifoldType::SE2, se2_data);
+            var_keys.insert(id, key);
         }
     }
 
@@ -215,7 +215,6 @@ fn run_se2_optimization(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
     {
-        let var_name = format!("x{}", first_id);
         let pose = &first_vertex.pose;
         let prior_value = dvector![pose.x(), pose.y(), pose.angle()];
 
@@ -223,8 +222,9 @@ fn run_se2_optimization(
             data: prior_value.clone(),
         };
         let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_keys[&first_id];
         problem.add_residual_block(
-            &[&var_name],
+            &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
@@ -232,11 +232,10 @@ fn run_se2_optimization(
 
     // Add SE2 between factors
     for edge in &graph.edges_se2 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-
         let between_factor = BetweenFactor::new(edge.measurement.clone());
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), None);
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), None);
+        }
     }
 
     // Configure and run Levenberg-Marquardt optimizer
@@ -249,7 +248,7 @@ fn run_se2_optimization(
     let mut solver = LevenbergMarquardt::with_config(config);
 
     let start_time = Instant::now();
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
     let elapsed_time = start_time.elapsed();
 
     // Calculate improvement percentage

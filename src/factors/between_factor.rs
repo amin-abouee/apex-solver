@@ -1,6 +1,6 @@
 use super::Factor;
-use apex_manifolds::LieGroup;
-use nalgebra::{DMatrix, DVector};
+use apex_manifolds::{LieGroup, Tangent};
+use faer::prelude::ReborrowMut;
 
 /// Generic between factor for Lie group pose constraints.
 ///
@@ -64,19 +64,20 @@ use nalgebra::{DMatrix, DVector};
 /// use apex_solver::manifold::se3::SE3;
 /// use nalgebra::{Vector3, Quaternion, DVector};
 ///
-/// // Measurement: relative 3D transformation between two poses
 /// let relative_pose = SE3::from_translation_quaternion(
-///     Vector3::new(1.0, 0.0, 0.0),        // 1m forward
-///     Quaternion::new(1.0, 0.0, 0.0, 0.0) // No rotation
+///     Vector3::new(1.0, 0.0, 0.0),
+///     Quaternion::new(1.0, 0.0, 0.0, 0.0),
 /// );
 /// let between = BetweenFactor::new(relative_pose);
 ///
-/// // Current pose estimates (in [tx, ty, tz, qw, qx, qy, qz] format)
 /// let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
 /// let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0]);
 ///
-/// // Compute residual (dimension 6) and Jacobian (6×12)
-/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
+/// let mut residual = vec![0.0f64; between.residual_dim()];
+/// let (rows, cols) = between.jacobian_shape();
+/// let mut jac_buf = vec![0.0f64; rows * cols];
+/// let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+/// between.linearize(&[pose_i.as_slice(), pose_j.as_slice()], &mut residual, Some(jac_mut));
 /// ```
 ///
 /// ## SE(2) - 2D Pose Graph
@@ -86,16 +87,14 @@ use nalgebra::{DMatrix, DVector};
 /// use apex_solver::manifold::se2::SE2;
 /// use nalgebra::DVector;
 ///
-/// // Measurement: robot moved 1m forward and rotated 0.1 rad
 /// let relative_pose = SE2::from_xy_angle(1.0, 0.0, 0.1);
 /// let between = BetweenFactor::new(relative_pose);
 ///
-/// // Current pose estimates (in [x, y, theta] format)
 /// let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0]);
 /// let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.12]);
 ///
-/// // Compute residual (dimension 3) and Jacobian (3×6)
-/// let (residual, jacobian) = between.linearize(&[pose_i, pose_j], true);
+/// let mut residual = vec![0.0f64; between.residual_dim()];
+/// between.linearize(&[pose_i.as_slice(), pose_j.as_slice()], &mut residual, None);
 /// ```
 ///
 /// # Performance
@@ -109,7 +108,6 @@ use nalgebra::{DMatrix, DVector};
 pub struct BetweenFactor<T>
 where
     T: LieGroup + Clone + Send + Sync,
-    T::TangentVector: Into<DVector<f64>>,
 {
     /// The measured relative pose transformation between the two connected poses
     pub relative_pose: T,
@@ -118,7 +116,6 @@ where
 impl<T> BetweenFactor<T>
 where
     T: LieGroup + Clone + Send + Sync,
-    T::TangentVector: Into<DVector<f64>>,
 {
     /// Create a new between factor from a relative pose measurement.
     ///
@@ -170,108 +167,16 @@ where
 
 impl<T> Factor for BetweenFactor<T>
 where
-    T: LieGroup + Clone + Send + Sync + From<DVector<f64>>,
-    T::TangentVector: Into<DVector<f64>>,
+    T: LieGroup + Clone + Send + Sync,
 {
-    /// Compute residual and Jacobian for a generic between factor.
-    ///
-    /// This method works with any Lie group manifold type, automatically adapting to
-    /// the manifold's degrees of freedom. The residual and Jacobian dimensions are
-    /// determined at runtime based on the manifold type.
-    ///
-    /// # Arguments
-    ///
-    /// * `params` - Two poses as `DVector<f64>` in the manifold's representation format:
-    ///   - **SE(3)**: `[tx, ty, tz, qw, qx, qy, qz]` (7 parameters, 6 DOF)
-    ///   - **SE(2)**: `[x, y, theta]` (3 parameters, 3 DOF)
-    ///   - **SO(3)**: `[qw, qx, qy, qz]` (4 parameters, 3 DOF)
-    ///   - **SO(2)**: `[angle]` (1 parameter, 1 DOF)
-    /// * `compute_jacobian` - Whether to compute the analytical Jacobian matrix
-    ///
-    /// # Returns
-    ///
-    /// A tuple `(residual, jacobian)` where:
-    /// - **Residual**: `DVector<f64>` with dimension = manifold DOF
-    ///   - SE(3): 6×1 vector `[v_x, v_y, v_z, ω_x, ω_y, ω_z]`
-    ///   - SE(2): 3×1 vector `[dx, dy, dθ]`
-    ///   - SO(3): 3×1 vector `[ω_x, ω_y, ω_z]`
-    ///   - SO(2): 1×1 vector `[dθ]`
-    /// - **Jacobian**: `Option<DMatrix<f64>>` with dimension = (DOF, 2×DOF)
-    ///   - SE(3): 6×12 matrix `[∂r/∂pose_i | ∂r/∂pose_j]`
-    ///   - SE(2): 3×6 matrix `[∂r/∂pose_i | ∂r/∂pose_j]`
-    ///   - SO(3): 3×6 matrix `[∂r/∂pose_i | ∂r/∂pose_j]`
-    ///   - SO(2): 1×2 matrix `[∂r/∂pose_i | ∂r/∂pose_j]`
-    ///
-    /// # Algorithm
-    ///
-    /// Uses analytical Jacobians computed via chain rule through three steps:
-    /// 1. **Between**: `T_j.between(T_i) = T_j⁻¹ ⊕ T_i` with Jacobians ∂/∂T_j and ∂/∂T_i
-    /// 2. **Composition**: `(T_j⁻¹ ⊕ T_i) ⊕ T_ij` with Jacobian ∂/∂(T_j⁻¹ ⊕ T_i)
-    /// 3. **Logarithm**: `log(...)` with Jacobian ∂log/∂(...)
-    ///
-    /// The final Jacobian is computed using the chain rule:
-    /// ```text
-    /// J = ∂log/∂diff · ∂diff/∂between · ∂between/∂poses
-    /// ```
-    ///
-    /// This approach reduces the number of matrix operations compared to computing
-    /// inverse and compose separately, resulting in both clearer code and better performance.
-    ///
-    /// # Performance
-    ///
-    /// - **Static dispatch**: All operations are monomorphized at compile time
-    /// - **Zero overhead**: Same performance as type-specific implementations
-    /// - **Parallel-safe**: Marked `Send + Sync` for use in parallel optimization
-    ///
-    /// # Examples
-    ///
-    /// ## SE(3) Linearization
-    ///
-    /// ```
-    /// use apex_solver::factors::{Factor, BetweenFactor};
-    /// use apex_solver::manifold::se3::SE3;
-    /// use nalgebra::DVector;
-    ///
-    /// let relative = SE3::identity();
-    /// let factor = BetweenFactor::new(relative);
-    ///
-    /// let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
-    /// let pose_j = DVector::from_vec(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
-    ///
-    /// let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
-    /// assert_eq!(residual.len(), 6);  // 6 DOF
-    /// assert!(jacobian.is_some());
-    /// let jac = jacobian.unwrap();
-    /// assert_eq!(jac.nrows(), 6);      // Residual dimension
-    /// assert_eq!(jac.ncols(), 12);     // 2 × DOF
-    /// ```
-    ///
-    /// ## SE(2) Linearization
-    ///
-    /// ```
-    /// use apex_solver::factors::{Factor, BetweenFactor};
-    /// use apex_solver::manifold::se2::SE2;
-    /// use nalgebra::DVector;
-    ///
-    /// let relative = SE2::from_xy_angle(1.0, 0.0, 0.0);
-    /// let factor = BetweenFactor::new(relative);
-    ///
-    /// let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0]);
-    /// let pose_j = DVector::from_vec(vec![1.0, 0.0, 0.0]);
-    ///
-    /// let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
-    /// assert_eq!(residual.len(), 3);   // 3 DOF
-    /// let jac = jacobian.unwrap();
-    /// assert_eq!(jac.nrows(), 3);      // Residual dimension
-    /// assert_eq!(jac.ncols(), 6);      // 2 × DOF
-    /// ```
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-        let se3_origin_k0 = T::from(params[0].clone());
-        let se3_origin_k1 = T::from(params[1].clone());
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        let se3_origin_k0 = T::from_param_slice(params[0]);
+        let se3_origin_k1 = T::from_param_slice(params[1]);
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.between(se3_origin_k0) = k1⁻¹ * k0
@@ -289,40 +194,34 @@ where
 
         // Step 3: se3_diff.log()
         let mut j_log_wrt_diff = T::zero_jacobian();
-        let residual = se3_diff.log(Some(&mut j_log_wrt_diff));
+        let tangent = se3_diff.log(Some(&mut j_log_wrt_diff));
+        let tangent_slice = tangent.as_slice();
+        let dof = tangent_slice.len();
 
-        let jacobian = if compute_jacobian {
-            // Calculate dimensions dynamically based on manifold DOF
-            let dof = se3_origin_k0.tangent_dim();
+        residual[..dof].copy_from_slice(tangent_slice);
 
-            // Chain rule: d(residual)/d(k0) and d(residual)/d(k1)
+        if let Some(mut jac) = jacobian {
             let j_diff_wrt_k0 = j_diff_wrt_k1_k0.clone() * j_k1_k0_wrt_k0;
             let j_diff_wrt_k1 = j_diff_wrt_k1_k0 * j_k1_k0_wrt_k1;
-
             let jacobian_wrt_k0 = j_log_wrt_diff.clone() * j_diff_wrt_k0;
             let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
 
-            // Assemble full Jacobian: [∂r/∂pose_i | ∂r/∂pose_j]
-            let mut jacobian = DMatrix::<f64>::zeros(dof, 2 * dof);
-
-            // Copy element-wise from JacobianMatrix to DMatrix
-            // This works for all Matrix types (fixed-size and dynamic)
             for i in 0..dof {
                 for j in 0..dof {
-                    jacobian[(i, j)] = jacobian_wrt_k0[(i, j)];
-                    jacobian[(i, j + dof)] = jacobian_wrt_k1[(i, j)];
+                    *jac.rb_mut().get_mut(i, j) = jacobian_wrt_k0[(i, j)];
+                    *jac.rb_mut().get_mut(i, j + dof) = jacobian_wrt_k1[(i, j)];
                 }
             }
-
-            Some(jacobian)
-        } else {
-            None
-        };
-        (residual.into(), jacobian)
+        }
     }
 
-    fn get_dimension(&self) -> usize {
+    fn residual_dim(&self) -> usize {
         self.relative_pose.tangent_dim()
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        let dof = self.relative_pose.tangent_dim();
+        (dof, 2 * dof)
     }
 }
 
@@ -333,71 +232,93 @@ mod tests {
     use apex_manifolds::se3::SE3;
     use apex_manifolds::so2::SO2;
     use apex_manifolds::so3::SO3;
-    use nalgebra::{DVector, Quaternion, Vector3};
+    use nalgebra::{DMatrix, DVector, Quaternion, Vector3};
 
     const TOLERANCE: f64 = 1e-9;
     const FD_EPSILON: f64 = 1e-6;
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
+    fn compute_residual<T>(
+        factor: &BetweenFactor<T>,
+        pose_i: &DVector<f64>,
+        pose_j: &DVector<f64>,
+    ) -> Vec<f64>
+    where
+        T: LieGroup + Clone + Send + Sync,
+    {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[pose_i.as_slice(), pose_j.as_slice()], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian<T>(
+        factor: &BetweenFactor<T>,
+        pose_i: &DVector<f64>,
+        pose_j: &DVector<f64>,
+    ) -> (Vec<f64>, DMatrix<f64>)
+    where
+        T: LieGroup + Clone + Send + Sync,
+    {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(
+            &[pose_i.as_slice(), pose_j.as_slice()],
+            &mut residual,
+            Some(jac_mut),
+        );
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
+    }
+
     #[test]
     fn test_between_factor_se2_identity() {
-        // Test that identity measurement yields zero residual
         let relative = SE2::identity();
         let factor = BetweenFactor::new(relative);
 
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![0.0, 0.0, 0.0]);
 
-        let (residual, _) = factor.linearize(&[pose_i, pose_j], false);
+        let residual = compute_residual(&factor, &pose_i, &pose_j);
 
         assert_eq!(residual.len(), 3);
-        assert!(
-            residual.norm() < TOLERANCE,
-            "Residual norm: {}",
-            residual.norm()
-        );
+        let norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm < TOLERANCE, "Residual norm: {}", norm);
     }
 
     #[test]
     fn test_between_factor_se3_identity() {
-        // Test that identity measurement yields zero residual
         let relative = SE3::identity();
         let factor = BetweenFactor::new(relative);
 
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
 
-        let (residual, _) = factor.linearize(&[pose_i, pose_j], false);
+        let residual = compute_residual(&factor, &pose_i, &pose_j);
 
         assert_eq!(residual.len(), 6);
-        assert!(
-            residual.norm() < TOLERANCE,
-            "Residual norm: {}",
-            residual.norm()
-        );
+        let norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(norm < TOLERANCE, "Residual norm: {}", norm);
     }
 
     #[test]
     fn test_between_factor_se2_jacobian_numerical() -> TestResult {
-        // Verify Jacobian using finite differences with manifold perturbations
         let relative = SE2::from_xy_angle(1.0, 0.0, 0.1);
         let factor = BetweenFactor::new(relative);
 
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.12]);
 
-        let (residual, jacobian_opt) = factor.linearize(&[pose_i.clone(), pose_j.clone()], true);
-        let jacobian = jacobian_opt.ok_or("Jacobian should be Some when compute_jacobians=true")?;
+        let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 
         assert_eq!(jacobian.nrows(), 3);
         assert_eq!(jacobian.ncols(), 6);
 
-        // Finite difference validation using manifold plus operation
         let mut jacobian_fd = DMatrix::<f64>::zeros(3, 6);
-        let se2_i = SE2::from(pose_i.clone());
-        let se2_j = SE2::from(pose_j.clone());
+        let se2_i = SE2::from_param_slice(pose_i.as_slice());
+        let se2_j = SE2::from_param_slice(pose_j.as_slice());
 
-        // Perturb pose_i in tangent space
         for i in 0..3 {
             let delta = match i {
                 0 => SE2Tangent::new(FD_EPSILON, 0.0, 0.0),
@@ -405,17 +326,14 @@ mod tests {
                 2 => SE2Tangent::new(0.0, 0.0, FD_EPSILON),
                 _ => unreachable!(),
             };
-            let se2_i_perturbed = se2_i.plus(&delta, None, None);
-            let pose_i_perturbed = DVector::<f64>::from(se2_i_perturbed);
-            let (residual_perturbed, _) =
-                factor.linearize(&[pose_i_perturbed, pose_j.clone()], false);
-
+            let pose_i_p =
+                DVector::from_column_slice(se2_i.plus(&delta, None, None).as_param_slice());
+            let residual_p = compute_residual(&factor, &pose_i_p, &pose_j);
             for j in 0..3 {
-                jacobian_fd[(j, i)] = (residual_perturbed[j] - residual[j]) / FD_EPSILON;
+                jacobian_fd[(j, i)] = (residual_p[j] - residual[j]) / FD_EPSILON;
             }
         }
 
-        // Perturb pose_j in tangent space
         for i in 0..3 {
             let delta = match i {
                 0 => SE2Tangent::new(FD_EPSILON, 0.0, 0.0),
@@ -423,13 +341,11 @@ mod tests {
                 2 => SE2Tangent::new(0.0, 0.0, FD_EPSILON),
                 _ => unreachable!(),
             };
-            let se2_j_perturbed = se2_j.plus(&delta, None, None);
-            let pose_j_perturbed = DVector::<f64>::from(se2_j_perturbed);
-            let (residual_perturbed, _) =
-                factor.linearize(&[pose_i.clone(), pose_j_perturbed], false);
-
+            let pose_j_p =
+                DVector::from_column_slice(se2_j.plus(&delta, None, None).as_param_slice());
+            let residual_p = compute_residual(&factor, &pose_i, &pose_j_p);
             for j in 0..3 {
-                jacobian_fd[(j, i + 3)] = (residual_perturbed[j] - residual[j]) / FD_EPSILON;
+                jacobian_fd[(j, i + 3)] = (residual_p[j] - residual[j]) / FD_EPSILON;
             }
         }
 
@@ -440,7 +356,6 @@ mod tests {
 
     #[test]
     fn test_between_factor_se3_jacobian_numerical() -> TestResult {
-        // Verify Jacobian using finite differences for SE3
         let relative = SE3::from_translation_quaternion(
             Vector3::new(1.0, 0.0, 0.0),
             Quaternion::new(1.0, 0.0, 0.0, 0.0),
@@ -450,40 +365,31 @@ mod tests {
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![0.95, 0.05, 0.0, 1.0, 0.0, 0.0, 0.0]);
 
-        let (residual, jacobian_opt) = factor.linearize(&[pose_i.clone(), pose_j.clone()], true);
-        let jacobian = jacobian_opt.ok_or("Jacobian should be Some when compute_jacobians=true")?;
+        let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 
         assert_eq!(jacobian.nrows(), 6);
         assert_eq!(jacobian.ncols(), 12);
 
-        // Finite difference validation (only check translation part for simplicity)
         let mut jacobian_fd = DMatrix::<f64>::zeros(6, 12);
 
-        // Perturb pose_i translation
         for i in 0..3 {
-            let mut pose_i_perturbed = pose_i.clone();
-            pose_i_perturbed[i] += FD_EPSILON;
-            let (residual_perturbed, _) =
-                factor.linearize(&[pose_i_perturbed, pose_j.clone()], false);
-
+            let mut pose_i_p = pose_i.clone();
+            pose_i_p[i] += FD_EPSILON;
+            let residual_p = compute_residual(&factor, &pose_i_p, &pose_j);
             for j in 0..6 {
-                jacobian_fd[(j, i)] = (residual_perturbed[j] - residual[j]) / FD_EPSILON;
+                jacobian_fd[(j, i)] = (residual_p[j] - residual[j]) / FD_EPSILON;
             }
         }
 
-        // Perturb pose_j translation
         for i in 0..3 {
-            let mut pose_j_perturbed = pose_j.clone();
-            pose_j_perturbed[i] += FD_EPSILON;
-            let (residual_perturbed, _) =
-                factor.linearize(&[pose_i.clone(), pose_j_perturbed], false);
-
+            let mut pose_j_p = pose_j.clone();
+            pose_j_p[i] += FD_EPSILON;
+            let residual_p = compute_residual(&factor, &pose_i, &pose_j_p);
             for j in 0..6 {
-                jacobian_fd[(j, i + 6)] = (residual_perturbed[j] - residual[j]) / FD_EPSILON;
+                jacobian_fd[(j, i + 6)] = (residual_p[j] - residual[j]) / FD_EPSILON;
             }
         }
 
-        // Check translation part only (more robust for FD)
         let diff_norm_trans = (jacobian.columns(0, 3) - jacobian_fd.columns(0, 3)).norm();
         assert!(
             diff_norm_trans < 1e-5,
@@ -498,17 +404,16 @@ mod tests {
         let relative = SE2::from_xy_angle(1.0, 0.5, 0.1);
         let factor = BetweenFactor::new(relative);
 
+        assert_eq!(factor.residual_dim(), 3);
+        assert_eq!(factor.jacobian_shape(), (3, 6));
+
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![1.0, 0.0, 0.0]);
-
-        let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
+        let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 
         assert_eq!(residual.len(), 3);
-        assert_eq!(factor.get_dimension(), 3);
-
-        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
-        assert_eq!(jac.nrows(), 3);
-        assert_eq!(jac.ncols(), 6);
+        assert_eq!(jacobian.nrows(), 3);
+        assert_eq!(jacobian.ncols(), 6);
         Ok(())
     }
 
@@ -517,49 +422,41 @@ mod tests {
         let relative = SE3::identity();
         let factor = BetweenFactor::new(relative);
 
+        assert_eq!(factor.residual_dim(), 6);
+        assert_eq!(factor.jacobian_shape(), (6, 12));
+
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
-
-        let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
+        let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 
         assert_eq!(residual.len(), 6);
-        assert_eq!(factor.get_dimension(), 6);
-
-        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
-        assert_eq!(jac.nrows(), 6);
-        assert_eq!(jac.ncols(), 12);
+        assert_eq!(jacobian.nrows(), 6);
+        assert_eq!(jacobian.ncols(), 12);
         Ok(())
     }
 
     #[test]
     fn test_between_factor_so2_so3() -> TestResult {
-        // Test SO2 (rotation-only in 2D)
         let so2_relative = SO2::from_angle(0.1);
         let so2_factor = BetweenFactor::new(so2_relative);
 
+        assert_eq!(so2_factor.residual_dim(), 1);
+        assert_eq!(so2_factor.jacobian_shape(), (1, 2));
+
         let so2_i = DVector::from_vec(vec![0.0]);
         let so2_j = DVector::from_vec(vec![0.12]);
-
-        let (residual_so2, jacobian_so2) = so2_factor.linearize(&[so2_i, so2_j], true);
-        assert_eq!(residual_so2.len(), 1);
-        assert_eq!(so2_factor.get_dimension(), 1);
-
-        let jac_so2 = jacobian_so2.ok_or("Jacobian should be Some when compute_jacobians=true")?;
+        let (res_so2, jac_so2) = compute_with_jacobian(&so2_factor, &so2_i, &so2_j);
+        assert_eq!(res_so2.len(), 1);
         assert_eq!(jac_so2.nrows(), 1);
         assert_eq!(jac_so2.ncols(), 2);
 
-        // Test SO3 (rotation-only in 3D)
         let so3_relative = SO3::identity();
         let so3_factor = BetweenFactor::new(so3_relative);
 
         let so3_i = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
         let so3_j = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0]);
-
-        let (residual_so3, jacobian_so3) = so3_factor.linearize(&[so3_i, so3_j], true);
-        assert_eq!(residual_so3.len(), 3);
-        assert_eq!(so3_factor.get_dimension(), 3);
-
-        let jac_so3 = jacobian_so3.ok_or("Jacobian should be Some when compute_jacobians=true")?;
+        let (res_so3, jac_so3) = compute_with_jacobian(&so3_factor, &so3_i, &so3_j);
+        assert_eq!(res_so3.len(), 3);
         assert_eq!(jac_so3.nrows(), 3);
         assert_eq!(jac_so3.ncols(), 6);
         Ok(())
@@ -567,18 +464,16 @@ mod tests {
 
     #[test]
     fn test_between_factor_finiteness() -> TestResult {
-        // Test numerical stability with various inputs
         let relative = SE2::from_xy_angle(100.0, -200.0, std::f64::consts::PI);
         let factor = BetweenFactor::new(relative);
 
         let pose_i = DVector::from_vec(vec![50.0, -100.0, 1.5]);
         let pose_j = DVector::from_vec(vec![150.0, -300.0, -1.5]);
 
-        let (residual, jacobian) = factor.linearize(&[pose_i, pose_j], true);
+        let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 
-        assert!(residual.iter().all(|&x| x.is_finite()));
-        let jac = jacobian.ok_or("Jacobian should be Some when compute_jacobians=true")?;
-        assert!(jac.iter().all(|&x| x.is_finite()));
+        assert!(residual.iter().all(|x| x.is_finite()));
+        assert!(jacobian.iter().all(|x| x.is_finite()));
         Ok(())
     }
 
@@ -591,9 +486,10 @@ mod tests {
         let pose_i = DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
         let pose_j = DVector::from_vec(vec![1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
 
-        let (residual1, _) = factor.linearize(&[pose_i.clone(), pose_j.clone()], false);
-        let (residual2, _) = factor_clone.linearize(&[pose_i, pose_j], false);
+        let r1 = compute_residual(&factor, &pose_i, &pose_j);
+        let r2 = compute_residual(&factor_clone, &pose_i, &pose_j);
 
-        assert!((residual1 - residual2).norm() < TOLERANCE);
+        let diff: f64 = r1.iter().zip(r2.iter()).map(|(a, b)| (a - b).abs()).sum();
+        assert!(diff < TOLERANCE);
     }
 }

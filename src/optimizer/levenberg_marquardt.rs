@@ -103,18 +103,14 @@
 //! use apex_solver::LevenbergMarquardt;
 //! use apex_solver::core::problem::Problem;
 //! use apex_solver::JacobianMode;
-//! use std::collections::HashMap;
 //!
 //! # type TestResult = Result<(), Box<dyn std::error::Error>>;
 //! # fn main() -> TestResult {
 //! let mut problem = Problem::new(JacobianMode::Sparse);
 //! // ... add residual blocks (factors) to problem ...
 //!
-//! let initial_values = HashMap::new();
-//! // ... initialize parameters ...
-//!
 //! let mut solver = LevenbergMarquardt::new();
-//! let result = solver.optimize(&problem, &initial_values)?;
+//! let result = solver.optimize(&mut problem)?;
 //!
 //! # Ok(())
 //! # }
@@ -146,7 +142,7 @@
 //! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 10.
 //! - Nielsen, H. B. (1999). "Damping Parameter in Marquardt's Method". Technical Report IMM-REP-1999-05.
 
-use crate::core::problem::{Problem, VariableEnum};
+use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
@@ -156,14 +152,9 @@ use crate::linalg::{
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
-    OptimizerError, SolverResult, apply_negative_parameter_step, apply_parameter_step,
-    compute_cost,
+    OptimizerError, apply_negative_parameter_step, apply_parameter_step, compute_cost,
 };
-use apex_manifolds::ManifoldType;
-
 use faer::Mat;
-use nalgebra::DVector;
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tracing::debug;
 
@@ -822,10 +813,9 @@ impl LevenbergMarquardt {
     /// dispatches to this based on `LinearSolverType`.
     fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
+        problem: &mut Problem,
         linear_solver: &mut dyn LinearSolver<M>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
+    ) -> crate::optimizer::OptimizeResult {
         let start_time = Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1;
@@ -834,7 +824,7 @@ impl LevenbergMarquardt {
         let mut unsuccessful_steps = 0;
 
         // Initialize optimization state
-        let mut state = crate::optimizer::initialize_optimization_state(problem, initial_params)?;
+        let mut state = crate::optimizer::initialize_optimization_state(problem)?;
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
@@ -1002,13 +992,8 @@ impl LevenbergMarquardt {
                 };
 
                 // Notify observers that optimization is complete
-                let final_parameters: HashMap<String, VariableEnum> = state
-                    .variables
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
                 self.observers
-                    .notify_complete(&final_parameters, iteration + 1);
+                    .notify_complete(&state.variables, iteration + 1);
 
                 return Ok(crate::optimizer::build_solver_result(
                     status,
@@ -1031,39 +1016,34 @@ impl LevenbergMarquardt {
     ///
     /// - `JacobianMode::Dense` → always uses `DenseCholeskySolver`
     /// - `JacobianMode::Sparse` → uses the solver selected by `config.linear_solver_type`
-    pub fn optimize(
-        &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, error::ApexSolverError> {
+    pub fn optimize(&mut self, problem: &mut Problem) -> crate::optimizer::OptimizeResult {
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
                 LinearSolverType::DenseQR => {
                     let mut solver = DenseQRSolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
                 _ => {
                     let mut solver = DenseCholeskySolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
                 LinearSolverType::SparseSchurComplement => {
-                    // Schur complement needs variable structure before the first solve.
-                    // Initialize state once to get variables, then create and prepare the solver.
-                    // optimize_with_mode will re-initialize state internally, which is acceptable
-                    // since Schur structure initialization is cheap.
-                    let state =
-                        crate::optimizer::initialize_optimization_state(problem, initial_params)?;
+                    let state = crate::optimizer::initialize_optimization_state(problem)?;
                     let mut solver = SparseSchurComplementSolver::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner);
                     solver
-                        .initialize_structure(&state.variables, &state.variable_index_map)
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
                         .map_err(|e| {
                             OptimizerError::LinearSolveFailed(format!(
                                 "Failed to initialize Schur solver: {}",
@@ -1071,33 +1051,33 @@ impl LevenbergMarquardt {
                             ))
                             .log()
                         })?;
-                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
                 _ => {
-                    // SparseCholesky (default) or DenseCholesky with sparse mode → SparseCholeskySolver
                     let mut solver = SparseCholeskySolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, initial_params, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
             },
         }
     }
 }
 impl crate::optimizer::Optimizer for LevenbergMarquardt {
-    fn optimize(
-        &mut self,
-        problem: &Problem,
-        initial_params: &HashMap<String, (ManifoldType, DVector<f64>)>,
-    ) -> Result<SolverResult<HashMap<String, VariableEnum>>, crate::error::ApexSolverError> {
-        self.optimize(problem, initial_params)
+    fn optimize(&mut self, problem: &mut Problem) -> crate::optimizer::OptimizeResult {
+        self.optimize(problem)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ManifoldType;
+    use crate::core::VarKey;
+    use crate::core::variable::ManifoldVariable;
     use crate::factors::Factor;
     use crate::optimizer::OptimizationStatus;
-    use nalgebra::{DMatrix, dvector};
+    use faer::prelude::ReborrowMut;
+    use nalgebra::dvector;
+    use slotmap::SlotMap;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
     /// Custom Rosenbrock Factor 1: r1 = 10(x2 - x1²)
@@ -1108,31 +1088,23 @@ mod tests {
     impl Factor for RosenbrockFactor1 {
         fn linearize(
             &self,
-            params: &[DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
             let x1 = params[0][0];
             let x2 = params[1][0];
-
-            // Residual: r1 = 10(x2 - x1²)
-            let residual = dvector![10.0 * (x2 - x1 * x1)];
-
-            let jacobian = if compute_jacobian {
-                // Jacobian: ∂r1/∂x1 = -20*x1, ∂r1/∂x2 = 10
-                let mut jacobian = DMatrix::zeros(1, 2);
-                jacobian[(0, 0)] = -20.0 * x1;
-                jacobian[(0, 1)] = 10.0;
-
-                Some(jacobian)
-            } else {
-                None
-            };
-
-            (residual, jacobian)
+            residual[0] = 10.0 * (x2 - x1 * x1);
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = -20.0 * x1;
+                *jac.rb_mut().get_mut(0, 1) = 10.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 2)
         }
     }
 
@@ -1144,26 +1116,20 @@ mod tests {
     impl Factor for RosenbrockFactor2 {
         fn linearize(
             &self,
-            params: &[DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-            let x1 = params[0][0];
-
-            // Residual: r2 = 1 - x1
-            let residual = dvector![1.0 - x1];
-
-            let jacobian = if compute_jacobian {
-                // Jacobian: ∂r2/∂x1 = -1
-                Some(DMatrix::from_element(1, 1, -1.0))
-            } else {
-                None
-            };
-
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = 1.0 - params[0][0];
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = -1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
         }
     }
 
@@ -1177,15 +1143,12 @@ mod tests {
         // Expected minimum: [1.0, 1.0]
 
         let mut problem = Problem::new(JacobianMode::Sparse);
-        let mut initial_values = HashMap::new();
-
-        // Add variables using Rn manifold (Euclidean space)
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
 
         // Add custom factors (demonstrates extensibility!)
-        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
         // Configure Levenberg-Marquardt optimizer
         let config = LevenbergMarquardtConfig::new()
@@ -1195,19 +1158,11 @@ mod tests {
             .with_gradient_tolerance(1e-10);
 
         let mut solver = LevenbergMarquardt::with_config(config);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
 
         // Extract final values
-        let x1_final = result
-            .parameters
-            .get("x1")
-            .ok_or("x1 not found")?
-            .to_vector()[0];
-        let x2_final = result
-            .parameters
-            .get("x2")
-            .ok_or("x2 not found")?
-            .to_vector()[0];
+        let x1_final = result.parameters[x1].as_param_slice()[0];
+        let x2_final = result.parameters[x2].as_param_slice()[0];
 
         // Verify convergence to [1.0, 1.0]
         assert!(
@@ -1246,47 +1201,37 @@ mod tests {
     impl Factor for LinearFactor {
         fn linearize(
             &self,
-            params: &[nalgebra::DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (nalgebra::DVector<f64>, Option<nalgebra::DMatrix<f64>>) {
-            let residual = dvector![params[0][0] - self.target];
-            let jacobian = if compute_jacobian {
-                Some(nalgebra::DMatrix::from_element(1, 1, 1.0))
-            } else {
-                None
-            };
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
         }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
     }
 
-    fn rosenbrock_problem() -> (
-        Problem,
-        HashMap<String, (apex_manifolds::ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn rosenbrock_problem() -> Problem {
         let mut problem = Problem::new(JacobianMode::Sparse);
-        let mut initial_values = HashMap::new();
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
-        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
-        (problem, initial_values)
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+        problem
     }
 
-    fn linear_problem(
-        start: f64,
-    ) -> (
-        Problem,
-        HashMap<String, (apex_manifolds::ManifoldType, nalgebra::DVector<f64>)>,
-    ) {
+    fn linear_problem(start: f64) -> Problem {
         let mut problem = Problem::new(JacobianMode::Sparse);
-        let mut initial_values = HashMap::new();
-        initial_values.insert("x".to_string(), (ManifoldType::RN, dvector![start]));
-        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
-        (problem, initial_values)
+        let x = problem.add_variable(ManifoldType::RN, dvector![start]);
+        problem.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
+        problem
     }
 
     // -------------------------------------------------------------------------
@@ -1372,10 +1317,10 @@ mod tests {
 
     #[test]
     fn test_lm_max_iterations_termination() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = LevenbergMarquardtConfig::new().with_max_iterations(2);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(result.status, OptimizationStatus::MaxIterationsReached);
         assert!(result.iterations <= 3, "iterations={}", result.iterations);
         Ok(())
@@ -1383,21 +1328,21 @@ mod tests {
 
     #[test]
     fn test_lm_gradient_tolerance_convergence() -> TestResult {
-        let (problem, initial_values) = linear_problem(1.0);
+        let mut problem = linear_problem(1.0);
         // Very loose gradient tolerance → triggers after first accepted step
         let cfg = LevenbergMarquardtConfig::new()
             .with_gradient_tolerance(1e3)
             .with_cost_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(result.status, OptimizationStatus::GradientToleranceReached);
         Ok(())
     }
 
     #[test]
     fn test_lm_min_cost_threshold() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         // Set threshold very high so even initial cost triggers it
         let cfg = LevenbergMarquardtConfig::new()
             .with_min_cost_threshold(1e10)
@@ -1405,40 +1350,40 @@ mod tests {
             .with_gradient_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert_eq!(result.status, OptimizationStatus::MinCostThresholdReached);
         Ok(())
     }
 
     #[test]
     fn test_lm_qr_solver() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = LevenbergMarquardtConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
     }
 
     #[test]
     fn test_lm_jacobi_scaling_enabled() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = LevenbergMarquardtConfig::new()
             .with_jacobi_scaling(true)
             .with_max_iterations(100);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
     }
 
     #[test]
     fn test_lm_result_initial_cost_greater_than_final() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let mut solver = LevenbergMarquardt::new();
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(
             result.initial_cost > result.final_cost,
             "initial={} final={}",
@@ -1450,18 +1395,18 @@ mod tests {
 
     #[test]
     fn test_lm_convergence_info_populated() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let mut solver = LevenbergMarquardt::new();
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.convergence_info.is_some());
         Ok(())
     }
 
     #[test]
     fn test_lm_iterations_positive() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let mut solver = LevenbergMarquardt::new();
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(result.iterations > 0);
         Ok(())
     }
@@ -1494,16 +1439,15 @@ mod tests {
     #[test]
     fn test_lm_dense_cholesky_solver() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
-        let mut initial_values = HashMap::new();
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
-        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
         // Default linear solver type (SparseCholesky) with Dense mode → DenseCholeskySolver
         let cfg = LevenbergMarquardtConfig::new().with_max_iterations(100);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(
             result.final_cost < 1e-6,
             "Dense Cholesky mode should converge Rosenbrock, got cost={}",
@@ -1516,17 +1460,16 @@ mod tests {
     #[test]
     fn test_lm_dense_qr_solver() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
-        let mut initial_values = HashMap::new();
-        initial_values.insert("x1".to_string(), (ManifoldType::RN, dvector![-1.2]));
-        initial_values.insert("x2".to_string(), (ManifoldType::RN, dvector![1.0]));
-        problem.add_residual_block(&["x1", "x2"], Box::new(RosenbrockFactor1), None);
-        problem.add_residual_block(&["x1"], Box::new(RosenbrockFactor2), None);
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+        problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
         let cfg = LevenbergMarquardtConfig::new()
             .with_linear_solver_type(LinearSolverType::DenseQR)
             .with_max_iterations(100);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
+        let result = solver.optimize(&mut problem)?;
         assert!(
             result.final_cost < 1e-6,
             "Dense QR mode should converge Rosenbrock, got cost={}",
@@ -1543,13 +1486,12 @@ mod tests {
     /// This block was completely unreachable in prior tests.
     #[test]
     fn test_lm_compute_covariances_enabled() -> TestResult {
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let cfg = LevenbergMarquardtConfig::new()
             .with_max_iterations(100)
             .with_compute_covariances(true);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let result = solver.optimize(&problem, &initial_values)?;
-        // result.covariances is Option<HashMap<String, Mat<f64>>>
+        let result = solver.optimize(&mut problem)?;
         assert!(
             result.covariances.is_some(),
             "compute_covariances=true should populate result.covariances"
@@ -1651,11 +1593,16 @@ mod tests {
         }
 
         impl OptObserver for CountObserver {
-            fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {}
+            fn on_step(
+                &self,
+                _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+                _iteration: usize,
+            ) {
+            }
 
             fn on_optimization_complete(
                 &self,
-                _values: &HashMap<String, VariableEnum>,
+                _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
                 _iterations: usize,
             ) {
                 if let Ok(mut guard) = self.complete_calls.lock() {
@@ -1669,10 +1616,10 @@ mod tests {
             complete_calls: Arc::clone(&call_count),
         };
 
-        let (problem, initial_values) = rosenbrock_problem();
+        let mut problem = rosenbrock_problem();
         let mut solver = LevenbergMarquardt::new();
         solver.add_observer(observer);
-        let _ = solver.optimize(&problem, &initial_values)?;
+        let _ = solver.optimize(&mut problem)?;
 
         let count = *call_count
             .lock()

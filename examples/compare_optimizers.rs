@@ -5,11 +5,11 @@ use tracing::{info, warn};
 use apex_solver::JacobianMode;
 use apex_solver::apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
-use apex_solver::linearizer::cpu::sparse::build_symbolic_structure;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
@@ -92,52 +92,95 @@ fn print_summary_table(results: &[BenchmarkResult]) {
     info!("{}", "-".repeat(150));
 }
 
-fn run_optimizer_se3(
-    problem: &Problem,
-    initial_values: &HashMap<String, (ManifoldType, nalgebra::DVector<f64>)>,
-    optimizer_name: &str,
-    max_iterations: usize,
-    cost_tolerance: f64,
-    parameter_tolerance: f64,
-) -> Result<(f64, usize, OptimizationStatus, u128), Box<dyn std::error::Error>> {
-    let start = Instant::now();
+/// Build an SE3 problem from a loaded graph.
+/// Returns `(Problem, num_vertices, num_edges)`.
+fn build_se3_problem(
+    graph: &apex_solver::apex_io::Graph,
+) -> Result<(Problem, HashMap<usize, VarKey>), Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
 
-    let result = match optimizer_name {
-        "LM" => {
-            let config = LevenbergMarquardtConfig::new()
-                .with_max_iterations(max_iterations)
-                .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance);
-            let mut solver = LevenbergMarquardt::with_config(config);
-            solver.optimize(problem, initial_values)?
-        }
-        "GN" => {
-            let config = GaussNewtonConfig::new()
-                .with_max_iterations(max_iterations)
-                .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance);
-            let mut solver = GaussNewton::with_config(config);
-            solver.optimize(problem, initial_values)?
-        }
-        "DL" => {
-            let config = DogLegConfig::new()
-                .with_max_iterations(max_iterations)
-                .with_cost_tolerance(cost_tolerance)
-                .with_parameter_tolerance(parameter_tolerance);
-            let mut solver = DogLeg::with_config(config);
-            solver.optimize(problem, initial_values)?
-        }
-        _ => unreachable!(),
-    };
+    let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
+    vertex_ids.sort();
 
-    let elapsed = start.elapsed();
+    for &id in &vertex_ids {
+        if let Some(vertex) = graph.vertices_se3.get(&id) {
+            let quat = vertex.pose.rotation_quaternion();
+            let trans = vertex.pose.translation();
+            let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+            let key = problem.add_variable(ManifoldType::SE3, se3_data);
+            var_keys.insert(id, key);
+        }
+    }
 
-    Ok((
-        result.final_cost,
-        result.iterations,
-        result.status,
-        elapsed.as_millis(),
-    ))
+    if let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
+    {
+        let quat = first_vertex.pose.rotation_quaternion();
+        let trans = first_vertex.pose.translation();
+        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
+        let prior_factor = PriorFactor { data: prior_value };
+        let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_keys[&first_id];
+        problem.add_residual_block(
+            &[first_key],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
+    }
+
+    for edge in &graph.edges_se3 {
+        let factor = BetweenFactor::new(edge.measurement.clone());
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(factor), None);
+        }
+    }
+
+    Ok((problem, var_keys))
+}
+
+/// Build an SE2 problem from a loaded graph.
+fn build_se2_problem(
+    graph: &apex_solver::apex_io::Graph,
+) -> Result<(Problem, HashMap<usize, VarKey>), Box<dyn std::error::Error>> {
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let mut var_keys: HashMap<usize, VarKey> = HashMap::new();
+
+    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
+    vertex_ids.sort();
+
+    for &id in &vertex_ids {
+        if let Some(vertex) = graph.vertices_se2.get(&id) {
+            let se2_data = dvector![vertex.pose.x(), vertex.pose.y(), vertex.pose.angle()];
+            let key = problem.add_variable(ManifoldType::SE2, se2_data);
+            var_keys.insert(id, key);
+        }
+    }
+
+    if let Some(&first_id) = vertex_ids.first()
+        && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
+    {
+        let trans = first_vertex.pose.translation();
+        let angle = first_vertex.pose.rotation_angle();
+        let prior_value = dvector![trans.x, trans.y, angle];
+        let prior_factor = PriorFactor { data: prior_value };
+        let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_keys[&first_id];
+        problem.add_residual_block(
+            &[first_key],
+            Box::new(prior_factor),
+            Some(Box::new(huber_loss)),
+        );
+    }
+
+    for edge in &graph.edges_se2 {
+        let factor = BetweenFactor::new(edge.measurement.clone());
+        if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(factor), None);
+        }
+    }
+
+    Ok((problem, var_keys))
 }
 
 fn test_se3_dataset(
@@ -158,128 +201,76 @@ fn test_se3_dataset(
 
     let num_vertices = graph.vertices_se3.len();
     let num_edges = graph.edges_se3.len();
-
     info!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
 
-    // Create initial values
-    let mut initial_values = HashMap::new();
-    let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
-    vertex_ids.sort();
-
-    for &id in &vertex_ids {
-        if let Some(vertex) = graph.vertices_se3.get(&id) {
-            let var_name = format!("x{}", id);
-            let quat = vertex.pose.rotation_quaternion();
-            let trans = vertex.pose.translation();
-            let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
-        }
-    }
-
-    // Create problem
-    let mut problem = Problem::new(JacobianMode::Sparse);
-
-    // Add prior factor on first vertex to handle gauge freedom
-    // This prevents rank-deficient Hessian and improves convergence for all optimizers
-    if let Some(&first_id) = vertex_ids.first()
-        && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
-    {
-        let var_name = format!("x{}", first_id);
-        let quat = first_vertex.pose.rotation_quaternion();
-        let trans = first_vertex.pose.translation();
-        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-
-        let prior_factor = PriorFactor { data: prior_value };
-        // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-        let huber_loss = HuberLoss::new(1.0)?;
-        problem.add_residual_block(
-            &[&var_name],
-            Box::new(prior_factor),
-            Some(Box::new(huber_loss)),
-        );
-    }
-
-    for edge in &graph.edges_se3 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-        let factor = BetweenFactor::new(edge.measurement.clone());
-        problem.add_residual_block(&[&id0, &id1], Box::new(factor), None);
-    }
-
-    // Compute initial cost
-    let variables = problem.initialize_variables(&initial_values);
-    let mut variable_name_to_col_idx_dict = HashMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-    sorted_vars.sort();
-    for var_name in &sorted_vars {
-        variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
-    }
-
-    let symbolic_structure = build_symbolic_structure(
-        &problem,
-        &variables,
-        &variable_name_to_col_idx_dict,
-        col_offset,
-    )?;
-
-    let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-        &variables,
-        &variable_name_to_col_idx_dict,
-        &symbolic_structure,
-    )?;
-
-    // Compute initial cost: 0.5 * ||r||² to match the solver's cost convention
-    let init_cost = 0.5 * residual.as_ref().squared_norm_l2();
-
-    info!("Initial cost: {:.6e}", init_cost);
-
-    // Test all optimizers
+    // Run each optimizer on a fresh problem (Problem can't be cloned since Factor isn't Clone)
     for opt_name in &["LM", "GN", "DL"] {
         info!("--- Testing {} ---", opt_name);
 
-        match run_optimizer_se3(
-            &problem,
-            &initial_values,
-            opt_name,
-            args.max_iterations,
-            args.cost_tolerance,
-            args.parameter_tolerance,
-        ) {
-            Ok((final_cost, iterations, status, time_ms)) => {
-                let improvement = ((init_cost - final_cost) / init_cost) * 100.0;
-                let status_str = match status {
-                    OptimizationStatus::Converged => "CONVERGED",
-                    OptimizationStatus::CostToleranceReached => "CONVERGED",
-                    OptimizationStatus::ParameterToleranceReached => "CONVERGED",
-                    OptimizationStatus::GradientToleranceReached => "CONVERGED",
-                    _ => "NOT_CONVERGED",
-                };
+        let (mut problem, _) = build_se3_problem(&graph)?;
+        let start = Instant::now();
 
-                info!("Final cost: {:.6e}", final_cost);
-                info!("Iterations: {}", iterations);
-                info!("Time: {}ms", time_ms);
-                info!("Status: {}\n", status_str);
+        let result = match *opt_name {
+            "LM" => {
+                let config = LevenbergMarquardtConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = LevenbergMarquardt::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            "GN" => {
+                let config = GaussNewtonConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = GaussNewton::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            "DL" => {
+                let config = DogLegConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = DogLeg::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            _ => unreachable!(),
+        };
 
-                all_results.push(BenchmarkResult {
-                    dataset: dataset_name.to_string(),
-                    manifold: "SE3".to_string(),
-                    optimizer: opt_name.to_string(),
-                    vertices: num_vertices,
-                    edges: num_edges,
-                    initial_cost: init_cost,
-                    final_cost,
-                    improvement,
-                    iterations,
-                    time_ms,
-                    status: status_str.to_string(),
-                });
-            }
-            Err(e) => {
-                warn!("{} failed: {}", opt_name, e);
-            }
-        }
+        let time_ms = start.elapsed().as_millis();
+        let improvement = if result.initial_cost > 0.0 {
+            ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0
+        } else {
+            0.0
+        };
+        let status_str = match result.status {
+            OptimizationStatus::Converged
+            | OptimizationStatus::CostToleranceReached
+            | OptimizationStatus::ParameterToleranceReached
+            | OptimizationStatus::GradientToleranceReached => "CONVERGED",
+            _ => "NOT_CONVERGED",
+        };
+
+        info!("Initial cost: {:.6e}", result.initial_cost);
+        info!("Final cost: {:.6e}", result.final_cost);
+        info!("Iterations: {}", result.iterations);
+        info!("Time: {}ms", time_ms);
+        info!("Status: {}\n", status_str);
+
+        all_results.push(BenchmarkResult {
+            dataset: dataset_name.to_string(),
+            manifold: "SE3".to_string(),
+            optimizer: opt_name.to_string(),
+            vertices: num_vertices,
+            edges: num_edges,
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            improvement,
+            iterations: result.iterations,
+            time_ms,
+            status: status_str.to_string(),
+        });
     }
     Ok(())
 }
@@ -302,134 +293,81 @@ fn test_se2_dataset(
 
     let num_vertices = graph.vertices_se2.len();
     let num_edges = graph.edges_se2.len();
-
     info!("Loaded: {} vertices, {} edges", num_vertices, num_edges);
 
-    // Create initial values
-    let mut initial_values = HashMap::new();
-    let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
-    vertex_ids.sort();
-
-    for &id in &vertex_ids {
-        if let Some(vertex) = graph.vertices_se2.get(&id) {
-            let var_name = format!("x{}", id);
-            let se2_data = dvector![vertex.pose.x(), vertex.pose.y(), vertex.pose.angle()];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
-        }
-    }
-
-    // Create problem
-    let mut problem = Problem::new(JacobianMode::Sparse);
-
-    // Add prior factor on first vertex to handle gauge freedom
-    // This prevents rank-deficient Hessian and improves convergence for all optimizers
-    if let Some(&first_id) = vertex_ids.first()
-        && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
-    {
-        let var_name = format!("x{}", first_id);
-        let trans = first_vertex.pose.translation();
-        let angle = first_vertex.pose.rotation_angle();
-        let prior_value = dvector![trans.x, trans.y, angle];
-
-        let prior_factor = PriorFactor { data: prior_value };
-        // Use HuberLoss with scale=1.0 (allows slight movement if needed)
-        let huber_loss = HuberLoss::new(1.0)?;
-        problem.add_residual_block(
-            &[&var_name],
-            Box::new(prior_factor),
-            Some(Box::new(huber_loss)),
-        );
-    }
-
-    for edge in &graph.edges_se2 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-        let factor = BetweenFactor::new(edge.measurement.clone());
-        problem.add_residual_block(&[&id0, &id1], Box::new(factor), None);
-    }
-
-    // Compute initial cost
-    let variables = problem.initialize_variables(&initial_values);
-    let mut variable_name_to_col_idx_dict = HashMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-    sorted_vars.sort();
-    for var_name in &sorted_vars {
-        variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
-    }
-
-    let symbolic_structure = build_symbolic_structure(
-        &problem,
-        &variables,
-        &variable_name_to_col_idx_dict,
-        col_offset,
-    )?;
-
-    let (residual, _) = problem.compute_residual_and_jacobian_sparse(
-        &variables,
-        &variable_name_to_col_idx_dict,
-        &symbolic_structure,
-    )?;
-
-    // Compute initial cost: 0.5 * ||r||² to match the solver's cost convention
-    let init_cost = 0.5 * residual.as_ref().squared_norm_l2();
-
-    info!("Initial cost: {:.6e}", init_cost);
-
-    // Test all optimizers
     for opt_name in &["LM", "GN", "DL"] {
         info!("--- Testing {} ---", opt_name);
 
-        match run_optimizer_se3(
-            &problem,
-            &initial_values,
-            opt_name,
-            args.max_iterations,
-            args.cost_tolerance,
-            args.parameter_tolerance,
-        ) {
-            Ok((final_cost, iterations, status, time_ms)) => {
-                let improvement = ((init_cost - final_cost) / init_cost) * 100.0;
-                let status_str = match status {
-                    OptimizationStatus::Converged => "CONVERGED",
-                    OptimizationStatus::CostToleranceReached => "CONVERGED",
-                    OptimizationStatus::ParameterToleranceReached => "CONVERGED",
-                    OptimizationStatus::GradientToleranceReached => "CONVERGED",
-                    _ => "NOT_CONVERGED",
-                };
+        let (mut problem, _) = build_se2_problem(&graph)?;
+        let start = Instant::now();
 
-                info!("Final cost: {:.6e}", final_cost);
-                info!("Iterations: {}", iterations);
-                info!("Time: {}ms", time_ms);
-                info!("Status: {}\n", status_str);
+        let result = match *opt_name {
+            "LM" => {
+                let config = LevenbergMarquardtConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = LevenbergMarquardt::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            "GN" => {
+                let config = GaussNewtonConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = GaussNewton::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            "DL" => {
+                let config = DogLegConfig::new()
+                    .with_max_iterations(args.max_iterations)
+                    .with_cost_tolerance(args.cost_tolerance)
+                    .with_parameter_tolerance(args.parameter_tolerance);
+                let mut solver = DogLeg::with_config(config);
+                solver.optimize(&mut problem)?
+            }
+            _ => unreachable!(),
+        };
 
-                all_results.push(BenchmarkResult {
-                    dataset: dataset_name.to_string(),
-                    manifold: "SE2".to_string(),
-                    optimizer: opt_name.to_string(),
-                    vertices: num_vertices,
-                    edges: num_edges,
-                    initial_cost: init_cost,
-                    final_cost,
-                    improvement,
-                    iterations,
-                    time_ms,
-                    status: status_str.to_string(),
-                });
-            }
-            Err(e) => {
-                warn!("{} failed: {}", opt_name, e);
-            }
-        }
+        let time_ms = start.elapsed().as_millis();
+        let improvement = if result.initial_cost > 0.0 {
+            ((result.initial_cost - result.final_cost) / result.initial_cost) * 100.0
+        } else {
+            0.0
+        };
+        let status_str = match result.status {
+            OptimizationStatus::Converged
+            | OptimizationStatus::CostToleranceReached
+            | OptimizationStatus::ParameterToleranceReached
+            | OptimizationStatus::GradientToleranceReached => "CONVERGED",
+            _ => "NOT_CONVERGED",
+        };
+
+        info!("Initial cost: {:.6e}", result.initial_cost);
+        info!("Final cost: {:.6e}", result.final_cost);
+        info!("Iterations: {}", result.iterations);
+        info!("Time: {}ms", time_ms);
+        info!("Status: {}\n", status_str);
+
+        all_results.push(BenchmarkResult {
+            dataset: dataset_name.to_string(),
+            manifold: "SE2".to_string(),
+            optimizer: opt_name.to_string(),
+            vertices: num_vertices,
+            edges: num_edges,
+            initial_cost: result.initial_cost,
+            final_cost: result.final_cost,
+            improvement,
+            iterations: result.iterations,
+            time_ms,
+            status: status_str.to_string(),
+        });
     }
     Ok(())
 }
 
 fn main() {
     let args = Args::parse();
-
-    // Initialize logger with INFO level
     init_logger();
 
     info!("APEX-SOLVER OPTIMIZER COMPARISON");
@@ -437,15 +375,12 @@ fn main() {
 
     let mut all_results = Vec::new();
 
-    // Test SE3 datasets
     if let Err(e) = test_se3_dataset("parking-garage", &args, &mut all_results) {
         warn!("Failed to test parking-garage dataset: {}", e);
     }
     if let Err(e) = test_se3_dataset("sphere2500", &args, &mut all_results) {
         warn!("Failed to test sphere2500 dataset: {}", e);
     }
-
-    // Test SE2 datasets
     if let Err(e) = test_se2_dataset("intel", &args, &mut all_results) {
         warn!("Failed to test intel dataset: {}", e);
     }
@@ -453,8 +388,6 @@ fn main() {
         warn!("Failed to test mit dataset: {}", e);
     }
 
-    // Print summary
     print_summary_table(&all_results);
-
     info!("Comparison complete!");
 }

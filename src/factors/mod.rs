@@ -38,13 +38,11 @@
 //!
 //! # Linearization
 //!
-//! Each factor must provide a `linearize` method that computes:
-//! 1. **Residual** `r(x)`: The error at the current variable values
-//! 2. **Jacobian** `J = ∂r/∂x`: How the residual changes with each variable
+//! Each factor must provide a `linearize` method that writes the residual and Jacobian
+//! directly into caller-provided buffers — no heap allocation for the output.
 //!
 //! This information is used by the optimizer to compute parameter updates via Newton-type methods.
 
-use nalgebra::{DMatrix, DVector};
 use thiserror::Error;
 
 // Pose factors
@@ -136,16 +134,9 @@ pub type FactorResult<T> = Result<T, FactorError>;
 /// Trait for factor (constraint) implementations in factor graph optimization.
 ///
 /// A factor represents a measurement or constraint connecting one or more variables.
-/// It computes the residual (error) and Jacobian for the current variable values,
-/// which are used by the optimizer to minimize the total cost.
-///
-/// # Implementing Custom Factors
-///
-/// To create a custom factor:
-/// 1. Implement this trait
-/// 2. Define the residual function `r(x)` (how to compute error from variable values)
-/// 3. Compute the Jacobian `J = ∂r/∂x` (analytically or numerically)
-/// 4. Return the residual dimension
+/// It writes the residual and Jacobian directly into caller-provided buffers — no heap
+/// allocation for the output. Parameters arrive as zero-copy `&[f64]` slices from
+/// manifold storage.
 ///
 /// # Thread Safety
 ///
@@ -155,83 +146,59 @@ pub type FactorResult<T> = Result<T, FactorError>;
 ///
 /// ```
 /// use apex_solver::factors::Factor;
-/// use nalgebra::{DMatrix, DVector};
+/// use faer::prelude::ReborrowMut;
 ///
 /// // Simple 1D range measurement factor
 /// struct RangeFactor {
-///     measurement: f64,  // Measured distance
+///     measurement: f64,
 /// }
 ///
 /// impl Factor for RangeFactor {
-///     fn linearize(&self, params: &[DVector<f64>], compute_jacobian: bool) -> (DVector<f64>, Option<DMatrix<f64>>) {
-///         // params[0] is a 2D point [x, y]
+///     fn linearize(
+///         &self,
+///         params: &[&[f64]],
+///         residual: &mut [f64],
+///         jacobian: Option<faer::mat::MatMut<'_, f64>>,
+///     ) {
 ///         let x = params[0][0];
 ///         let y = params[0][1];
-///
-///         // Residual: measured distance - actual distance
-///         let predicted_distance = (x * x + y * y).sqrt();
-///         let residual = DVector::from_vec(vec![self.measurement - predicted_distance]);
-///
-///         // Jacobian: ∂(residual)/∂[x, y]
-///         let jacobian = if compute_jacobian {
-///             Some(DMatrix::from_row_slice(1, 2, &[
-///                 -x / predicted_distance,
-///                 -y / predicted_distance,
-///             ]))
-///         } else {
-///             None
-///         };
-///
-///         (residual, jacobian)
+///         let dist = (x * x + y * y).sqrt();
+///         residual[0] = self.measurement - dist;
+///         if let Some(mut jac) = jacobian {
+///             *jac.rb_mut().get_mut(0, 0) = -x / dist;
+///             *jac.rb_mut().get_mut(0, 1) = -y / dist;
+///         }
 ///     }
-///
-///     fn get_dimension(&self) -> usize { 1 }
+///     fn residual_dim(&self) -> usize { 1 }
+///     fn jacobian_shape(&self) -> (usize, usize) { (1, 2) }
 /// }
 /// ```
 pub trait Factor: Send + Sync {
-    /// Compute the residual and Jacobian at the given parameter values.
+    /// Write residual and (optionally) Jacobian into pre-allocated buffers.
     ///
-    /// # Arguments
-    ///
-    /// * `params` - Slice of variable values (one `DVector` per connected variable)
-    /// * `compute_jacobian` - Whether to compute the Jacobian matrix
-    ///
-    /// # Returns
-    ///
-    /// Tuple `(residual, jacobian)` where:
-    /// - `residual`: N-dimensional error vector
-    /// - `jacobian`: N × M matrix where M is the total DOF of all variables
-    ///
-    /// # Example
-    ///
-    /// For a between factor connecting two SE2 poses (3 DOF each):
-    /// - Input: `params = [pose1 (3×1), pose2 (3×1)]`
-    /// - Output: `(residual (3×1), jacobian (3×6))`
+    /// - `params`: one `&[f64]` slice per connected variable (from `ManifoldVariable::as_param_slice`)
+    /// - `residual`: pre-allocated output buffer of length `residual_dim()`
+    /// - `jacobian`: optional column-major `MatMut` of shape `jacobian_shape()`
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>);
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    );
 
-    /// Get the dimension of the residual vector.
-    ///
-    /// # Returns
-    ///
-    /// Number of elements in the residual vector (number of constraints)
-    ///
-    /// # Example
-    ///
-    /// - SE2 between factor: 3 (dx, dy, dtheta)
-    /// - SE3 between factor: 6 (translation + rotation)
-    /// - Prior factor: dimension of the variable
-    fn get_dimension(&self) -> usize;
+    /// Number of residual rows (length of the `residual` buffer).
+    fn residual_dim(&self) -> usize;
+
+    /// `(rows, cols)` of the Jacobian — `rows == residual_dim()`, `cols == sum of variable DOFs`.
+    fn jacobian_shape(&self) -> (usize, usize);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::ErrorLogging;
-    use nalgebra::{DMatrix, DVector, dvector};
+    use faer::prelude::ReborrowMut;
+    use nalgebra::dvector;
 
     // -------------------------------------------------------------------------
     // OptimizeParams const generic flags — all 7 type aliases
@@ -355,47 +322,52 @@ mod tests {
     impl Factor for ConstantFactor {
         fn linearize(
             &self,
-            params: &[DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-            let residual = dvector![params[0][0] - self.value];
-            let jacobian = if compute_jacobian {
-                Some(DMatrix::from_element(1, 1, 1.0))
-            } else {
-                None
-            };
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.value;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
         }
 
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
         }
+
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
     }
 
     #[test]
-    fn test_factor_linearize_with_jacobian() {
+    fn test_factor_compute_with_jacobian() {
         let f = ConstantFactor { value: 3.0 };
-        let params = vec![dvector![5.0]];
-        let (r, j) = f.linearize(&params, true);
-        assert!((r[0] - 2.0).abs() < 1e-12);
-        assert!(j.is_some());
-        let j = j.unwrap_or_else(|| DMatrix::from_element(1, 1, 0.0));
-        assert!((j[(0, 0)] - 1.0).abs() < 1e-12);
+        let p = dvector![5.0];
+        let params: Vec<&[f64]> = vec![p.as_slice()];
+        let mut residual = vec![0.0f64; 1];
+        let mut jac_buf = vec![0.0f64; 1];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, 1, 1);
+        f.linearize(&params, &mut residual, Some(jac_mut));
+        assert!((residual[0] - 2.0).abs() < 1e-12);
+        assert!((jac_buf[0] - 1.0).abs() < 1e-12);
     }
 
     #[test]
-    fn test_factor_linearize_without_jacobian() {
+    fn test_factor_compute_without_jacobian() {
         let f = ConstantFactor { value: 3.0 };
-        let params = vec![dvector![5.0]];
-        let (r, j) = f.linearize(&params, false);
-        assert!((r[0] - 2.0).abs() < 1e-12);
-        assert!(j.is_none());
+        let p = dvector![5.0];
+        let params: Vec<&[f64]> = vec![p.as_slice()];
+        let mut residual = vec![0.0f64; 1];
+        f.linearize(&params, &mut residual, None);
+        assert!((residual[0] - 2.0).abs() < 1e-12);
     }
 
     #[test]
-    fn test_factor_get_dimension() {
+    fn test_factor_residual_dim() {
         let f = ConstantFactor { value: 0.0 };
-        assert_eq!(f.get_dimension(), 1);
+        assert_eq!(f.residual_dim(), 1);
     }
 
     // -------------------------------------------------------------------------
