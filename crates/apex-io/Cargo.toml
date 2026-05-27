@@ -8,7 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 documentation = "https://docs.rs/apex-io"
-description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS2 bags with SE2/SE3 support"
+description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS1/ROS2 bags with SE2/SE3 support"
 readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
@@ -34,13 +34,25 @@ name = "write_dummy_bag"
 path = "bin/write_dummy_bag.rs"
 
 [[bin]]
+name = "bag_convert"
+path = "bin/bag_convert.rs"
+
+[[bin]]
 name = "dds_multi_listener"
 path = "bin/dds_multi_listener.rs"
 required-features = ["dds"]
 
 [[test]]
-name = "rosbag_integration_tests"
-path = "tests/rosbag_integration_tests.rs"
+name = "rosbag_ros2_integration_tests"
+path = "tests/rosbag_ros2_integration_tests.rs"
+
+[[test]]
+name = "rosbag_ros1_integration_tests"
+path = "tests/rosbag_ros1_integration_tests.rs"
+
+[[test]]
+name = "asl_integration_tests"
+path = "tests/asl_integration_tests.rs"
 
 [dependencies]
 apex-manifolds.workspace = true
@@ -66,6 +78,7 @@ image.workspace = true
 rusqlite.workspace = true
 zstd.workspace = true
 mcap.workspace = true
+lz4_flex.workspace = true
 
 [dependencies.rerun]
 workspace = true
@@ -87,6 +100,7 @@ optional = true
 default = []
 visualization = ["dep:rerun"]
 dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
+asl-async = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile.workspace = true

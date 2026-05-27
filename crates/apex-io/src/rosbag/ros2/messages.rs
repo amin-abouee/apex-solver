@@ -3,7 +3,7 @@
 //! This module contains Rust definitions for common ROS2 message types
 //! that match the official ROS2 API specifications.
 
-use crate::rosbag::cdr::CdrDeserializer;
+use super::cdr::CdrDeserializer;
 use crate::rosbag::error::Result;
 
 /// builtin_interfaces/msg/Time

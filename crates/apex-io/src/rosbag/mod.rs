@@ -1,8 +1,11 @@
-//! ROS2 bag reading and writing (sqlite3 and MCAP formats).
+//! ROS1 and ROS2 bag reading and writing.
 //!
-//! This module provides comprehensive functionality to read and write ROS2 bag files,
-//! supporting both SQLite3 and MCAP storage formats with guaranteed compatibility
-//! with the Python rosbags library.
+//! This module provides comprehensive functionality to read and write both
+//! ROS1 (v2.0, single `.bag` file) and ROS2 bag files (SQLite3 and MCAP storage
+//! formats). The two formats are exposed through parallel APIs rather than a
+//! single unified one: use [`Reader`]/[`Writer`] for ROS2 and
+//! [`ros1::Ros1Reader`]/[`ros1::Ros1Writer`] for ROS1. The design mirrors the
+//! upstream Python [`rosbags`](https://gitlab.com/ternaris/rosbags) library.
 //!
 //! ## Features
 //!
@@ -70,38 +73,35 @@
 //! # }
 //! ```
 
-/// CDR (Common Data Representation) deserialization.
-pub mod cdr;
-
 /// Error types for bag I/O operations.
 pub mod error;
-
-/// ROS2 message type definitions with CDR deserialization support.
-pub mod messages;
-
-/// Metadata parsing and validation (`metadata.yaml`).
-pub mod metadata;
-
-/// Main reader interface.
-pub mod reader;
-
-/// Main writer interface.
-pub mod writer;
-
-/// Storage backend implementations (SQLite3 and MCAP).
-pub mod storage;
 
 /// Core data types and structures.
 pub mod types;
 
+/// ROS1 bag (v2.0) reader and writer.
+pub mod ros1;
+
+/// ROS2 bag reader, writer, CDR deserialization, and message catalog.
+pub mod ros2;
+
+// Backward-compatible module re-exports so existing code using
+// `apex_io::rosbag::cdr::*`, `::messages::*`, `::storage::*`, `::metadata::*` continues to compile.
+pub use ros2::cdr;
+pub use ros2::messages;
+pub use ros2::metadata;
+pub use ros2::storage;
+
 // Re-export main types for convenience
 pub use error::{BagError, ReaderError, Result, WriterResult};
-pub use metadata::{BagMetadata, TopicMetadata};
-pub use reader::Reader;
+pub use ros2::metadata::{BagMetadata, TopicMetadata};
+pub use ros2::reader::Reader;
+pub use ros2::writer::Writer;
 pub use types::{
     CompressionFormat, CompressionMode, Connection, Message, StoragePlugin, TopicInfo,
 };
-pub use writer::Writer;
+
+pub use ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 
 /// Read bag metadata from `metadata.yaml` without opening storage files.
 ///

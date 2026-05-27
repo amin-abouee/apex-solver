@@ -1,8 +1,8 @@
 //! Main writer implementation for ROS2 bag files
 
+use super::metadata::{BagFileInformation, BagMetadata};
+use super::storage::{StorageWriter, create_storage_writer};
 use crate::rosbag::error::{BagError, Result};
-use crate::rosbag::metadata::{BagFileInformation, BagMetadata};
-use crate::rosbag::storage::{StorageWriter, create_storage_writer};
 use crate::rosbag::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, QosProfile, StoragePlugin,
 };
@@ -338,13 +338,13 @@ impl Writer {
         let topics_with_message_count = self
             .connections
             .iter()
-            .map(|conn| crate::rosbag::metadata::TopicWithMessageCount {
+            .map(|conn| super::metadata::TopicWithMessageCount {
                 message_count: *self.message_counts.get(&conn.id).unwrap_or(&0),
-                topic_metadata: crate::rosbag::metadata::TopicMetadata {
+                topic_metadata: super::metadata::TopicMetadata {
                     name: conn.topic.clone(),
                     message_type: conn.message_type.clone(),
                     serialization_format: conn.serialization_format.clone(),
-                    offered_qos_profiles: crate::rosbag::metadata::QosProfilesField::List(
+                    offered_qos_profiles: super::metadata::QosProfilesField::List(
                         conn.offered_qos_profiles.clone(),
                     ),
                     type_description_hash: conn.type_description_hash.clone(),
@@ -374,7 +374,7 @@ impl Writer {
                 self.compression_mode.as_str().to_string()
             },
             topics_with_message_count,
-            files: vec![crate::rosbag::metadata::FileInformation {
+            files: vec![super::metadata::FileInformation {
                 path: final_file_name,
                 starting_time: crate::rosbag::types::StartingTime {
                     nanoseconds_since_epoch: self.min_timestamp,

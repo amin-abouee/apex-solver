@@ -3,8 +3,8 @@
 //! This module provides support for reading ROS2 bag files stored in MCAP format.
 //! MCAP is a modern, efficient container format for multimodal log data.
 
+use super::StorageReader;
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::storage::StorageReader;
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
 use mcap::MessageStream;
 use std::collections::HashMap;
@@ -649,6 +649,54 @@ mod tests {
         // Close without opening should be a noop
         writer.close(9, "{}")?;
         assert!(!writer.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn mcap_writer_write_with_valid_connection() -> TestResult {
+        let dir = tempdir()?;
+        std::fs::create_dir_all(dir.path().join("write_bag"))?;
+        let bag_path = dir.path().join("write_bag");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None)?;
+        writer.open()?;
+        let conn = make_connection("/test", "std_msgs/msg/String");
+        writer.add_msgtype(&conn)?;
+        writer.add_connection(&conn, "")?;
+        let result = writer.write(&conn, 1_000_000, &[0x00, 0x01, 0x00, 0x00]);
+        assert!(result.is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn mcap_writer_write_unknown_connection_errors() -> TestResult {
+        let dir = tempdir()?;
+        std::fs::create_dir_all(dir.path().join("unknown_bag"))?;
+        let bag_path = dir.path().join("unknown_bag");
+        let mut writer = McapWriter::new(&bag_path, CompressionMode::None)?;
+        writer.open()?;
+        let unknown_conn = make_connection("/nonexistent", "std_msgs/msg/String");
+        assert!(writer.write(&unknown_conn, 0, &[]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mcap_reader_open_and_close() -> TestResult {
+        let dir = tempdir()?;
+        let mcap_path = dir.path().join("test.mcap");
+        std::fs::write(&mcap_path, b"\x89MCAP0\r\n")?;
+        let mut reader = McapStorageReader::new(vec![mcap_path.as_path()], vec![])?;
+        reader.open()?;
+        assert!(reader.is_open());
+        reader.close()?;
+        assert!(!reader.is_open());
+        Ok(())
+    }
+
+    #[test]
+    fn mcap_reader_is_open_initially_false() -> TestResult {
+        let path = std::path::PathBuf::from("test.mcap");
+        let reader = McapStorageReader::new(vec![path.as_path()], vec![])?;
+        assert!(!reader.is_open());
         Ok(())
     }
 }

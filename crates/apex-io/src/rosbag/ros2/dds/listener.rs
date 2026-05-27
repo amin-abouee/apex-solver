@@ -1,4 +1,4 @@
-use crate::dds::subscriber::{DdsSubscriber, DdsSubscriberConfig};
+use super::subscriber::{DdsSubscriber, DdsSubscriberConfig};
 use crate::rosbag::types::{QosDurability, QosReliability, RawMessage};
 
 // ── ReceivedMessage ───────────────────────────────────────────────────────────
