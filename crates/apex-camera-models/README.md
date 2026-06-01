@@ -2,6 +2,13 @@
 
 Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
 
+## Cookbook
+
+For the full mathematical formulations, Jacobian derivations, and references, see the
+[apex-camera-models cookbook](doc/cookbook/src/introduction.html). The cookbook is the
+canonical source for projection equations, unprojection strategies, parameter layouts,
+and validation rules. The per-model source files link back to the relevant chapter.
+
 ## Overview
 
 This library provides a comprehensive collection of camera projection models commonly used in computer vision applications including bundle adjustment, SLAM, visual odometry, and Structure-from-Motion (SfM). Each camera model implements analytic Jacobians for efficient nonlinear optimization.
@@ -152,52 +159,10 @@ All models implement the `CameraModel` trait providing a unified interface for p
 
 ## Mathematical Background
 
-### Camera Coordinate System
-
-All camera models follow the standard computer vision convention RDF:
-- **X-axis**: Points right
-- **Y-axis**: Points down
-- **Z-axis**: Points forward (into the scene)
-
-**Exception**: BAL Pinhole models use the Bundler convention where the camera looks down the **-Z axis** (negative Z is in front of camera).
-
-### Projection Process
-
-Camera models transform 3D points in camera coordinates to 2D image pixels:
-
-```
-3D Point (x, y, z) → Normalized Coordinates → Distortion → Image Coordinates (u, v)
-```
-
-1. **Normalization**: Project 3D point onto a normalized plane
-2. **Distortion**: Apply model-specific distortion
-3. **Image Formation**: Scale and shift to pixel coordinates
-
-### Unprojection Process
-
-Inverse operation to recover a 3D ray from 2D pixels:
-
-```
-2D Pixel (u, v) → Normalized Coordinates → Undistortion → 3D Ray Direction
-```
-
-Most models use iterative methods (Newton-Raphson) for undistortion.
-
-### Jacobian Matrices
-
-All models provide three Jacobian matrices for optimization:
-
-1. **Point Jacobian** ∂(u,v)/∂(x,y,z): 2×3 matrix
-   - Derivatives of projection w.r.t. 3D point coordinates
-   - Used in: Structure optimization, triangulation
-
-2. **Pose Jacobian** ∂(u,v)/∂(pose): 2×6 matrix  
-   - Derivatives w.r.t. SE(3) camera pose (6-DOF: translation + rotation)
-   - Used in: Pose estimation, visual odometry, SLAM
-
-3. **Intrinsic Jacobian** ∂(u,v)/∂(intrinsics): 2×N matrix (N = parameter count)
-   - Derivatives w.r.t. camera parameters (fx, fy, cx, cy, distortion)
-   - Used in: Camera calibration, self-calibration bundle adjustment
+Coordinate conventions, projection / unprojection equations, and the full Jacobian
+derivations live in the [cookbook](doc/cookbook/src/introduction.html). All models
+follow the standard computer vision RDF frame (`+Z` forward) except for the BAL Pinhole
+family, which uses the Bundler convention (`-Z` forward).
 
 ## Features
 
@@ -433,84 +398,10 @@ problem.add_residual_block(&[...], Box::new(factor1), None);
 - `nalgebra`: Linear algebra primitives
 - `apex-manifolds`: SE(3) pose representation and Lie group operations
 
-## Acknowledgments
+## References
 
-This crate's camera models are based on implementations and formulas from:
-
-### Primary References
-
-- **[Camera Model Survey (ArXiv)](https://arxiv.org/html/2407.12405v3)**: Comprehensive survey of camera projection models with mathematical formulations and comparisons. Primary source for model equations and implementation details.
-
-- **[fisheye-calib-adapter](https://github.com/eowjd0512/fisheye-calib-adapter)**: Fisheye camera calibration and adaptation techniques. Reference implementation for fisheye distortion models and calibration workflows.
-
-- **[Granite VIO](https://github.com/DLR-RM/granite/tree/master/thirdparty/granite-headers/include/granite/camera)**: High-quality camera model implementations from DLR's visual-inertial odometry system. Reference for Double Sphere, EUCM, and other omnidirectional models.
-
-### Academic References
-
-#### Pinhole Camera
-
-- **Hartley, R. & Zisserman, A.** (2003). *Multiple View Geometry in Computer Vision* (2nd ed.). Cambridge University Press. ISBN: 978-0521540513.
-  - Definitive textbook reference for the pinhole camera model, projective geometry, and bundle adjustment
-
-#### Radial-Tangential (Brown-Conrady / RadTan)
-
-- **Conrady, A.E.** (1919). "Decentred Lens-Systems". *Monthly Notices of the Royal Astronomical Society*, 79(5), pp. 384–390. DOI: 10.1093/mnras/79.5.384
-  - Early formulation of decentered (tangential) lens distortion
-
-- **Brown, D.C.** (1966). "Decentering Distortion of Lenses". *Photogrammetric Engineering*, 32(3), pp. 444–462.
-  - Original formulation of radial and decentering distortion polynomials
-
-- **Brown, D.C.** (1971). "Close-Range Camera Calibration". *Photogrammetric Engineering*, 37(8), pp. 855–866.
-  - Extended calibration methodology; basis for the OpenCV distortion model
-
-#### Kannala-Brandt Fisheye
-
-- **Kannala, J. & Brandt, S.S.** (2006). "A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses". *IEEE Transactions on Pattern Analysis and Machine Intelligence*, 28(8), pp. 1335–1340. DOI: 10.1109/TPAMI.2006.153
-  - Odd-order polynomial in incidence angle θ; also called "equidistant fisheye" in Kalibr/OpenCV
-
-#### FOV (Field-of-View)
-
-- **Devernay, F. & Faugeras, O.** (2001). "Straight Lines Have to Be Straight: Automatic Calibration and Removal of Distortion from Scenes of Structured Environments". *Machine Vision and Applications*, 13(1), pp. 14–24. DOI: 10.1007/PL00013269
-  - Introduces the atan-based FOV distortion model with single parameter ω
-
-#### UCM (Unified Camera Model)
-
-- **Geyer, C. & Daniilidis, K.** (2000). "A Unifying Theory for Central Panoramic Systems and Practical Implications". *ECCV 2000*, LNCS 1843, pp. 445–461. DOI: 10.1007/3-540-45053-X_29
-  - Theoretical foundation: projection via a unit sphere onto a perspective image plane
-
-- **Mei, C. & Rives, P.** (2007). "Single View Point Omnidirectional Camera Calibration from Planar Grids". *ICRA 2007*, pp. 3945–3950. DOI: 10.1109/ROBOT.2007.364084
-  - Practical calibration method and software implementation for UCM
-
-#### EUCM (Extended Unified Camera Model)
-
-- **Khomutenko, B., Garcia, G. & Martinet, P.** (2016). "An Enhanced Unified Camera Model". *IEEE Robotics and Automation Letters*, 1(1), pp. 137–144. DOI: 10.1109/LRA.2015.2502921
-  - Introduces the β parameter to the UCM, improving projection accuracy for high-distortion fisheyes
-
-#### Double Sphere
-
-- **Usenko, V., Demmel, N., Schubert, D., Stückler, J. & Cremers, D.** (2018). "The Double Sphere Camera Model". *International Conference on 3D Vision (3DV)*, pp. 552–560. DOI: 10.1109/3DV.2018.00069. arXiv:1807.08957
-  - Efficient closed-form projection model for cameras with FOV > 180° using two unit spheres
-
-#### F-Theta (Polynomial Fisheye)
-
-- **Scaramuzza, D., Martinelli, A. & Siegwart, R.** (2006). "A Flexible Technique for Accurate Omnidirectional Camera Calibration and Structure from Motion". *4th IEEE International Conference on Computer Vision Systems (ICVS)*, p. 45. DOI: 10.1109/ICVS.2006.3
-  - General polynomial calibration for omnidirectional cameras mapping angle θ to image radius
-
-- **Abraham, S. & Förstner, W.** (2005). "Fish-Eye-Stereo Calibration and Epipolar Rectification". *ISPRS Journal of Photogrammetry and Remote Sensing*, 59(5), pp. 278–288. DOI: 10.1016/j.isprsjprs.2005.03.001
-  - Polynomial fisheye model r = f(θ); direct mathematical precursor to the f-theta formulation
-
-#### BAL Pinhole / Bundler Format
-
-- **Snavely, N., Seitz, S.M. & Szeliski, R.** (2006). "Photo Tourism: Exploring Photo Collections in 3D". *ACM SIGGRAPH 2006*, ACM TOG 25(3), pp. 835–846. DOI: 10.1145/1179352.1141964
-  - Bundler reconstruction system; defines the (f, k1, k2) strict camera convention
-
-- **Agarwal, S., Snavely, N., Simon, I., Seitz, S.M. & Szeliski, R.** (2009). "Building Rome in a Day". *ICCV 2009*, pp. 72–79. DOI: 10.1109/ICCV.2009.5459148
-  - Large-scale bundle adjustment; defines the BAL dataset format with -Z looking direction
-
-#### Survey
-
-- **Yu, G. et al.** (2024). "A Survey on Camera Models for Image Formation". arXiv:2407.12405.
-  - Comprehensive survey of camera projection models with unified mathematical formulations and comparisons
+The full bibliography (primary, academic, and survey references) lives in the
+[cookbook references page](doc/cookbook/src/references.html).
 
 
 ## License
