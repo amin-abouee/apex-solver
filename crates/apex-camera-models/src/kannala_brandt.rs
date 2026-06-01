@@ -1,45 +1,9 @@
-//! Kannala-Brandt Fisheye Camera Model
+//! Kannala-Brandt fisheye camera model.
 //!
-//! A widely-used fisheye camera model with polynomial radial distortion,
-//! commonly implemented in OpenCV for fisheye lens calibration.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! r = √(x² + y²)
-//! θ = atan2(r, z)
-//! θ_d = θ·(1 + k₁·θ² + k₂·θ⁴ + k₃·θ⁶ + k₄·θ⁸)
-//! u = fx · θ_d · (x/r) + cx
-//! v = fy · θ_d · (y/r) + cy
-//! ```
-//!
-//! Or equivalently: d(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Uses Newton-Raphson iteration to solve for θ from θ_d, then recovers
-//! the 3D ray direction.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: k₁, k₂, k₃, k₄ (8 parameters total)
-//!
-//! # Use Cases
-//!
-//! - Fisheye cameras with up to 180° field of view
-//! - Wide-angle surveillance cameras
-//! - Automotive and robotics applications
-//! - OpenCV fisheye calibration
-//!
-//! # References
-//!
-//! - Kannala & Brandt, "A Generic Camera Model and Calibration Method for
-//!   Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006
+//! Polynomial radial distortion parameterized in the incidence angle θ, suitable for fisheye
+//! lenses up to ~180° FOV. Has 8 intrinsic parameters. See the
+//! [kannala-brandt cookbook chapter](../doc/cookbook/src/kannala-brandt.html) for the full
+//! projection, unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -52,20 +16,24 @@ pub struct KannalaBrandtCamera {
 }
 
 impl KannalaBrandtCamera {
-    /// Create a new Kannala-Brandt fisheye camera.
-    ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
-    /// * `distortion` - MUST be [`DistortionModel::KannalaBrandt`] with `k1`, `k2`, `k3`, `k4`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `KannalaBrandtCamera` instance if the distortion model matches.
+    /// Creates a new Kannala-Brandt fisheye camera.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::KannalaBrandt`].
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::KannalaBrandt`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, KannalaBrandtCamera, PinholeParams};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::KannalaBrandt { k1: 0.1, k2: 0.01, k3: 0.001, k4: 0.0001 };
+    /// let camera = KannalaBrandtCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "kannala_brandt");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -78,12 +46,8 @@ impl KannalaBrandtCamera {
         Ok(model)
     }
 
-    /// Helper method to extract distortion parameters.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(k1, k2, k3, k4)` of distortion coefficients.
-    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns zeros.
+    /// Returns the Kannala-Brandt distortion parameters as `(k1, k2, k3, k4)`.
+    /// Returns zeros if the model is not Kannala-Brandt.
     fn distortion_params(&self) -> (f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::KannalaBrandt { k1, k2, k3, k4 } => (k1, k2, k3, k4),
@@ -91,33 +55,13 @@ impl KannalaBrandtCamera {
         }
     }
 
-    /// Checks the geometric condition for a valid projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point in the camera frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if `z > f64::EPSILON`, `false` otherwise.
+    /// Returns `true` if the point's z-coordinate is strictly positive.
     fn check_projection_condition(&self, z: f64) -> bool {
         z > f64::EPSILON
     }
 
-    /// Performs linear estimation to initialize distortion parameters from point correspondences.
-    ///
-    /// This method estimates the distortion coefficients [k1, k2, k3, k4] using a linear
-    /// least squares approach given 3D-2D point correspondences. It assumes the intrinsic
-    /// parameters (fx, fy, cx, cy) are already set.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Initializes `[k1, k2, k3, k4]` via linear least-squares given 3D–2D correspondences.
+    /// Requires the intrinsics `[fx, fy, cx, cy]` to already be set; needs at least 4 correspondences.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
@@ -237,11 +181,7 @@ impl KannalaBrandtCamera {
     }
 }
 
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
+/// Converts the camera to a dynamic vector with layout `[fx, fy, cx, cy, k1, k2, k3, k4]`.
 impl From<&KannalaBrandtCamera> for DVector<f64> {
     fn from(camera: &KannalaBrandtCamera) -> Self {
         let (k1, k2, k3, k4) = camera.distortion_params();
@@ -258,11 +198,7 @@ impl From<&KannalaBrandtCamera> for DVector<f64> {
     }
 }
 
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, k1, k2, k3, k4]
+/// Converts the camera to a fixed-size array with layout `[fx, fy, cx, cy, k1, k2, k3, k4]`.
 impl From<&KannalaBrandtCamera> for [f64; 8] {
     fn from(camera: &KannalaBrandtCamera) -> Self {
         let (k1, k2, k3, k4) = camera.distortion_params();
@@ -279,15 +215,8 @@ impl From<&KannalaBrandtCamera> for [f64; 8] {
     }
 }
 
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, k3, k4]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 8 elements.
+/// Creates a camera from a slice with layout `[fx, fy, cx, cy, k1, k2, k3, k4]`.
+/// Returns an error if the slice has fewer than 8 elements.
 impl TryFrom<&[f64]> for KannalaBrandtCamera {
     type Error = CameraModelError;
 
@@ -315,11 +244,7 @@ impl TryFrom<&[f64]> for KannalaBrandtCamera {
     }
 }
 
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, k1, k2, k3, k4]
+/// Creates a camera from a fixed-size array with layout `[fx, fy, cx, cy, k1, k2, k3, k4]`.
 impl From<[f64; 8]> for KannalaBrandtCamera {
     fn from(params: [f64; 8]) -> Self {
         Self {
@@ -342,12 +267,9 @@ impl From<[f64; 8]> for KannalaBrandtCamera {
 /// Creates a `KannalaBrandtCamera` from a parameter slice with validation.
 ///
 /// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 8 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+/// Creates a `KannalaBrandtCamera` from a parameter slice with full validation.
+/// Unlike [`<KannalaBrandtCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<KannalaBrandtCamera, CameraModelError> {
     let camera = KannalaBrandtCamera::try_from(params)?;
     camera.validate_params()?;
@@ -359,35 +281,14 @@ impl CameraModel for KannalaBrandtCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 8>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// r = √(x² + y²)
-    /// θ = atan2(r, z)
-    /// θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
-    /// u = fx · θ_d · (x/r) + cx
-    /// v = fy · θ_d · (y/r) + cy
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(uv)` - 2D image coordinates if valid.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::InvalidParams`] if point is behind camera (z <= EPSILON).
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
+    /// Returns [`CameraModelError::PointBehindCamera`] if the point lies at or behind
+    /// the camera.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
         let z = p_cam[2];
 
-        // Check if point is valid for projection (in front of camera)
         if !self.check_projection_condition(z) {
             return Err(CameraModelError::PointBehindCamera {
                 z,
@@ -410,12 +311,6 @@ impl CameraModel for KannalaBrandtCamera {
         let theta_d = theta + k1 * theta3 + k2 * theta5 + k3 * theta7 + k4 * theta9;
 
         if r < crate::GEOMETRIC_PRECISION {
-            // Point near optical axis: x/r and y/r are unstable.
-            // Limit approaches (fx * (theta_d/r) * x + cx)
-            // theta ~ r/z (for small theta), theta_d ~ theta (for small theta)
-            // theta_d/r ~ 1/z.
-            // u = fx * x/z + cx, v = fy * y/z + cy.
-            // Effectively pinhole close to center.
             let inv_z = 1.0 / z;
             return Ok(Vector2::new(
                 self.pinhole.fx * x * inv_z + self.pinhole.cx,
@@ -430,25 +325,9 @@ impl CameraModel for KannalaBrandtCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Newton-Raphson iteration to solve for θ from θ_d:
-    /// - f(θ) = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹ - θ_d = 0
-    /// - f'(θ) = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(ray)` - Normalized 3D ray direction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::NumericalError`] if Newton-Raphson fails to converge or derivative is too small.
+    /// Unprojects a 2D image point to a unit 3D ray. Solves for the incidence angle
+    /// θ with Newton-Raphson, then converts to a 3D direction. Returns
+    /// [`CameraModelError::NumericalError`] if the derivative becomes too small.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -459,20 +338,13 @@ impl CameraModel for KannalaBrandtCamera {
 
         let mut ru = (mx * mx + my * my).sqrt();
 
-        // Clamp undistorted radius to π/2 to ensure Newton-Raphson stability.
-        // For the Kannala-Brandt model, θ ∈ [0, π/2] maps the maximum valid
-        // field of view (180° full angle). Values beyond this produce physically
-        // meaningless results and can cause the iterative solver to diverge.
-        // Reference: Kannala & Brandt, "A Generic Camera Model and Calibration
-        // Method for Conventional, Wide-Angle, and Fish-Eye Lenses", PAMI 2006.
         ru = ru.min(std::f64::consts::PI / 2.0);
 
         if ru < crate::GEOMETRIC_PRECISION {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
         }
 
-        // Newton-Raphson
-        let mut theta = ru; // Initial guess
+        let mut theta = ru;
         const MAX_ITER: usize = 10;
         const CONVERGENCE_THRESHOLD: f64 = crate::CONVERGENCE_THRESHOLD;
 
@@ -487,10 +359,7 @@ impl CameraModel for KannalaBrandtCamera {
             let k3_theta6 = k3 * theta6;
             let k4_theta8 = k4 * theta8;
 
-            // f(θ)
             let f = theta * (1.0 + k1_theta2 + k2_theta4 + k3_theta6 + k4_theta8) - ru;
-
-            // f'(θ)
             let f_prime =
                 1.0 + 3.0 * k1_theta2 + 5.0 * k2_theta4 + 7.0 * k3_theta6 + 9.0 * k4_theta8;
 
@@ -509,14 +378,9 @@ impl CameraModel for KannalaBrandtCamera {
             }
         }
 
-        // Convert θ to 3D ray
         let sin_theta = theta.sin();
         let cos_theta = theta.cos();
 
-        // Direction in xy plane
-        // if ru is small we returned already.
-        // x = mx * sin(theta) / ru
-        // y = my * sin(theta) / ru
         let scale = sin_theta / ru;
         let x = mx * scale;
         let y = my * scale;
@@ -525,82 +389,8 @@ impl CameraModel for KannalaBrandtCamera {
         Ok(Vector3::new(x, y, z).normalize())
     }
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
-    ///
-    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// ## Kannala-Brandt Projection Model Recap
-    ///
-    /// ```text
-    /// r = √(x² + y²)                              // Radial distance from optical axis
-    /// θ = atan2(r, z)                             // Angle from optical axis
-    /// θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹    // Distorted angle (polynomial)
-    /// u = fx · θ_d · (x/r) + cx                  // Pixel u-coordinate
-    /// v = fy · θ_d · (y/r) + cy                  // Pixel v-coordinate
-    /// ```
-    ///
-    /// Derivatives of intermediate quantities:
-    /// ```text
-    /// ∂r/∂x = x/r,  ∂r/∂y = y/r,  ∂r/∂z = 0
-    /// ∂θ/∂x = z·x / (r·(r²+z²))
-    /// ∂θ/∂y = z·y / (r·(r²+z²))
-    /// ∂θ/∂z = -r / (r²+z²)
-    /// ∂θ_d/∂θ = 1 + 3k₁·θ² + 5k₂·θ⁴ + 7k₃·θ⁶ + 9k₄·θ⁸
-    /// ∂θ_d/∂x = (∂θ_d/∂θ) · (∂θ/∂x)
-    /// ∂θ_d/∂y = (∂θ_d/∂θ) · (∂θ/∂y)
-    /// ∂θ_d/∂z = (∂θ_d/∂θ) · (∂θ/∂z)
-    /// ```
-    ///
-    /// Derivatives of pixel coordinates (quotient + product rule):
-    ///
-    /// For u = fx · θ_d · (x/r) + cx:
-    /// ```text
-    /// ∂u/∂x = fx · [∂θ_d/∂x · (x/r) + θ_d · ∂(x/r)/∂x]
-    ///       = fx · [∂θ_d/∂x · (x/r) + θ_d · (1/r - x²/r³)]
-    ///
-    /// ∂u/∂y = fx · [∂θ_d/∂y · (x/r) + θ_d · (-x·y/r³)]
-    ///
-    /// ∂u/∂z = fx · [∂θ_d/∂z · (x/r)]
-    /// ```
-    ///
-    /// Similarly for v = fy · θ_d · (y/r) + cy:
-    /// ```text
-    /// ∂v/∂x = fy · [∂θ_d/∂x · (y/r) + θ_d · (-x·y/r³)]
-    ///
-    /// ∂v/∂y = fy · [∂θ_d/∂y · (y/r) + θ_d · (1/r - y²/r³)]
-    ///
-    /// ∂v/∂z = fy · [∂θ_d/∂z · (y/r)]
-    /// ```
-    ///
-    /// Near optical axis (r → 0): Use simplified Jacobian for numerical stability:
-    /// ```text
-    /// ∂u/∂x ≈ fx · (∂θ_d/∂θ) / z
-    /// ∂v/∂y ≈ fy · (∂θ_d/∂θ) / z
-    /// (all other terms ≈ 0)
-    /// ```
-    ///
-    /// Final Jacobian matrix (2×3):
-    ///
-    /// ```text
-    /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
-    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2×3 Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Kannala & Brandt, "A Generic Camera Model and Calibration Method for Conventional,
-    ///   Wide-Angle, and Fish-Eye Lenses", IEEE PAMI 2006
-    /// - Verified against numerical differentiation in `test_jacobian_point_numerical()`
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/kannala-brandt.html#jacobians) for the full derivation.
     ///
     /// # Implementation Note
     ///
@@ -675,95 +465,8 @@ impl CameraModel for KannalaBrandtCamera {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×8).
-    ///
-    /// Computes ∂π/∂K where K = [fx, fy, cx, cy, k₁, k₂, k₃, k₄] are the intrinsic parameters.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The intrinsic parameters consist of:
-    /// 1. **Linear parameters**: fx, fy, cx, cy (pinhole projection)
-    /// 2. **Distortion parameters**: k₁, k₂, k₃, k₄ (Kannala-Brandt polynomial coefficients)
-    ///
-    /// ## Kannala-Brandt Projection Model Recap
-    ///
-    /// ```text
-    /// r = √(x² + y²)
-    /// θ = atan2(r, z)
-    /// θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
-    /// u = fx · θ_d · (x/r) + cx
-    /// v = fy · θ_d · (y/r) + cy
-    /// ```
-    ///
-    /// Linear parameters (fx, fy, cx, cy):
-    /// ```text
-    /// ∂u/∂fx = θ_d · (x/r),  ∂u/∂fy = 0,  ∂u/∂cx = 1,  ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,  ∂v/∂fy = θ_d · (y/r),  ∂v/∂cx = 0,  ∂v/∂cy = 1
-    /// ```
-    ///
-    /// Distortion parameters (k₁, k₂, k₃, k₄):
-    ///
-    /// The distortion affects θ_d through the polynomial expansion.
-    ///
-    /// ### Derivatives of θ_d:
-    /// ```text
-    /// θ_d = θ + k₁·θ³ + k₂·θ⁵ + k₃·θ⁷ + k₄·θ⁹
-    ///
-    /// ∂θ_d/∂k₁ = θ³
-    /// ∂θ_d/∂k₂ = θ⁵
-    /// ∂θ_d/∂k₃ = θ⁷
-    /// ∂θ_d/∂k₄ = θ⁹
-    /// ```
-    ///
-    /// ### Chain rule to pixel coordinates:
-    ///
-    /// For u = fx · θ_d · (x/r) + cx:
-    /// ```text
-    /// ∂u/∂k₁ = fx · (∂θ_d/∂k₁) · (x/r) = fx · θ³ · (x/r)
-    /// ∂u/∂k₂ = fx · θ⁵ · (x/r)
-    /// ∂u/∂k₃ = fx · θ⁷ · (x/r)
-    /// ∂u/∂k₄ = fx · θ⁹ · (x/r)
-    /// ```
-    ///
-    /// Similarly for v = fy · θ_d · (y/r) + cy:
-    /// ```text
-    /// ∂v/∂k₁ = fy · θ³ · (y/r)
-    /// ∂v/∂k₂ = fy · θ⁵ · (y/r)
-    /// ∂v/∂k₃ = fy · θ⁷ · (y/r)
-    /// ∂v/∂k₄ = fy · θ⁹ · (y/r)
-    /// ```
-    ///
-    /// ## Final Jacobian Matrix (2×8)
-    ///
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂k₁  ∂u/∂k₂  ∂u/∂k₃  ∂u/∂k₄ ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂k₁  ∂v/∂k₂  ∂v/∂k₃  ∂v/∂k₄ ]
-    /// ```
-    ///
-    /// Expanded:
-    /// ```text
-    /// J = [ θ_d·x/r    0       1    0    fx·θ³·x/r  fx·θ⁵·x/r  fx·θ⁷·x/r  fx·θ⁹·x/r ]
-    ///     [    0    θ_d·y/r    0    1    fy·θ³·y/r  fy·θ⁵·y/r  fy·θ⁷·y/r  fy·θ⁹·y/r ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2×8 intrinsic Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Kannala & Brandt, "A Generic Camera Model and Calibration Method for Conventional,
-    ///   Wide-Angle, and Fish-Eye Lenses", IEEE PAMI 2006
-    /// - Verified against numerical differentiation in `test_jacobian_intrinsics_numerical()`
-    ///
-    /// # Implementation Note
-    ///
-    /// For numerical stability, when r (radial distance) is very small (near optical axis),
-    /// the Jacobian is set to zero as the projection becomes degenerate in this region.
+    /// 2×8 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, k1, k2, k3, k4]. See the
+    /// [cookbook](../doc/cookbook/src/kannala-brandt.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -823,28 +526,23 @@ impl CameraModel for KannalaBrandtCamera {
         ])
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - `fx`, `fy` must be positive.
-    /// - `fx`, `fy` must be finite.
-    /// - `cx`, `cy` must be finite.
-    /// - `k1`..`k4` must be finite.
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `k1`..`k4` must be finite
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -854,20 +552,12 @@ impl CameraModel for KannalaBrandtCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::KannalaBrandt`]).
+    /// Returns the distortion model (must be [`DistortionModel::KannalaBrandt`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"kannala_brandt"`.
+    /// Returns the model name: `"kannala_brandt"`.
     fn get_model_name(&self) -> &'static str {
         "kannala_brandt"
     }
