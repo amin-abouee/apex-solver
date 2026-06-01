@@ -27,7 +27,7 @@ profiles/
 scripts/
 output/
 *.csv
-cookbook
+crates/apex-camera-models/doc/cookbook/book/
 deprecated
 
 # C++ benchmark build artifacts
