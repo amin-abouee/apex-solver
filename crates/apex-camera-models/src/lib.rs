@@ -87,13 +87,13 @@ pub enum CameraModelError {
 /// Linear intrinsic parameters shared by every model except F-Theta.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PinholeParams {
-    /// Focal length, $x$ (pixels)
+    /// Focal length, x (pixels)
     pub fx: f64,
-    /// Focal length, $y$ (pixels)
+    /// Focal length, y (pixels)
     pub fy: f64,
-    /// Principal point, $x$ (pixels)
+    /// Principal point, x (pixels)
     pub cx: f64,
-    /// Principal point, $y$ (pixels)
+    /// Principal point, y (pixels)
     pub cy: f64,
 }
 
