@@ -74,7 +74,7 @@ impl DoubleSphereCamera {
     /// Returns `Ok(true)` if the squared normalised radius is within the unprojection
     /// domain (only constrains for `alpha > 0.5`).
     fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
-        let (alpha, _) = self.distortion_params();
+        let (_, alpha) = self.distortion_params();
         if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
             return Ok(false);
         }

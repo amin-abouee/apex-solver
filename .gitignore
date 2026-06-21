@@ -28,7 +28,7 @@ scripts/
 output/
 *.csv
 crates/apex-camera-models/doc/cookbook/book/
-deprecated
+cookbook/book/
 
 # C++ benchmark build artifacts
 **/benches/cpp_comparison/build/
