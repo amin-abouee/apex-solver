@@ -58,7 +58,7 @@ impl PinholeCamera {
     /// True if `z` is far enough from the optical centre for a numerically
     /// stable projection.
     fn check_projection_condition(&self, z: f64) -> bool {
-        z >= 1e-6
+        z >= crate::GEOMETRIC_PRECISION
     }
 }
 
@@ -146,7 +146,7 @@ impl CameraModel for PinholeCamera {
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::PointBehindCamera`] when `z ≤ MIN_DEPTH`.
+    /// Returns [`CameraModelError::PointBehindCamera`] when `z < GEOMETRIC_PRECISION`.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
             return Err(CameraModelError::PointBehindCamera {

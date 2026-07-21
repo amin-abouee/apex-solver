@@ -227,7 +227,7 @@ impl CameraModel for FovCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        if z < f64::EPSILON.sqrt() {
+        if z < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::ProjectionOutOfBounds);
         }
 

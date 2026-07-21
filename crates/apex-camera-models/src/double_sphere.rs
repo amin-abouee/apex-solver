@@ -835,21 +835,23 @@ mod tests {
 
     #[test]
     fn test_unproject_outside_image_returns_error() -> TestResult {
-        // check_unprojection_condition reads distortion_params() as (alpha, _),
-        // where distortion_params() returns (xi, alpha). So the condition triggers
-        // when xi > 0.5 and r² > 1/(2*xi - 1).
-        // With xi=0.6: threshold = 1/(2*0.6-1) = 5.0.
-        // Use fx=fy=1, cx=cy=0 so mx=u, my=v.  u=3 → r²=9 > 5.0 ✓
+        // check_unprojection_condition reads distortion_params() as (_, alpha),
+        // where distortion_params() returns (xi, alpha). The guard fires when
+        // alpha > 0.5 and r² > 1/(2*alpha - 1).
+        // With alpha=0.9: threshold = 1/(2*0.9-1) = 1.25.
+        // Use xi=0.3 (≤ 0.5) so that the OLD buggy guard (which tested xi instead
+        // of alpha) would NOT fire — this ensures the test only passes with the fix.
+        // Use fx=fy=1, cx=cy=0 so mx=u, my=v.  u=2 → r²=4 > 1.25 ✓
         let pinhole = PinholeParams::new(1.0, 1.0, 0.0, 0.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            xi: 0.6,
+            xi: 0.3,
             alpha: 0.9,
         };
         let camera = DoubleSphereCamera::new(pinhole, distortion)?;
-        let result = camera.unproject(&Vector2::new(3.0, 0.0));
+        let result = camera.unproject(&Vector2::new(2.0, 0.0));
         assert!(
             result.is_err(),
-            "Point with r² > threshold should return PointOutsideImage"
+            "Point with r² > 1/(2*alpha - 1) should return PointOutsideImage"
         );
         Ok(())
     }

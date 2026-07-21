@@ -55,9 +55,9 @@ impl KannalaBrandtCamera {
         }
     }
 
-    /// Returns `true` if the point's z-coordinate is strictly positive.
+    /// Returns `true` if the point's z-coordinate is at or above [`crate::GEOMETRIC_PRECISION`].
     fn check_projection_condition(&self, z: f64) -> bool {
-        z > f64::EPSILON
+        z >= crate::GEOMETRIC_PRECISION
     }
 
     /// Initializes `[k1, k2, k3, k4]` via linear least-squares given 3D–2D correspondences.
@@ -292,7 +292,7 @@ impl CameraModel for KannalaBrandtCamera {
         if !self.check_projection_condition(z) {
             return Err(CameraModelError::PointBehindCamera {
                 z,
-                min_z: f64::EPSILON,
+                min_z: crate::GEOMETRIC_PRECISION,
             });
         }
 

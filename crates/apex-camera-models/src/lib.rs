@@ -271,12 +271,12 @@ impl DistortionModel {
     }
 }
 
-/// Returns `Ok(())` if `z > √ε` (≈ 1.5e-8) and
+/// Returns `Ok(())` if `z >= GEOMETRIC_PRECISION` (1e-6) and
 /// `Err(PointAtCameraCenter)` otherwise. Used to reject points too close to
 /// the optical axis that would cause numerical instability in the
 /// perspective division.
 pub fn validate_point_in_front(z: f64) -> Result<(), CameraModelError> {
-    if z < f64::EPSILON.sqrt() {
+    if z < crate::GEOMETRIC_PRECISION {
         return Err(CameraModelError::PointAtCameraCenter);
     }
     Ok(())
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn test_validate_point_in_front_at_center() {
-        // z = 0 < sqrt(EPSILON) ≈ 1.49e-8, should fail
+        // z = 0 < GEOMETRIC_PRECISION (1e-6), should fail
         assert!(validate_point_in_front(0.0).is_err(), "z = 0 should fail");
     }
 
