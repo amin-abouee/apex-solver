@@ -1,96 +1,103 @@
 # BAL Pinhole
 
-The "Bundle Adjustment in the Large" pinhole variant used by Bundler, Ceres,
-and GTSAM. Two important differences from the standard pinhole model:
+The "Bundle Adjustment in the Large" pinhole variant used by Bundler, Ceres, and
+GTSAM. Two differences from the standard pinhole model:
 
-1. The camera looks down the **-Z axis** (the world is in front of the
-   camera when $z < 0$).
-2. The intrinsic parameter vector is reduced to **3** scalars in the strict
-   form: a single focal length $f$ shared by $f_x$ and $f_y$, a single
-   radial pair $k_1, k_2$, and a fixed principal point at the image
-   origin. This is the parameterisation used by the BAL dataset.
-
-The crate enforces the strict constraints in `BALPinholeCameraStrict::new`.
+1. The camera looks down the **$-Z$ axis** — the world is in front of the camera
+   when $z < 0$.
+2. The intrinsic vector is reduced to **3** scalars in the strict form: a single
+   focal length $f = f_x = f_y$, a radial pair $k_1, k_2$, and a fixed principal
+   point at the image origin ($c_x = c_y = 0$). This is the BAL dataset
+   parameterisation, enforced by `BALPinholeCameraStrict::new`.
 
 ## Parameters
 
 | Symbol | Name | Units | Range |
 |---|---|---|---|
-| $f$ | Shared focal length | pixels | $f > 0$ |
-| $k_1$ | Radial distortion (second order) | — | finite |
-| $k_2$ | Radial distortion (fourth order) | — | finite |
+| $f$ | Shared focal length | pixels | $f > 0$, finite |
+| $k_1$ | Radial distortion (2nd order) | — | finite |
+| $k_2$ | Radial distortion (4th order) | — | finite |
 
-Total: **3 parameters**. The parameter vector is $[f, k_1, k_2]$.
-By convention $f_x = f_y = f$ and $c_x = c_y = 0$.
+Total: **3 parameters**, in the order $[f, k_1, k_2]$. The strict form additionally
+requires $|f_x - f_y| \le 10^{-10}$ and $|c_x|, |c_y| \le 10^{-10}$, and accepts
+only `DistortionModel::Radial { k1, k2 }`.
 
 ## Projection
 
-For a 3D point $p_{\mathrm{cam}} = (x, y, z)$ with $z < 0$ (in front of the
-camera):
+Because the camera looks down $-Z$, divide by $w = -z > 0$ to get the normalised
+coordinates $x' = x/(-z)$, $y' = y/(-z)$ and their squared radius
+$r^2 = x'^2 + y'^2$. The radial factor and pixel are
 
 $$
-x' = \frac{x}{-z}, \qquad y' = \frac{y}{-z}, \qquad r^2 = x'^2 + y'^2
+D = 1 + k_1 r^2 + k_2 r^4, \qquad
+u = f \, D \, x', \qquad v = f \, D \, y' .
 $$
 
-Radial factor
+There is no $c_x, c_y$ offset — the principal point sits at the image origin.
+
+**Validity.** The point must be in front of the camera under the BAL convention:
+$z < -\epsilon_g$ (`MIN_DEPTH`); a depth failing this raises
+`ProjectionOutOfBounds`.
+
+<a id="unprojection"></a>
+## Inverse Projection
+
+**Iterative** (fixed point). From $x_d = u/f$, $y_d = v/f$, initialise
+$(x', y') = (x_d, y_d)$ and iterate $x' = x_d / D$, $y' = y_d / D$ five times,
+re-evaluating $D = 1 + k_1 r^2 + k_2 r^4$ each pass. With $s = \sqrt{1 + x'^2 + y'^2}$
+the unit ray points down $-Z$:
 
 $$
-d = 1 + k_1 r^2 + k_2 r^4
+\mathbf{r} = \frac{1}{s}\begin{bmatrix} x' \\ y' \\ -1 \end{bmatrix} .
 $$
 
-Distorted coordinates and pixel projection
+**Validity.** None beyond the fixed number of iterations; the radial inverse is
+well conditioned for the small BAL distortion coefficients.
 
-$$
-u = f \cdot d \cdot x', \qquad v = f \cdot d \cdot y'
-$$
-
-(No $c_x$, $c_y$ offset — the principal point is at the image origin.)
-
-## Unprojection
-
-**Iterative** for the radial part, with the same Newton-Raphson scheme as
-the other radial models. The azimuth is recovered directly from
-$(m_x, m_y) = (u / f, v / f)$.
-
-## Validity
-
-- $z < 0$ (point in front of the camera under the BAL convention).
-- $|f_x - f_y| < 10^{-10}$ and $|c_x|, |c_y| < 10^{-10}$ for the strict form.
-
+<a id="jacobians"></a>
 ## Point Jacobian
 
-With $w = -z > 0$ and the standard pinhole quotient rule, the model differs
-from the regular pinhole only by a global sign in the $z$ partial:
+Let $s = 1/(-z) = 1/w$, $D' = k_1 + 2 k_2 r^2$, and the $2 \times 2$ retinal block
+
+$$
+J_2 = \frac{\partial (x_d, y_d)}{\partial (x', y')}
+=
+\begin{bmatrix}
+D + 2 D' x'^2 & 2 D' x' y' \\
+2 D' x' y' & D + 2 D' y'^2
+\end{bmatrix},
+$$
+
+where $(x_d, y_d) = (D x',\, D y')$ is the distorted retinal point. Since
+$\partial x'/\partial x = s$ and $\partial x'/\partial z = x' s$ (and likewise for
+$y'$), the $2 \times 3$ point Jacobian is
 
 $$
 \frac{\partial (u, v)}{\partial (x, y, z)}
-=
-\begin{bmatrix}
-f \, d \, / w + f \, x' \cdot \partial d / \partial x' & \ldots & f \, x \, d / w^2 \\
-\ldots & f \, d \, / w + f \, y' \cdot \partial d / \partial y' & f \, y \, d / w^2
-\end{bmatrix}
+= f \, s \left[\; J_2 e_x \;\;\middle|\;\; J_2 e_y \;\;\middle|\;\; J_2 \begin{bmatrix} x' \\ y' \end{bmatrix} \right],
 $$
 
-(where the third column picks up a positive sign because the chain rule runs
-through $w = -z$). The full expression is implemented in the crate.
+i.e. the first two columns are $f s$ times the columns of $J_2$, and the $z$
+column is $f s \, J_2 (x', y')^\top$ (positive sign, because the chain rule runs
+through $w = -z$).
 
 ## Intrinsic Jacobian
 
-Parameter order: $[f, k_1, k_2]$.
+With parameter order $[f, k_1, k_2]$,
 
 $$
 \frac{\partial (u, v)}{\partial (f, k_1, k_2)}
 =
 \begin{bmatrix}
-d \, x' & f \, x' \, r^2 & f \, x' \, r^4 \\
-d \, y' & f \, y' \, r^2 & f \, y' \, r^4
-\end{bmatrix}
+D x' & f \, x' \, r^2 & f \, x' \, r^4 \\
+D y' & f \, y' \, r^2 & f \, y' \, r^4
+\end{bmatrix} .
 $$
 
 ## Linear Estimation
 
-Not provided. BAL-format datasets ship with pre-calibrated $f, k_1, k_2$
-and the strict form is meant to be a drop-in replacement, not a calibrator.
+Not provided. BAL-format datasets ship with pre-calibrated $f, k_1, k_2$; the
+strict form is a drop-in replacement, not a calibrator.
 
 ## Example
 
@@ -102,14 +109,6 @@ let distortion = DistortionModel::Radial { k1: -0.1, k2: 0.01 };
 let camera = BALPinholeCameraStrict::new(pinhole, distortion)?;
 # Ok::<(), apex_camera_models::CameraModelError>(())
 ```
-
-## Validation Rules
-
-- $f > 0$ and finite (enforced via $f_x = f_y$).
-- $k_1, k_2$ finite.
-- $|f_x - f_y| \le 10^{-10}$ (single focal length).
-- $|c_x|, |c_y| \le 10^{-10}$ (no principal point offset).
-- `DistortionModel::Radial { k1, k2 }` only.
 
 ## References
 
