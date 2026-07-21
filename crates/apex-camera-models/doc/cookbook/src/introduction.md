@@ -36,7 +36,9 @@ lengths $f_x, f_y$ are in pixels.
 | $r$ | Lateral distance in the normalised image plane, $r = \sqrt{x^2 + y^2}$ |
 | $r_d$ | Distorted radius, mapped to pixels by $f(r_d)$ |
 | $\pi$ | The projection function $p_{\mathrm{cam}} \mapsto p_{uv}$ |
+| $m_x, m_y$ | Normalised image coordinates, $m_x = (u - c_x)/f_x$, $m_y = (v - c_y)/f_y$ |
 | $\partial_a b$ | Partial derivative of $b$ with respect to $a$ |
+| $\epsilon_g$ | Geometric-precision threshold, $\epsilon_g = 10^{-6}$ (crate constant `GEOMETRIC_PRECISION`) |
 
 ## Pose Jacobians (SE(3))
 
@@ -82,14 +84,45 @@ $$
 [v]_\times = \begin{bmatrix} 0 & -v_z & v_y \\ v_z & 0 & -v_x \\ -v_y & v_x & 0 \end{bmatrix}
 $$
 
-## Validity of Projection
+## A Unified Chapter Layout
 
-For every model, a 3D point must have $z > 0$ to be in front of the camera.
-Some models (UCM, EUCM, Double Sphere) impose additional geometric conditions
-that exclude points inside a virtual sphere; see the relevant chapter for the
-exact inequality. Points that fail the projection condition yield a
-`CameraModelError::PointBehindCamera`, `PointAtCameraCenter`, or
-`ProjectionOutOfBounds` error.
+Every camera-model chapter follows the **same eight-section structure** so the
+models can be read and compared side by side:
+
+1. **Parameters** — the intrinsic vector, its units and admissible ranges.
+2. **Projection** — the forward map $p_{\mathrm{cam}} \mapsto p_{uv}$, with the
+   **validity conditions of the forward map merged in** (depth, denominator, and
+   the error each violation raises).
+3. **Inverse Projection** — the map $p_{uv} \mapsto \mathbf{r}$ (a unit ray),
+   with the **validity conditions of the inverse map merged in** (the domain on
+   which a real solution exists).
+4. **Point Jacobian** — $\partial p_{uv} / \partial p_{\mathrm{cam}}$ (2×3).
+5. **Intrinsic Jacobian** — $\partial p_{uv} / \partial (\text{parameters})$.
+6. **Linear Estimation** — the closed-form / least-squares initialiser, if any.
+7. **Example** — a minimal constructor snippet.
+8. **References**.
+
+Validity is therefore **not** a separate section: a condition that guards the
+forward map lives inside *Projection*, and a condition that guards the inverse
+map lives inside *Inverse Projection*.
+
+## Validity Conventions
+
+For every model a 3D point must be in front of the camera. The depth test uses
+the geometric-precision threshold $\epsilon_g = 10^{-6}$: a point is rejected
+when $z < \epsilon_g$ (or $z > -\epsilon_g$ for the BAL $-Z$ convention). Models
+built on a virtual sphere (UCM, EUCM, Double Sphere) add a geometric inequality
+that excludes points inside that sphere, and the algebraic inverses of those
+models are only real on a bounded disc $r \le r_{\max}(\text{parameters})$. Each
+chapter states the exact inequality and the error it raises:
+
+| Error variant | Raised when |
+|---|---|
+| `PointBehindCamera { z, min_z }` | depth test $z < \epsilon_g$ fails |
+| `ProjectionOutOfBounds` | the sphere/FOV geometric condition fails |
+| `DenominatorTooSmall { denom, threshold }` | the projection denominator $< \epsilon_g$ |
+| `PointOutsideImage { x, y }` | the inverse map leaves the real domain |
+| `NumericalError { .. }` | an iterative inverse fails to converge |
 
 ## Number of Parameters
 
