@@ -1,45 +1,9 @@
-//! Field-of-View (FOV) Camera Model
+//! Field-of-View (FOV) camera model.
 //!
-//! A fisheye camera model using a field-of-view parameter for radial distortion.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! r = √(x² + y²)
-//! atan_wrd = atan2(2·tan(w/2)·r, z)
-//! rd = atan_wrd / (r·w)    (if r > 0)
-//! rd = 2·tan(w/2) / w       (if r ≈ 0)
-//!
-//! mx = x · rd
-//! my = y · rd
-//! u = fx · mx + cx
-//! v = fy · my + cy
-//! ```
-//!
-//! where w is the field-of-view parameter (0 < w ≤ π).
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Uses trigonometric inverse with special handling near optical axis.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: w (field-of-view parameter) (5 parameters total)
-//!
-//! # Use Cases
-//!
-//! - Fisheye cameras in SLAM applications
-//! - Wide field-of-view lenses
-//!
-//! # References
-//!
-//! - Zhang et al., "Simultaneous Localization and Mapping with Fisheye Cameras"
-//!   https://arxiv.org/pdf/1807.08957
+//! Fisheye model parameterised by a single FOV coefficient `w` rather than a polynomial
+//! series, suitable for wide-FOV SLAM lenses. Has 5 intrinsic parameters. See the
+//! [fov cookbook chapter](../doc/cookbook/src/fov.html) for the full projection,
+//! unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -52,20 +16,24 @@ pub struct FovCamera {
 }
 
 impl FovCamera {
-    /// Create a new Field-of-View (FOV) camera.
-    ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
-    /// * `distortion` - MUST be [`DistortionModel::FOV`] with parameter `w`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `FovCamera` instance if the distortion model matches.
+    /// Creates a new FOV camera.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::FOV`].
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::FOV`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, FovCamera, PinholeParams};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::FOV { w: 1.5 };
+    /// let camera = FovCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "fov");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -78,12 +46,7 @@ impl FovCamera {
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameter.
-    ///
-    /// # Returns
-    ///
-    /// Returns the `w` parameter for FOV.
-    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns `0.0`.
+    /// Returns the FOV parameter `w`. Returns `0.0` if the model is not FOV.
     fn distortion_params(&self) -> f64 {
         match self.distortion {
             DistortionModel::FOV { w } => w,
@@ -91,26 +54,14 @@ impl FovCamera {
         }
     }
 
-    /// Performs linear estimation to initialize the w parameter from point correspondences.
-    ///
-    /// This method estimates the `w` parameter using a linear least squares approach
-    /// given 3D-2D point correspondences. It assumes the intrinsic parameters (fx, fy, cx, cy)
-    /// are already set.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Estimates the `w` parameter by 1-D grid search over candidate values.
+    /// Requires the intrinsics `[fx, fy, cx, cy]` to already be set; needs at least
+    /// 2 correspondences. Note: this is a search, not a closed-form LS solve.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
     ) -> Result<(), CameraModelError> {
-        // Check if the number of 2D and 3D points match
         if points_2d.ncols() != points_3d.ncols() {
             return Err(CameraModelError::InvalidParams(
                 "Number of 2D and 3D points must match".to_string(),
@@ -179,18 +130,13 @@ impl FovCamera {
 
         self.distortion = DistortionModel::FOV { w: best_w };
 
-        // Validate parameters
         self.validate_params()?;
 
         Ok(())
     }
 }
 
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, w]
+/// Converts the camera to a dynamic vector with layout `[fx, fy, cx, cy, w]`.
 impl From<&FovCamera> for DVector<f64> {
     fn from(camera: &FovCamera) -> Self {
         let w = camera.distortion_params();
@@ -204,11 +150,7 @@ impl From<&FovCamera> for DVector<f64> {
     }
 }
 
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, w]
+/// Converts the camera to a fixed-size array with layout `[fx, fy, cx, cy, w]`.
 impl From<&FovCamera> for [f64; 5] {
     fn from(camera: &FovCamera) -> Self {
         let w = camera.distortion_params();
@@ -222,15 +164,8 @@ impl From<&FovCamera> for [f64; 5] {
     }
 }
 
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, w]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 5 elements.
+/// Creates a camera from a slice with layout `[fx, fy, cx, cy, w]`.
+/// Returns an error if the slice has fewer than 5 elements.
 impl TryFrom<&[f64]> for FovCamera {
     type Error = CameraModelError;
 
@@ -253,11 +188,7 @@ impl TryFrom<&[f64]> for FovCamera {
     }
 }
 
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, w]
+/// Creates a camera from a fixed-size array with layout `[fx, fy, cx, cy, w]`.
 impl From<[f64; 5]> for FovCamera {
     fn from(params: [f64; 5]) -> Self {
         Self {
@@ -272,15 +203,9 @@ impl From<[f64; 5]> for FovCamera {
     }
 }
 
-/// Creates a `FovCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 5 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or w is out of range.
+/// Creates an `FovCamera` from a parameter slice with full validation.
+/// Unlike [`<FovCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<FovCamera, CameraModelError> {
     let camera = FovCamera::try_from(params)?;
     camera.validate_params()?;
@@ -292,19 +217,7 @@ impl CameraModel for FovCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 5>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// Uses atan-based radial distortion with FOV parameter w.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(uv)` - 2D image coordinates if valid.
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
     ///
     /// # Errors
     ///
@@ -314,7 +227,7 @@ impl CameraModel for FovCamera {
         let y = p_cam[1];
         let z = p_cam[2];
 
-        if z < f64::EPSILON.sqrt() {
+        if z < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::ProjectionOutOfBounds);
         }
 
@@ -339,23 +252,8 @@ impl CameraModel for FovCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Trigonometric inverse using sin/cos relationships.
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(ray)` - Normalized 3D ray direction.
-    ///
-    /// # Errors
-    ///
-    /// This model does not explicitly fail unprojection unless internal math errors occur, in which case it propagates them.
+    /// Unprojects a 2D image point to a unit 3D ray. Inverts the projection via the
+    /// trigonometric relationship of the FOV model.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -384,87 +282,8 @@ impl CameraModel for FovCamera {
         Ok(Vector3::new(x, y, z))
     }
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// For the FOV camera model, projection is defined as:
-    ///
-    /// ```text
-    /// r = √(x² + y²)
-    /// α = 2·tan(w/2)·r / z
-    /// atan_wrd = atan(α)
-    /// rd = atan_wrd / (r·w)    (if r > 0)
-    /// rd = 2·tan(w/2) / w       (if r ≈ 0)
-    ///
-    /// mx = x · rd
-    /// my = y · rd
-    /// u = fx · mx + cx
-    /// v = fy · my + cy
-    /// ```
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// Computing ∂u/∂p and ∂v/∂p where p = (x, y, z):
-    ///
-    /// ```text
-    /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
-    ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
-    /// ```
-    ///
-    /// Chain rule for u = fx · x · rd + cx and v = fy · y · rd + cy:
-    ///
-    /// ```text
-    /// ∂u/∂x = fx · ∂(x·rd)/∂x = fx · (rd + x · ∂rd/∂x)
-    /// ∂u/∂y = fx · ∂(x·rd)/∂y = fx · x · ∂rd/∂y
-    /// ∂u/∂z = fx · ∂(x·rd)/∂z = fx · x · ∂rd/∂z
-    ///
-    /// ∂v/∂x = fy · ∂(y·rd)/∂x = fy · y · ∂rd/∂x
-    /// ∂v/∂y = fy · ∂(y·rd)/∂y = fy · (rd + y · ∂rd/∂y)
-    /// ∂v/∂z = fy · ∂(y·rd)/∂z = fy · y · ∂rd/∂z
-    /// ```
-    ///
-    /// Computing ∂rd/∂x, ∂rd/∂y, ∂rd/∂z for r > 0 (rd = atan(α) / (r·w), α = 2·tan(w/2)·r / z):
-    ///
-    /// ```text
-    /// ∂rd/∂r = [∂atan/∂α · ∂α/∂r · r·w - atan(α) · w] / (r·w)²
-    ///        = [1/(1+α²) · 2·tan(w/2)/z · r·w - atan(α) · w] / (r·w)²
-    ///
-    /// ∂rd/∂z = ∂atan/∂α · ∂α/∂z / (r·w)
-    ///        = 1/(1+α²) · (-2·tan(w/2)·r/z²) / (r·w)
-    /// ```
-    ///
-    /// Then using ∂r/∂x = x/r and ∂r/∂y = y/r:
-    ///
-    /// ```text
-    /// ∂rd/∂x = ∂rd/∂r · ∂r/∂x = ∂rd/∂r · x/r
-    /// ∂rd/∂y = ∂rd/∂r · ∂r/∂y = ∂rd/∂r · y/r
-    /// ∂rd/∂z = (computed directly above)
-    /// ```
-    ///
-    /// Near optical axis (r < ε): rd = 2·tan(w/2) / w is constant, so ∂rd/∂x = ∂rd/∂y = ∂rd/∂z = 0:
-    /// ```text
-    /// J_point = [ fx·rd  0      0  ]
-    ///           [ 0      fy·rd  0  ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x3 Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
-    /// - Zhang et al., "Fisheye Camera Calibration Using Principal Point Constraints", PAMI 2012
-    ///
-    /// # Numerical Verification
-    ///
-    /// This analytical Jacobian is verified against numerical differentiation in
-    /// `test_jacobian_point_numerical()` with tolerance < 1e-6.
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/fov.html#jacobians) for the full derivation.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -518,132 +337,8 @@ impl CameraModel for FovCamera {
         )
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×5).
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The FOV camera has 5 intrinsic parameters: [fx, fy, cx, cy, w]
-    ///
-    /// ## Projection Equations
-    ///
-    /// ```text
-    /// u = fx · mx + cx
-    /// v = fy · my + cy
-    /// ```
-    ///
-    /// where mx = x · rd and my = y · rd, with:
-    ///
-    /// ```text
-    /// rd = atan(2·tan(w/2)·r/z) / (r·w)  (for r > 0)
-    /// rd = 2·tan(w/2) / w                 (for r ≈ 0)
-    /// ```
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// Intrinsic Jacobian (2×5):
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂w ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂w ]
-    /// ```
-    ///
-    /// ## Linear Parameters (fx, fy, cx, cy)
-    ///
-    /// These appear linearly in the projection equations:
-    ///
-    /// ```text
-    /// ∂u/∂fx = mx,     ∂u/∂fy = 0,      ∂u/∂cx = 1,      ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,      ∂v/∂fy = my,     ∂v/∂cx = 0,      ∂v/∂cy = 1
-    /// ```
-    ///
-    /// ## Distortion Parameter (w)
-    ///
-    /// The parameter w affects the distortion factor rd. We need ∂rd/∂w.
-    ///
-    /// ### Case 1: r > 0 (Non-Optical Axis)
-    ///
-    /// Starting from:
-    ///
-    /// ```text
-    /// α = 2·tan(w/2)·r / z
-    /// rd = atan(α) / (r·w)
-    /// ```
-    ///
-    /// Taking derivatives:
-    ///
-    /// ```text
-    /// ∂α/∂w = 2·sec²(w/2)·(1/2)·r/z = sec²(w/2)·r/z
-    /// ```
-    ///
-    /// where sec²(w/2) = 1 + tan²(w/2).
-    ///
-    /// Using the quotient rule for rd = atan(α) / (r·w):
-    ///
-    /// ```text
-    /// ∂rd/∂w = [∂atan(α)/∂w · r·w - atan(α) · r] / (r·w)²
-    ///        = [1/(1+α²) · ∂α/∂w · r·w - atan(α) · r] / (r·w)²
-    ///        = [sec²(w/2)·r²·w/z·(1/(1+α²)) - atan(α)·r] / (r²·w²)
-    /// ```
-    ///
-    /// Simplifying:
-    ///
-    /// ```text
-    /// ∂rd/∂w = [∂atan(α)/∂α · ∂α/∂w · r·w - atan(α)·r] / (r·w)²
-    /// ```
-    ///
-    /// ### Case 2: r ≈ 0 (Near Optical Axis)
-    ///
-    /// When r ≈ 0, we use rd = 2·tan(w/2) / w.
-    ///
-    /// Using the quotient rule:
-    ///
-    /// ```text
-    /// ∂rd/∂w = [2·sec²(w/2)·(1/2)·w - 2·tan(w/2)] / w²
-    ///        = [sec²(w/2)·w - 2·tan(w/2)] / w²
-    /// ```
-    ///
-    /// ## Final Jacobian w.r.t. w
-    ///
-    /// Once we have ∂rd/∂w, we compute:
-    ///
-    /// ```text
-    /// ∂u/∂w = fx · ∂(x·rd)/∂w = fx · x · ∂rd/∂w
-    /// ∂v/∂w = fy · ∂(y·rd)/∂w = fy · y · ∂rd/∂w
-    /// ```
-    ///
-    /// ## Matrix Form
-    ///
-    /// The complete Jacobian matrix is:
-    ///
-    /// ```text
-    /// J = [ mx   0    1    0    fx·x·∂rd/∂w ]
-    ///     [  0  my    0    1    fy·y·∂rd/∂w ]
-    /// ```
-    ///
-    /// where mx = x·rd and my = y·rd.
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x5 Intrinsic Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Devernay & Faugeras, "Straight lines have to be straight", Machine Vision and Applications 2001
-    /// - Hughes et al., "Rolling Shutter Motion Deblurring", CVPR 2010 (uses FOV model)
-    ///
-    /// # Numerical Verification
-    ///
-    /// This analytical Jacobian is verified against numerical differentiation in
-    /// `test_jacobian_intrinsics_numerical()` with tolerance < 1e-4.
-    ///
-    /// # Notes
-    ///
-    /// The FOV parameter w controls the field of view angle. Typical values range from
-    /// 0.5 (narrow FOV) to π (hemispheric fisheye). The derivative ∂rd/∂w captures how
-    /// changes in the FOV parameter affect the radial distortion mapping.
+    /// 2×5 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, w]. See the
+    /// [cookbook](../doc/cookbook/src/fov.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -695,28 +390,23 @@ impl CameraModel for FovCamera {
         SMatrix::<f64, 2, 5>::new(mx, 0.0, 1.0, 0.0, du_dw, 0.0, my, 0.0, 1.0, dv_dw)
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - fx, fy must be finite
-    /// - cx, cy must be finite
-    /// - w must be in (0, π]
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `w` must be in `(0, π]`
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -726,20 +416,12 @@ impl CameraModel for FovCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::FOV`]).
+    /// Returns the distortion model (must be [`DistortionModel::FOV`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"fov"`.
+    /// Returns the model name: `"fov"`.
     fn get_model_name(&self) -> &'static str {
         "fov"
     }

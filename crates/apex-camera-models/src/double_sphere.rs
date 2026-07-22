@@ -1,44 +1,9 @@
-//! Double Sphere Camera Model
+//! Double Sphere camera model.
 //!
-//! A two-parameter fisheye model that provides improved accuracy over
-//! the Unified Camera Model by using two sphere projections.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! d₁ = √(x² + y² + z²)
-//! d₂ = √(x² + y² + (ξ·d₁ + z)²)
-//! denom = α·d₂ + (1-α)·(ξ·d₁ + z)
-//! u = fx · (x/denom) + cx
-//! v = fy · (y/denom) + cy
-//! ```
-//!
-//! where:
-//! - ξ (xi) is the first distortion parameter
-//! - α (alpha) ∈ (0, 1] is the second distortion parameter
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Algebraic solution using the double sphere inverse equations.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: ξ (xi), α (alpha) (6 parameters total)
-//!
-//! # Use Cases
-//!
-//! - High-quality fisheye calibration
-//! - Wide field-of-view cameras
-//! - More accurate than UCM for extreme wide-angle lenses
-//!
-//! # References
-//!
-//! - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
+//! Two-parameter fisheye model that combines two consecutive sphere projections, providing
+//! better accuracy than UCM at extreme wide angles. Has 6 intrinsic parameters. See the
+//! [double-sphere cookbook chapter](../doc/cookbook/src/double-sphere.html) for the full
+//! projection, unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -52,31 +17,23 @@ pub struct DoubleSphereCamera {
 }
 
 impl DoubleSphereCamera {
-    /// Creates a new Double Sphere camera model.
-    ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - Pinhole camera parameters (fx, fy, cx, cy).
-    /// * `distortion` - Distortion model (must be [`DistortionModel::DoubleSphere`]).
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `DoubleSphereCamera` instance if the parameters are valid.
+    /// Creates a new Double Sphere camera.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if:
-    /// - The distortion model is not `DoubleSphere`.
-    /// - Parameters are invalid (e.g., negative focal length, invalid alpha).
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::DoubleSphere`], or if validation fails (e.g. non-positive
+    /// focal length, alpha out of range).
     ///
     /// # Example
     ///
     /// ```
-    /// use apex_camera_models::{DoubleSphereCamera, PinholeParams, DistortionModel};
+    /// use apex_camera_models::{CameraModel, DistortionModel, DoubleSphereCamera, PinholeParams};
     ///
     /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
     /// let distortion = DistortionModel::DoubleSphere { xi: -0.2, alpha: 0.6 };
     /// let camera = DoubleSphereCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "double_sphere");
     /// # Ok::<(), apex_camera_models::CameraModelError>(())
     /// ```
     pub fn new(
@@ -91,13 +48,8 @@ impl DoubleSphereCamera {
         Ok(model)
     }
 
-    /// Helper method to extract Double Sphere distortion parameters.
-    ///
-    /// This method assumes the caller has already verified the camera model.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(xi, alpha)` containing the Double Sphere parameters.
+    /// Returns the Double Sphere parameters as `(xi, alpha)`. Returns `(0.0, 0.0)` if
+    /// the model is not Double Sphere.
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::DoubleSphere { xi, alpha } => (xi, alpha),
@@ -105,16 +57,9 @@ impl DoubleSphereCamera {
         }
     }
 
-    /// Checks the geometric condition for a valid projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point in the camera frame.
-    /// * `d1` - The Euclidean distance to the point.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(true)` if the point satisfies the projection condition, or `Ok(false)` otherwise.
+    /// Returns `Ok(true)` if the projection is valid for the given `z` and Euclidean
+    /// distance `d1`; `Ok(false)` if not. Returns an error only for unrecoverable
+    /// numerical failures.
     fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
         let (xi, alpha) = self.distortion_params();
         let w1 = if alpha > 0.5 {
@@ -126,37 +71,19 @@ impl DoubleSphereCamera {
         Ok(z > -w2 * d1)
     }
 
-    /// Checks the geometric condition for a valid unprojection.
-    ///
-    /// # Arguments
-    ///
-    /// * `r_squared` - The squared radius of the point in normalized image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(true)` if the point satisfies the unprojection condition, or `Ok(false)` otherwise.
+    /// Returns `Ok(true)` if the squared normalised radius is within the unprojection
+    /// domain (only constrains for `alpha > 0.5`).
     fn check_unprojection_condition(&self, r_squared: f64) -> Result<bool, CameraModelError> {
-        let (alpha, _) = self.distortion_params();
+        let (_, alpha) = self.distortion_params();
         if alpha > 0.5 && r_squared > 1.0 / (2.0 * alpha - 1.0) {
             return Ok(false);
         }
         Ok(true)
     }
 
-    /// Performs linear estimation to initialize distortion parameters from point correspondences.
-    ///
-    /// This method estimates the `alpha` parameter using a linear least squares approach
-    /// given 3D-2D point correspondences. It assumes the intrinsic parameters (fx, fy, cx, cy)
-    /// are already set. The `xi` parameter is initialized to 0.0.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Estimates the `alpha` parameter via linear least-squares given 3D–2D
+    /// correspondences. `xi` is reset to `0.0`. Requires the intrinsics
+    /// `[fx, fy, cx, cy]` to already be set; needs at least 1 correspondence.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
@@ -201,17 +128,15 @@ impl DoubleSphereCamera {
             }
         };
 
-        // Update distortion with estimated alpha, set xi to 0.0
         self.distortion = DistortionModel::DoubleSphere { xi: 0.0, alpha };
 
-        // Validate parameters
         self.validate_params()?;
 
         Ok(())
     }
 }
 
-/// Provides a debug string representation for [`DoubleSphereModel`].
+/// Debug formatter for [`DoubleSphereCamera`].
 impl fmt::Debug for DoubleSphereCamera {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let (xi, alpha) = self.distortion_params();
@@ -223,9 +148,7 @@ impl fmt::Debug for DoubleSphereCamera {
     }
 }
 
-/// Convert DoubleSphereCamera to parameter vector.
-///
-/// Returns intrinsic parameters in the order: [fx, fy, cx, cy, xi, alpha]
+/// Converts the camera to a dynamic vector with layout `[fx, fy, cx, cy, xi, alpha]`.
 impl From<&DoubleSphereCamera> for DVector<f64> {
     fn from(camera: &DoubleSphereCamera) -> Self {
         let (xi, alpha) = camera.distortion_params();
@@ -240,9 +163,7 @@ impl From<&DoubleSphereCamera> for DVector<f64> {
     }
 }
 
-/// Convert DoubleSphereCamera to fixed-size parameter array.
-///
-/// Returns intrinsic parameters as [fx, fy, cx, cy, xi, alpha]
+/// Converts the camera to a fixed-size array with layout `[fx, fy, cx, cy, xi, alpha]`.
 impl From<&DoubleSphereCamera> for [f64; 6] {
     fn from(camera: &DoubleSphereCamera) -> Self {
         let (xi, alpha) = camera.distortion_params();
@@ -257,15 +178,8 @@ impl From<&DoubleSphereCamera> for [f64; 6] {
     }
 }
 
-/// Create DoubleSphereCamera from parameter slice.
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 6 elements.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy, xi, alpha]
+/// Creates a camera from a slice with layout `[fx, fy, cx, cy, xi, alpha]`.
+/// Returns an error if the slice has fewer than 6 elements.
 impl TryFrom<&[f64]> for DoubleSphereCamera {
     type Error = CameraModelError;
 
@@ -291,11 +205,7 @@ impl TryFrom<&[f64]> for DoubleSphereCamera {
     }
 }
 
-/// Create DoubleSphereCamera from fixed-size parameter array.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy, xi, alpha]
+/// Creates a camera from a fixed-size array with layout `[fx, fy, cx, cy, xi, alpha]`.
 impl From<[f64; 6]> for DoubleSphereCamera {
     fn from(params: [f64; 6]) -> Self {
         Self {
@@ -313,15 +223,9 @@ impl From<[f64; 6]> for DoubleSphereCamera {
     }
 }
 
-/// Creates a `DoubleSphereCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or xi/alpha are out of range.
+/// Creates a `DoubleSphereCamera` from a parameter slice with full validation.
+/// Unlike [`<DoubleSphereCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<DoubleSphereCamera, CameraModelError> {
     let camera = DoubleSphereCamera::try_from(params)?;
     camera.validate_params()?;
@@ -333,31 +237,9 @@ impl CameraModel for DoubleSphereCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 6>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// d₁ = √(x² + y² + z²)
-    /// d₂ = √(x² + y² + (ξ·d₁ + z)²)
-    /// denom = α·d₂ + (1-α)·(ξ·d₁ + z)
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2D image coordinates if valid.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError`] if:
-    /// - The point fails the geometric projection condition (`ProjectionOutOfBounds`).
-    /// - The denominator is too small, indicating the point is at the camera center (`PointAtCameraCenter`).
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
+    /// Returns [`CameraModelError::PointBehindCamera`] / `PointOutsideImage` if the
+    /// point violates the model's domain (`check_projection_condition`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -367,7 +249,6 @@ impl CameraModel for DoubleSphereCamera {
         let r2 = x * x + y * y;
         let d1 = (r2 + z * z).sqrt();
 
-        // Check projection condition using the helper
         if !self.check_projection_condition(z, d1)? {
             return Err(CameraModelError::ProjectionOutOfBounds);
         }
@@ -389,23 +270,9 @@ impl CameraModel for DoubleSphereCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Algebraic solution for double sphere inverse projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// Returns the normalized 3D ray direction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection condition fails.
+    /// Unprojects a 2D image point to a unit 3D ray via the double-sphere algebraic
+    /// inverse. Returns [`CameraModelError::PointOutsideImage`] if the unprojection
+    /// domain (`check_unprojection_condition`) is violated.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -443,92 +310,8 @@ impl CameraModel for DoubleSphereCamera {
         Ok(Vector3::new(x / norm, y / norm, z / norm))
     }
 
-    /// Checks if a 3D point can be validly projected.
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
-    ///
-    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// Given the Double Sphere projection model:
-    /// ```text
-    /// d₁ = √(x² + y² + z²)              // Distance to origin
-    /// w = ξ·d₁ + z                      // Intermediate value
-    /// d₂ = √(x² + y² + w²)              // Second sphere distance
-    /// denom = α·d₂ + (1-α)·w            // Denominator
-    /// u = fx · (x/denom) + cx           // Pixel u-coordinate
-    /// v = fy · (y/denom) + cy           // Pixel v-coordinate
-    /// ```
-    ///
-    /// Derivatives of intermediate quantities:
-    /// ```text
-    /// ∂d₁/∂x = x/d₁,  ∂d₁/∂y = y/d₁,  ∂d₁/∂z = z/d₁
-    /// ∂w/∂x = ξ·(∂d₁/∂x) = ξx/d₁
-    /// ∂w/∂y = ξ·(∂d₁/∂y) = ξy/d₁
-    /// ∂w/∂z = ξ·(∂d₁/∂z) + 1 = ξz/d₁ + 1
-    /// ```
-    ///
-    /// Derivative of d₂:
-    ///
-    /// Since d₂ = √(x² + y² + w²), using chain rule:
-    /// ```text
-    /// ∂d₂/∂x = (x + w·∂w/∂x) / d₂ = (x + w·ξx/d₁) / d₂
-    /// ∂d₂/∂y = (y + w·∂w/∂y) / d₂ = (y + w·ξy/d₁) / d₂
-    /// ∂d₂/∂z = (w·∂w/∂z) / d₂ = w·(ξz/d₁ + 1) / d₂
-    /// ```
-    ///
-    /// Derivative of denominator:
-    /// ```text
-    /// ∂denom/∂x = α·∂d₂/∂x + (1-α)·∂w/∂x
-    /// ∂denom/∂y = α·∂d₂/∂y + (1-α)·∂w/∂y
-    /// ∂denom/∂z = α·∂d₂/∂z + (1-α)·∂w/∂z
-    /// ```
-    ///
-    /// Derivatives of pixel coordinates (quotient rule):
-    ///
-    /// For u = fx·(x/denom) + cx:
-    /// ```text
-    /// ∂u/∂x = fx · ∂(x/denom)/∂x
-    ///       = fx · (denom·1 - x·∂denom/∂x) / denom²
-    ///       = fx · (denom - x·∂denom/∂x) / denom²
-    ///
-    /// ∂u/∂y = fx · (0 - x·∂denom/∂y) / denom²
-    ///       = -fx·x·∂denom/∂y / denom²
-    ///
-    /// ∂u/∂z = -fx·x·∂denom/∂z / denom²
-    /// ```
-    ///
-    /// Similarly for v = fy·(y/denom) + cy:
-    /// ```text
-    /// ∂v/∂x = -fy·y·∂denom/∂x / denom²
-    /// ∂v/∂y = fy · (denom - y·∂denom/∂y) / denom²
-    /// ∂v/∂z = -fy·y·∂denom/∂z / denom²
-    /// ```
-    ///
-    /// Final Jacobian matrix (2×3):
-    ///
-    /// ```text
-    /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
-    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x3 Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Usenko et al., "The Double Sphere Camera Model", 3DV 2018 (Supplementary Material)
-    /// - Verified against numerical differentiation in tests
-    ///
-    /// # Implementation Note
-    ///
-    /// The implementation uses the chain rule systematically through intermediate quantities
-    /// d₁, w, d₂, and denom to ensure numerical stability and code clarity.
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/double-sphere.html#jacobians) for the full derivation.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -579,115 +362,8 @@ impl CameraModel for DoubleSphereCamera {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×6).
-    ///
-    /// Computes ∂π/∂K where K = [fx, fy, cx, cy, ξ, α] are the intrinsic parameters.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The intrinsic parameters consist of:
-    /// 1. **Linear parameters**: fx, fy, cx, cy (pinhole projection)
-    /// 2. **Distortion parameters**: ξ (xi), α (alpha) (Double Sphere specific)
-    ///
-    /// ## Projection Model Recap
-    ///
-    /// ```text
-    /// d₁ = √(x² + y² + z²)
-    /// w = ξ·d₁ + z
-    /// d₂ = √(x² + y² + w²)
-    /// denom = α·d₂ + (1-α)·w
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// ## Part 1: Linear Parameters (fx, fy, cx, cy)
-    ///
-    /// These have direct, simple derivatives:
-    ///
-    /// ### Focal lengths (fx, fy):
-    /// ```text
-    /// ∂u/∂fx = x/denom    (coefficient of fx in u)
-    /// ∂u/∂fy = 0          (fy doesn't affect u)
-    /// ∂v/∂fx = 0          (fx doesn't affect v)
-    /// ∂v/∂fy = y/denom    (coefficient of fy in v)
-    /// ```
-    ///
-    /// ### Principal point (cx, cy):
-    /// ```text
-    /// ∂u/∂cx = 1          (additive constant)
-    /// ∂u/∂cy = 0          (cy doesn't affect u)
-    /// ∂v/∂cx = 0          (cx doesn't affect v)
-    /// ∂v/∂cy = 1          (additive constant)
-    /// ```
-    ///
-    /// ## Part 2: Distortion Parameters (ξ, α)
-    ///
-    /// These affect the projection through the denominator term.
-    ///
-    /// ### Derivative w.r.t. ξ (xi):
-    ///
-    /// Since w = ξ·d₁ + z and d₂ = √(x² + y² + w²), we have:
-    /// ```text
-    /// ∂w/∂ξ = d₁
-    ///
-    /// ∂d₂/∂ξ = ∂d₂/∂w · ∂w/∂ξ
-    ///        = (w/d₂) · d₁
-    ///        = w·d₁/d₂
-    ///
-    /// ∂denom/∂ξ = α·∂d₂/∂ξ + (1-α)·∂w/∂ξ
-    ///           = α·(w·d₁/d₂) + (1-α)·d₁
-    ///           = d₁·[α·w/d₂ + (1-α)]
-    /// ```
-    ///
-    /// Using the quotient rule on u = fx·(x/denom) + cx:
-    /// ```text
-    /// ∂u/∂ξ = fx · ∂(x/denom)/∂ξ
-    ///       = fx · (-x/denom²) · ∂denom/∂ξ
-    ///       = -fx·x·∂denom/∂ξ / denom²
-    /// ```
-    ///
-    /// Similarly:
-    /// ```text
-    /// ∂v/∂ξ = -fy·y·∂denom/∂ξ / denom²
-    /// ```
-    ///
-    /// ### Derivative w.r.t. α (alpha):
-    ///
-    /// Since denom = α·d₂ + (1-α)·w:
-    /// ```text
-    /// ∂denom/∂α = d₂ - w
-    ///
-    /// ∂u/∂α = -fx·x·(d₂ - w) / denom²
-    /// ∂v/∂α = -fy·y·(d₂ - w) / denom²
-    /// ```
-    ///
-    /// ## Final Jacobian Matrix (2×6)
-    ///
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂y  ∂u/∂cx  ∂u/∂cy  ∂u/∂ξ  ∂u/∂α ]
-    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂cx  ∂v/∂cy  ∂v/∂ξ  ∂v/∂α ]
-    ///
-    ///   = [ x/denom    0       1       0      -fx·x·∂denom/∂ξ/denom²  -fx·x·(d₂-w)/denom² ]
-    ///     [   0     y/denom    0       1      -fy·y·∂denom/∂ξ/denom²  -fy·y·(d₂-w)/denom² ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x6 Intrinsic Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Usenko et al., "The Double Sphere Camera Model", 3DV 2018
-    /// - Verified against numerical differentiation in tests
-    ///
-    /// # Implementation Note
-    ///
-    /// The implementation computes all intermediate values (d₁, w, d₂, denom)
-    /// first, then applies the chain rule derivatives systematically.
+    /// 2×6 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, xi, alpha]. See the
+    /// [cookbook](../doc/cookbook/src/double-sphere.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -730,29 +406,24 @@ impl CameraModel for DoubleSphereCamera {
         )
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - fx, fy must be finite
-    /// - cx, cy must be finite
-    /// - ξ must be finite
-    /// - α must be in (0, 1]
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `ξ` must be finite
+    /// - `α` must be in `(0, 1]`
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates the validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -762,20 +433,12 @@ impl CameraModel for DoubleSphereCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::DoubleSphere`]).
+    /// Returns the distortion model (must be [`DistortionModel::DoubleSphere`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"double_sphere"`.
+    /// Returns the model name: `"double_sphere"`.
     fn get_model_name(&self) -> &'static str {
         "double_sphere"
     }
@@ -1172,21 +835,23 @@ mod tests {
 
     #[test]
     fn test_unproject_outside_image_returns_error() -> TestResult {
-        // check_unprojection_condition reads distortion_params() as (alpha, _),
-        // where distortion_params() returns (xi, alpha). So the condition triggers
-        // when xi > 0.5 and r² > 1/(2*xi - 1).
-        // With xi=0.6: threshold = 1/(2*0.6-1) = 5.0.
-        // Use fx=fy=1, cx=cy=0 so mx=u, my=v.  u=3 → r²=9 > 5.0 ✓
+        // check_unprojection_condition reads distortion_params() as (_, alpha),
+        // where distortion_params() returns (xi, alpha). The guard fires when
+        // alpha > 0.5 and r² > 1/(2*alpha - 1).
+        // With alpha=0.9: threshold = 1/(2*0.9-1) = 1.25.
+        // Use xi=0.3 (≤ 0.5) so that the OLD buggy guard (which tested xi instead
+        // of alpha) would NOT fire — this ensures the test only passes with the fix.
+        // Use fx=fy=1, cx=cy=0 so mx=u, my=v.  u=2 → r²=4 > 1.25 ✓
         let pinhole = PinholeParams::new(1.0, 1.0, 0.0, 0.0)?;
         let distortion = DistortionModel::DoubleSphere {
-            xi: 0.6,
+            xi: 0.3,
             alpha: 0.9,
         };
         let camera = DoubleSphereCamera::new(pinhole, distortion)?;
-        let result = camera.unproject(&Vector2::new(3.0, 0.0));
+        let result = camera.unproject(&Vector2::new(2.0, 0.0));
         assert!(
             result.is_err(),
-            "Point with r² > threshold should return PointOutsideImage"
+            "Point with r² > 1/(2*alpha - 1) should return PointOutsideImage"
         );
         Ok(())
     }

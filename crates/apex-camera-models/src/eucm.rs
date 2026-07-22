@@ -1,44 +1,9 @@
-//! Extended Unified Camera Model (EUCM)
+//! Extended Unified Camera Model (EUCM).
 //!
-//! An extension of the Unified Camera Model with an additional parameter for
-//! improved modeling of wide-angle and fisheye lenses.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! d = √(β(x² + y²) + z²)
-//! denom = α·d + (1-α)·z
-//! u = fx · (x/denom) + cx
-//! v = fy · (y/denom) + cy
-//! ```
-//!
-//! where:
-//! - α ∈ [0, 1] is the projection parameter
-//! - β > 0 is the distortion parameter
-//! - (fx, fy, cx, cy) are standard intrinsics
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Uses algebraic solution to recover the 3D ray direction.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: α (projection), β (distortion) (6 parameters total)
-//!
-//! # Use Cases
-//!
-//! - Wide-angle cameras
-//! - Fisheye lenses
-//! - More flexible than UCM due to β parameter
-//!
-//! # References
-//!
-//! - Khomutenko et al., "An Enhanced Unified Camera Model"
+//! Generalisation of UCM with an extra shape parameter `β` to better model wide-angle
+//! and fisheye lenses. Has 6 intrinsic parameters. See the
+//! [eucm cookbook chapter](../doc/cookbook/src/eucm.html) for the full projection,
+//! unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -51,20 +16,24 @@ pub struct EucmCamera {
 }
 
 impl EucmCamera {
-    /// Create a new Extended Unified Camera Model (EUCM) camera.
-    ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
-    /// * `distortion` - MUST be [`DistortionModel::EUCM`] with `alpha` and `beta`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `EucmCamera` instance if the distortion model matches.
+    /// Creates a new EUCM camera.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::EUCM`].
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::EUCM`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, EucmCamera, PinholeParams};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::EUCM { alpha: 0.5, beta: 1.0 };
+    /// let camera = EucmCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "eucm");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -77,12 +46,8 @@ impl EucmCamera {
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameters.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(alpha, beta)` containing the EUCM parameters.
-    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns `(0.0, 0.0)`.
+    /// Returns the EUCM parameters as `(alpha, beta)`. Returns `(0.0, 0.0)` if the
+    /// model is not EUCM.
     fn distortion_params(&self) -> (f64, f64) {
         match self.distortion {
             DistortionModel::EUCM { alpha, beta } => (alpha, beta),
@@ -90,16 +55,8 @@ impl EucmCamera {
         }
     }
 
-    /// Checks the geometric condition for a valid projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point.
-    /// * `denom` - The projection denominator `α·d + (1-α)·z`.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point satisfies the projection condition, `false` otherwise.
+    /// Returns `true` if the projection domain is valid for the given `z` and
+    /// projection denominator. The extra constraint only binds for `alpha > 0.5`.
     fn check_projection_condition(&self, z: f64, denom: f64) -> bool {
         let (alpha, _) = self.distortion_params();
         let mut condition = true;
@@ -112,20 +69,9 @@ impl EucmCamera {
         condition
     }
 
-    /// Checks the geometric condition for a valid unprojection.
-    ///
-    /// # Arguments
-    ///
-    /// * `r_squared` - The squared radius in normalized image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point satisfies the unprojection condition, `false` otherwise.
+    /// Returns `true` if the squared normalised radius is within the EUCM
+    /// unprojection domain (only constrains for `alpha > 0.5`).
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
-        // Valid EUCM unprojection requires the radicand
-        //     1 − (2α − 1) · β · r²
-        // to stay non-negative (Usenko 2018, Eq. 41). Solving for r²:
-        //     r² ≤ 1 / ((2α − 1) · β)        when α > 0.5
         let (alpha, beta) = self.distortion_params();
         if alpha > 0.5 {
             let bound = 1.0 / ((2.0 * alpha - 1.0) * beta);
@@ -136,20 +82,9 @@ impl EucmCamera {
         true
     }
 
-    /// Performs linear estimation to initialize distortion parameters from point correspondences.
-    ///
-    /// This method estimates the `alpha` parameter using a linear least squares approach
-    /// given 3D-2D point correspondences. The `beta` parameter is fixed to 1.0.
-    /// It assumes the intrinsic parameters (fx, fy, cx, cy) are already set.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Estimates the `alpha` parameter via linear least-squares given 3D–2D
+    /// correspondences. `beta` is reset to `1.0`. Requires the intrinsics
+    /// `[fx, fy, cx, cy]` to already be set; needs at least 1 correspondence.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
@@ -200,24 +135,18 @@ impl EucmCamera {
             }
         };
 
-        // Set beta to 1.0 (following reference implementation)
         self.distortion = DistortionModel::EUCM {
             alpha: solution[0],
             beta: 1.0,
         };
 
-        // Validate parameters
         self.validate_params()?;
 
         Ok(())
     }
 }
 
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
+/// Converts the camera to a dynamic vector with layout `[fx, fy, cx, cy, alpha, beta]`.
 impl From<&EucmCamera> for DVector<f64> {
     fn from(camera: &EucmCamera) -> Self {
         let (alpha, beta) = camera.distortion_params();
@@ -232,11 +161,7 @@ impl From<&EucmCamera> for DVector<f64> {
     }
 }
 
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, alpha, beta]
+/// Converts the camera to a fixed-size array with layout `[fx, fy, cx, cy, alpha, beta]`.
 impl From<&EucmCamera> for [f64; 6] {
     fn from(camera: &EucmCamera) -> Self {
         let (alpha, beta) = camera.distortion_params();
@@ -251,15 +176,8 @@ impl From<&EucmCamera> for [f64; 6] {
     }
 }
 
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, alpha, beta]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 6 elements.
+/// Creates a camera from a slice with layout `[fx, fy, cx, cy, alpha, beta]`.
+/// Returns an error if the slice has fewer than 6 elements.
 impl TryFrom<&[f64]> for EucmCamera {
     type Error = CameraModelError;
 
@@ -285,11 +203,7 @@ impl TryFrom<&[f64]> for EucmCamera {
     }
 }
 
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, alpha, beta]
+/// Creates a camera from a fixed-size array with layout `[fx, fy, cx, cy, alpha, beta]`.
 impl From<[f64; 6]> for EucmCamera {
     fn from(params: [f64; 6]) -> Self {
         Self {
@@ -307,15 +221,9 @@ impl From<[f64; 6]> for EucmCamera {
     }
 }
 
-/// Creates an `EucmCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 6 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or alpha/beta are out of range.
+/// Creates an `EucmCamera` from a parameter slice with full validation.
+/// Unlike [`<EucmCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<EucmCamera, CameraModelError> {
     let camera = EucmCamera::try_from(params)?;
     camera.validate_params()?;
@@ -327,28 +235,9 @@ impl CameraModel for EucmCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 6>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// d = √(β(x² + y²) + z²)
-    /// denom = α·d + (1-α)·z
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(uv)` - 2D image coordinates if valid.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::InvalidParams`] if the geometric projection condition fails or the denominator is too small.
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
+    /// Returns [`CameraModelError::PointBehindCamera`] / `PointOutsideImage` if the
+    /// point violates the model's domain (`check_projection_condition`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -379,24 +268,10 @@ impl CameraModel for EucmCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Algebraic solution using EUCM inverse equations with α and β parameters.
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(ray)` - Normalized 3D ray direction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection condition fails.
-    /// Returns [`CameraModelError::NumericalError`] if a division by zero occurs during calculation.
+    /// Unprojects a 2D image point to a unit 3D ray via the EUCM algebraic inverse.
+    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection domain
+    /// (`check_unprojection_condition`) is violated, or a numerical error on
+    /// division by zero.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -430,91 +305,8 @@ impl CameraModel for EucmCamera {
         Ok(Vector3::new(mx, my, mz).normalize())
     }
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
-    ///
-    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// For the EUCM camera model, projection is defined as:
-    ///
-    /// ```text
-    /// r² = x² + y²
-    /// d = √(β·r² + z²)
-    /// denom = α·d + (1-α)·z
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// Computing ∂u/∂p and ∂v/∂p where p = (x, y, z):
-    ///
-    /// ```text
-    /// J_point = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
-    ///           [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
-    /// ```
-    ///
-    /// Chain rule application for u = fx · (x/denom) + cx and v = fy · (y/denom) + cy:
-    ///
-    /// ```text
-    /// ∂(x/denom)/∂x = (denom - x·∂denom/∂x) / denom²
-    /// ∂(x/denom)/∂y = -x·∂denom/∂y / denom²
-    /// ∂(x/denom)/∂z = -x·∂denom/∂z / denom²
-    ///
-    /// ∂(y/denom)/∂x = -y·∂denom/∂x / denom²
-    /// ∂(y/denom)/∂y = (denom - y·∂denom/∂y) / denom²
-    /// ∂(y/denom)/∂z = -y·∂denom/∂z / denom²
-    /// ```
-    ///
-    /// Computing ∂d/∂p where d = √(β·r² + z²):
-    ///
-    /// ```text
-    /// ∂d/∂x = ∂/∂x √(β·(x²+y²) + z²)
-    ///       = (1/2) · (β·r² + z²)^(-1/2) · 2β·x
-    ///       = β·x / d
-    ///
-    /// ∂d/∂y = β·y / d
-    /// ∂d/∂z = z / d
-    /// ```
-    ///
-    /// Computing ∂denom/∂p where denom = α·d + (1-α)·z:
-    ///
-    /// ```text
-    /// ∂denom/∂x = α · ∂d/∂x = α·β·x/d
-    /// ∂denom/∂y = α · ∂d/∂y = α·β·y/d
-    /// ∂denom/∂z = α · ∂d/∂z + (1-α) = α·z/d + (1-α)
-    /// ```
-    ///
-    /// Final Jacobian (substituting into quotient rule):
-    ///
-    /// ```text
-    /// ∂u/∂x = fx · (denom - x·α·β·x/d) / denom²
-    /// ∂u/∂y = fx · (-x·α·β·y/d) / denom²
-    /// ∂u/∂z = fx · (-x·(α·z/d + 1-α)) / denom²
-    ///
-    /// ∂v/∂x = fy · (-y·α·β·x/d) / denom²
-    /// ∂v/∂y = fy · (denom - y·α·β·y/d) / denom²
-    /// ∂v/∂z = fy · (-y·(α·z/d + 1-α)) / denom²
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x3 Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Khomutenko et al., "An Enhanced Unified Camera Model", RAL 2016
-    /// - Mei & Rives, "Single View Point Omnidirectional Camera Calibration from Planar Grids", ICRA 2007
-    ///
-    /// # Numerical Verification
-    ///
-    /// This analytical Jacobian is verified against numerical differentiation in
-    /// `test_jacobian_point_numerical()` with tolerance < 1e-5.
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/eucm.html#jacobians) for the full derivation.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -549,110 +341,8 @@ impl CameraModel for EucmCamera {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×6).
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The EUCM camera has 6 intrinsic parameters: [fx, fy, cx, cy, α, β]
-    ///
-    /// ## Projection Equations
-    ///
-    /// ```text
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// where denom = α·d + (1-α)·z and d = √(β·r² + z²).
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// Intrinsic Jacobian (2×6):
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂α  ∂u/∂β ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂α  ∂v/∂β ]
-    /// ```
-    ///
-    /// ## Linear Parameters (fx, fy, cx, cy)
-    ///
-    /// These appear linearly in the projection equations:
-    ///
-    /// ```text
-    /// ∂u/∂fx = x/denom,   ∂u/∂fy = 0,         ∂u/∂cx = 1,   ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,         ∂v/∂fy = y/denom,   ∂v/∂cx = 0,   ∂v/∂cy = 1
-    /// ```
-    ///
-    /// ## Distortion Parameter α
-    ///
-    /// The parameter α affects denom = α·d + (1-α)·z. Taking derivative:
-    ///
-    /// ```text
-    /// ∂denom/∂α = d - z
-    /// ```
-    ///
-    /// Using the quotient rule for u = fx·(x/denom) + cx:
-    ///
-    /// ```text
-    /// ∂u/∂α = fx · ∂(x/denom)/∂α
-    ///       = fx · (-x · ∂denom/∂α) / denom²
-    ///       = -fx · x · (d - z) / denom²
-    ///
-    /// ∂v/∂α = -fy · y · (d - z) / denom²
-    /// ```
-    ///
-    /// ## Distortion Parameter β
-    ///
-    /// The parameter β affects d = √(β·r² + z²). Taking derivative:
-    ///
-    /// ```text
-    /// ∂d/∂β = ∂/∂β √(β·r² + z²)
-    ///       = (1/2) · (β·r² + z²)^(-1/2) · r²
-    ///       = r² / (2d)
-    /// ```
-    ///
-    /// Chain rule through denom = α·d + (1-α)·z:
-    /// ```text
-    /// ∂denom/∂β = α · ∂d/∂β = α · r² / (2d)
-    /// ```
-    ///
-    /// Quotient rule:
-    ///
-    /// ```text
-    /// ∂u/∂β = fx · (-x · ∂denom/∂β) / denom²
-    ///       = -fx · x · α · r² / (2d · denom²)
-    ///
-    /// ∂v/∂β = -fy · y · α · r² / (2d · denom²)
-    /// ```
-    ///
-    /// ## Matrix Form
-    ///
-    /// The complete Jacobian matrix is:
-    ///
-    /// ```text
-    /// J = [ x/denom    0        1    0    ∂u/∂α    ∂u/∂β ]
-    ///     [   0     y/denom    0    1    ∂v/∂α    ∂v/∂β ]
-    /// ```
-    ///
-    /// where:
-    /// - ∂u/∂α = -fx · x · (d - z) / denom²
-    /// - ∂u/∂β = -fx · x · α · r² / (2d · denom²)
-    /// - ∂v/∂α = -fy · y · (d - z) / denom²
-    /// - ∂v/∂β = -fy · y · α · r² / (2d · denom²)
-    ///
-    /// ## References
-    ///
-    /// - Khomutenko et al., "An Enhanced Unified Camera Model", RAL 2016
-    /// - Scaramuzza et al., "A Toolbox for Easily Calibrating Omnidirectional Cameras", IROS 2006
-    ///
-    /// ## Numerical Verification
-    ///
-    /// This analytical Jacobian is verified against numerical differentiation in
-    /// `test_jacobian_intrinsics_numerical()` with tolerance < 1e-5.
-    ///
-    /// ## Notes
-    ///
-    /// The EUCM model parameters have physical interpretation:
-    /// - α ∈ [0, 1]: Projection model parameter (α=0 is perspective, α=1 is parabolic)
-    /// - β > 0: Mirror parameter controlling field of view
+    /// 2×6 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, alpha, beta]. See the
+    /// [cookbook](../doc/cookbook/src/eucm.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -686,29 +376,24 @@ impl CameraModel for EucmCamera {
         )
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - `fx`, `fy` must be positive.
-    /// - `fx`, `fy` must be finite.
-    /// - `cx`, `cy` must be finite.
-    /// - `α` must be in [0, 1].
-    /// - `β` must be positive (> 0).
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `α` must be in `[0, 1]`
+    /// - `β` must be positive (> 0)
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -718,20 +403,12 @@ impl CameraModel for EucmCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::EUCM`]).
+    /// Returns the distortion model (must be [`DistortionModel::EUCM`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"eucm"`.
+    /// Returns the model name: `"eucm"`.
     fn get_model_name(&self) -> &'static str {
         "eucm"
     }

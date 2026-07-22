@@ -1,47 +1,9 @@
-//! Pinhole Camera Model
+//! Pinhole camera model.
 //!
-//! The simplest perspective camera model with no lens distortion.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! u = fx · (x/z) + cx
-//! v = fy · (y/z) + cy
-//! ```
-//!
-//! where:
-//! - (fx, fy) are focal lengths in pixels
-//! - (cx, cy) is the principal point in pixels
-//! - z > 0 (point in front of camera)
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! For a 2D point (u, v) in image coordinates, the unprojected ray is:
-//!
-//! ```text
-//! mx = (u - cx) / fx
-//! my = (v - cy) / fy
-//! ray = normalize([mx, my, 1])
-//! ```
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy (4 parameters)
-//! - **Distortion**: None
-//!
-//! # Use Cases
-//!
-//! - Standard narrow field-of-view cameras
-//! - Initial calibration estimates
-//! - Testing and validation
-//!
-//! # References
-//!
-//! - Hartley & Zisserman, "Multiple View Geometry in Computer Vision"
+//! The simplest perspective camera: a 3D point is divided by its depth, then
+//! scaled and shifted to pixel coordinates. There is no lens distortion.
+//! Suitable for narrow FOV lenses and as a baseline for calibration.
+//! See the [cookbook](../doc/cookbook/src/pinhole.html) for the formulation.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -93,23 +55,14 @@ impl PinholeCamera {
         Ok(camera)
     }
 
-    /// Checks the geometric condition for a valid projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point in the camera frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if `z >= 1e-6`, `false` otherwise.
+    /// True if `z` is far enough from the optical centre for a numerically
+    /// stable projection.
     fn check_projection_condition(&self, z: f64) -> bool {
-        z >= 1e-6
+        z >= crate::GEOMETRIC_PRECISION
     }
 }
 
-/// Convert PinholeCamera to parameter vector.
-///
-/// Returns intrinsic parameters in the order: [fx, fy, cx, cy]
+/// Parameter order: `[fx, fy, cx, cy]`.
 impl From<&PinholeCamera> for DVector<f64> {
     fn from(camera: &PinholeCamera) -> Self {
         DVector::from_vec(vec![
@@ -121,9 +74,7 @@ impl From<&PinholeCamera> for DVector<f64> {
     }
 }
 
-/// Convert PinholeCamera to fixed-size parameter array.
-///
-/// Returns intrinsic parameters as [fx, fy, cx, cy]
+/// Parameter order: `[fx, fy, cx, cy]`.
 impl From<&PinholeCamera> for [f64; 4] {
     fn from(camera: &PinholeCamera) -> Self {
         [
@@ -135,13 +86,8 @@ impl From<&PinholeCamera> for [f64; 4] {
     }
 }
 
-/// Create PinholeCamera from parameter slice.
-///
-/// Returns an error if the slice has fewer than 4 elements.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy]
+/// Parameter order: `[fx, fy, cx, cy]`. Returns an error if the slice has
+/// fewer than 4 elements.
 impl TryFrom<&[f64]> for PinholeCamera {
     type Error = CameraModelError;
 
@@ -164,11 +110,7 @@ impl TryFrom<&[f64]> for PinholeCamera {
     }
 }
 
-/// Create PinholeCamera from fixed-size parameter array.
-///
-/// # Parameter Order
-///
-/// params = [fx, fy, cx, cy]
+/// Parameter order: `[fx, fy, cx, cy]`.
 impl From<[f64; 4]> for PinholeCamera {
     fn from(params: [f64; 4]) -> Self {
         Self {
@@ -183,15 +125,10 @@ impl From<[f64; 4]> for PinholeCamera {
     }
 }
 
-/// Creates a `PinholeCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 4 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+/// Like [`<PinholeCamera as TryFrom<&[f64]>>::try_from`] but also validates
+/// the resulting parameters. Returns
+/// [`CameraModelError::InvalidParams`] on a short slice and a validation
+/// error otherwise.
 pub fn try_from_params(params: &[f64]) -> Result<PinholeCamera, CameraModelError> {
     let camera = PinholeCamera::try_from(params)?;
     camera.validate_params()?;
@@ -203,26 +140,13 @@ impl CameraModel for PinholeCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 4>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// u = fx · (x/z) + cx
-    /// v = fy · (y/z) + cy
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame (x, y, z).
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2D image coordinates if valid.
+    /// Projects a 3D point to 2D pixel coordinates. See the
+    /// [cookbook](../doc/cookbook/src/pinhole.html#projection) for the
+    /// formula.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::PointAtCameraCenter`] if the point is behind or at the camera center (`z <= MIN_DEPTH`).
+    /// Returns [`CameraModelError::PointBehindCamera`] when `z < GEOMETRIC_PRECISION`.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
             return Err(CameraModelError::PointBehindCamera {
@@ -237,27 +161,12 @@ impl CameraModel for PinholeCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray in camera frame.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// mx = (u - cx) / fx
-    /// my = (v - cy) / fy
-    /// ray = normalize([mx, my, 1])
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates (u, v).
-    ///
-    /// # Returns
-    ///
-    /// Returns the normalized 3D ray direction.
+    /// Unprojects a pixel to a unit ray. Algebraic. See the
+    /// [cookbook](../doc/cookbook/src/pinhole.html#unprojection).
     ///
     /// # Errors
     ///
-    /// This function never fails for the simple pinhole model, but returns a `Result` for trait consistency.
+    /// Never fails; the `Result` is for trait uniformity.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let mx = (point_2d.x - self.pinhole.cx) / self.pinhole.fx;
         let my = (point_2d.y - self.pinhole.cy) / self.pinhole.fy;
@@ -269,55 +178,13 @@ impl CameraModel for PinholeCamera {
         Ok(Vector3::new(mx * norm_inv, my * norm_inv, norm_inv))
     }
 
-    /// Jacobian of projection w.r.t. 3D point coordinates (2×3).
-    ///
-    /// Computes ∂π/∂p where π is the projection function and p = (x, y, z) is the 3D point.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// Given the pinhole projection model:
-    /// ```text
-    /// u = fx · (x/z) + cx
-    /// v = fy · (y/z) + cy
-    /// ```
-    ///
-    /// Derivatives:
-    /// ```text
-    /// ∂u/∂x = fx/z,        ∂u/∂y = 0,     ∂u/∂z = -fx·x/z²
-    /// ∂v/∂x = 0,           ∂v/∂y = fy/z,  ∂v/∂z = -fy·y/z²
-    /// ```
-    ///
-    /// Final Jacobian matrix (2×3):
-    ///
-    /// ```text
-    /// J = [ ∂u/∂x   ∂u/∂y   ∂u/∂z  ]   [ fx/z    0      -fx·x/z² ]
-    ///     [ ∂v/∂x   ∂v/∂y   ∂v/∂z  ] = [  0     fy/z    -fy·y/z² ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x3 Jacobian matrix.
-    ///
-    /// # Implementation Note
-    ///
-    /// The implementation uses `inv_z = 1/z` and `x_norm = x/z`, `y_norm = y/z`
-    /// to avoid redundant divisions and improve numerical stability.
-    ///
-    /// # References
-    ///
-    /// - Hartley & Zisserman, "Multiple View Geometry", Chapter 6
-    /// - Standard perspective projection derivatives
-    /// - Verified against numerical differentiation in tests
+    /// ∂(u,v)/∂(x,y,z) — 2×3 projection Jacobian.
+    /// See the [cookbook](../doc/cookbook/src/pinhole.html#point-jacobian).
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_norm = p_cam.x * inv_z;
         let y_norm = p_cam.y * inv_z;
 
-        // Jacobian ∂(u,v)/∂(x,y,z) where (x,y,z) is point in camera frame
         SMatrix::<f64, 2, 3>::new(
             self.pinhole.fx * inv_z,
             0.0,
@@ -328,90 +195,28 @@ impl CameraModel for PinholeCamera {
         )
     }
 
-    /// Jacobian of projection w.r.t. intrinsic parameters (2×4).
-    ///
-    /// Computes ∂π/∂K where K = [fx, fy, cx, cy] are the intrinsic parameters.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The intrinsic parameters for the pinhole model are:
-    /// - **Focal lengths**: fx, fy (scaling factors)
-    /// - **Principal point**: cx, cy (image center offset)
-    ///
-    /// ## Projection Model Recap
-    ///
-    /// ```text
-    /// u = fx · (x/z) + cx
-    /// v = fy · (y/z) + cy
-    /// ```
-    ///
-    /// Derivatives:
-    /// ```text
-    /// ∂u/∂fx = x/z,  ∂u/∂fy = 0,     ∂u/∂cx = 1,  ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,    ∂v/∂fy = y/z,   ∂v/∂cx = 0,  ∂v/∂cy = 1
-    /// ```
-    ///
-    /// Final Jacobian matrix (2×4):
-    ///
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy ]
-    ///
-    ///   = [ x/z      0       1       0    ]
-    ///     [  0      y/z      0       1    ]
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x4 Intrinsic Jacobian matrix.
-    ///
-    /// # Implementation Note
-    ///
-    /// The implementation uses precomputed normalized coordinates:
-    /// - `x_norm = x/z`
-    /// - `y_norm = y/z`
-    ///
-    /// This avoids redundant divisions and improves efficiency.
-    ///
-    /// # References
-    ///
-    /// - Standard camera calibration literature
-    /// - Hartley & Zisserman, "Multiple View Geometry", Chapter 6
-    /// - Verified against numerical differentiation in tests
+    /// ∂(u,v)/∂(fx, fy, cx, cy) — 2×4 intrinsic Jacobian. Parameter
+    /// order: `[fx, fy, cx, cy]`. See the
+    /// [cookbook](../doc/cookbook/src/pinhole.html#intrinsic-jacobian).
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_norm = p_cam.x * inv_z;
         let y_norm = p_cam.y * inv_z;
 
-        // Jacobian ∂(u,v)/∂(fx,fy,cx,cy)
         SMatrix::<f64, 2, 4>::new(x_norm, 0.0, 1.0, 0.0, 0.0, y_norm, 0.0, 1.0)
     }
 
-    /// Validates camera parameters.
+    /// Validates pinhole intrinsics. Rules (mirrored in the
+    /// [cookbook](../doc/cookbook/src/pinhole.html#validation-rules)):
     ///
-    /// # Validation Rules
-    ///
-    /// - `fx` and `fy` must be positive.
-    /// - `fx` and `fy` must be finite.
-    /// - `cx` and `cy` must be finite.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// - `fx > 0`, `fy > 0` and finite.
+    /// - `cx`, `cy` finite.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the linear intrinsics `(fx, fy, cx, cy)`.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -421,20 +226,12 @@ impl CameraModel for PinholeCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::None`] for pinhole).
+    /// Returns the distortion model (always [`DistortionModel::None`] for this camera).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"pinhole"`.
+    /// Returns the model identifier `"pinhole"`.
     fn get_model_name(&self) -> &'static str {
         "pinhole"
     }

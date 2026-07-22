@@ -1,0 +1,13 @@
+[book]
+title = "Apex Camera Models Cookbook"
+authors = ["Amin Abouee"]
+language = "en"
+src = "src"
+description = "Mathematical reference for the camera projection models in apex-camera-models."
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[preprocessor.katex]
+after = ["links"]

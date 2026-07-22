@@ -27,8 +27,8 @@ profiles/
 scripts/
 output/
 *.csv
-cookbook
-deprecated
+crates/apex-camera-models/doc/cookbook/book/
+cookbook/book/
 
 # C++ benchmark build artifacts
 **/benches/cpp_comparison/build/
@@ -50,3 +50,4 @@ GEMINI.md
 .claude/
 .opencode/
 .rust_rules.mdc
+book/

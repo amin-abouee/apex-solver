@@ -1,75 +1,10 @@
-//! NVIDIA f-theta Fisheye Camera Model
+//! NVIDIA f-theta fisheye camera model.
 //!
-//! A polynomial-based fisheye camera model used in NVIDIA's autonomous-vehicle
-//! cameras. The model maps the angle θ between a 3-D ray and the optical axis
-//! to an image-plane radius via a degree-4 polynomial, while preserving the
-//! azimuthal direction exactly (the model is isotropic).
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! d     = √(x² + y² + z²)
-//! θ     = arccos(z / d)               — angle from optical axis
-//! r_p   = √(x² + y²)                 — lateral distance in camera plane
-//! f(θ)  = k₁θ + k₂θ² + k₃θ³ + k₄θ⁴ — forward polynomial
-//! u     = cx + f(θ) · x / r_p
-//! v     = cy + f(θ) · y / r_p
-//! ```
-//!
-//! Special case r_p < ε (point on optical axis): `(u, v) = (cx, cy)`.
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Given pixel (u, v), let dx = u − cx, dy = v − cy, r_d = √(dx² + dy²).
-//! If r_d < ε return (0, 0, 1). Otherwise solve f(θ) = r_d via Newton-Raphson
-//! (initial guess θ₀ = r_d / k₁):
-//!
-//! ```text
-//! θ_{n+1} = θ_n − (f(θ_n) − r_d) / f′(θ_n)
-//! f′(θ)   = k₁ + 2k₂θ + 3k₃θ² + 4k₄θ³
-//! ```
-//!
-//! Recover the unit ray:
-//! ```text
-//! ray = [sin θ · dx/r_d,  sin θ · dy/r_d,  cos θ]
-//! ```
-//!
-//! ## Jacobians
-//!
-//! ### ∂(u,v)/∂(x,y,z) — 2×3
-//!
-//! With `A = f′(θ)·z / (r_p²·d²)` and `B = f(θ) / r_p³`:
-//!
-//! ```text
-//! J = [[ A·x² + B·y²,   (A−B)·xy,   −f′·x/d² ],
-//!      [ (A−B)·xy,       A·y² + B·x²,  −f′·y/d² ]]
-//! ```
-//!
-//! At the optical axis (r_p < ε): `J = [[k₁/z, 0, 0], [0, k₁/z, 0]]`.
-//!
-//! ### ∂(u,v)/∂(cx,cy,k₁,k₂,k₃,k₄) — 2×6
-//!
-//! ```text
-//! J_intr = [[1, 0,  θ·cφ,  θ²·cφ,  θ³·cφ,  θ⁴·cφ],
-//!            [0, 1,  θ·sφ,  θ²·sφ,  θ³·sφ,  θ⁴·sφ]]
-//! ```
-//! where cφ = x/r_p, sφ = y/r_p.  At the optical axis all kᵢ columns are zero.
-//!
-//! # Parameters
-//!
-//! `INTRINSIC_DIM = 6`, parameter vector: `[cx, cy, k₁, k₂, k₃, k₄]`
-//!
-//! - **cx, cy**: principal point in pixels (finite)
-//! - **k₁**: linear coefficient — acts as focal length (pixels/radian); must be > 0
-//! - **k₂, k₃, k₄**: higher-order distortion coefficients (finite, typically small)
-//!
-//! # References
-//!
-//! NVIDIA, "The f-theta Camera Model", internal whitepaper.
+//! Polynomial-based fisheye model used in NVIDIA's autonomous-vehicle cameras. The
+//! polynomial `k₁θ + k₂θ² + k₃θ³ + k₄θ⁴` maps the incidence angle θ to an image-plane
+//! radius; the model is isotropic (no separate `fx`/`fy`). Has 6 intrinsic parameters.
+//! See the [f-theta cookbook chapter](../doc/cookbook/src/f-theta.html) for the full
+//! projection, unprojection, and Jacobian derivations.
 
 use crate::{CONVERGENCE_THRESHOLD, CameraModel, CameraModelError, GEOMETRIC_PRECISION, MIN_DEPTH};
 use crate::{DistortionModel, PinholeParams};
@@ -104,12 +39,23 @@ impl std::fmt::Debug for FThetaCamera {
 }
 
 impl FThetaCamera {
-    /// Create a new f-theta camera.
+    /// Creates a new f-theta camera.
     ///
     /// # Errors
     ///
     /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
     /// [`DistortionModel::FTheta`], or if any parameter fails validation.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, FThetaCamera};
+    ///
+    /// let distortion = DistortionModel::FTheta { k1: 500.0, k2: 0.0, k3: 0.0, k4: 0.0 };
+    /// let camera = FThetaCamera::new(320.0, 240.0, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "ftheta");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(cx: f64, cy: f64, distortion: DistortionModel) -> Result<Self, CameraModelError> {
         let cam = Self { cx, cy, distortion };
         cam.validate_params()?;
