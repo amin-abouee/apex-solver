@@ -2,6 +2,14 @@
 
 High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.
 
+## What's new in 0.3.0 — Cookbook
+
+A complete reference book documenting **every public functionality** of the crate — the
+pose-graph formats (G2O, TORO, BAL), the ASL/EuRoC dataset readers, ROS1/ROS2 bag read/write
+(SQLite3 & MCAP storage, CDR, message types), live DDS subscription, the dataset registry, and
+all seven CLI binaries — organized by domain with per-type/per-function API tables. Build it
+with `mdbook build doc/cookbook`.
+
 ## What's new in 0.2.0 — `unsafe`-free I/O
 
 `apex-io` v0.2.0 **removes all `unsafe` code** from the crate. Previous versions used `unsafe { memmap2::Mmap::map(&file) }` in four locations — `bal.rs`, `g2o.rs`, `toro.rs`, and `rosbag/storage/mcap.rs` — to memory-map input files. Memory mapping carries an inherent soundness footgun (concurrent external file mutation is undefined behaviour) and provided no measurable benefit for the access patterns used here, all of which read each file end-to-end exactly once.
@@ -49,13 +57,13 @@ the `ros2 bag` CLI.
 ```toml
 # Core: pose graphs + ROS2 bag reader/writer
 [dependencies]
-apex-io = "0.2.0"
+apex-io = "0.3.0"
 
 # With Rerun visualization helpers
-apex-io = { version = "0.2.0", features = ["visualization"] }
+apex-io = { version = "0.3.0", features = ["visualization"] }
 
 # With live DDS topic subscription (requires a DDS runtime)
-apex-io = { version = "0.2.0", features = ["dds"] }
+apex-io = { version = "0.3.0", features = ["dds"] }
 ```
 
 > **Note:** `apex-io` depends on `apex-manifolds` (for SE2/SE3 types). Both crates must be
@@ -288,7 +296,7 @@ writer.close()?;
 Enable the `dds` feature and have a running ROS2 node on the same DDS domain.
 
 ```toml
-apex-io = { version = "0.2.0", features = ["dds"] }
+apex-io = { version = "0.3.0", features = ["dds"] }
 ```
 
 ### Subscribe to a single topic
@@ -662,7 +670,7 @@ topic, byte offset) for actionable diagnostics.
 ## Visualization Feature
 
 ```toml
-apex-io = { version = "0.2.0", features = ["visualization"] }
+apex-io = { version = "0.3.0", features = ["visualization"] }
 ```
 
 ```rust

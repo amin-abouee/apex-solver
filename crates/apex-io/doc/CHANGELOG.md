@@ -5,6 +5,22 @@ All notable changes to `apex-io` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-22
+
+### Added
+- **Cookbook** (`doc/cookbook`, mdBook + KaTeX) documenting every public functionality of the
+  crate, organized by domain with per-type / per-function API tables:
+  - Pose-graph formats — the `Graph` model, G2O, TORO, BAL.
+  - Sensor datasets — ASL / EuRoC (`AslReader`, `AslStream`).
+  - ROS bags — shared types, ROS1 (`Ros1Reader`/`Ros1Writer` + wire codec), ROS2
+    (`Reader`/`Writer`, SQLite3 & MCAP storage, CDR), DDS live subscription, and the catalog
+    of supported ROS1/ROS2 message types.
+  - Utilities & tools — dataset registry & downloads, all seven CLI binaries, logging &
+    visualization, and a feature-flag reference.
+
+### Notes
+- No public API changes; this release adds documentation only.
+
 ## [0.2.0] - 2026-04-29
 
 First release prepared for publishing to crates.io. This version promotes the crate from an
