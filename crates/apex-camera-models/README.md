@@ -2,6 +2,16 @@
 
 Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
 
+## What's new in 0.3.0 — Cookbook overhaul
+
+The [cookbook](#cookbook) was rebuilt so every model chapter follows the **same eight-section
+template** (Parameters → Projection → Inverse Projection → Point Jacobian → Intrinsic Jacobian
+→ Linear Estimation → Example → References), with the geometric **validity conditions merged
+into** the Projection and Inverse-Projection sections. All formulas were re-derived from the
+implementation — correcting several inverse-projection formulas (the UCM Mei ξ-sphere inverse,
+the EUCM numerator, the Kannala-Brandt ray reconstruction, and the f-theta point Jacobian) —
+and prose now uses inline `$...$` math throughout.
+
 ## Cookbook
 
 For the full mathematical formulations, Jacobian derivations, and references, see the
@@ -210,7 +220,7 @@ All camera models use a unified `CameraModelError` enum with structured variants
 
 ```toml
 [dependencies]
-apex-camera-models = "0.2.0"
+apex-camera-models = "0.3.0"
 ```
 
 ## Usage
