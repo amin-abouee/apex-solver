@@ -77,7 +77,7 @@ pub use linalg::{
 };
 
 // Re-export logger
-pub use logger::{init_logger, init_logger_with_level};
+pub use logger::{init_logger, init_logger_with_directives, init_logger_with_level};
 
 // Re-export optimizer types
 pub use optimizer::{
