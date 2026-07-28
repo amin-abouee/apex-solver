@@ -22,9 +22,6 @@ bool ReadBALFile(const std::string& filepath, BALDataset& dataset) {
         return false;
     }
 
-    std::cout << "Loading BAL dataset: " << num_cameras << " cameras, " 
-              << num_points << " points, " << num_observations << " observations" << std::endl;
-
     // Pre-allocate vectors
     dataset.cameras.reserve(num_cameras);
     dataset.points.reserve(num_points);
@@ -72,8 +69,7 @@ bool ReadBALFile(const std::string& filepath, BALDataset& dataset) {
     }
 
     infile.close();
-    
-    std::cout << "Successfully loaded BAL dataset" << std::endl;
+
     return true;
 }
 
