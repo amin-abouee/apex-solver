@@ -50,7 +50,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
 
 // apex-solver imports
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
@@ -59,7 +59,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
-use apex_solver::init_logger;
+use apex_solver::init_logger_with_directives;
 use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
@@ -822,11 +822,10 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let gtsam_exe = build_dir.join("gtsam_odometry_benchmark");
 
     if g2o_exe.exists() && gtsam_exe.exists() {
-        info!("C++ benchmarks already built");
         return Ok(build_dir);
     }
 
-    info!("Building C++ benchmarks...");
+    info!("Building C++ benchmarks ...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -860,7 +859,6 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    info!("C++ benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -889,11 +887,6 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
             exe_name,
             String::from_utf8_lossy(&output.stderr)
         ));
-    }
-
-    // Print stdout for user visibility
-    if !output.stdout.is_empty() {
-        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename based on executable name
@@ -959,8 +952,8 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let build_dir = match build_cpp_benchmarks() {
         Ok(dir) => dir,
         Err(e) => {
-            info!("Warning: C++ benchmarks unavailable: {}", e);
-            info!("Continuing with Rust-only benchmarks...\n");
+            warn!("C++ benchmarks unavailable: {}", e);
+            warn!("Continuing with Rust-only benchmarks...");
             return all_results;
         }
     };
@@ -976,15 +969,14 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
         match run_cpp_benchmark(exe_name, &build_dir) {
             Ok(csv_path) => match parse_cpp_results(&csv_path) {
                 Ok(results) => {
-                    info!("{} completed: {} datasets", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
-                    info!("Warning: Failed to parse {} results: {}", exe_name, e);
+                    warn!("Failed to parse {} results: {}", exe_name, e);
                 }
             },
             Err(e) => {
-                info!("Warning: Failed to run {}: {}", exe_name, e);
+                warn!("Failed to run {}: {}", exe_name, e);
             }
         }
     }
@@ -1025,11 +1017,13 @@ fn save_csv_results(
 }
 
 fn main() {
-    // Initialize logger with INFO level
-    init_logger();
+    // factrs and tiny-solver log per-iteration progress through the `log` crate from
+    // *inside* their optimize() calls, i.e. inside the timed region. Silencing them keeps
+    // the measured time solve time rather than formatting time. An explicit RUST_LOG wins.
+    init_logger_with_directives(Level::INFO, "info,factrs=warn,tiny_solver=warn");
 
-    info!("Starting solver comparison benchmark...");
-    info!("Running each configuration 5 times and averaging results...");
+    info!("ODOMETRY POSE GRAPH BENCHMARK COMPARISON");
+    info!("Running each configuration 5 times and averaging results");
 
     let solvers = ["apex-solver", "factrs", "tiny-solver"];
     let mut all_results = Vec::new();
@@ -1039,8 +1033,7 @@ fn main() {
         info!("Dataset: {}", dataset.name);
 
         for solver in &solvers {
-            info!("{} ... ", solver);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            info!("Running {} ...", solver);
 
             // Run multiple times to get stable measurements
             let num_runs = 5;
@@ -1064,11 +1057,6 @@ fn main() {
                     avg_result.elapsed_ms = format!("{:.2}", total_time / num_runs as f64);
                 }
 
-                info!(
-                    "done (converged: {}, time: {} ms)",
-                    avg_result.converged, avg_result.elapsed_ms
-                );
-
                 all_results.push(avg_result);
             }
         }
@@ -1083,9 +1071,7 @@ fn main() {
     // Write results to CSV in output folder
     let csv_path = "output/odometry_pose_benchmark_results.csv";
     if let Err(e) = save_csv_results(&all_results, csv_path) {
-        warn!("Warning: Failed to save CSV results: {}", e);
-    } else {
-        info!("Results written to {}", csv_path);
+        warn!("Failed to save CSV results: {}", e);
     }
 
     // Separate 2D and 3D results and sort by dataset name
