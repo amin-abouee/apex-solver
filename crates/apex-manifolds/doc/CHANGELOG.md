@@ -5,6 +5,23 @@ All notable changes to `apex-manifolds` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-22
+
+### Added
+- **Cookbook** (`doc/cookbook`, mdBook + KaTeX) — a complete mathematical reference for every
+  manifold and every operation defined in the crate: composition, inverse, exponential and
+  logarithmic maps, adjoints, left/right Jacobians and their inverses, and the ⊞/⊟ retraction.
+  - One chapter per group (SO(2), SO(3), SE(2), SE(3), SE₂(3), SGal(3), Sim(3), Rⁿ) on a
+    unified template (Representation → Group Operations → Hat/Vee → Exp → Log → Adjoint →
+    Jacobians → Plus/Minus → Example → References).
+  - A shared **Conventions** page documenting notation, storage layout (w-first quaternions,
+    `[ρ, θ]` twist order), the ⊞/⊟ operators, and the SO(3) Jacobians reused by the higher
+    groups.
+  - All formulas derived from the implementation (e.g. the Sim(3) scale-coupled V matrix).
+
+### Notes
+- No public API changes; this release adds documentation only.
+
 ## [0.2.0] - 2026-04-29
 
 First release prepared for publishing to crates.io. This version promotes the crate from an
