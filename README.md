@@ -8,9 +8,15 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
-## Key Features (v1.3.0)
+## Key Features (v1.4.0)
 
-- **Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (8 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
+- **Slot-Map Problem Structure (faster)**: Variables and factors are stored in a
+  [`slotmap`](https://docs.rs/slotmap)-backed arena and referenced by stable, generational
+  `VarKey` / `FactorKey` handles instead of string keys. This gives O(1) access with no
+  hashing or per-key allocation on the hot path, and keeps manifold parameters in contiguous
+  `nalgebra` storage that `faer` views **without copying** — minimizing data movement between
+  the two linear-algebra backends. See [Performance](#performance--data-structure).
+- **Bundle Adjustment with Camera Intrinsic Optimization**: Simultaneous optimization of camera poses, 3D landmarks, and camera intrinsics (10 camera models via apex-camera-models crate) [apex-camera-models](crates/apex-camera-models/README.md)
 - **Explicit & Implicit Schur Complement Solvers**: Memory-efficient matrix-free PCG for large-scale problems (10,000+ cameras) alongside traditional explicit formulation
 - **15 Robust Loss Functions**: Comprehensive outlier rejection (Huber, Cauchy, Tukey, Welsch, Barron, and more)
 - **Manifold-Aware**: Full Lie group support (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians [apex-manifolds](crates/apex-manifolds/README.md)
@@ -129,6 +135,35 @@ apex-solver/                # workspace root = apex-solver crate
 
 ---
 
+## Performance & Data Structure
+
+Apex Solver stores the optimization problem in a **slot-map arena**. `Problem` keeps its
+variables and residual blocks in `slotmap::SlotMap`s and returns stable, generational
+`VarKey` / `FactorKey` handles; per-variable side data (fixed indices, bounds, column
+offsets) lives in matching `SecondaryMap`s.
+
+Why it's faster than the previous string-keyed design:
+
+- **O(1) generational access, no hashing.** Looking up a variable during residual/Jacobian
+  assembly is an index + generation check, not a `HashMap<String, _>` hash and compare.
+- **No per-key allocation.** `VarKey`/`FactorKey` are `Copy` 8-byte handles; there are no
+  `String` keys to allocate, clone, or compare.
+- **Cache-friendly iteration.** Values live in a dense backing array, so assembly sweeps
+  contiguous memory.
+- **Generational safety.** A removed handle can never alias a reused slot — stale keys
+  return `None` instead of silently pointing at a different variable.
+
+The handles also enable a **zero-copy nalgebra ↔ faer boundary**: manifold parameters stay in
+contiguous `nalgebra` column-major storage and are handed to factors as `&[f64]` slices that
+`faer` views directly (`MatRef`/`MatMut::from_column_major_slice`) — no `DVector`↔`Mat`
+conversion in the inner loop. Combined with a persistent symbolic factorization (built once,
+reused every iteration) and lock-free parallel assembly over disjoint buffers (rayon), the
+per-iteration hot path is allocation- and copy-free for the manifold data.
+
+→ **[Full performance benchmarks](doc/performance.md)**
+
+---
+
 ## Datasets
 
 Datasets are downloaded on demand using the built-in `download_datasets` tool in the `apex-io` crate. No Git LFS required.
@@ -170,13 +205,13 @@ Apex Solver is organized as a Cargo workspace with specialized sub-crates that c
 
 ```toml
 [dependencies]
-apex-manifolds = "0.2.0"
+apex-manifolds = "0.3.0"
 
 [dependencies]
-apex-camera-models = "0.2.0"
+apex-camera-models = "0.3.0"
 
 [dependencies]
-apex-io = "0.2.0"
+apex-io = "0.3.0"
 ```
 
 ---
