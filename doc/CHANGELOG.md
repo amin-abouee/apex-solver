@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-07-22
+
+### Changed
+- **Slot-map `Problem` data structure (faster).** `Problem` now stores variables and
+  residual blocks in `slotmap::SlotMap`s keyed by stable, generational `VarKey` / `FactorKey`
+  handles, replacing the previous `HashMap<String, _>` design. Per-variable side data (fixed
+  indices, bounds, column offsets) moved to matching `SecondaryMap`s. Benefits:
+  - O(1) generational access on the assembly hot path — no string hashing or comparison.
+  - No per-key allocation; `VarKey`/`FactorKey` are `Copy` 8-byte handles.
+  - Cache-friendly, dense-array iteration during residual/Jacobian assembly.
+  - Generational safety: a stale handle returns `None` instead of aliasing a reused slot.
+- **Zero-copy nalgebra ↔ faer boundary.** Manifold parameters stay in contiguous `nalgebra`
+  storage and are handed to factors as `&[f64]` slices that `faer` views directly
+  (`from_column_major_slice`), removing `DVector`↔`Mat` conversions from the inner loop. The
+  symbolic sparsity structure is built once and reused every iteration; parallel assembly is
+  lock-free over disjoint buffers (rayon).
+  - **API:** `Problem::add_variable` / `add_residual_block` now take and return `VarKey` /
+    `FactorKey` handles instead of `String` names.
+
+### Added
+- **Documentation cookbooks** (mdBook, KaTeX) for the three sub-crates, each under
+  `crates/<crate>/doc/cookbook`:
+  - `apex-manifolds` — every group and operation (exp/log, adjoint, Jacobians, ⊞/⊟) with
+    formulas derived from the implementation and a shared Conventions page.
+  - `apex-camera-models` — a unified eight-section template per model with validity merged
+    into projection/inverse-projection and corrected inverse-projection formulas.
+  - `apex-io` — every public functionality (pose-graph formats, ASL, ROS1/ROS2 bags, DDS,
+    CLI tools) organized by domain.
+- Sub-crate versions bumped to `0.3.0` (`apex-manifolds`, `apex-io`, `apex-camera-models`).
+
 ## [1.3.0] - 2026-04-29
 
 ### Added
