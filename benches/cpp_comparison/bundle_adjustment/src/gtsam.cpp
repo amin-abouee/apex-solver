@@ -13,8 +13,6 @@
 #include "../../common/include/ba_benchmark_utils.h"
 #include "../include/gtsam_ba.h"
 
-#include <thread>
-
 
 // Type aliases and using declarations moved to gtsam_ba.h
 
@@ -25,10 +23,7 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
     result.solver = "GTSAM";
     result.language = "C++";
 
-    std::cout << "\n=== GTSAM Benchmark ===" << std::endl;
-
     // Use GTSAM's native BAL reader which handles camera model conventions correctly
-    std::cout << "Loading BAL dataset using GTSAM native reader..." << std::endl;
     SfmData sfm_data;
 
     try {
@@ -49,24 +44,16 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
     }
     result.num_observations = static_cast<int>(total_obs);
 
-    std::cout << "Loaded: " << result.num_cameras << " cameras, "
-              << result.num_points << " points, "
-              << result.num_observations << " observations" << std::endl;
-
     // Build factor graph using GeneralSFMFactor (optimizes full camera including calibration)
-    std::cout << "Building optimization problem..." << std::endl;
     NonlinearFactorGraph graph;
     Values initial;
 
     // Add camera variables
-    std::cout << "Adding " << sfm_data.numberCameras() << " cameras..." << std::endl;
     for (size_t i = 0; i < sfm_data.numberCameras(); ++i) {
         initial.insert(C(i), sfm_data.cameras[i]);
     }
 
     // Add point variables and projection factors
-    std::cout << "Adding " << sfm_data.numberTracks() << " 3D points and projection factors..." << std::endl;
-
     // Measurement noise with Huber robust loss
     auto noise = noiseModel::Robust::Create(
         noiseModel::mEstimator::Huber::Create(1.0),
@@ -92,7 +79,6 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
     }
 
     // Fix first camera for gauge freedom
-    std::cout << "Fixing first camera for gauge freedom..." << std::endl;
     // Use a strong prior on the first camera (all 9 DOF: 6 pose + 3 calibration)
     auto prior_noise = noiseModel::Diagonal::Sigmas(
         (Vector(9) << 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6, 1e-6).finished());
@@ -105,7 +91,7 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
     // Configure optimizer
     // Use more conservative settings to handle potential numerical issues
     LevenbergMarquardtParams params;
-    params.setVerbosityLM("SUMMARY");
+    params.setVerbosityLM("SILENT");
     params.setMaxIterations(100);
     params.setAbsoluteErrorTol(1e-6);
     params.setRelativeErrorTol(1e-6);
@@ -117,23 +103,12 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
     // Use diagonal damping for better conditioning
     params.setDiagonalDamping(true);
 
-    int num_threads = static_cast<int>(std::thread::hardware_concurrency());
-    std::cout << "Solver configuration:" << std::endl;
-    std::cout << "  Algorithm: Levenberg-Marquardt" << std::endl;
-    std::cout << "  Max iterations: " << params.getMaxIterations() << std::endl;
-    std::cout << "  Tolerance: " << params.getAbsoluteErrorTol() << std::endl;
-    std::cout << "  Available threads: " << num_threads << " (GTSAM uses TBB if available)" << std::endl;
-    std::cout << "  Note: Optimizing full cameras (pose + calibration)" << std::endl;
-
     // Compute initial error
     double initial_error = graph.error(initial);
     result.initial_mse = initial_error / result.num_observations;
     result.initial_rmse = std::sqrt(result.initial_mse);
-    std::cout << "Initial error: " << initial_error << std::endl;
-    std::cout << "Initial RMSE: " << result.initial_rmse << " pixels" << std::endl;
 
     // Optimize
-    std::cout << "\nStarting optimization..." << std::endl;
     Timer timer;
 
     try {
@@ -148,8 +123,6 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
         result.final_rmse = std::sqrt(result.final_mse);
 
         result.status = "CONVERGED";
-
-        std::cout << "\nOptimization completed in " << result.iterations << " iterations" << std::endl;
     } catch (const std::exception& e) {
         std::cerr << "Optimization failed: " << e.what() << std::endl;
         result.time_ms = timer.elapsed_ms();
@@ -157,16 +130,6 @@ benchmark_utils::BenchmarkResult BenchmarkGTSAM(const std::string& dataset_path)
         result.final_mse = result.initial_mse;
         result.final_rmse = result.initial_rmse;
     }
-
-    double improvement_pct = ((result.initial_mse - result.final_mse) / result.initial_mse) * 100.0;
-
-    std::cout << "\nResults:" << std::endl;
-    std::cout << "  Initial RMSE: " << result.initial_rmse << " pixels" << std::endl;
-    std::cout << "  Final RMSE: " << result.final_rmse << " pixels" << std::endl;
-    std::cout << "  Improvement: " << improvement_pct << "%" << std::endl;
-    std::cout << "  Iterations: " << result.iterations << std::endl;
-    std::cout << "  Time: " << result.time_ms / 1000.0 << " seconds" << std::endl;
-    std::cout << "  Status: " << result.status << std::endl;
 
     return result;
 }
@@ -182,9 +145,7 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkGTSAM(dataset_path));
 
     std::string csv_path = "gtsam_ba_benchmark_results.csv";
-    if (benchmark_utils::WriteResultsToCSV(csv_path, results)) {
-        std::cout << "\nResults written to " << csv_path << std::endl;
-    } else {
+    if (!benchmark_utils::WriteResultsToCSV(csv_path, results)) {
         std::cerr << "Failed to write CSV results" << std::endl;
         return 1;
     }
