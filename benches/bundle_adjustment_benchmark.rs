@@ -621,7 +621,7 @@ fn save_csv_results(
 
 /// Print comparison table grouped by dataset
 fn print_comparison_table(results: &[BABenchmarkResult]) {
-    info!("\n{}", "=".repeat(150));
+    info!("{}", "=".repeat(150));
     info!("BUNDLE ADJUSTMENT COMPARISON RESULTS");
     info!("{}", "=".repeat(150));
 
@@ -695,7 +695,7 @@ fn run_benchmark_comparison() {
 
     // Run benchmarks for each dataset
     for dataset in &datasets {
-        info!("\nDATASET: {}", dataset.name);
+        info!("DATASET: {}", dataset.name);
 
         // Verify dataset file exists
         if !Path::new(&dataset.path).exists() {
@@ -726,7 +726,7 @@ fn run_benchmark_comparison() {
     // Print comparison table
     print_comparison_table(&all_results);
 
-    info!("\nResults written to {}", output_path);
+    info!("Results written to {}", output_path);
 }
 
 fn main() {
