@@ -3,18 +3,17 @@
 //! This benchmark compares three Rust nonlinear optimization libraries (apex-solver, factrs, tiny-solver)
 //! and two C++ libraries (g2o, GTSAM) on standard pose graph optimization datasets (both SE2 and SE3).
 //!
-//! ## Simplified Performance Metric
+//! ## Performance Metrics
 //!
-//! **Important Change**: This benchmark no longer uses cost-based metrics due to inconsistent cost
-//! computation across solvers (information-weighted vs unweighted residuals). Instead, it uses a
-//! simple convergence-based scoring system:
+//! Following the pose graph optimization literature (SE-Sync, Rosen et al. IJRR 2019;
+//! Carlone et al. ICRA 2015), solvers are compared on **final objective value (cost) and
+//! runtime**. Cost is computed by this harness directly from the G2O file for every solver,
+//! so the values are comparable across implementations.
 //!
-//! - **Score**: 100.0 if solver converged successfully, 0.0 if diverged or failed
-//! - **Converged**: "true" if solver met convergence criteria, "false" otherwise
-//! - **Time**: Average wall-clock time in milliseconds (5 runs per configuration)
-//! - **Iterations**: Number of iterations taken (where available)
-//!
-//! This approach provides a clear, unambiguous comparison of solver reliability and speed.
+//! - **Final chi2 / cost**: quality of the returned solution (lower is better)
+//! - **Time**: wall-clock milliseconds for the `optimize()` call only
+//! - **Iterations**: number of iterations taken (where the solver exposes it)
+//! - **Vertices / edges**: graph size, used to normalize chi2 by degrees of freedom (m - n)
 //!
 //! ## Configuration Philosophy
 //!
@@ -39,7 +38,7 @@
 //! - Timing starts immediately before `solver.optimize()` call
 //! - Problem setup (graph loading, factor creation) is excluded from timing
 //! - This matches the timing approach in optimize_*_graph.rs binaries
-//! - Each dataset is run 5 times and results are averaged for stability
+//! - One sample per invocation; `benches/tools/run_repeated.sh` supplies the repetitions
 //!
 //! ### Gauge Freedom Handling:
 //! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
@@ -199,6 +198,15 @@ fn compute_se3_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
     }
 }
 
+/// Graph size as (vertices, edges), used to normalize chi2 by degrees of freedom.
+fn graph_size(graph: &apex_io::Graph, is_3d: bool) -> (usize, usize) {
+    if is_3d {
+        (graph.vertices_se3.len(), graph.edges_se3.len())
+    } else {
+        (graph.vertices_se2.len(), graph.edges_se2.len())
+    }
+}
+
 // Note: Computing factrs final cost using unified cost function is complex due to
 // factrs's internal Value representation. For now, we use factrs's own cost computation
 // for final cost, but use unified cost for initial cost to ensure fair comparison baseline.
@@ -349,6 +357,10 @@ struct BenchmarkResult {
     dataset: String,
     solver: String,
     language: String,
+    /// Number of poses in the graph (n), for normalized chi2 = chi2 / (edges - vertices)
+    vertices: usize,
+    /// Number of constraints in the graph (m)
+    edges: usize,
     elapsed_ms: String,
     converged: String,
     iterations: String,
@@ -396,6 +408,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: converged.to_string(),
             iterations: iterations.map_or("-".to_string(), |i| i.to_string()),
@@ -413,6 +427,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: "false".to_string(),
             iterations: "-".to_string(),
@@ -430,6 +446,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: "-".to_string(),
             converged: "false".to_string(),
             iterations: format!("error: {}", error),
@@ -441,6 +459,13 @@ impl BenchmarkResult {
             improvement_pct: "-".to_string(),
         }
     }
+
+    /// Record the graph size, used to normalize chi2 by degrees of freedom.
+    fn with_size(mut self, vertices: usize, edges: usize) -> Self {
+        self.vertices = vertices;
+        self.edges = edges;
+        self
+    }
 }
 
 /// Helper to determine if apex-solver converged successfully
@@ -450,6 +475,7 @@ fn is_converged(status: &OptimizationStatus) -> bool {
         OptimizationStatus::Converged
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::MaxIterationsReached
     )
@@ -520,6 +546,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(graph.vertices_se2.len(), graph.edges_se2.len())
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
@@ -595,6 +622,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(graph.vertices_se3.len(), graph.edges_se3.len())
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
@@ -614,6 +642,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     } else {
         compute_se2_cost_metrics(&raw_graph)
     };
+    let (n_vertices, n_edges) = graph_size(&raw_graph, dataset.is_3d);
 
     // Catch panics from factrs parsing/loading
     let file = dataset.file.clone();
@@ -667,6 +696,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         Err(factrs::optimizers::OptError::MaxIterations(final_values)) => {
             // Update raw graph with optimized values from factrs
@@ -693,6 +723,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         Err(factrs::optimizers::OptError::FailedToStep) => {
             BenchmarkResult::diverged(dataset.name, "factrs", "Rust", elapsed_ms)
@@ -743,6 +774,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     } else {
         compute_se2_cost_metrics(&raw_graph)
     };
+    let (n_vertices, n_edges) = graph_size(&raw_graph, dataset.is_3d);
 
     // Start timing
     let start = Instant::now();
@@ -779,6 +811,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         None => {
             // Optimization failed (NaN, solve failed, or other error)
@@ -936,7 +969,8 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
             Some(cpp_result.iterations),
             initial_metrics,
             final_metrics,
-        );
+        )
+        .with_size(cpp_result.vertices, cpp_result.edges);
 
         results.push(result);
     }
@@ -1035,8 +1069,9 @@ fn main() {
         for solver in &solvers {
             info!("Running {} ...", solver);
 
-            // Run multiple times to get stable measurements
-            let num_runs = 5;
+            // One sample per invocation; the repeat-run driver supplies the repetitions so
+            // that Rust and C++ solvers contribute the same number of independent samples.
+            let num_runs = 1;
             let mut results = Vec::new();
 
             for _ in 0..num_runs {
