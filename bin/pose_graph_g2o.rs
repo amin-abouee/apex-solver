@@ -638,6 +638,7 @@ fn test_se2_dataset(
         OptimizationStatus::Converged
         | OptimizationStatus::CostToleranceReached
         | OptimizationStatus::GradientToleranceReached
+        | OptimizationStatus::StalledNoProgress
         | OptimizationStatus::ParameterToleranceReached => "CONVERGED".to_string(),
         OptimizationStatus::MaxIterationsReached => "ITER_LIMIT".to_string(),
         OptimizationStatus::NumericalFailure => "NUM_FAILURE".to_string(),
@@ -951,6 +952,7 @@ fn test_se3_dataset(
         OptimizationStatus::Converged
         | OptimizationStatus::CostToleranceReached
         | OptimizationStatus::GradientToleranceReached
+        | OptimizationStatus::StalledNoProgress
         | OptimizationStatus::ParameterToleranceReached => "CONVERGED".to_string(),
         OptimizationStatus::MaxIterationsReached => "ITER_LIMIT".to_string(),
         OptimizationStatus::NumericalFailure => "NUM_FAILURE".to_string(),

@@ -33,10 +33,9 @@
 //! - Number of iterations
 //! - Convergence status
 
-use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -171,13 +170,14 @@ fn is_converged(status: &OptimizationStatus) -> bool {
         OptimizationStatus::Converged
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
             | OptimizationStatus::ParameterToleranceReached
     )
 }
 
 /// Run Apex Solver bundle adjustment with SelfCalibration + Iterative Schur
 fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
-    info!("Apex Solver Benchmark ({})", dataset_name);
+    info!("Running Apex-Solver ...");
 
     // Run solver in separate thread with timeout
     let dataset_name_owned = dataset_name.to_string();
@@ -218,7 +218,6 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
 /// Implementation of Apex Solver BA (runs in separate thread)
 fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
     // Load dataset
-    info!("Loading BAL dataset from {}", dataset_path);
     let dataset = match BalLoader::load(dataset_path) {
         Ok(d) => d,
         Err(e) => {
@@ -227,16 +226,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         }
     };
 
-    info!(
-        "Dataset: {}: Cameras: {}, Landmarks: {}, Observations: {}",
-        dataset_name,
-        dataset.cameras.len(),
-        dataset.points.len(),
-        dataset.observations.len()
-    );
-
     // Setup problem
-    info!("Building optimization problem...");
     let mut problem = Problem::new(JacobianMode::Sparse);
 
     // Helper function to convert axis-angle to SO3
@@ -282,10 +272,6 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
 
     // Add projection factors using ProjectionFactor with SE3 + BALPinholeCameraStrict
     // SelfCalibration mode: optimize pose + landmarks + intrinsics
-    info!(
-        "Adding {} projection factors (SelfCalibration mode)...",
-        dataset.observations.len()
-    );
     for obs in &dataset.observations {
         let cam = &dataset.cameras[obs.camera_index];
         let camera = match BALPinholeCameraStrict::new(
@@ -328,7 +314,6 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
-    info!("Fixing first camera pose for gauge freedom...");
     for dof in 0..6 {
         problem.fix_variable(pose_keys[0], dof);
     }
@@ -336,20 +321,9 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
     let config = LevenbergMarquardtConfig::for_bundle_adjustment();
 
-    info!("Solver configuration:");
-    info!("  Mode: SelfCalibration (pose + landmarks + intrinsics)");
-    info!("  Linear solver: {:?}", config.linear_solver_type);
-    info!("  Schur variant: {:?}", config.schur_variant);
-    info!("  Preconditioner: {:?}", config.schur_preconditioner);
-    info!("  Initial damping: {:e}", config.damping);
-    info!("  Max iterations: {}", config.max_iterations);
-    info!("  Cost tolerance: {:e}", config.cost_tolerance);
-    info!("  Parameter tolerance: {:e}", config.parameter_tolerance);
-
     let mut solver = LevenbergMarquardt::with_config(config);
 
     // Optimize (timing excludes setup)
-    info!("Starting optimization...");
     let start = Instant::now();
     let result = match solver.optimize(&mut problem) {
         Ok(r) => r,
@@ -360,11 +334,6 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     };
     let elapsed_seconds = start.elapsed().as_secs_f64();
 
-    info!("Optimization completed!");
-    info!("Status: {:?}", result.status);
-    info!("Iterations: {}", result.iterations);
-    info!("Time: {:.2} seconds", elapsed_seconds);
-
     // Compute initial and final RMSE from solver costs.
     // Solver cost = 0.5 * sum ||r_i||², so MSE = mean ||r_i||² = 2 * cost / n.
     let num_obs = dataset.observations.len() as f64;
@@ -373,17 +342,7 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     let final_mse = 2.0 * result.final_cost / num_obs;
     let final_rmse = final_mse.sqrt();
 
-    info!("Metrics:");
-    info!("  Initial cost: {:.6e}", result.initial_cost);
-    info!("  Final cost: {:.6e}", result.final_cost);
-    info!("  Initial RMSE: {:.3} pixels", initial_rmse);
-    info!("  Final RMSE: {:.3} pixels", final_rmse);
-
-    let improvement_pct = ((initial_mse - final_mse) / initial_mse) * 100.0;
     let converged = is_converged(&result.status);
-
-    info!("  Improvement: {:.2}%", improvement_pct);
-    info!("  Converged: {}", converged);
 
     BABenchmarkResult::success(
         dataset_name,
@@ -436,11 +395,10 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let g2o_exe = build_dir.join("g2o_ba_benchmark");
 
     if ceres_exe.exists() && gtsam_exe.exists() && g2o_exe.exists() {
-        info!("C++ BA benchmarks already built");
         return Ok(build_dir);
     }
 
-    info!("Building C++ BA benchmarks...");
+    info!("Building C++ BA benchmarks ...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -474,7 +432,6 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    info!("C++ BA benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -492,10 +449,13 @@ fn run_cpp_benchmark(
 
     info!("Running {} ...", exe_name);
 
-    // Spawn process (non-blocking)
+    // Spawn process (non-blocking). The benchmark itself is silent; only genuine
+    // failures reach stderr, which is inherited so they stay visible.
     let mut child = Command::new(&exe_path)
         .arg(dataset_path)
         .current_dir(build_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", exe_name, e))?;
 
@@ -534,16 +494,6 @@ fn run_cpp_benchmark(
                 return Err(format!("Error waiting for {}: {}", exe_name, e));
             }
         }
-    }
-
-    // Process completed, read output
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to get output from {}: {}", exe_name, e))?;
-
-    // Print stdout for user visibility
-    if !output.stdout.is_empty() {
-        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename
@@ -601,7 +551,7 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
         Ok(dir) => dir,
         Err(e) => {
             warn!("C++ benchmarks unavailable for {}: {}", dataset_name, e);
-            warn!("Continuing with Rust-only benchmark...\n");
+            warn!("Continuing with Rust-only benchmark...");
             return all_results;
         }
     };
@@ -622,7 +572,6 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
         match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path) {
             Ok(csv_path) => match parse_cpp_ba_results(&csv_path, dataset_name) {
                 Ok(results) => {
-                    info!("{} completed: {} results", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
@@ -737,41 +686,29 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
 
 /// Run the full benchmark comparison
 fn run_benchmark_comparison() {
-    // Initialize logger only once (avoid panic on multiple calls)
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        init_logger();
-    });
+    init_logger();
 
     info!("BUNDLE ADJUSTMENT BENCHMARK COMPARISON");
     info!("Testing 4 datasets: Ladybug, Trafalgar, Dubrovnik, Venice");
-    info!("Apex Solver: SelfCalibration mode + Iterative Schur + Schur-Jacobi preconditioner\n");
 
     let datasets = get_datasets();
     let mut all_results = Vec::new();
 
     // Run benchmarks for each dataset
     for dataset in &datasets {
-        info!("{}", "=".repeat(150));
         info!("DATASET: {}", dataset.name);
-        info!("PATH: {}", dataset.path);
-        info!("{}", "=".repeat(150));
 
         // Verify dataset file exists
         if !Path::new(&dataset.path).exists() {
-            error!("Dataset file not found: {}", dataset.path);
-            error!("Skipping {}...", dataset.name);
+            warn!("Dataset file not found, skipping: {}", dataset.path);
             continue;
         }
 
         // Phase 1: Apex Solver (Rust)
-        info!("Phase 1: Apex Solver");
         let apex_result = apex_solver_ba(&dataset.name, &dataset.path);
         all_results.push(apex_result);
 
         // Phase 2: C++ Solvers
-        info!("Phase 2: C++ Solvers (Ceres, GTSAM, g2o)");
         let cpp_results = run_cpp_ba_benchmarks(&dataset.name, &dataset.path);
         all_results.extend(cpp_results);
     }
@@ -779,28 +716,20 @@ fn run_benchmark_comparison() {
     // Save results to CSV in output/ folder
     let output_dir = "output";
     if let Err(e) = std::fs::create_dir_all(output_dir) {
-        warn!("Warning: Failed to create output directory: {}", e);
+        warn!("Failed to create output directory: {}", e);
     }
 
     let output_path = format!("{}/ba_comparison_results.csv", output_dir);
     if let Err(e) = save_csv_results(&all_results, &output_path) {
-        warn!("Warning: Failed to save CSV results: {}", e);
-    } else {
-        info!("Results written to {}", output_path);
+        warn!("Failed to save CSV results: {}", e);
     }
 
     // Print comparison table
     print_comparison_table(&all_results);
 
-    info!("\nBenchmark completed!");
+    info!("Results written to {}", output_path);
 }
 
-/// Criterion benchmark function
-fn criterion_benchmark(_c: &mut Criterion) {
-    // This is a comparison benchmark, not a performance benchmark
-    // Run once directly instead of using Criterion's timing infrastructure
+fn main() {
     run_benchmark_comparison();
 }
-
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);

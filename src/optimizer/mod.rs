@@ -205,6 +205,12 @@ pub enum OptimizationStatus {
     Timeout,
     /// Trust region radius fell below minimum threshold
     TrustRegionRadiusTooSmall,
+    /// Too many consecutive rejected steps — the solver can no longer make progress.
+    ///
+    /// Damping has grown until the step is negligible and every trial step is rejected,
+    /// so further iterations cannot change the cost. Reported instead of silently
+    /// burning the remaining iteration budget.
+    StalledNoProgress,
     /// Objective function fell below user-specified cutoff
     MinCostThresholdReached,
     /// Jacobian matrix is singular or ill-conditioned
@@ -230,6 +236,9 @@ impl Display for OptimizationStatus {
             OptimizationStatus::Timeout => write!(f, "Timeout"),
             OptimizationStatus::TrustRegionRadiusTooSmall => {
                 write!(f, "Trust region radius too small")
+            }
+            OptimizationStatus::StalledNoProgress => {
+                write!(f, "Stalled (no further progress possible)")
             }
             OptimizationStatus::MinCostThresholdReached => {
                 write!(f, "Minimum cost threshold reached")

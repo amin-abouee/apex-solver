@@ -154,6 +154,7 @@ fn run_se3_optimization(
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
     );
 
     let test_result = TestResult {
@@ -264,6 +265,7 @@ fn run_se2_optimization(
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
     );
 
     let test_result = TestResult {

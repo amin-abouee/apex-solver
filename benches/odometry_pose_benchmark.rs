@@ -3,18 +3,17 @@
 //! This benchmark compares three Rust nonlinear optimization libraries (apex-solver, factrs, tiny-solver)
 //! and two C++ libraries (g2o, GTSAM) on standard pose graph optimization datasets (both SE2 and SE3).
 //!
-//! ## Simplified Performance Metric
+//! ## Performance Metrics
 //!
-//! **Important Change**: This benchmark no longer uses cost-based metrics due to inconsistent cost
-//! computation across solvers (information-weighted vs unweighted residuals). Instead, it uses a
-//! simple convergence-based scoring system:
+//! Following the pose graph optimization literature (SE-Sync, Rosen et al. IJRR 2019;
+//! Carlone et al. ICRA 2015), solvers are compared on **final objective value (cost) and
+//! runtime**. Cost is computed by this harness directly from the G2O file for every solver,
+//! so the values are comparable across implementations.
 //!
-//! - **Score**: 100.0 if solver converged successfully, 0.0 if diverged or failed
-//! - **Converged**: "true" if solver met convergence criteria, "false" otherwise
-//! - **Time**: Average wall-clock time in milliseconds (5 runs per configuration)
-//! - **Iterations**: Number of iterations taken (where available)
-//!
-//! This approach provides a clear, unambiguous comparison of solver reliability and speed.
+//! - **Final chi2 / cost**: quality of the returned solution (lower is better)
+//! - **Time**: wall-clock milliseconds for the `optimize()` call only
+//! - **Iterations**: number of iterations taken (where the solver exposes it)
+//! - **Vertices / edges**: graph size, used to normalize chi2 by degrees of freedom (m - n)
 //!
 //! ## Configuration Philosophy
 //!
@@ -39,7 +38,7 @@
 //! - Timing starts immediately before `solver.optimize()` call
 //! - Problem setup (graph loading, factor creation) is excluded from timing
 //! - This matches the timing approach in optimize_*_graph.rs binaries
-//! - Each dataset is run 5 times and results are averaged for stability
+//! - One sample per invocation; `benches/tools/run_repeated.sh` supplies the repetitions
 //!
 //! ### Gauge Freedom Handling:
 //! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
@@ -50,7 +49,7 @@ use std::panic;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
 
 // apex-solver imports
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
@@ -59,7 +58,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
-use apex_solver::init_logger;
+use apex_solver::init_logger_with_directives;
 use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
@@ -196,6 +195,15 @@ fn compute_se3_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
     CostMetrics {
         chi2_cost,
         unweighted_cost,
+    }
+}
+
+/// Graph size as (vertices, edges), used to normalize chi2 by degrees of freedom.
+fn graph_size(graph: &apex_io::Graph, is_3d: bool) -> (usize, usize) {
+    if is_3d {
+        (graph.vertices_se3.len(), graph.edges_se3.len())
+    } else {
+        (graph.vertices_se2.len(), graph.edges_se2.len())
     }
 }
 
@@ -349,6 +357,10 @@ struct BenchmarkResult {
     dataset: String,
     solver: String,
     language: String,
+    /// Number of poses in the graph (n), for normalized chi2 = chi2 / (edges - vertices)
+    vertices: usize,
+    /// Number of constraints in the graph (m)
+    edges: usize,
     elapsed_ms: String,
     converged: String,
     iterations: String,
@@ -396,6 +408,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: converged.to_string(),
             iterations: iterations.map_or("-".to_string(), |i| i.to_string()),
@@ -413,6 +427,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: format!("{:.2}", elapsed_ms),
             converged: "false".to_string(),
             iterations: "-".to_string(),
@@ -430,6 +446,8 @@ impl BenchmarkResult {
             dataset: dataset.to_string(),
             solver: solver.to_string(),
             language: language.to_string(),
+            vertices: 0,
+            edges: 0,
             elapsed_ms: "-".to_string(),
             converged: "false".to_string(),
             iterations: format!("error: {}", error),
@@ -441,6 +459,13 @@ impl BenchmarkResult {
             improvement_pct: "-".to_string(),
         }
     }
+
+    /// Record the graph size, used to normalize chi2 by degrees of freedom.
+    fn with_size(mut self, vertices: usize, edges: usize) -> Self {
+        self.vertices = vertices;
+        self.edges = edges;
+        self
+    }
 }
 
 /// Helper to determine if apex-solver converged successfully
@@ -450,6 +475,7 @@ fn is_converged(status: &OptimizationStatus) -> bool {
         OptimizationStatus::Converged
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::MaxIterationsReached
     )
@@ -520,6 +546,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(graph.vertices_se2.len(), graph.edges_se2.len())
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
@@ -595,6 +622,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(graph.vertices_se3.len(), graph.edges_se3.len())
         }
         Err(e) => BenchmarkResult::failed(dataset.name, "apex-solver", "Rust", &e.to_string()),
     }
@@ -614,6 +642,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
     } else {
         compute_se2_cost_metrics(&raw_graph)
     };
+    let (n_vertices, n_edges) = graph_size(&raw_graph, dataset.is_3d);
 
     // Catch panics from factrs parsing/loading
     let file = dataset.file.clone();
@@ -667,6 +696,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         Err(factrs::optimizers::OptError::MaxIterations(final_values)) => {
             // Update raw graph with optimized values from factrs
@@ -693,6 +723,7 @@ fn factrs_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         Err(factrs::optimizers::OptError::FailedToStep) => {
             BenchmarkResult::diverged(dataset.name, "factrs", "Rust", elapsed_ms)
@@ -743,6 +774,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
     } else {
         compute_se2_cost_metrics(&raw_graph)
     };
+    let (n_vertices, n_edges) = graph_size(&raw_graph, dataset.is_3d);
 
     // Start timing
     let start = Instant::now();
@@ -779,6 +811,7 @@ fn tiny_solver_benchmark(dataset: &Dataset) -> BenchmarkResult {
                 initial_cost,
                 final_cost,
             )
+            .with_size(n_vertices, n_edges)
         }
         None => {
             // Optimization failed (NaN, solve failed, or other error)
@@ -822,11 +855,10 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let gtsam_exe = build_dir.join("gtsam_odometry_benchmark");
 
     if g2o_exe.exists() && gtsam_exe.exists() {
-        info!("C++ benchmarks already built");
         return Ok(build_dir);
     }
 
-    info!("Building C++ benchmarks...");
+    info!("Building C++ benchmarks ...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -860,7 +892,6 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    info!("C++ benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -889,11 +920,6 @@ fn run_cpp_benchmark(exe_name: &str, build_dir: &Path) -> Result<PathBuf, String
             exe_name,
             String::from_utf8_lossy(&output.stderr)
         ));
-    }
-
-    // Print stdout for user visibility
-    if !output.stdout.is_empty() {
-        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename based on executable name
@@ -943,7 +969,8 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
             Some(cpp_result.iterations),
             initial_metrics,
             final_metrics,
-        );
+        )
+        .with_size(cpp_result.vertices, cpp_result.edges);
 
         results.push(result);
     }
@@ -959,8 +986,8 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let build_dir = match build_cpp_benchmarks() {
         Ok(dir) => dir,
         Err(e) => {
-            info!("Warning: C++ benchmarks unavailable: {}", e);
-            info!("Continuing with Rust-only benchmarks...\n");
+            warn!("C++ benchmarks unavailable: {}", e);
+            warn!("Continuing with Rust-only benchmarks...");
             return all_results;
         }
     };
@@ -976,15 +1003,14 @@ fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
         match run_cpp_benchmark(exe_name, &build_dir) {
             Ok(csv_path) => match parse_cpp_results(&csv_path) {
                 Ok(results) => {
-                    info!("{} completed: {} datasets", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
-                    info!("Warning: Failed to parse {} results: {}", exe_name, e);
+                    warn!("Failed to parse {} results: {}", exe_name, e);
                 }
             },
             Err(e) => {
-                info!("Warning: Failed to run {}: {}", exe_name, e);
+                warn!("Failed to run {}: {}", exe_name, e);
             }
         }
     }
@@ -1025,11 +1051,13 @@ fn save_csv_results(
 }
 
 fn main() {
-    // Initialize logger with INFO level
-    init_logger();
+    // factrs and tiny-solver log per-iteration progress through the `log` crate from
+    // *inside* their optimize() calls, i.e. inside the timed region. Silencing them keeps
+    // the measured time solve time rather than formatting time. An explicit RUST_LOG wins.
+    init_logger_with_directives(Level::INFO, "info,factrs=warn,tiny_solver=warn");
 
-    info!("Starting solver comparison benchmark...");
-    info!("Running each configuration 5 times and averaging results...");
+    info!("ODOMETRY POSE GRAPH BENCHMARK COMPARISON");
+    info!("Running each configuration 5 times and averaging results");
 
     let solvers = ["apex-solver", "factrs", "tiny-solver"];
     let mut all_results = Vec::new();
@@ -1039,11 +1067,11 @@ fn main() {
         info!("Dataset: {}", dataset.name);
 
         for solver in &solvers {
-            info!("{} ... ", solver);
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            info!("Running {} ...", solver);
 
-            // Run multiple times to get stable measurements
-            let num_runs = 5;
+            // One sample per invocation; the repeat-run driver supplies the repetitions so
+            // that Rust and C++ solvers contribute the same number of independent samples.
+            let num_runs = 1;
             let mut results = Vec::new();
 
             for _ in 0..num_runs {
@@ -1064,11 +1092,6 @@ fn main() {
                     avg_result.elapsed_ms = format!("{:.2}", total_time / num_runs as f64);
                 }
 
-                info!(
-                    "done (converged: {}, time: {} ms)",
-                    avg_result.converged, avg_result.elapsed_ms
-                );
-
                 all_results.push(avg_result);
             }
         }
@@ -1083,9 +1106,7 @@ fn main() {
     // Write results to CSV in output folder
     let csv_path = "output/odometry_pose_benchmark_results.csv";
     if let Err(e) = save_csv_results(&all_results, csv_path) {
-        warn!("Warning: Failed to save CSV results: {}", e);
-    } else {
-        info!("Results written to {}", csv_path);
+        warn!("Failed to save CSV results: {}", e);
     }
 
     // Separate 2D and 3D results and sort by dataset name

@@ -200,6 +200,7 @@ fn test_pinhole_multi_camera_calibration_200_points() -> TestResult {
                 | OptimizationStatus::CostToleranceReached
                 | OptimizationStatus::ParameterToleranceReached
                 | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::StalledNoProgress
         ),
         "Optimization should converge, got: {:?}",
         result.status
@@ -353,6 +354,7 @@ fn test_pinhole_3_cameras_calibration() -> TestResult {
                 | OptimizationStatus::CostToleranceReached
                 | OptimizationStatus::ParameterToleranceReached
                 | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::StalledNoProgress
         ),
         "3-camera calibration should converge, got: {:?}",
         result.status

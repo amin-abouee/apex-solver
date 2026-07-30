@@ -28,7 +28,15 @@ Eigen::Matrix3d Skew(const Eigen::Vector3d& v) {
 
 /// SE3 log map for SO(3) component (quaternion to rotation vector)
 /// Uses full Rodriguez formula to match Rust implementation
-Eigen::Vector3d SO3LogMap(const Eigen::Quaterniond& q) {
+Eigen::Vector3d SO3LogMap(const Eigen::Quaterniond& q_in) {
+    // Quaternion double cover: q and -q describe the same rotation. Pick the
+    // representative with w >= 0 so the log returns the shortest-path rotation.
+    // Without this, w < 0 yields theta near 2*pi, and the inverse left Jacobian
+    // (which divides by sin(theta)) becomes singular and explodes the residual.
+    const Eigen::Quaterniond q = (q_in.w() < 0.0)
+        ? Eigen::Quaterniond(-q_in.w(), -q_in.x(), -q_in.y(), -q_in.z())
+        : q_in;
+
     // Clamp qw to [-1, 1] to avoid numerical issues with acos
     double qw = std::clamp(q.w(), -1.0, 1.0);
 
