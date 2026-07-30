@@ -226,6 +226,8 @@ pub struct LevenbergMarquardtConfig {
     pub damping_decrease_factor: f64,
     /// Damping nu parameter
     pub damping_nu: f64,
+    /// Stop after this many consecutive rejected steps.
+    pub max_consecutive_rejected_steps: usize,
     /// Trust region radius
     pub trust_region_radius: f64,
     /// Minimum step quality for acceptance
@@ -327,6 +329,7 @@ impl Default for LevenbergMarquardtConfig {
             damping_increase_factor: 10.0,
             damping_decrease_factor: 0.3,
             damping_nu: 2.0,
+            max_consecutive_rejected_steps: 5,
             trust_region_radius: 1e4,
             min_step_quality: 0.0,
             good_step_quality: 0.75,
@@ -822,6 +825,7 @@ impl LevenbergMarquardt {
         let mut jacobian_evaluations = 0;
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
+        let mut consecutive_rejected = 0;
 
         // Initialize optimization state
         let mut state = crate::optimizer::initialize_optimization_state(problem)?;
@@ -886,9 +890,11 @@ impl LevenbergMarquardt {
             // Update counters based on acceptance
             if step_eval.accepted {
                 successful_steps += 1;
+                consecutive_rejected = 0;
                 total_cost_reduction += step_eval.cost_reduction;
             } else {
                 unsuccessful_steps += 1;
+                consecutive_rejected += 1;
             }
 
             // OPTIMIZATION: Only collect iteration statistics if debug level is enabled
@@ -939,7 +945,7 @@ impl LevenbergMarquardt {
                 state.current_cost
             };
 
-            if let Some(status) = crate::optimizer::check_convergence(&ConvergenceParams {
+            let convergence_status = crate::optimizer::check_convergence(&ConvergenceParams {
                 iteration,
                 current_cost: cost_before_step,
                 new_cost,
@@ -956,7 +962,23 @@ impl LevenbergMarquardt {
                 timeout: self.config.timeout,
                 trust_region_radius: Some(self.config.trust_region_radius),
                 min_trust_region_radius: Some(self.config.min_trust_region_radius),
-            }) {
+            })
+            .or_else(|| {
+                // `check_convergence` returns early on a rejected step, so a solver that
+                // rejects every trial step would otherwise run out the full iteration
+                // budget without the cost ever changing.
+                //
+                // Both conditions are required. A run of rejections alone is normal — LM
+                // raises damping and the next step succeeds. Only once damping has also
+                // saturated at `damping_max` can it no longer shrink the step further, so
+                // the state is provably stuck and the remaining iterations are wasted.
+                let damping_saturated = self.config.damping >= self.config.damping_max;
+                let stalled = consecutive_rejected >= self.config.max_consecutive_rejected_steps
+                    && damping_saturated;
+                stalled.then_some(crate::optimizer::OptimizationStatus::StalledNoProgress)
+            });
+
+            if let Some(status) = convergence_status {
                 if tracing::enabled!(tracing::Level::DEBUG) {
                     let summary = crate::optimizer::create_optimizer_summary(
                         "Levenberg-Marquardt",
