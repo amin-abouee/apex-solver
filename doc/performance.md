@@ -2,117 +2,142 @@
 
 **Hardware**: Apple Mac Mini M4, 64GB RAM
 **Build**: Rust release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**Methodology**: Pose graph — average of 5 runs. Bundle adjustment — single run, 10-minute timeout per solver. Timing covers `optimize()` only; problem setup and metric computation are excluded.
+**Methodology**: 5 independent runs per benchmark, reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup and metric computation are excluded. Bundle adjustment uses a 10-minute timeout per solver.
+**Metrics**: final objective value (cost) and runtime, following the pose graph optimization literature ([SE-Sync, Rosen et al. IJRR 2019](https://david-m-rosen.github.io/publication/sesync-ijrr/SESync-IJRR.pdf); [Carlone et al. ICRA 2015](https://dellaert.github.io/files/Carlone15icra1.pdf)). Bundle adjustment uses reprojection RMSE and runtime ([arXiv:2409.12190](https://arxiv.org/abs/2409.12190)).
+
+Solution cost is deterministic for a fixed input and algorithm, so its std is zero; the error bars reflect runtime variation.
 
 ## Pose Graph Optimization
 
-Six solvers on standard pose graph datasets, Levenberg-Marquardt throughout. Cost columns use the unweighted metric (`0.5 · Σ‖r‖²`) computed from the raw G2O file.
+Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark harness directly from the G2O file for every solver, so values are comparable across implementations. `cost/(m−n)` normalizes by degrees of freedom (m = edges, n = poses) so datasets of different size are comparable.
+
+![Pose graph benchmark](plots/odometry_benchmark.png)
+
+*[Interactive version](plots/odometry_benchmark.html)*
 
 ### 2D Datasets (SE2)
 
-| Dataset | Solver | Lang | Time (ms) | Iters | Init Cost | Final Cost | Improve % | Conv |
-|---------|--------|------|-----------|-------|-----------|------------|-----------|------|
-| **M3500** (3500 vertices, 5453 edges) |
-| | apex-solver | Rust | **56.3** | 10 | 2.86e4 | 1.51e0 | 99.99 | ✓ |
-| | factrs | Rust | 57.5 | - | 2.86e4 | 1.52e0 | 99.99 | ✓ |
-| | tiny-solver | Rust | 196.7 | - | 3.65e4 | 2.86e4 | 21.67 | ✓ |
-| | Ceres | C++ | 77.0 | 18 | 2.86e4 | 4.54e3 | 84.14 | ✓ |
-| | g2o | C++ | 121.7 | 33 | 2.86e4 | 1.51e0 | 99.99 | ✓ |
-| | GTSAM | C++ | 70.8 | 6 | 2.86e4 | 1.51e0 | 99.99 | ✓ |
-| **mit** (808 vertices, 827 edges) |
-| | apex-solver | Rust | 82.0 | 110 | 1.63e5 | 1.15e2 | 99.93 | ✓ |
-| | factrs | Rust | **3.3** | - | 1.63e5 | 1.48e4 | 90.91 | ✓ |
-| | tiny-solver | Rust | 5.7 | - | 5.78e4 | 1.19e4 | 79.34 | ✓ |
-| | Ceres | C++ | 11.5 | 29 | 1.63e5 | 3.49e2 | 99.79 | ✓ |
-| | g2o | C++ | 59.6 | 100 | 1.63e5 | 1.26e3 | 99.23 | ✓ |
-| | GTSAM | C++ | 46.9 | 4 | 1.63e5 | 8.33e4 | 48.94 | ✓ |
-| **city10000** (10000 vertices, 20687 edges) |
-| | apex-solver | Rust | **122.0** | 5 | 7.18e6 | 4.36e0 | 100.00 | ✓ |
-| | factrs | Rust | 222.2 | - | 7.18e6 | 4.43e0 | 100.00 | ✓ |
-| | tiny-solver | Rust | 1078.2 | - | 4.96e6 | 1.22e5 | 97.53 | ✓ |
-| | Ceres | C++ | 403.8 | 27 | 7.18e6 | 1.80e4 | 99.75 | ✓ |
-| | g2o | C++ | 4342.1 | 100 | 7.18e6 | 4.42e2 | 99.99 | ✓ |
-| | GTSAM | C++ | 2087.6 | 22 | 7.18e6 | 2.93e5 | 95.92 | ✓ |
-| **ring** (434 vertices, 459 edges) |
-| | apex-solver | Rust | 5.3 | 10 | 1.02e4 | 2.22e-2 | 100.00 | ✓ |
-| | factrs | Rust | 4.2 | - | 1.02e4 | 3.02e-2 | 100.00 | ✓ |
-| | tiny-solver | Rust | 20.3 | - | 3.17e3 | 9.87e2 | 68.81 | ✓ |
-| | Ceres | C++ | **3.2** | 14 | 1.02e4 | 2.22e-2 | 100.00 | ✓ |
-| | g2o | C++ | 8.3 | 34 | 1.02e4 | 2.22e-2 | 100.00 | ✓ |
-| | GTSAM | C++ | 13.8 | 6 | 1.02e4 | 2.22e-2 | 100.00 | ✓ |
+| Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
+|---------|--------|-----------|------------|-----------|-------|
+| **M3500** (3500 poses, 5453 edges) |
+| | apex-solver | 1.5109e+00 | **7.737e-04** | 69.9 ± 10.4 | 10 |
+| | factrs | 1.5238e+00 | 7.802e-04 | **59.0 ± 1.0** | - |
+| | tiny-solver | 2.8604e+04 | 1.465e+01 | 205.4 ± 2.1 | - |
+| | Ceres | 4.5437e+03 | 2.327e+00 | 76.3 ± 0.4 | 18 |
+| | GTSAM | 1.5111e+00 | **7.737e-04** | 69.1 ± 1.2 | 6 |
+| | g2o | 1.5109e+00 | **7.737e-04** | 108.0 ± 0.5 | 33 |
+| **mit** (808 poses, 827 edges) |
+| | apex-solver | 1.1454e+02 | **6.028e+00** | 82.3 ± 1.0 | 110 |
+| | factrs | 1.4831e+04 | 7.806e+02 | **3.3 ± 0.0** | - |
+| | tiny-solver | 1.1933e+04 | 6.280e+02 | 5.8 ± 0.2 | - |
+| | Ceres | 3.4865e+02 | 1.835e+01 | 11.5 ± 0.1 | 29 |
+| | GTSAM | 8.3309e+04 | 4.385e+03 | 42.1 ± 0.7 | 4 |
+| | g2o | 1.2571e+03 | 6.616e+01 | 46.3 ± 0.3 | 100 |
+| **city10000** (10000 poses, 20687 edges) |
+| | apex-solver | 4.3620e+00 | **4.082e-04** | **123.6 ± 0.8** | 5 |
+| | factrs | 4.4330e+00 | 4.148e-04 | 226.9 ± 2.7 | - |
+| | tiny-solver | 1.2237e+05 | 1.145e+01 | 1097.7 ± 10.9 | - |
+| | Ceres | 1.8045e+04 | 1.689e+00 | 393.7 ± 1.7 | 27 |
+| | GTSAM | 2.9292e+05 | 2.741e+01 | 2040.8 ± 20.9 | 22 |
+| | g2o | 4.4232e+02 | 4.139e-02 | 4178.6 ± 2.8 | 100 |
+| **ring** (434 poses, 459 edges) |
+| | apex-solver | 2.2179e-02 | **8.872e-04** | 5.0 ± 0.2 | 10 |
+| | factrs | 3.0176e-02 | 1.207e-03 | 4.4 ± 0.1 | - |
+| | tiny-solver | 9.8712e+02 | 3.948e+01 | 20.8 ± 0.2 | - |
+| | Ceres | 2.2188e-02 | 8.875e-04 | **3.2 ± 0.0** | 14 |
+| | GTSAM | 2.2179e-02 | **8.872e-04** | 11.1 ± 0.4 | 6 |
+| | g2o | 2.2179e-02 | **8.872e-04** | 6.3 ± 0.0 | 34 |
 
 ### 3D Datasets (SE3)
 
-| Dataset | Solver | Lang | Time (ms) | Iters | Init Cost | Final Cost | Improve % | Conv |
-|---------|--------|------|-----------|-------|-----------|------------|-----------|------|
-| **sphere2500** (2500 vertices, 4949 edges) |
-| | apex-solver | Rust | 208.4 | 7 | 1.28e5 | 2.13e1 | 99.98 | ✓ |
-| | factrs | Rust | - | - | - | - | - | ✗ |
-| | tiny-solver | Rust | 2037.9 | - | 4.08e4 | 4.06e4 | 0.48 | ✓ |
-| | Ceres | C++ | 1131.9 | 90 | 8.26e7 | 1.43e5 | 99.83 | ✓ |
-| | g2o | C++ | 11089.9 | 84 | 8.26e7 | 3.89e3 | 100.00 | ✓ |
-| | GTSAM | C++ | **142.2** | 7 | 8.26e7 | 1.01e4 | 99.99 | ✓ |
-| **parking-garage** (1661 vertices, 6275 edges) |
-| | apex-solver | Rust | 112.6 | 6 | 8.36e3 | 6.24e-1 | 99.99 | ✓ |
-| | factrs | Rust | 453.3 | - | 8.36e3 | 6.28e-1 | 99.99 | ✓ |
-| | tiny-solver | Rust | 901.6 | - | 1.21e5 | 1.21e5 | -0.05 | ✓ |
-| | Ceres | C++ | 269.4 | 34 | 1.22e8 | 1.17e6 | 99.04 | ✓ |
-| | g2o | C++ | 631.2 | 56 | 1.22e8 | 2.82e6 | 97.70 | ✓ |
-| | GTSAM | C++ | **37.8** | 3 | 1.22e8 | 4.79e6 | 96.08 | ✓ |
-| **torus3D** (5000 vertices, 9048 edges) |
-| | apex-solver | Rust | 6127.4 | 101 | 1.91e4 | 1.01e3 | 94.70 | ✓ |
-| | factrs | Rust | - | - | - | - | - | ✗ |
-| | tiny-solver | Rust | - | - | - | - | - | ✗ |
-| | Ceres | C++ | 1026.5 | 38 | 2.30e5 | 3.90e4 | 83.02 | ✓ |
-| | g2o | C++ | 31796.7 | 96 | 2.30e5 | 1.52e5 | 34.04 | ✓ |
-| | GTSAM | C++ | **645.2** | 12 | 2.30e5 | 3.10e5 | -34.88 | ✗ |
-| **cubicle** (5750 vertices, 16869 edges) |
-| | apex-solver | Rust | 7774.8 | 101 | 3.19e4 | 5.18e2 | 98.37 | ✓ |
-| | factrs | Rust | - | - | - | - | - | ✗ |
-| | tiny-solver | Rust | 1976.9 | - | 1.14e4 | 9.92e3 | 12.62 | ✓ |
-| | Ceres | C++ | 978.4 | 29 | 8.41e6 | 1.96e4 | 99.77 | ✓ |
-| | g2o | C++ | 8598.4 | 47 | 8.41e6 | 2.17e5 | 97.42 | ✓ |
-| | GTSAM | C++ | **563.1** | 5 | 8.41e6 | 7.52e5 | 91.05 | ✓ |
+| Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
+|---------|--------|-----------|------------|-----------|-------|
+| **sphere2500** (2500 poses, 4949 edges) |
+| | apex-solver | 2.1320e+01 | 8.706e-03 | 209.5 ± 1.5 | 7 |
+| | factrs | - | - | - | ✗ |
+| | tiny-solver | 4.0584e+04 | 1.657e+01 | 2063.3 ± 10.4 | - |
+| | Ceres | 1.1654e+05 | 4.759e+01 | 1120.6 ± 3.7 | 90 |
+| | GTSAM | 2.1298e+01 | **8.697e-03** | **131.9 ± 1.5** | 7 |
+| | g2o | 6.4554e+01 | 2.636e-02 | 10864.3 ± 18.5 | 84 |
+| **parking-garage** (1661 poses, 6275 edges) |
+| | apex-solver | 6.2449e-01 | **1.353e-04** | 112.9 ± 0.4 | 6 |
+| | factrs | 6.2777e-01 | 1.361e-04 | 445.1 ± 1.8 | - |
+| | tiny-solver | 1.2116e+05 | 2.626e+01 | 843.3 ± 11.5 | - |
+| | Ceres | 2.0103e+05 | 4.357e+01 | 270.8 ± 1.0 | 34 |
+| | GTSAM | 6.2471e-01 | 1.354e-04 | **33.3 ± 0.3** | 3 |
+| | g2o | 6.2869e-01 | 1.363e-04 | 628.0 ± 3.3 | 56 |
+| **torus3D** (5000 poses, 9048 edges) |
+| | apex-solver | 1.0124e+03 | 2.501e-01 | 1347.5 ± 3.5 | 23 |
+| | factrs | - | - | - | ✗ |
+| | tiny-solver | - | - | - | ✗ |
+| | Ceres | 2.3940e+04 | 5.914e+00 | 1014.3 ± 4.4 | 38 |
+| | GTSAM | 1.2032e+02 | **2.972e-02** | **638.7 ± 5.1** | 12 |
+| | g2o | 1.4131e+02 | 3.491e-02 | 31073.9 ± 28.2 | 96 |
+| **cubicle** (5750 poses, 16869 edges) |
+| | apex-solver | 5.1827e+02 | 4.661e-02 | 1565.5 ± 6.3 | 21 |
+| | factrs | - | - | - | ✗ |
+| | tiny-solver | 9.9185e+03 | 8.920e-01 | 1948.2 ± 28.7 | - |
+| | Ceres | 1.7144e+04 | 1.542e+00 | 965.4 ± 7.0 | 29 |
+| | GTSAM | 5.3897e+00 | **4.847e-04** | **551.0 ± 3.7** | 5 |
+| | g2o | 1.2771e+01 | 1.149e-03 | 8483.6 ± 7.6 | 47 |
 
 **Observations**:
-- **apex-solver**: fastest on M3500 and city10000, lowest final cost on all 2D datasets. On city10000 it is 3.3× faster than Ceres and 36× faster than g2o. Slower on torus3D and cubicle, where it uses its full 101-iteration budget.
-- **GTSAM**: fastest 3D solver, but weakest 3D accuracy — increases cost on torus3D (−34.88%).
-- **g2o**: reaches good final costs but is consistently the slowest, up to 31.8 s on torus3D.
-- **factrs**: competitive in 2D, fastest on mit; fails on three of four 3D datasets.
-- **tiny-solver**: weak convergence — 0.48% improvement on sphere2500, −0.05% on parking-garage.
+- **apex-solver** reaches the lowest cost on all four 2D datasets and on parking-garage, and is fastest on city10000 (3.2× vs Ceres, 34× vs g2o). On mit it is 3× better than the next-best solver.
+- **apex-solver is weakest on torus3D and cubicle**, where GTSAM reaches 8× and 96× lower cost respectively. These are the clear optimization targets.
+- **GTSAM** is the fastest 3D solver and the most accurate on torus3D and cubicle, but is the *worst* solver on mit (4.385e+03) and city10000 (2.741e+01).
+- **g2o** reaches competitive cost but is consistently the slowest — 31 s on torus3D, 10.9 s on sphere2500.
+- **factrs** is fast in 2D but fails on three of four 3D datasets; **tiny-solver** rarely reaches a good solution.
+- **Ceres** trails on cost throughout; its odometry configuration uses `function_tolerance = 1e-3`, looser than the other solvers, so this reflects benchmark configuration rather than a Ceres limitation.
 
 ## Bundle Adjustment (Self-Calibration)
 
-Large-scale BAL datasets, optimizing **camera poses, 3D landmarks, and camera intrinsics simultaneously**. apex-solver uses iterative Schur complement (PCG + Schur-Jacobi preconditioner). Timeout: 10 minutes per solver.
+Large-scale BAL datasets, optimizing **camera poses, 3D landmarks, and camera intrinsics simultaneously**. apex-solver uses iterative Schur complement (PCG + Schur-Jacobi preconditioner).
 
-| Dataset | Solver | Lang | Cameras | Landmarks | Observations | Init RMSE | Final RMSE | Time (s) | Iters |
-|---------|--------|------|---------|-----------|--------------|-----------|------------|----------|-------|
+![Bundle adjustment benchmark](plots/ba_benchmark.png)
+
+*[Interactive version](plots/ba_benchmark.html)*
+
+| Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
+|---------|--------|---------|-----------|--------------|-----------------|----------|-------|
 | **Ladybug** |
-| | apex-solver | Rust | 1,723 | 156,502 | 678,718 | 1.955 | **0.770** | 88.62 | 21 |
-| | Ceres | C++ | 1,723 | 156,502 | 678,718 | 13.518 | 1.166 | **17.26** | 101 |
-| | GTSAM | C++ | 1,723 | 156,502 | 678,718 | 1.857 | 0.981 | 83.79 | 2 |
-| | g2o | C++ | 1,723 | 156,502 | 678,718 | 13.518 | 13.507 | 152.49 | 20 |
+| | apex-solver | 1,723 | 156,502 | 678,718 | **0.7700 ± 0.0000** | 86.3 ± 0.6 | 21 |
+| | Ceres | 1,723 | 156,502 | 678,718 | 1.1673 ± 0.0008 | **17.9 ± 0.9** | 101 |
+| | GTSAM | 1,723 | 156,502 | 678,718 | 0.9812 ± 0.0000 | 82.7 ± 0.2 | 2 |
+| | g2o | 1,723 | 156,502 | 678,718 | 13.5074 ± 0.0000 | 150.4 ± 0.1 | 20 |
 | **Trafalgar** |
-| | apex-solver | Rust | 257 | 65,132 | 225,911 | 2.874 | 0.784 | **5.48** | 10 |
-| | Ceres | C++ | 257 | 65,132 | 225,911 | 14.753 | 1.305 | 50.32 | 101 |
-| | GTSAM | C++ | 257 | 65,132 | 225,911 | 2.798 | **0.626** | 58.83 | 100 |
-| | g2o | C++ | 257 | 65,132 | 225,911 | 14.753 | 8.151 | 16.31 | 20 |
+| | apex-solver | 257 | 65,132 | 225,911 | 0.7844 ± 0.0000 | **5.2 ± 0.0** | 10 |
+| | Ceres | 257 | 65,132 | 225,911 | 1.3184 ± 0.0173 | 42.7 ± 5.3 | 101 |
+| | GTSAM | 257 | 65,132 | 225,911 | **0.6259 ± 0.0000** | 57.6 ± 0.1 | 100 |
+| | g2o | 257 | 65,132 | 225,911 | 8.1506 ± 0.0000 | 16.4 ± 0.1 | 20 |
 | **Dubrovnik** |
-| | apex-solver | Rust | 356 | 226,730 | 1,255,268 | 2.890 | 0.724 | **40.26** | 11 |
-| | Ceres | C++ | 356 | 226,730 | 1,255,268 | 12.975 | 1.004 | 93.34 | 101 |
-| | GTSAM | C++ | 356 | 226,730 | 1,255,268 | 2.812 | **0.562** | 119.51 | 31 |
-| | g2o | C++ | 356 | 226,730 | 1,255,268 | 12.975 | 12.168 | 34.54 | 20 |
+| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7237 ± 0.0000 | 37.6 ± 0.2 | 11 |
+| | Ceres | 356 | 226,730 | 1,255,268 | 1.0036 ± 0.0001 | 86.2 ± 14.9 | 101 |
+| | GTSAM | 356 | 226,730 | 1,255,268 | **0.5622 ± 0.0000** | 117.9 ± 0.2 | 31 |
+| | g2o | 356 | 226,730 | 1,255,268 | 12.1678 ± 0.0000 | **34.8 ± 0.1** | 20 |
 | **Venice** (largest) |
-| | apex-solver | Rust | 1,778 | 993,923 | 5,001,946 | 2.371 | **0.650** | **51.92** | 2 |
-| | Ceres | C++ | 1,778 | 993,923 | 5,001,946 | - | - | TIMEOUT | - |
-| | GTSAM | C++ | 1,778 | 993,923 | 5,001,946 | - | - | TIMEOUT | - |
-| | g2o | C++ | 1,778 | 993,923 | 5,001,946 | 10.128 | 10.126 | 249.09 | 20 |
+| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.6503 ± 0.0000** | **48.7 ± 0.5** | 2 |
+| | Ceres | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
+| | GTSAM | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
+| | g2o | 1,778 | 993,923 | 5,001,946 | 10.1261 ± 0.0000 | 244.9 ± 0.4 | 20 |
 
 **Observations**:
-- **Scalability**: apex-solver is the only solver to produce a usable Venice result (5M observations, 0.650 px in 51.92 s). Ceres and GTSAM exceed the 10-minute timeout; g2o finishes but barely moves the solution (10.128 → 10.126 px).
-- **Accuracy**: apex-solver reaches sub-pixel RMSE on all four datasets — best on Ladybug and Venice; GTSAM is better on Trafalgar (0.626) and Dubrovnik (0.562).
-- **Speed**: apex-solver is fastest on Trafalgar (9.2× vs Ceres), Dubrovnik (2.3× vs Ceres) and Venice. Ceres is 5× faster on Ladybug.
-- **g2o**: never meaningfully reduces reprojection error on Ladybug, Dubrovnik or Venice within its 20-iteration cap.
+- **Scalability**: apex-solver is the only solver to produce a usable Venice result (5M observations, 0.650 px in 48.7 s). Ceres and GTSAM exceed the 10-minute timeout on all 5 runs; g2o finishes but barely moves the solution (10.128 → 10.126 px).
+- **Accuracy**: apex-solver reaches sub-pixel RMSE on all four datasets — best on Ladybug and Venice. GTSAM is more accurate on Trafalgar (0.626) and Dubrovnik (0.562).
+- **Speed**: apex-solver is fastest on Trafalgar (8.2× vs Ceres) and Venice. Ceres is 4.8× faster on Ladybug.
+- **g2o** never meaningfully reduces reprojection error within its 20-iteration cap.
+
+---
+
+## Reproducing
+
+```bash
+# 5 runs each, raw per-run CSVs archived to output/runs/
+bash benches/tools/run_repeated.sh odometry_pose_benchmark 5
+bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5
+
+# aggregate to output/*_aggregated.csv and render doc/plots/*.{html,png}
+uv run --with plotly --with kaleido --with pandas benches/tools/plot_benchmarks.py
+```
 
 ---
 
