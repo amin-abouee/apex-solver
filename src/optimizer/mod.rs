@@ -287,9 +287,9 @@ pub type OptimizeResult =
 
 /// Unified optimizer interface. Object-safe — `Box<dyn Optimizer>` is valid.
 ///
-/// All three optimizers ([`LevenbergMarquardt`](crate::optimizer::levenberg_marquardt::LevenbergMarquardt),
-/// [`GaussNewton`](crate::optimizer::gauss_newton::GaussNewton),
-/// [`DogLeg`](crate::optimizer::dog_leg::DogLeg)) implement this trait.
+/// All three optimizers ([`LevenbergMarquardt`],
+/// [`GaussNewton`],
+/// [`DogLeg`]) implement this trait.
 /// Each optimizer also provides inherent `new()`, `with_config()`, and `optimize()` methods
 /// for direct (non-polymorphic) usage.
 pub trait Optimizer {

@@ -155,8 +155,8 @@ use crate::optimizer::{AssemblyBackend, IterationStats};
 /// # See Also
 ///
 /// - [`GaussNewton`] - The solver that uses this configuration
-/// - [`LevenbergMarquardtConfig`](crate::optimizer::LevenbergMarquardtConfig) - For adaptive damping
-/// - [`DogLegConfig`](crate::optimizer::DogLegConfig) - For trust region methods
+/// - [`LevenbergMarquardtConfig`](crate::optimizer::levenberg_marquardt::LevenbergMarquardtConfig) - For adaptive damping
+/// - [`DogLegConfig`](crate::optimizer::dog_leg::DogLegConfig) - For trust region methods
 #[derive(Clone)]
 pub struct GaussNewtonConfig {
     /// Type of linear solver for the linear systems

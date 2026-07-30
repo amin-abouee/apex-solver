@@ -189,7 +189,7 @@
 //! - Nocedal, J. & Wright, S. (2006). *Numerical Optimization* (2nd ed.). Springer. Chapter 4 (Trust Region Methods).
 //! - Madsen, K., Nielsen, H. B., & Tingleff, O. (2004). *Methods for Non-Linear Least Squares Problems* (2nd ed.). Chapter 6.
 //! - Conn, A. R., Gould, N. I. M., & Toint, P. L. (2000). *Trust-Region Methods*. SIAM.
-//! - Ceres Solver: http://ceres-solver.org/ - Google's C++ nonlinear least squares library
+//! - Ceres Solver: <http://ceres-solver.org/> - Google's C++ nonlinear least squares library
 
 use crate::{core::problem, error, linalg, optimizer};
 use std::{fmt, time};
@@ -250,8 +250,8 @@ use crate::optimizer::{AssemblyBackend, IterationStats};
 /// # See Also
 ///
 /// - [`DogLeg`] - The solver that uses this configuration
-/// - [`LevenbergMarquardtConfig`](crate::optimizer::LevenbergMarquardtConfig) - Alternative damping approach
-/// - [`GaussNewtonConfig`](crate::optimizer::GaussNewtonConfig) - Undamped variant
+/// - [`LevenbergMarquardtConfig`](crate::optimizer::levenberg_marquardt::LevenbergMarquardtConfig) - Alternative damping approach
+/// - [`GaussNewtonConfig`](crate::optimizer::gauss_newton::GaussNewtonConfig) - Undamped variant
 #[derive(Clone)]
 pub struct DogLegConfig {
     /// Type of linear solver for the linear systems
