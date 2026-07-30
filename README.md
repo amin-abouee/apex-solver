@@ -8,6 +8,41 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 [![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
+## ⚠️ Upgrading to 1.4.0 — breaking API changes
+
+`1.4.0` changes the public API. Code written against `1.3.0` will not compile until you make
+the edits below. Full detail in the [changelog](doc/CHANGELOG.md).
+
+**1. `Problem` uses handles instead of string names.** `add_variable` returns a `VarKey`;
+`add_residual_block` takes `&[VarKey]` and returns a `FactorKey` (previously `&[&str]` and
+`usize`). Keep the returned key and pass it where you used to pass a name:
+
+```rust
+// 1.3.0
+problem.add_variable("pose_0", ManifoldType::SE3, params);
+problem.add_residual_block(&["pose_0", "pose_1"], factor, loss);
+
+// 1.4.0
+let k0 = problem.add_variable(ManifoldType::SE3, params);
+let k1 = problem.add_variable(ManifoldType::SE3, params_1);
+problem.add_residual_block(&[k0, k1], factor, loss);
+```
+
+If you need to look variables up later, keep your own `HashMap<YourId, VarKey>` — the
+[Quick Start](#quick-start) below shows the pattern.
+
+**2. `Factor::get_dimension` is renamed to `Factor::residual_dim`.** Custom factor
+implementations must rename the method; there is no default implementation.
+
+```rust
+// 1.3.0                              // 1.4.0
+fn get_dimension(&self) -> usize      fn residual_dim(&self) -> usize
+```
+
+**3. `OptimizationStatus` gained a `StalledNoProgress` variant.** Exhaustive `match`
+expressions need a new arm. Treat it as a *successful* termination — it means the solver
+reached a point where the cost can no longer improve.
+
 ## Key Features (v1.4.0)
 
 - **Slot-Map Problem Structure (faster)**: Variables and factors are stored in a
@@ -26,6 +61,7 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 - **Real-time Visualization**: Integrated [Rerun](https://rerun.io/) support for live debugging of optimization progress
 - **I/O**: Read and write G2O, Toro, BAL format files for seamless integration with SLAM ecosystems [apex-io](crates/apex-io/README.md)
 - **High Performance**: Sparse linear algebra with persistent symbolic factorization
+- **Mathematical Cookbooks**: Full derivations and explanations for [apex-manifolds](crates/apex-manifolds/doc/cookbook/src/introduction.md), [apex-camera-models](crates/apex-camera-models/doc/cookbook/src/introduction.md), and [apex-io](crates/apex-io/doc/cookbook/src/introduction.md)
 - **Production-Grade**: Comprehensive error handling, structured tracing, integration test suite
 
 ---
@@ -200,11 +236,35 @@ Available datasets:
 
 Apex Solver is organized as a Cargo workspace with specialized sub-crates that can be used independently:
 
-| Crate | Description | Docs |
-|-------|-------------|------|
-| **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) |
-| **[apex-camera-models](crates/apex-camera-models)** | 10 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) |
-| **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) |
+| Crate | Description | Docs | Cookbook |
+|-------|-------------|------|----------|
+| **[apex-manifolds](crates/apex-manifolds)** | Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic Jacobians | [README](crates/apex-manifolds/README.md) | [Cookbook](crates/apex-manifolds/doc/cookbook/src/introduction.md) |
+| **[apex-camera-models](crates/apex-camera-models)** | 10 camera projection models for bundle adjustment and SLAM | [README](crates/apex-camera-models/README.md) | [Cookbook](crates/apex-camera-models/doc/cookbook/src/introduction.md) |
+| **[apex-io](crates/apex-io)** | File I/O utilities for G2O, TORO, and BAL formats | [README](crates/apex-io/README.md) | [Cookbook](crates/apex-io/doc/cookbook/src/introduction.md) |
+
+### Cookbooks
+
+Each sub-crate ships an mdBook cookbook (KaTeX-rendered) that is the mathematical reference
+for its domain — derived from the implementation, not restated from papers:
+
+- **[apex-manifolds](crates/apex-manifolds/doc/cookbook/src/introduction.md)** — every group
+  and operation: exp/log, adjoints, left/right Jacobians and inverses, ⊞/⊟, plus a shared
+  [Conventions](crates/apex-manifolds/doc/cookbook/src/manifolds/conventions.md) page
+  documenting w-first quaternions and `[ρ, θ]` twist order.
+- **[apex-camera-models](crates/apex-camera-models/doc/cookbook/src/introduction.md)** — one
+  chapter per model on an eight-section template (Parameters → Projection → Inverse
+  Projection → Point Jacobian → Intrinsic Jacobian → Linear Estimation → Example →
+  References), with validity conditions merged into the projection sections.
+- **[apex-io](crates/apex-io/doc/cookbook/src/introduction.md)** — every public capability by
+  domain: pose-graph formats, ASL/EuRoC, ROS1/ROS2 bags, DDS, CLI tools, and a feature-flag
+  reference.
+
+Build any of them locally:
+
+```bash
+cargo install mdbook mdbook-katex
+mdbook build crates/apex-manifolds/doc/cookbook      # then open book/index.html
+```
 
 **Using sub-crates independently:**
 
