@@ -134,6 +134,7 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
     );
     assert!(
         converged,

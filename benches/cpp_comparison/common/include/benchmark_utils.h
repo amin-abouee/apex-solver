@@ -104,7 +104,6 @@ inline bool WriteResultsToCSV(const std::string& output_file,
     }
 
     ofs.close();
-    std::cout << "Results written to: " << output_file << std::endl;
     return true;
 }
 

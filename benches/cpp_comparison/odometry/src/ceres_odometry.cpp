@@ -1,4 +1,5 @@
 #include <ceres/ceres.h>
+#include <glog/logging.h>
 #include <Eigen/Core>
 
 #include "../../common/include/benchmark_utils.h"
@@ -227,6 +228,9 @@ benchmark_utils::BenchmarkResult BenchmarkSE3(const std::string& dataset_name,
 }
 
 int main(int argc, char** argv) {
+    google::InitGoogleLogging(argv[0]);
+    FLAGS_minloglevel = google::GLOG_FATAL;  // Silence Ceres' internal glog output
+
     std::vector<benchmark_utils::BenchmarkResult> results;
 
     // SE3 datasets

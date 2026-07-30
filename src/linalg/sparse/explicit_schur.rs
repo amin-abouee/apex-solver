@@ -57,7 +57,7 @@ use faer::{
 };
 use nalgebra::Matrix3;
 use slotmap::{SecondaryMap, SlotMap};
-use tracing::{debug, info};
+use tracing::debug;
 
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -269,13 +269,13 @@ impl SparseSchurComplementSolver {
         }
 
         // Log block structure for diagnostics
-        info!("Schur complement block structure:");
-        info!(
+        debug!("Schur complement block structure:");
+        debug!(
             "  Camera blocks: {} variables, {} total DOF",
             structure.camera_blocks.len(),
             structure.camera_dof
         );
-        info!(
+        debug!(
             "  Landmark blocks: {} variables, {} total DOF",
             structure.landmark_blocks.len(),
             structure.landmark_dof
@@ -285,7 +285,7 @@ impl SparseSchurComplementSolver {
             "  Landmark column range: {:?}",
             structure.landmark_col_range()
         );
-        info!(
+        debug!(
             "  Schur complement S size: {} × {}",
             structure.camera_dof, structure.camera_dof
         );

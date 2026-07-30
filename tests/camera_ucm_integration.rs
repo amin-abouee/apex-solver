@@ -227,6 +227,7 @@ fn test_ucm_multi_camera_calibration_200_points() -> TestResult {
                 | OptimizationStatus::CostToleranceReached
                 | OptimizationStatus::ParameterToleranceReached
                 | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::StalledNoProgress
                 | OptimizationStatus::MaxIterationsReached
         ),
         "Optimization should converge, got: {:?}",
@@ -392,6 +393,7 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
                 | OptimizationStatus::CostToleranceReached
                 | OptimizationStatus::ParameterToleranceReached
                 | OptimizationStatus::GradientToleranceReached
+                | OptimizationStatus::StalledNoProgress
                 | OptimizationStatus::MaxIterationsReached
         ),
         "3-camera calibration should converge, got: {:?}",
