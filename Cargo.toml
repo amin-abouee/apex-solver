@@ -91,6 +91,10 @@ exclude = [
     "output/*",
 ]
 
+# Build docs.rs with every feature so the `visualization` API is documented.
+[package.metadata.docs.rs]
+all-features = true
+
 [[bin]]
 name = "pose_graph_g2o"
 path = "bin/pose_graph_g2o.rs"
