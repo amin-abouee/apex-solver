@@ -100,7 +100,7 @@ impl Factor for MyRangeFactor {
         (residual, jacobian)
     }
 
-    fn get_dimension(&self) -> usize {
+    fn residual_dim(&self) -> usize {
         1  // One scalar residual
     }
 }

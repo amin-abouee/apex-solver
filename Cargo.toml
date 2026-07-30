@@ -89,6 +89,7 @@ exclude = [
     "data/*",
     "profiles/*",
     "output/*",
+    "doc/*.pdf",
 ]
 
 # Build docs.rs with every feature so the `visualization` API is documented.
