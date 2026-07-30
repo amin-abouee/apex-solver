@@ -15,7 +15,7 @@ and prose now uses inline `$...$` math throughout.
 ## Cookbook
 
 For the full mathematical formulations, Jacobian derivations, and references, see the
-[apex-camera-models cookbook](doc/cookbook/src/introduction.html). The cookbook is the
+[apex-camera-models cookbook](doc/cookbook/src/introduction.md). The cookbook is the
 canonical source for projection equations, unprojection strategies, parameter layouts,
 and validation rules. The per-model source files link back to the relevant chapter.
 
@@ -170,7 +170,7 @@ All models implement the `CameraModel` trait providing a unified interface for p
 ## Mathematical Background
 
 Coordinate conventions, projection / unprojection equations, and the full Jacobian
-derivations live in the [cookbook](doc/cookbook/src/introduction.html). All models
+derivations live in the [cookbook](doc/cookbook/src/introduction.md). All models
 follow the standard computer vision RDF frame (`+Z` forward) except for the BAL Pinhole
 family, which uses the Bundler convention (`-Z` forward).
 
@@ -411,7 +411,7 @@ problem.add_residual_block(&[...], Box::new(factor1), None);
 ## References
 
 The full bibliography (primary, academic, and survey references) lives in the
-[cookbook references page](doc/cookbook/src/references.html).
+[cookbook references page](doc/cookbook/src/references.md).
 
 
 ## License
