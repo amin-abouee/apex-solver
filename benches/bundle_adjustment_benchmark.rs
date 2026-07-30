@@ -170,6 +170,7 @@ fn is_converged(status: &OptimizationStatus) -> bool {
         OptimizationStatus::Converged
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
             | OptimizationStatus::ParameterToleranceReached
     )
 }
