@@ -32,6 +32,11 @@ Apex Solver is a comprehensive optimization library that bridges the gap between
 
 ## Quick Start
 
+```toml
+[dependencies]
+apex-solver = "1.4.0"
+```
+
 ```rust
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
@@ -42,7 +47,7 @@ use std::collections::HashMap;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load pose graph from G2O file
-    let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
+    let graph = G2oLoader::load("data/odometry/3d/sphere2500.g2o")?;
 
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
