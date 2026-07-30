@@ -5,7 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.4.0] - 2026-07-22
+## [1.4.0] - 2026-07-30
+
+### Breaking Changes
+
+This release changes the public API. Code written against `1.3.0` will not compile without
+the edits below. (The version number is `1.4.0` rather than `2.0.0` by project decision.)
+
+- **`Problem` uses handles instead of string names.** `add_variable` now returns a `VarKey`,
+  and `add_residual_block` takes `&[VarKey]` and returns a `FactorKey` — previously `&[&str]`
+  and `usize`. Keep the returned key and pass it where you used to pass a name:
+  ```rust
+  // 1.3.0
+  problem.add_variable("pose_0", ManifoldType::SE3, params);
+  problem.add_residual_block(&["pose_0", "pose_1"], factor, loss);
+
+  // 1.4.0
+  let k0 = problem.add_variable(ManifoldType::SE3, params);
+  let k1 = problem.add_variable(ManifoldType::SE3, params_1);
+  problem.add_residual_block(&[k0, k1], factor, loss);
+  ```
+- **`Factor::get_dimension` renamed to `Factor::residual_dim`.** Custom factor implementations
+  must rename the method; there is no default implementation.
+- **`OptimizationStatus` gained the `StalledNoProgress` variant.** Exhaustive `match`
+  expressions over this enum need a new arm. Treat it as a *successful* termination — it means
+  the solver reached a point where the cost can no longer improve (verified to return the same
+  final cost as running to the iteration limit).
 
 ### Changed
 - **Slot-map `Problem` data structure (faster).** `Problem` now stores variables and
@@ -21,10 +46,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`from_column_major_slice`), removing `DVector`↔`Mat` conversions from the inner loop. The
   symbolic sparsity structure is built once and reused every iteration; parallel assembly is
   lock-free over disjoint buffers (rayon).
-  - **API:** `Problem::add_variable` / `add_residual_block` now take and return `VarKey` /
-    `FactorKey` handles instead of `String` names.
 
 ### Added
+- **`LevenbergMarquardt` stall detection.** New config field
+  `max_consecutive_rejected_steps` (default `5`, matching Ceres'
+  `max_num_consecutive_invalid_steps`) and the matching
+  `OptimizationStatus::StalledNoProgress`. LM stops once trial steps are rejected repeatedly
+  *and* damping has saturated at `damping_max` — the point past which the step is negligible
+  and the cost provably cannot change. Both conditions are required: a run of rejections alone
+  is normal LM behaviour (damping rises, the next step succeeds).
+- **`init_logger_with_directives(level, directives)`** — installs the tracing subscriber with
+  fallback filter directives, so a noisy dependency can be quieted without mutating the process
+  environment. `RUST_LOG` still takes precedence when set.
+
+### Fixed
+- **SE3 cost was over-reported by the C++ benchmark harness.** `SO3LogMap` in
+  `benches/cpp_comparison/common/src/unified_cost.cpp` ignored quaternion double cover: when
+  `q.w() < 0` the angle landed near `2π` instead of the equivalent short rotation, and the
+  inverse left Jacobian (which divides by `sin θ`) then blew up the translation residual. On
+  parking-garage the initial cost read `1.22e8` instead of `8.36e3` (~14,000×); on sphere2500
+  `8.26e7` instead of `1.28e5`. All six benchmarked solvers now agree on initial cost for both
+  SE2 and SE3, making cross-implementation comparison valid for the first time.
+
+### Performance
+- **Wasted LM iterations eliminated on stalled problems**, with bit-identical final cost —
+  no tolerance was loosened. Measured on the pose-graph benchmark:
+  - `torus3D`: 101 → 23 iterations, 5877 → 1347 ms (4.3× faster)
+  - `cubicle`: 101 → 21 iterations, 7466 → 1579 ms (4.7× faster)
+  - All other datasets unchanged in both iteration count and cost.
+
+### Documentation
 - **Documentation cookbooks** (mdBook, KaTeX) for the three sub-crates, each under
   `crates/<crate>/doc/cookbook`:
   - `apex-manifolds` — every group and operation (exp/log, adjoint, Jacobians, ⊞/⊟) with
@@ -33,6 +84,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     into projection/inverse-projection and corrected inverse-projection formulas.
   - `apex-io` — every public functionality (pose-graph formats, ASL, ROS1/ROS2 bags, DDS,
     CLI tools) organized by domain.
+- **Performance benchmarks** (`doc/performance.md`) rewritten: 5 independent runs reported as
+  mean ± std, with plotly figures for cost and runtime. Metrics changed from "% cost
+  improvement" to the literature-standard final objective value plus runtime (SE-Sync,
+  Rosen et al. IJRR 2019; Carlone et al. ICRA 2015).
+
+### Notes
 - Sub-crate versions bumped to `0.3.0` (`apex-manifolds`, `apex-io`, `apex-camera-models`).
 
 ## [1.3.0] - 2026-04-29
