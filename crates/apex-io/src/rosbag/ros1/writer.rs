@@ -1,7 +1,7 @@
 //! ROS1 bag v2.0 writer.
 //!
 //! Buffers messages into chunks; each chunk is written when its uncompressed
-//! payload exceeds [`Ros1Writer::chunk_threshold`].  Index data records follow
+//! payload exceeds the writer's configured chunk threshold.  Index data records follow
 //! each chunk; connection and chunk-info records are written at close.
 //!
 //! ```text
