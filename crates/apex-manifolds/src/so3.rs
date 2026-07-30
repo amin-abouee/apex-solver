@@ -324,7 +324,7 @@ impl LieGroup for SO3 {
     /// θu = Log(q) = (2 / ||v||) * v * arctan(||v||, w) ∈ R³
     ///
     /// # Equation 144: Inverse of Right Jacobian for SO(3) Exp map
-    /// J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
+    /// `J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²`
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         let uq = self.unit_quaternion();
@@ -575,7 +575,7 @@ impl Tangent<SO3> for SO3Tangent {
     /// q = Exp(θu) = cos(θ/2) + u sin(θ/2) ∈ H
     ///
     /// # Equation 143: Right Jacobian for SO(3) Exp map
-    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn exp(&self, jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>) -> SO3 {
         let theta_squared = self.data.norm_squared();
@@ -602,7 +602,7 @@ impl Tangent<SO3> for SO3Tangent {
     ///
     /// # Notes
     /// # Equation 143: Right Jacobian for SO(3) Exp map
-    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn right_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         self.left_jacobian().transpose()
@@ -612,7 +612,7 @@ impl Tangent<SO3> for SO3Tangent {
     ///
     /// # Notes
     /// # Equation 144: Left Jacobian for SO(3) Exp map
-    /// J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn left_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         let angle = self.data.norm_squared();
@@ -643,7 +643,7 @@ impl Tangent<SO3> for SO3Tangent {
 
     /// Left Jacobian inverse for SO(3)
     ///
-    /// J_L⁻¹(θ) = I - (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
+    /// `J_L⁻¹(θ) = I - (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²`
     ///
     /// Has numerical conditioning issues near θ → π (sin θ → 0).
     ///
@@ -668,7 +668,7 @@ impl Tangent<SO3> for SO3Tangent {
     /// Hat map for SO(3)
     ///
     /// # Notes
-    /// [θ]ₓ = [0 -θz θy; θz 0 -θx; -θy θx 0]
+    /// `[θ]ₓ = [0 -θz θy; θz 0 -θx; -θy θx 0]`
     ///
     fn hat(&self) -> <SO3 as LieGroup>::LieAlgebra {
         Matrix3::new(

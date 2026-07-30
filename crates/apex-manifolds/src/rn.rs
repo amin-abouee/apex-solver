@@ -3,8 +3,8 @@
 //! This module implements the n-dimensional Euclidean space Rⁿ with vector addition
 //! as the group operation.
 //!
-//! Rⁿ elements are represented using nalgebra's DVector<f64> for dynamic sizing.
-//! Rⁿ tangent elements are also represented as DVector<f64> since the tangent space
+//! Rⁿ elements are represented using nalgebra's `DVector<f64>` for dynamic sizing.
+//! Rⁿ tangent elements are also represented as `DVector<f64>` since the tangent space
 //! is isomorphic to the manifold itself.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
@@ -19,7 +19,7 @@ use std::{
 
 /// Rⁿ group element representing n-dimensional Euclidean vectors.
 ///
-/// Internally represented using nalgebra's DVector<f64> for dynamic sizing.
+/// Internally represented using nalgebra's `DVector<f64>` for dynamic sizing.
 #[derive(Clone, PartialEq)]
 pub struct Rn {
     /// Internal representation as a dynamic vector
@@ -55,7 +55,7 @@ impl From<Rn> for DVector<f64> {
 /// Rⁿ tangent space element representing elements in the Lie algebra rⁿ.
 ///
 /// For Euclidean space, the tangent space is isomorphic to the manifold itself,
-/// so this is also represented as a DVector<f64>.
+/// so this is also represented as a `DVector<f64>`.
 #[derive(Clone, PartialEq)]
 pub struct RnTangent {
     /// Internal data: n-dimensional vector
@@ -702,11 +702,11 @@ impl Tangent<Rn> for RnTangent {
 impl Interpolatable for Rn {
     /// Linear interpolation in Euclidean space.
     ///
-    /// For parameter t ∈ [0,1]: interp(v₁, v₂, 0) = v₁, interp(v₁, v₂, 1) = v₂.
+    /// For parameter t ∈ `[0,1]`: interp(v₁, v₂, 0) = v₁, interp(v₁, v₂, 1) = v₂.
     ///
     /// # Arguments
     /// * `other` - Target element for interpolation
-    /// * `t` - Interpolation parameter in [0,1]
+    /// * `t` - Interpolation parameter in `[0,1]`
     fn interp(&self, other: &Self, t: f64) -> Self {
         assert_eq!(
             self.data.len(),
