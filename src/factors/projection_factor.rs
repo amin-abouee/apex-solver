@@ -36,7 +36,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Type Parameters
 ///
 /// - `CAM`: Camera model implementing [`CameraModel`] trait
-/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](apex_camera_models::BundleAdjustment))
+/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](crate::factors::BundleAdjustment))
 ///
 /// # Examples
 ///

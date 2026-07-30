@@ -1,7 +1,8 @@
 //! Residual blocks that connect factors with robust loss functions.
 //!
 //! A `ResidualBlock` is the fundamental building block of the optimization problem. It wraps
-//! a [`Factor`] (which computes residuals and Jacobians) with an optional [`Loss`] function
+//! a [`Factor`] (which computes residuals and Jacobians) with an optional
+//! [`LossFunction`]
 //! (which provides robustness to outliers). Each residual block corresponds to one measurement
 //! or constraint in the factor graph.
 //!
