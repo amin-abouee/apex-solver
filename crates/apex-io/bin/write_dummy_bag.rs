@@ -6,7 +6,7 @@
 //!
 //! Usage:
 //!   cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- \
-//!       [output_path] [--compression]
+//!       `[output_path] [--compression]`
 //!
 //! Example:
 //!   cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- \

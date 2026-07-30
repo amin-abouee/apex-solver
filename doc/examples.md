@@ -11,7 +11,7 @@ use nalgebra::dvector;
 use std::collections::HashMap;
 
 // Load pose graph
-let graph = G2oLoader::load("data/odometry/sphere2500.g2o")?;
+let graph = G2oLoader::load("data/odometry/3d/sphere2500.g2o")?;
 
 // Build optimization problem
 let mut problem = Problem::new(JacobianMode::Sparse);
@@ -100,7 +100,7 @@ impl Factor for MyRangeFactor {
         (residual, jacobian)
     }
 
-    fn get_dimension(&self) -> usize {
+    fn residual_dim(&self) -> usize {
         1  // One scalar residual
     }
 }

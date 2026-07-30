@@ -25,7 +25,8 @@
 //!
 //! ## Camera Projection Factors
 //!
-//! Use [`ProjectionFactor`](camera::ProjectionFactor) with a specific [`CameraModel`](camera::CameraModel).
+//! Use [`ProjectionFactor`] with a specific
+//! [`CameraModel`](apex_camera_models::CameraModel).
 //!
 //! Supported camera models:
 //! - [`PinholeCamera`](camera::PinholeCamera)

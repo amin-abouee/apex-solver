@@ -8,7 +8,7 @@
 //! are re-serialised (ROS1 wire format ↔ CDR) in a single batch pass.
 //!
 //! Usage:
-//!   cargo run -p apex-io --bin bag_convert -- <INPUT> <OUTPUT> [OPTIONS]
+//!   `cargo run -p apex-io --bin bag_convert -- <INPUT> <OUTPUT> [OPTIONS]`
 
 use apex_io::rosbag::Reader as Ros2Reader;
 use apex_io::rosbag::Writer as Ros2Writer;

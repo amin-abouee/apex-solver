@@ -4,35 +4,26 @@ This document provides step-by-step instructions for setting up and running the 
 
 ## Prerequisites
 
-### Git LFS (Required)
+### Datasets (Required)
 
-The benchmark datasets are stored using Git LFS. You must have Git LFS installed and initialized:
+Datasets are downloaded on demand by the `download_datasets` tool in the `apex-io` crate —
+no Git LFS is involved:
 
 ```bash
-# Install Git LFS (if not already installed)
-brew install git-lfs  # macOS
-# or
-sudo apt-get install git-lfs  # Ubuntu/Debian
+# List all available datasets and selection numbers
+cargo run --release -p apex-io --bin download_datasets -- --list
 
-# Initialize Git LFS in your repository
-git lfs install
-
-# Pull LFS files (if cloning existing repo)
-git lfs pull
+# Download everything the benchmarks need
+cargo run --release -p apex-io --bin download_datasets -- --select 10
 ```
 
-**Verify datasets are downloaded:**
+**Verify datasets are present:**
 ```bash
-# Check file sizes (should show actual MB, not KB pointers)
-ls -lh data/odometry/
+ls -lh data/odometry/2d data/odometry/3d
 ls -lh data/bundle_adjustment/
 ```
 
-If files show as ~1KB, they are LFS pointers and need to be pulled:
-```bash
-git lfs fetch --all
-git lfs checkout
-```
+Files land in `data/odometry/{2d,3d}/` (g2o) and `data/bundle_adjustment/<name>/` (BAL).
 
 ## Quick Start
 
@@ -156,11 +147,12 @@ cmake --build . --config Release -j$(sysctl -n hw.ncpu)
 
 ## Datasets
 
-**Note**: All datasets are stored via Git LFS. Ensure you have run `git lfs pull` before running benchmarks.
+**Note**: Datasets are fetched with `download_datasets` (see Prerequisites above); they are not
+stored in the repository.
 
-### Odometry Datasets (Git LFS)
+### Odometry Datasets
 
-Located in `data/odometry/` (all `.g2o` files tracked via LFS):
+Located in `data/odometry/2d/` and `data/odometry/3d/`:
 
 **SE3 (3D Pose Graphs):**
 | Dataset | Vertices | Edges | Description |
@@ -173,18 +165,21 @@ Located in `data/odometry/` (all `.g2o` files tracked via LFS):
 **SE2 (2D Pose Graphs):**
 | Dataset | Vertices | Edges | Description |
 |---------|----------|-------|-------------|
-| intel | 1,228 | 1,483 | Intel Research Lab |
+| city10000 | 10,000 | 20,687 | Synthetic city grid |
 | mit | 808 | 827 | MIT Killian Court |
-| ring | 901 | 991 | Ring topology |
+| ring | 434 | 459 | Ring topology |
 | M3500 | 3,500 | 5,453 | Manhattan grid |
 
-### Bundle Adjustment Datasets (Git LFS)
+### Bundle Adjustment Datasets
 
-Located in `data/bundle_adjustment/` (all `.txt` files tracked via LFS):
+Located in `data/bundle_adjustment/<name>/`:
 
 | Dataset | Cameras | Points | Observations |
 |---------|---------|--------|--------------|
-| problem-1723-156502-pre | 1,723 | 156,502 | 1,044,414 |
+| Ladybug | 1,723 | 156,502 | 678,718 |
+| Trafalgar | 257 | 65,132 | 225,911 |
+| Dubrovnik | 356 | 226,730 | 1,255,268 |
+| Venice | 1,778 | 993,923 | 5,001,946 |
 
 ## Running Benchmarks
 
@@ -224,24 +219,20 @@ cd benches/cpp_comparison/build
 
 # Run Rust benchmark suite
 cd ../../..
-cargo bench solver_comparison
+cargo bench --bench odometry_pose_benchmark
 ```
 
 ## Troubleshooting
 
 ### "Cannot open file" or datasets appear corrupted
-**Cause:** Git LFS files not downloaded (files are LFS pointers instead of actual data)
-**Solution:** 
+**Cause:** Dataset not downloaded yet.
+**Solution:**
 ```bash
-# Check if files are LFS pointers (they'll be ~1KB instead of MB/GB)
-ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
+# Check the file exists and has a plausible size
+ls -lh data/odometry/3d/sphere2500.g2o
 
-# Pull LFS files
-git lfs fetch --all
-git lfs checkout
-
-# Verify LFS status
-git lfs ls-files  # Should list all .g2o and .txt files
+# Download the benchmark datasets
+cargo run --release -p apex-io --bin download_datasets -- --select 10
 ```
 
 ### "No C++ optimization libraries found"

@@ -72,8 +72,8 @@
 //! - You want reliable convergence across diverse problem types
 //!
 //! For problems with specific structure, consider:
-//! - [`GaussNewton`](crate::GaussNewton) if well-conditioned with good initialization
-//! - [`DogLeg`](crate::DogLeg) for explicit trust region control
+//! - [`GaussNewton`](crate::optimizer::GaussNewton) if well-conditioned with good initialization
+//! - [`DogLeg`](crate::optimizer::DogLeg) for explicit trust region control
 //!
 //! # Implementation Features
 //!
@@ -198,8 +198,8 @@ use tracing::debug;
 /// # See Also
 ///
 /// - [`LevenbergMarquardt`] - The solver that uses this configuration
-/// - [`GaussNewtonConfig`](crate::GaussNewtonConfig) - Undamped variant
-/// - [`DogLegConfig`](crate::DogLegConfig) - Trust region alternative
+/// - [`GaussNewtonConfig`](crate::optimizer::gauss_newton::GaussNewtonConfig) - Undamped variant
+/// - [`DogLegConfig`](crate::optimizer::dog_leg::DogLegConfig) - Trust region alternative
 #[derive(Clone)]
 pub struct LevenbergMarquardtConfig {
     /// Type of linear solver for the linear systems
@@ -627,8 +627,8 @@ struct StepEvaluation {
 /// # See Also
 ///
 /// - [`LevenbergMarquardtConfig`] - Configuration options
-/// - [`GaussNewton`](crate::GaussNewton) - Undamped variant (faster but less robust)
-/// - [`DogLeg`](crate::DogLeg) - Alternative trust region method
+/// - [`GaussNewton`](crate::optimizer::GaussNewton) - Undamped variant (faster but less robust)
+/// - [`DogLeg`](crate::optimizer::DogLeg) - Alternative trust region method
 pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<Vec<f64>>,

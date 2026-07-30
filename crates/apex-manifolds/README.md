@@ -3,6 +3,15 @@
 Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic
 Jacobians for nonlinear optimization.
 
+## What's new in 0.3.0
+
+- **Cookbook** — a complete mathematical reference for every group and every operation
+  (exp/log, compose, inverse, adjoint, left/right Jacobians, ⊞/⊟), with all formulas derived
+  from the implementation. Each chapter follows a unified template and the shared
+  [Conventions](doc/cookbook/src/manifolds/conventions.md) page documents the storage layout
+  (w-first quaternions, `[ρ, θ]` twists), the ⊞/⊟ operators, and the SO(3) Jacobians reused
+  across the higher groups. Build it with `mdbook build doc/cookbook`.
+
 ## Overview
 
 This library provides efficient implementations of Lie group manifolds commonly used in
@@ -56,7 +65,7 @@ Sim(3)      | 7   | 8   | (R,t,λ), R∈SO(3), λ∈ℝ>0     | ξ ∈ ℝ⁷   
 
 ```toml
 [dependencies]
-apex-manifolds = "0.2.0"
+apex-manifolds = "0.3.0"
 ```
 
 ## Usage

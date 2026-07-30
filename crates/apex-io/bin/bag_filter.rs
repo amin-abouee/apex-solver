@@ -4,19 +4,19 @@
 //! topic and time-range filtering. Supports both SQLite3 and MCAP formats.
 //!
 //! Usage:
-//!   cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \
+//!   `cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \`
 //!       <input_bag> <output_bag> [--topics topic1,topic2,...] [--start NS] [--end NS]
 //!
 //! Examples:
 //!   # Copy entire bag
-//!   cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- ./input ./output
+//!   `cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- ./input ./output`
 //!
 //!   # Copy only specific topics
-//!   cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \
+//!   `cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \`
 //!       ./input ./output --topics /camera/image_raw,/imu/data
 //!
 //!   # Copy with time filtering
-//!   cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \
+//!   `cargo run -p apex-io --features rosbag-sqlite --bin bag_filter -- \`
 //!       ./input ./output --start 1000000000 --end 2000000000
 
 use apex_io::rosbag::types::{CompressionFormat, CompressionMode, Connection, StoragePlugin};

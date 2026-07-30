@@ -26,7 +26,7 @@
 //! - 3D reconstruction with unknown scale
 //!
 //! # References
-//! - Ethan Eade: "Lie Groups for Computer Vision" - https://www.ethaneade.com/lie.pdf
+//! - Ethan Eade: "Lie Groups for Computer Vision" - <https://www.ethaneade.com/lie.pdf>
 //! - Sophus library: sophus/sim3.hpp
 
 use crate::{

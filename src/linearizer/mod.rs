@@ -2,7 +2,7 @@
 //! and the linear system solved each iteration.
 //!
 //! This is the central module for all linearization concerns:
-//! - [`linearize_block()`]: Shared factor evaluation (loss correction, residual accumulation)
+//! - `linearize_block()`: Shared factor evaluation (loss correction, residual accumulation)
 //! - [`cpu::sparse`]: Sparse Jacobian assembly using `SparseColMat` and symbolic structure
 //! - [`cpu::dense`]: Dense Jacobian assembly using `Mat<f64>`
 //! - [`AssemblyBackend`]: Trait bridging linearization with the optimizer's solver types

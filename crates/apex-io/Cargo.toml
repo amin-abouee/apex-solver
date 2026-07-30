@@ -1,6 +1,6 @@
 [package]
 name = "apex-io"
-version = "0.2.0"
+version = "0.3.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,6 +12,11 @@ description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS1/ROS2 bags with
 readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
+exclude = ["tests/", "benches/"]
+
+# Build docs.rs with every feature so the rosbag, DDS and visualization APIs are visible.
+[package.metadata.docs.rs]
+all-features = true
 
 [[bin]]
 name = "download_datasets"

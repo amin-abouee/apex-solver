@@ -2,10 +2,20 @@
 
 Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
 
+## What's new in 0.3.0 — Cookbook overhaul
+
+The [cookbook](#cookbook) was rebuilt so every model chapter follows the **same eight-section
+template** (Parameters → Projection → Inverse Projection → Point Jacobian → Intrinsic Jacobian
+→ Linear Estimation → Example → References), with the geometric **validity conditions merged
+into** the Projection and Inverse-Projection sections. All formulas were re-derived from the
+implementation — correcting several inverse-projection formulas (the UCM Mei ξ-sphere inverse,
+the EUCM numerator, the Kannala-Brandt ray reconstruction, and the f-theta point Jacobian) —
+and prose now uses inline `$...$` math throughout.
+
 ## Cookbook
 
 For the full mathematical formulations, Jacobian derivations, and references, see the
-[apex-camera-models cookbook](doc/cookbook/src/introduction.html). The cookbook is the
+[apex-camera-models cookbook](doc/cookbook/src/introduction.md). The cookbook is the
 canonical source for projection equations, unprojection strategies, parameter layouts,
 and validation rules. The per-model source files link back to the relevant chapter.
 
@@ -160,7 +170,7 @@ All models implement the `CameraModel` trait providing a unified interface for p
 ## Mathematical Background
 
 Coordinate conventions, projection / unprojection equations, and the full Jacobian
-derivations live in the [cookbook](doc/cookbook/src/introduction.html). All models
+derivations live in the [cookbook](doc/cookbook/src/introduction.md). All models
 follow the standard computer vision RDF frame (`+Z` forward) except for the BAL Pinhole
 family, which uses the Bundler convention (`-Z` forward).
 
@@ -210,7 +220,7 @@ All camera models use a unified `CameraModelError` enum with structured variants
 
 ```toml
 [dependencies]
-apex-camera-models = "0.2.0"
+apex-camera-models = "0.3.0"
 ```
 
 ## Usage
@@ -401,7 +411,7 @@ problem.add_residual_block(&[...], Box::new(factor1), None);
 ## References
 
 The full bibliography (primary, academic, and survey references) lives in the
-[cookbook references page](doc/cookbook/src/references.html).
+[cookbook references page](doc/cookbook/src/references.md).
 
 
 ## License

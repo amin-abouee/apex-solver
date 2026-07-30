@@ -1,247 +1,110 @@
 # Apex Solver Benchmarks
 
-This directory contains two comprehensive benchmarks for evaluating Apex Solver performance:
+Two comparison benchmarks:
 
-1. **Bundle Adjustment Benchmark** (`bundle_adjustment_benchmark.rs`) - BAL datasets, Apex vs C++ solvers
-2. **Pose Graph Optimization Benchmark** (`solver_comparison.rs`) - G2O datasets, Apex vs Rust/C++ solvers
+1. **Pose Graph Optimization** (`odometry_pose_benchmark.rs`) — apex-solver vs factrs,
+   tiny-solver, Ceres, GTSAM and g2o on 8 standard G2O datasets (SE2 + SE3).
+2. **Bundle Adjustment** (`bundle_adjustment_benchmark.rs`) — apex-solver vs Ceres, GTSAM and
+   g2o on 4 BAL datasets.
+
+**→ Results live in [`doc/performance.md`](../doc/performance.md)** — tables (mean ± std over
+5 runs) and figures. Numbers are not duplicated here so they cannot drift.
 
 ---
 
 ## Prerequisites
 
-### Git LFS
+### Datasets
 
-All benchmark datasets are stored using **Git LFS** to avoid bloating the repository:
-
-- **Bundle adjustment datasets**: `data/bundle_adjustment/**/*.txt` (~1.9GB)
-- **Odometry datasets**: `data/odometry/**/*.g2o` (~11MB)
-
-#### Setup
+Datasets are downloaded on demand by the `download_datasets` tool in the `apex-io` crate.
+No Git LFS is involved.
 
 ```bash
-# Install Git LFS
-brew install git-lfs  # macOS
-# or
-sudo apt-get install git-lfs  # Ubuntu/Debian
+# List all available datasets and selection numbers
+cargo run --release -p apex-io --bin download_datasets -- --list
 
-# Initialize and pull LFS files
-git lfs install
-git lfs pull
+# Download everything the benchmarks need
+# (all odometry g2o + the largest problem from each BA dataset)
+cargo run --release -p apex-io --bin download_datasets -- --select 10
+
+# Interactive mode (prompts for selection)
+cargo run --release -p apex-io --bin download_datasets
 ```
 
-#### Troubleshooting
+Files land in `data/odometry/{2d,3d}/` and `data/bundle_adjustment/<name>/`. A benchmark skips
+any dataset whose file is missing, so a partial download still runs.
 
-If benchmarks fail with "file not found" or data appears corrupted:
+### C++ solvers (optional)
 
-1. **Check if files are LFS pointers** (they'll be ~1KB instead of MB/GB):
-   ```bash
-   ls -lh data/odometry/sphere2500.g2o  # Should be ~1MB, not 1KB
-   ```
+The Ceres / GTSAM / g2o comparisons build from `benches/cpp_comparison/` on first run and need
+CMake 3.15+, Eigen3, and the solvers themselves:
 
-2. **Pull LFS files**:
-   ```bash
-   git lfs fetch --all
-   git lfs checkout
-   ```
+```bash
+brew install ceres-solver gtsam g2o eigen   # macOS
+```
 
-3. **Verify LFS status**:
-   ```bash
-   git lfs ls-files  # Should list all .g2o and .txt files
-   ```
+If they are unavailable the benchmarks run with the Rust solvers only and log a warning.
 
 ---
 
-## 1. Bundle Adjustment Benchmark
-
-Compares **Apex Solver (Iterative Schur)** against **Ceres**, **GTSAM**, and **g2o** on 4 large-scale BAL datasets.
-
-### Datasets Tested
-
-| Dataset | Cameras | Landmarks | Observations | Size |
-|---------|---------|-----------|--------------|------|
-| Ladybug | 1,723 | 156,502 | 678,718 | Large |
-| Trafalgar | 257 | 65,132 | 225,911 | Medium |
-| Dubrovnik | 356 | 226,730 | 1,255,268 | Large |
-| Venice | 1,778 | 993,923 | 5,001,946 | Very Large |
-
-### Apex Solver Configuration
-
-- **Mode**: SelfCalibration (optimizes pose + intrinsics + landmarks)
-- **Linear Solver**: Iterative Schur Complement (PCG with Schur-Jacobi preconditioner)
-- **Timeout**: 10 minutes per solver
-- **Parameters**: 
-  - Max iterations: 50
-  - Cost tolerance: 1e-6
-  - Parameter tolerance: 1e-8
-  - Damping: 1e-3
-
-### Usage
+## Running
 
 ```bash
-# Run all 4 datasets
+# single run of either benchmark
+cargo bench --bench odometry_pose_benchmark
 cargo bench --bench bundle_adjustment_benchmark
 ```
 
-### Output
+Each run writes an aggregate CSV to `output/`:
+`odometry_pose_benchmark_results.csv` and `ba_comparison_results.csv`.
 
-Results are saved to **`output/ba_comparison_results.csv`** with:
-- Dataset name
-- Solver (Apex-Iterative, Ceres, GTSAM, g2o)
-- Language (Rust, C++)
-- Initial/Final RMSE (pixels)
-- Time (seconds)
-- Iterations
-- Status (CONVERGED / TIMEOUT)
+### Repeated runs and figures
 
-### Example Output
-
-```
-Dataset: Ladybug: Cameras: 1723, Landmarks: 156502, Observations: 678718
---------------------------------------------------------------------------------------
-Solver               Language   Initial RMSE    Final RMSE      Time (s)    Iters      Status
---------------------------------------------------------------------------------------
-Apex-Iterative       Rust       49.234          14.675          70.14       12         CONVERGED
-Ceres                C++        49.234          1.892           45.32       40         CONVERGED
-GTSAM                C++        49.234          1.889           52.18       38         CONVERGED
-g2o                  C++        49.234          1.891           48.67       41         CONVERGED
-
-Dataset: Trafalgar: Cameras: 257, Landmarks: 65132, Observations: 225911
-...
-```
-
----
-
-## 2. Pose Graph Optimization Benchmark
-
-Compares **apex-solver**, **factrs**, **tiny-solver** (Rust) and **g2o**, **GTSAM** (C++) on standard pose graph datasets.
-
-### Datasets Tested
-
-**SE2 (2D Pose Graphs)**:
-- M3500 (3,500 poses)
-- mit (1,045 poses)
-- intel (943 poses)
-- ring (3,500 poses)
-
-**SE3 (3D Pose Graphs)**:
-- sphere2500 (2,500 poses)
-- parking-garage (1,661 poses)
-- torus3D (5,000 poses)
-- cubicle (5,750 poses)
-
-### Apex Solver Configuration
-
-#### SE2 (2D):
-- Max iterations: 150
-- Cost tolerance: 1e-4
-- Parameter tolerance: 1e-4
-- Gradient tolerance: 1e-10
-
-#### SE3 (3D):
-- Max iterations: 100
-- Cost tolerance: 1e-4
-- Parameter tolerance: 1e-4
-- Gradient tolerance: 1e-12
-
-### Usage
+`doc/performance.md` is generated from 5 repetitions of each benchmark:
 
 ```bash
-# Run all datasets across all solvers
-cargo run --release --bin solver_comparison
+# run N times, archiving every run's raw CSV + log to output/runs/
+bash benches/tools/run_repeated.sh odometry_pose_benchmark 5
+bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5
+
+# aggregate to output/*_aggregated.csv and render doc/plots/*.{html,png}
+uv run --with plotly --with kaleido --with pandas benches/tools/plot_benchmarks.py
 ```
 
-### Output
-
-CSV files with convergence metrics:
-- **Converged**: true/false
-- **Time**: Average milliseconds (5 runs)
-- **Iterations**: Number of iterations
-- **Initial/Final Cost**: Optimization cost
-- **Improvement**: Percentage cost reduction
+The bundle-adjustment sweep is slow — roughly 3.5 hours for 5 runs, since Ceres and GTSAM each
+consume the full 10-minute timeout on Venice.
 
 ---
 
-## C++ Solver Integration
+## Methodology
 
-Both benchmarks support C++ solvers (Ceres, GTSAM, g2o) if available.
+- **Timing** covers the `optimize()` call only. Problem construction, cost evaluation and CSV
+  writing are all outside the timed region.
+- **Console logging is off** during measurement, for the solvers and the harness alike.
+- **Cost** is computed by the harness directly from the source file for every solver, so values
+  are comparable across implementations rather than reflecting each library's internal
+  bookkeeping.
+- **Metrics** are the final objective value and runtime, following the pose-graph literature
+  (SE-Sync, Rosen et al. IJRR 2019; Carlone et al. ICRA 2015). Bundle adjustment uses
+  reprojection RMSE and runtime.
+- One sample per invocation — `run_repeated.sh` supplies the repetitions, so Rust and C++
+  solvers contribute the same number of independent samples.
 
-### Requirements
+## Configuration
 
-- CMake 3.10+
-- Ceres Solver
-- GTSAM
-- g2o
-- Eigen3
+| | Max iters | Cost tol | Param tol | Grad tol | Damping |
+|---|---|---|---|---|---|
+| apex-solver SE2 | 150 | 1e-4 | 1e-4 | 1e-10 | 1e-4 |
+| apex-solver SE3 | 100 | 1e-4 | 1e-4 | 1e-12 | 1e-4 |
+| apex-solver BA | 20 | 1e-6 | 1e-8 | 1e-10 | 1e-3 |
 
-### Build Process
-
-C++ benchmarks are located in `benches/cpp_comparison/` and build automatically on first run.
-
-If C++ solvers are unavailable, benchmarks run with Rust solvers only (with warnings).
-
-### Troubleshooting
-
-**"C++ benchmarks unavailable"**:
-1. Install required libraries (Ceres, GTSAM, g2o)
-2. Ensure CMake is in PATH
-3. Check `benches/cpp_comparison/CMakeLists.txt` for build requirements
-
-**OR** ignore and run Rust-only benchmarks.
-
----
-
-## Output Files
-
-All benchmark results are saved to the **`output/`** directory:
-
-- **`ba_comparison_results.csv`**: Bundle adjustment benchmark results
-- **`solver_comparison_*.csv`**: Pose graph benchmark results (multiple files)
-
-The `output/` directory is gitignored and created automatically.
+Bundle adjustment runs in SelfCalibration mode (pose + landmarks + intrinsics) with an
+iterative Schur complement solver (PCG + Schur-Jacobi preconditioner) and a 10-minute timeout
+per solver.
 
 ---
 
-## Quick Start
+## Dataset sources
 
-### Run Bundle Adjustment Benchmark
-```bash
-cargo bench --bench bundle_adjustment_benchmark
-```
-
-### Run Pose Graph Benchmark
-```bash
-cargo run --release --bin solver_comparison
-```
-
-### View Results
-```bash
-# Open CSV in spreadsheet software
-open output/ba_comparison_results.csv
-
-# Or view in terminal
-cat output/ba_comparison_results.csv
-```
-
----
-
-## Performance Notes
-
-- **Bundle adjustment**: Iterative Schur scales well to large problems (1,000+ cameras)
-- **Pose graphs**: apex-solver matches or exceeds factrs/tiny-solver on most datasets
-- **Timeouts**: BA benchmark enforces 10-minute timeout per solver to handle very large datasets
-- **Averaging**: Pose graph benchmark runs 5 iterations per dataset for stable timing
-
----
-
-## Dataset Sources
-
-- **BAL datasets**: [Bundle Adjustment in the Large](https://grail.cs.washington.edu/projects/bal/)
-- **G2O datasets**: Standard SLAM benchmarks from g2o repository
-
-**Storage**: All datasets are managed via Git LFS to keep the repository lightweight:
-- Bundle adjustment: `.txt` files (~1.9GB total)
-- Odometry: `.g2o` files (~11MB total)
-
-Datasets are expected in:
-- `data/bundle_adjustment/[dataset]/problem-*.txt` (BAL format, LFS)
-- `data/odometry/*.g2o` (G2O format, LFS)
+- **BAL** — [Bundle Adjustment in the Large](https://grail.cs.washington.edu/projects/bal/)
+- **G2O** — standard SLAM benchmarks from the g2o and SE-Sync distributions

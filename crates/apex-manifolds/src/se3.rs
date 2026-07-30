@@ -225,7 +225,7 @@ impl LieGroup for SE3 {
     ///       [ 0    1   ]
     ///
     /// # Equation 176: Jacobian of inverse operation
-    /// J_M⁻¹_M = - [ R [t]ₓ R ]
+    /// `J_M⁻¹_M = - [ R [t]ₓ R ]`
     ///             [ 0    R   ]
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         let rot = self.rotation_impl();
@@ -252,7 +252,7 @@ impl LieGroup for SE3 {
     ///           [ 0             1         ]
     ///
     /// # Equation 177: Jacobian of the composition wrt self.
-    /// J_MaMb_Ma = [ R_bᵀ   -R_bᵀ*[t_b]ₓ ]
+    /// `J_MaMb_Ma = [ R_bᵀ   -R_bᵀ*[t_b]ₓ ]`
     ///             [ 0          R_bᵀ     ]
     ///
     /// # Equation 178: Jacobian of the composition wrt other.
@@ -293,7 +293,7 @@ impl LieGroup for SE3 {
     ///              [ Log(R)  ]
     ///
     /// # Equation 174: V(θ) function for SE(3) Log/Exp maps
-    /// V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         let theta = self.rotation_impl().log(None);
