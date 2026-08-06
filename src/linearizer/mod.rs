@@ -164,6 +164,11 @@ pub(crate) fn compute_block_into(
 
     // Apply robust-loss correction in-place: no heap allocation, math identical to
     // `Corrector::correct_jacobian` / `correct_residuals` on `DVector`/`DMatrix`.
+    //
+    // Note this produces the corrected residual/Jacobian that drive the linear
+    // system. The *cost* is not derivable from them — see
+    // `Problem::compute_residual_and_cost_sparse` and
+    // `cov_issues/05-robust-cost-mismatch.md`.
     if let Some(loss_func) = &residual_block.loss_func {
         let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
         let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
