@@ -9,30 +9,18 @@ use crate::linalg::{DenseMode, LinAlgResult, LinearSolver};
 /// because QR decomposition never fails on singular or near-singular matrices.
 #[derive(Debug, Clone)]
 pub struct DenseQRSolver {
-    /// Cached column-pivoting QR factorization of the Hessian (or augmented Hessian)
-    factorizer: Option<faer::linalg::solvers::ColPivQr<f64>>,
-
     /// Dense Hessian H = J^T · J (un-augmented, for covariance)
     hessian: Option<Mat<f64>>,
 
     /// Dense gradient g = J^T · r
     gradient: Option<Mat<f64>>,
-
-    /// The parameter covariance matrix (H^{-1}), computed lazily
-    covariance_matrix: Option<Mat<f64>>,
-
-    /// Asymptotic standard errors sqrt(diag(H^{-1})), computed lazily
-    standard_errors: Option<Mat<f64>>,
 }
 
 impl DenseQRSolver {
     pub fn new() -> Self {
         Self {
-            factorizer: None,
             hessian: None,
             gradient: None,
-            covariance_matrix: None,
-            standard_errors: None,
         }
     }
 
@@ -42,34 +30,6 @@ impl DenseQRSolver {
 
     pub fn gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
-    }
-
-    /// Compute and cache standard errors as sqrt of covariance diagonal.
-    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
-        if self.covariance_matrix.is_none() {
-            LinearSolver::<DenseMode>::compute_covariance_matrix(self);
-        }
-
-        let n = self.hessian.as_ref()?.ncols();
-        if let Some(cov) = &self.covariance_matrix {
-            let mut std_errors = Mat::zeros(n, 1);
-            for i in 0..n {
-                let diag_val = cov[(i, i)];
-                if diag_val >= 0.0 {
-                    std_errors[(i, 0)] = diag_val.sqrt();
-                } else {
-                    return None;
-                }
-            }
-            self.standard_errors = Some(std_errors);
-        }
-        self.standard_errors.as_ref()
-    }
-
-    /// Reset covariance computation state (useful for iterative optimization).
-    pub fn reset_covariance(&mut self) {
-        self.covariance_matrix = None;
-        self.standard_errors = None;
     }
 
     /// Solve with dense Jacobian directly (the core dense QR implementation).
@@ -89,11 +49,8 @@ impl DenseQRSolver {
         // Solve H · dx = -g
         let dx = qr.solve(-&gradient);
 
-        self.factorizer = Some(qr);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.covariance_matrix = None;
-        self.standard_errors = None;
 
         Ok(dx)
     }
@@ -124,11 +81,8 @@ impl DenseQRSolver {
         let dx = qr.solve(-&gradient);
 
         // Cache the un-augmented Hessian (DogLeg/LM need the true quadratic model)
-        self.factorizer = Some(qr);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.covariance_matrix = None;
-        self.standard_errors = None;
 
         Ok(dx)
     }
@@ -169,23 +123,6 @@ impl LinearSolver<DenseMode> for DenseQRSolver {
     fn get_gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
     }
-
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        if self.covariance_matrix.is_none()
-            && let Some(hessian) = &self.hessian
-            && let Some(factorizer) = &self.factorizer
-        {
-            let n = hessian.nrows();
-            let identity = Mat::identity(n, n);
-            let cov = factorizer.solve(&identity);
-            self.covariance_matrix = Some(cov);
-        }
-        self.covariance_matrix.as_ref()
-    }
-
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        self.covariance_matrix.as_ref()
-    }
 }
 
 #[cfg(test)]
@@ -220,12 +157,12 @@ mod tests {
     #[test]
     fn test_dense_qr_solver_creation() {
         let solver = DenseQRSolver::new();
-        assert!(solver.factorizer.is_none());
         assert!(solver.hessian.is_none());
         assert!(solver.gradient.is_none());
 
         let default_solver = DenseQRSolver::default();
-        assert!(default_solver.factorizer.is_none());
+        assert!(default_solver.hessian.is_none());
+        assert!(default_solver.gradient.is_none());
     }
 
     #[test]
@@ -250,7 +187,6 @@ mod tests {
 
         assert!(solver.hessian.is_some());
         assert!(solver.gradient.is_some());
-        assert!(solver.factorizer.is_some());
 
         Ok(())
     }
@@ -365,9 +301,8 @@ mod tests {
     fn test_dense_qr_solver_clone() {
         let solver1 = DenseQRSolver::new();
         let solver2 = solver1.clone();
-
-        assert!(solver1.factorizer.is_none());
-        assert!(solver2.factorizer.is_none());
+        assert!(solver2.hessian.is_none());
+        assert!(solver2.gradient.is_none());
     }
 
     #[test]
@@ -385,171 +320,6 @@ mod tests {
                 "Zero-lambda augmented should match normal equation"
             );
         }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_covariance_computation() -> TestResult {
-        let (j, r) = create_test_data();
-        let mut solver = DenseQRSolver::new();
-
-        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-
-        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
-            .ok_or("covariance should be computable")?;
-        let n = cov.nrows();
-
-        // Symmetry
-        for i in 0..n {
-            for k in 0..n {
-                assert!(
-                    (cov[(i, k)] - cov[(k, i)]).abs() < TOLERANCE,
-                    "Covariance not symmetric at ({i}, {k})"
-                );
-            }
-        }
-
-        // Positive diagonal
-        for i in 0..n {
-            assert!(cov[(i, i)] > 0.0, "Diagonal entry {i} should be positive");
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_standard_errors_computation() -> TestResult {
-        let (j, r) = create_test_data();
-        let mut solver = DenseQRSolver::new();
-
-        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-
-        // clone to release the borrow on `solver` so we can access covariance_matrix next
-        let errors = solver
-            .compute_standard_errors()
-            .ok_or("standard errors should be computable")?
-            .clone();
-        let cov = solver
-            .covariance_matrix
-            .as_ref()
-            .ok_or("covariance matrix not available")?;
-
-        assert_eq!(errors.nrows(), cov.nrows());
-        assert_eq!(errors.ncols(), 1);
-
-        for i in 0..errors.nrows() {
-            assert!(
-                errors[(i, 0)] > 0.0,
-                "Standard error at {i} should be positive"
-            );
-            let expected = cov[(i, i)].sqrt();
-            assert!(
-                (errors[(i, 0)] - expected).abs() < TOLERANCE,
-                "Standard error should equal sqrt of covariance diagonal"
-            );
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_covariance_well_conditioned() -> TestResult {
-        let mut solver = DenseQRSolver::new();
-
-        // J = diag(2, 3) → H = diag(4, 9) → H^{-1} = diag(0.25, 1/9)
-        let mut j = Mat::zeros(2, 2);
-        j[(0, 0)] = 2.0;
-        j[(1, 1)] = 3.0;
-
-        let mut r = Mat::zeros(2, 1);
-        r[(0, 0)] = 1.0;
-        r[(1, 0)] = 2.0;
-
-        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-
-        let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver)
-            .ok_or("covariance computation failed")?;
-        assert!(
-            (cov[(0, 0)] - 0.25).abs() < TOLERANCE,
-            "cov[0,0] should be 0.25"
-        );
-        assert!(
-            (cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE,
-            "cov[1,1] should be 1/9"
-        );
-        assert!(cov[(0, 1)].abs() < TOLERANCE);
-        assert!(cov[(1, 0)].abs() < TOLERANCE);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_covariance_caching() -> TestResult {
-        let (j, r) = create_test_data();
-        let mut solver = DenseQRSolver::new();
-
-        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-
-        LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr1 = solver
-            .covariance_matrix
-            .as_ref()
-            .ok_or("covariance not cached after first call")?
-            .as_ptr();
-
-        // Second call should return cached result (same pointer)
-        LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        let ptr2 = solver
-            .covariance_matrix
-            .as_ref()
-            .ok_or("covariance not cached after second call")?
-            .as_ptr();
-
-        assert_eq!(ptr1, ptr2, "Covariance matrix should be cached");
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_covariance_singular_system() -> TestResult {
-        let mut solver = DenseQRSolver::new();
-
-        // Singular Jacobian: second row = 2 × first row
-        let mut j = Mat::zeros(2, 2);
-        j[(0, 0)] = 1.0;
-        j[(0, 1)] = 2.0;
-        j[(1, 0)] = 2.0;
-        j[(1, 1)] = 4.0;
-
-        let mut r = Mat::zeros(2, 1);
-        r[(0, 0)] = 0.0;
-        r[(1, 0)] = 1.0;
-
-        let result = LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j);
-        if result.is_ok() {
-            let cov = LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-            if let Some(cov) = cov {
-                assert_eq!(cov.nrows(), 2);
-                assert_eq!(cov.ncols(), 2);
-            }
-        }
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_dense_qr_reset_covariance() -> TestResult {
-        let (j, r) = create_test_data();
-        let mut solver = DenseQRSolver::new();
-
-        LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-        LinearSolver::<DenseMode>::compute_covariance_matrix(&mut solver);
-        assert!(solver.covariance_matrix.is_some());
-
-        solver.reset_covariance();
-        assert!(solver.covariance_matrix.is_none());
-        assert!(solver.standard_errors.is_none());
 
         Ok(())
     }
