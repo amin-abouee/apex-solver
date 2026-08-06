@@ -1094,8 +1094,8 @@ impl DogLeg {
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_cost = optimizer::compute_cost(&new_residual);
+        let (_new_residual, new_cost) =
+            problem.compute_residual_and_cost_sparse(&state.variables)?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
@@ -1311,11 +1311,7 @@ impl DogLeg {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances_generic::<M>(
-                        linear_solver,
-                        &mut state.variables,
-                        &state.variable_index_map,
-                    )
+                    problem.compute_and_set_covariances(&mut state.variables)
                 } else {
                     None
                 };

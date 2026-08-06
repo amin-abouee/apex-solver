@@ -518,6 +518,32 @@ pub fn process_jacobian(
     Ok(jacobian * scaling)
 }
 
+/// Assign each variable a contiguous range of tangent-space columns.
+///
+/// Ordering follows `variables.keys()` — slotmap insertion order, which is already
+/// deterministic — and each variable is given `dof()` consecutive columns starting
+/// at the running offset.
+///
+/// Returns `(column offset per variable, variable keys in column order, total DOF)`.
+///
+/// This is shared by [`initialize_optimization_state`] and by covariance
+/// estimation ([`crate::linalg::covariance`]). Both must agree on the column
+/// layout, or extracted covariance blocks land on the wrong variables.
+pub(crate) fn build_variable_index_map(
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+) -> (SecondaryMap<VarKey, usize>, Vec<VarKey>, usize) {
+    let sorted_vars: Vec<VarKey> = variables.keys().collect();
+
+    let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+    let mut col_offset = 0;
+    for &var_key in &sorted_vars {
+        variable_index_map.insert(var_key, col_offset);
+        col_offset += variables[var_key].dof();
+    }
+
+    (variable_index_map, sorted_vars, col_offset)
+}
+
 /// Initialize optimization state from problem and initial parameters.
 ///
 /// This is the common initialization sequence used by all optimizers:
@@ -531,22 +557,7 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
     let mut variables = problem.variables.clone();
     problem.apply_constraints_to_variables(&mut variables);
 
-    let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<VarKey> = variables.keys().collect();
-    // Sort by current column offset for deterministic ordering
-    sorted_vars.sort_by_key(|k| variable_index_map.get(*k).copied().unwrap_or(usize::MAX));
-
-    for &var_key in &sorted_vars {
-        variable_index_map.insert(var_key, col_offset);
-        col_offset += variables[var_key].dof();
-    }
-
-    // Rebuild sorted_vars in correct column order now that index map is built
-    let mut sorted_vars: Vec<VarKey> = variables.keys().collect();
-    sorted_vars.sort_by_key(|k| variable_index_map[*k]);
-
-    let total_dof = col_offset;
+    let (variable_index_map, sorted_vars, total_dof) = build_variable_index_map(&variables);
 
     let symbolic_structure = match problem.jacobian_mode {
         JacobianMode::Sparse => Some(crate::linearizer::cpu::sparse::build_symbolic_structure(
@@ -558,8 +569,7 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
         JacobianMode::Dense => None,
     };
 
-    let residual = problem.compute_residual_sparse(&variables)?;
-    let current_cost = compute_cost(&residual);
+    let (_residual, current_cost) = problem.compute_residual_and_cost_sparse(&variables)?;
     let initial_cost = current_cost;
 
     Ok(InitializedState {

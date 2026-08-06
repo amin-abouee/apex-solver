@@ -152,7 +152,7 @@ use crate::linalg::{
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
-    OptimizerError, apply_negative_parameter_step, apply_parameter_step, compute_cost,
+    OptimizerError, apply_negative_parameter_step, apply_parameter_step,
 };
 use faer::Mat;
 use std::time::{Duration, Instant};
@@ -228,8 +228,6 @@ pub struct LevenbergMarquardtConfig {
     pub damping_nu: f64,
     /// Stop after this many consecutive rejected steps.
     pub max_consecutive_rejected_steps: usize,
-    /// Trust region radius
-    pub trust_region_radius: f64,
     /// Minimum step quality for acceptance
     pub min_step_quality: f64,
     /// Good step quality threshold
@@ -245,14 +243,6 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: None (disabled)
     pub min_cost_threshold: Option<f64>,
-    /// Minimum trust region radius before termination
-    ///
-    /// When the trust region radius falls below this value, the optimizer
-    /// terminates as it indicates the search has converged or the problem
-    /// is ill-conditioned. Matches Ceres Solver's min_trust_region_radius.
-    ///
-    /// Default: 1e-32 (Ceres-compatible)
-    pub min_trust_region_radius: f64,
     /// Maximum condition number for Jacobian matrix (optional check)
     ///
     /// If set, the optimizer checks if condition_number(J^T*J) exceeds this
@@ -330,14 +320,12 @@ impl Default for LevenbergMarquardtConfig {
             damping_decrease_factor: 0.3,
             damping_nu: 2.0,
             max_consecutive_rejected_steps: 5,
-            trust_region_radius: 1e4,
             min_step_quality: 0.0,
             good_step_quality: 0.75,
             min_diagonal: 1e-6,
             max_diagonal: 1e32,
             // New Ceres-compatible parameters
             min_cost_threshold: None,
-            min_trust_region_radius: 1e-32,
             max_condition_number: None,
             min_relative_decrease: 1e-3,
             // Existing parameters
@@ -415,8 +403,17 @@ impl LevenbergMarquardtConfig {
     }
 
     /// Set the trust region parameters.
-    pub fn with_trust_region(mut self, radius: f64, min_quality: f64, good_quality: f64) -> Self {
-        self.trust_region_radius = radius;
+    ///
+    /// `radius` is ignored: this Levenberg-Marquardt implementation controls step
+    /// size through `damping` (Nielsen's update rule), not through a trust-region
+    /// radius, and the radius was never read by the algorithm. See
+    /// `cov_issues/06-dead-code-issue-40.md`.
+    #[deprecated(
+        since = "1.5.0",
+        note = "the `radius` argument is ignored — Levenberg-Marquardt here is damping-controlled. \
+                Use `with_damping`/`with_damping_bounds` to control step size."
+    )]
+    pub fn with_trust_region(mut self, _radius: f64, min_quality: f64, good_quality: f64) -> Self {
         self.min_step_quality = min_quality;
         self.good_step_quality = good_quality;
         self
@@ -432,13 +429,18 @@ impl LevenbergMarquardtConfig {
         self
     }
 
-    /// Set minimum trust region radius before termination.
+    /// No-op, retained for backward compatibility.
     ///
-    /// When the trust region radius falls below this value, optimization
-    /// terminates with TrustRegionRadiusTooSmall status.
-    /// Default: 1e-32 (Ceres-compatible)
-    pub fn with_min_trust_region_radius(mut self, min_radius: f64) -> Self {
-        self.min_trust_region_radius = min_radius;
+    /// This value was never read by the algorithm. Unlike Ceres, where
+    /// `min_trust_region_radius` terminates the solve when the radius collapses,
+    /// this implementation is damping-controlled and has no radius to compare
+    /// against. See `cov_issues/06-dead-code-issue-40.md`.
+    #[deprecated(
+        since = "1.5.0",
+        note = "no-op: Levenberg-Marquardt here is damping-controlled and never read this value. \
+                Use `with_damping_bounds` to bound the damping instead."
+    )]
+    pub fn with_min_trust_region_radius(self, _min_radius: f64) -> Self {
         self
     }
 
@@ -545,7 +547,7 @@ impl LevenbergMarquardtConfig {
     ///   Print configuration parameters (verbose mode only)
     pub fn print_configuration(&self) {
         debug!(
-            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Trust Region:\n  Initial radius:      {:.2e}\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Step Quality:\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
             self.linear_solver_type,
             self.max_iterations,
             self.cost_tolerance,
@@ -557,7 +559,6 @@ impl LevenbergMarquardtConfig {
             self.damping_max,
             self.damping_increase_factor,
             self.damping_decrease_factor,
-            self.trust_region_radius,
             self.min_step_quality,
             self.good_step_quality,
             if self.use_jacobi_scaling {
@@ -739,6 +740,17 @@ impl LevenbergMarquardt {
         })?;
         let gradient_norm = gradient.norm_l2();
 
+        // Compute the predicted reduction BEFORE un-scaling the step.
+        //
+        // The identity `pred = ½·dxᵀ(λ·dx − g)` is derived by substituting the
+        // augmented normal equations `(H + λI)·dx = −g`, so it is only valid when
+        // the step and the gradient live in the *same* space. The solver's cached
+        // gradient is `g̃ = J̃ᵀ·r` — the scaled one — so the scaled step must be
+        // used here. The predicted reduction is a scalar value of the quadratic
+        // model and is invariant under the change of variables, so this is
+        // equally the predicted reduction for the un-scaled step below.
+        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, gradient);
+
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
             let scaling = self
@@ -749,9 +761,6 @@ impl LevenbergMarquardt {
         } else {
             scaled_step
         };
-
-        // Compute predicted reduction using scaled values
-        let predicted_reduction = self.compute_predicted_reduction(&step, gradient);
 
         Ok(StepResult {
             step,
@@ -775,8 +784,8 @@ impl LevenbergMarquardt {
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_cost = compute_cost(&new_residual);
+        let (_new_residual, new_cost) =
+            problem.compute_residual_and_cost_sparse(&state.variables)?;
 
         // Compute step quality
         let rho = crate::optimizer::compute_step_quality(
@@ -960,8 +969,8 @@ impl LevenbergMarquardt {
                 cost_tolerance: self.config.cost_tolerance,
                 min_cost_threshold: self.config.min_cost_threshold,
                 timeout: self.config.timeout,
-                trust_region_radius: Some(self.config.trust_region_radius),
-                min_trust_region_radius: Some(self.config.min_trust_region_radius),
+                trust_region_radius: None,
+                min_trust_region_radius: None,
             })
             .or_else(|| {
                 // `check_convergence` returns early on a rejected step, so a solver that
@@ -1004,11 +1013,7 @@ impl LevenbergMarquardt {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances_generic::<M>(
-                        linear_solver,
-                        &mut state.variables,
-                        &state.variable_index_map,
-                    )
+                    problem.compute_and_set_covariances(&mut state.variables)
                 } else {
                     None
                 };
@@ -1257,6 +1262,115 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Predicted reduction under Jacobi scaling (issue #43)
+    // -------------------------------------------------------------------------
+
+    /// Two-variable factor with deliberately mismatched column scales:
+    /// `r = [a·x1 - 1, x2 - 1]`, so the Jacobian columns have norms `a` and `1`.
+    struct IllScaledFactor {
+        a: f64,
+    }
+
+    impl Factor for IllScaledFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            let x1 = params[0][0];
+            let x2 = params[1][0];
+            residual[0] = self.a * x1 - 1.0;
+            residual[1] = x2 - 1.0;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = self.a;
+                *jac.rb_mut().get_mut(0, 1) = 0.0;
+                *jac.rb_mut().get_mut(1, 0) = 0.0;
+                *jac.rb_mut().get_mut(1, 1) = 1.0;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            2
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (2, 2)
+        }
+    }
+
+    /// The predicted reduction must equal the reduction of the quadratic model
+    /// `m(dx) = ½‖r + J·dx‖²` measured with the **un-scaled** `J` and the
+    /// **un-scaled** step that the optimizer actually applies.
+    ///
+    /// This is the invariant issue #43 reports as broken: with Jacobi scaling on,
+    /// the old code fed an un-scaled step to a formula that had already been
+    /// substituted with the scaled normal equations, mixing the two spaces.
+    ///
+    /// <https://github.com/amin-abouee/apex-solver/issues/43>
+    fn assert_predicted_reduction_matches_model(use_jacobi_scaling: bool) -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+
+        let config = LevenbergMarquardtConfig::new()
+            .with_damping(1e-1)
+            .with_jacobi_scaling(use_jacobi_scaling);
+        let mut solver = LevenbergMarquardt::with_config(config);
+
+        let state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let (residuals, jacobian) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+        )?;
+
+        let solver_jacobian = if use_jacobi_scaling {
+            crate::optimizer::process_jacobian_generic::<SparseMode>(
+                &jacobian,
+                &mut solver.jacobi_scaling,
+                0,
+            )?
+        } else {
+            jacobian.clone()
+        };
+
+        let mut linear_solver = SparseCholeskySolver::new();
+        let step_result = solver.compute_step_generic::<SparseMode>(
+            &residuals,
+            &solver_jacobian,
+            &mut linear_solver,
+        )?;
+
+        // Reduction of the quadratic model, computed independently from the
+        // un-scaled Jacobian and the step the optimizer will actually apply.
+        let predicted_residual = &residuals + &jacobian * &step_result.step;
+        let expected =
+            0.5 * residuals.squared_norm_l2() - 0.5 * predicted_residual.squared_norm_l2();
+
+        assert!(
+            (step_result.predicted_reduction - expected).abs() < 1e-9 * expected.abs().max(1.0),
+            "predicted_reduction {} disagrees with the quadratic model {} \
+             (use_jacobi_scaling = {})",
+            step_result.predicted_reduction,
+            expected,
+            use_jacobi_scaling,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_predicted_reduction_matches_model_without_scaling() -> TestResult {
+        assert_predicted_reduction_matches_model(false)
+    }
+
+    #[test]
+    fn test_lm_predicted_reduction_matches_model_with_scaling() -> TestResult {
+        assert_predicted_reduction_matches_model(true)
+    }
+
+    // -------------------------------------------------------------------------
     // Config builder tests
     // -------------------------------------------------------------------------
 
@@ -1280,9 +1394,7 @@ mod tests {
             .with_damping(1e-2)
             .with_damping_bounds(1e-15, 1e15)
             .with_damping_factors(8.0, 0.2)
-            .with_trust_region(500.0, 0.1, 0.8)
             .with_min_cost_threshold(1e-12)
-            .with_min_trust_region_radius(1e-35)
             .with_jacobi_scaling(true)
             .with_compute_covariances(true)
             .with_linear_solver_type(LinearSolverType::SparseQR);
@@ -1295,7 +1407,6 @@ mod tests {
         assert!((cfg.damping_max - 1e15).abs() < 1.0);
         assert!((cfg.damping_increase_factor - 8.0).abs() < 1e-12);
         assert!((cfg.damping_decrease_factor - 0.2).abs() < 1e-12);
-        assert!((cfg.trust_region_radius - 500.0).abs() < 1e-10);
         assert!(cfg.min_cost_threshold.is_some());
         assert!(cfg.use_jacobi_scaling);
         assert!(cfg.compute_covariances);
