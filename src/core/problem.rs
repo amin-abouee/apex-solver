@@ -20,7 +20,7 @@ use crate::{
         variable::{ManifoldVariable, Variable},
     },
     factors::Factor,
-    linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
+    linalg::JacobianMode,
 };
 use apex_manifolds::{LieGroup, ManifoldType, rn, se2, se3, se23, sgal3, sim3, so2, so3};
 
@@ -184,6 +184,13 @@ impl Problem {
         self.residual_blocks.len()
     }
 
+    /// Total number of scalar residuals across all residual blocks.
+    ///
+    /// This is the row count `m` of the assembled Jacobian.
+    pub fn total_residual_dimension(&self) -> usize {
+        self.total_residual_dimension
+    }
+
     pub(crate) fn residual_blocks(&self) -> &SlotMap<FactorKey, ResidualBlock> {
         &self.residual_blocks
     }
@@ -193,6 +200,23 @@ impl Problem {
         &self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> CoreResult<Mat<f64>> {
+        Ok(self.compute_residual_and_cost_sparse(variables)?.0)
+    }
+
+    /// Compute the residual vector together with the objective value.
+    ///
+    /// The cost is **not** `0.5·‖r‖²` of the returned vector. For blocks carrying a
+    /// robust loss the returned residual is Triggs-corrected — it exists to drive
+    /// the linear system — while the cost is the true robust cost `0.5·ρ(‖r‖²)`.
+    /// Squaring the corrected residual gives a different function, which is what
+    /// made every reported cost and every trust-region ratio wrong for robust
+    /// problems. See `cov_issues/05-robust-cost-mismatch.md`.
+    ///
+    /// For blocks with no loss function the two coincide at `0.5·‖r‖²`.
+    pub fn compute_residual_and_cost_sparse(
+        &self,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    ) -> CoreResult<(Mat<f64>, f64)> {
         use crate::linearizer::split_by_row_offsets_mut;
 
         let mut blocks: Vec<&crate::core::residual_block::ResidualBlock> =
@@ -206,15 +230,17 @@ impl Problem {
             .collect();
         let residual_slices = split_by_row_offsets_mut(&mut residual_buf, &offsets_lens);
 
-        let results: Vec<CoreResult<()>> = residual_slices
+        // Accumulate the per-block cost on the existing parallel pass rather than
+        // making a second traversal.
+        let results: Vec<CoreResult<f64>> = residual_slices
             .into_par_iter()
             .zip(blocks.par_iter())
             .map(|(slice, block)| self.compute_residual_block(block, variables, slice))
             .collect();
-        results.into_iter().collect::<CoreResult<Vec<_>>>()?;
+        let cost: f64 = results.into_iter().sum::<CoreResult<f64>>()?;
 
         let n = self.total_residual_dimension;
-        Ok(Mat::from_fn(n, 1, |i, _| residual_buf[i]))
+        Ok((Mat::from_fn(n, 1, |i, _| residual_buf[i]), cost))
     }
 
     /// Compute residuals and sparse Jacobian.
@@ -247,12 +273,17 @@ impl Problem {
         )?)
     }
 
+    /// Evaluate one residual block into `residual_slice`, returning its cost.
+    ///
+    /// With a loss function the slice receives the Triggs-corrected residual while
+    /// the returned cost is `0.5·ρ(s)`; without one, the slice receives the raw
+    /// residual and the cost is `0.5·‖r‖²`.
     fn compute_residual_block(
         &self,
         residual_block: &ResidualBlock,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         residual_slice: &mut [f64],
-    ) -> CoreResult<()> {
+    ) -> CoreResult<f64> {
         let mut param_slices: smallvec::SmallVec<[&[f64]; 8]> = smallvec::SmallVec::new();
         for &k in &residual_block.variable_keys {
             if let Some(v) = variables.get(k) {
@@ -264,13 +295,17 @@ impl Problem {
             .factor
             .linearize(&param_slices, residual_slice, None);
 
-        if let Some(loss_func) = &residual_block.loss_func {
-            let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
-            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-            corrector.correct_residual_in_place(residual_slice);
-        }
+        let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
+        let cost = match &residual_block.loss_func {
+            Some(loss_func) => {
+                let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
+                corrector.correct_residual_in_place(residual_slice);
+                corrector.robust_cost()
+            }
+            None => 0.5 * squared_norm,
+        };
 
-        Ok(())
+        Ok(cost)
     }
 
     pub fn log_residual_to_file(
@@ -324,32 +359,36 @@ impl Problem {
         Ok(())
     }
 
+    /// Compute per-variable covariances at `variables` and store them on the
+    /// variables themselves.
+    ///
+    /// This re-linearizes the problem at the given point and inverts a clean
+    /// `H = JᵀJ` — no Levenberg-Marquardt damping and no Jacobi scaling, both of
+    /// which are internal solver details and must not appear in the result. See
+    /// [`crate::linalg::covariance`].
+    ///
+    /// Returns `None` if covariance estimation fails (most commonly a
+    /// rank-deficient `H` from unfixed gauge freedom), after logging the reason.
+    /// Callers that need to handle the failure should use
+    /// [`Covariance::compute`](crate::linalg::covariance::Covariance::compute)
+    /// directly, which returns a typed error.
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn LinearSolver<SparseMode>>,
         variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-        variable_index_map: &SecondaryMap<VarKey, usize>,
     ) -> Option<SecondaryMap<VarKey, Mat<f64>>> {
-        linear_solver.compute_covariance_matrix()?;
-        let full_cov = linear_solver.get_covariance_matrix()?.clone();
-        let per_var = extract_variable_covariances(&full_cov, variables, variable_index_map);
-        for (key, cov) in &per_var {
-            if let Some(var) = variables.get_mut(key) {
-                var.set_covariance(cov.clone());
+        let covariance = match crate::linalg::covariance::Covariance::compute(
+            crate::linalg::covariance::CovarianceOptions::default(),
+            self,
+            variables,
+        ) {
+            Ok(covariance) => covariance,
+            Err(e) => {
+                tracing::error!("Covariance estimation failed: {e}");
+                return None;
             }
-        }
-        Some(per_var)
-    }
+        };
 
-    pub fn compute_and_set_covariances_generic<M: crate::linalg::LinearizationMode>(
-        &self,
-        linear_solver: &mut dyn crate::linalg::LinearSolver<M>,
-        variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-        variable_index_map: &SecondaryMap<VarKey, usize>,
-    ) -> Option<SecondaryMap<VarKey, Mat<f64>>> {
-        linear_solver.compute_covariance_matrix()?;
-        let full_cov = linear_solver.get_covariance_matrix()?.clone();
-        let per_var = extract_variable_covariances(&full_cov, variables, variable_index_map);
+        let per_var = covariance.per_variable();
         for (key, cov) in &per_var {
             if let Some(var) = variables.get_mut(key) {
                 var.set_covariance(cov.clone());
@@ -630,6 +669,107 @@ mod tests {
             .sum();
         assert!(norm_sq >= 0.0);
         assert_eq!(residual.nrows(), problem.total_residual_dimension);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Robust cost (cov_issues/05-robust-cost-mismatch.md)
+    // -------------------------------------------------------------------------
+
+    /// `r = x`, a single scalar residual — lets a test dial ‖r‖ exactly.
+    struct IdentityFactor;
+
+    impl crate::factors::Factor for IdentityFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0];
+            if let Some(mut jac) = jacobian {
+                use faer::prelude::ReborrowMut;
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+    }
+
+    /// The cost of a robust block must be `0.5·ρ(s)`, not `0.5·‖r̃‖²` computed
+    /// from the Triggs-corrected residual.
+    ///
+    /// Huber with δ = 1 at ‖r‖ = 2 (s = 4): ρ(s) = 2δ√s − δ² = 3, so the cost is
+    /// 1.5. The old code reported 1.0 — 33% low.
+    #[test]
+    fn robust_cost_is_half_rho_not_half_corrected_residual_squared() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![2.0]);
+        problem.add_residual_block(
+            &[x],
+            Box::new(IdentityFactor),
+            Some(Box::new(HuberLoss::new(1.0)?)),
+        );
+
+        let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+
+        assert!(
+            (cost - 1.5).abs() < 1e-12,
+            "robust cost should be 0.5·ρ(4) = 1.5, got {cost}"
+        );
+
+        // And confirm the old formula really does differ, so this test cannot
+        // silently start passing for the wrong reason.
+        let from_corrected_residual = 0.5 * residual.squared_norm_l2();
+        assert!(
+            (from_corrected_residual - 1.0).abs() < 1e-12,
+            "corrected-residual cost should be 1.0, got {from_corrected_residual}"
+        );
+        Ok(())
+    }
+
+    /// Without a loss function the two definitions coincide, so non-robust
+    /// problems must be completely unaffected by the change.
+    #[test]
+    fn cost_without_loss_is_half_squared_norm() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![3.0]);
+        problem.add_residual_block(&[x], Box::new(IdentityFactor), None);
+
+        let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+        assert!(
+            (cost - 4.5).abs() < 1e-12,
+            "expected 0.5·3² = 4.5, got {cost}"
+        );
+        assert!((cost - 0.5 * residual.squared_norm_l2()).abs() < 1e-15);
+        Ok(())
+    }
+
+    /// The cost must equal `0.5·ρ(s)` read straight off the loss function, for
+    /// every loss, not just Huber.
+    #[test]
+    fn robust_cost_matches_loss_function_rho() -> TestResult {
+        use crate::core::loss_functions::{CauchyLoss, LossFunction};
+
+        let value = 2.5;
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![value]);
+        problem.add_residual_block(
+            &[x],
+            Box::new(IdentityFactor),
+            Some(Box::new(CauchyLoss::new(1.0)?)),
+        );
+
+        let (_, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+        let expected = 0.5 * CauchyLoss::new(1.0)?.evaluate(value * value)[0];
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "expected 0.5·ρ(s) = {expected}, got {cost}"
+        );
         Ok(())
     }
 
