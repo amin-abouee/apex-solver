@@ -1,4 +1,6 @@
 pub mod dense;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod sparse;
 pub mod utils;
 
@@ -53,6 +55,12 @@ pub enum LinearSolverType {
     SparseSchurComplement,
     DenseCholesky,
     DenseQR,
+    /// Sparse Cholesky on an NVIDIA GPU via cuSOLVER. Requires the `cuda`
+    /// feature and a CUDA device at runtime.
+    GpuSparseCholesky,
+    /// Sparse QR on an NVIDIA GPU via cuSOLVER. Requires the `cuda` feature
+    /// and a CUDA device at runtime.
+    GpuSparseQR,
 }
 
 impl Display for LinearSolverType {
@@ -63,6 +71,8 @@ impl Display for LinearSolverType {
             LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
             LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
             LinearSolverType::DenseQR => write!(f, "Dense QR"),
+            LinearSolverType::GpuSparseCholesky => write!(f, "GPU Sparse Cholesky (cuSOLVER)"),
+            LinearSolverType::GpuSparseQR => write!(f, "GPU Sparse QR (cuSOLVER)"),
         }
     }
 }
