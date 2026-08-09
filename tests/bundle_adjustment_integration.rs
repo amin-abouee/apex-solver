@@ -29,8 +29,12 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
     }
 }
 
-#[test]
-fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
+/// Build the Trafalgar-21 self-calibration problem.
+///
+/// Extracted so the CPU test and the GPU test exercise byte-identical problem
+/// construction — any difference in their results is then attributable to the
+/// linear solver alone.
+fn build_trafalgar_21() -> Result<(Problem, usize), Box<dyn std::error::Error>> {
     // Ensure the dataset is present, downloading it if necessary.
     apex_solver::apex_io::ensure_ba_dataset("trafalgar", 21, 11315)?;
 
@@ -113,6 +117,13 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         problem.fix_variable(first_pose_key, dof);
     }
 
+    Ok((problem, num_observations))
+}
+
+#[test]
+fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>> {
+    let (mut problem, num_observations) = build_trafalgar_21()?;
+
     // Iterative Schur is required for SelfCalibration because intrinsics (RN, 3 DOF) and
     // landmarks (RN, 3 DOF) are indistinguishable for the Sparse Schur block classifier.
     let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(50);
@@ -158,5 +169,57 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         initial_rmse
     );
 
+    Ok(())
+}
+
+/// Bundle adjustment driven by the GPU sparse Cholesky solver.
+///
+/// Uses the same problem as the CPU test, so any difference in the optimum is
+/// attributable to the linear solver. `#[ignore]`d because it needs an NVIDIA
+/// GPU; run with:
+///
+/// ```bash
+/// cargo test --features cuda --test bundle_adjustment_integration -- --ignored --nocapture
+/// ```
+///
+/// Note this uses `SparseCholesky`/`GpuSparseCholesky` rather than the Schur
+/// preset: the GPU solver operates on the full 34,134-DOF normal equations
+/// directly, which is the whole point of having sparse cuSOLVER available.
+#[cfg(feature = "cuda")]
+#[test]
+#[ignore = "requires an NVIDIA GPU"]
+fn test_trafalgar_21_on_gpu_matches_cpu() -> Result<(), Box<dyn std::error::Error>> {
+    use apex_solver::linalg::LinearSolverType;
+
+    if !apex_solver::linalg::gpu::is_available() {
+        eprintln!("skipping: no CUDA device available");
+        return Ok(());
+    }
+
+    let run = |solver_type: LinearSolverType| -> Result<f64, Box<dyn std::error::Error>> {
+        let (mut problem, _) = build_trafalgar_21()?;
+        let config = LevenbergMarquardtConfig::new()
+            .with_linear_solver_type(solver_type)
+            .with_max_iterations(20)
+            .with_cost_tolerance(1e-8);
+        let started = std::time::Instant::now();
+        let result = LevenbergMarquardt::with_config(config).optimize(&mut problem)?;
+        eprintln!(
+            "{solver_type}: final_cost={:.6e} iterations={} elapsed={:.2?}",
+            result.final_cost,
+            result.iterations,
+            started.elapsed()
+        );
+        Ok(result.final_cost)
+    };
+
+    let cpu = run(LinearSolverType::SparseCholesky)?;
+    let gpu = run(LinearSolverType::GpuSparseCholesky)?;
+
+    let scale = cpu.abs().max(gpu.abs()).max(1.0);
+    assert!(
+        (cpu - gpu).abs() <= 1e-6 * scale,
+        "GPU final cost {gpu:.9e} should match CPU {cpu:.9e}"
+    );
     Ok(())
 }
