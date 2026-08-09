@@ -685,10 +685,59 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
     }
 }
 
+/// Construct the GPU sparse Cholesky solver, or explain why it is unavailable.
+///
+/// Deliberately errors instead of falling back to the CPU: a silent fallback
+/// would make a GPU benchmark quietly measure the CPU path.
+pub(crate) fn gpu_sparse_cholesky() -> OptimizerResult<Box<dyn LinearSolver<SparseMode>>> {
+    #[cfg(feature = "cuda")]
+    {
+        let solver = crate::linalg::gpu::GpuSparseCholeskySolver::new()
+            .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
+        Ok(Box::new(solver))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Err(OptimizerError::UnknownLinearSolver(
+            "GpuSparseCholesky requires the `cuda` feature; rebuild with \
+             `--features cuda`, or select a CPU solver such as SparseCholesky"
+                .to_string(),
+        )
+        .log())
+    }
+}
+
+/// Construct the GPU sparse QR solver, or explain why it is unavailable.
+pub(crate) fn gpu_sparse_qr() -> OptimizerResult<Box<dyn LinearSolver<SparseMode>>> {
+    #[cfg(feature = "cuda")]
+    {
+        let solver = crate::linalg::gpu::GpuSparseQRSolver::new()
+            .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
+        Ok(Box::new(solver))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Err(OptimizerError::UnknownLinearSolver(
+            "GpuSparseQR requires the `cuda` feature; rebuild with \
+             `--features cuda`, or select a CPU solver such as SparseQR"
+                .to_string(),
+        )
+        .log())
+    }
+}
+
 /// Create the appropriate linear solver based on configuration.
 ///
-/// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
-/// solver creation logic due to special Schur complement adapter requirements.
+/// # Cannot construct GPU solvers
+///
+/// This returns a bare `Box`, so it has no way to report a failure — and GPU
+/// solver construction genuinely can fail (no CUDA device, feature disabled).
+/// `GpuSparseCholesky`/`GpuSparseQR` therefore fall through to the CPU Cholesky
+/// arm here and **must not** be routed through this function.
+///
+/// All three optimizers dispatch GPU variants explicitly via
+/// [`gpu_sparse_cholesky`]/[`gpu_sparse_qr`], which return a `Result`, so no
+/// production path reaches this fallback with a GPU variant.
 pub fn create_linear_solver(
     solver_type: &linalg::LinearSolverType,
 ) -> Box<dyn LinearSolver<SparseMode>> {
@@ -697,7 +746,8 @@ pub fn create_linear_solver(
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
         _ => {
             // SparseSchurComplement requires special handling; DenseCholesky/DenseQR are
-            // dispatched via the dense path in each optimizer — all fall back to Cholesky here.
+            // dispatched via the dense path in each optimizer; GPU variants are handled by
+            // `gpu_sparse_cholesky`/`gpu_sparse_qr` — all fall back to Cholesky here.
             Box::new(SparseCholeskySolver::new())
         }
     }

@@ -122,6 +122,7 @@ use crate::linalg::{
     SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
+use crate::optimizer::{gpu_sparse_cholesky, gpu_sparse_qr};
 
 /// Configuration parameters for the Gauss-Newton optimizer.
 ///
@@ -750,6 +751,14 @@ impl GaussNewton {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                }
+                linalg::LinearSolverType::GpuSparseCholesky => {
+                    let mut solver = gpu_sparse_cholesky()?;
+                    self.optimize_with_mode::<SparseMode>(problem, solver.as_mut())
+                }
+                linalg::LinearSolverType::GpuSparseQR => {
+                    let mut solver = gpu_sparse_qr()?;
+                    self.optimize_with_mode::<SparseMode>(problem, solver.as_mut())
                 }
                 _ => {
                     // SparseCholesky (default), SparseSchurComplement or DenseCholesky with

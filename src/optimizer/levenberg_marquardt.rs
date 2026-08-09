@@ -154,6 +154,7 @@ use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
     OptimizerError, apply_negative_parameter_step, apply_parameter_step, compute_cost,
 };
+use crate::optimizer::{gpu_sparse_cholesky, gpu_sparse_qr};
 use faer::Mat;
 use std::time::{Duration, Instant};
 use tracing::debug;
@@ -1074,6 +1075,14 @@ impl LevenbergMarquardt {
                             .log()
                         })?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                }
+                LinearSolverType::GpuSparseCholesky => {
+                    let mut solver = gpu_sparse_cholesky()?;
+                    self.optimize_with_mode::<SparseMode>(problem, solver.as_mut())
+                }
+                LinearSolverType::GpuSparseQR => {
+                    let mut solver = gpu_sparse_qr()?;
+                    self.optimize_with_mode::<SparseMode>(problem, solver.as_mut())
                 }
                 _ => {
                     let mut solver = SparseCholeskySolver::new();
