@@ -37,6 +37,18 @@ chrono = "0.4"
 colored = "2.2"
 num_cpus = "1.17"
 rerun = { version = "0.26.2", features = ["sdk"] }
+# CUDA bindings for the optional GPU linear solvers (`cuda` feature).
+# `fallback-dynamic-loading` resolves the CUDA libraries at runtime instead of
+# linking at build time, so this compiles on machines with no CUDA toolkit.
+cudarc = { version = "0.19", default-features = false, features = [
+    "std",
+    "driver",
+    "cublas",
+    "cublaslt",
+    "cusparse",
+    "cusolver",
+    "fallback-dynamic-loading",
+] }
 ureq = "2.12"
 bzip2 = "0.5"
 toml = "0.8"
@@ -92,9 +104,11 @@ exclude = [
     "doc/*.pdf",
 ]
 
-# Build docs.rs with every feature so the `visualization` API is documented.
+# Build docs.rs with `visualization` so that API is documented. Deliberately not
+# `all-features`: the `cuda` feature pulls in cudarc, and docs.rs builders have
+# no CUDA installation.
 [package.metadata.docs.rs]
-all-features = true
+features = ["visualization"]
 
 [[bin]]
 name = "pose_graph_g2o"
@@ -118,6 +132,17 @@ required-features = ["visualization"]
 [features]
 default = []
 visualization = ["dep:rerun", "apex-io/visualization"]
+# GPU linear solvers backed by NVIDIA cuSOLVER. Requires an NVIDIA GPU and
+# driver at *runtime*; builds anywhere thanks to cudarc's dynamic loading.
+#
+# The pinned `cuda-12060` selects which cuSOLVER API declarations are compiled —
+# not which driver is used, since symbols are resolved at runtime. The routines
+# used here (cusolverSpDcsrlsvchol/qr) have existed since CUDA 7, so this baseline
+# is safe across toolkits. Override without editing this file by exporting
+# `CUDARC_CUDA_VERSION=12.4` (cudarc's build.rs gives the env var priority), or
+# use the `cuda-detect` feature to match the locally installed toolkit.
+cuda = ["dep:cudarc", "cudarc/cuda-12060"]
+cuda-detect = ["dep:cudarc", "cudarc/cuda-version-from-build-system"]
 
 [dependencies]
 apex-manifolds.workspace = true
@@ -144,6 +169,10 @@ bzip2.workspace = true
 smallvec.workspace = true
 
 [dependencies.rerun]
+workspace = true
+optional = true
+
+[dependencies.cudarc]
 workspace = true
 optional = true
 
