@@ -245,10 +245,35 @@ fn main() {
         ("Sparse QR", LinearSolverType::SparseQR, false),
         ("Dense Cholesky", LinearSolverType::DenseCholesky, true),
         ("Dense QR", LinearSolverType::DenseQR, true),
+        // GPU solvers are only listed when built with `--features cuda` AND a
+        // CUDA device is actually present, so this example stays runnable
+        // everywhere. Selecting them without a device is an error, never a
+        // silent CPU fallback.
+        #[cfg(feature = "cuda")]
+        (
+            "GPU Sparse Cholesky",
+            LinearSolverType::GpuSparseCholesky,
+            false,
+        ),
+        #[cfg(feature = "cuda")]
+        ("GPU Sparse QR", LinearSolverType::GpuSparseQR, false),
     ];
 
     let mut results = Vec::new();
     for &(name, solver_type, use_dense) in SOLVERS {
+        // A GPU solver with no device is a hard error by design (so benchmarks
+        // can't silently measure the CPU). Skip it here rather than aborting the
+        // whole comparison.
+        #[cfg(feature = "cuda")]
+        if matches!(
+            solver_type,
+            LinearSolverType::GpuSparseCholesky | LinearSolverType::GpuSparseQR
+        ) && !apex_solver::linalg::gpu::is_available()
+        {
+            info!("Skipping {} - no CUDA device available", name);
+            continue;
+        }
+
         info!("Running {}...", name);
         let mode = if use_dense {
             JacobianMode::Dense
