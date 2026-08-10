@@ -9,6 +9,9 @@ use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
+use apex_solver::linalg::{
+    LinearSolver, SparseCholeskySolver, SparseMode, SparseQRSolver, TimedSolver,
+};
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{LevenbergMarquardt, OptimizationStatus};
 use apex_solver::{JacobianMode, LinearSolverType};
@@ -28,6 +31,28 @@ struct Args {
     /// Cost convergence tolerance
     #[arg(long, default_value = "1e-6")]
     cost_tolerance: f64,
+
+    /// Comma-separated subset of solvers to run, e.g.
+    /// `sparse-cholesky,gpu-sparse-cholesky`. Defaults to every solver that is
+    /// sensible for the problem size.
+    #[arg(long, value_delimiter = ',')]
+    solvers: Option<Vec<String>>,
+
+    /// Run the dense solvers even on large problems. They allocate an
+    /// n x n Hessian, which is ~7 GB at 30k DOF (city10000), so they are skipped
+    /// automatically above `--dense-limit` DOF.
+    #[arg(long)]
+    force_dense: bool,
+
+    /// DOF above which the dense solvers are skipped unless `--force-dense`.
+    #[arg(long, default_value = "2000")]
+    dense_limit: usize,
+
+    /// Print the CUDA per-phase breakdown (permutation, symbolic analysis,
+    /// upload, factorization, triangular solve, download) and device memory
+    /// totals after each GPU run. Requires `--features cuda`.
+    #[arg(long)]
+    gpu_profile: bool,
 }
 
 struct RunResult {
@@ -37,7 +62,35 @@ struct RunResult {
     improvement_pct: f64,
     iterations: usize,
     time_ms: u128,
+    /// Time inside the linear solver only — the part a GPU backend can change.
+    solve_ms: u128,
+    /// Number of factorize-and-solve calls (> iterations when LM rejects steps).
+    solves: usize,
     status: &'static str,
+}
+
+/// What a timed run produced, independent of which backend ran it.
+struct TimedRun {
+    outcome: apex_solver::optimizer::OptimizeResult,
+    solve_ms: u128,
+    solves: usize,
+}
+
+/// Run the optimization with `inner` wrapped in a [`TimedSolver`], then hand the
+/// solver back so backend-specific results (a CUDA profile) can be read off it.
+fn run_timed<S: LinearSolver<SparseMode>>(
+    solver: &mut LevenbergMarquardt,
+    problem: &mut Problem,
+    inner: S,
+) -> (TimedRun, S) {
+    let mut timed = TimedSolver::new(inner);
+    let outcome = solver.optimize_with_mode::<SparseMode>(problem, &mut timed);
+    let run = TimedRun {
+        outcome,
+        solve_ms: timed.solve_time().as_millis(),
+        solves: timed.solve_count(),
+    };
+    (run, timed.into_inner())
 }
 
 fn run_solver(
@@ -54,7 +107,57 @@ fn run_solver(
     let mut solver = LevenbergMarquardt::with_config(config);
 
     let start = Instant::now();
-    let result = match solver.optimize(problem) {
+    // Sparse solvers go through `optimize_with_mode` so the linear solve can be
+    // timed in isolation; the dense ones use the standard entry point. The CUDA
+    // arms keep their concrete type so `--gpu-profile` can read the per-phase
+    // breakdown off the solver afterwards.
+    let run = match solver_type {
+        LinearSolverType::SparseCholesky => {
+            run_timed(&mut solver, problem, SparseCholeskySolver::new()).0
+        }
+        LinearSolverType::SparseQR => run_timed(&mut solver, problem, SparseQRSolver::new()).0,
+        #[cfg(feature = "cuda")]
+        LinearSolverType::GpuSparseCholesky => {
+            let cuda = match apex_solver::linalg::CudaSparseCholeskySolver::new() {
+                Ok(cuda) => cuda,
+                Err(e) => {
+                    warn!("GPU Cholesky unavailable: {e}");
+                    return None;
+                }
+            };
+            let (run, cuda) = run_timed(&mut solver, problem, cuda);
+            if args.gpu_profile {
+                info!("{} phase breakdown:\n{}", solver_name, cuda.profile());
+            }
+            run
+        }
+        #[cfg(feature = "cuda")]
+        LinearSolverType::GpuSparseQR => {
+            let cuda = match apex_solver::linalg::CudaSparseQRSolver::new() {
+                Ok(cuda) => cuda,
+                Err(e) => {
+                    warn!("GPU QR unavailable: {e}");
+                    return None;
+                }
+            };
+            let (run, cuda) = run_timed(&mut solver, problem, cuda);
+            if args.gpu_profile {
+                info!("{} phase breakdown:\n{}", solver_name, cuda.profile());
+            }
+            run
+        }
+        _ => TimedRun {
+            outcome: solver.optimize(problem),
+            solve_ms: 0,
+            solves: 0,
+        },
+    };
+    let TimedRun {
+        outcome,
+        solve_ms,
+        solves,
+    } = run;
+    let result = match outcome {
         Ok(r) => r,
         Err(e) => {
             warn!("{} failed: {}", solver_name, e);
@@ -81,31 +184,62 @@ fn run_solver(
         improvement_pct,
         iterations: result.iterations,
         time_ms,
+        solve_ms,
+        solves,
         status,
     })
 }
 
 fn print_table(results: &[RunResult]) {
-    let w = 110;
+    let w = 132;
     info!("{}", "-".repeat(w));
     info!(
-        "{:<18} | {:>12} | {:>12} | {:>11} | {:>5} | {:>8} | {:<12}",
-        "Solver", "Init chi2", "Final chi2", "Improvement", "Iters", "Time(ms)", "Status"
+        "{:<18} | {:>12} | {:>12} | {:>11} | {:>5} | {:>8} | {:>9} | {:>6} | {:<12}",
+        "Solver",
+        "Init chi2",
+        "Final chi2",
+        "Improvement",
+        "Iters",
+        "Time(ms)",
+        "Solve(ms)",
+        "Solves",
+        "Status"
     );
     info!("{}", "-".repeat(w));
     for r in results {
+        // Dense runs are not instrumented, so report "-" rather than a zero that
+        // would read as "the solve was free".
+        let (solve, solves) = if r.solves == 0 {
+            ("-".to_string(), "-".to_string())
+        } else {
+            (r.solve_ms.to_string(), r.solves.to_string())
+        };
         info!(
-            "{:<18} | {:>12.4e} | {:>12.4e} | {:>10.2}% | {:>5} | {:>8} | {:<12}",
+            "{:<18} | {:>12.4e} | {:>12.4e} | {:>10.2}% | {:>5} | {:>8} | {:>9} | {:>6} | {:<12}",
             r.solver_name,
             r.init_chi2,
             r.final_chi2,
             r.improvement_pct,
             r.iterations,
             r.time_ms,
+            solve,
+            solves,
             r.status
         );
     }
     info!("{}", "-".repeat(w));
+
+    // The headline comparison, when both are present.
+    let cpu = results.iter().find(|r| r.solver_name == "Sparse Cholesky");
+    let gpu = results.iter().find(|r| r.solver_name == "GPU Sparse Cholesky");
+    if let (Some(cpu), Some(gpu)) = (cpu, gpu) {
+        let ratio = |c: u128, g: u128| if g == 0 { f64::NAN } else { c as f64 / g as f64 };
+        info!(
+            "Sparse Cholesky CPU vs GPU: solve {:.2}x, end-to-end {:.2}x (>1 means GPU is faster)",
+            ratio(cpu.solve_ms, gpu.solve_ms),
+            ratio(cpu.time_ms, gpu.time_ms),
+        );
+    }
 }
 
 fn build_se3_problem(
@@ -233,10 +367,16 @@ fn main() {
     );
     info!("");
 
-    if vertices > 500 {
+    // DOF, not vertices: this is what sizes the dense Hessian.
+    let total_dof = if is_se3 { vertices * 6 } else { vertices * 3 };
+    let skip_dense = total_dof > args.dense_limit && !args.force_dense;
+    if skip_dense {
         warn!(
-            "Large problem ({} vertices) - dense solvers may be slow",
-            vertices
+            "Skipping dense solvers: {} DOF exceeds --dense-limit {} \
+             (a dense Hessian would be ~{:.1} GB). Pass --force-dense to run them anyway.",
+            total_dof,
+            args.dense_limit,
+            (total_dof * total_dof * 8) as f64 / 1e9,
         );
     }
 
@@ -259,8 +399,24 @@ fn main() {
         ("GPU Sparse QR", LinearSolverType::GpuSparseQR, false),
     ];
 
+    // `--solvers` matches on a kebab-case form of the display name, so
+    // `gpu-sparse-cholesky` selects "GPU Sparse Cholesky".
+    let selected = args
+        .solvers
+        .as_ref()
+        .map(|names| names.iter().map(|n| n.to_lowercase()).collect::<Vec<_>>());
+
     let mut results = Vec::new();
     for &(name, solver_type, use_dense) in SOLVERS {
+        if let Some(selected) = &selected {
+            let slug = name.to_lowercase().replace(' ', "-");
+            if !selected.contains(&slug) {
+                continue;
+            }
+        } else if use_dense && skip_dense {
+            continue;
+        }
+
         // A GPU solver with no device is a hard error by design (so benchmarks
         // can't silently measure the CPU). Skip it here rather than aborting the
         // whole comparison.
@@ -268,7 +424,7 @@ fn main() {
         if matches!(
             solver_type,
             LinearSolverType::GpuSparseCholesky | LinearSolverType::GpuSparseQR
-        ) && !apex_solver::linalg::gpu::is_available()
+        ) && !apex_solver::cuda::is_available()
         {
             info!("Skipping {} - no CUDA device available", name);
             continue;
