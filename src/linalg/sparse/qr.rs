@@ -1,3 +1,13 @@
+//! Sparse QR, on the CPU via faer and on an NVIDIA GPU via cuSOLVER.
+//!
+//! Both factorize the **normal-equation matrix** `H = JᵀJ`, not `J` itself — so
+//! they have the same conditioning as the Cholesky path and are drop-in
+//! alternatives rather than numerically superior QR-on-`J`. They are useful
+//! because QR does not require positive definiteness, so it tolerates matrices
+//! where Cholesky fails.
+//!
+//! The CUDA solver contains no `unsafe`; see [`crate::cuda`].
+
 use faer::{
     Mat,
     linalg::solvers::Solve,
@@ -252,6 +262,215 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
             // Solve H * X = I to get X = H^(-1) = covariance matrix
             let cov_matrix = factorizer.solve(&identity);
             self.covariance_matrix = Some(cov_matrix);
+        }
+        self.covariance_matrix.as_ref()
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
+    }
+}
+
+// ============================================================================
+// CUDA sparse QR (cuSOLVER)
+// ============================================================================
+
+/// Sparse QR running on an NVIDIA GPU via `cusolverSpDcsrlsvqr`.
+///
+/// Solves `H · dx = −g` with `H = JᵀJ` (optionally `+ λI`).
+///
+/// # Why there is no reusable path here
+///
+/// [`CudaSparseCholeskySolver`] gets a large win from cuSOLVER's low-level
+/// analyze-once API. This solver deliberately stays on the one-shot
+/// `csrlsvqr`: it exists as the not-positive-definite fallback and as the only
+/// GPU path that reliably reports singularity, not as the performance path. If
+/// QR ever becomes performance-critical, the equivalent `csrqr` low-level family
+/// exists in the same header [`crate::cuda::ffi`] already binds from.
+///
+/// [`CudaSparseCholeskySolver`]: crate::linalg::sparse::CudaSparseCholeskySolver
+#[cfg(feature = "cuda")]
+pub struct CudaSparseQRSolver {
+    context: crate::cuda::CudaContext,
+    reordering: crate::cuda::Reordering,
+
+    csr: crate::cuda::buffers::CsrStructure,
+    system: Option<crate::cuda::buffers::DeviceSystem>,
+
+    stopwatch: crate::cuda::profile::DeviceStopwatch,
+    profile: crate::cuda::CudaProfile,
+
+    /// Undamped `H = JᵀJ` from the last solve.
+    hessian: Option<SparseColMat<usize, f64>>,
+    /// Positive `g = Jᵀr` from the last solve.
+    gradient: Option<Mat<f64>>,
+    /// Cached `H⁻¹`, invalidated on every solve.
+    covariance_matrix: Option<Mat<f64>>,
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for CudaSparseQRSolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaSparseQRSolver")
+            .field("reordering", &self.reordering)
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CudaSparseQRSolver {
+    /// Create a solver on CUDA device 0.
+    pub fn new() -> LinAlgResult<Self> {
+        Self::with_device(0)
+    }
+
+    /// Create a solver on a specific CUDA device.
+    pub fn with_device(ordinal: usize) -> LinAlgResult<Self> {
+        let context = crate::cuda::CudaContext::new(ordinal)?;
+        let stopwatch = crate::cuda::profile::DeviceStopwatch::new(context.stream())?;
+        Ok(Self {
+            context,
+            reordering: crate::cuda::Reordering::default(),
+            csr: crate::cuda::buffers::CsrStructure::default(),
+            system: None,
+            stopwatch,
+            profile: crate::cuda::CudaProfile::default(),
+            hessian: None,
+            gradient: None,
+            covariance_matrix: None,
+        })
+    }
+
+    /// Choose the fill-reducing reordering passed to `csrlsvqr`.
+    pub fn with_reordering(mut self, reordering: crate::cuda::Reordering) -> Self {
+        self.reordering = reordering;
+        self
+    }
+
+    /// Per-phase timings and device memory totals accumulated so far.
+    pub fn profile(&self) -> &crate::cuda::CudaProfile {
+        &self.profile
+    }
+
+    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    pub fn gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    fn solve_on_device(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        gradient: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        use crate::cuda::profile::DevicePhase;
+
+        // Invalidate any cached covariance: it belongs to the previous solve.
+        self.covariance_matrix = None;
+
+        if gradient.nrows() != hessian.ncols() {
+            return Err(LinAlgError::InvalidState(format!(
+                "gradient length ({}) does not match the Hessian dimension ({})",
+                gradient.nrows(),
+                hessian.ncols(),
+            ))
+            .log());
+        }
+
+        let rebuilt = self.csr.sync(hessian, &mut self.profile)?;
+        let stream = self.context.stream().clone();
+
+        if rebuilt
+            || !self
+                .system
+                .as_ref()
+                .is_some_and(|system| system.matches(&self.csr))
+        {
+            self.system = Some(crate::cuda::buffers::DeviceSystem::new(&stream, &self.csr)?);
+        }
+        let (n, nnz) = (self.csr.n_i32()?, self.csr.nnz_i32()?);
+        let system = self.system.as_mut().ok_or_else(|| {
+            LinAlgError::InvalidState("device buffers missing before solve".to_string()).log()
+        })?;
+
+        self.stopwatch.begin(DevicePhase::Upload, &stream);
+        system.upload_values(&stream, hessian.val())?;
+        system.upload_rhs(&stream, |rhs| {
+            for (i, slot) in rhs.iter_mut().enumerate() {
+                *slot = -gradient[(i, 0)];
+            }
+        })?;
+        self.stopwatch.end(DevicePhase::Upload, &stream);
+
+        // Analysis, factorization and solve are fused in this API, so they are
+        // reported together under `factorize`.
+        self.stopwatch.begin(DevicePhase::Factorize, &stream);
+        self.context.csrlsvqr(system, n, nnz, self.reordering)?;
+        self.stopwatch.end(DevicePhase::Factorize, &stream);
+
+        self.stopwatch.begin(DevicePhase::Download, &stream);
+        system.download_solution(&stream)?;
+        self.stopwatch.end(DevicePhase::Download, &stream);
+
+        self.context.synchronize()?;
+        self.profile.memory = system.memory();
+        self.stopwatch.drain(&mut self.profile);
+
+        let solution = system.solution();
+        Ok(Mat::from_fn(solution.len(), 1, |i, _| solution[i]))
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl LinearSolver<SparseMode> for CudaSparseQRSolver {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        let hessian = crate::linalg::sparse::normal_matrix(jacobians)?;
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
+
+        let dx = self.solve_on_device(&hessian, &gradient)?;
+
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        Ok(dx)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>> {
+        let hessian = crate::linalg::sparse::normal_matrix(jacobians)?;
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
+
+        let augmented = crate::linalg::sparse::add_damping(&hessian, lambda)?;
+        let dx = self.solve_on_device(&augmented, &gradient)?;
+
+        // Cache the UNDAMPED Hessian, matching every other solver.
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        Ok(dx)
+    }
+
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    /// Covariance as `H⁻¹` from the **undamped** Hessian.
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        if self.covariance_matrix.is_none() {
+            let hessian = self.hessian.as_ref()?;
+            self.covariance_matrix = crate::linalg::sparse::invert_undamped_hessian(hessian);
         }
         self.covariance_matrix.as_ref()
     }

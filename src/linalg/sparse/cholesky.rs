@@ -1,3 +1,13 @@
+//! Sparse Cholesky, on the CPU via faer and on an NVIDIA GPU via cuSOLVER.
+//!
+//! Both solvers implement `LinearSolver<SparseMode>` and are interchangeable
+//! from the optimizer's point of view: `get_hessian` returns the **undamped**
+//! `JᵀJ` and `get_gradient` the **positive** `Jᵀr`, even from an augmented solve.
+//!
+//! The CUDA solver contains no `unsafe`. Every device operation goes through the
+//! checked wrappers in [`crate::cuda::context`], which is the only module in the
+//! crate that touches FFI.
+
 use faer::{
     Mat, Side,
     linalg::solvers::Solve,
@@ -251,6 +261,503 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
             // Solve H * X = I to get X = H^(-1) = covariance matrix
             let cov_matrix = factorizer.solve(&identity);
             self.covariance_matrix = Some(cov_matrix);
+        }
+        self.covariance_matrix.as_ref()
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        self.covariance_matrix.as_ref()
+    }
+}
+
+// ============================================================================
+// CUDA sparse Cholesky (cuSOLVER)
+// ============================================================================
+
+/// Which cuSOLVER sparse Cholesky path [`CudaSparseCholeskySolver`] uses.
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CholeskyAlgorithm {
+    /// `cusolverSpXcsrcholAnalysis` + `Dcsrcholfactor`/`Dcsrcholsolve`:
+    /// permutation and symbolic analysis once per sparsity pattern, numeric
+    /// factorization and triangular solves per iteration.
+    ///
+    /// The default, and the only one that competes with [`SparseCholeskySolver`],
+    /// which caches its symbolic factorization the same way.
+    #[default]
+    Reusable,
+    /// `cusolverSpDcsrlsvchol`: one call does reordering, symbolic analysis,
+    /// factorization and solve.
+    ///
+    /// Simpler and fully cudarc-declared, but redoes the analysis every
+    /// iteration. Kept for A/B measurement and as a fallback if the low-level
+    /// symbols cannot be resolved.
+    OneShot,
+}
+
+/// Symbolic analysis and device state for one sparsity pattern.
+///
+/// Rebuilt only when the pattern changes; in a normal optimization that means
+/// once, and every iteration after the first pays only factor + solve.
+#[cfg(feature = "cuda")]
+struct CudaAnalysis {
+    info: crate::cuda::context::CholeskyInfo,
+    system: crate::cuda::buffers::DeviceSystem,
+    /// `permuted_values[i] = original_values[value_map[i]]`.
+    value_map: Vec<usize>,
+    /// `permutation[new_index] = old_index`.
+    permutation: Vec<usize>,
+    n: std::ffi::c_int,
+    nnz: std::ffi::c_int,
+}
+
+/// Sparse Cholesky running on an NVIDIA GPU via cuSOLVER.
+///
+/// Solves `H · dx = −g` with `H = JᵀJ` (optionally `+ λI`). `H` must be
+/// symmetric positive definite.
+///
+/// Mirrors [`SparseCholeskySolver`]'s caching contract exactly, so the
+/// optimizers cannot tell the two apart.
+///
+/// # Fill-reducing ordering is ours to choose
+///
+/// Unlike the one-shot `csrlsvchol`, the reusable cuSOLVER API applies **no**
+/// ordering — it factorizes the matrix exactly as given, which on a pose graph
+/// with loop closures is ruinous. The permutation is therefore computed once on
+/// the host ([`Reordering`], nested dissection by default) and re-applied to new
+/// values each iteration through a cached value map, with no further symbolic
+/// work.
+///
+/// # Singularity detection is weak on this path
+///
+/// [`CholeskyAlgorithm::OneShot`] cannot detect it at all: the device
+/// `csrlsvchol` leaves cuSOLVER's `singularity` out-parameter at `-1` even for a
+/// rank-deficient matrix — only the `...Host` variant and `csrlsvqr` run the
+/// zero-pivot check (verified on CUDA 13.0, driver 580).
+///
+/// [`CholeskyAlgorithm::Reusable`] has a zero-pivot check but uses it only as a
+/// diagnostic, raising [`LinAlgError::SingularMatrix`] when the resulting step is
+/// non-finite. That matches [`SparseCholeskySolver`], which has no pivot check
+/// either; treating cuSOLVER's absolute-tolerance report as fatal rejected large
+/// problems the CPU path solves fine.
+///
+/// Use [`CudaSparseQRSolver`] when detection matters, and anchor pose graphs with
+/// a `PriorFactor` so the question does not arise.
+///
+/// [`Reordering`]: crate::cuda::Reordering
+/// [`CudaSparseQRSolver`]: crate::linalg::sparse::CudaSparseQRSolver
+#[cfg(feature = "cuda")]
+pub struct CudaSparseCholeskySolver {
+    context: crate::cuda::CudaContext,
+    algorithm: CholeskyAlgorithm,
+    reordering: crate::cuda::Reordering,
+
+    /// Host-side CSR pattern; permuted in place by the reusable path.
+    csr: crate::cuda::buffers::CsrStructure,
+    /// Analyze-once state, used by [`CholeskyAlgorithm::Reusable`].
+    analysis: Option<CudaAnalysis>,
+    /// The ordering the current analysis was built with, so changing
+    /// `reordering` between solves forces a re-analysis.
+    analyzed_with: Option<crate::cuda::Reordering>,
+    /// Device staging for [`CholeskyAlgorithm::OneShot`].
+    one_shot: Option<crate::cuda::buffers::DeviceSystem>,
+
+    /// Staging reused across iterations, so a solve allocates nothing.
+    permuted_values: Vec<f64>,
+    permuted_solution: Vec<f64>,
+
+    stopwatch: crate::cuda::profile::DeviceStopwatch,
+    profile: crate::cuda::CudaProfile,
+
+    /// Undamped `H = JᵀJ` from the last solve.
+    hessian: Option<SparseColMat<usize, f64>>,
+    /// Positive `g = Jᵀr` from the last solve.
+    gradient: Option<Mat<f64>>,
+    /// Cached `H⁻¹`. Invalidated on every solve so a reused solver can never
+    /// return a covariance belonging to a previous problem.
+    covariance_matrix: Option<Mat<f64>>,
+}
+
+#[cfg(feature = "cuda")]
+impl std::fmt::Debug for CudaSparseCholeskySolver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaSparseCholeskySolver")
+            .field("algorithm", &self.algorithm)
+            .field("reordering", &self.reordering)
+            .field("analyzed", &self.analysis.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl CudaSparseCholeskySolver {
+    /// Create a solver on CUDA device 0.
+    pub fn new() -> LinAlgResult<Self> {
+        Self::with_device(0)
+    }
+
+    /// Create a solver on a specific CUDA device.
+    pub fn with_device(ordinal: usize) -> LinAlgResult<Self> {
+        let context = crate::cuda::CudaContext::new(ordinal)?;
+        let stopwatch = crate::cuda::profile::DeviceStopwatch::new(context.stream())?;
+        Ok(Self {
+            context,
+            algorithm: CholeskyAlgorithm::default(),
+            reordering: crate::cuda::Reordering::default(),
+            csr: crate::cuda::buffers::CsrStructure::default(),
+            analysis: None,
+            analyzed_with: None,
+            one_shot: None,
+            permuted_values: Vec::new(),
+            permuted_solution: Vec::new(),
+            stopwatch,
+            profile: crate::cuda::CudaProfile::default(),
+            hessian: None,
+            gradient: None,
+            covariance_matrix: None,
+        })
+    }
+
+    /// Choose the fill-reducing reordering.
+    ///
+    /// Applies to both algorithms, by different means: the one-shot path passes
+    /// it to `csrlsvchol`, while the reusable path computes the permutation
+    /// itself and re-runs its analysis when this changes.
+    pub fn with_reordering(mut self, reordering: crate::cuda::Reordering) -> Self {
+        self.reordering = reordering;
+        self
+    }
+
+    /// Choose between the reusable and one-shot cuSOLVER paths.
+    pub fn with_algorithm(mut self, algorithm: CholeskyAlgorithm) -> Self {
+        self.algorithm = algorithm;
+        self
+    }
+
+    /// Per-phase timings and device memory totals accumulated so far.
+    ///
+    /// See [`CudaProfile`](crate::cuda::CudaProfile); `Display` renders a table.
+    pub fn profile(&self) -> &crate::cuda::CudaProfile {
+        &self.profile
+    }
+
+    pub fn hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    pub fn gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    /// Factorize `H` and solve `H · dx = −g` on the device.
+    fn solve_on_device(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        gradient: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        // Invalidate any cached covariance: it belongs to the previous solve.
+        self.covariance_matrix = None;
+
+        if gradient.nrows() != hessian.ncols() {
+            return Err(LinAlgError::InvalidState(format!(
+                "gradient length ({}) does not match the Hessian dimension ({})",
+                gradient.nrows(),
+                hessian.ncols(),
+            ))
+            .log());
+        }
+
+        match self.algorithm {
+            CholeskyAlgorithm::Reusable => self.solve_reusable(hessian, gradient),
+            CholeskyAlgorithm::OneShot => self.solve_one_shot(hessian, gradient),
+        }
+    }
+
+    /// Analyze once per pattern, then factor and solve per iteration.
+    fn solve_reusable(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        gradient: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        let rebuilt = self.csr.sync(hessian, &mut self.profile)?;
+        let needs_analysis =
+            rebuilt || self.analysis.is_none() || self.analyzed_with != Some(self.reordering);
+
+        if needs_analysis {
+            if !rebuilt {
+                // `analyze` permutes the cached pattern in place, so what is
+                // held right now is the *previous* analysis's permuted pattern.
+                // Re-analyzing from it would compose two permutations and
+                // silently corrupt the value map. Start from the Hessian again.
+                self.csr.invalidate();
+                self.csr.sync(hessian, &mut self.profile)?;
+            }
+            // Drop the old analysis before allocating the new one, so a resize
+            // does not need both resident at once.
+            self.analysis = None;
+            self.analysis = Some(self.analyze()?);
+            self.analyzed_with = Some(self.reordering);
+        }
+        self.factor_and_solve(hessian.val(), gradient)
+    }
+
+    /// Permute for fill reduction, upload, and run cuSOLVER's symbolic analysis.
+    fn analyze(&mut self) -> LinAlgResult<CudaAnalysis> {
+        use crate::cuda::profile::HostTimer;
+
+        let (permutation, value_map) = {
+            let _timer = HostTimer::start(&mut self.profile.permutation);
+            let permutation = self.context.reorder(&self.csr, self.reordering)?;
+            let value_map = self.context.permute(&mut self.csr, &permutation)?;
+            (permutation, value_map)
+        };
+
+        let (n, nnz) = (self.csr.n_i32()?, self.csr.nnz_i32()?);
+        let mut system =
+            crate::cuda::buffers::DeviceSystem::new(self.context.stream(), &self.csr)?;
+
+        let info = {
+            let _timer = HostTimer::start(&mut self.profile.symbolic_analysis);
+            let info = self.context.chol_analyze(&mut system, n, nnz)?;
+            // The analysis is asynchronous on the stream; without this the timer
+            // would measure the launch, not the work.
+            self.context.synchronize()?;
+            info
+        };
+
+        let workspace = {
+            let _timer = HostTimer::start(&mut self.profile.buffer_query);
+            self.context.chol_buffer_size(&mut system, &info, n, nnz)?
+        };
+        system.size_workspace(self.context.stream(), workspace.workspace_bytes)?;
+
+        self.profile.memory = system.memory();
+        self.profile.memory.internal = workspace.internal_bytes;
+
+        tracing::debug!(
+            n = self.csr.n(),
+            nnz = self.csr.nnz(),
+            workspace_mib = workspace.workspace_bytes as f64 / (1024.0 * 1024.0),
+            internal_mib = workspace.internal_bytes as f64 / (1024.0 * 1024.0),
+            "CUDA Cholesky analysis complete"
+        );
+
+        self.permuted_values.resize(self.csr.nnz(), 0.0);
+        self.permuted_solution.resize(self.csr.n(), 0.0);
+
+        Ok(CudaAnalysis {
+            info,
+            system,
+            value_map: value_map.iter().map(|&i| i as usize).collect(),
+            permutation: permutation.iter().map(|&i| i as usize).collect(),
+            n,
+            nnz,
+        })
+    }
+
+    /// Numeric factorization and triangular solves — the per-iteration cost.
+    fn factor_and_solve(&mut self, values: &[f64], gradient: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
+        use crate::cuda::profile::DevicePhase;
+
+        let analysis = self.analysis.as_mut().ok_or_else(|| {
+            LinAlgError::InvalidState("factorization requested before analysis".to_string()).log()
+        })?;
+        let stream = self.context.stream().clone();
+
+        // Apply the cached permutation to this iteration's values.
+        for (dst, &src) in self
+            .permuted_values
+            .iter_mut()
+            .zip(analysis.value_map.iter())
+        {
+            *dst = values[src];
+        }
+
+        self.stopwatch.begin(DevicePhase::Upload, &stream);
+        analysis
+            .system
+            .upload_values(&stream, &self.permuted_values)?;
+        let permutation = &analysis.permutation;
+        analysis.system.upload_rhs(&stream, |rhs| {
+            for (new, &old) in permutation.iter().enumerate() {
+                rhs[new] = -gradient[(old, 0)];
+            }
+        })?;
+        self.stopwatch.end(DevicePhase::Upload, &stream);
+
+        self.stopwatch.begin(DevicePhase::Factorize, &stream);
+        self.context
+            .chol_factor(&mut analysis.system, &analysis.info, analysis.n, analysis.nnz)?;
+        self.stopwatch.end(DevicePhase::Factorize, &stream);
+
+        // cuSOLVER's zero-pivot check is a *diagnostic*, not a hard failure: the
+        // test is `pivot < tol` on an absolute tolerance, so on a large
+        // well-scaled Hessian it fires on pivots that are merely small. The CPU
+        // solver has no equivalent check and completes such systems successfully
+        // — failing here would make the GPU backend reject problems the CPU path
+        // solves (observed on the 485k-DOF ladybug BAL problem). The
+        // authoritative test is whether the resulting step is usable, applied
+        // after the solve.
+        let position = self.context.chol_zero_pivot(
+            &analysis.info,
+            crate::cuda::context::DEFAULT_SINGULARITY_TOL,
+        )?;
+        if position >= 0 {
+            tracing::debug!(
+                permuted_row = position,
+                "cuSOLVER reports a near-zero Cholesky pivot; continuing, the step is validated \
+                 after the solve"
+            );
+        }
+
+        self.stopwatch.begin(DevicePhase::TriangularSolve, &stream);
+        self.context
+            .chol_solve(&mut analysis.system, &analysis.info, analysis.n, analysis.nnz)?;
+        self.stopwatch.end(DevicePhase::TriangularSolve, &stream);
+
+        self.stopwatch.begin(DevicePhase::Download, &stream);
+        analysis.system.download_solution(&stream)?;
+        self.stopwatch.end(DevicePhase::Download, &stream);
+
+        self.context.synchronize()?;
+        self.stopwatch.drain(&mut self.profile);
+
+        self.permuted_solution
+            .copy_from_slice(analysis.system.solution());
+
+        // A rank-deficient Hessian shows up here as a non-finite step. This is
+        // the check that matters — it catches real breakage regardless of how the
+        // pivot heuristic above behaved.
+        if let Some(bad) = self
+            .permuted_solution
+            .iter()
+            .position(|value| !value.is_finite())
+        {
+            let pivot = if position >= 0 {
+                format!(" (cuSOLVER reported a near-zero pivot at permuted row {position})")
+            } else {
+                String::new()
+            };
+            return Err(LinAlgError::SingularMatrix(format!(
+                "cusolverSpDcsrcholSolve produced a non-finite step at permuted row {bad}{pivot}; \
+                 the Hessian is singular or not positive definite. For a pose graph this usually \
+                 means unconstrained gauge freedom — add a PriorFactor to anchor it."
+            ))
+            .log());
+        }
+
+        // Scatter back to the original ordering.
+        let mut dx = Mat::<f64>::zeros(self.permuted_solution.len(), 1);
+        for (new, &old) in analysis.permutation.iter().enumerate() {
+            dx[(old, 0)] = self.permuted_solution[new];
+        }
+        Ok(dx)
+    }
+
+    /// One `cusolverSpDcsrlsvchol` call: reorder, analyze, factorize, solve.
+    fn solve_one_shot(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        gradient: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        use crate::cuda::profile::DevicePhase;
+
+        let rebuilt = self.csr.sync(hessian, &mut self.profile)?;
+        let stream = self.context.stream().clone();
+
+        if rebuilt
+            || !self
+                .one_shot
+                .as_ref()
+                .is_some_and(|system| system.matches(&self.csr))
+        {
+            self.one_shot = Some(crate::cuda::buffers::DeviceSystem::new(&stream, &self.csr)?);
+        }
+        let (n, nnz) = (self.csr.n_i32()?, self.csr.nnz_i32()?);
+        let system = self.one_shot.as_mut().ok_or_else(|| {
+            LinAlgError::InvalidState("device buffers missing before solve".to_string()).log()
+        })?;
+
+        self.stopwatch.begin(DevicePhase::Upload, &stream);
+        system.upload_values(&stream, hessian.val())?;
+        system.upload_rhs(&stream, |rhs| {
+            for (i, slot) in rhs.iter_mut().enumerate() {
+                *slot = -gradient[(i, 0)];
+            }
+        })?;
+        self.stopwatch.end(DevicePhase::Upload, &stream);
+
+        // Analysis and factorization are fused in this API, so they are reported
+        // together under `factorize`.
+        self.stopwatch.begin(DevicePhase::Factorize, &stream);
+        self.context.csrlsvchol(system, n, nnz, self.reordering)?;
+        self.stopwatch.end(DevicePhase::Factorize, &stream);
+
+        self.stopwatch.begin(DevicePhase::Download, &stream);
+        system.download_solution(&stream)?;
+        self.stopwatch.end(DevicePhase::Download, &stream);
+
+        self.context.synchronize()?;
+        self.profile.memory = system.memory();
+        self.stopwatch.drain(&mut self.profile);
+
+        let solution = system.solution();
+        Ok(Mat::from_fn(solution.len(), 1, |i, _| solution[i]))
+    }
+}
+
+#[cfg(feature = "cuda")]
+impl LinearSolver<SparseMode> for CudaSparseCholeskySolver {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        let hessian = crate::linalg::sparse::normal_matrix(jacobians)?;
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
+
+        let dx = self.solve_on_device(&hessian, &gradient)?;
+
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        Ok(dx)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobians: &SparseColMat<usize, f64>,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>> {
+        let hessian = crate::linalg::sparse::normal_matrix(jacobians)?;
+        let gradient = jacobians.as_ref().transpose().mul(residuals);
+
+        let augmented = crate::linalg::sparse::add_damping(&hessian, lambda)?;
+        let dx = self.solve_on_device(&augmented, &gradient)?;
+
+        // Cache the UNDAMPED Hessian — Dog Leg needs the true quadratic model,
+        // and covariance estimation must never see lambda.
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
+        Ok(dx)
+    }
+
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        self.hessian.as_ref()
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
+    }
+
+    /// Covariance as `H⁻¹` from the **undamped** Hessian.
+    ///
+    /// Implemented explicitly rather than inheriting the trait's `None` default,
+    /// so enabling covariance on the CUDA path does not silently produce nothing.
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        if self.covariance_matrix.is_none() {
+            let hessian = self.hessian.as_ref()?;
+            self.covariance_matrix = crate::linalg::sparse::invert_undamped_hessian(hessian);
         }
         self.covariance_matrix.as_ref()
     }
