@@ -38,7 +38,9 @@ use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::init_logger;
-use apex_solver::linalg::SchurVariant;
+use apex_solver::linalg::{
+    LinearSolver, LinearSolverType, SchurVariant, SparseCholeskySolver, SparseMode, TimedSolver,
+};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -47,21 +49,45 @@ use std::path::PathBuf;
 use std::time::Instant;
 use tracing::info;
 
-/// Solver variant for Schur complement
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+/// Linear solver to drive the optimization with.
+///
+/// The two Schur variants exploit the camera/landmark block structure and are
+/// what you want in production. The direct variants factorize the *full* normal
+/// equations instead — far more expensive, but the only way to compare the CPU
+/// and GPU sparse Cholesky implementations on identical work.
+#[derive(Debug, Clone, Copy, ValueEnum, Default, PartialEq, Eq)]
 enum SolverArg {
     /// Explicit Schur: direct sparse Cholesky factorization
     Explicit,
     /// Implicit Schur: iterative PCG solver (default, most efficient)
     #[default]
     Implicit,
+    /// Direct sparse Cholesky on the full normal equations (CPU)
+    SparseCholesky,
+    /// Direct sparse Cholesky on the full normal equations (GPU, cuSOLVER)
+    GpuSparseCholesky,
+    /// Direct sparse QR on the full normal equations (GPU, cuSOLVER)
+    GpuSparseQr,
 }
 
-impl From<SolverArg> for SchurVariant {
-    fn from(arg: SolverArg) -> Self {
-        match arg {
+impl SolverArg {
+    /// The Schur variant to configure; irrelevant for the direct solvers, which
+    /// never enter the Schur path.
+    fn schur_variant(self) -> SchurVariant {
+        match self {
             SolverArg::Explicit => SchurVariant::Sparse,
-            SolverArg::Implicit => SchurVariant::Iterative,
+            _ => SchurVariant::Iterative,
+        }
+    }
+
+    /// The direct linear solver this variant selects, or `None` for the Schur
+    /// variants.
+    fn linear_solver_type(self) -> Option<LinearSolverType> {
+        match self {
+            SolverArg::SparseCholesky => Some(LinearSolverType::SparseCholesky),
+            SolverArg::GpuSparseCholesky => Some(LinearSolverType::GpuSparseCholesky),
+            SolverArg::GpuSparseQr => Some(LinearSolverType::GpuSparseQR),
+            SolverArg::Explicit | SolverArg::Implicit => None,
         }
     }
 }
@@ -189,7 +215,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_bundle_adjustment(
         &dataset,
         num_points_to_use,
-        args.solver.into(),
+        args.solver,
         args.optimization_type,
         args.verbose,
         with_visualizer,
@@ -207,16 +233,51 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
     }
 }
 
+/// One-line summary of how much of a run went into the linear solve.
+fn solve_summary<S: LinearSolver<SparseMode>>(timed: &TimedSolver<S>) -> String {
+    format!(
+        "{:.2} s over {} solves ({:.1} ms each)",
+        timed.solve_time().as_secs_f64(),
+        timed.solve_count(),
+        timed.mean_solve_time().as_secs_f64() * 1e3,
+    )
+}
+
+/// A directly-constructed sparse linear solver, if the CLI selected one.
+type DirectSolver = Option<Box<dyn LinearSolver<SparseMode>>>;
+
+/// Build the direct linear solver `solver_arg` selects, or `None` for the Schur
+/// variants, which the optimizer constructs itself.
+fn direct_solver(solver_arg: SolverArg) -> Result<DirectSolver, Box<dyn Error>> {
+    Ok(match solver_arg {
+        SolverArg::SparseCholesky => Some(Box::new(SparseCholeskySolver::new())),
+        #[cfg(feature = "cuda")]
+        SolverArg::GpuSparseCholesky => Some(Box::new(
+            apex_solver::linalg::CudaSparseCholeskySolver::new()?,
+        )),
+        #[cfg(feature = "cuda")]
+        SolverArg::GpuSparseQr => {
+            Some(Box::new(apex_solver::linalg::CudaSparseQRSolver::new()?))
+        }
+        #[cfg(not(feature = "cuda"))]
+        SolverArg::GpuSparseCholesky | SolverArg::GpuSparseQr => {
+            return Err("GPU solvers require building with `--features cuda`".into());
+        }
+        SolverArg::Explicit | SolverArg::Implicit => None,
+    })
+}
+
 /// Run bundle adjustment with specified solver and optimization type
 #[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
-    solver_variant: SchurVariant,
+    solver_arg: SolverArg,
     opt_type: OptimizationType,
     verbose: bool,
     with_visualizer: bool,
 ) -> Result<(), Box<dyn Error>> {
+    let solver_variant = solver_arg.schur_variant();
     use apex_solver::factors::{
         BundleAdjustment, OnlyIntrinsics, OnlyLandmarks, OnlyPose, SelfCalibration,
     };
@@ -345,6 +406,9 @@ fn run_bundle_adjustment(
     // Configure solver
     let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
     config.schur_variant = solver_variant;
+    if let Some(linear_solver_type) = solver_arg.linear_solver_type() {
+        config.linear_solver_type = linear_solver_type;
+    }
 
     info!("");
     info!("Solver configuration:");
@@ -397,7 +461,32 @@ fn run_bundle_adjustment(
     info!("");
     info!("Starting optimization...");
     let start = Instant::now();
-    let result = solver.optimize(&mut problem)?;
+    // The direct solvers are routed through `optimize_with_mode` wrapped in a
+    // TimedSolver, so the factorization cost can be separated from the Jacobian
+    // assembly that every backend pays identically. The Schur path keeps the
+    // ordinary entry point, which builds its own structured solver.
+    let (result, solve_time) = match solver_arg {
+        #[cfg(feature = "cuda")]
+        SolverArg::GpuSparseCholesky => {
+            let cuda = apex_solver::linalg::CudaSparseCholeskySolver::new()?;
+            let mut timed = TimedSolver::new(cuda);
+            let result = solver.optimize_with_mode::<SparseMode>(&mut problem, &mut timed)?;
+            let summary = solve_summary(&timed);
+            if verbose {
+                info!("CUDA phase breakdown:\n{}", timed.inner().profile());
+            }
+            (result, Some(summary))
+        }
+        _ => match direct_solver(solver_arg)? {
+            Some(inner) => {
+                let mut timed = TimedSolver::new(inner);
+                let result = solver.optimize_with_mode::<SparseMode>(&mut problem, &mut timed)?;
+                let summary = solve_summary(&timed);
+                (result, Some(summary))
+            }
+            None => (solver.optimize(&mut problem)?, None),
+        },
+    };
     let elapsed = start.elapsed();
 
     info!("");
@@ -405,6 +494,9 @@ fn run_bundle_adjustment(
     info!("Status: {:?}", result.status);
     info!("Iterations: {}", result.iterations);
     info!("Time: {:.2} seconds", elapsed.as_secs_f64());
+    if let Some(solve_time) = solve_time {
+        info!("Linear solve: {}", solve_time);
+    }
 
     let num_obs = valid_obs.len() as f64;
     let initial_rmse = (result.initial_cost / num_obs).sqrt();
