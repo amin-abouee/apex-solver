@@ -43,12 +43,14 @@ rerun = { version = "0.26.2", features = ["sdk"] }
 cudarc = { version = "0.19", default-features = false, features = [
     "std",
     "driver",
-    "cublas",
-    "cublaslt",
     "cusparse",
     "cusolver",
     "fallback-dynamic-loading",
 ] }
+# Used only by the `cuda` feature, to resolve the handful of cuSOLVER low-level
+# symbols cudarc does not declare (see `linalg::gpu::ffi`). Same major version
+# cudarc itself depends on, so this adds nothing to the dependency graph.
+libloading = "0.9"
 ureq = "2.12"
 bzip2 = "0.5"
 toml = "0.8"
@@ -141,8 +143,8 @@ visualization = ["dep:rerun", "apex-io/visualization"]
 # is safe across toolkits. Override without editing this file by exporting
 # `CUDARC_CUDA_VERSION=12.4` (cudarc's build.rs gives the env var priority), or
 # use the `cuda-detect` feature to match the locally installed toolkit.
-cuda = ["dep:cudarc", "cudarc/cuda-12060"]
-cuda-detect = ["dep:cudarc", "cudarc/cuda-version-from-build-system"]
+cuda = ["dep:cudarc", "dep:libloading", "cudarc/cuda-12060"]
+cuda-detect = ["dep:cudarc", "dep:libloading", "cudarc/cuda-version-from-build-system"]
 
 [dependencies]
 apex-manifolds.workspace = true
@@ -173,6 +175,10 @@ workspace = true
 optional = true
 
 [dependencies.cudarc]
+workspace = true
+optional = true
+
+[dependencies.libloading]
 workspace = true
 optional = true
 

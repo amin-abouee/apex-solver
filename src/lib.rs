@@ -55,6 +55,12 @@ pub use factors::{
 
 // Local modules
 pub mod core;
+/// CUDA device plumbing for the GPU linear solvers (`cuda` feature).
+///
+/// Infrastructure only — the solvers themselves live with their CPU
+/// counterparts in [`linalg::sparse`].
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod error;
 pub mod factors;
 pub mod linalg;
