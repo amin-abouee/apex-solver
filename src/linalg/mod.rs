@@ -1,7 +1,6 @@
 pub mod dense;
-#[cfg(feature = "cuda")]
-pub mod gpu;
 pub mod sparse;
+pub mod timing;
 pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};
@@ -17,6 +16,14 @@ pub use sparse::{
 };
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
+
+/// The CUDA solvers sit beside their CPU counterparts in [`sparse`] — a sparse
+/// Cholesky is a sparse Cholesky regardless of device. The device plumbing they
+/// share lives in [`crate::cuda`].
+#[cfg(feature = "cuda")]
+pub use sparse::{CholeskyAlgorithm, CudaSparseCholeskySolver, CudaSparseQRSolver};
+
+pub use timing::TimedSolver;
 
 pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
 
@@ -186,6 +193,46 @@ pub trait LinearSolver<M: LinearizationMode> {
     /// Returns `None` if covariance has not been computed or is not supported.
     fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
         None
+    }
+}
+
+/// A boxed solver is itself a solver.
+///
+/// Lets a backend chosen at runtime be wrapped by adapters that are generic over
+/// the solver type — [`TimedSolver`] in particular — without those adapters
+/// needing a boxed special case.
+impl<M: LinearizationMode> LinearSolver<M> for Box<dyn LinearSolver<M>> {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &M::Jacobian,
+    ) -> LinAlgResult<Mat<f64>> {
+        (**self).solve_normal_equation(residuals, jacobian)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &M::Jacobian,
+        lambda: f64,
+    ) -> LinAlgResult<Mat<f64>> {
+        (**self).solve_augmented_equation(residuals, jacobian, lambda)
+    }
+
+    fn get_hessian(&self) -> Option<&M::Hessian> {
+        (**self).get_hessian()
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        (**self).get_gradient()
+    }
+
+    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
+        (**self).compute_covariance_matrix()
+    }
+
+    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
+        (**self).get_covariance_matrix()
     }
 }
 
