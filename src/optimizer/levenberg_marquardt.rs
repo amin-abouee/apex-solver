@@ -815,7 +815,7 @@ impl LevenbergMarquardt {
     ///
     /// This is the core generic optimization loop. The public `optimize()` method
     /// dispatches to this based on `LinearSolverType`.
-    fn optimize_with_mode<M: AssemblyBackend>(
+    pub fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &mut Problem,
         linear_solver: &mut dyn LinearSolver<M>,

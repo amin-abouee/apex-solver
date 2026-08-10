@@ -1132,7 +1132,7 @@ impl DogLeg {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
-    fn optimize_with_mode<M: AssemblyBackend>(
+    pub fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &mut problem::Problem,
         linear_solver: &mut dyn LinearSolver<M>,

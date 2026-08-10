@@ -692,7 +692,7 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
 pub(crate) fn gpu_sparse_cholesky() -> OptimizerResult<Box<dyn LinearSolver<SparseMode>>> {
     #[cfg(feature = "cuda")]
     {
-        let solver = crate::linalg::gpu::GpuSparseCholeskySolver::new()
+        let solver = crate::linalg::CudaSparseCholeskySolver::new()
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
         Ok(Box::new(solver))
     }
@@ -711,7 +711,7 @@ pub(crate) fn gpu_sparse_cholesky() -> OptimizerResult<Box<dyn LinearSolver<Spar
 pub(crate) fn gpu_sparse_qr() -> OptimizerResult<Box<dyn LinearSolver<SparseMode>>> {
     #[cfg(feature = "cuda")]
     {
-        let solver = crate::linalg::gpu::GpuSparseQRSolver::new()
+        let solver = crate::linalg::CudaSparseQRSolver::new()
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
         Ok(Box::new(solver))
     }
