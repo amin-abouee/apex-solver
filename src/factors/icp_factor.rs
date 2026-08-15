@@ -27,8 +27,10 @@
 //! ∂p_A/∂T_WB = [ C_WAᵀ | −C_WAᵀ · [C_WB·p_B]×]                 (3×6)
 //! ```
 
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix3, SMatrix, Vector3};
 
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
@@ -72,21 +74,18 @@ impl<F: DistanceField> IcpFactor<F> {
 }
 
 impl<F: DistanceField> Factor for IcpFactor<F> {
-    fn get_dimension(&self) -> usize {
-        1
-    }
-
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(params.len(), 2, "IcpFactor expects 2 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
 
-        let t_wa = SE3::from(params[0].clone());
-        let t_wb = SE3::from(params[1].clone());
+        let t_wa = SE3::from_param_slice(params[0]);
+        let t_wb = SE3::from_param_slice(params[1]);
 
         let c_wa: Matrix3<f64> = t_wa.rotation_so3().rotation_matrix();
         let c_wb: Matrix3<f64> = t_wb.rotation_so3().rotation_matrix();
@@ -97,26 +96,25 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
         let p_w = c_wb * self.point_b + t_wb_pos;
         let p_a = c_wa.transpose() * (p_w - t_wa_pos);
 
-        let zero_res = DVector::zeros(1);
-        let zero_jac = || DMatrix::zeros(1, 12);
+        let zero_out = |residual: &mut [f64], jacobian: Option<faer::mat::MatMut<'_, f64>>| {
+            residual[0] = 0.0;
+            if let Some(mut jac) = jacobian {
+                for col in 0..12 {
+                    *jac.rb_mut().get_mut(0, col) = 0.0;
+                }
+            }
+        };
 
         // Query the field
-        let (field_val, gradient) = match self.field.query(&p_a) {
-            Some(v) => v,
-            None => {
-                if compute_jacobian {
-                    return (zero_res, Some(zero_jac()));
-                }
-                return (zero_res, None);
-            }
+        let Some((field_val, gradient)) = self.field.query(&p_a) else {
+            zero_out(residual, jacobian);
+            return;
         };
 
         let grad_norm = gradient.norm();
         if grad_norm < 1e-3 {
-            if compute_jacobian {
-                return (zero_res, Some(zero_jac()));
-            }
-            return (zero_res, None);
+            zero_out(residual, jacobian);
+            return;
         }
 
         // Compute total sigma (measurement + map uncertainty)
@@ -126,11 +124,11 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
 
         // Weighted residual
         let weighted_error = sqrt_info * field_val / grad_norm;
-        let residual = DVector::from_element(1, weighted_error);
+        residual[0] = weighted_error;
 
-        if !compute_jacobian {
-            return (residual, None);
-        }
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians (right SE3 perturbation, apex-solver convention) ─────────
         //
@@ -198,9 +196,17 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
         j_full.fixed_view_mut::<1, 6>(0, 0).copy_from(&j_twa);
         j_full.fixed_view_mut::<1, 6>(0, 6).copy_from(&j_twb);
 
-        let jac = DMatrix::from_iterator(1, 12, j_full.iter().copied());
+        for col in 0..12 {
+            *jac.rb_mut().get_mut(0, col) = j_full[(0, col)];
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        1
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (1, 12)
     }
 }
 
@@ -208,8 +214,9 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
 mod tests {
     use super::*;
     use apex_manifolds::LieGroup;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use nalgebra::{UnitQuaternion, Vector3};
+    use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
     /// Simple planar distance field: f(p) = n·p - d, grad = n.
     struct PlanarField {
@@ -250,10 +257,34 @@ mod tests {
         DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
     }
 
-    fn perturb_se3(pose: &DVector<f64>, tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from(pose.clone());
-        let tan = SE3Tangent::from(DVector::from_vec(tangent.to_vec()));
-        DVector::from(se3.right_plus(&tan, None, None))
+    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
+        let se3 = SE3::from_param_slice(pose);
+        let tan = SE3Tangent::from_slice(tangent);
+        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
+    }
+
+    fn compute_residual<F: DistanceField>(
+        factor: &IcpFactor<F>,
+        t_wa: &[f64],
+        t_wb: &[f64],
+    ) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[t_wa, t_wb], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian<F: DistanceField>(
+        factor: &IcpFactor<F>,
+        t_wa: &[f64],
+        t_wb: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[t_wa, t_wb], &mut residual, Some(jac_mut));
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
     }
 
     // ── Test 1: zero residual when point lies on the plane ──────────────────
@@ -271,7 +302,7 @@ mod tests {
         let point_b = Vector3::new(1.0, 2.0, 5.0); // on the plane
 
         let factor = IcpFactor::new(field, point_b, 1.0);
-        let (r, _) = factor.linearize(&[t_wa, t_wb], false);
+        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
     }
@@ -290,7 +321,7 @@ mod tests {
         let point_b = Vector3::new(1.0, 2.0, 7.0); // 2m above the plane
 
         let factor = IcpFactor::new(field, point_b, 1.0);
-        let (r, _) = factor.linearize(&[t_wa, t_wb], false);
+        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         // field_val = 7 - 5 = 2, grad_norm = 1, sqrt_info = 1
         assert!((r[0] - 2.0).abs() < 1e-10, "residual = {}", r[0]);
@@ -320,9 +351,7 @@ mod tests {
 
         let factor = IcpFactor::new(field, point_b, 0.5);
 
-        let nominal = vec![t_wa.clone(), t_wb.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         const EPS: f64 = 1e-7;
         const TOL: f64 = 1e-4;
@@ -331,16 +360,14 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&t_wa, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
+            let t_wa_p = perturb_se3(t_wa.as_slice(), &tan);
+            let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
             let fd = (r_pert[0] - r0[0]) / EPS;
-            let err = (fd - jac[(0, col)]).abs();
-            assert!(
-                err < TOL,
-                "J_T_WA[0,{col}]: analytical={:.8} fd={:.8} err={err:.2e}",
+            crate::factors::test_utils::assert_close(
                 jac[(0, col)],
-                fd
+                fd,
+                TOL,
+                &format!("J_T_WA[0,{col}]"),
             );
         }
 
@@ -348,16 +375,14 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[1] = perturb_se3(&t_wb, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
+            let t_wb_p = perturb_se3(t_wb.as_slice(), &tan);
+            let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
             let fd = (r_pert[0] - r0[0]) / EPS;
-            let err = (fd - jac[(0, 6 + col)]).abs();
-            assert!(
-                err < TOL,
-                "J_T_WB[0,{col}]: analytical={:.8} fd={:.8} err={err:.2e}",
+            crate::factors::test_utils::assert_close(
                 jac[(0, 6 + col)],
-                fd
+                fd,
+                TOL,
+                &format!("J_T_WB[0,{col}]"),
             );
         }
     }
@@ -386,9 +411,7 @@ mod tests {
 
         let factor = IcpFactor::new(field, point_b, 0.3);
 
-        let nominal = vec![t_wa.clone(), t_wb.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
 
         const EPS: f64 = 1e-7;
         const TOL: f64 = 1e-4;
@@ -400,15 +423,18 @@ mod tests {
             for col in 0..6 {
                 let mut tan = [0.0f64; 6];
                 tan[col] = EPS;
-                let mut p = nominal.clone();
-                p[block] = perturb_se3(pose, &tan);
+                let pose_p = perturb_se3(pose.as_slice(), &tan);
                 // Need fresh field for each evaluation
                 let field2 = SphereField {
                     center: Vector3::new(2.0, 1.0, 3.0),
                     radius: 1.0,
                 };
                 let factor2 = IcpFactor::new(field2, point_b, 0.3);
-                let (r_pert, _) = factor2.linearize(&p, false);
+                let r_pert = if block == 0 {
+                    compute_residual(&factor2, pose_p.as_slice(), t_wb.as_slice())
+                } else {
+                    compute_residual(&factor2, t_wa.as_slice(), pose_p.as_slice())
+                };
                 let fd = (r_pert[0] - r0[0]) / EPS;
                 let err = (fd - jac[(0, col_offset + col)]).abs();
                 assert!(
@@ -430,6 +456,6 @@ mod tests {
             offset: 0.0,
         };
         let factor = IcpFactor::new(field, Vector3::zeros(), 1.0);
-        assert_eq!(factor.get_dimension(), 1);
+        assert_eq!(factor.residual_dim(), 1);
     }
 }
