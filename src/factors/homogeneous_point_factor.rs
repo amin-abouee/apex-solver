@@ -24,7 +24,8 @@
 //! ∂e/∂hp = −sqrt_info · [I₃ | −p_est] / w
 //! ```
 
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::factors::Factor;
 
@@ -57,15 +58,12 @@ impl HomogeneousPointFactor {
 }
 
 impl Factor for HomogeneousPointFactor {
-    fn get_dimension(&self) -> usize {
-        3
-    }
-
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(
             params.len(),
             1,
@@ -77,7 +75,7 @@ impl Factor for HomogeneousPointFactor {
             "params[0] must be homogeneous point (4D)"
         );
 
-        let hp = &params[0];
+        let hp = params[0];
         let w = hp[3];
 
         // Dehomogenize
@@ -88,11 +86,13 @@ impl Factor for HomogeneousPointFactor {
 
         // Weighted residual
         let weighted_err = self.sqrt_information * raw_err;
-        let residual = DVector::from_iterator(3, weighted_err.iter().copied());
-
-        if !compute_jacobian {
-            return (residual, None);
+        for i in 0..3 {
+            residual[i] = weighted_err[i];
         }
+
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobian ──────────────────────────────────────────────────────────
         //
@@ -117,33 +117,57 @@ impl Factor for HomogeneousPointFactor {
         j_raw[(2, 3)] = p_est[2] * inv_w;
 
         let j_weighted = self.sqrt_information * j_raw;
-        let jac = DMatrix::from_iterator(3, 4, j_weighted.iter().copied());
+        for row in 0..3 {
+            for col in 0..4 {
+                *jac.rb_mut().get_mut(row, col) = j_weighted[(row, col)];
+            }
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        3
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (3, 4)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nalgebra::dvector;
+
+    fn compute_residual(factor: &HomogeneousPointFactor, hp: &[f64]) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[hp], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian(
+        factor: &HomogeneousPointFactor,
+        hp: &[f64],
+    ) -> (Vec<f64>, nalgebra::DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[hp], &mut residual, Some(jac_mut));
+        let jacobian = nalgebra::DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
+    }
 
     // ── Test 1: zero residual when measurement matches dehomogenized point ──
 
     #[test]
     fn zero_residual_at_measurement() {
-        let hp = dvector![2.0, 4.0, 6.0, 2.0]; // p_est = [1, 2, 3]
+        let hp = [2.0, 4.0, 6.0, 2.0]; // p_est = [1, 2, 3]
         let measurement = Vector3::new(1.0, 2.0, 3.0);
 
         let factor = HomogeneousPointFactor::new_isotropic(measurement, 1.0);
-        let (r, _) = factor.linearize(&[hp], false);
+        let r = compute_residual(&factor, &hp);
 
-        for i in 0..3 {
-            assert!(
-                r[i].abs() < 1e-12,
-                "residual[{i}] = {} should be zero",
-                r[i]
-            );
+        for (i, ri) in r.iter().enumerate().take(3) {
+            assert!(ri.abs() < 1e-12, "residual[{i}] = {} should be zero", ri);
         }
     }
 
@@ -153,13 +177,13 @@ mod tests {
     fn zero_residual_with_nonunit_w() {
         let w = 0.5;
         let p = Vector3::new(3.0, -1.0, 7.0);
-        let hp = dvector![p[0] * w, p[1] * w, p[2] * w, w];
+        let hp = [p[0] * w, p[1] * w, p[2] * w, w];
 
         let factor = HomogeneousPointFactor::new_isotropic(p, 0.5);
-        let (r, _) = factor.linearize(&[hp], false);
+        let r = compute_residual(&factor, &hp);
 
-        for i in 0..3 {
-            assert!(r[i].abs() < 1e-12, "residual[{i}] = {}", r[i]);
+        for (i, ri) in r.iter().enumerate().take(3) {
+            assert!(ri.abs() < 1e-12, "residual[{i}] = {}", ri);
         }
     }
 
@@ -167,11 +191,11 @@ mod tests {
 
     #[test]
     fn nonzero_residual() {
-        let hp = dvector![1.0, 2.0, 3.0, 1.0];
+        let hp = [1.0, 2.0, 3.0, 1.0];
         let measurement = Vector3::new(2.0, 2.0, 3.0); // differs in x by 1
 
         let factor = HomogeneousPointFactor::new_isotropic(measurement, 1.0);
-        let (r, _) = factor.linearize(&[hp], false);
+        let r = compute_residual(&factor, &hp);
 
         assert!((r[0] - 1.0).abs() < 1e-12);
         assert!(r[1].abs() < 1e-12);
@@ -182,30 +206,28 @@ mod tests {
 
     #[test]
     fn finite_difference_jacobian() {
-        let hp = dvector![2.0, -1.5, 4.0, 0.8];
+        let hp = [2.0, -1.5, 4.0, 0.8];
         let measurement = Vector3::new(1.0, 2.0, 3.0);
 
         let sqrt_info = SMatrix::<f64, 3, 3>::new(1.0, 0.1, 0.0, 0.0, 2.0, 0.05, 0.0, 0.0, 0.5);
         let factor = HomogeneousPointFactor::new(measurement, sqrt_info);
 
-        let (r0, jac_opt) = factor.linearize(&[hp.clone()], true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian(&factor, &hp);
 
         const EPS: f64 = 1e-7;
         const TOL: f64 = 1e-5;
 
         for col in 0..4 {
-            let mut hp_pert = hp.clone();
+            let mut hp_pert = hp;
             hp_pert[col] += EPS;
-            let (r_pert, _) = factor.linearize(&[hp_pert], false);
-            let fd = (&r_pert - &r0) / EPS;
+            let r_pert = compute_residual(&factor, &hp_pert);
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, col)]).abs();
-                assert!(
-                    err < TOL,
-                    "J[{row},{col}]: analytical={:.8} fd={:.8} err={err:.2e}",
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                crate::factors::test_utils::assert_close(
                     jac[(row, col)],
-                    fd[row]
+                    fd,
+                    TOL,
+                    &format!("J[{row},{col}]"),
                 );
             }
         }
@@ -216,6 +238,6 @@ mod tests {
     #[test]
     fn dimension_is_three() {
         let factor = HomogeneousPointFactor::new_isotropic(Vector3::zeros(), 1.0);
-        assert_eq!(factor.get_dimension(), 3);
+        assert_eq!(factor.residual_dim(), 3);
     }
 }
