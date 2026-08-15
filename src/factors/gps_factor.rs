@@ -34,8 +34,10 @@
 //! ∂e/∂δθ_GW =  C_GW · [t_antenna_W]×
 //! ```
 
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::factors::Factor;
 use crate::factors::imu::helpers::cross_matrix;
@@ -87,22 +89,19 @@ impl GpsFactor {
 }
 
 impl Factor for GpsFactor {
-    fn get_dimension(&self) -> usize {
-        3
-    }
-
     /// Compute the weighted 3D residual and optional 3×12 Jacobian.
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(params.len(), 2, "GpsFactor expects 2 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
 
-        let t_ws = SE3::from(params[0].clone());
-        let t_gw = SE3::from(params[1].clone());
+        let t_ws = SE3::from_param_slice(params[0]);
+        let t_gw = SE3::from_param_slice(params[1]);
 
         let c_ws: Matrix3<f64> = t_ws.rotation_so3().rotation_matrix();
         let c_gw: Matrix3<f64> = t_gw.rotation_so3().rotation_matrix();
@@ -120,11 +119,13 @@ impl Factor for GpsFactor {
 
         // Weighted residual (apply sqrt_info)
         let weighted_err = self.sqrt_information * raw_err;
-        let residual = DVector::from_iterator(3, weighted_err.iter().copied());
-
-        if !compute_jacobian {
-            return (residual, None);
+        for i in 0..3 {
+            residual[i] = weighted_err[i];
         }
+
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians ─────────────────────────────────────────────────────────
         //
@@ -163,9 +164,19 @@ impl Factor for GpsFactor {
         j_raw.fixed_view_mut::<3, 3>(0, 9).copy_from(&de_dtheta_gw);
 
         let j_weighted = self.sqrt_information * j_raw;
-        let jac = DMatrix::from_iterator(3, 12, j_weighted.iter().copied());
+        for row in 0..3 {
+            for col in 0..12 {
+                *jac.rb_mut().get_mut(row, col) = j_weighted[(row, col)];
+            }
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        3
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (3, 12)
     }
 }
 
@@ -257,16 +268,13 @@ impl GpsAsyncFactor {
 }
 
 impl Factor for GpsAsyncFactor {
-    fn get_dimension(&self) -> usize {
-        3
-    }
-
     /// Compute the weighted 3D residual and optional 3×21 Jacobian.
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(params.len(), 3, "GpsAsyncFactor expects 3 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 9, "params[1] must be SpeedAndBias (9D)");
@@ -274,9 +282,9 @@ impl Factor for GpsAsyncFactor {
 
         let preint = &self.preintegration;
 
-        let t_ws_k = SE3::from(params[0].clone());
-        let sb_k = SpeedAndBias::from_iterator(params[1].iter().copied());
-        let t_gw = SE3::from(params[2].clone());
+        let t_ws_k = SE3::from_param_slice(params[0]);
+        let sb_k = SpeedAndBias::from_column_slice(params[1]);
+        let t_gw = SE3::from_param_slice(params[2]);
 
         let c_ws_k: Matrix3<f64> = t_ws_k.rotation_so3().rotation_matrix();
         let c_gw: Matrix3<f64> = t_gw.rotation_so3().rotation_matrix();
@@ -314,11 +322,13 @@ impl Factor for GpsAsyncFactor {
 
         // Weighted residual
         let weighted_err = self.sqrt_information * raw_err;
-        let residual = DVector::from_iterator(3, weighted_err.iter().copied());
-
-        if !compute_jacobian {
-            return (residual, None);
+        for i in 0..3 {
+            residual[i] = weighted_err[i];
         }
+
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians ─────────────────────────────────────────────────────────
         //
@@ -375,9 +385,19 @@ impl Factor for GpsAsyncFactor {
         j_raw.fixed_view_mut::<3, 3>(0, 18).copy_from(&de_dtheta_gw);
 
         let j_weighted = self.sqrt_information * j_raw;
-        let jac = DMatrix::from_iterator(3, 21, j_weighted.iter().copied());
+        for row in 0..3 {
+            for col in 0..21 {
+                *jac.rb_mut().get_mut(row, col) = j_weighted[(row, col)];
+            }
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        3
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (3, 21)
     }
 }
 
@@ -387,8 +407,9 @@ impl Factor for GpsAsyncFactor {
 mod tests {
     use super::*;
     use apex_manifolds::LieGroup;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::{SE3, SE3Tangent};
-    use nalgebra::{UnitQuaternion, Vector3};
+    use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
     use crate::factors::imu::preintegration::ImuPreintegration;
     use crate::factors::imu::types::{
@@ -404,10 +425,56 @@ mod tests {
         DVector::from_vec(vec![tx, ty, tz, q.w, q.i, q.j, q.k])
     }
 
-    fn perturb_se3(pose: &DVector<f64>, tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from(pose.clone());
-        let tan = SE3Tangent::from(DVector::from_vec(tangent.to_vec()));
-        DVector::from(se3.right_plus(&tan, None, None))
+    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
+        let se3 = SE3::from_param_slice(pose);
+        let tan = SE3Tangent::from_slice(tangent);
+        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
+    }
+
+    fn compute_residual_gps(factor: &GpsFactor, pose_ws: &[f64], pose_gw: &[f64]) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[pose_ws, pose_gw], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian_gps(
+        factor: &GpsFactor,
+        pose_ws: &[f64],
+        pose_gw: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[pose_ws, pose_gw], &mut residual, Some(jac_mut));
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
+    }
+
+    fn compute_residual_async(
+        factor: &GpsAsyncFactor,
+        pose_ws: &[f64],
+        sb: &[f64],
+        pose_gw: &[f64],
+    ) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[pose_ws, sb, pose_gw], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian_async(
+        factor: &GpsAsyncFactor,
+        pose_ws: &[f64],
+        sb: &[f64],
+        pose_gw: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[pose_ws, sb, pose_gw], &mut residual, Some(jac_mut));
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
     }
 
     // ── Test 1: zero residual when measurement equals prediction (no offset) ──
@@ -426,14 +493,10 @@ mod tests {
 
         let measurement = t_ws_pos; // No offset, no T_GW rotation
         let factor = GpsFactor::new_isotropic(measurement, Vector3::zeros(), 1.0);
-        let (r, _) = factor.linearize(&[pose_ws, pose_gw], false);
+        let r = compute_residual_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
-        for i in 0..3 {
-            assert!(
-                r[i].abs() < 1e-12,
-                "residual[{i}] = {} should be zero",
-                r[i]
-            );
+        for (i, ri) in r.iter().enumerate().take(3) {
+            assert!(ri.abs() < 1e-12, "residual[{i}] = {} should be zero", ri);
         }
     }
 
@@ -466,14 +529,10 @@ mod tests {
         let pose_gw = make_pose(t_gw_pos.x, t_gw_pos.y, t_gw_pos.z, q_gw);
 
         let factor = GpsFactor::new_isotropic(measurement, r_sa, 1.0);
-        let (r, _) = factor.linearize(&[pose_ws, pose_gw], false);
+        let r = compute_residual_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
-        for i in 0..3 {
-            assert!(
-                r[i].abs() < 1e-10,
-                "residual[{i}] = {} should be zero",
-                r[i]
-            );
+        for (i, ri) in r.iter().enumerate().take(3) {
+            assert!(ri.abs() < 1e-10, "residual[{i}] = {} should be zero", ri);
         }
     }
 
@@ -504,9 +563,7 @@ mod tests {
         let pose_gw = make_pose(t_gw_pos.x, t_gw_pos.y, t_gw_pos.z, q_gw);
 
         let factor = GpsFactor::new_isotropic(measurement, r_sa, 0.5);
-        let nominal = vec![pose_ws.clone(), pose_gw.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian_gps(&factor, pose_ws.as_slice(), pose_gw.as_slice());
 
         const EPS: f64 = 1e-6;
         const TOL: f64 = 1e-4;
@@ -515,17 +572,16 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&pose_ws, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_ws_p = perturb_se3(pose_ws.as_slice(), &tan);
+            let r_pert = compute_residual_gps(&factor, pose_ws_p.as_slice(), pose_gw.as_slice());
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, col)]).abs();
                 assert!(
                     err < TOL,
                     "J_T_WS[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, col)],
-                    fd[row]
+                    fd
                 );
             }
         }
@@ -534,17 +590,16 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[1] = perturb_se3(&pose_gw, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_gw_p = perturb_se3(pose_gw.as_slice(), &tan);
+            let r_pert = compute_residual_gps(&factor, pose_ws.as_slice(), pose_gw_p.as_slice());
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, 6 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 6 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_T_GW[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 6 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
@@ -579,8 +634,8 @@ mod tests {
         ImuPreintegration::new(measurements, params, 0.0, dt, &sb)
     }
 
-    fn perturb_sb(sb: &DVector<f64>, idx: usize, eps: f64) -> DVector<f64> {
-        let mut out = sb.clone();
+    fn perturb_sb(sb: &[f64], idx: usize, eps: f64) -> DVector<f64> {
+        let mut out = DVector::from_column_slice(sb);
         out[idx] += eps;
         out
     }
@@ -616,13 +671,18 @@ mod tests {
         sb_vec[2] = v_k.z;
 
         let factor = GpsAsyncFactor::new_isotropic(measurement, r_sa, 1.0, preint);
-        let (r, _) = factor.linearize(&[pose_ws, sb_vec, pose_gw], false);
+        let r = compute_residual_async(
+            &factor,
+            pose_ws.as_slice(),
+            sb_vec.as_slice(),
+            pose_gw.as_slice(),
+        );
 
-        for i in 0..3 {
+        for (i, ri) in r.iter().enumerate().take(3) {
             assert!(
-                r[i].abs() < 1e-6,
+                ri.abs() < 1e-6,
                 "async residual[{i}] = {} should be near zero",
-                r[i]
+                ri
             );
         }
     }
@@ -670,9 +730,12 @@ mod tests {
             || GpsAsyncFactor::new_isotropic(measurement, r_sa, 0.5, make_preint(dt, v_k));
 
         let factor = make_factor();
-        let nominal = vec![pose_ws.clone(), sb_vec.clone(), pose_gw.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian_async(
+            &factor,
+            pose_ws.as_slice(),
+            sb_vec.as_slice(),
+            pose_gw.as_slice(),
+        );
 
         const EPS: f64 = 1e-6;
         const TOL: f64 = 1e-4;
@@ -681,34 +744,42 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&pose_ws, &tan);
-            let (r_pert, _) = make_factor().linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_ws_p = perturb_se3(pose_ws.as_slice(), &tan);
+            let r_pert = compute_residual_async(
+                &make_factor(),
+                pose_ws_p.as_slice(),
+                sb_vec.as_slice(),
+                pose_gw.as_slice(),
+            );
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, col)]).abs();
                 assert!(
                     err < TOL,
                     "async J_T_WS[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 1: sb_k (9 DOF, cols 6–14)
         for col in 0..9 {
-            let mut p = nominal.clone();
-            p[1] = perturb_sb(&sb_vec, col, EPS);
-            let (r_pert, _) = make_factor().linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let sb_p = perturb_sb(sb_vec.as_slice(), col, EPS);
+            let r_pert = compute_residual_async(
+                &make_factor(),
+                pose_ws.as_slice(),
+                sb_p.as_slice(),
+                pose_gw.as_slice(),
+            );
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, 6 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 6 + col)]).abs();
                 assert!(
                     err < TOL,
                     "async J_sb[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 6 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
@@ -717,17 +788,21 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[2] = perturb_se3(&pose_gw, &tan);
-            let (r_pert, _) = make_factor().linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_gw_p = perturb_se3(pose_gw.as_slice(), &tan);
+            let r_pert = compute_residual_async(
+                &make_factor(),
+                pose_ws.as_slice(),
+                sb_vec.as_slice(),
+                pose_gw_p.as_slice(),
+            );
             for row in 0..3 {
-                let err = (fd[row] - jac[(row, 15 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 15 + col)]).abs();
                 assert!(
                     err < TOL,
                     "async J_T_GW[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 15 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
