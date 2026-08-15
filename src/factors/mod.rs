@@ -60,20 +60,22 @@ pub mod gps_factor;
 // Vision / landmark factors
 pub mod bearing_factor;
 pub mod depth_factor;
-pub mod essential_matrix_factor;
 pub mod homogeneous_point_factor;
 
 // LiDAR / ICP factors
 pub mod icp_factor;
+pub mod lidar_factor;
 
 pub use bearing_factor::BearingFactor;
 pub use between_factor::BetweenFactor;
 pub use depth_factor::{DepthFactor, OneSidedDepthFactor};
-pub use essential_matrix_factor::EssentialMatrixFactor;
 pub use gps_factor::{GpsAsyncFactor, GpsFactor};
 pub use homogeneous_point_factor::HomogeneousPointFactor;
 pub use icp_factor::{DistanceField, IcpFactor};
-pub use imu::{CombinedImuFactor, ImuFactor, ImuPreintegration};
+pub use imu::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, ImuPreintegration};
+pub use lidar_factor::{
+    LidarEdgeFactor, LidarPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
+};
 pub use prior_factor::PriorFactor;
 pub use projection_factor::ProjectionFactor;
 
@@ -214,6 +216,24 @@ pub trait Factor: Send + Sync {
 
     /// `(rows, cols)` of the Jacobian — `rows == residual_dim()`, `cols == sum of variable DOFs`.
     fn jacobian_shape(&self) -> (usize, usize);
+}
+
+/// Shared helpers for finite-difference Jacobian tests across factor modules.
+///
+/// Per-block perturbation construction (manifold `right_plus` vs. plain-vector
+/// `+= eps`) differs by factor and stays inline in each test; this only factors
+/// out the repeated compare-and-report boilerplate.
+#[cfg(test)]
+pub(crate) mod test_utils {
+    /// Assert a single analytical Jacobian entry matches its finite-difference
+    /// estimate within `tol`, panicking with both values and the error on failure.
+    pub(crate) fn assert_close(analytical: f64, fd: f64, tol: f64, label: &str) {
+        let err = (analytical - fd).abs();
+        assert!(
+            err < tol,
+            "{label}: analytical={analytical:.8} fd={fd:.8} err={err:.2e}"
+        );
+    }
 }
 
 #[cfg(test)]
