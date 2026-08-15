@@ -1,8 +1,8 @@
 //! Dataset downloader for pose graph and bundle adjustment datasets.
 //!
 //! Downloads datasets from two sources:
-//! 1. **Luca Carlone's pose graph datasets** (3D/2D g2o): https://lucacarlone.mit.edu/datasets/
-//! 2. **UW BAL bundle adjustment datasets**: https://grail.cs.washington.edu/projects/bal/
+//! 1. **Luca Carlone's pose graph datasets** (3D/2D g2o): <https://lucacarlone.mit.edu/datasets/>
+//! 2. **UW BAL bundle adjustment datasets**: <https://grail.cs.washington.edu/projects/bal/>
 //!
 //! All dataset metadata (names, URLs, categories) lives in `datasets.toml`, which is
 //! embedded at compile time. No URLs are hardcoded here.
@@ -263,17 +263,17 @@ fn download_largest_each_ba(
                 match decompress_and_cleanup(&compressed_path, &decompressed_path) {
                     Ok(()) => {
                         success_count += 1;
-                        info!("    OK ({size} bytes)");
+                        info!("OK ({size} bytes)");
                     }
                     Err(e) => {
                         fail_count += 1;
-                        info!("    DECOMPRESS FAILED: {e}");
+                        info!("DECOMPRESS FAILED: {e}");
                     }
                 }
             }
             Err(e) => {
                 fail_count += 1;
-                info!("    FAILED: {e}");
+                info!("FAILED: {e}");
             }
         }
     }

@@ -1,6 +1,6 @@
 [package]
 name = "apex-io"
-version = "0.1.0"
+version = "0.3.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,21 +8,60 @@ repository.workspace = true
 homepage.workspace = true
 rust-version.workspace = true
 documentation = "https://docs.rs/apex-io"
-description = "File I/O for pose graphs (G2O, TORO, BAL formats) with SE2/SE3 support"
+description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS1/ROS2 bags with SE2/SE3 support"
 readme = "README.md"
-keywords = ["slam", "pose-graph", "g2o", "bundle-adjustment", "robotics"]
+keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
-
 exclude = ["tests/", "benches/"]
+
+# Build docs.rs with every feature so the rosbag, DDS and visualization APIs are visible.
+[package.metadata.docs.rs]
+all-features = true
 
 [[bin]]
 name = "download_datasets"
 path = "bin/download_datasets.rs"
 
+[[bin]]
+name = "bag_info"
+path = "bin/bag_info.rs"
+
+[[bin]]
+name = "bag_filter"
+path = "bin/bag_filter.rs"
+
+[[bin]]
+name = "extract_topic_data"
+path = "bin/extract_topic_data.rs"
+
+[[bin]]
+name = "write_dummy_bag"
+path = "bin/write_dummy_bag.rs"
+
+[[bin]]
+name = "bag_convert"
+path = "bin/bag_convert.rs"
+
+[[bin]]
+name = "dds_multi_listener"
+path = "bin/dds_multi_listener.rs"
+required-features = ["dds"]
+
+[[test]]
+name = "rosbag_ros2_integration_tests"
+path = "tests/rosbag_ros2_integration_tests.rs"
+
+[[test]]
+name = "rosbag_ros1_integration_tests"
+path = "tests/rosbag_ros1_integration_tests.rs"
+
+[[test]]
+name = "asl_integration_tests"
+path = "tests/asl_integration_tests.rs"
+
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
-memmap2.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
@@ -35,13 +74,38 @@ ureq.workspace = true
 bzip2.workspace = true
 toml.workspace = true
 
+# ROS2 bag dependencies
+serde_yaml.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+hex.workspace = true
+image.workspace = true
+rusqlite.workspace = true
+zstd.workspace = true
+mcap.workspace = true
+lz4_flex.workspace = true
+
 [dependencies.rerun]
+workspace = true
+optional = true
+
+[dependencies.rustdds]
+workspace = true
+optional = true
+
+[dependencies.tokio]
+workspace = true
+optional = true
+
+[dependencies.futures]
 workspace = true
 optional = true
 
 [features]
 default = []
 visualization = ["dep:rerun"]
+dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
+asl-async = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,0 +1,584 @@
+rosbag2_bagfile_information:
+  compression_format: ''
+  compression_mode: ''
+  duration:
+    nanoseconds: 18700000000
+  files:
+  - duration:
+      nanoseconds: 18700000000
+    message_count: 188
+    path: test_bag_sqlite3.db3
+    starting_time:
+      nanoseconds_since_epoch: 1749315324675930112
+  message_count: 188
+  relative_file_paths:
+  - test_bag_sqlite3.db3
+  starting_time:
+    nanoseconds_since_epoch: 1749315324675930112
+  storage_identifier: sqlite3
+  topics_with_message_count:
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/accel
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Accel
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/accel_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/AccelStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/accel_with_covariance
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/AccelWithCovariance
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/accel_with_covariance_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/AccelWithCovarianceStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/inertia
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Inertia
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/inertia_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/InertiaStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/point
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Point
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/point32
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Point32
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/point_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PointStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/polygon
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Polygon
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/polygon_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PolygonStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Pose
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose2d
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Pose2D
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PoseArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PoseStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose_with_covariance
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PoseWithCovariance
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/pose_with_covariance_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/PoseWithCovarianceStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/quaternion
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Quaternion
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/quaternion_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/QuaternionStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/transform
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Transform
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/transform_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/TransformStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/twist
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Twist
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/twist_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/TwistStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/twist_with_covariance
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/TwistWithCovariance
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/twist_with_covariance_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/TwistWithCovarianceStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/vector3
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Vector3
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/vector3_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Vector3Stamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/wrench
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/Wrench
+  - message_count: 2
+    topic_metadata:
+      name: /test/geometry_msgs/wrench_stamped
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: geometry_msgs/msg/WrenchStamped
+  - message_count: 2
+    topic_metadata:
+      name: /test/nav_msgs/grid_cells
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: nav_msgs/msg/GridCells
+  - message_count: 2
+    topic_metadata:
+      name: /test/nav_msgs/map_metadata
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: nav_msgs/msg/MapMetaData
+  - message_count: 2
+    topic_metadata:
+      name: /test/nav_msgs/occupancy_grid
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: nav_msgs/msg/OccupancyGrid
+  - message_count: 2
+    topic_metadata:
+      name: /test/nav_msgs/odometry
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: nav_msgs/msg/Odometry
+  - message_count: 2
+    topic_metadata:
+      name: /test/nav_msgs/path
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: nav_msgs/msg/Path
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/battery_state
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/BatteryState
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/camera_info
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/CameraInfo
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/channel_float32
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/ChannelFloat32
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/compressed_image
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/CompressedImage
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/fluid_pressure
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/FluidPressure
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/illuminance
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Illuminance
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/image
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Image
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/imu
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Imu
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/joint_state
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/JointState
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/joy
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Joy
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/joy_feedback
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/JoyFeedback
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/joy_feedback_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/JoyFeedbackArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/laser_echo
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/LaserEcho
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/laser_scan
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/LaserScan
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/magnetic_field
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/MagneticField
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/multi_dof_joint_state
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/MultiDOFJointState
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/multi_echo_laser_scan
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/MultiEchoLaserScan
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/nav_sat_fix
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/NavSatFix
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/nav_sat_status
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/NavSatStatus
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/point_cloud
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/PointCloud
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/point_cloud2
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/PointCloud2
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/point_field
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/PointField
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/range
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Range
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/region_of_interest
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/RegionOfInterest
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/relative_humidity
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/RelativeHumidity
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/temperature
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/Temperature
+  - message_count: 2
+    topic_metadata:
+      name: /test/sensor_msgs/time_reference
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: sensor_msgs/msg/TimeReference
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/bool
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Bool
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/byte
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Byte
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/byte_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/ByteMultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/char
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Char
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/color_rgba
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/ColorRGBA
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/empty
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Empty
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/float32
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Float32
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/float32_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Float32MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/float64
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Float64
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/float64_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Float64MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/header
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Header
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int16
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int16
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int16_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int16MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int32
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int32
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int32_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int32MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int64
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int64
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int64_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int64MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int8
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int8
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/int8_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/Int8MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/multi_array_dimension
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/MultiArrayDimension
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/multi_array_layout
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/MultiArrayLayout
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/string
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/String
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint16
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt16
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint16_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt16MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint32
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt32
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint32_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt32MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint64
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt64
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint64_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt64MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint8
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt8
+  - message_count: 2
+    topic_metadata:
+      name: /test/std_msgs/uint8_multi_array
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: std_msgs/msg/UInt8MultiArray
+  - message_count: 2
+    topic_metadata:
+      name: /test/stereo_msgs/disparity_image
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: stereo_msgs/msg/DisparityImage
+  - message_count: 2
+    topic_metadata:
+      name: /test/tf2_msgs/tf2_error
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: tf2_msgs/msg/TF2Error
+  - message_count: 2
+    topic_metadata:
+      name: /test/tf2_msgs/tf_message
+      offered_qos_profiles: ''
+      serialization_format: cdr
+      type: tf2_msgs/msg/TFMessage
+  version: 5

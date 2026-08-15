@@ -2,6 +2,23 @@
 
 Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
 
+## What's new in 0.3.0 — Cookbook overhaul
+
+The [cookbook](#cookbook) was rebuilt so every model chapter follows the **same eight-section
+template** (Parameters → Projection → Inverse Projection → Point Jacobian → Intrinsic Jacobian
+→ Linear Estimation → Example → References), with the geometric **validity conditions merged
+into** the Projection and Inverse-Projection sections. All formulas were re-derived from the
+implementation — correcting several inverse-projection formulas (the UCM Mei ξ-sphere inverse,
+the EUCM numerator, the Kannala-Brandt ray reconstruction, and the f-theta point Jacobian) —
+and prose now uses inline `$...$` math throughout.
+
+## Cookbook
+
+For the full mathematical formulations, Jacobian derivations, and references, see the
+[apex-camera-models cookbook](doc/cookbook/src/introduction.md). The cookbook is the
+canonical source for projection equations, unprojection strategies, parameter layouts,
+and validation rules. The per-model source files link back to the relevant chapter.
+
 ## Overview
 
 This library provides a comprehensive collection of camera projection models commonly used in computer vision applications including bundle adjustment, SLAM, visual odometry, and Structure-from-Motion (SfM). Each camera model implements analytic Jacobians for efficient nonlinear optimization.
@@ -44,12 +61,6 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Distortion: Radial (k1, k2, k3) + Tangential (p1, p2)
   - Use: Most standard cameras with lens distortion, OpenCV compatibility
 
-- **Equidistant**: Fisheye lens model
-  - Parameters: 8 (fx, fy, cx, cy, k1, k2, k3, k4)
-  - FOV: ~180°
-  - Distortion: Radial polynomial on angle θ
-  - Use: Fisheye lenses, wide-angle cameras
-
 - **Kannala-Brandt**: GoPro-style fisheye
   - Parameters: 8 (fx, fy, cx, cy, k1, k2, k3, k4)
   - FOV: ~180°
@@ -82,13 +93,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
   - Projection: Consecutive projection onto two unit spheres
   - Use: Omnidirectional cameras, best accuracy for extreme FOV
 
-### Specialized Models
-
-- **Orthographic**: Orthographic projection
-  - Parameters: 4 (fx, fy, cx, cy)
-  - FOV: N/A
-  - Projection: Parallel rays (no perspective)
-  - Use: Telephoto lenses, orthographic rendering
+- **F-Theta (FTheta)**: NVIDIA-style polynomial fisheye used in automotive and robotics
+  - Parameters: 6 (cx, cy, k1, k2, k3, k4)
+  - FOV: Up to 220°
+  - Distortion: Polynomial f(θ) = k₁θ + k₂θ² + k₃θ³ + k₄θ⁴
+  - Note: No separate focal length — k₁ acts as pixels-per-radian
+  - Use: Automotive surround-view cameras, robotics fisheye, NVIDIA DriveWorks
 
 ## Camera Model Comparison
 
@@ -96,13 +106,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
 |-------|-----------|-----------|----------------|---------------------|------------------|
 | **Pinhole** | 4 | ~60° | None | Simple | Standard cameras, initial estimates |
 | **RadTan** | 9 | ~100° | Radial + Tangential | Medium | OpenCV calibration, most cameras |
-| **Equidistant** | 8 | ~180° | Radial polynomial | Medium | Fisheye lenses |
 | **Kannala-Brandt** | 8 | ~180° | Polynomial on θ | Complex | GoPro, action cameras |
 | **FOV** | 5 | Variable | Atan-based | Medium | SLAM with wide-angle |
 | **UCM** | 5 | >90° | Unified sphere | Medium | Catadioptric cameras |
 | **EUCM** | 6 | >180° | Extended unified | Medium | High-distortion fisheye |
 | **Double Sphere** | 6 | >180° | Two-sphere | Complex | Omnidirectional, best extreme FOV accuracy |
-| **Orthographic** | 4 | N/A | None | Simple | Telephoto, orthographic projection |
+| **F-Theta** | 6 | Up to 220° | Polynomial f(θ) | Complex | Automotive surround-view, NVIDIA DriveWorks |
 | **BAL Pinhole** | 6 | ~60° | Radial (k1, k2) | Simple | BAL datasets |
 | **BAL Pinhole Strict** | 3 | ~60° | Radial (k1, k2) | Simple | Bundler compatibility |
 
@@ -125,11 +134,12 @@ All models implement the `CameraModel` trait providing a unified interface for p
 - Wide-angle: **FOV** or **UCM**
 
 **Wide FOV (120°-180°)**
-- Fisheye lenses: **Equidistant** or **Kannala-Brandt**
+- Fisheye lenses: **Kannala-Brandt**
 - Action cameras (GoPro): **Kannala-Brandt**
 - SLAM applications: **FOV**
 
-**Extreme FOV (>180°)**
+**Extreme FOV (>180°, up to 220°)**
+- Automotive/robotics surround-view: **F-Theta**
 - Omnidirectional: **EUCM** or **Double Sphere**
 - Best accuracy: **Double Sphere** (higher computational cost)
 - Good balance: **EUCM**
@@ -148,62 +158,21 @@ All models implement the `CameraModel` trait providing a unified interface for p
 **Camera Calibration:**
 - Match your calibration tool:
   - OpenCV: **RadTan** or **Kannala-Brandt** (fisheye)
-  - Kalibr: **Equidistant** or **EUCM**
+  - Kalibr: **Kannala-Brandt** (called "equidistant" in Kalibr) or **EUCM**
   - Bundler/BAL: **BAL Pinhole Strict**
 
 **Robotics / Autonomous Vehicles:**
 - 360° cameras: **Double Sphere** or **EUCM**
+- Surround-view fisheye (automotive): **F-Theta** (NVIDIA DriveWorks)
 - Fisheye: **Kannala-Brandt**
 - Standard: **RadTan**
 
 ## Mathematical Background
 
-### Camera Coordinate System
-
-All camera models follow the standard computer vision convention:
-- **X-axis**: Points right
-- **Y-axis**: Points down
-- **Z-axis**: Points forward (into the scene)
-
-**Exception**: BAL Pinhole models use the Bundler convention where the camera looks down the **-Z axis** (negative Z is in front of camera).
-
-### Projection Process
-
-Camera models transform 3D points in camera coordinates to 2D image pixels:
-
-```
-3D Point (x, y, z) → Normalized Coordinates → Distortion → Image Coordinates (u, v)
-```
-
-1. **Normalization**: Project 3D point onto a normalized plane
-2. **Distortion**: Apply model-specific distortion
-3. **Image Formation**: Scale and shift to pixel coordinates
-
-### Unprojection Process
-
-Inverse operation to recover a 3D ray from 2D pixels:
-
-```
-2D Pixel (u, v) → Normalized Coordinates → Undistortion → 3D Ray Direction
-```
-
-Most models use iterative methods (Newton-Raphson) for undistortion.
-
-### Jacobian Matrices
-
-All models provide three Jacobian matrices for optimization:
-
-1. **Point Jacobian** ∂(u,v)/∂(x,y,z): 2×3 matrix
-   - Derivatives of projection w.r.t. 3D point coordinates
-   - Used in: Structure optimization, triangulation
-
-2. **Pose Jacobian** ∂(u,v)/∂(pose): 2×6 matrix  
-   - Derivatives w.r.t. SE(3) camera pose (6-DOF: translation + rotation)
-   - Used in: Pose estimation, visual odometry, SLAM
-
-3. **Intrinsic Jacobian** ∂(u,v)/∂(intrinsics): 2×N matrix (N = parameter count)
-   - Derivatives w.r.t. camera parameters (fx, fy, cx, cy, distortion)
-   - Used in: Camera calibration, self-calibration bundle adjustment
+Coordinate conventions, projection / unprojection equations, and the full Jacobian
+derivations live in the [cookbook](doc/cookbook/src/introduction.md). All models
+follow the standard computer vision RDF frame (`+Z` forward) except for the BAL Pinhole
+family, which uses the Bundler convention (`-Z` forward).
 
 ## Features
 
@@ -251,7 +220,7 @@ All camera models use a unified `CameraModelError` enum with structured variants
 
 ```toml
 [dependencies]
-apex-camera-models = "0.1.0"
+apex-camera-models = "0.3.0"
 ```
 
 ## Usage
@@ -269,6 +238,29 @@ match camera.project(&point_3d) {
     Ok(pixel) => println!("Projected to pixel: ({}, {})", pixel.x, pixel.y),
     Err(e) => println!("Projection failed: {}", e), // Shows actual values in error
 }
+```
+
+### F-Theta Projection (Automotive / Robotics)
+
+```rust
+use apex_camera_models::FThetaCamera;
+use nalgebra::Vector3;
+
+// Parameters: [cx, cy, k1, k2, k3, k4] — k1 acts as focal length (pixels/radian)
+let camera = FThetaCamera::from([640.0, 400.0, 800.0, -0.5, 0.1, -0.01]);
+
+// Can project points at extreme off-axis angles (e.g., >90°)
+let point_3d = Vector3::new(2.0, 0.0, 1.0); // ~63° off optical axis
+match camera.project(&point_3d) {
+    Ok(pixel) => println!("F-Theta projected to: ({:.1}, {:.1})", pixel.x, pixel.y),
+    Err(e) => println!("Projection failed: {}", e),
+}
+
+// Unproject a pixel back to a 3D ray (Newton-Raphson iteration)
+let pixel = nalgebra::Vector2::new(640.0, 400.0); // principal point
+let ray = camera.unproject(&pixel).unwrap();
+println!("Unprojected ray: ({:.3}, {:.3}, {:.3})", ray.x, ray.y, ray.z);
+// → (0.000, 0.000, 1.000)
 ```
 
 ### Parameter Validation
@@ -335,51 +327,57 @@ For multi-camera systems where each camera may have different intrinsics:
 
 ```rust
 use apex_camera_models::{RadTanCamera, CameraModel, SelfCalibration};
+use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
-use std::collections::HashMap;
+use apex_solver::{JacobianMode, ManifoldType};
+use nalgebra::DVector;
 
 fn bundle_adjustment_per_camera_intrinsics() {
-    let mut problem = Problem::new();
-    let mut initial_values = HashMap::new();
-    
-    // Add variables for each camera's intrinsics separately
-    for camera_id in 0..num_cameras {
-        initial_values.insert(
-            format!("intrinsics_{}", camera_id),
-            (ManifoldType::RN, DVector::from_vec(vec![
-                cameras[camera_id].fx,
-                cameras[camera_id].fy,
-                cameras[camera_id].cx,
-                cameras[camera_id].cy,
-                cameras[camera_id].k1,
-                cameras[camera_id].k2,
-                cameras[camera_id].p1,
-                cameras[camera_id].p2,
-                cameras[camera_id].k3,
-            ]))
+    let mut problem = Problem::new(JacobianMode::Sparse);
+
+    // Add camera poses, landmarks, and per-camera intrinsics -- returns VarKey handles
+    let mut pose_keys = Vec::new();
+    let mut landmark_keys = Vec::new();
+    let mut intrinsics_keys = Vec::new();
+
+    for camera in &cameras {
+        let pose = problem.add_variable(ManifoldType::SE3, camera.initial_pose.clone());
+        let intr = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![
+                camera.fx, camera.fy, camera.cx, camera.cy,
+                camera.k1, camera.k2, camera.p1, camera.p2, camera.k3,
+            ]),
         );
+        pose_keys.push(pose);
+        intrinsics_keys.push(intr);
     }
-    
-    // Add projection factors linking pose + landmark + camera intrinsics
+
+    for landmark in &landmarks {
+        let pt = problem.add_variable(ManifoldType::RN, landmark.position.clone());
+        landmark_keys.push(pt);
+    }
+
+    // Add projection factors linking pose + landmark + camera intrinsics via VarKey
     for observation in &observations {
         let camera = RadTanCamera::from_params(&intrinsics[observation.camera_id]);
-        let factor: ProjectionFactor<RadTanCamera, SelfCalibration> = 
+        let factor: ProjectionFactor<RadTanCamera, SelfCalibration> =
             ProjectionFactor::new(measurements, camera);
-        
+
         problem.add_residual_block(
             &[
-                &format!("pose_{}", observation.camera_id),
-                &format!("landmark_{}", observation.point_id),
-                &format!("intrinsics_{}", observation.camera_id)
+                pose_keys[observation.camera_id],
+                landmark_keys[observation.point_id],
+                intrinsics_keys[observation.camera_id],
             ],
             Box::new(factor),
             Some(Box::new(HuberLoss::new(1.0))),
         );
     }
-    
+
     // Solve with Levenberg-Marquardt
     let mut solver = LevenbergMarquardt::for_bundle_adjustment();
-    let result = solver.optimize(&problem, &initial_values).unwrap();
+    let result = solver.optimize(&mut problem).unwrap();
 }
 ```
 
@@ -410,40 +408,11 @@ problem.add_residual_block(&[...], Box::new(factor1), None);
 - `nalgebra`: Linear algebra primitives
 - `apex-manifolds`: SE(3) pose representation and Lie group operations
 
-## Acknowledgments
+## References
 
-This crate's camera models are based on implementations and formulas from:
+The full bibliography (primary, academic, and survey references) lives in the
+[cookbook references page](doc/cookbook/src/references.md).
 
-### Primary References
-
-- **[Camera Model Survey (ArXiv)](https://arxiv.org/html/2407.12405v3)**: Comprehensive survey of camera projection models with mathematical formulations and comparisons. Primary source for model equations and implementation details.
-
-- **[fisheye-calib-adapter](https://github.com/eowjd0512/fisheye-calib-adapter)**: Fisheye camera calibration and adaptation techniques. Reference implementation for fisheye distortion models and calibration workflows.
-
-- **[Granite VIO](https://github.com/DLR-RM/granite/tree/master/thirdparty/granite-headers/include/granite/camera)**: High-quality camera model implementations from DLR's visual-inertial odometry system. Reference for Double Sphere, EUCM, and other omnidirectional models.
-
-### Academic References
-
-- **Kannala & Brandt** (2006). "A Generic Camera Model and Calibration Method for Conventional, Wide-Angle, and Fish-Eye Lenses". *IEEE TPAMI*.
-  - Foundation for Kannala-Brandt fisheye model
-
-- **Usenko et al.** (2018). "The Double Sphere Camera Model". *3DV*.
-  - Double Sphere omnidirectional model
-
-- **Mei & Rives** (2007). "Single View Point Omnidirectional Camera Calibration from Planar Grids". *ICRA*.
-  - Unified Camera Model (UCM) foundation
-
-- **Khomutenko et al.** (2016). "An Enhanced Unified Camera Model". *RA-L*.
-  - Enhanced Unified Camera Model (EUCM)
-
-- **Brown, D.C.** (1966). "Decentering Distortion of Lenses". *Photogrammetric Engineering*.
-  - Radial-Tangential distortion model
-
-### Software References
-
-- **OpenCV**: Reference implementation for RadTan and Kannala-Brandt models
-- **Kalibr**: Multi-camera calibration toolbox with Equidistant and EUCM support
-- **Ceres Solver**: Bundle adjustment examples and BAL dataset format
 
 ## License
 

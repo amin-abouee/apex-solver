@@ -51,8 +51,8 @@
 //! use apex_solver::core::corrector::Corrector;
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use nalgebra::{DVector, DMatrix};
-//! # use apex_solver::error::ApexSolverResult;
-//! # fn example() -> ApexSolverResult<()> {
+//! # use apex_solver::core::CoreResult;
+//! # fn example() -> CoreResult<()> {
 //!
 //! // Create a robust loss function
 //! let loss = HuberLoss::new(1.0)?;
@@ -127,8 +127,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let residual = DVector::from_vec(vec![1.0, 2.0, 3.0]);
@@ -210,8 +210,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::{DVector, DMatrix};
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let residual = DVector::from_vec(vec![2.0, 1.0]);
@@ -274,8 +274,8 @@ impl Corrector {
     /// use apex_solver::core::corrector::Corrector;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use nalgebra::DVector;
-    /// # use apex_solver::error::ApexSolverResult;
-    /// # fn example() -> ApexSolverResult<()> {
+    /// # use apex_solver::core::CoreResult;
+    /// # fn example() -> CoreResult<()> {
     ///
     /// let loss = HuberLoss::new(1.0)?;
     /// let mut residual = DVector::from_vec(vec![2.0, 3.0, 1.0]);
@@ -295,6 +295,58 @@ impl Corrector {
         // This downweights outliers (where ρ'(s) < 1) and leaves inliers
         // approximately unchanged (where ρ'(s) ≈ 1)
         *residual *= self.residual_scaling;
+    }
+
+    /// In-place residual correction over a flat slice. Equivalent to
+    /// `correct_residuals` but does not require a `DVector` wrapper.
+    #[inline]
+    pub fn correct_residual_in_place(&self, residual: &mut [f64]) {
+        let s = self.residual_scaling;
+        for r in residual.iter_mut() {
+            *r *= s;
+        }
+    }
+
+    /// In-place Jacobian correction over a column-major (rows × cols) buffer.
+    ///
+    /// `jac.len() == rows * cols`, `residual.len() == rows`. The math is
+    /// identical to [`Corrector::correct_jacobian`] but operates directly on
+    /// flat memory — no `DVector`/`DMatrix` allocation or copy.
+    ///
+    /// Formula: J̃ = √ρ₁ · (J − α²·r·rᵀ·J)
+    #[inline]
+    pub fn correct_jacobian_in_place(
+        &self,
+        residual: &[f64],
+        jac: &mut [f64],
+        rows: usize,
+        cols: usize,
+    ) {
+        debug_assert_eq!(jac.len(), rows * cols);
+        debug_assert_eq!(residual.len(), rows);
+
+        if self.alpha_sq_norm == 0.0 {
+            let s = self.sqrt_rho1;
+            for v in jac.iter_mut() {
+                *v *= s;
+            }
+            return;
+        }
+
+        let alpha = self.alpha_sq_norm;
+        let scale = self.sqrt_rho1;
+        for c in 0..cols {
+            let col = &mut jac[c * rows..c * rows + rows];
+            // u_c = <r, col>
+            let mut u_c = 0.0;
+            for i in 0..rows {
+                u_c += residual[i] * col[i];
+            }
+            let factor = alpha * u_c;
+            for i in 0..rows {
+                col[i] = scale * (col[i] - factor * residual[i]);
+            }
+        }
     }
 }
 

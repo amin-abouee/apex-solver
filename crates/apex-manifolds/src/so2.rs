@@ -3,14 +3,15 @@
 //! This module implements the Special Orthogonal group SO(2), which represents
 //! rotations in 2D space.
 //!
-//! SO(2) elements are represented using nalgebra's UnitComplex internally.
-//! SO(2) tangent elements are represented as a single angle in radians.
+//! SO(2) elements are stored as a single angle θ (radians). UnitComplex is
+//! constructed on-the-fly for math operations. This gives contiguous single-float
+//! storage compatible with zero-copy faer views.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 
 use crate::{LieGroup, Tangent};
-use nalgebra::{DVector, Matrix1, Matrix2, Matrix3, UnitComplex, Vector2, Vector3};
+use nalgebra::{Matrix1, Matrix2, Matrix3, UnitComplex, Vector2, Vector3};
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -18,29 +19,17 @@ use std::{
 
 /// SO(2) group element representing rotations in 2D.
 ///
-/// Internally represented using nalgebra's UnitComplex<f64> for efficient rotations.
+/// Stored as a single angle θ (radians). UnitComplex is derived on demand for
+/// math operations, keeping storage minimal and contiguous.
 #[derive(Clone, PartialEq)]
 pub struct SO2 {
-    /// Internal representation as a unit complex number
-    complex: UnitComplex<f64>,
+    /// Rotation angle in radians
+    theta: f64,
 }
 
 impl Display for SO2 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "SO2(angle: {:.4})", self.complex.angle())
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SO2 {
-    fn from(data: DVector<f64>) -> Self {
-        SO2::from_angle(data[0])
-    }
-}
-
-impl From<SO2> for DVector<f64> {
-    fn from(so2: SO2) -> Self {
-        DVector::from_vec(vec![so2.complex.angle()])
+        write!(f, "SO2(angle: {:.4})", self.theta)
     }
 }
 
@@ -51,95 +40,71 @@ impl SO2 {
     /// Degrees of freedom - dimension of the tangent space
     pub const DOF: usize = 1;
 
-    /// Representation size - size of the underlying data representation
-    pub const REP_SIZE: usize = 2;
+    /// Representation size - one angle θ
+    pub const REP_SIZE: usize = 1;
 
     /// Get the identity element of the group.
-    ///
-    /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
-        SO2 {
-            complex: UnitComplex::identity(),
-        }
+        SO2 { theta: 0.0 }
     }
 
     /// Get the identity matrix for Jacobians.
-    ///
-    /// Returns the identity matrix in the appropriate dimension for Jacobian computations.
     pub fn jacobian_identity() -> Matrix1<f64> {
         Matrix1::<f64>::identity()
     }
 
     /// Create a new SO(2) element from a unit complex number.
-    ///
-    /// # Arguments
-    /// * `complex` - Unit complex number representing rotation
     #[inline]
     pub fn new(complex: UnitComplex<f64>) -> Self {
-        SO2 { complex }
+        SO2 {
+            theta: complex.angle(),
+        }
     }
 
     /// Create SO(2) from an angle.
-    ///
-    /// # Arguments
-    /// * `angle` - Rotation angle in radians
     pub fn from_angle(angle: f64) -> Self {
-        SO2::new(UnitComplex::from_angle(angle))
+        SO2 { theta: angle }
+    }
+
+    /// Derive a UnitComplex from the stored angle (on-the-fly).
+    #[inline]
+    fn unit_complex(&self) -> UnitComplex<f64> {
+        UnitComplex::new(self.theta)
     }
 
     /// Get the underlying unit complex number.
     pub fn complex(&self) -> UnitComplex<f64> {
-        self.complex
+        self.unit_complex()
     }
 
     /// Get the rotation angle in radians.
     #[inline]
     pub fn angle(&self) -> f64 {
-        self.complex.angle()
+        self.theta
     }
 
     /// Get the rotation matrix (2x2).
     pub fn rotation_matrix(&self) -> Matrix2<f64> {
-        self.complex.to_rotation_matrix().into_inner()
+        self.unit_complex().to_rotation_matrix().into_inner()
     }
 }
 
 impl LieGroup for SO2 {
+    const NAME: &'static str = "SO2";
+
     type TangentVector = SO2Tangent;
     type JacobianMatrix = Matrix1<f64>;
     type LieAlgebra = Matrix2<f64>;
 
-    /// SO2 inverse.
-    ///
-    /// # Arguments
-    /// * `jacobian` - Optional Jacobian matrix of the inverse wrt self.
-    ///
-    /// # Notes
-    /// # Equation 118: SO(2) Inverse
-    /// R(θ)⁻¹ = R(-θ)
-    ///
-    /// # Equation 124: Jacobian of Inverse for SO(2)
-    /// J_R⁻¹_R = -I
+    /// SO2 inverse: R(θ)⁻¹ = R(-θ).
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
-        SO2 {
-            complex: self.complex.inverse(),
-        }
+        SO2 { theta: -self.theta }
     }
 
-    /// SO2 composition.
-    ///
-    /// # Arguments
-    /// * `other` - Another SO2 element.
-    /// * `jacobian_self` - Optional Jacobian matrix of the composition wrt self.
-    /// * `jacobian_other` - Optional Jacobian matrix of the composition wrt other.
-    ///
-    /// # Notes
-    /// # Equation 125: Jacobian of Composition for SO(2)
-    /// J_C_A = I
-    /// J_C_B = I
+    /// SO2 composition: angles add, wrapped via UnitComplex to stay in [-π, π].
     fn compose(
         &self,
         other: &Self,
@@ -153,42 +118,21 @@ impl LieGroup for SO2 {
             *jac_other = Matrix1::identity();
         }
         SO2 {
-            complex: self.complex * other.complex,
+            theta: (self.unit_complex() * other.unit_complex()).angle(),
         }
     }
 
-    /// Get the SO2 corresponding Lie algebra element in vector form.
-    ///
-    /// # Arguments
-    /// * `jacobian` - Optional Jacobian matrix of the tangent wrt to self.
-    ///
-    /// # Notes
-    /// # Equation 115: Logarithmic map for SO(2)
-    /// θ = atan2(R(1,0), R(0,0))
-    ///
-    /// # Equation 126: Jacobian of Logarithmic map for SO(2)
-    /// J_log_R = I
+    /// Logarithmic map: returns the canonical angle in [-π, π].
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
         if let Some(jac) = jacobian {
             *jac = Matrix1::identity();
         }
         SO2Tangent {
-            data: self.complex.angle(),
+            data: self.unit_complex().angle(),
         }
     }
 
-    /// Rotation action on a 3-vector.
-    ///
-    /// # Arguments
-    /// * `v` - A 3-vector.
-    /// * `jacobian_self` - Optional Jacobian of the new object wrt this.
-    /// * `jacobian_vector` - Optional Jacobian of the new object wrt input object.
-    ///
-    /// # Returns
-    /// The rotated 3-vector.
-    ///
-    /// # Notes
-    /// This is a convenience function that treats the 3D vector as a 2D vector and ignores the z component.
+    /// Rotation action on a 3-vector (operates on the xy-plane).
     fn act(
         &self,
         vector: &Vector3<f64>,
@@ -196,19 +140,15 @@ impl LieGroup for SO2 {
         _jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
         let point2d = Vector2::new(vector.x, vector.y);
-        let rotated_point = self.complex * point2d;
-        Vector3::new(rotated_point.x, rotated_point.y, vector.z)
+        let rotated = self.unit_complex() * point2d;
+        Vector3::new(rotated.x, rotated.y, vector.z)
     }
 
-    /// Get the adjoint matrix of SO2 at this.
-    ///
-    /// # Notes
-    /// See Eq. (123).
+    /// Adjoint for SO(2) is identity (abelian group).
     fn adjoint(&self) -> Self::JacobianMatrix {
         Matrix1::identity()
     }
 
-    /// Generate a random element.
     fn random() -> Self {
         SO2::from_angle(rand::random::<f64>() * 2.0 * std::f64::consts::PI)
     }
@@ -221,33 +161,36 @@ impl LieGroup for SO2 {
         Matrix1::<f64>::zeros()
     }
 
-    /// Normalize the underlying complex number.
+    /// Normalize: wrap angle to [-π, π] using UnitComplex.
     fn normalize(&mut self) {
-        self.complex.renormalize();
+        self.theta = self.unit_complex().angle();
     }
 
-    /// Check if the element is valid.
-    fn is_valid(&self, tolerance: f64) -> bool {
-        let norm_diff = (self.complex.norm() - 1.0).abs();
-        norm_diff < tolerance
+    /// Any finite angle is valid.
+    fn is_valid(&self, _tolerance: f64) -> bool {
+        self.theta.is_finite()
     }
 
-    /// Vee operator: log(g)^∨.
-    ///
-    /// Maps a group element g ∈ G to its tangent vector log(g)^∨ ∈ 𝔤.
-    /// For SO(2), this is the same as log().
     fn vee(&self) -> Self::TangentVector {
         self.log(None)
     }
 
-    /// Check if the element is approximately equal to another element.
-    ///
-    /// # Arguments
-    /// * `other` - The other element to compare with
-    /// * `tolerance` - The tolerance for the comparison
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool {
         let difference = self.right_minus(other, None, None);
         difference.is_zero(tolerance)
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        std::slice::from_ref(&self.theta)
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        std::slice::from_mut(&mut self.theta)
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 1);
+        SO2 { theta: s[0] }
     }
 }
 
@@ -263,21 +206,6 @@ pub struct SO2Tangent {
 impl fmt::Display for SO2Tangent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "so2(angle: {:.4})", self.data)
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SO2Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        SO2Tangent {
-            data: data_vector[0],
-        }
-    }
-}
-
-impl From<SO2Tangent> for DVector<f64> {
-    fn from(so2_tangent: SO2Tangent) -> Self {
-        DVector::from_vec(vec![so2_tangent.data])
     }
 }
 
@@ -374,6 +302,15 @@ impl Tangent<SO2> for SO2Tangent {
         } else {
             SO2Tangent::new(0.0)
         }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        std::slice::from_ref(&self.data)
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 1);
+        SO2Tangent { data: s[0] }
     }
 
     /// Small adjoint matrix for SO(2).
@@ -660,22 +597,18 @@ mod tests {
     }
 
     #[test]
-    fn test_so2_from_dvector_and_back() {
+    fn test_so2_from_slice_and_back() {
         let angle = 1.0f64;
-        let v = DVector::from_vec(vec![angle]);
-        let r = SO2::from(v);
-        // The From<DVector> implementation treats data[0] as angle
-        let back: DVector<f64> = DVector::from(r);
+        let r = SO2::from_param_slice(&[angle]);
+        let back = DVector::from_column_slice(r.as_param_slice());
         assert_eq!(back.len(), 1);
-        // angle should be preserved (modulo wrapping)
         assert!((back[0] - angle).abs() < 1e-9);
     }
 
     #[test]
-    fn test_so2_tangent_from_dvector_and_back() {
-        let v = DVector::from_vec(vec![0.7f64]);
-        let t = SO2Tangent::from(v);
-        let v2: DVector<f64> = DVector::from(t);
+    fn test_so2_tangent_from_slice_and_back() {
+        let t = SO2Tangent::from_slice(&[0.7f64]);
+        let v2 = DVector::from_column_slice(t.as_slice());
         assert!((v2[0] - 0.7).abs() < 1e-10);
     }
 
@@ -804,5 +737,19 @@ mod tests {
         use crate::Tangent;
         let zero = SO2Tangent::zero();
         assert!(zero.is_zero(1e-9));
+    }
+
+    #[test]
+    fn so2_param_slice_round_trip() {
+        let g = SO2::random();
+        let recovered = SO2::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn so2_tangent_slice_round_trip() {
+        let t = SO2Tangent::random();
+        let recovered = SO2Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }

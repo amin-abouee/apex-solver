@@ -26,7 +26,7 @@ use crate::{
     LieGroup, Tangent,
     so3::{SO3, SO3Tangent},
 };
-use nalgebra::{DVector, Matrix3, Quaternion, SMatrix, SVector, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 
 /// Type alias for 9x1 vector
 pub type Vector9<T> = SVector<T, 9>;
@@ -39,15 +39,11 @@ use std::{
 
 /// SE_2(3) group element representing extended pose transformations in 3D.
 ///
-/// Represented as (rotation, translation, velocity).
+/// Stored as a flat `SVector<f64, 10>` = [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz].
 #[derive(Clone, PartialEq)]
 pub struct SE23 {
-    /// Rotation part as SO(3) element
-    rotation: SO3,
-    /// Translation part (position) as Vector3
-    translation: Vector3<f64>,
-    /// Velocity part as Vector3
-    velocity: Vector3<f64>,
+    /// Flat parameter storage: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
+    params: SVector<f64, 10>,
 }
 
 impl Display for SE23 {
@@ -73,12 +69,40 @@ impl SE23 {
     /// Representation size - size of the underlying data representation
     pub const REP_SIZE: usize = 10;
 
+    #[inline]
+    fn translation_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[0], self.params[1], self.params[2])
+    }
+
+    #[inline]
+    fn velocity_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[7], self.params[8], self.params[9])
+    }
+
+    #[inline]
+    fn rotation_impl(&self) -> SO3 {
+        SO3::from_quaternion_wxyz(
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+        )
+    }
+
+    #[inline]
+    fn from_parts(t: Vector3<f64>, v: Vector3<f64>, r: &SO3) -> Self {
+        let q = r.params();
+        SE23 {
+            params: SVector::<f64, 10>::from([
+                t.x, t.y, t.z, q[0], q[1], q[2], q[3], v.x, v.y, v.z,
+            ]),
+        }
+    }
+
     /// Get the identity element of the group.
     pub fn identity() -> Self {
         SE23 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
-            velocity: Vector3::zeros(),
+            params: SVector::<f64, 10>::from([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
         }
     }
 
@@ -88,21 +112,12 @@ impl SE23 {
     }
 
     /// Create a new SE_2(3) element from translation, velocity, and rotation.
-    ///
-    /// # Arguments
-    /// * `translation` - Position vector [x, y, z]
-    /// * `velocity` - Velocity vector [vx, vy, vz]
-    /// * `rotation` - Unit quaternion representing rotation
     pub fn new(
         translation: Vector3<f64>,
         velocity: Vector3<f64>,
         rotation: UnitQuaternion<f64>,
     ) -> Self {
-        SE23 {
-            rotation: SO3::new(rotation),
-            translation,
-            velocity,
-        }
+        SE23::from_parts(translation, velocity, &SO3::new(rotation))
     }
 
     /// Create SE_2(3) from components.
@@ -111,137 +126,93 @@ impl SE23 {
         velocity: Vector3<f64>,
         rotation: SO3,
     ) -> Self {
-        SE23 {
-            rotation,
-            translation,
-            velocity,
-        }
+        SE23::from_parts(translation, velocity, &rotation)
     }
 
     /// Get the translation part as a Vector3.
     pub fn translation(&self) -> Vector3<f64> {
-        self.translation
+        self.translation_impl()
     }
 
     /// Get the velocity part as a Vector3.
     pub fn velocity(&self) -> Vector3<f64> {
-        self.velocity
+        self.velocity_impl()
     }
 
     /// Get the rotation part as SO3.
     pub fn rotation_so3(&self) -> SO3 {
-        self.rotation.clone()
+        self.rotation_impl()
     }
 
     /// Get the rotation part as a UnitQuaternion.
     pub fn rotation_quaternion(&self) -> UnitQuaternion<f64> {
-        self.rotation.quaternion()
+        self.rotation_impl().quaternion()
     }
 
     /// Get the x component of translation.
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.params[0]
     }
-
     /// Get the y component of translation.
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.params[1]
     }
-
     /// Get the z component of translation.
     pub fn z(&self) -> f64 {
-        self.translation.z
+        self.params[2]
     }
-
     /// Get the vx component of velocity.
     pub fn vx(&self) -> f64 {
-        self.velocity.x
+        self.params[7]
     }
-
     /// Get the vy component of velocity.
     pub fn vy(&self) -> f64 {
-        self.velocity.y
+        self.params[8]
     }
-
     /// Get the vz component of velocity.
     pub fn vz(&self) -> f64 {
-        self.velocity.z
+        self.params[9]
     }
 
     /// Get the rotation matrix (3x3).
     pub fn rotation_matrix(&self) -> Matrix3<f64> {
-        self.rotation.rotation_matrix()
+        self.rotation_impl().rotation_matrix()
     }
 
     /// Get the parameter vector [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz].
     pub fn coeffs(&self) -> [f64; 10] {
-        let q = self.rotation.quaternion();
         [
-            self.translation.x,
-            self.translation.y,
-            self.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            self.velocity.x,
-            self.velocity.y,
-            self.velocity.z,
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+            self.params[7],
+            self.params[8],
+            self.params[9],
         ]
     }
 
     /// Get the 5x5 homogeneous matrix representation.
-    ///
-    /// ```text
-    /// [ R   t   v ]
-    /// [ 0   1   0 ]
-    /// [ 0   0   1 ]
-    /// ```
     pub fn matrix(&self) -> SMatrix<f64, 5, 5> {
         let mut mat = SMatrix::<f64, 5, 5>::identity();
         let rot = self.rotation_matrix();
         mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
-        mat[(0, 3)] = self.translation.x;
-        mat[(1, 3)] = self.translation.y;
-        mat[(2, 3)] = self.translation.z;
-        mat[(0, 4)] = self.velocity.x;
-        mat[(1, 4)] = self.velocity.y;
-        mat[(2, 4)] = self.velocity.z;
+        mat[(0, 3)] = self.params[0];
+        mat[(1, 3)] = self.params[1];
+        mat[(2, 3)] = self.params[2];
+        mat[(0, 4)] = self.params[7];
+        mat[(1, 4)] = self.params[8];
+        mat[(2, 4)] = self.params[9];
         mat
     }
 }
 
-impl From<DVector<f64>> for SE23 {
-    /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
-    fn from(data: DVector<f64>) -> Self {
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let q = Quaternion::new(data[3], data[4], data[5], data[6]);
-        let rotation = SO3::new(UnitQuaternion::from_quaternion(q));
-        let velocity = Vector3::new(data[7], data[8], data[9]);
-        SE23::from_components(translation, velocity, rotation)
-    }
-}
-
-impl From<SE23> for DVector<f64> {
-    /// Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
-    fn from(val: SE23) -> Self {
-        let q = val.rotation.quaternion();
-        DVector::from_vec(vec![
-            val.translation.x,
-            val.translation.y,
-            val.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-            val.velocity.x,
-            val.velocity.y,
-            val.velocity.z,
-        ])
-    }
-}
-
 impl LieGroup for SE23 {
+    const NAME: &'static str = "SE23";
+
     type TangentVector = SE23Tangent;
     type JacobianMatrix = Matrix9<f64>;
     type LieAlgebra = SMatrix<f64, 5, 5>;
@@ -250,15 +221,16 @@ impl LieGroup for SE23 {
     ///
     /// For SE_2(3): g^{-1} = (R^T, -R^T * t, -R^T * v)
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let rot_inv = self.rotation.inverse(None);
-        let trans_inv = -rot_inv.act(&self.translation, None, None);
-        let vel_inv = -rot_inv.act(&self.velocity, None, None);
+        let rot = self.rotation_impl();
+        let rot_inv = rot.inverse(None);
+        let trans_inv = -rot_inv.act(&self.translation_impl(), None, None);
+        let vel_inv = -rot_inv.act(&self.velocity_impl(), None, None);
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        SE23::from_components(trans_inv, vel_inv, rot_inv)
+        SE23::from_parts(trans_inv, vel_inv, &rot_inv)
     }
 
     /// Composition of this and another SE_2(3) element.
@@ -270,13 +242,13 @@ impl LieGroup for SE23 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let composed_rotation = self.rotation.compose(&other.rotation, None, None);
+        let rot = self.rotation_impl();
+        let composed_rotation = rot.compose(&other.rotation_impl(), None, None);
         let composed_translation =
-            self.rotation.act(&other.translation, None, None) + self.translation;
-        let composed_velocity = self.rotation.act(&other.velocity, None, None) + self.velocity;
+            rot.act(&other.translation_impl(), None, None) + self.translation_impl();
+        let composed_velocity = rot.act(&other.velocity_impl(), None, None) + self.velocity_impl();
 
-        let result =
-            SE23::from_components(composed_translation, composed_velocity, composed_rotation);
+        let result = SE23::from_parts(composed_translation, composed_velocity, &composed_rotation);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -291,12 +263,12 @@ impl LieGroup for SE23 {
 
     /// Logarithmic map from SE_2(3) to its tangent space.
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        let theta = self.rotation.log(None);
+        let theta = self.rotation_impl().log(None);
         let mut data = Vector9::zeros();
 
         let v_inv = theta.left_jacobian_inv();
-        let translation_vector = v_inv * self.translation;
-        let velocity_vector = v_inv * self.velocity;
+        let translation_vector = v_inv * self.translation_impl();
+        let velocity_vector = v_inv * self.velocity_impl();
 
         data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
@@ -317,10 +289,11 @@ impl LieGroup for SE23 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        let result = self.rotation.act(vector, None, None) + self.translation;
+        let rot = self.rotation_impl();
+        let rotation_matrix = rot.rotation_matrix();
+        let result = rot.act(vector, None, None) + self.translation_impl();
 
         if let Some(jac_self) = jacobian_self {
-            let rotation_matrix = self.rotation.rotation_matrix();
             jac_self
                 .fixed_view_mut::<3, 3>(0, 0)
                 .copy_from(&rotation_matrix);
@@ -331,16 +304,16 @@ impl LieGroup for SE23 {
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            *jac_vector = self.rotation.rotation_matrix();
+            *jac_vector = rotation_matrix;
         }
 
         result
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        let rotation_matrix = self.rotation.rotation_matrix();
-        let translation = self.translation;
-        let velocity = self.velocity;
+        let rotation_matrix = self.rotation_impl().rotation_matrix();
+        let translation = self.translation_impl();
+        let velocity = self.velocity_impl();
         let mut adjoint_matrix = Matrix9::zeros();
 
         // Block structure:
@@ -396,15 +369,36 @@ impl LieGroup for SE23 {
 
         let rotation = SO3::random();
 
-        SE23::from_components(translation, velocity, rotation)
+        SE23::from_parts(translation, velocity, &rotation)
     }
 
     fn normalize(&mut self) {
-        self.rotation.normalize();
+        let mut rot = self.rotation_impl();
+        rot.normalize();
+        let q = rot.params();
+        self.params[3] = q[0];
+        self.params[4] = q[1];
+        self.params[5] = q[2];
+        self.params[6] = q[3];
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        self.rotation.is_valid(tolerance)
+        self.rotation_impl().is_valid(tolerance)
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 10);
+        SE23 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     fn vee(&self) -> Self::TangentVector {
@@ -447,20 +441,6 @@ impl fmt::Display for SE23Tangent {
             "se_2_3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}], nu: [{:.4}, {:.4}, {:.4}])",
             rho.x, rho.y, rho.z, theta.x, theta.y, theta.z, nu.x, nu.y, nu.z
         )
-    }
-}
-
-impl From<DVector<f64>> for SE23Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        SE23Tangent {
-            data: Vector9::from_iterator(data_vector.iter().copied()),
-        }
-    }
-}
-
-impl From<SE23Tangent> for DVector<f64> {
-    fn from(tangent: SE23Tangent) -> Self {
-        DVector::from_vec(tangent.data.as_slice().to_vec())
     }
 }
 
@@ -570,7 +550,7 @@ impl Tangent<SE23> for SE23Tangent {
             *jac = self.right_jacobian();
         }
 
-        SE23::from_components(translation, velocity, rotation)
+        SE23::from_parts(translation, velocity, &rotation)
     }
 
     /// Right Jacobian for SE_2(3).
@@ -732,6 +712,17 @@ impl Tangent<SE23> for SE23Tangent {
             SE23Tangent::new(self.rho(), self.theta() / norm, self.nu())
         } else {
             SE23Tangent::new(self.rho(), Vector3::zeros(), self.nu())
+        }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 9);
+        SE23Tangent {
+            data: Vector9::from_column_slice(s),
         }
     }
 
@@ -1174,6 +1165,7 @@ mod tests {
         let se_2_3 = SE23::new(translation, velocity, rotation);
         let c = se_2_3.coeffs();
 
+        // Layout: [tx, ty, tz, qw, qx, qy, qz, vx, vy, vz]
         assert!((c[0] - 1.0).abs() < TOLERANCE);
         assert!((c[1] - 2.0).abs() < TOLERANCE);
         assert!((c[2] - 3.0).abs() < TOLERANCE);
@@ -1331,10 +1323,9 @@ mod tests {
     }
 
     #[test]
-    fn test_se23_dvector_round_trip() {
+    fn test_se23_param_slice_round_trip() {
         let se_2_3 = SE23::random();
-        let dvec: DVector<f64> = se_2_3.clone().into();
-        let recovered = SE23::from(dvec);
+        let recovered = SE23::from_param_slice(se_2_3.as_param_slice());
         assert!(se_2_3.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1443,14 +1434,13 @@ mod tests {
     }
 
     #[test]
-    fn test_se23_tangent_dvector_conversions() {
+    fn test_se23_tangent_slice_round_trip() {
         let tangent = SE23Tangent::new(
             Vector3::new(1.0, 2.0, 3.0),
             Vector3::new(0.1, 0.2, 0.3),
             Vector3::new(4.0, 5.0, 6.0),
         );
-        let dvec: DVector<f64> = tangent.clone().into();
-        let recovered = SE23Tangent::from(dvec);
+        let recovered = SE23Tangent::from_slice(tangent.as_slice());
         assert!(tangent.is_approx(&recovered, TOLERANCE));
     }
 
@@ -1540,5 +1530,19 @@ mod tests {
     fn test_se23_tangent_generator_out_of_range() {
         let tangent = SE23Tangent::zero();
         tangent.generator(9);
+    }
+
+    #[test]
+    fn se23_param_slice_round_trip() {
+        let g = SE23::random();
+        let recovered = SE23::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn se23_tangent_slice_round_trip() {
+        let t = SE23Tangent::random();
+        let recovered = SE23Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }

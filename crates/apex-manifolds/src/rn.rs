@@ -3,8 +3,8 @@
 //! This module implements the n-dimensional Euclidean space Rⁿ with vector addition
 //! as the group operation.
 //!
-//! Rⁿ elements are represented using nalgebra's DVector<f64> for dynamic sizing.
-//! Rⁿ tangent elements are also represented as DVector<f64> since the tangent space
+//! Rⁿ elements are represented using nalgebra's `DVector<f64>` for dynamic sizing.
+//! Rⁿ tangent elements are also represented as `DVector<f64>` since the tangent space
 //! is isomorphic to the manifold itself.
 //!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
@@ -19,7 +19,7 @@ use std::{
 
 /// Rⁿ group element representing n-dimensional Euclidean vectors.
 ///
-/// Internally represented using nalgebra's DVector<f64> for dynamic sizing.
+/// Internally represented using nalgebra's `DVector<f64>` for dynamic sizing.
 #[derive(Clone, PartialEq)]
 pub struct Rn {
     /// Internal representation as a dynamic vector
@@ -55,11 +55,22 @@ impl From<Rn> for DVector<f64> {
 /// Rⁿ tangent space element representing elements in the Lie algebra rⁿ.
 ///
 /// For Euclidean space, the tangent space is isomorphic to the manifold itself,
-/// so this is also represented as a DVector<f64>.
+/// so this is also represented as a `DVector<f64>`.
 #[derive(Clone, PartialEq)]
 pub struct RnTangent {
     /// Internal data: n-dimensional vector
     data: DVector<f64>,
+}
+impl From<DVector<f64>> for RnTangent {
+    fn from(data: DVector<f64>) -> Self {
+        RnTangent::new(data)
+    }
+}
+
+impl From<RnTangent> for DVector<f64> {
+    fn from(rn: RnTangent) -> Self {
+        rn.data
+    }
 }
 
 impl Display for RnTangent {
@@ -169,6 +180,8 @@ impl Rn {
 }
 
 impl LieGroup for Rn {
+    const NAME: &'static str = "Rn";
+
     type TangentVector = RnTangent;
     type JacobianMatrix = DMatrix<f64>;
     type LieAlgebra = DMatrix<f64>;
@@ -313,6 +326,18 @@ impl LieGroup for Rn {
 
     fn is_valid(&self, _tolerance: f64) -> bool {
         self.data.iter().all(|x| x.is_finite())
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.data.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        Rn::from_slice(s)
     }
 
     /// Check if the element is approximately equal to another element.
@@ -663,17 +688,25 @@ impl Tangent<Rn> for RnTangent {
         result.normalize();
         result
     }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        RnTangent::from_slice(s)
+    }
 }
 
 // Implement Interpolatable trait for Rn
 impl Interpolatable for Rn {
     /// Linear interpolation in Euclidean space.
     ///
-    /// For parameter t ∈ [0,1]: interp(v₁, v₂, 0) = v₁, interp(v₁, v₂, 1) = v₂.
+    /// For parameter t ∈ `[0,1]`: interp(v₁, v₂, 0) = v₁, interp(v₁, v₂, 1) = v₂.
     ///
     /// # Arguments
     /// * `other` - Target element for interpolation
-    /// * `t` - Interpolation parameter in [0,1]
+    /// * `t` - Interpolation parameter in `[0,1]`
     fn interp(&self, other: &Self, t: f64) -> Self {
         assert_eq!(
             self.data.len(),
@@ -1301,5 +1334,27 @@ mod tests {
         assert!(rn.is_valid(1e-9));
         // After normalize, it should have unit norm
         assert!((rn.norm() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rn_param_slice_round_trip() {
+        let g = Rn::random_with_dim(4);
+        let recovered = Rn::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn rn_tangent_slice_round_trip() {
+        let t = RnTangent::from_slice(&[1.0, 2.0, 3.0]);
+        let recovered = RnTangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn test_bijective_rn_tangent() {
+        let tangent_expected = RnTangent::from_slice(&[1.0, 2.0, 3.0]);
+        let slice_expected = tangent_expected.as_slice();
+        let tangent_actual = RnTangent::from_slice(slice_expected);
+        assert!(tangent_expected.is_approx(&tangent_actual, 1e-14));
     }
 }

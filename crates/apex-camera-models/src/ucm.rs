@@ -1,41 +1,9 @@
-//! Unified Camera Model (UCM)
+//! Unified Camera Model (UCM).
 //!
-//! A generic camera model for catadioptric and fisheye cameras using
-//! a single parameter α for projection onto a unit sphere.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! d = √(x² + y² + z²)
-//! denom = α·d + (1-α)·z
-//! u = fx · (x/denom) + cx
-//! v = fy · (y/denom) + cy
-//! ```
-//!
-//! where α is the projection parameter (typically α ∈ [0, 1]).
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Algebraic solution using the UCM inverse equations.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: α (projection parameter) (5 parameters total)
-//!
-//! # Use Cases
-//!
-//! - Catadioptric systems (mirror-based omnidirectional cameras)
-//! - Fisheye lenses
-//! - Wide-angle cameras
-//!
-//! # References
-//!
-//! - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems"
+//! Projects via a single shape parameter α onto a virtual unit sphere, generalising
+//! catadioptric and fisheye cameras. Has 5 intrinsic parameters. See the
+//! [ucm cookbook chapter](../doc/cookbook/src/ucm.html) for the full projection,
+//! unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, SMatrix, Vector2, Vector3};
@@ -48,21 +16,24 @@ pub struct UcmCamera {
 }
 
 impl UcmCamera {
-    /// Create a new Unified Camera Model (UCM) camera.
-    ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - Pinhole parameters (fx, fy, cx, cy).
-    /// * `distortion` - MUST be [`DistortionModel::UCM`] with `alpha`.
-    ///
-    /// # Returns
-    ///
-    /// Returns a new `UcmCamera` instance if the distortion model matches.
+    /// Creates a new UCM camera.
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::UCM`].
-    #[must_use]
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::UCM`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, UcmCamera};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::UCM { alpha: 0.5 };
+    /// let camera = UcmCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "ucm");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -75,12 +46,7 @@ impl UcmCamera {
         Ok(camera)
     }
 
-    /// Helper method to extract distortion parameter.
-    ///
-    /// # Returns
-    ///
-    /// Returns the `alpha` parameter for UCM.
-    /// If the distortion model is incorrect (which shouldn't happen for valid instances), returns `0.0`.
+    /// Returns the UCM `alpha` parameter. Returns `0.0` if the model is not UCM.
     fn distortion_params(&self) -> f64 {
         match self.distortion {
             DistortionModel::UCM { alpha } => alpha,
@@ -88,16 +54,9 @@ impl UcmCamera {
         }
     }
 
-    /// Checks the geometric condition for a valid projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point.
-    /// * `d` - The Euclidean distance `√(x² + y² + z²)`.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if `z > -w * d`, where `w` depends on `alpha`.
+    /// Returns `true` if the projection is valid for the given `z` and Euclidean
+    /// distance `d = √(x² + y² + z²)`. The condition is `z > -w·d` where
+    /// `w` depends on `alpha`.
     fn check_projection_condition(&self, z: f64, d: f64) -> bool {
         let alpha = self.distortion_params();
         let w = if alpha <= 0.5 {
@@ -108,15 +67,8 @@ impl UcmCamera {
         z > -w * d
     }
 
-    /// Checks the geometric condition for a valid unprojection.
-    ///
-    /// # Arguments
-    ///
-    /// * `r_squared` - The squared radius in normalized image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if the point satisfies the unprojection condition.
+    /// Returns `true` if the squared normalised radius is within the model's
+    /// unprojection domain (a constraint that only binds for `alpha > 0.5`).
     fn check_unprojection_condition(&self, r_squared: f64) -> bool {
         let alpha = self.distortion_params();
         if alpha > 0.5 {
@@ -127,33 +79,20 @@ impl UcmCamera {
         }
     }
 
-    /// Performs linear estimation to initialize the alpha parameter from point correspondences.
-    ///
-    /// This method estimates the `alpha` parameter using a linear least squares approach
-    /// given 3D-2D point correspondences. It assumes the intrinsic parameters (fx, fy, cx, cy)
-    /// are already set.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Estimates the `alpha` parameter via linear least-squares given 3D–2D
+    /// correspondences. Requires the intrinsics `[fx, fy, cx, cy]` to already
+    /// be set; needs at least 1 correspondence.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
         points_2d: &nalgebra::Matrix2xX<f64>,
     ) -> Result<(), CameraModelError> {
-        // Check if the number of 2D and 3D points match
         if points_2d.ncols() != points_3d.ncols() {
             return Err(CameraModelError::InvalidParams(
                 "Number of 2D and 3D points must match".to_string(),
             ));
         }
 
-        // Set up the linear system to solve for alpha
         let num_points = points_2d.ncols();
         let mut a = nalgebra::DMatrix::zeros(num_points * 2, 1);
         let mut b = nalgebra::DVector::zeros(num_points * 2);
@@ -176,7 +115,6 @@ impl UcmCamera {
             b[i * 2 + 1] = (self.pinhole.fy * y) - (v_cy * z);
         }
 
-        // Solve the linear system using SVD
         let svd = a.svd(true, true);
         let alpha = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol[0],
@@ -196,11 +134,7 @@ impl UcmCamera {
     }
 }
 
-/// Convert camera to dynamic vector of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, alpha]
+/// Converts the camera to a dynamic vector with layout `[fx, fy, cx, cy, alpha]`.
 impl From<&UcmCamera> for DVector<f64> {
     fn from(camera: &UcmCamera) -> Self {
         let alpha = camera.distortion_params();
@@ -214,11 +148,7 @@ impl From<&UcmCamera> for DVector<f64> {
     }
 }
 
-/// Convert camera to fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// The parameters are ordered as: [fx, fy, cx, cy, alpha]
+/// Converts the camera to a fixed-size array with layout `[fx, fy, cx, cy, alpha]`.
 impl From<&UcmCamera> for [f64; 5] {
     fn from(camera: &UcmCamera) -> Self {
         let alpha = camera.distortion_params();
@@ -232,15 +162,8 @@ impl From<&UcmCamera> for [f64; 5] {
     }
 }
 
-/// Create camera from slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, alpha]
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 5 elements.
+/// Creates a camera from a slice with layout `[fx, fy, cx, cy, alpha]`.
+/// Returns an error if the slice has fewer than 5 elements.
 impl TryFrom<&[f64]> for UcmCamera {
     type Error = CameraModelError;
 
@@ -263,11 +186,7 @@ impl TryFrom<&[f64]> for UcmCamera {
     }
 }
 
-/// Create camera from fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: [fx, fy, cx, cy, alpha]
+/// Creates a camera from a fixed-size array with layout `[fx, fy, cx, cy, alpha]`.
 impl From<[f64; 5]> for UcmCamera {
     fn from(params: [f64; 5]) -> Self {
         Self {
@@ -282,15 +201,9 @@ impl From<[f64; 5]> for UcmCamera {
     }
 }
 
-/// Creates a `UcmCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 5 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or alpha is out of range.
+/// Creates a `UcmCamera` from a parameter slice with full validation.
+/// Unlike [`<UcmCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<UcmCamera, CameraModelError> {
     let camera = UcmCamera::try_from(params)?;
     camera.validate_params()?;
@@ -302,28 +215,9 @@ impl CameraModel for UcmCamera {
     type IntrinsicJacobian = SMatrix<f64, 2, 5>;
     type PointJacobian = SMatrix<f64, 2, 3>;
 
-    /// Projects a 3D point to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// ```text
-    /// d = √(x² + y² + z²)
-    /// denom = α·d + (1-α)·z
-    /// u = fx · (x/denom) + cx
-    /// v = fy · (y/denom) + cy
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(uv)` - 2D image coordinates if valid.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::PointAtCameraCenter`] if the projection condition fails or the denominator is too small.
+    /// Projects a 3D point in the camera frame to 2D image coordinates.
+    /// Returns [`CameraModelError::PointBehindCamera`] / `PointOutsideImage` if the
+    /// point violates the model's domain (`check_projection_condition`).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -354,23 +248,9 @@ impl CameraModel for UcmCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Algebraic solution for UCM inverse projection.
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(ray)` - Normalized 3D ray direction.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection condition fails.
+    /// Unprojects a 2D image point to a unit 3D ray via the UCM algebraic inverse.
+    /// Returns [`CameraModelError::PointOutsideImage`] if the unprojection domain
+    /// (`check_unprojection_condition`) is violated.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
         let u = point_2d.x;
         let v = point_2d.y;
@@ -381,14 +261,14 @@ impl CameraModel for UcmCamera {
         let my = (v - self.pinhole.cy) / self.pinhole.fy * gamma;
 
         let r_squared = mx * mx + my * my;
-
-        // Check unprojection condition
         if !self.check_unprojection_condition(r_squared) {
             return Err(CameraModelError::PointOutsideImage { x: u, y: v });
         }
 
+        // Mei xi-sphere inverse: bx = mx·f, by = my·f, bz = f − ξ
+        // with f = (ξ + √(1 + (1−ξ²)·R²)) / (1 + R²).
         let num = xi + (1.0 + (1.0 - xi * xi) * r_squared).sqrt();
-        let denom = 1.0 - r_squared;
+        let denom = 1.0 + r_squared;
 
         if denom < crate::GEOMETRIC_PRECISION {
             return Err(CameraModelError::PointOutsideImage { x: u, y: v });
@@ -401,61 +281,8 @@ impl CameraModel for UcmCamera {
         Ok(point3d.normalize())
     }
 
-    /// Checks if a 3D point can be validly projected.
-    ///
-    /// Computes the Jacobian of the projection function with respect to the 3D point in camera frame.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The UCM projection model maps a 3D point p = (x, y, z) to 2D pixel coordinates (u, v).
-    ///
-    /// Projection:
-    /// ```text
-    /// ρ = √(x² + y² + z²)
-    /// D = α·ρ + (1-α)·z
-    /// u = fx · (x/D) + cx
-    /// v = fy · (y/D) + cy
-    /// ```
-    ///
-    /// Jacobian:
-    ///
-    /// Derivatives of D with respect to (x, y, z):
-    /// ```text
-    /// ∂D/∂x = α · (x/ρ)
-    /// ∂D/∂y = α · (y/ρ)
-    /// ∂D/∂z = α · (z/ρ) + (1-α)
-    /// ```
-    ///
-    /// Using the quotient rule for u = fx · (x/D):
-    /// ```text
-    /// ∂u/∂x = fx · (D - x·∂D/∂x) / D²
-    /// ∂u/∂y = fx · (-x·∂D/∂y) / D²
-    /// ∂u/∂z = fx · (-x·∂D/∂z) / D²
-    /// ```
-    ///
-    /// Similarly for v:
-    /// ```text
-    /// ∂v/∂x = fy · (-y·∂D/∂x) / D²
-    /// ∂v/∂y = fy · (D - y·∂D/∂y) / D²
-    /// ∂v/∂z = fy · (-y·∂D/∂z) / D²
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x3 Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems", ICCV 2000
-    /// - Mei & Rives, "Single View Point Omnidirectional Camera Calibration from Planar Grids", ICRA 2007
-    ///
-    /// # Verification
-    ///
-    /// This Jacobian is verified against numerical differentiation in tests.
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/ucm.html#jacobians) for the full derivation.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -502,51 +329,8 @@ impl CameraModel for UcmCamera {
         jac
     }
 
-    /// Computes the Jacobian of the projection function with respect to intrinsic parameters.
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The UCM camera has 5 intrinsic parameters: θ = [fx, fy, cx, cy, α]
-    ///
-    /// ## Projection Model
-    ///
-    /// ```text
-    /// u = fx · (x/D) + cx
-    /// v = fy · (y/D) + cy
-    /// ```
-    ///
-    /// Where D = α·ρ + (1-α)·z and ρ = √(x²+y²+z²)
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// Linear parameters (fx, fy, cx, cy):
-    /// ```text
-    /// ∂u/∂fx = x/D,  ∂u/∂fy = 0,    ∂u/∂cx = 1,    ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,    ∂v/∂fy = y/D,  ∂v/∂cx = 0,    ∂v/∂cy = 1
-    /// ```
-    ///
-    /// Projection parameter α:
-    /// ```text
-    /// ∂D/∂α = ρ - z
-    /// ∂u/∂α = -fx · (x/D²) · (ρ - z)
-    /// ∂v/∂α = -fy · (y/D²) · (ρ - z)
-    /// ```
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - 3D point in camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns the 2x5 Intrinsic Jacobian matrix.
-    ///
-    /// # References
-    ///
-    /// - Geyer & Daniilidis, "A Unifying Theory for Central Panoramic Systems", ICCV 2000
-    ///
-    /// # Verification
-    ///
-    /// This Jacobian is verified against numerical differentiation in tests.
+    /// 2×5 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, alpha]. See the
+    /// [cookbook](../doc/cookbook/src/ucm.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -564,50 +348,35 @@ impl CameraModel for UcmCamera {
 
         let mut jac = SMatrix::<f64, 2, 5>::zeros();
 
-        // ∂u/∂fx = x / denom
         jac[(0, 0)] = x_norm;
-
-        // ∂v/∂fy = y / denom
         jac[(1, 1)] = y_norm;
-
-        // ∂u/∂cx = 1
         jac[(0, 2)] = 1.0;
-
-        // ∂v/∂cy = 1
         jac[(1, 3)] = 1.0;
 
-        // ∂denom/∂alpha = rho - z
         let d_denom_d_alpha = rho - z;
-
-        // ∂u/∂alpha = -fx * x / denom² * (rho - z) = -u_cx * (rho - z) / denom
         jac[(0, 4)] = -u_cx * d_denom_d_alpha / denom;
         jac[(1, 4)] = -v_cy * d_denom_d_alpha / denom;
 
         jac
     }
 
-    /// Validates camera parameters.
+    /// Validates the camera parameters.
     ///
     /// # Validation Rules
     ///
-    /// - `fx`, `fy` must be positive.
-    /// - `fx`, `fy` must be finite.
-    /// - `cx`, `cy` must be finite.
-    /// - `α` must be in [0, 1].
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `α` must be in `[0, 1]`
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
-    /// Returns the pinhole parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
+    /// Returns the pinhole parameters.
     fn get_pinhole_params(&self) -> PinholeParams {
         PinholeParams {
             fx: self.pinhole.fx,
@@ -617,28 +386,16 @@ impl CameraModel for UcmCamera {
         }
     }
 
-    /// Returns the distortion model and parameters of the camera.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::UCM`]).
+    /// Returns the distortion model (must be [`DistortionModel::UCM`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the string identifier for the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"ucm"`.
+    /// Returns the model name: `"ucm"`.
     fn get_model_name(&self) -> &'static str {
         "ucm"
     }
 }
-
-// ============================================================================
-// From/Into Trait Implementations for UcmCamera
-// ============================================================================
 
 #[cfg(test)]
 mod tests {
@@ -729,8 +486,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = UcmCamera::from(<[f64; 5]>::try_from(params_plus.as_slice())?);
-            let cam_minus = UcmCamera::from(<[f64; 5]>::try_from(params_minus.as_slice())?);
+            let cam_plus = UcmCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = UcmCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -828,8 +585,8 @@ mod tests {
 
         // Verify reprojection error
         for i in 0..valid {
-            let p3d = pts_3d.column(i).into_owned();
-            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let col = pts_3d.column(i);
+            let projected = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
             let err = ((projected.x - pts_2d[(0, i)]).powi(2)
                 + (projected.y - pts_2d[(1, i)]).powi(2))
             .sqrt();
@@ -841,14 +598,22 @@ mod tests {
 
     #[test]
     fn test_project_unproject_round_trip() -> TestResult {
+        // Use α = 0.6 so the (1 − ξ²)·R² term in the unprojection is
+        // non-zero — this catches sign-of-denominator regressions that
+        // pass at the degenerate α = 0.5.
         let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
-        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let distortion = DistortionModel::UCM { alpha: 0.6 };
         let camera = UcmCamera::new(pinhole, distortion)?;
 
+        // Include off-axis bearings that reach the fisheye periphery
+        // (around 60° from optical axis), where the round-trip error
+        // dominates if the inverse formula is wrong.
         let test_points = [
             Vector3::new(0.1, 0.2, 1.0),
             Vector3::new(-0.3, 0.1, 2.0),
             Vector3::new(0.05, -0.1, 0.5),
+            Vector3::new(0.6, 0.0, 0.8),
+            Vector3::new(0.4, -0.5, 0.7),
         ];
 
         for p_cam in &test_points {
@@ -856,8 +621,8 @@ mod tests {
             let ray = camera.unproject(&uv)?;
             let dot = ray.dot(&p_cam.normalize());
             assert!(
-                (dot - 1.0).abs() < 1e-4,
-                "Round-trip failed: dot={dot}, expected ~1.0"
+                (dot - 1.0).abs() < 1e-8,
+                "Round-trip failed: dot={dot}, expected ~1.0 (p_cam = {p_cam:?})"
             );
         }
 
@@ -882,6 +647,78 @@ mod tests {
         if let Ok(uv) = camera.project(&p_min) {
             assert!(uv.x.is_finite() && uv.y.is_finite());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_projection_off_axis() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let camera = UcmCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.3, 0.0, 1.0);
+        let uv = camera.project(&p_cam)?;
+        assert!(
+            uv.x > 320.0,
+            "off-axis point should project right of principal point"
+        );
+        assert!(
+            (uv.y - 240.0).abs() < 1.0,
+            "y should be close to cy for horizontal offset"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unproject_center_pixel() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let camera = UcmCamera::new(pinhole, distortion)?;
+        let uv = Vector2::new(320.0, 240.0);
+        let ray = camera.unproject(&uv)?;
+        assert!(ray.x.abs() < 1e-6, "x should be ~0, got {}", ray.x);
+        assert!(ray.y.abs() < 1e-6, "y should be ~0, got {}", ray.y);
+        assert!((ray.z - 1.0).abs() < 1e-6, "z should be ~1, got {}", ray.z);
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_projection_matches_individual() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let camera = UcmCamera::new(pinhole, distortion)?;
+        let pts = Matrix3xX::from_columns(&[
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.3, 0.2, 1.5),
+            Vector3::new(-0.4, 0.1, 2.0),
+        ]);
+        let batch = camera.project_batch(&pts);
+        for i in 0..3 {
+            let col = pts.column(i);
+            let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
+            assert!(
+                (batch[(0, i)] - p.x).abs() < 1e-10,
+                "batch u mismatch at col {i}"
+            );
+            assert!(
+                (batch[(1, i)] - p.y).abs() < 1e-10,
+                "batch v mismatch at col {i}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_jacobian_dimensions() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::UCM { alpha: 0.5 };
+        let camera = UcmCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.1, 0.2, 1.0);
+        let jac_point = camera.jacobian_point(&p_cam);
+        assert_eq!(jac_point.nrows(), 2);
+        assert_eq!(jac_point.ncols(), 3);
+        let jac_intr = camera.jacobian_intrinsics(&p_cam);
+        assert_eq!(jac_intr.nrows(), 2);
+        assert_eq!(jac_intr.ncols(), 5); // UcmCamera::INTRINSIC_DIM = 5
         Ok(())
     }
 }

@@ -1,5 +1,4 @@
 use crate::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
-use memmap2::Mmap;
 use std::{fs, io::Write, path::Path};
 
 /// TORO format loader
@@ -8,26 +7,11 @@ pub struct ToroLoader;
 impl GraphLoader for ToroLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Graph, IoError> {
         let path_ref = path.as_ref();
-        let file = fs::File::open(path_ref).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to open TORO file: {:?}", path_ref))
-        })?;
-        // SAFETY: The file is opened read-only and the handle remains valid for the
-        // lifetime of `mmap`. No other thread modifies the file during this scope.
-        let mmap = unsafe {
-            Mmap::map(&file).map_err(|e| {
-                IoError::Io(e)
-                    .log_with_source(format!("Failed to memory-map TORO file: {:?}", path_ref))
-            })?
-        };
-        let content = std::str::from_utf8(&mmap).map_err(|e| {
-            IoError::Parse {
-                line: 0,
-                message: format!("Invalid UTF-8: {e}"),
-            }
-            .log()
+        let content = fs::read_to_string(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to read TORO file: {:?}", path_ref))
         })?;
 
-        Self::parse_content(content)
+        Self::parse_content(&content)
     }
 
     fn write<P: AsRef<Path>>(graph: &Graph, path: P) -> Result<(), IoError> {
@@ -424,9 +408,10 @@ mod tests {
     }
 
     #[test]
-    fn test_load_nonexistent_file() {
+    fn test_load_nonexistent_file() -> TestResult {
         let result = ToroLoader::load("/no/such/file.graph");
         assert!(result.is_err(), "loading missing file should return Err");
+        Ok(())
     }
 
     #[test]
@@ -726,6 +711,28 @@ mod tests {
             (v.theta() - std::f64::consts::PI / 4.0).abs() < 1e-10,
             "theta not preserved"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_invalid_utf8_returns_err() -> TestResult {
+        let mut f = NamedTempFile::new()?;
+        f.write_all(&[0xFF, 0xFE, 0x80, 0x00, 0xAB])?;
+        let result = ToroLoader::load(f.path());
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_to_nonexistent_dir_returns_err() -> TestResult {
+        let mut graph = Graph::new();
+        graph
+            .vertices_se2
+            .insert(0, VertexSE2::new(0, 0.0, 0.0, 0.0));
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("nested").join("deep").join("output.toro");
+        let result = ToroLoader::write(&graph, &path);
+        assert!(result.is_err());
         Ok(())
     }
 }

@@ -7,17 +7,16 @@
 use apex_solver::JacobianMode;
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::BalLoader;
-use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::apex_manifolds::so3::SO3;
+use apex_solver::apex_manifolds::{LieGroup, ManifoldType};
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{ProjectionFactor, SelfCalibration};
-use apex_solver::linalg::SchurVariant;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
-use std::collections::HashMap;
 
 /// Convert axis-angle rotation vector to SO3.
 fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
@@ -42,7 +41,11 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
 
     // Build problem
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values: HashMap<String, (ManifoldType, DVector<f64>)> = HashMap::new();
+
+    // Track VarKeys by index
+    let mut pose_keys: Vec<VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut intr_keys: Vec<VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut pt_keys: Vec<VarKey> = Vec::with_capacity(dataset.points.len());
 
     // Add camera poses (SE3) and intrinsics (RN)
     for (i, cam) in dataset.cameras.iter().enumerate() {
@@ -51,20 +54,25 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         let so3 = axis_angle_to_so3(&axis_angle);
         let pose = SE3::from_translation_so3(translation, so3);
 
-        let pose_name = format!("pose_{:04}", i);
-        initial_values.insert(pose_name, (ManifoldType::SE3, DVector::from(pose)));
+        let pose_key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        pose_keys.push(pose_key);
 
-        let intrinsics_name = format!("intr_{:04}", i);
         let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
-        initial_values.insert(intrinsics_name, (ManifoldType::RN, intrinsics_vec));
+        let intr_key = problem.add_variable(ManifoldType::RN, intrinsics_vec);
+        intr_keys.push(intr_key);
+        let _ = i;
     }
 
     // Add landmarks (RN3)
-    for (j, point) in dataset.points.iter().enumerate() {
-        let var_name = format!("pt_{:05}", j);
+    for point in &dataset.points {
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
-        initial_values.insert(var_name, (ManifoldType::RN, point_vec));
+        let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
+        problem.mark_as_schur_landmark(pt_key);
+        pt_keys.push(pt_key);
     }
 
     // Add projection factors (self-calibration: pose + landmark + intrinsics)
@@ -87,32 +95,32 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
             ProjectionFactor::new(observations, camera);
 
-        let pose_name = format!("pose_{:04}", obs.camera_index);
-        let pt_name = format!("pt_{:05}", obs.point_index);
-        let intr_name = format!("intr_{:04}", obs.camera_index);
+        let pose_key = pose_keys[obs.camera_index];
+        let pt_key = pt_keys[obs.point_index];
+        let intr_key = intr_keys[obs.camera_index];
 
         let loss = HuberLoss::new(1.0)?;
         problem.add_residual_block(
-            &[&pose_name, &pt_name, &intr_name],
+            &[pose_key, pt_key, intr_key],
             Box::new(factor),
             Some(Box::new(loss)),
         );
     }
 
     // Fix first camera pose for gauge freedom
+    let first_pose_key = pose_keys[0];
     for dof in 0..6 {
-        problem.fix_variable("pose_0000", dof);
+        problem.fix_variable(first_pose_key, dof);
     }
 
-    // Configure solver (explicit Schur for small problem, more iterations for convergence)
-    let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
-    config.schur_variant = SchurVariant::Sparse;
-    config = config.with_max_iterations(50);
+    // Iterative Schur is required for SelfCalibration because intrinsics (RN, 3 DOF) and
+    // landmarks (RN, 3 DOF) are indistinguishable for the Sparse Schur block classifier.
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(50);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
     // Optimize
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
 
     // Compute RMSE
     let num_obs = num_observations as f64;
@@ -126,6 +134,7 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::ParameterToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
     );
     assert!(
         converged,

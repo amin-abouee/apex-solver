@@ -47,6 +47,7 @@
 //! ```
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::{SE2, SE2Tangent};
+//! use apex_solver::manifold::Tangent;
 //! use nalgebra::DVector;
 //!
 //! // Create a 2D pose variable
@@ -54,7 +55,7 @@
 //! let mut var = Variable::new(initial_pose);
 //!
 //! // Apply a tangent space update: [dx, dy, dtheta]
-//! let delta = SE2Tangent::from(DVector::from_vec(vec![0.1, 0.2, 0.05]));
+//! let delta = SE2Tangent::from_slice(&[0.1, 0.2, 0.05]);
 //! let updated_pose = var.plus(&delta);
 //! var.set_value(updated_pose);
 //! ```
@@ -85,6 +86,7 @@
 //! assert_eq!(result[2], 0.0);    // Fixed at original value
 //! ```
 
+use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use apex_manifolds::{LieGroup, Tangent};
@@ -193,13 +195,14 @@ where
     /// ```
     /// use apex_solver::core::variable::Variable;
     /// use apex_solver::manifold::se2::{SE2, SE2Tangent};
+    /// use apex_solver::manifold::Tangent;
     /// use nalgebra as na;
     ///
     /// let se2_value = SE2::from_xy_angle(1.0, 2.0, 0.0);
     /// let variable = Variable::new(se2_value);
     ///
     /// // Create a tangent vector: [dx, dy, dtheta]
-    /// let tangent = SE2Tangent::from(na::DVector::from(vec![0.1, 0.1, 0.1]));
+    /// let tangent = SE2Tangent::from_slice(&[0.1, 0.1, 0.1]);
     /// let new_value = variable.plus(&tangent);
     /// ```
     pub fn plus(&self, tangent: &M::TangentVector) -> M {
@@ -288,6 +291,143 @@ impl Variable<Rn> {
         }
 
         self.value = Rn::new(tangent_delta);
+    }
+}
+
+// ============================================================================
+// ManifoldVariable — object-safe trait for heterogeneous variable collections
+// ============================================================================
+
+/// Object-safe trait covering all manifold variable types.
+///
+/// Replaces `VariableEnum` as the common type for `HashMap<String, Box<dyn ManifoldVariable>>`.
+/// One blanket impl covers all 8 manifold types; no per-manifold match arms needed.
+///
+/// # Hot-path contract
+/// `as_param_slice`, `dof`, and `apply_tangent_step` must never heap-allocate.
+pub trait ManifoldVariable: Send + Sync + 'static {
+    // ── Hot path (zero allocation) ──────────────────────────────────────
+    /// Zero-copy borrow of the parameter storage backing this variable.
+    fn as_param_slice(&self) -> &[f64];
+    /// Tangent space dimension (degrees of freedom).
+    fn dof(&self) -> usize;
+    /// Apply a tangent-space step in-place: x ← x ⊞ δx.
+    /// Fixed indices are zeroed before the retraction.
+    fn apply_tangent_step(&mut self, step: &[f64]);
+
+    // ── Build-time configuration ─────────────────────────────────────────
+    fn set_fixed_indices(&mut self, indices: HashSet<usize>);
+    fn get_fixed_indices(&self) -> &HashSet<usize>;
+    fn set_bounds(&mut self, bounds: HashMap<usize, (f64, f64)>);
+    fn get_bounds(&self) -> &HashMap<usize, (f64, f64)>;
+    /// Static name of the underlying manifold type ("SE3", "SO3", …).
+    fn manifold_type_name(&self) -> &'static str;
+
+    // ── Covariance ───────────────────────────────────────────────────────
+    fn set_covariance(&mut self, cov: faer::Mat<f64>);
+    fn covariance(&self) -> Option<&faer::Mat<f64>>;
+    fn clear_covariance(&mut self);
+
+    // ── I/O (NOT hot path — allocates) ───────────────────────────────────
+    fn to_dvector(&self) -> DVector<f64>;
+
+    // ── Downcast support ─────────────────────────────────────────────────
+    fn as_any(&self) -> &dyn Any;
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+    fn clone_box(&self) -> Box<dyn ManifoldVariable>;
+}
+
+impl Clone for Box<dyn ManifoldVariable> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
+impl<M> ManifoldVariable for Variable<M>
+where
+    M: LieGroup + Clone + Send + Sync + 'static,
+    M::TangentVector: Tangent<M> + Send + Sync + 'static,
+{
+    fn as_param_slice(&self) -> &[f64] {
+        self.value.as_param_slice()
+    }
+
+    fn dof(&self) -> usize {
+        self.value.tangent_dim()
+    }
+
+    fn apply_tangent_step(&mut self, step: &[f64]) {
+        let dof = self.dof();
+        // Stack buffer for fixed-size manifolds (all current types have DOF ≤ 10).
+        // Fall back to heap Vec only for large dynamic Rn variables.
+        if dof <= 16 {
+            let mut buf = [0f64; 16];
+            buf[..dof].copy_from_slice(&step[..dof]);
+            for &idx in &self.fixed_indices {
+                if idx < dof {
+                    buf[idx] = 0.0;
+                }
+            }
+            let tangent = M::TangentVector::from_slice(&buf[..dof]);
+            self.value = self.value.plus(&tangent, None, None);
+        } else {
+            let mut v = step[..dof].to_vec();
+            for &idx in &self.fixed_indices {
+                if idx < dof {
+                    v[idx] = 0.0;
+                }
+            }
+            let tangent = M::TangentVector::from_slice(&v);
+            self.value = self.value.plus(&tangent, None, None);
+        }
+    }
+
+    fn manifold_type_name(&self) -> &'static str {
+        M::NAME
+    }
+
+    fn set_fixed_indices(&mut self, indices: HashSet<usize>) {
+        self.fixed_indices = indices;
+    }
+
+    fn get_fixed_indices(&self) -> &HashSet<usize> {
+        &self.fixed_indices
+    }
+
+    fn set_bounds(&mut self, bounds: HashMap<usize, (f64, f64)>) {
+        self.bounds = bounds;
+    }
+
+    fn get_bounds(&self) -> &HashMap<usize, (f64, f64)> {
+        &self.bounds
+    }
+
+    fn set_covariance(&mut self, cov: faer::Mat<f64>) {
+        self.covariance = Some(cov);
+    }
+
+    fn covariance(&self) -> Option<&faer::Mat<f64>> {
+        self.covariance.as_ref()
+    }
+
+    fn clear_covariance(&mut self) {
+        self.covariance = None;
+    }
+
+    fn to_dvector(&self) -> DVector<f64> {
+        DVector::from_column_slice(self.value.as_param_slice())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+
+    fn clone_box(&self) -> Box<dyn ManifoldVariable> {
+        Box::new(self.clone())
     }
 }
 
@@ -382,7 +522,7 @@ mod tests {
         let var2_updated = var2.plus(&diff_tangent);
         let final_diff = var1.minus(&Variable::new(var2_updated));
 
-        assert!(DVector::from(final_diff).norm() < 1e-10);
+        assert!(DVector::from_column_slice(final_diff.as_slice()).norm() < 1e-10);
     }
 
     #[test]
@@ -511,7 +651,7 @@ mod tests {
         let final_diff = var1.minus(&Variable::new(var2_updated));
 
         // The final difference should be small (close to identity in tangent space)
-        assert!(DVector::from(final_diff).norm() < 1e-10);
+        assert!(DVector::from_column_slice(final_diff.as_slice()).norm() < 1e-10);
     }
 
     #[test]

@@ -33,10 +33,9 @@
 //! - Number of iterations
 //! - Convergence status
 
-use criterion::{Criterion, criterion_group, criterion_main};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -47,6 +46,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_io::{BalLoader, utils::DatasetRegistry};
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
 use apex_solver::ManifoldType;
@@ -55,7 +55,7 @@ use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::factors::SelfCalibration;
 use apex_solver::init_logger;
-use apex_solver::linalg::{JacobianMode, LinearSolverType, SchurPreconditioner, SchurVariant};
+use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -170,13 +170,14 @@ fn is_converged(status: &OptimizationStatus) -> bool {
         OptimizationStatus::Converged
             | OptimizationStatus::CostToleranceReached
             | OptimizationStatus::GradientToleranceReached
+            | OptimizationStatus::StalledNoProgress
             | OptimizationStatus::ParameterToleranceReached
     )
 }
 
 /// Run Apex Solver bundle adjustment with SelfCalibration + Iterative Schur
 fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
-    info!("Apex Solver Benchmark ({})", dataset_name);
+    info!("Running Apex-Solver ...");
 
     // Run solver in separate thread with timeout
     let dataset_name_owned = dataset_name.to_string();
@@ -217,7 +218,6 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
 /// Implementation of Apex Solver BA (runs in separate thread)
 fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
     // Load dataset
-    info!("Loading BAL dataset from {}", dataset_path);
     let dataset = match BalLoader::load(dataset_path) {
         Ok(d) => d,
         Err(e) => {
@@ -226,18 +226,8 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         }
     };
 
-    info!(
-        "Dataset: {}: Cameras: {}, Landmarks: {}, Observations: {}",
-        dataset_name,
-        dataset.cameras.len(),
-        dataset.points.len(),
-        dataset.observations.len()
-    );
-
     // Setup problem
-    info!("Building optimization problem...");
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
 
     // Helper function to convert axis-angle to SO3
     fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
@@ -250,42 +240,41 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         }
     }
 
+    let mut pose_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut intr_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
+
     // Add cameras as SE3 poses
-    for (i, cam) in dataset.cameras.iter().enumerate() {
-        // Convert axis-angle to SE3
+    for cam in &dataset.cameras {
         let axis_angle = Vector3::new(cam.rotation.x, cam.rotation.y, cam.rotation.z);
         let translation = Vector3::new(cam.translation.x, cam.translation.y, cam.translation.z);
         let so3 = axis_angle_to_so3(&axis_angle);
         let pose = SE3::from_translation_so3(translation, so3);
 
-        // Add SE3 pose variable (6 DOF)
-        let pose_name = format!("pose_{:04}", i);
-        initial_values.insert(pose_name, (ManifoldType::SE3, DVector::from(pose)));
+        let pose_key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        pose_keys.push(pose_key);
 
-        // Add intrinsics: [focal, k1, k2] (3 DOF) for SelfCalibration mode
-        let intrinsics_name = format!("intr_{:04}", i);
         let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
-        initial_values.insert(intrinsics_name, (ManifoldType::RN, intrinsics_vec));
+        let intr_key = problem.add_variable(ManifoldType::RN, intrinsics_vec);
+        intr_keys.push(intr_key);
     }
 
-    // Add landmarks as R3 variables
-    for (j, point) in dataset.points.iter().enumerate() {
-        let var_name = format!("pt_{:05}", j);
+    let mut pt_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.points.len());
+    for point in &dataset.points {
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
-        initial_values.insert(var_name, (ManifoldType::RN, point_vec));
+        let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
+        problem.mark_as_schur_landmark(pt_key);
+        pt_keys.push(pt_key);
     }
 
     // Add projection factors using ProjectionFactor with SE3 + BALPinholeCameraStrict
     // SelfCalibration mode: optimize pose + landmarks + intrinsics
-    info!(
-        "Adding {} projection factors (SelfCalibration mode)...",
-        dataset.observations.len()
-    );
     for obs in &dataset.observations {
         let cam = &dataset.cameras[obs.camera_index];
-        #[allow(clippy::expect_used)]
-        let camera = BALPinholeCameraStrict::new(
+        let camera = match BALPinholeCameraStrict::new(
             PinholeParams {
                 fx: cam.focal_length,
                 fy: cam.focal_length,
@@ -296,67 +285,47 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
                 k1: cam.k1,
                 k2: cam.k2,
             },
-        )
-        .expect("Invalid camera parameters in dataset");
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return BABenchmarkResult::failed(
+                    dataset_name,
+                    "Apex-Solver",
+                    "Rust",
+                    &format!("Invalid camera parameters: {}", e),
+                );
+            }
+        };
 
-        // Single observation per factor
         let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
         let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
             ProjectionFactor::new(observations, camera);
 
-        let pose_name = format!("pose_{:04}", obs.camera_index);
-        let intr_name = format!("intr_{:04}", obs.camera_index);
-        let pt_name = format!("pt_{:05}", obs.point_index);
+        let pose_key = pose_keys[obs.camera_index];
+        let intr_key = intr_keys[obs.camera_index];
+        let pt_key = pt_keys[obs.point_index];
 
         // Use Huber loss (matching C++ implementations)
         let loss = match HuberLoss::new(1.0) {
             Ok(l) => Box::new(l),
             Err(_) => continue,
         };
-        problem.add_residual_block(
-            &[&pose_name, &pt_name, &intr_name],
-            Box::new(factor),
-            Some(loss),
-        );
+        problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
-    info!("Fixing first camera pose for gauge freedom...");
     for dof in 0..6 {
-        problem.fix_variable("pose_0000", dof);
-    }
-    // Also fix first camera intrinsics
-    for dof in 0..3 {
-        problem.fix_variable("intr_0000", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
 
-    // Configure solver with Iterative Schur + Schur-Jacobi preconditioner
-    info!("Configuring solver...");
-    let config = LevenbergMarquardtConfig::new()
-        .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-        .with_max_iterations(50)
-        .with_cost_tolerance(1e-6)
-        .with_parameter_tolerance(1e-8)
-        .with_damping(1e-3)
-        .with_schur_variant(SchurVariant::Iterative)
-        .with_schur_preconditioner(SchurPreconditioner::SchurJacobi);
-
-    info!("Solver configuration:");
-    info!("  Mode: SelfCalibration (pose + landmarks + intrinsics)");
-    info!("  Linear solver: {:?}", config.linear_solver_type);
-    info!("  Schur variant: {:?}", config.schur_variant);
-    info!("  Preconditioner: {:?}", config.schur_preconditioner);
-    info!("  Initial damping: {:e}", config.damping);
-    info!("  Max iterations: {}", config.max_iterations);
-    info!("  Cost tolerance: {:e}", config.cost_tolerance);
-    info!("  Parameter tolerance: {:e}", config.parameter_tolerance);
+    // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
     // Optimize (timing excludes setup)
-    info!("Starting optimization...");
     let start = Instant::now();
-    let result = match solver.optimize(&problem, &initial_values) {
+    let result = match solver.optimize(&mut problem) {
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
@@ -365,30 +334,15 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     };
     let elapsed_seconds = start.elapsed().as_secs_f64();
 
-    info!("Optimization completed!");
-    info!("Status: {:?}", result.status);
-    info!("Iterations: {}", result.iterations);
-    info!("Time: {:.2} seconds", elapsed_seconds);
-
-    // Compute initial and final RMSE from solver costs
-    // Cost = sum of squared residuals, RMSE = sqrt(cost / num_observations)
+    // Compute initial and final RMSE from solver costs.
+    // Solver cost = 0.5 * sum ||r_i||², so MSE = mean ||r_i||² = 2 * cost / n.
     let num_obs = dataset.observations.len() as f64;
-    let initial_mse = result.initial_cost / num_obs;
+    let initial_mse = 2.0 * result.initial_cost / num_obs;
     let initial_rmse = initial_mse.sqrt();
-    let final_mse = result.final_cost / num_obs;
+    let final_mse = 2.0 * result.final_cost / num_obs;
     let final_rmse = final_mse.sqrt();
 
-    info!("Metrics:");
-    info!("  Initial cost: {:.6e}", result.initial_cost);
-    info!("  Final cost: {:.6e}", result.final_cost);
-    info!("  Initial RMSE: {:.3} pixels", initial_rmse);
-    info!("  Final RMSE: {:.3} pixels", final_rmse);
-
-    let improvement_pct = ((initial_mse - final_mse) / initial_mse) * 100.0;
     let converged = is_converged(&result.status);
-
-    info!("  Improvement: {:.2}%", improvement_pct);
-    info!("  Converged: {}", converged);
 
     BABenchmarkResult::success(
         dataset_name,
@@ -441,11 +395,10 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     let g2o_exe = build_dir.join("g2o_ba_benchmark");
 
     if ceres_exe.exists() && gtsam_exe.exists() && g2o_exe.exists() {
-        info!("C++ BA benchmarks already built");
         return Ok(build_dir);
     }
 
-    info!("Building C++ BA benchmarks...");
+    info!("Building C++ BA benchmarks ...");
 
     // Create build directory if needed
     std::fs::create_dir_all(&build_dir)
@@ -479,7 +432,6 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
         ));
     }
 
-    info!("C++ BA benchmarks built successfully");
     Ok(build_dir)
 }
 
@@ -497,10 +449,13 @@ fn run_cpp_benchmark(
 
     info!("Running {} ...", exe_name);
 
-    // Spawn process (non-blocking)
+    // Spawn process (non-blocking). The benchmark itself is silent; only genuine
+    // failures reach stderr, which is inherited so they stay visible.
     let mut child = Command::new(&exe_path)
         .arg(dataset_path)
         .current_dir(build_dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", exe_name, e))?;
 
@@ -539,16 +494,6 @@ fn run_cpp_benchmark(
                 return Err(format!("Error waiting for {}: {}", exe_name, e));
             }
         }
-    }
-
-    // Process completed, read output
-    let output = child
-        .wait_with_output()
-        .map_err(|e| format!("Failed to get output from {}: {}", exe_name, e))?;
-
-    // Print stdout for user visibility
-    if !output.stdout.is_empty() {
-        info!("{}", String::from_utf8_lossy(&output.stdout));
     }
 
     // Determine CSV output filename
@@ -606,7 +551,7 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
         Ok(dir) => dir,
         Err(e) => {
             warn!("C++ benchmarks unavailable for {}: {}", dataset_name, e);
-            warn!("Continuing with Rust-only benchmark...\n");
+            warn!("Continuing with Rust-only benchmark...");
             return all_results;
         }
     };
@@ -627,7 +572,6 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
         match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path) {
             Ok(csv_path) => match parse_cpp_ba_results(&csv_path, dataset_name) {
                 Ok(results) => {
-                    info!("{} completed: {} results", exe_name, results.len());
                     all_results.extend(results);
                 }
                 Err(e) => {
@@ -742,41 +686,29 @@ fn print_comparison_table(results: &[BABenchmarkResult]) {
 
 /// Run the full benchmark comparison
 fn run_benchmark_comparison() {
-    // Initialize logger only once (avoid panic on multiple calls)
-    use std::sync::Once;
-    static INIT: Once = Once::new();
-    INIT.call_once(|| {
-        init_logger();
-    });
+    init_logger();
 
     info!("BUNDLE ADJUSTMENT BENCHMARK COMPARISON");
     info!("Testing 4 datasets: Ladybug, Trafalgar, Dubrovnik, Venice");
-    info!("Apex Solver: SelfCalibration mode + Iterative Schur + Schur-Jacobi preconditioner\n");
 
     let datasets = get_datasets();
     let mut all_results = Vec::new();
 
     // Run benchmarks for each dataset
     for dataset in &datasets {
-        info!("{}", "=".repeat(150));
         info!("DATASET: {}", dataset.name);
-        info!("PATH: {}", dataset.path);
-        info!("{}", "=".repeat(150));
 
         // Verify dataset file exists
         if !Path::new(&dataset.path).exists() {
-            error!("Dataset file not found: {}", dataset.path);
-            error!("Skipping {}...", dataset.name);
+            warn!("Dataset file not found, skipping: {}", dataset.path);
             continue;
         }
 
         // Phase 1: Apex Solver (Rust)
-        info!("Phase 1: Apex Solver");
         let apex_result = apex_solver_ba(&dataset.name, &dataset.path);
         all_results.push(apex_result);
 
         // Phase 2: C++ Solvers
-        info!("Phase 2: C++ Solvers (Ceres, GTSAM, g2o)");
         let cpp_results = run_cpp_ba_benchmarks(&dataset.name, &dataset.path);
         all_results.extend(cpp_results);
     }
@@ -784,28 +716,20 @@ fn run_benchmark_comparison() {
     // Save results to CSV in output/ folder
     let output_dir = "output";
     if let Err(e) = std::fs::create_dir_all(output_dir) {
-        warn!("Warning: Failed to create output directory: {}", e);
+        warn!("Failed to create output directory: {}", e);
     }
 
     let output_path = format!("{}/ba_comparison_results.csv", output_dir);
     if let Err(e) = save_csv_results(&all_results, &output_path) {
-        warn!("Warning: Failed to save CSV results: {}", e);
-    } else {
-        info!("Results written to {}", output_path);
+        warn!("Failed to save CSV results: {}", e);
     }
 
     // Print comparison table
     print_comparison_table(&all_results);
 
-    info!("\nBenchmark completed!");
+    info!("Results written to {}", output_path);
 }
 
-/// Criterion benchmark function
-fn criterion_benchmark(_c: &mut Criterion) {
-    // This is a comparison benchmark, not a performance benchmark
-    // Run once directly instead of using Criterion's timing infrastructure
+fn main() {
     run_benchmark_comparison();
 }
-
-criterion_group!(benches, criterion_benchmark);
-criterion_main!(benches);

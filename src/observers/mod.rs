@@ -39,11 +39,9 @@
 //! use apex_solver::observers::OptObserver;
 //! # use apex_solver::core::problem::Problem;
 //! # use apex_solver::JacobianMode;
-//! # use std::collections::HashMap;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new(JacobianMode::Sparse);
-//! # let initial_values = HashMap::new();
+//! # let mut problem = Problem::new(JacobianMode::Sparse);
 //!
 //! let config = LevenbergMarquardtConfig::new().with_max_iterations(100);
 //! let mut solver = LevenbergMarquardt::with_config(config);
@@ -55,7 +53,7 @@
 //!     solver.add_observer(rerun_observer);
 //! }
 //!
-//! let result = solver.optimize(&problem, &initial_values)?;
+//! let result = solver.optimize(&mut problem)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -64,10 +62,12 @@
 //!
 //! ```no_run
 //! # use apex_solver::{LevenbergMarquardt, LevenbergMarquardtConfig};
-//! # use apex_solver::core::problem::{Problem, VariableEnum};
+//! # use apex_solver::core::problem::Problem;
+//! # use apex_solver::core::variable::ManifoldVariable;
+//! # use apex_solver::core::VarKey;
 //! # use apex_solver::observers::OptObserver;
 //! # use apex_solver::JacobianMode;
-//! # use std::collections::HashMap;
+//! # use slotmap::SlotMap;
 //!
 //! // Custom observer that logs to CSV
 //! struct CsvObserver {
@@ -75,15 +75,14 @@
 //! }
 //!
 //! impl OptObserver for CsvObserver {
-//!     fn on_step(&self, _values: &HashMap<String, VariableEnum>, iteration: usize) {
+//!     fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {
 //!         // Write iteration data to CSV
 //!         // ... implementation ...
 //!     }
 //! }
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # let problem = Problem::new(JacobianMode::Sparse);
-//! # let initial_values = HashMap::new();
+//! # let mut problem = Problem::new(JacobianMode::Sparse);
 //! let mut solver = LevenbergMarquardt::new();
 //!
 //! // Add Rerun visualization
@@ -96,7 +95,7 @@
 //! // Add CSV logging
 //! // solver.add_observer(CsvObserver { file: ... });
 //!
-//! let result = solver.optimize(&problem, &initial_values)?;
+//! let result = solver.optimize(&mut problem)?;
 //! # Ok(())
 //! # }
 //! ```
@@ -105,15 +104,16 @@
 //!
 //! ```no_run
 //! use apex_solver::observers::OptObserver;
-//! use apex_solver::core::problem::VariableEnum;
-//! use std::collections::HashMap;
+//! use apex_solver::core::variable::ManifoldVariable;
+//! use apex_solver::core::VarKey;
+//! use slotmap::SlotMap;
 //!
 //! struct MetricsObserver {
 //!     max_variables_seen: std::cell::RefCell<usize>,
 //! }
 //!
 //! impl OptObserver for MetricsObserver {
-//!     fn on_step(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
+//!     fn on_step(&self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {
 //!         let count = values.len();
 //!         let mut max = self.max_variables_seen.borrow_mut();
 //!         *max = (*max).max(count);
@@ -135,12 +135,12 @@ pub use visualization::{RerunObserver, VisualizationConfig, VisualizationMode};
 #[cfg(feature = "visualization")]
 pub use conversions::{CollectRerun2D, CollectRerun3D, RerunConvert2D, RerunConvert3D};
 
-use crate::core::problem::VariableEnum;
+use crate::core::VarKey;
+use crate::core::variable::ManifoldVariable;
 use faer::Mat;
 use faer::sparse;
-use std::collections::HashMap;
+use slotmap::SlotMap;
 use thiserror::Error;
-use tracing::error;
 
 /// Observer-specific error types for apex-solver
 #[derive(Debug, Clone, Error)]
@@ -176,60 +176,6 @@ pub enum ObserverError {
     /// Mutex was poisoned (thread panicked while holding lock)
     #[error("Mutex poisoned in {context}: {reason}")]
     MutexPoisoned { context: String, reason: String },
-}
-
-impl ObserverError {
-    /// Log the error with tracing::error and return self for chaining
-    ///
-    /// This method allows for a consistent error logging pattern throughout
-    /// the observers module, ensuring all errors are properly recorded.
-    ///
-    /// # Example
-    /// ```
-    /// # use apex_solver::observers::ObserverError;
-    /// # fn operation() -> Result<(), ObserverError> { Ok(()) }
-    /// # fn example() -> Result<(), ObserverError> {
-    /// operation()
-    ///     .map_err(|e| e.log())?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[must_use]
-    pub fn log(self) -> Self {
-        error!("{}", self);
-        self
-    }
-
-    /// Log the error with the original source error from a third-party library
-    ///
-    /// This method logs both the ObserverError and the underlying error
-    /// from external libraries (e.g., Rerun's errors). This provides full
-    /// debugging context when errors occur in third-party code.
-    ///
-    /// # Arguments
-    /// * `source_error` - The original error from the third-party library (must implement Debug)
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use apex_solver::observers::ObserverError;
-    /// # fn rec_log() -> Result<(), std::io::Error> { Ok(()) }
-    /// # fn example() -> Result<(), ObserverError> {
-    /// rec_log()
-    ///     .map_err(|e| {
-    ///         ObserverError::LoggingFailed {
-    ///             entity_path: "world/points".to_string(),
-    ///             reason: format!("{}", e)
-    ///         }
-    ///         .log_with_source(e)
-    ///     })?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    #[must_use]
-    pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
-        error!("{} | Source: {:?}", self, source_error);
-        self
-    }
 }
 
 /// Result type for observer operations
@@ -272,18 +218,19 @@ pub trait OptObserver: Send {
     ///
     /// ```no_run
     /// use apex_solver::observers::OptObserver;
-    /// use apex_solver::core::problem::VariableEnum;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::variable::ManifoldVariable;
+    /// use apex_solver::core::VarKey;
+    /// use slotmap::SlotMap;
     ///
     /// struct SimpleLogger;
     ///
     /// impl OptObserver for SimpleLogger {
-    ///     fn on_step(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
+    ///     fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {
     ///         // Track optimization progress
     ///     }
     /// }
     /// ```
-    fn on_step(&self, values: &HashMap<String, VariableEnum>, iteration: usize);
+    fn on_step(&self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize);
 
     /// Set iteration metrics for visualization and monitoring.
     ///
@@ -353,15 +300,16 @@ pub trait OptObserver: Send {
     ///
     /// ```no_run
     /// use apex_solver::observers::OptObserver;
-    /// use apex_solver::core::problem::VariableEnum;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::variable::ManifoldVariable;
+    /// use apex_solver::core::VarKey;
+    /// use slotmap::SlotMap;
     ///
     /// struct FinalStateLogger;
     ///
     /// impl OptObserver for FinalStateLogger {
-    ///     fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {}
+    ///     fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {}
     ///
-    ///     fn on_optimization_complete(&self, values: &HashMap<String, VariableEnum>, iterations: usize) {
+    ///     fn on_optimization_complete(&self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iterations: usize) {
     ///         println!("Optimization completed after {} iterations with {} variables",
     ///                  iterations, values.len());
     ///     }
@@ -369,7 +317,7 @@ pub trait OptObserver: Send {
     /// ```
     fn on_optimization_complete(
         &self,
-        _values: &HashMap<String, VariableEnum>,
+        _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         _iterations: usize,
     ) {
         // Default implementation does nothing
@@ -389,8 +337,9 @@ pub trait OptObserver: Send {
 ///
 /// ```no_run
 /// use apex_solver::observers::{OptObserver, OptObserverVec};
-/// use apex_solver::core::problem::VariableEnum;
-/// use std::collections::HashMap;
+/// use apex_solver::core::variable::ManifoldVariable;
+/// use apex_solver::core::VarKey;
+/// use slotmap::SlotMap;
 ///
 /// struct MyOptimizer {
 ///     observers: OptObserverVec,
@@ -398,7 +347,7 @@ pub trait OptObserver: Send {
 /// }
 ///
 /// impl MyOptimizer {
-///     fn step(&mut self, values: &HashMap<String, VariableEnum>, iteration: usize) {
+///     fn step(&mut self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize) {
 ///         // ... optimization logic ...
 ///
 ///         // Notify all observers
@@ -432,12 +381,13 @@ impl OptObserverVec {
     ///
     /// ```no_run
     /// use apex_solver::observers::{OptObserver, OptObserverVec};
-    /// use apex_solver::core::problem::VariableEnum;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::variable::ManifoldVariable;
+    /// use apex_solver::core::VarKey;
+    /// use slotmap::SlotMap;
     ///
     /// struct MyObserver;
     /// impl OptObserver for MyObserver {
-    ///     fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {
+    ///     fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {
     ///         // Handle optimization step
     ///     }
     /// }
@@ -509,16 +459,18 @@ impl OptObserverVec {
     ///
     /// ```no_run
     /// use apex_solver::observers::OptObserverVec;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::variable::ManifoldVariable;
+    /// use apex_solver::core::VarKey;
+    /// use slotmap::SlotMap;
     ///
     /// let observers = OptObserverVec::new();
-    /// let values = HashMap::new();
+    /// let values: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
     ///
     /// // Notify all observers (safe even if empty)
     /// observers.notify(&values, 0);
     /// ```
     #[inline]
-    pub fn notify(&self, values: &HashMap<String, VariableEnum>, iteration: usize) {
+    pub fn notify(&self, values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize) {
         for observer in &self.observers {
             observer.on_step(values, iteration);
         }
@@ -538,16 +490,22 @@ impl OptObserverVec {
     ///
     /// ```no_run
     /// use apex_solver::observers::OptObserverVec;
-    /// use std::collections::HashMap;
+    /// use apex_solver::core::variable::ManifoldVariable;
+    /// use apex_solver::core::VarKey;
+    /// use slotmap::SlotMap;
     ///
     /// let observers = OptObserverVec::new();
-    /// let values = HashMap::new();
+    /// let values: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
     ///
     /// // Notify all observers that optimization is complete
     /// observers.notify_complete(&values, 50);
     /// ```
     #[inline]
-    pub fn notify_complete(&self, values: &HashMap<String, VariableEnum>, iterations: usize) {
+    pub fn notify_complete(
+        &self,
+        values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        iterations: usize,
+    ) {
         for observer in &self.observers {
             observer.on_optimization_complete(values, iterations);
         }
@@ -571,7 +529,12 @@ impl OptObserverVec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::ErrorLogging;
     use std::sync::{Arc, Mutex};
+
+    fn empty_vars() -> SlotMap<VarKey, Box<dyn ManifoldVariable>> {
+        SlotMap::with_key()
+    }
 
     #[derive(Clone)]
     struct TestObserver {
@@ -579,7 +542,7 @@ mod tests {
     }
 
     impl OptObserver for TestObserver {
-        fn on_step(&self, _values: &HashMap<String, VariableEnum>, iteration: usize) {
+        fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, iteration: usize) {
             // In test code, we log and ignore mutex poisoning errors since they indicate test bugs
             if let Ok(mut guard) = self.calls.lock().map_err(|e| {
                 ObserverError::MutexPoisoned {
@@ -600,7 +563,7 @@ mod tests {
         assert_eq!(observers.len(), 0);
 
         // Should not panic with no observers
-        observers.notify(&HashMap::new(), 0);
+        observers.notify(&empty_vars(), 0);
     }
 
     #[test]
@@ -615,9 +578,9 @@ mod tests {
 
         assert_eq!(observers.len(), 1);
 
-        observers.notify(&HashMap::new(), 0);
-        observers.notify(&HashMap::new(), 1);
-        observers.notify(&HashMap::new(), 2);
+        observers.notify(&empty_vars(), 0);
+        observers.notify(&empty_vars(), 1);
+        observers.notify(&empty_vars(), 2);
 
         let guard = calls.lock().map_err(|e| {
             ObserverError::MutexPoisoned {
@@ -648,7 +611,7 @@ mod tests {
 
         assert_eq!(observers.len(), 2);
 
-        observers.notify(&HashMap::new(), 5);
+        observers.notify(&empty_vars(), 5);
 
         let guard1 = calls1.lock().map_err(|e| {
             ObserverError::MutexPoisoned {
@@ -793,11 +756,12 @@ mod tests {
     }
 
     impl OptObserver for CompleteObserver {
-        fn on_step(&self, _values: &HashMap<String, VariableEnum>, _iteration: usize) {}
+        fn on_step(&self, _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>, _iteration: usize) {
+        }
 
         fn on_optimization_complete(
             &self,
-            _values: &HashMap<String, VariableEnum>,
+            _values: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
             _iterations: usize,
         ) {
             if let Ok(mut guard) = self.complete_calls.lock() {
@@ -815,7 +779,7 @@ mod tests {
 
         let mut observers = OptObserverVec::new();
         observers.add(observer);
-        observers.notify_complete(&HashMap::new(), 10);
+        observers.notify_complete(&empty_vars(), 10);
 
         let count = *complete_calls.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(count, 1);
@@ -824,7 +788,7 @@ mod tests {
     #[test]
     fn test_notify_complete_empty_no_panic() {
         let observers = OptObserverVec::new();
-        observers.notify_complete(&HashMap::new(), 5);
+        observers.notify_complete(&empty_vars(), 5);
     }
 
     #[test]
@@ -836,6 +800,6 @@ mod tests {
         // Default implementations should be no-ops
         observer.set_iteration_metrics(1.0, 1e-3, None, 0.0, None);
         observer.set_matrix_data(None, None);
-        observer.on_optimization_complete(&HashMap::new(), 5);
+        observer.on_optimization_complete(&empty_vars(), 5);
     }
 }

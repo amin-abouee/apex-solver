@@ -16,11 +16,17 @@ use tracing::error;
 use apex_manifolds::{se2::SE2, se3::SE3};
 
 // Module declarations
+pub mod asl;
 pub mod bal;
 pub mod g2o;
 pub mod logger;
 pub mod toro;
 pub mod utils;
+
+pub mod rosbag;
+
+#[cfg(feature = "dds")]
+pub use rosbag::ros2::dds;
 
 pub use logger::init_logger;
 pub use utils::{DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset};
@@ -38,6 +44,8 @@ pub const ODOMETRY_DATA_DIR_3D: &str = "data/odometry/3d";
 pub const BUNDLE_ADJUSTMENT_DATA_DIR: &str = "data/bundle_adjustment";
 
 // Re-exports
+pub use asl::error::AslError;
+pub use asl::{AslDataset, AslReader, AslStream};
 pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
@@ -78,14 +86,12 @@ pub enum IoError {
 
 impl IoError {
     /// Log the error using tracing::error and return self for chaining
-    #[must_use]
     pub fn log(self) -> Self {
         error!("{}", self);
         self
     }
 
     /// Log the error with source error information using tracing::error and return self for chaining
-    #[must_use]
     pub fn log_with_source<E: std::fmt::Debug>(self, source_error: E) -> Self {
         error!("{} | Source: {:?}", self, source_error);
         self
@@ -699,5 +705,46 @@ mod tests {
         std::fs::remove_file(&toro_path)?;
         assert_eq!(graph.vertices_se2.len(), 2);
         Ok(())
+    }
+
+    #[test]
+    fn test_io_error_log_returns_self() {
+        let err = IoError::UnsupportedFormat("xyz".to_string());
+        let returned = err.log();
+        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn test_io_error_log_with_source() {
+        let err = IoError::UnsupportedFormat("abc".to_string());
+        let source = std::io::Error::other("source");
+        let returned = err.log_with_source(source);
+        assert!(matches!(returned, IoError::UnsupportedFormat(_)));
+    }
+
+    #[test]
+    fn test_vertex_se2_theta() {
+        use std::f64::consts::PI;
+        let v = VertexSE2::new(0, 1.0, 2.0, PI / 4.0);
+        assert!((v.theta() - PI / 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_edge_se3_new() {
+        let t = Vector3::new(1.0, 2.0, 3.0);
+        let r = UnitQuaternion::identity();
+        let info = Matrix6::identity();
+        let e = EdgeSE3::new(0, 1, t, r, info);
+        assert_eq!(e.from, 0);
+        assert_eq!(e.to, 1);
+    }
+
+    #[test]
+    fn test_vertex_se3_new() {
+        let t = Vector3::new(1.0, 2.0, 3.0);
+        let r = UnitQuaternion::identity();
+        let v = VertexSE3::new(5, t, r);
+        assert_eq!(v.id, 5);
+        assert!((v.translation() - t).norm() < 1e-10);
     }
 }

@@ -11,8 +11,6 @@
 #include "../../common/include/ba_benchmark_utils.h"
 #include "../include/g2o_ba.h"
 
-#include <thread>
-
 // EdgeBALProjection class moved to g2o_ba.h
 
 benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
@@ -21,9 +19,7 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
     result.dataset = "problem-1723-156502-pre";
     result.solver = "g2o";
     result.language = "C++";
-    
-    std::cout << "\n=== g2o Benchmark ===" << std::endl;
-    
+
     // Load dataset
     bal_reader::BALDataset dataset;
     if (!bal_reader::ReadBALFile(dataset_path, dataset)) {
@@ -36,13 +32,10 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
     result.num_observations = dataset.num_observations();
     
     // Compute initial cost
-    std::cout << "Computing initial metrics..." << std::endl;
     result.initial_mse = ba_cost::ComputeMSE(dataset);
     result.initial_rmse = ba_cost::ComputeRMSE(dataset);
-    std::cout << "Initial RMSE: " << result.initial_rmse << " pixels" << std::endl;
-    
+
     // Setup g2o optimizer
-    std::cout << "Building optimization problem..." << std::endl;
     typedef g2o::BlockSolver<g2o::BlockSolverTraits<6, 3>> BlockSolverType;
     typedef g2o::LinearSolverEigen<BlockSolverType::PoseMatrixType> LinearSolverType;
     
@@ -54,7 +47,6 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
     optimizer.setVerbose(false);
     
     // Add camera vertices
-    std::cout << "Adding " << dataset.cameras.size() << " camera vertices..." << std::endl;
     for (size_t i = 0; i < dataset.cameras.size(); ++i) {
         const auto& cam = dataset.cameras[i];
         
@@ -78,14 +70,12 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
         // Fix first camera (gauge freedom)
         if (i == 0) {
             v_cam->setFixed(true);
-            std::cout << "Fixed first camera for gauge freedom" << std::endl;
         }
         
         optimizer.addVertex(v_cam);
     }
     
     // Add point vertices
-    std::cout << "Adding " << dataset.points.size() << " point vertices..." << std::endl;
     int point_id_offset = static_cast<int>(dataset.cameras.size());
     for (size_t j = 0; j < dataset.points.size(); ++j) {
         const auto& pt = dataset.points[j];
@@ -99,7 +89,6 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
     }
     
     // Add projection edges with custom BAL camera model
-    std::cout << "Adding " << dataset.observations.size() << " projection edges..." << std::endl;
     for (const auto& obs : dataset.observations) {
         const auto& cam = dataset.cameras[obs.camera_index];
         
@@ -124,30 +113,19 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
         optimizer.addEdge(edge);
     }
     
-    int num_threads = static_cast<int>(std::thread::hardware_concurrency());
-    std::cout << "Solver configuration:" << std::endl;
     // g2o is single-threaded and very slow on large problems
     // Use fewer iterations for practical benchmarking (still demonstrates convergence)
     const int max_iterations = 20;  // Reduced from 100 for practical runtime
-    
-    std::cout << "  Algorithm: Levenberg-Marquardt" << std::endl;
-    std::cout << "  Linear solver: Eigen sparse (Schur complement on landmarks)" << std::endl;
-    std::cout << "  Max iterations: " << max_iterations << " (reduced for g2o single-threaded)" << std::endl;
-    std::cout << "  Available threads: " << num_threads << " (g2o core is single-threaded)" << std::endl;
-    
+
     // Initialize and optimize
-    std::cout << "\nInitializing optimization..." << std::endl;
     optimizer.initializeOptimization();
-    
-    std::cout << "Starting optimization..." << std::endl;
+
     Timer timer;
     int iterations = optimizer.optimize(max_iterations);
     result.time_ms = timer.elapsed_ms();
-    
+
     result.iterations = iterations;
-    
-    std::cout << "Optimization completed in " << result.iterations << " iterations" << std::endl;
-    
+
     // Extract optimized values
     for (size_t i = 0; i < dataset.cameras.size(); ++i) {
         auto* v_cam = dynamic_cast<g2o::VertexSE3Expmap*>(
@@ -168,20 +146,11 @@ benchmark_utils::BenchmarkResult BenchmarkG2O(const std::string& dataset_path) {
     }
     
     // Compute final cost
-    std::cout << "Computing final metrics..." << std::endl;
     result.final_mse = ba_cost::ComputeMSE(dataset);
     result.final_rmse = ba_cost::ComputeRMSE(dataset);
-    
-    double improvement_pct = ((result.initial_mse - result.final_mse) / result.initial_mse) * 100.0;
+
     result.status = (iterations > 0) ? "CONVERGED" : "NOT_CONVERGED";
-    
-    std::cout << "\nResults:" << std::endl;
-    std::cout << "  Final RMSE: " << result.final_rmse << " pixels" << std::endl;
-    std::cout << "  Improvement: " << improvement_pct << "%" << std::endl;
-    std::cout << "  Iterations: " << result.iterations << std::endl;
-    std::cout << "  Time: " << result.time_ms / 1000.0 << " seconds" << std::endl;
-    std::cout << "  Status: " << result.status << std::endl;
-    
+
     return result;
 }
 
@@ -196,9 +165,7 @@ int main(int argc, char** argv) {
     results.push_back(BenchmarkG2O(dataset_path));
     
     std::string csv_path = "g2o_ba_benchmark_results.csv";
-    if (benchmark_utils::WriteResultsToCSV(csv_path, results)) {
-        std::cout << "\nResults written to " << csv_path << std::endl;
-    } else {
+    if (!benchmark_utils::WriteResultsToCSV(csv_path, results)) {
         std::cerr << "Failed to write CSV results" << std::endl;
         return 1;
     }

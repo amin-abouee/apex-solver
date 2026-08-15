@@ -30,9 +30,10 @@
 use apex_solver::JacobianMode;
 use apex_solver::apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
 use apex_solver::apex_io::{BalDataset, BalLoader};
-use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::apex_manifolds::so3::SO3;
+use apex_solver::apex_manifolds::{LieGroup, ManifoldType};
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
@@ -41,7 +42,6 @@ use apex_solver::linalg::SchurVariant;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
-use std::collections::HashMap;
 use std::error::Error;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -222,14 +222,18 @@ fn run_bundle_adjustment(
     };
 
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+
+    // Track VarKeys by camera/point index
+    let mut pose_keys: Vec<VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut intr_keys: Vec<VarKey> = Vec::with_capacity(dataset.cameras.len());
+    let mut pt_keys: Vec<VarKey> = Vec::with_capacity(num_points);
 
     // Add cameras as SE3 poses + intrinsic variables
     info!(
         "Adding {} cameras as SE3 poses + intrinsics...",
         dataset.cameras.len()
     );
-    for (i, cam) in dataset.cameras.iter().enumerate() {
+    for cam in &dataset.cameras {
         // Convert axis-angle to SE3
         let axis_angle = Vector3::new(cam.rotation.x, cam.rotation.y, cam.rotation.z);
         let translation = Vector3::new(cam.translation.x, cam.translation.y, cam.translation.z);
@@ -237,23 +241,27 @@ fn run_bundle_adjustment(
         let pose = SE3::from_translation_so3(translation, so3);
 
         // Add SE3 pose variable (6 DOF)
-        let pose_name = format!("pose_{:04}", i);
-        initial_values.insert(pose_name, (ManifoldType::SE3, DVector::from(pose)));
+        let pose_key = problem.add_variable(
+            ManifoldType::SE3,
+            DVector::from_column_slice(pose.as_param_slice()),
+        );
+        pose_keys.push(pose_key);
 
         // Add intrinsics: [focal, k1, k2] (3 DOF)
-        let intrinsics_name = format!("intr_{:04}", i);
         let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
-        initial_values.insert(intrinsics_name, (ManifoldType::RN, intrinsics_vec));
+        let intr_key = problem.add_variable(ManifoldType::RN, intrinsics_vec);
+        intr_keys.push(intr_key);
     }
 
     // Add landmarks as RN(3)
     info!("Adding {} landmarks as RN(3) variables...", num_points);
     for j in 0..num_points {
         let point = &dataset.points[j];
-        let var_name = format!("pt_{:05}", j);
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
-        initial_values.insert(var_name, (ManifoldType::RN, point_vec));
+        let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
+        problem.mark_as_schur_landmark(pt_key);
+        pt_keys.push(pt_key);
     }
 
     // Count valid observations
@@ -270,31 +278,68 @@ fn run_bundle_adjustment(
         opt_type
     );
 
-    // We need to use a macro or dynamic dispatch for different optimization types
-    // For now, use match with type-specific factor creation
-    // include_intrinsics = true when the optimization type has INTRINSIC = true
     match opt_type {
         OptimizationType::SelfCalibration => {
-            add_factors::<SelfCalibration>(&mut problem, dataset, &valid_obs, true)?;
+            add_factors::<SelfCalibration>(
+                &mut problem,
+                dataset,
+                &valid_obs,
+                &pose_keys,
+                &pt_keys,
+                &intr_keys,
+                true,
+            )?;
         }
         OptimizationType::BundleAdjustment => {
-            add_factors::<BundleAdjustment>(&mut problem, dataset, &valid_obs, false)?;
+            add_factors::<BundleAdjustment>(
+                &mut problem,
+                dataset,
+                &valid_obs,
+                &pose_keys,
+                &pt_keys,
+                &intr_keys,
+                false,
+            )?;
         }
         OptimizationType::OnlyPose => {
-            add_factors::<OnlyPose>(&mut problem, dataset, &valid_obs, false)?;
+            add_factors::<OnlyPose>(
+                &mut problem,
+                dataset,
+                &valid_obs,
+                &pose_keys,
+                &pt_keys,
+                &intr_keys,
+                false,
+            )?;
         }
         OptimizationType::OnlyLandmarks => {
-            add_factors::<OnlyLandmarks>(&mut problem, dataset, &valid_obs, false)?;
+            add_factors::<OnlyLandmarks>(
+                &mut problem,
+                dataset,
+                &valid_obs,
+                &pose_keys,
+                &pt_keys,
+                &intr_keys,
+                false,
+            )?;
         }
         OptimizationType::OnlyIntrinsics => {
-            add_factors::<OnlyIntrinsics>(&mut problem, dataset, &valid_obs, true)?;
+            add_factors::<OnlyIntrinsics>(
+                &mut problem,
+                dataset,
+                &valid_obs,
+                &pose_keys,
+                &pt_keys,
+                &intr_keys,
+                true,
+            )?;
         }
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
     info!("Fixing first camera pose (all 6 DOF) for gauge freedom...");
     for dof in 0..6 {
-        problem.fix_variable("pose_0000", dof);
+        problem.fix_variable(pose_keys[0], dof);
     }
 
     // Configure solver
@@ -352,7 +397,7 @@ fn run_bundle_adjustment(
     info!("");
     info!("Starting optimization...");
     let start = Instant::now();
-    let result = solver.optimize(&problem, &initial_values)?;
+    let result = solver.optimize(&mut problem)?;
     let elapsed = start.elapsed();
 
     info!("");
@@ -388,10 +433,14 @@ fn run_bundle_adjustment(
 }
 
 /// Helper function to add factors with a specific optimization configuration
+#[allow(clippy::too_many_arguments)]
 fn add_factors<OP>(
     problem: &mut Problem,
     dataset: &BalDataset,
     valid_obs: &[&apex_solver::apex_io::BalObservation],
+    pose_keys: &[VarKey],
+    pt_keys: &[VarKey],
+    intr_keys: &[VarKey],
     include_intrinsics: bool,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -418,9 +467,9 @@ where
         let factor: ProjectionFactor<BALPinholeCameraStrict, OP> =
             ProjectionFactor::new(observations, camera);
 
-        let pose_name = format!("pose_{:04}", obs.camera_index);
-        let pt_name = format!("pt_{:05}", obs.point_index);
-        let intr_name = format!("intr_{:04}", obs.camera_index);
+        let pose_key = pose_keys[obs.camera_index];
+        let pt_key = pt_keys[obs.point_index];
+        let intr_key = intr_keys[obs.camera_index];
 
         let loss = match HuberLoss::new(1.0) {
             Ok(l) => Box::new(l),
@@ -428,13 +477,9 @@ where
         };
 
         if include_intrinsics {
-            problem.add_residual_block(
-                &[&pose_name, &pt_name, &intr_name],
-                Box::new(factor),
-                Some(loss),
-            );
+            problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
         } else {
-            problem.add_residual_block(&[&pose_name, &pt_name], Box::new(factor), Some(loss));
+            problem.add_residual_block(&[pose_key, pt_key], Box::new(factor), Some(loss));
         }
     }
     Ok(())

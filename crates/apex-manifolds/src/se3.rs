@@ -32,7 +32,7 @@ use crate::{
     so3::{SO3, SO3Tangent},
 };
 use nalgebra::{
-    DVector, Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, Translation3, UnitQuaternion,
+    Isometry3, Matrix3, Matrix4, Matrix6, Quaternion, SVector, Translation3, UnitQuaternion,
     Vector3, Vector6,
 };
 use std::{
@@ -42,13 +42,12 @@ use std::{
 
 /// SE(3) group element representing rigid body transformations in 3D.
 ///
-/// Represented as a combination of SO(3) rotation and Vector3 translation.
+/// Stored as a flat `SVector<f64, 7>` = [tx, ty, tz, qw, qx, qy, qz] for
+/// contiguous memory compatible with zero-copy faer views.
 #[derive(Clone, PartialEq)]
 pub struct SE3 {
-    /// Rotation part as SO(3) element
-    rotation: SO3,
-    /// Translation part as Vector3
-    translation: Vector3<f64>,
+    /// Flat parameter storage: [tx, ty, tz, qw, qx, qy, qz]
+    params: SVector<f64, 7>,
 }
 
 impl Display for SE3 {
@@ -73,13 +72,35 @@ impl SE3 {
     /// Representation size - size of the underlying data representation
     pub const REP_SIZE: usize = 7;
 
+    #[inline]
+    fn translation_impl(&self) -> Vector3<f64> {
+        Vector3::new(self.params[0], self.params[1], self.params[2])
+    }
+
+    #[inline]
+    fn rotation_impl(&self) -> SO3 {
+        SO3::from_quaternion_wxyz(
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
+        )
+    }
+
+    #[inline]
+    fn from_parts(t: Vector3<f64>, r: &SO3) -> Self {
+        let q = r.params();
+        SE3 {
+            params: SVector::<f64, 7>::from([t.x, t.y, t.z, q[0], q[1], q[2], q[3]]),
+        }
+    }
+
     /// Get the identity element of the group.
     ///
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
         SE3 {
-            rotation: SO3::identity(),
-            translation: Vector3::zeros(),
+            params: SVector::<f64, 7>::from([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]),
         }
     }
 
@@ -97,63 +118,54 @@ impl SE3 {
     /// * `rotation` - Unit quaternion representing rotation
     #[inline]
     pub fn new(translation: Vector3<f64>, rotation: UnitQuaternion<f64>) -> Self {
-        SE3 {
-            rotation: SO3::new(rotation),
-            translation,
-        }
+        SE3::from_parts(translation, &SO3::new(rotation))
     }
 
-    /// Create SE3 from translation components and Euler angles.
+    /// Create SE3 from translation and raw quaternion (will be normalized).
     pub fn from_translation_quaternion(
         translation: Vector3<f64>,
         quaternion: Quaternion<f64>,
     ) -> Self {
-        let quaternion = UnitQuaternion::from_quaternion(quaternion.normalize());
-        Self::new(translation, quaternion)
+        let q = UnitQuaternion::from_quaternion(quaternion.normalize());
+        SE3::from_parts(translation, &SO3::new(q))
     }
 
     /// Create SE3 from translation components and Euler angles.
     pub fn from_translation_euler(x: f64, y: f64, z: f64, roll: f64, pitch: f64, yaw: f64) -> Self {
         let translation = Vector3::new(x, y, z);
         let rotation = UnitQuaternion::from_euler_angles(roll, pitch, yaw);
-        Self::new(translation, rotation)
+        SE3::from_parts(translation, &SO3::new(rotation))
     }
 
     /// Create SE3 directly from an Isometry3.
     pub fn from_isometry(isometry: Isometry3<f64>) -> Self {
-        SE3 {
-            rotation: SO3::new(isometry.rotation),
-            translation: isometry.translation.vector,
-        }
+        SE3::from_parts(isometry.translation.vector, &SO3::new(isometry.rotation))
     }
 
     /// Create SE3 from SO3 and Vector3 components.
     pub fn from_translation_so3(translation: Vector3<f64>, rotation: SO3) -> Self {
-        SE3 {
-            rotation,
-            translation,
-        }
+        SE3::from_parts(translation, &rotation)
     }
 
     /// Get the translation part as a Vector3.
     pub fn translation(&self) -> Vector3<f64> {
-        self.translation
+        self.translation_impl()
     }
 
     /// Get the rotation part as SO3.
     pub fn rotation_so3(&self) -> SO3 {
-        self.rotation.clone()
+        self.rotation_impl()
     }
 
     /// Get the rotation part as a UnitQuaternion.
     pub fn rotation_quaternion(&self) -> UnitQuaternion<f64> {
-        self.rotation.quaternion()
+        self.rotation_impl().quaternion()
     }
 
     /// Get as an Isometry3 (convenience method).
     pub fn isometry(&self) -> Isometry3<f64> {
         Isometry3::from_parts(
-            Translation3::from(self.translation),
+            Translation3::from(self.translation()),
             self.rotation_quaternion(),
         )
     }
@@ -166,62 +178,38 @@ impl SE3 {
     /// Get the x component of translation.
     #[inline]
     pub fn x(&self) -> f64 {
-        self.translation.x
+        self.params[0]
     }
 
     /// Get the y component of translation.
     #[inline]
     pub fn y(&self) -> f64 {
-        self.translation.y
+        self.params[1]
     }
 
     /// Get the z component of translation.
     #[inline]
     pub fn z(&self) -> f64 {
-        self.translation.z
+        self.params[2]
     }
 
     /// Get coefficients as array [tx, ty, tz, qw, qx, qy, qz].
     pub fn coeffs(&self) -> [f64; 7] {
-        let q = self.rotation.quaternion();
         [
-            self.translation.x,
-            self.translation.y,
-            self.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+            self.params[4],
+            self.params[5],
+            self.params[6],
         ]
     }
 }
 
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SE3 {
-    fn from(data: DVector<f64>) -> Self {
-        let translation = Vector3::new(data[0], data[1], data[2]);
-        let quaternion = Quaternion::new(data[3], data[4], data[5], data[6]);
-        SE3::from_translation_quaternion(translation, quaternion)
-    }
-}
-
-impl From<SE3> for DVector<f64> {
-    fn from(se3: SE3) -> Self {
-        let q = se3.rotation.quaternion();
-        DVector::from_vec(vec![
-            se3.translation.x,
-            se3.translation.y,
-            se3.translation.z,
-            q.w,
-            q.i,
-            q.j,
-            q.k,
-        ])
-    }
-}
-
-// Implement basic trait requirements for LieGroup
 impl LieGroup for SE3 {
+    const NAME: &'static str = "SE3";
+
     type TangentVector = SE3Tangent;
     type JacobianMatrix = Matrix6<f64>;
     type LieAlgebra = Matrix4<f64>;
@@ -237,17 +225,18 @@ impl LieGroup for SE3 {
     ///       [ 0    1   ]
     ///
     /// # Equation 176: Jacobian of inverse operation
-    /// J_M⁻¹_M = - [ R [t]ₓ R ]
+    /// `J_M⁻¹_M = - [ R [t]ₓ R ]`
     ///             [ 0    R   ]
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let rot_inv = self.rotation.inverse(None);
-        let trans_inv = -rot_inv.act(&self.translation, None, None);
+        let rot = self.rotation_impl();
+        let rot_inv = rot.inverse(None);
+        let trans_inv = -rot_inv.act(&self.translation_impl(), None, None);
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        SE3::from_translation_so3(trans_inv, rot_inv)
+        SE3::from_parts(trans_inv, &rot_inv)
     }
 
     /// Composition of this and another SE3 element.
@@ -263,7 +252,7 @@ impl LieGroup for SE3 {
     ///           [ 0             1         ]
     ///
     /// # Equation 177: Jacobian of the composition wrt self.
-    /// J_MaMb_Ma = [ R_bᵀ   -R_bᵀ*[t_b]ₓ ]
+    /// `J_MaMb_Ma = [ R_bᵀ   -R_bᵀ*[t_b]ₓ ]`
     ///             [ 0          R_bᵀ     ]
     ///
     /// # Equation 178: Jacobian of the composition wrt other.
@@ -275,11 +264,12 @@ impl LieGroup for SE3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let composed_rotation = self.rotation.compose(&other.rotation, None, None);
+        let rot = self.rotation_impl();
+        let composed_rotation = rot.compose(&other.rotation_impl(), None, None);
         let composed_translation =
-            self.rotation.act(&other.translation, None, None) + self.translation;
+            rot.act(&other.translation_impl(), None, None) + self.translation_impl();
 
-        let result = SE3::from_translation_so3(composed_translation, composed_rotation);
+        let result = SE3::from_parts(composed_translation, &composed_rotation);
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -303,12 +293,12 @@ impl LieGroup for SE3 {
     ///              [ Log(R)  ]
     ///
     /// # Equation 174: V(θ) function for SE(3) Log/Exp maps
-    /// V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `V(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
-        let theta = self.rotation.log(None);
+        let theta = self.rotation_impl().log(None);
         let mut data = Vector6::zeros();
-        let translation_vector = theta.left_jacobian_inv() * self.translation;
+        let translation_vector = theta.left_jacobian_inv() * self.translation_impl();
         data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
         data.fixed_rows_mut::<3>(3).copy_from(&theta.coeffs());
         let result = SE3Tangent { data };
@@ -325,41 +315,36 @@ impl LieGroup for SE3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        let result = self.rotation.act(vector, None, None) + self.translation;
+        let rot = self.rotation_impl();
+        let result = rot.act(vector, None, None) + self.translation_impl();
 
         if let Some(jac_self) = jacobian_self {
-            jac_self
-                .fixed_view_mut::<3, 3>(0, 0)
-                .copy_from(&self.rotation.rotation_matrix());
+            let rot_mat = rot.rotation_matrix();
+            jac_self.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot_mat);
             jac_self
                 .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(-self.rotation.rotation_matrix() * SO3Tangent::new(*vector).hat()));
+                .copy_from(&(-rot_mat * SO3Tangent::new(*vector).hat()));
         }
 
         if let Some(jac_vector) = jacobian_vector {
-            let rotation_matrix = self.rotation.rotation_matrix();
-            jac_vector.copy_from(&rotation_matrix);
+            jac_vector.copy_from(&rot.rotation_matrix());
         }
 
         result
     }
 
     fn adjoint(&self) -> Self::JacobianMatrix {
-        let rotation_matrix = self.rotation.rotation_matrix();
-        let translation = self.translation;
+        let rotation_matrix = self.rotation_impl().rotation_matrix();
+        let translation = self.translation_impl();
         let mut adjoint_matrix = Matrix6::zeros();
 
-        // Top-left block: R
         adjoint_matrix
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&rotation_matrix);
-
-        // Bottom-right block: R
         adjoint_matrix
             .fixed_view_mut::<3, 3>(3, 3)
             .copy_from(&rotation_matrix);
 
-        // Top-right block: [t]_× R (skew-symmetric of translation times rotation)
         let top_right = SO3Tangent::new(translation).hat() * rotation_matrix;
         adjoint_matrix
             .fixed_view_mut::<3, 3>(0, 3)
@@ -372,17 +357,14 @@ impl LieGroup for SE3 {
         use rand::Rng;
         let mut rng = rand::rng();
 
-        // Random translation in [-1, 1]³
         let translation = Vector3::new(
             rng.random_range(-1.0..1.0),
             rng.random_range(-1.0..1.0),
             rng.random_range(-1.0..1.0),
         );
-
-        // Random rotation
         let rotation = SO3::random();
 
-        SE3::from_translation_so3(translation, rotation)
+        SE3::from_parts(translation, &rotation)
     }
 
     fn jacobian_identity() -> Self::JacobianMatrix {
@@ -394,13 +376,32 @@ impl LieGroup for SE3 {
     }
 
     fn normalize(&mut self) {
-        // Normalize the rotation part
-        self.rotation.normalize();
+        let mut rot = self.rotation_impl();
+        rot.normalize();
+        let q = rot.params();
+        self.params[3] = q[0];
+        self.params[4] = q[1];
+        self.params[5] = q[2];
+        self.params[6] = q[3];
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        // Check if rotation is valid
-        self.rotation.is_valid(tolerance)
+        self.rotation_impl().is_valid(tolerance)
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 7);
+        SE3 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     /// Vee operator: log(g)^∨.
@@ -442,34 +443,6 @@ impl fmt::Display for SE3Tangent {
             "se3(rho: [{:.4}, {:.4}, {:.4}], theta: [{:.4}, {:.4}, {:.4}])",
             rho.x, rho.y, rho.z, theta.x, theta.y, theta.z
         )
-    }
-}
-
-impl From<DVector<f64>> for SE3Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        SE3Tangent {
-            data: Vector6::new(
-                data_vector[0],
-                data_vector[1],
-                data_vector[2],
-                data_vector[3],
-                data_vector[4],
-                data_vector[5],
-            ),
-        }
-    }
-}
-
-impl From<SE3Tangent> for DVector<f64> {
-    fn from(se3_tangent: SE3Tangent) -> Self {
-        DVector::from_vec(vec![
-            se3_tangent.data[0],
-            se3_tangent.data[1],
-            se3_tangent.data[2],
-            se3_tangent.data[3],
-            se3_tangent.data[4],
-            se3_tangent.data[5],
-        ])
     }
 }
 
@@ -796,6 +769,17 @@ impl Tangent<SE3> for SE3Tangent {
             SE3Tangent::new(self.rho(), self.theta() / norm)
         } else {
             SE3Tangent::new(self.rho(), Vector3::zeros())
+        }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 6);
+        SE3Tangent {
+            data: Vector6::from_column_slice(s),
         }
     }
 
@@ -1587,5 +1571,26 @@ mod tests {
             "Jl * Jl_inv should be identity, got error: {}",
             (product - Matrix6::identity()).norm()
         );
+    }
+
+    #[test]
+    fn se3_param_slice_round_trip() {
+        let g = SE3::random();
+        let recovered = SE3::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn se3_param_slice_mut_modifies_in_place() {
+        let mut g = SE3::identity();
+        g.as_param_slice_mut()[0] = 1.0;
+        assert_eq!(g.translation().x, 1.0);
+    }
+
+    #[test]
+    fn se3_tangent_slice_round_trip() {
+        let t = SE3Tangent::random();
+        let recovered = SE3Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
     }
 }

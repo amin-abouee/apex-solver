@@ -33,7 +33,7 @@
 //! - Sophus library: <https://github.com/strasdat/Sophus/issues/179>
 
 use crate::{LieGroup, Tangent};
-use nalgebra::{DVector, Matrix3, Matrix4, Quaternion, Unit, UnitQuaternion, Vector3};
+use nalgebra::{Matrix3, Matrix4, Quaternion, SVector, Unit, UnitQuaternion, Vector3};
 use std::{
     fmt,
     fmt::{Display, Formatter},
@@ -41,20 +41,21 @@ use std::{
 
 /// SO(3) group element representing rotations in 3D.
 ///
-/// Internally represented using nalgebra's UnitQuaternion<f64> for efficient rotations.
+/// Stored as a flat `SVector<f64, 4>` = [qw, qx, qy, qz] for contiguous memory
+/// compatible with zero-copy faer views. UnitQuaternion is constructed on-the-fly
+/// for math operations.
 #[derive(Clone, PartialEq)]
 pub struct SO3 {
-    /// Internal representation as a unit quaternion
-    quaternion: UnitQuaternion<f64>,
+    /// Flat parameter storage: [qw, qx, qy, qz]
+    params: SVector<f64, 4>,
 }
 
 impl Display for SO3 {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let q = self.quaternion.quaternion();
         write!(
             f,
             "SO3(quaternion: [w: {:.4}, x: {:.4}, y: {:.4}, z: {:.4}])",
-            q.w, q.i, q.j, q.k
+            self.params[0], self.params[1], self.params[2], self.params[3]
         )
     }
 }
@@ -74,7 +75,7 @@ impl SO3 {
     /// Returns the neutral element e such that e ∘ g = g ∘ e = g for any group element g.
     pub fn identity() -> Self {
         SO3 {
-            quaternion: UnitQuaternion::identity(),
+            params: SVector::<f64, 4>::new(1.0, 0.0, 0.0, 0.0),
         }
     }
 
@@ -91,7 +92,27 @@ impl SO3 {
     /// * `quaternion` - Unit quaternion representing rotation
     #[inline]
     pub fn new(quaternion: UnitQuaternion<f64>) -> Self {
-        SO3 { quaternion }
+        Self::from_unit_quaternion(quaternion)
+    }
+
+    /// Derive a UnitQuaternion from the flat params [qw, qx, qy, qz].
+    #[inline]
+    fn unit_quaternion(&self) -> UnitQuaternion<f64> {
+        UnitQuaternion::from_quaternion(Quaternion::new(
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+        ))
+    }
+
+    /// Build an SO3 from a UnitQuaternion, storing as flat params.
+    #[inline]
+    fn from_unit_quaternion(q: UnitQuaternion<f64>) -> Self {
+        let r = q.quaternion();
+        SO3 {
+            params: SVector::<f64, 4>::new(r.w, r.i, r.j, r.k),
+        }
     }
 
     /// Create SO(3) from quaternion coefficients in G2O convention `[x, y, z, w]`.
@@ -106,8 +127,8 @@ impl SO3 {
     /// * `z` - k component of quaternion
     /// * `w` - w (real) component of quaternion
     pub fn from_quaternion_coeffs(x: f64, y: f64, z: f64, w: f64) -> Self {
-        let q = Quaternion::new(w, x, y, z);
-        SO3::new(UnitQuaternion::from_quaternion(q))
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z));
+        Self::from_unit_quaternion(q)
     }
 
     /// Create SO(3) from quaternion coefficients in nalgebra convention `[w, x, y, z]`.
@@ -122,94 +143,104 @@ impl SO3 {
     /// * `y` - j component of quaternion
     /// * `z` - k component of quaternion
     pub fn from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> Self {
-        let q = Quaternion::new(w, x, y, z);
-        SO3::new(UnitQuaternion::from_quaternion(q))
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z));
+        Self::from_unit_quaternion(q)
     }
 
     /// Create SO(3) from Euler angles (roll, pitch, yaw).
     pub fn from_euler_angles(roll: f64, pitch: f64, yaw: f64) -> Self {
-        let quaternion = UnitQuaternion::from_euler_angles(roll, pitch, yaw);
-        SO3::new(quaternion)
+        Self::from_unit_quaternion(UnitQuaternion::from_euler_angles(roll, pitch, yaw))
     }
 
     /// Create SO(3) from axis-angle representation.
     pub fn from_axis_angle(axis: &Vector3<f64>, angle: f64) -> Self {
         let unit_axis = Unit::new_normalize(*axis);
-        let quaternion = UnitQuaternion::from_axis_angle(&unit_axis, angle);
-        SO3::new(quaternion)
+        Self::from_unit_quaternion(UnitQuaternion::from_axis_angle(&unit_axis, angle))
     }
 
     /// Create SO(3) from scaled axis (axis-angle vector).
     pub fn from_scaled_axis(axis_angle: Vector3<f64>) -> Self {
-        let quaternion = UnitQuaternion::from_scaled_axis(axis_angle);
-        SO3::new(quaternion)
+        Self::from_unit_quaternion(UnitQuaternion::from_scaled_axis(axis_angle))
     }
 
-    /// Get the quaternion representation.
+    /// Get the quaternion representation (derived from flat params).
     pub fn quaternion(&self) -> UnitQuaternion<f64> {
-        self.quaternion
+        self.unit_quaternion()
     }
 
-    /// Create SO3 from quaternion (alias for new)
+    /// Create SO3 from quaternion (alias for new).
     pub fn from_quaternion(quaternion: UnitQuaternion<f64>) -> Self {
-        Self::new(quaternion)
+        Self::from_unit_quaternion(quaternion)
     }
 
-    /// Get the quaternion representation (alias for quaternion)
+    /// Get the quaternion representation (alias for quaternion).
     pub fn to_quaternion(&self) -> UnitQuaternion<f64> {
-        self.quaternion
+        self.unit_quaternion()
     }
 
     /// Get the raw quaternion coefficients.
     pub fn quat(&self) -> Quaternion<f64> {
-        *self.quaternion.quaternion()
+        *self.unit_quaternion().quaternion()
     }
 
-    /// Get the x component of the quaternion.
+    /// Get the x (i) component of the quaternion.
     #[inline]
     pub fn x(&self) -> f64 {
-        self.quaternion.i
+        self.params[1]
     }
 
-    /// Get the y component of the quaternion.
+    /// Get the y (j) component of the quaternion.
     #[inline]
     pub fn y(&self) -> f64 {
-        self.quaternion.j
+        self.params[2]
     }
 
-    /// Get the z component of the quaternion.
+    /// Get the z (k) component of the quaternion.
     #[inline]
     pub fn z(&self) -> f64 {
-        self.quaternion.k
+        self.params[3]
     }
 
-    /// Get the w component of the quaternion.
+    /// Get the w (real) component of the quaternion.
     #[inline]
     pub fn w(&self) -> f64 {
-        self.quaternion.w
+        self.params[0]
     }
 
     /// Get the rotation matrix (3x3).
     pub fn rotation_matrix(&self) -> Matrix3<f64> {
-        self.quaternion.to_rotation_matrix().into_inner()
+        self.unit_quaternion().to_rotation_matrix().into_inner()
     }
 
     /// Get the homogeneous transformation matrix (4x4).
     pub fn transform(&self) -> Matrix4<f64> {
-        self.quaternion.to_homogeneous()
+        self.unit_quaternion().to_homogeneous()
     }
 
     /// Set the quaternion from coefficients array [w, x, y, z].
     pub fn set_quaternion(&mut self, coeffs: &[f64; 4]) {
-        let q = Quaternion::new(coeffs[0], coeffs[1], coeffs[2], coeffs[3]);
-        self.quaternion = UnitQuaternion::from_quaternion(q);
+        let q = UnitQuaternion::from_quaternion(Quaternion::new(
+            coeffs[0], coeffs[1], coeffs[2], coeffs[3],
+        ));
+        let r = q.quaternion();
+        self.params = SVector::<f64, 4>::new(r.w, r.i, r.j, r.k);
     }
 
     /// Get coefficients as array [w, x, y, z].
     #[inline]
     pub fn coeffs(&self) -> [f64; 4] {
-        let q = self.quaternion.quaternion();
-        [q.w, q.i, q.j, q.k]
+        [
+            self.params[0],
+            self.params[1],
+            self.params[2],
+            self.params[3],
+        ]
+    }
+
+    /// Get a reference to the flat parameter vector [qw, qx, qy, qz].
+    #[inline]
+    pub fn params(&self) -> &SVector<f64, 4> {
+        &self.params
     }
 
     /// Calculate the distance between two SO3 elements
@@ -221,21 +252,10 @@ impl SO3 {
     }
 }
 
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SO3 {
-    fn from(data: DVector<f64>) -> Self {
-        SO3::from_quaternion_coeffs(data[0], data[1], data[2], data[3])
-    }
-}
-
-impl From<SO3> for DVector<f64> {
-    fn from(so3: SO3) -> Self {
-        DVector::from_vec(so3.coeffs().to_vec())
-    }
-}
-
 // Implement basic trait requirements for LieGroup
 impl LieGroup for SO3 {
+    const NAME: &'static str = "SO3";
+
     type TangentVector = SO3Tangent;
     type JacobianMatrix = Matrix3<f64>;
     type LieAlgebra = Matrix3<f64>;
@@ -252,15 +272,13 @@ impl LieGroup for SO3 {
     /// J_R⁻¹_R = -Adj(R) = -R
     ///
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
-        let inverse_quat = self.quaternion.inverse();
+        let inverse_quat = self.unit_quaternion().inverse();
 
         if let Some(jac) = jacobian {
             *jac = -self.adjoint();
         }
 
-        SO3 {
-            quaternion: inverse_quat,
-        }
+        Self::from_unit_quaternion(inverse_quat)
     }
 
     /// SO3 composition.
@@ -283,9 +301,7 @@ impl LieGroup for SO3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
-        let result = SO3 {
-            quaternion: self.quaternion * other.quaternion,
-        };
+        let result = Self::from_unit_quaternion(self.unit_quaternion() * other.unit_quaternion());
 
         if let Some(jac_self) = jacobian_self {
             *jac_self = other.inverse(None).adjoint();
@@ -308,16 +324,17 @@ impl LieGroup for SO3 {
     /// θu = Log(q) = (2 / ||v||) * v * arctan(||v||, w) ∈ R³
     ///
     /// # Equation 144: Inverse of Right Jacobian for SO(3) Exp map
-    /// J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
+    /// `J_R⁻¹(θ) = I + (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²`
     ///
     fn log(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self::TangentVector {
+        let uq = self.unit_quaternion();
         debug_assert!(
-            (self.quaternion.norm() - 1.0).abs() < 1e-6,
+            (uq.norm() - 1.0).abs() < 1e-6,
             "SO3::log() requires normalized quaternion, norm = {}",
-            self.quaternion.norm()
+            uq.norm()
         );
 
-        let q = self.quaternion.quaternion();
+        let q = uq.quaternion();
         let sin_angle_squared = q.i * q.i + q.j * q.j + q.k * q.k;
 
         let log_coeff = if sin_angle_squared > crate::SMALL_ANGLE_THRESHOLD {
@@ -362,7 +379,7 @@ impl LieGroup for SO3 {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
-        let result = self.quaternion * vector;
+        let result = self.unit_quaternion() * vector;
 
         if let Some(jac_self) = jacobian_self {
             // -R * [v]×
@@ -382,13 +399,11 @@ impl LieGroup for SO3 {
     }
 
     fn random() -> Self {
-        SO3 {
-            quaternion: UnitQuaternion::from_scaled_axis(Vector3::new(
-                rand::random::<f64>() * 2.0 - 1.0,
-                rand::random::<f64>() * 2.0 - 1.0,
-                rand::random::<f64>() * 2.0 - 1.0,
-            )),
-        }
+        Self::from_unit_quaternion(UnitQuaternion::from_scaled_axis(Vector3::new(
+            rand::random::<f64>() * 2.0 - 1.0,
+            rand::random::<f64>() * 2.0 - 1.0,
+            rand::random::<f64>() * 2.0 - 1.0,
+        )))
     }
 
     fn jacobian_identity() -> Self::JacobianMatrix {
@@ -400,14 +415,40 @@ impl LieGroup for SO3 {
     }
 
     fn normalize(&mut self) {
-        let q = self.quaternion.into_inner().normalize();
-        self.quaternion = UnitQuaternion::from_quaternion(q);
+        let q = UnitQuaternion::from_quaternion(
+            Quaternion::new(
+                self.params[0],
+                self.params[1],
+                self.params[2],
+                self.params[3],
+            )
+            .normalize(),
+        );
+        let r = q.quaternion();
+        self.params = SVector::<f64, 4>::new(r.w, r.i, r.j, r.k);
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        // Check if the quaternion is normalized
-        let norm_diff = (self.quaternion.norm() - 1.0).abs();
-        norm_diff < tolerance
+        let norm_sq = self.params[0] * self.params[0]
+            + self.params[1] * self.params[1]
+            + self.params[2] * self.params[2]
+            + self.params[3] * self.params[3];
+        (norm_sq.sqrt() - 1.0).abs() < tolerance
+    }
+
+    fn as_param_slice(&self) -> &[f64] {
+        self.params.as_slice()
+    }
+
+    fn as_param_slice_mut(&mut self) -> &mut [f64] {
+        self.params.as_mut_slice()
+    }
+
+    fn from_param_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 4);
+        SO3 {
+            params: SVector::from_column_slice(s),
+        }
     }
 
     /// Vee operator: log(g)^∨.
@@ -447,25 +488,6 @@ impl fmt::Display for SO3Tangent {
             "so3(axis-angle: [{:.4}, {:.4}, {:.4}])",
             self.data.x, self.data.y, self.data.z
         )
-    }
-}
-
-// Conversion traits for integration with generic Problem
-impl From<DVector<f64>> for SO3Tangent {
-    fn from(data_vector: DVector<f64>) -> Self {
-        SO3Tangent {
-            data: Vector3::new(data_vector[0], data_vector[1], data_vector[2]),
-        }
-    }
-}
-
-impl From<SO3Tangent> for DVector<f64> {
-    fn from(so3_tangent: SO3Tangent) -> Self {
-        DVector::from_vec(vec![
-            so3_tangent.data.x,
-            so3_tangent.data.y,
-            so3_tangent.data.z,
-        ])
     }
 }
 
@@ -553,7 +575,7 @@ impl Tangent<SO3> for SO3Tangent {
     /// q = Exp(θu) = cos(θ/2) + u sin(θ/2) ∈ H
     ///
     /// # Equation 143: Right Jacobian for SO(3) Exp map
-    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn exp(&self, jacobian: Option<&mut <SO3 as LieGroup>::JacobianMatrix>) -> SO3 {
         let theta_squared = self.data.norm_squared();
@@ -573,14 +595,14 @@ impl Tangent<SO3> for SO3Tangent {
             *jac = self.right_jacobian();
         }
 
-        SO3 { quaternion }
+        SO3::from_unit_quaternion(quaternion)
     }
 
     /// Right Jacobian for SO(3)
     ///
     /// # Notes
     /// # Equation 143: Right Jacobian for SO(3) Exp map
-    /// J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R(θ) = I - (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn right_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         self.left_jacobian().transpose()
@@ -590,7 +612,7 @@ impl Tangent<SO3> for SO3Tangent {
     ///
     /// # Notes
     /// # Equation 144: Left Jacobian for SO(3) Exp map
-    /// J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²
+    /// `J_R⁻¹(θ) = I + (1 - cos θ)/θ² [θ]ₓ + (θ - sin θ)/θ³ [θ]ₓ²`
     ///
     fn left_jacobian(&self) -> <SO3 as LieGroup>::JacobianMatrix {
         let angle = self.data.norm_squared();
@@ -621,7 +643,7 @@ impl Tangent<SO3> for SO3Tangent {
 
     /// Left Jacobian inverse for SO(3)
     ///
-    /// J_L⁻¹(θ) = I - (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²
+    /// `J_L⁻¹(θ) = I - (1/2) [θ]ₓ + (1/θ² - (1 + cos θ)/(2θ sin θ)) [θ]ₓ²`
     ///
     /// Has numerical conditioning issues near θ → π (sin θ → 0).
     ///
@@ -646,7 +668,7 @@ impl Tangent<SO3> for SO3Tangent {
     /// Hat map for SO(3)
     ///
     /// # Notes
-    /// [θ]ₓ = [0 -θz θy; θz 0 -θx; -θy θx 0]
+    /// `[θ]ₓ = [0 -θz θy; θz 0 -θx; -θy θx 0]`
     ///
     fn hat(&self) -> <SO3 as LieGroup>::LieAlgebra {
         Matrix3::new(
@@ -691,6 +713,17 @@ impl Tangent<SO3> for SO3Tangent {
             SO3Tangent::new(self.data / norm)
         } else {
             Self::zero()
+        }
+    }
+
+    fn as_slice(&self) -> &[f64] {
+        self.data.as_slice()
+    }
+
+    fn from_slice(s: &[f64]) -> Self {
+        debug_assert_eq!(s.len(), 3);
+        SO3Tangent {
+            data: Vector3::from_column_slice(s),
         }
     }
 
@@ -1733,5 +1766,48 @@ mod tests {
         assert!(result.norm() > 0.0);
         assert!(j_self[(0, 0)].is_finite());
         assert!(j_vec[(0, 0)].is_finite());
+    }
+
+    #[test]
+    fn so3_param_slice_round_trip() {
+        let g = SO3::random();
+        let recovered = SO3::from_param_slice(g.as_param_slice());
+        assert!(g.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn so3_tangent_slice_round_trip() {
+        let t = SO3Tangent::random();
+        let recovered = SO3Tangent::from_slice(t.as_slice());
+        assert!(t.is_approx(&recovered, 1e-14));
+    }
+
+    #[test]
+    fn test_from_dvector_wxyz() {
+        let dv = ::nalgebra::dvector![144., 96., 72., 83.] / 205.; // norm 1
+        let so3 = SO3::from_param_slice(dv.as_slice());
+        assert_eq!(144. / 205., so3.w());
+        assert_eq!(96. / 205., so3.x());
+        assert_eq!(72. / 205., so3.y());
+        assert_eq!(83. / 205., so3.z());
+    }
+
+    #[test]
+    fn test_from_s03_wxyz() {
+        let so3 = SO3::from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.); // norm 1
+        let s = so3.as_param_slice();
+        assert_eq!(144. / 205., s[0]);
+        assert_eq!(96. / 205., s[1]);
+        assert_eq!(72. / 205., s[2]);
+        assert_eq!(83. / 205., s[3]);
+    }
+
+    #[test]
+    fn test_bijective_from_dvector() {
+        let so3_expected =
+            SO3::from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.); // norm 1
+        let slice_expected = so3_expected.as_param_slice();
+        let so3_actual = SO3::from_param_slice(slice_expected);
+        assert!(so3_expected.is_approx(&so3_actual, 1e-14));
     }
 }

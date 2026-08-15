@@ -1,0 +1,23 @@
+[book]
+authors = ["Apex Solver Contributors"]
+language = "en"
+src = "src"
+title = "Apex Manifolds Cookbook"
+description = "Mathematical reference for the Lie groups and manifold operations in apex-manifolds."
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[preprocessor.katex]
+after = ["links"]
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/your-org/apex-solver"
+edit-url-template = "https://github.com/your-org/apex-solver/edit/main/crates/apex-manifolds/doc/cookbook/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

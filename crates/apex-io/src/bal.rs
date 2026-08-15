@@ -36,7 +36,6 @@
 
 use super::IoError;
 use nalgebra::Vector3;
-use std::fs::File;
 use std::path::Path;
 
 /// Represents a camera using Snavely's 9-parameter camera model.
@@ -137,24 +136,9 @@ impl BalLoader {
     /// # Ok::<(), apex_io::IoError>(())
     /// ```
     pub fn load(path: impl AsRef<Path>) -> Result<BalDataset, IoError> {
-        // Open file with error context
-        let file = File::open(path.as_ref()).map_err(|e| {
-            IoError::Io(e).log_with_source(format!("Failed to open BAL file: {:?}", path.as_ref()))
-        })?;
-
-        // Memory-map file for performance (following g2o.rs pattern)
-        // SAFETY: The file is opened read-only and the handle remains valid for the
-        // lifetime of `mmap`. No other thread modifies the file during this scope.
-        let mmap = unsafe {
-            memmap2::Mmap::map(&file).map_err(|e| {
-                IoError::Io(e).log_with_source("Failed to memory-map BAL file".to_string())
-            })?
-        };
-
-        // Convert to UTF-8 string
-        let content = std::str::from_utf8(&mmap).map_err(|_| IoError::Parse {
-            line: 0,
-            message: "File is not valid UTF-8".to_string(),
+        let path_ref = path.as_ref();
+        let content = std::fs::read_to_string(path_ref).map_err(|e| {
+            IoError::Io(e).log_with_source(format!("Failed to read BAL file: {:?}", path_ref))
         })?;
 
         // Create line iterator (skip empty lines, trim whitespace)

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.15)
 project(apex_cpp_benchmarks CXX)
+cmake_policy(SET CMP0167 NEW)  # Use upstream BoostConfig.cmake; suppress FindBoost deprecation
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +19,7 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 # =============================================================================
 
 # First, find Eigen 5.0.x for Ceres and g2o
-set(Eigen3_DIR "/opt/homebrew/opt/eigen/share/eigen3/cmake" CACHE PATH "Path to Eigen 5.x CMake config")
+set(Eigen3_DIR "/opt/homebrew/opt/eigen/share/eigen3/cmake" CACHE PATH "Path to Eigen 5.x CMake config" FORCE)
 find_package(Eigen3 5.0 QUIET NO_MODULE)
 if(Eigen3_FOUND)
     message(STATUS "Found Eigen 5.x: ${EIGEN3_INCLUDE_DIRS}")
@@ -159,7 +160,21 @@ if(BUILD_CERES_BENCHMARK)
     )
 
     # OpenMP for multi-threading
-    find_package(OpenMP)
+    if(APPLE)
+        execute_process(
+            COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE LIBOMP_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}")
+            set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
+            set(OpenMP_CXX_LIB_NAMES omp)
+            set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib")
+            include_directories("${LIBOMP_PREFIX}/include")
+        endif()
+    endif()
+    find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(ceres_ba_benchmark PRIVATE OpenMP::OpenMP_CXX)
         message(STATUS "Ceres BA: OpenMP enabled")
@@ -256,7 +271,21 @@ if(BUILD_G2O_BENCHMARK)
     )
 
     # OpenMP for multi-threading
-    find_package(OpenMP)
+    if(APPLE)
+        execute_process(
+            COMMAND brew --prefix libomp
+            OUTPUT_VARIABLE LIBOMP_PREFIX
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(LIBOMP_PREFIX AND EXISTS "${LIBOMP_PREFIX}")
+            set(OpenMP_CXX_FLAGS "-Xpreprocessor -fopenmp")
+            set(OpenMP_CXX_LIB_NAMES omp)
+            set(OpenMP_omp_LIBRARY "${LIBOMP_PREFIX}/lib/libomp.dylib")
+            include_directories("${LIBOMP_PREFIX}/include")
+        endif()
+    endif()
+    find_package(OpenMP QUIET)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(g2o_ba_benchmark PRIVATE OpenMP::OpenMP_CXX)
         message(STATUS "g2o BA: OpenMP enabled")

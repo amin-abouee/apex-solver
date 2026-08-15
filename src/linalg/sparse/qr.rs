@@ -6,6 +6,7 @@ use faer::{
 };
 use std::ops::Mul;
 
+use crate::error::ErrorLogging;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]

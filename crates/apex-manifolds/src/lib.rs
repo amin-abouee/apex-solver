@@ -9,18 +9,20 @@
 //! - **SE(2)**: Rigid transformations in 2D
 //! - **SO(2)**: Rotations in 2D
 //!
+//! ```text
 //! Lie group M,° | size   | dim | X ∈ M                   | Constraint      | T_E M             | T_X M                 | Exp(T)             | Comp. | Action
 //! ------------- | ------ | --- | ----------------------- | --------------- | ----------------- | --------------------- | ------------------ | ----- | ------
 //! n-D vector    | Rⁿ,+   | n   | n   | v ∈ Rⁿ            | |v-v|=0         | v ∈ Rⁿ            | v ∈ Rⁿ                | v = exp(v)         | v₁+v₂ | v + x
 //! Circle        | S¹,.   | 2   | 1   | z ∈ C             | z*z = 1         | iθ ∈ iR           | θ ∈ R                 | z = exp(iθ)        | z₁z₂  | zx
-//! Rotation      | SO(2),.| 4   | 1   | R                 | RᵀR = I         | [θ]x ∈ so(2)      | [θ] ∈ R²              | R = exp([θ]x)      | R₁R₂  | Rx
-//! Rigid motion  | SE(2),.| 9   | 3   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(2)       | [v̂] ∈ R³              | Exp([v̂])           | M₁M₂  | Rx+t
+//! `Rotation      | SO(2),.| 4   | 1   | R                 | RᵀR = I         | [θ]x ∈ so(2)      | [θ] ∈ R²              | R = exp([θ]x)      | R₁R₂  | Rx`
+//! `Rigid motion  | SE(2),.| 9   | 3   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(2)       | [v̂] ∈ R³              | Exp([v̂])           | M₁M₂  | Rx+t`
 //! 3-sphere      | S³,.   | 4   | 3   | q ∈ H             | q*q = 1         | θ/2 ∈ Hp          | θ ∈ R³                | q = exp(uθ/2)      | q₁q₂  | qxq*
-//! Rotation      | SO(3),.| 9   | 3   | R                 | RᵀR = I         | [θ]x ∈ so(3)      | [θ] ∈ R³              | R = exp([θ]x)      | R₁R₂  | Rx
-//! Rigid motion  | SE(3),.| 16  | 6   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(3)       | [v̂] ∈ R⁶              | Exp([v̂])           | M₁M₂  | Rx+t
-//! Similarity    | Sim(3),.| 16 | 7   | M = [sR t; 0 1]   | RᵀR=I, s>0     | [v̂] ∈ sim(3)      | [ρ,θ,σ] ∈ R⁷          | Exp([v̂])           | M₁M₂  | sRx+t
-//! Galilean      | SGal(3),.| 25| 10  | (R,t,v,s)         | RᵀR = I         | [v̂] ∈ sgal(3)     | [ρ,ν,θ,s] ∈ R¹⁰       | Exp([v̂])           | M₁M₂  | Rx+t+sv
-//! Extended pose | SE_2(3),.| 25| 9   | (R,t,v)           | RᵀR = I         | [v̂] ∈ se_2_3      | [ρ,θ,ν] ∈ R⁹          | Exp([v̂])           | M₁M₂  | Rx+t
+//! `Rotation      | SO(3),.| 9   | 3   | R                 | RᵀR = I         | [θ]x ∈ so(3)      | [θ] ∈ R³              | R = exp([θ]x)      | R₁R₂  | Rx`
+//! `Rigid motion  | SE(3),.| 16  | 6   | M = [R t; 0 1]    | RᵀR = I         | [v̂] ∈ se(3)       | [v̂] ∈ R⁶              | Exp([v̂])           | M₁M₂  | Rx+t`
+//! `Similarity    | Sim(3),.| 16 | 7   | M = [sR t; 0 1]   | RᵀR=I, s>0     | [v̂] ∈ sim(3)      | [ρ,θ,σ] ∈ R⁷          | Exp([v̂])           | M₁M₂  | sRx+t`
+//! `Galilean      | SGal(3),.| 25| 10  | (R,t,v,s)         | RᵀR = I         | [v̂] ∈ sgal(3)     | [ρ,ν,θ,s] ∈ R¹⁰       | Exp([v̂])           | M₁M₂  | Rx+t+sv`
+//! `Extended pose | SE_2(3),.| 25| 9   | (R,t,v)           | RᵀR = I         | [v̂] ∈ se_2_3      | [ρ,θ,ν] ∈ R⁹          | Exp([v̂])           | M₁M₂  | Rx+t`
+//! ```
 //!
 //! The design is inspired by the [manif](https://github.com/artivis/manif) C++ library
 //! and provides:
@@ -142,6 +144,9 @@ pub type ManifoldResult<T> = Result<T, ManifoldError>;
 /// - `JacobianMatrix`: Jacobian matrix type for this group
 /// - `LieAlgebra`: Matrix representation of the Lie algebra
 pub trait LieGroup: Clone + PartialEq {
+    /// Human-readable name for serialization and logging.
+    const NAME: &'static str;
+
     /// The tangent space vector type
     type TangentVector: Tangent<Self>;
 
@@ -250,6 +255,17 @@ pub trait LieGroup: Clone + PartialEq {
     /// * `other` - The other element to compare with
     /// * `tolerance` - The tolerance for the comparison
     fn is_approx(&self, other: &Self, tolerance: f64) -> bool;
+
+    /// Returns the manifold parameters as a contiguous flat slice.
+    ///
+    /// Enables zero-copy faer views: `faer::col::from_slice(g.as_param_slice())`.
+    fn as_param_slice(&self) -> &[f64];
+
+    /// Mutably borrows the raw parameter storage for in-place retraction updates.
+    fn as_param_slice_mut(&mut self) -> &mut [f64];
+
+    /// Constructs from a raw parameter slice (same layout as `as_param_slice`).
+    fn from_param_slice(s: &[f64]) -> Self;
 
     // Manifold plus/minus operations
 
@@ -537,17 +553,23 @@ pub trait Tangent<Group: LieGroup>: Clone + PartialEq {
 
     /// Return a unit tangent vector in the same direction.
     fn normalized(&self) -> Group::TangentVector;
+
+    /// Borrows the raw tangent data as a flat slice. Zero allocation.
+    fn as_slice(&self) -> &[f64];
+
+    /// Constructs from a raw slice (same layout as `as_slice`).
+    fn from_slice(s: &[f64]) -> Self;
 }
 
 /// Trait for Lie groups that support interpolation.
 pub trait Interpolatable: LieGroup {
     /// Linear interpolation in the manifold.
     ///
-    /// For parameter t ∈ [0,1]: interp(g₁, g₂, 0) = g₁, interp(g₁, g₂, 1) = g₂.
+    /// For parameter t ∈ `[0,1]`: interp(g₁, g₂, 0) = g₁, interp(g₁, g₂, 1) = g₂.
     ///
     /// # Arguments
     /// * `other` - Target element for interpolation
-    /// * `t` - Interpolation parameter in [0,1]
+    /// * `t` - Interpolation parameter in `[0,1]`
     fn interp(&self, other: &Self, t: f64) -> Self;
 
     /// Spherical linear interpolation (when applicable).

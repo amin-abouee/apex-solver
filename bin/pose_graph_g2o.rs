@@ -1,23 +1,25 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::apex_io::{
-    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D, VertexSE2, VertexSE3,
+    G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
 };
-use apex_solver::apex_manifolds::LieGroup;
-use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
 use apex_solver::apex_manifolds::se3::SE3;
+use apex_solver::apex_manifolds::{LieGroup, ManifoldType, Tangent};
+use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::*;
-use apex_solver::core::problem::{Problem, VariableEnum};
+use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
-use apex_solver::linearizer;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
-use apex_solver::optimizer::{DogLeg, GaussNewton, LevenbergMarquardt, OptimizationStatus};
+use apex_solver::optimizer::{
+    DogLeg, GaussNewton, LevenbergMarquardt, OptimizationStatus, initialize_optimization_state,
+};
 use clap::Parser;
 use nalgebra::dvector;
 use tracing::{error, info, warn};
@@ -111,8 +113,8 @@ fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
                 .inverse(None)
                 .compose(&actual_relative, None, None);
 
-            let residual_tangent = error.log(None);
-            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let residual_tangent = LieGroup::log(&error, None);
+            let residual_vec = nalgebra::DVector::from_column_slice(residual_tangent.as_slice());
 
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
@@ -148,8 +150,8 @@ fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
                 .inverse(None)
                 .compose(&actual_relative, None, None);
 
-            let residual_tangent = error.log(None);
-            let residual_vec: nalgebra::DVector<f64> = residual_tangent.into();
+            let residual_tangent = LieGroup::log(&error, None);
+            let residual_vec = nalgebra::DVector::from_column_slice(residual_tangent.as_slice());
 
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
@@ -364,16 +366,17 @@ fn test_se2_dataset(
 
     let setup_start = Instant::now();
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    // Map from vertex ID to VarKey (for building residual blocks and updating graph)
+    let mut var_key_map: HashMap<usize, VarKey> = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se2.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se2.get(&id) {
-            let var_name = format!("x{}", id);
             let se2_data = dvector![vertex.x(), vertex.y(), vertex.theta()];
-            initial_values.insert(var_name, (ManifoldType::SE2, se2_data));
+            let key = problem.add_variable(ManifoldType::SE2, se2_data);
+            var_key_map.insert(id, key);
         }
     }
 
@@ -388,7 +391,6 @@ fn test_se2_dataset(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
     {
-        let var_name = format!("x{}", first_id);
         let trans = first_vertex.pose.translation();
         let angle = first_vertex.pose.rotation_angle();
         let prior_value = dvector![trans.x, trans.y, angle];
@@ -397,16 +399,17 @@ fn test_se2_dataset(
             data: prior_value.clone(),
         };
         let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_key_map[&first_id];
         problem.add_residual_block(
-            &[&var_name],
+            &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
-        let first_var_name = format!("x{}", vertex_ids[0]);
-        problem.fix_variable(&first_var_name, 0);
-        problem.fix_variable(&first_var_name, 1);
-        problem.fix_variable(&first_var_name, 2);
+        let first_key = var_key_map[&vertex_ids[0]];
+        problem.fix_variable(first_key, 0);
+        problem.fix_variable(first_key, 1);
+        problem.fix_variable(first_key, 2);
     }
 
     let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
@@ -416,9 +419,6 @@ fn test_se2_dataset(
     })?;
 
     for edge in &graph.edges_se2 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactor::new(relative_pose);
 
@@ -432,7 +432,9 @@ fn test_se2_dataset(
             None
         };
 
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
+        if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+        }
     }
 
     let setup_time = setup_start.elapsed();
@@ -446,51 +448,20 @@ fn test_se2_dataset(
 
     info!(
         "Problem Structure: Variables: {}, Prior factors: {}, Between factors: {}",
-        initial_values.len(),
+        var_key_map.len(),
         if needs_prior { "1" } else { "0" },
         graph.edges_se2.len()
     );
 
     let init_cost_start = Instant::now();
-    let variables = problem.initialize_variables(&initial_values);
-    let mut variable_name_to_col_idx_dict = HashMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-    sorted_vars.sort();
-    for var_name in &sorted_vars {
-        variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
-    }
-
-    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
-        &problem,
-        &variables,
-        &variable_name_to_col_idx_dict,
-        col_offset,
-    )
-    .map_err(|e| {
+    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
         apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to build symbolic structure for dataset {}",
+            "Failed to initialize optimization state for dataset {}",
             dataset_name
         ))
         .log_with_source(e)
     })?;
-
-    let (residual, _jacobian) = problem
-        .compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_name_to_col_idx_dict,
-            &symbolic_structure,
-        )
-        .map_err(|e| {
-            apex_solver::core::CoreError::FactorLinearization(format!(
-                "Failed to compute residual and jacobian for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
-
-    let initial_cost = residual.as_ref().squared_norm_l2();
+    let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
 
     if args.profile {
@@ -541,7 +512,7 @@ fn test_se2_dataset(
 
             let mut solver = GaussNewton::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
         "DL" => {
             let config = DogLegConfig::new()
@@ -552,7 +523,7 @@ fn test_se2_dataset(
 
             let mut solver = DogLeg::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
         _ => {
             let config = LevenbergMarquardtConfig::new()
@@ -563,7 +534,7 @@ fn test_se2_dataset(
 
             let mut solver = LevenbergMarquardt::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
     };
 
@@ -593,12 +564,9 @@ fn test_se2_dataset(
     }
 
     // Update graph vertices with optimized values for chi2 computation
-    for (var_name, var_enum) in &result.parameters {
-        if let Some(id_str) = var_name.strip_prefix("x")
-            && let Ok(id) = id_str.parse::<usize>()
-            && let Some(vertex) = graph.vertices_se2.get_mut(&id)
-        {
-            let val = var_enum.to_vector();
+    for (&id, &key) in &var_key_map {
+        if let Some(vertex) = graph.vertices_se2.get_mut(&id) {
+            let val = result.parameters[key].to_dvector();
             vertex.pose = SE2::from_xy_angle(val[0], val[1], val[2]);
         }
     }
@@ -659,12 +627,9 @@ fn test_se2_dataset(
             })?;
         }
 
-        // Reconstruct graph from optimized variables
-        let optimized_graph = graph_from_optimized_variables(&result.parameters, &graph);
-
-        // Write to file (default: G2O format)
+        // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&optimized_graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }
@@ -673,6 +638,7 @@ fn test_se2_dataset(
         OptimizationStatus::Converged
         | OptimizationStatus::CostToleranceReached
         | OptimizationStatus::GradientToleranceReached
+        | OptimizationStatus::StalledNoProgress
         | OptimizationStatus::ParameterToleranceReached => "CONVERGED".to_string(),
         OptimizationStatus::MaxIterationsReached => "ITER_LIMIT".to_string(),
         OptimizationStatus::NumericalFailure => "NUM_FAILURE".to_string(),
@@ -745,18 +711,18 @@ fn test_se3_dataset(
     }
 
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut initial_values = HashMap::new();
+    let mut var_key_map: HashMap<usize, VarKey> = HashMap::new();
 
     let mut vertex_ids: Vec<_> = graph.vertices_se3.keys().cloned().collect();
     vertex_ids.sort();
 
     for &id in &vertex_ids {
         if let Some(vertex) = graph.vertices_se3.get(&id) {
-            let var_name = format!("x{}", id);
             let quat = vertex.pose.rotation_quaternion();
             let trans = vertex.pose.translation();
             let se3_data = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-            initial_values.insert(var_name, (ManifoldType::SE3, se3_data));
+            let key = problem.add_variable(ManifoldType::SE3, se3_data);
+            var_key_map.insert(id, key);
         }
     }
 
@@ -771,7 +737,6 @@ fn test_se3_dataset(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
     {
-        let var_name = format!("x{}", first_id);
         let quat = first_vertex.pose.rotation_quaternion();
         let trans = first_vertex.pose.translation();
         let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
@@ -780,19 +745,17 @@ fn test_se3_dataset(
             data: prior_value.clone(),
         };
         let huber_loss = HuberLoss::new(1.0)?;
+        let first_key = var_key_map[&first_id];
         problem.add_residual_block(
-            &[&var_name],
+            &[first_key],
             Box::new(prior_factor),
             Some(Box::new(huber_loss)),
         );
     } else if optimizer_type == "lm" || optimizer_type == "levenberg-marquardt" {
-        let first_var_name = format!("x{}", vertex_ids[0]);
-        problem.fix_variable(&first_var_name, 0);
-        problem.fix_variable(&first_var_name, 1);
-        problem.fix_variable(&first_var_name, 2);
-        problem.fix_variable(&first_var_name, 3);
-        problem.fix_variable(&first_var_name, 4);
-        problem.fix_variable(&first_var_name, 5);
+        let first_key = var_key_map[&vertex_ids[0]];
+        for dof in 0..6 {
+            problem.fix_variable(first_key, dof);
+        }
     }
 
     let loss_fn = create_loss_function(&args.loss_function, args.loss_scale).map_err(|e| {
@@ -802,9 +765,6 @@ fn test_se3_dataset(
     })?;
 
     for edge in &graph.edges_se3 {
-        let id0 = format!("x{}", edge.from);
-        let id1 = format!("x{}", edge.to);
-
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactor::new(relative_pose);
 
@@ -818,56 +778,27 @@ fn test_se3_dataset(
             None
         };
 
-        problem.add_residual_block(&[&id0, &id1], Box::new(between_factor), edge_loss);
+        if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
+            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+        }
     }
 
     info!(
         "Problem Structure: Variables: {}, Prior factors: {}, Between factors: {}",
-        initial_values.len(),
+        var_key_map.len(),
         if needs_prior { "1" } else { "0" },
         graph.edges_se3.len()
     );
 
     let init_cost_start = Instant::now();
-    let variables = problem.initialize_variables(&initial_values);
-    let mut variable_name_to_col_idx_dict = HashMap::new();
-    let mut col_offset = 0;
-    let mut sorted_vars: Vec<_> = variables.keys().cloned().collect();
-    sorted_vars.sort();
-    for var_name in &sorted_vars {
-        variable_name_to_col_idx_dict.insert(var_name.clone(), col_offset);
-        col_offset += variables[var_name].get_size();
-    }
-
-    let symbolic_structure = linearizer::cpu::sparse::build_symbolic_structure(
-        &problem,
-        &variables,
-        &variable_name_to_col_idx_dict,
-        col_offset,
-    )
-    .map_err(|e| {
+    let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
         apex_solver::core::CoreError::SymbolicStructure(format!(
-            "Failed to build symbolic structure for dataset {}",
+            "Failed to initialize optimization state for dataset {}",
             dataset_name
         ))
         .log_with_source(e)
     })?;
-
-    let (residual, _jacobian) = problem
-        .compute_residual_and_jacobian_sparse(
-            &variables,
-            &variable_name_to_col_idx_dict,
-            &symbolic_structure,
-        )
-        .map_err(|e| {
-            apex_solver::core::CoreError::FactorLinearization(format!(
-                "Failed to compute residual and jacobian for dataset {}",
-                dataset_name
-            ))
-            .log_with_source(e)
-        })?;
-
-    let initial_cost = residual.as_ref().squared_norm_l2();
+    let initial_cost = init_state.initial_cost;
     let init_cost_time = init_cost_start.elapsed();
     info!(
         "Initial cost computation: {:.2}ms",
@@ -915,7 +846,7 @@ fn test_se3_dataset(
 
             let mut solver = GaussNewton::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
         "DL" => {
             let config = DogLegConfig::new()
@@ -926,7 +857,7 @@ fn test_se3_dataset(
 
             let mut solver = DogLeg::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
         _ => {
             let config = LevenbergMarquardtConfig::new()
@@ -937,20 +868,17 @@ fn test_se3_dataset(
 
             let mut solver = LevenbergMarquardt::with_config(config);
             attach_visualizer!(solver, args);
-            solver.optimize(&problem, &initial_values)?
+            solver.optimize(&mut problem)?
         }
     };
 
     let optimization_time = opt_start.elapsed();
 
     // Update graph vertices with optimized values for chi2 computation
-    for (var_name, var_enum) in &result.parameters {
-        if let Some(id_str) = var_name.strip_prefix("x")
-            && let Ok(id) = id_str.parse::<usize>()
-            && let Some(vertex) = graph.vertices_se3.get_mut(&id)
-        {
+    for (&id, &key) in &var_key_map {
+        if let Some(vertex) = graph.vertices_se3.get_mut(&id) {
             use nalgebra::{Quaternion, Vector3};
-            let val = var_enum.to_vector();
+            let val = result.parameters[key].to_dvector();
             let translation = Vector3::new(val[0], val[1], val[2]);
             let rotation = Quaternion::new(val[3], val[4], val[5], val[6]);
             vertex.pose = SE3::from_translation_quaternion(translation, rotation);
@@ -1013,12 +941,9 @@ fn test_se3_dataset(
             })?;
         }
 
-        // Reconstruct graph from optimized variables
-        let optimized_graph = graph_from_optimized_variables(&result.parameters, &graph);
-
-        // Write to file (default: G2O format)
+        // Write updated graph to file (graph already updated in-place above)
         use apex_solver::apex_io::GraphLoader;
-        G2oLoader::write(&optimized_graph, &output_path)?;
+        G2oLoader::write(&graph, &output_path)?;
 
         info!("Saved optimized graph to: {}", output_path.display());
     }
@@ -1027,6 +952,7 @@ fn test_se3_dataset(
         OptimizationStatus::Converged
         | OptimizationStatus::CostToleranceReached
         | OptimizationStatus::GradientToleranceReached
+        | OptimizationStatus::StalledNoProgress
         | OptimizationStatus::ParameterToleranceReached => "CONVERGED".to_string(),
         OptimizationStatus::MaxIterationsReached => "ITER_LIMIT".to_string(),
         OptimizationStatus::NumericalFailure => "NUM_FAILURE".to_string(),
@@ -1049,50 +975,6 @@ fn test_se3_dataset(
         time_ms: optimization_time.as_millis(),
         status,
     })
-}
-
-/// Helper function to create a graph from optimized variables.
-///
-/// This converts solver output back to Graph format for saving.
-fn graph_from_optimized_variables(
-    variables: &HashMap<String, VariableEnum>,
-    original_graph: &Graph,
-) -> Graph {
-    let mut graph = Graph::new();
-
-    // Copy edges from original (unchanged during optimization)
-    graph.edges_se2 = original_graph.edges_se2.clone();
-    graph.edges_se3 = original_graph.edges_se3.clone();
-
-    // Convert optimized variables back to vertices
-    for (var_name, var) in variables {
-        // Extract vertex ID from variable name (format: "x{id}")
-        if let Some(id_str) = var_name.strip_prefix('x') {
-            if let Ok(id) = id_str.parse::<usize>() {
-                match var {
-                    VariableEnum::SE2(v) => {
-                        let vertex = VertexSE2 {
-                            id,
-                            pose: v.value.clone(),
-                        };
-                        graph.vertices_se2.insert(id, vertex);
-                    }
-                    VariableEnum::SE3(v) => {
-                        let vertex = VertexSE3 {
-                            id,
-                            pose: v.value.clone(),
-                        };
-                        graph.vertices_se3.insert(id, vertex);
-                    }
-                    _ => {
-                        // Skip other manifold types
-                    }
-                }
-            }
-        }
-    }
-
-    graph
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

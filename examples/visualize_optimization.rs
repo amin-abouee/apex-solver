@@ -30,12 +30,17 @@
 use apex_solver::JacobianMode;
 use apex_solver::apex_io::{DatasetRegistry, G2oLoader, Graph, GraphLoader, VertexSE2, VertexSE3};
 use apex_solver::apex_manifolds::ManifoldType;
-use apex_solver::core::problem::{Problem, VariableEnum};
+use apex_solver::apex_manifolds::se2::SE2;
+use apex_solver::apex_manifolds::se3::SE3;
+use apex_solver::core::VarKey;
+use apex_solver::core::problem::Problem;
+use apex_solver::core::variable::{ManifoldVariable, Variable};
 use apex_solver::factors::BetweenFactor;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
 use nalgebra::dvector;
+use slotmap::SlotMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use tracing::{info, warn};
@@ -74,7 +79,8 @@ struct Args {
 /// This converts solver output back to Graph format for saving/visualization.
 /// The edges remain unchanged from the original graph.
 fn graph_from_optimized_variables(
-    variables: &HashMap<String, VariableEnum>,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    key_to_id: &HashMap<VarKey, usize>,
     original_graph: &Graph,
 ) -> Graph {
     let mut graph = Graph::new();
@@ -84,30 +90,26 @@ fn graph_from_optimized_variables(
     graph.edges_se3 = original_graph.edges_se3.clone();
 
     // Convert optimized variables back to vertices
-    for (var_name, var) in variables {
-        // Extract vertex ID from variable name (format: "x{id}")
-        if let Some(id_str) = var_name.strip_prefix('x') {
-            if let Ok(id) = id_str.parse::<usize>() {
-                match var {
-                    VariableEnum::SE2(v) => {
-                        let vertex = VertexSE2 {
-                            id,
-                            pose: v.value.clone(),
-                        };
-                        graph.vertices_se2.insert(id, vertex);
-                    }
-                    VariableEnum::SE3(v) => {
-                        let vertex = VertexSE3 {
-                            id,
-                            pose: v.value.clone(),
-                        };
-                        graph.vertices_se3.insert(id, vertex);
-                    }
-                    _ => {
-                        // Skip other manifold types (SO2, SO3, Rn)
-                    }
-                }
-            }
+    for (key, var) in variables {
+        let Some(&id) = key_to_id.get(&key) else {
+            continue;
+        };
+        if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
+            graph.vertices_se2.insert(
+                id,
+                VertexSE2 {
+                    id,
+                    pose: v.value.clone(),
+                },
+            );
+        } else if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
+            graph.vertices_se3.insert(
+                id,
+                VertexSE3 {
+                    id,
+                    pose: v.value.clone(),
+                },
+            );
         }
     }
 
@@ -184,24 +186,12 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
 
-    // Add all SE3 edges as between factors
-    for edge in &graph.edges_se3 {
-        let from_key = format!("x{}", edge.from);
-        let to_key = format!("x{}", edge.to);
-
-        let factor = BetweenFactor::new(edge.measurement.clone());
-
-        let var_keys: Vec<&str> = vec![from_key.as_str(), to_key.as_str()];
-        problem.add_residual_block(&var_keys, Box::new(factor), None);
-    }
-
-    // Prepare initial parameters
-    let mut initial_params = HashMap::new();
+    // Add all SE3 vertices as variables with initial values
+    let mut name_to_key: HashMap<String, VarKey> = HashMap::new();
+    let mut key_to_id: HashMap<VarKey, usize> = HashMap::new();
     for (&id, vertex) in &graph.vertices_se3 {
-        let var_name = format!("x{}", id);
         let quat = vertex.rotation();
         let trans = vertex.translation();
-        // Quaternion order must be [w, x, y, z] (scalar first)
         let pose_vec = dvector![
             trans.x,
             trans.y,
@@ -211,7 +201,19 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
             quat.as_ref().j,
             quat.as_ref().k,
         ];
-        initial_params.insert(var_name, (ManifoldType::SE3, pose_vec));
+        let key = problem.add_variable(ManifoldType::SE3, pose_vec);
+        name_to_key.insert(format!("x{id}"), key);
+        key_to_id.insert(key, id);
+    }
+
+    // Add all SE3 edges as between factors
+    for edge in &graph.edges_se3 {
+        let from_name = format!("x{}", edge.from);
+        let to_name = format!("x{}", edge.to);
+        if let (Some(&fk), Some(&tk)) = (name_to_key.get(&from_name), name_to_key.get(&to_name)) {
+            let factor = BetweenFactor::new(edge.measurement.clone());
+            problem.add_residual_block(&[fk, tk], Box::new(factor), None);
+        }
     }
 
     // Configure optimizer
@@ -252,7 +254,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     info!("\n=== Starting Optimization ===");
     info!("The Rerun viewer should open automatically.");
 
-    let result = solver.optimize(&problem, &initial_params)?;
+    let result = solver.optimize(&mut problem)?;
 
     // Give Rerun time to flush data
     info!("\nWaiting for Rerun to flush visualization data...");
@@ -287,7 +289,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Save optimized graph if requested
     if let Some(output_path) = &args.save_output {
         info!("\n=== Saving Optimized Graph ===");
-        let optimized_graph = graph_from_optimized_variables(&result.parameters, graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, &key_to_id, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
         info!("Saved to: {}", output_path.display());
     }
@@ -302,23 +304,24 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
 
-    // Add all SE2 edges as between factors
-    for edge in &graph.edges_se2 {
-        let from_key = format!("x{}", edge.from);
-        let to_key = format!("x{}", edge.to);
-
-        let factor = BetweenFactor::new(edge.measurement.clone());
-
-        let var_keys: Vec<&str> = vec![from_key.as_str(), to_key.as_str()];
-        problem.add_residual_block(&var_keys, Box::new(factor), None);
+    // Add all SE2 vertices as variables with initial values
+    let mut name_to_key: HashMap<String, VarKey> = HashMap::new();
+    let mut key_to_id: HashMap<VarKey, usize> = HashMap::new();
+    for (&id, vertex) in &graph.vertices_se2 {
+        let pose_vec = dvector![vertex.x(), vertex.y(), vertex.theta()];
+        let key = problem.add_variable(ManifoldType::SE2, pose_vec);
+        name_to_key.insert(format!("x{id}"), key);
+        key_to_id.insert(key, id);
     }
 
-    // Prepare initial parameters
-    let mut initial_params = HashMap::new();
-    for (&id, vertex) in &graph.vertices_se2 {
-        let var_name = format!("x{}", id);
-        let pose_vec = dvector![vertex.x(), vertex.y(), vertex.theta()];
-        initial_params.insert(var_name, (ManifoldType::SE2, pose_vec));
+    // Add all SE2 edges as between factors
+    for edge in &graph.edges_se2 {
+        let from_name = format!("x{}", edge.from);
+        let to_name = format!("x{}", edge.to);
+        if let (Some(&fk), Some(&tk)) = (name_to_key.get(&from_name), name_to_key.get(&to_name)) {
+            let factor = BetweenFactor::new(edge.measurement.clone());
+            problem.add_residual_block(&[fk, tk], Box::new(factor), None);
+        }
     }
 
     // Configure optimizer
@@ -353,7 +356,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
     info!("\n=== Starting Optimization ===");
 
-    let result = solver.optimize(&problem, &initial_params)?;
+    let result = solver.optimize(&mut problem)?;
 
     // Print summary
     info!("\n=== Optimization Results ===");
@@ -368,7 +371,7 @@ fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
     // Save if requested
     if let Some(output_path) = &args.save_output {
-        let optimized_graph = graph_from_optimized_variables(&result.parameters, graph);
+        let optimized_graph = graph_from_optimized_variables(&result.parameters, &key_to_id, graph);
         G2oLoader::write(&optimized_graph, output_path)?;
         info!("\nSaved to: {}", output_path.display());
     }

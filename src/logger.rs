@@ -44,12 +44,45 @@ pub fn init_logger() {
 /// tracing::debug!("Debug logging enabled");
 /// ```
 pub fn init_logger_with_level(default_level: Level) {
+    init_with_filter(
+        tracing_subscriber::EnvFilter::builder()
+            .with_default_directive(default_level.into())
+            .from_env_lossy(),
+    )
+}
+
+/// Initialize the tracing subscriber with fallback filter directives.
+///
+/// Use this to quiet noisy dependencies without touching the process environment.
+/// `RUST_LOG`, when set and non-empty, takes precedence over `directives`.
+///
+/// # Arguments
+/// * `default_level` - The default log level
+/// * `directives` - Filter directives applied when `RUST_LOG` is unset,
+///   e.g. `"info,noisy_crate=warn"`
+///
+/// # Example
+/// ```no_run
+/// use apex_solver::init_logger_with_directives;
+/// use tracing::Level;
+///
+/// // INFO for us, but silence a dependency that logs inside a hot loop.
+/// init_logger_with_directives(Level::INFO, "info,factrs=warn");
+/// ```
+pub fn init_logger_with_directives(default_level: Level, directives: &str) {
+    let builder =
+        tracing_subscriber::EnvFilter::builder().with_default_directive(default_level.into());
+    let filter = match std::env::var("RUST_LOG") {
+        Ok(env) if !env.is_empty() => builder.parse_lossy(env),
+        _ => builder.parse_lossy(directives),
+    };
+    init_with_filter(filter)
+}
+
+/// Install the subscriber with apex-solver's shared formatting configuration.
+fn init_with_filter(filter: tracing_subscriber::EnvFilter) {
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::builder()
-                .with_default_directive(default_level.into())
-                .from_env_lossy(),
-        )
+        .with_env_filter(filter)
         .with_target(false)
         .with_level(false)
         .with_file(false)

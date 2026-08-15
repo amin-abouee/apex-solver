@@ -2,7 +2,7 @@
 //! and the linear system solved each iteration.
 //!
 //! This is the central module for all linearization concerns:
-//! - [`linearize_block()`]: Shared factor evaluation (loss correction, residual accumulation)
+//! - `linearize_block()`: Shared factor evaluation (loss correction, residual accumulation)
 //! - [`cpu::sparse`]: Sparse Jacobian assembly using `SparseColMat` and symbolic structure
 //! - [`cpu::dense`]: Dense Jacobian assembly using `Mat<f64>`
 //! - [`AssemblyBackend`]: Trait bridging linearization with the optimizer's solver types
@@ -25,106 +25,157 @@
 pub mod cpu;
 pub mod gpu;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use slotmap::{SecondaryMap, SlotMap};
 
+use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
-use faer::{Col, Mat};
-use nalgebra::{DMatrix, DVector};
+use smallvec::SmallVec;
+use thiserror::Error;
 
-use crate::core::problem::{Problem, VariableEnum};
+use crate::core::VarKey;
+use crate::core::problem::Problem;
+use crate::core::variable::ManifoldVariable;
 use crate::{
-    core::{CoreError, corrector::Corrector, residual_block::ResidualBlock},
-    error::{ApexSolverError, ApexSolverResult},
+    core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
 };
 
 pub use cpu::sparse::SymbolicStructure;
 
 // ============================================================================
+// Linearizer error types
+// ============================================================================
+
+/// Linearizer-specific error types for Jacobian assembly and symbolic structure operations.
+///
+/// These errors occur during the linearization phase of optimization, where
+/// the nonlinear factor graph is converted into a linear system (residual vector
+/// and Jacobian matrix).
+///
+/// # Error Hierarchy
+///
+/// `LinearizerError` is a Layer C (deep/module) error. It propagates up through:
+/// - `CoreError::Linearizer(LinearizerError)` → for core module callers
+/// - `ApexSolverError::Linearizer(LinearizerError)` → for direct API callers
+///
+
+#[derive(Debug, Clone, Error)]
+pub enum LinearizerError {
+    /// Symbolic structure construction or usage failed
+    #[error("Symbolic structure error: {0}")]
+    SymbolicStructure(String),
+
+    /// Parallel computation error (thread/mutex failures during assembly)
+    #[error("Parallel computation error: {0}")]
+    ParallelComputation(String),
+
+    /// Variable key missing in index mapping during Jacobian scatter
+    #[error("Variable error: {0}")]
+    Variable(String),
+
+    /// Factor linearization returned no Jacobian when expected
+    #[error("Factor linearization failed: {0}")]
+    FactorLinearization(String),
+
+    /// Invalid input (e.g., SparseMode requires symbolic structure)
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+}
+
+/// Result type for linearizer module operations
+pub type LinearizerResult<T> = Result<T, LinearizerError>;
+
+// ============================================================================
 // Block linearization (shared by sparse and dense paths)
 // ============================================================================
 
-/// Result of linearizing a single residual block.
+/// Metadata produced by evaluating a single residual block.
 ///
-/// Contains the corrected residual, Jacobian, and metadata needed by both
-/// sparse and dense assembly strategies to scatter values into the global matrix.
+/// The corrected Jacobian itself lives in a caller-provided buffer (see
+/// [`compute_block_into`]) — this struct only describes how to scatter it
+/// into the global Jacobian.
 pub(crate) struct BlockLinearization {
-    /// Corrected full Jacobian matrix for this block (rows = residual_dim, cols = sum of variable DOFs)
-    pub jacobian: DMatrix<f64>,
-    /// Maps each variable to (local_col_offset, dof_size) within the block Jacobian
-    pub variable_local_idx_size_list: Vec<(usize, usize)>,
+    /// Maps each variable to (local_col_offset, dof_size) within the block Jacobian.
+    /// SmallVec inline storage covers all current factor types (≤ 4 variables per factor).
+    pub variable_local_idx_size_list: SmallVec<[(usize, usize); 8]>,
     /// Starting row index in the global residual/Jacobian
     pub residual_row_start_idx: usize,
     /// Residual dimension for this block
     pub residual_dim: usize,
 }
 
-/// Linearize a single residual block: evaluate factor, apply loss correction, accumulate residual.
+/// Split a mutable buffer into non-overlapping slices at the given (start, len) offsets.
+///
+/// `sorted_offsets_lens` must be sorted ascending by `start` and non-overlapping.
+/// Uses chained `split_at_mut` calls — no unsafe code needed.
+pub(crate) fn split_by_row_offsets_mut<'a>(
+    buf: &'a mut [f64],
+    sorted_offsets_lens: &[(usize, usize)],
+) -> Vec<&'a mut [f64]> {
+    let mut remaining = buf;
+    let mut result = Vec::with_capacity(sorted_offsets_lens.len());
+    let mut current = 0usize;
+    for &(start, len) in sorted_offsets_lens {
+        let gap = start - current;
+        let (_, rest) = remaining.split_at_mut(gap);
+        let (slice, rest2) = rest.split_at_mut(len);
+        result.push(slice);
+        remaining = rest2;
+        current = start + len;
+    }
+    result
+}
+
+/// Evaluate a single residual block: call `factor.linearize()`, apply loss correction,
+/// write the corrected residual into the provided slice, return the Jacobian buffer.
 ///
 /// This is the shared core used by both sparse and dense assembly. It:
-/// 1. Gathers parameter vectors for each variable referenced by the block
-/// 2. Calls `factor.linearize()` to get the local residual and Jacobian
+/// 1. Gathers `&[f64]` parameter slices for each variable (zero copy from manifold storage)
+/// 2. Calls `factor.linearize()` — writes into `residual_slice` and a local Jacobian buffer
 /// 3. Applies the robust loss function correction (if any)
-/// 4. Writes the corrected residual into the shared `total_residual` vector
-/// 5. Returns the corrected Jacobian and metadata for the caller to scatter
-pub(crate) fn linearize_block(
+/// 4. Returns the corrected Jacobian buffer and metadata for the caller to scatter
+pub(crate) fn compute_block_into(
     residual_block: &ResidualBlock,
-    variables: &HashMap<String, VariableEnum>,
-    total_residual: &Arc<Mutex<Col<f64>>>,
-) -> ApexSolverResult<BlockLinearization> {
-    let mut param_vectors: Vec<DVector<f64>> = Vec::new();
-    let mut variable_local_idx_size_list = Vec::<(usize, usize)>::new();
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    residual_slice: &mut [f64],
+    jacobian_buf: &mut [f64],
+) -> LinearizerResult<BlockLinearization> {
+    let mut param_slices: SmallVec<[&[f64]; 8]> = SmallVec::new();
+    let mut variable_local_idx_size_list: SmallVec<[(usize, usize); 8]> = SmallVec::new();
     let mut count_variable_local_idx: usize = 0;
 
-    for var_key in &residual_block.variable_key_list {
+    for &var_key in &residual_block.variable_keys {
         if let Some(variable) = variables.get(var_key) {
-            param_vectors.push(variable.to_vector());
-            let var_size = variable.get_size();
+            param_slices.push(variable.as_param_slice());
+            let var_size = variable.dof();
             variable_local_idx_size_list.push((count_variable_local_idx, var_size));
             count_variable_local_idx += var_size;
         }
     }
 
-    let (mut res, jac_opt) = residual_block.factor.linearize(&param_vectors, true);
-    let mut jac = jac_opt.ok_or_else(|| {
-        CoreError::FactorLinearization(
-            "Factor returned None for Jacobian when compute_jacobian=true".to_string(),
-        )
-        .log()
-    })?;
-
-    // Apply loss function if present (critical for robust optimization)
-    if let Some(loss_func) = &residual_block.loss_func {
-        let squared_norm = res.dot(&res);
-        let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-        corrector.correct_jacobian(&res, &mut jac);
-        corrector.correct_residuals(&mut res);
+    let (rows, cols) = residual_block.factor.jacobian_shape();
+    debug_assert_eq!(jacobian_buf.len(), rows * cols);
+    {
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(jacobian_buf, rows, cols);
+        residual_block
+            .factor
+            .linearize(&param_slices, residual_slice, Some(jac_mut));
     }
 
-    let row_start = residual_block.residual_row_start_idx;
-    let dim = residual_block.factor.get_dimension();
-
-    // Write residual into shared accumulator
-    {
-        let mut total_residual = total_residual.lock().map_err(|e| {
-            CoreError::ParallelComputation("Failed to acquire lock on total residual".to_string())
-                .log_with_source(e)
-        })?;
-
-        let mut total_residual_mut = total_residual.as_mut();
-        for i in 0..dim {
-            total_residual_mut[row_start + i] = res[i];
-        }
+    // Apply robust-loss correction in-place: no heap allocation, math identical to
+    // `Corrector::correct_jacobian` / `correct_residuals` on `DVector`/`DMatrix`.
+    if let Some(loss_func) = &residual_block.loss_func {
+        let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
+        let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
+        // Jacobian correction must read the original (un-scaled) residual.
+        corrector.correct_jacobian_in_place(residual_slice, jacobian_buf, rows, cols);
+        corrector.correct_residual_in_place(residual_slice);
     }
 
     Ok(BlockLinearization {
-        jacobian: jac,
         variable_local_idx_size_list,
-        residual_row_start_idx: row_start,
-        residual_dim: dim,
+        residual_row_start_idx: residual_block.residual_row_start_idx,
+        residual_dim: rows,
     })
 }
 
@@ -146,11 +197,11 @@ pub trait AssemblyBackend: LinearizationMode {
     /// Assemble residuals and Jacobian from the problem.
     fn assemble(
         problem: &Problem,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, Self::Jacobian)>;
+    ) -> LinearizerResult<(Mat<f64>, Self::Jacobian)>;
 
     /// Compute column norms of the Jacobian (for Jacobi scaling).
     fn compute_column_norms(jacobian: &Self::Jacobian) -> Vec<f64>;
@@ -169,15 +220,13 @@ pub trait AssemblyBackend: LinearizationMode {
 impl AssemblyBackend for SparseMode {
     fn assemble(
         problem: &Problem,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         _total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+    ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let sym = symbolic_structure.ok_or_else(|| {
-            ApexSolverError::from(CoreError::InvalidInput(
-                "SparseMode requires symbolic structure".to_string(),
-            ))
+            LinearizerError::InvalidInput("SparseMode requires symbolic structure".to_string())
         })?;
         crate::linearizer::cpu::sparse::assemble_sparse(problem, variables, variable_index_map, sym)
     }
@@ -225,11 +274,11 @@ impl AssemblyBackend for SparseMode {
 impl AssemblyBackend for DenseMode {
     fn assemble(
         problem: &Problem,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
         _symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
-    ) -> ApexSolverResult<(Mat<f64>, Mat<f64>)> {
+    ) -> LinearizerResult<(Mat<f64>, Mat<f64>)> {
         crate::linearizer::cpu::dense::assemble_dense(
             problem,
             variables,
@@ -278,14 +327,15 @@ impl AssemblyBackend for DenseMode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{core::problem::Problem, factors, linalg::JacobianMode, optimizer};
-    use apex_manifolds::ManifoldType;
-    use faer::Col;
-    use nalgebra::{DMatrix, DVector, dvector};
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
+    use crate::{
+        core::{VarKey, problem::Problem},
+        factors,
+        linalg::JacobianMode,
     };
+    use apex_manifolds::ManifoldType;
+    use faer::prelude::ReborrowMut;
+    use nalgebra::dvector;
+    use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -296,78 +346,97 @@ mod tests {
     impl factors::Factor for LinearFactor {
         fn linearize(
             &self,
-            params: &[DVector<f64>],
-            compute_jacobian: bool,
-        ) -> (DVector<f64>, Option<DMatrix<f64>>) {
-            let residual = dvector![params[0][0] - self.target];
-            let jacobian = if compute_jacobian {
-                Some(DMatrix::from_element(1, 1, 1.0))
-            } else {
-                None
-            };
-            (residual, jacobian)
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
         }
-
-        fn get_dimension(&self) -> usize {
+        fn residual_dim(&self) -> usize {
             1
         }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
     }
 
-    fn one_var_problem() -> (Problem, HashMap<String, (ManifoldType, DVector<f64>)>) {
+    fn one_var_problem() -> (Problem, VarKey) {
         let mut problem = Problem::new(JacobianMode::Sparse);
-        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
-        let mut init = HashMap::new();
-        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
-        (problem, init)
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        (problem, k)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn make_index_map(
+        problem: &Problem,
+    ) -> (
+        SlotMap<VarKey, Box<dyn crate::core::variable::ManifoldVariable>>,
+        SecondaryMap<VarKey, usize>,
+        usize,
+    ) {
+        let variables = problem.variables.clone();
+        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        let mut offset = 0;
+        for (k, v) in &variables {
+            index_map.insert(k, offset);
+            offset += v.dof();
+        }
+        (variables, index_map, offset)
     }
 
     // -------------------------------------------------------------------------
-    // linearize_block
+    // compute_block_into
     // -------------------------------------------------------------------------
 
     #[test]
-    fn test_linearize_block_residual_value() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+    fn test_compute_block_into_residual_value() -> TestResult {
+        let (problem, _k) = one_var_problem();
+        let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
             .values()
             .next()
-            .ok_or("no residual blocks")?;
-        linearize_block(block, &state.variables, &total_residual)?;
-        let r = total_residual.lock().map_err(|e| format!("{e:?}"))?;
-        assert!((r[0] - 5.0).abs() < 1e-12);
+            .ok_or("no blocks")?;
+        let mut residual_slice = vec![0.0f64; 1];
+        let mut jac_buf = vec![0.0f64; 1];
+        compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
+        assert!((residual_slice[0] - 5.0).abs() < 1e-12);
         Ok(())
     }
 
     #[test]
-    fn test_linearize_block_jacobian_shape() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+    fn test_compute_block_into_jacobian_shape() -> TestResult {
+        let (problem, _k) = one_var_problem();
+        let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
             .values()
             .next()
-            .ok_or("no residual blocks")?;
-        let result = linearize_block(block, &state.variables, &total_residual)?;
-        assert_eq!(result.jacobian.nrows(), 1);
-        assert_eq!(result.jacobian.ncols(), 1);
+            .ok_or("no blocks")?;
+        let mut residual_slice = vec![0.0f64; 1];
+        let mut jac_buf = vec![0.0f64; 1];
+        let result = compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
+        assert_eq!(result.residual_dim, 1);
+        assert_eq!(jac_buf.len(), 1); // 1×1
         Ok(())
     }
 
     #[test]
-    fn test_linearize_block_variable_local_idx() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let total_residual = Arc::new(Mutex::new(Col::<f64>::zeros(1)));
+    fn test_compute_block_into_variable_local_idx() -> TestResult {
+        let (problem, _k) = one_var_problem();
+        let (variables, _, _) = make_index_map(&problem);
         let block = problem
             .residual_blocks()
             .values()
             .next()
-            .ok_or("no residual blocks")?;
-        let result = linearize_block(block, &state.variables, &total_residual)?;
+            .ok_or("no blocks")?;
+        let mut residual_slice = vec![0.0f64; 1];
+        let mut jac_buf = vec![0.0f64; 1];
+        let result = compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
         assert_eq!(result.variable_local_idx_size_list.len(), 1);
         let (local_idx, size) = result.variable_local_idx_size_list[0];
         assert_eq!(local_idx, 0);
@@ -376,50 +445,68 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // split_by_row_offsets_mut
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_split_by_row_offsets_mut_basic() {
+        let mut buf = vec![1.0f64, 2.0, 3.0, 4.0, 5.0];
+        let offsets = vec![(0, 2), (3, 2)];
+        let slices = split_by_row_offsets_mut(&mut buf, &offsets);
+        assert_eq!(slices.len(), 2);
+        assert_eq!(slices[0], &[1.0, 2.0]);
+        assert_eq!(slices[1], &[4.0, 5.0]);
+    }
+
+    #[test]
+    fn test_split_by_row_offsets_mut_write() {
+        let mut buf = vec![0.0f64; 4];
+        let offsets = vec![(0, 2), (2, 2)];
+        {
+            let mut slices = split_by_row_offsets_mut(&mut buf, &offsets);
+            slices[0][0] = 1.0;
+            slices[0][1] = 2.0;
+            slices[1][0] = 3.0;
+            slices[1][1] = 4.0;
+        }
+        assert_eq!(buf, vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    // -------------------------------------------------------------------------
     // SparseMode AssemblyBackend
     // -------------------------------------------------------------------------
 
     #[test]
     fn test_sparse_backend_assemble() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let (residual, _) = SparseMode::assemble(
-            &problem,
-            &state.variables,
-            &state.variable_index_map,
-            state.symbolic_structure.as_ref(),
-            state.total_dof,
+        let (problem, _k) = one_var_problem();
+        let (variables, index_map, total_dof) = make_index_map(&problem);
+        let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem, &variables, &index_map, total_dof,
         )?;
+        let (residual, _) =
+            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }
 
     #[test]
     fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let result = SparseMode::assemble(
-            &problem,
-            &state.variables,
-            &state.variable_index_map,
-            None, // no symbolic structure
-            state.total_dof,
-        );
+        let (problem, _k) = one_var_problem();
+        let (variables, index_map, total_dof) = make_index_map(&problem);
+        let result = SparseMode::assemble(&problem, &variables, &index_map, None, total_dof);
         assert!(result.is_err());
         Ok(())
     }
 
     #[test]
     fn test_sparse_backend_compute_column_norms() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let (_, jacobian) = SparseMode::assemble(
-            &problem,
-            &state.variables,
-            &state.variable_index_map,
-            state.symbolic_structure.as_ref(),
-            state.total_dof,
+        let (problem, _k) = one_var_problem();
+        let (variables, index_map, total_dof) = make_index_map(&problem);
+        let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem, &variables, &index_map, total_dof,
         )?;
+        let (_, jacobian) =
+            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
         let norms = SparseMode::compute_column_norms(&jacobian);
         assert_eq!(norms.len(), 1);
         assert!((norms[0] - 1.0).abs() < 1e-12);
@@ -428,15 +515,13 @@ mod tests {
 
     #[test]
     fn test_sparse_backend_apply_column_scaling() -> TestResult {
-        let (problem, init) = one_var_problem();
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let (_, jacobian) = SparseMode::assemble(
-            &problem,
-            &state.variables,
-            &state.variable_index_map,
-            state.symbolic_structure.as_ref(),
-            state.total_dof,
+        let (problem, _k) = one_var_problem();
+        let (variables, index_map, total_dof) = make_index_map(&problem);
+        let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
+            &problem, &variables, &index_map, total_dof,
         )?;
+        let (_, jacobian) =
+            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
         let scaling = vec![0.5_f64];
         let scaled = SparseMode::apply_column_scaling(&jacobian, &scaling);
         let val = scaled.as_ref().val_of_col(0)[0];
@@ -469,17 +554,10 @@ mod tests {
     #[test]
     fn test_dense_backend_assemble() -> TestResult {
         let mut problem = Problem::new(JacobianMode::Dense);
-        problem.add_residual_block(&["x"], Box::new(LinearFactor { target: 0.0 }), None);
-        let mut init = HashMap::new();
-        init.insert("x".to_string(), (ManifoldType::RN, dvector![5.0]));
-        let state = optimizer::initialize_optimization_state(&problem, &init)?;
-        let (residual, _) = DenseMode::assemble(
-            &problem,
-            &state.variables,
-            &state.variable_index_map,
-            None,
-            state.total_dof,
-        )?;
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        let (variables, index_map, total_dof) = make_index_map(&problem);
+        let (residual, _) = DenseMode::assemble(&problem, &variables, &index_map, None, total_dof)?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }

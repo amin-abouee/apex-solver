@@ -1,0 +1,13 @@
+[book]
+title = "Apex IO Cookbook"
+authors = ["Amin Abouee"]
+language = "en"
+src = "src"
+description = "Reference for the file, dataset, and ROS bag I/O in apex-io: pose-graph formats, sensor datasets, and ROS1/ROS2 bags."
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[preprocessor.katex]
+after = ["links"]

@@ -31,28 +31,34 @@
 //! ```no_run
 //! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
 //! # use apex_solver::linalg::StructureAware;
-//! # use std::collections::HashMap;
+//! # use apex_solver::core::VarKey;
+//! # use apex_solver::core::variable::ManifoldVariable;
+//! # use slotmap::{SlotMap, SecondaryMap};
+//! # use std::collections::HashSet;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let variables = HashMap::new();
-//! # let variable_index_map = HashMap::new();
+//! # let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+//! # let variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+//! # let landmark_keys: HashSet<VarKey> = HashSet::new();
 //! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
 //! use apex_solver::linalg::StructureAware;
 //!
 //! let mut solver = SparseSchurComplementSolver::new()
 //!     .with_variant(SchurVariant::Iterative) // Implicit Schur with PCG
 //!     .with_preconditioner(SchurPreconditioner::SchurJacobi); // Recommended for PCG
-//! solver.initialize_structure(&variables, &variable_index_map)?;
+//! solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 //! # Ok(())
 //! # }
 //! ```
 
-use super::explicit_schur::{SchurBlockStructure, SchurOrdering, SchurPreconditioner};
-use crate::core::problem::VariableEnum;
+use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
+use crate::core::VarKey;
+use crate::core::variable::ManifoldVariable;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::{DMatrix, DVector, Matrix3};
 use rayon::prelude::*;
+use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashMap;
 use std::ops::Mul;
 
@@ -60,7 +66,6 @@ use std::ops::Mul;
 #[derive(Debug, Clone)]
 pub struct IterativeSchurSolver {
     block_structure: Option<SchurBlockStructure>,
-    ordering: SchurOrdering,
 
     // CG parameters
     max_cg_iterations: usize,
@@ -90,7 +95,7 @@ impl IterativeSchurSolver {
     pub fn new() -> Self {
         Self {
             block_structure: None,
-            ordering: SchurOrdering::default(),
+
             max_cg_iterations: 500, // More iterations for large BA problems
             cg_tolerance: 1e-9,     // Tighter tolerance for accurate steps
             preconditioner_type: SchurPreconditioner::SchurJacobi,
@@ -107,7 +112,7 @@ impl IterativeSchurSolver {
     pub fn with_cg_params(max_iterations: usize, tolerance: f64) -> Self {
         Self {
             block_structure: None,
-            ordering: SchurOrdering::default(),
+
             max_cg_iterations: max_iterations,
             cg_tolerance: tolerance,
             preconditioner_type: SchurPreconditioner::SchurJacobi,
@@ -128,7 +133,7 @@ impl IterativeSchurSolver {
     ) -> Self {
         Self {
             block_structure: None,
-            ordering: SchurOrdering::default(),
+
             max_cg_iterations: max_iterations,
             cg_tolerance: tolerance,
             preconditioner_type: preconditioner,
@@ -955,35 +960,31 @@ impl Default for IterativeSchurSolver {
 impl StructureAware for IterativeSchurSolver {
     fn initialize_structure(
         &mut self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
+        schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
         let mut structure = SchurBlockStructure::new();
 
-        for (name, variable) in variables {
-            let manifold_type = variable.manifold_type();
-            let start_col = *variable_index_map.get(name).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("Variable {} not in index map", name))
+        for (key, variable) in variables {
+            let start_col = *variable_index_map.get(key).ok_or_else(|| {
+                LinAlgError::InvalidInput(format!("VarKey {:?} not in index map", key))
             })?;
-            let size = variable.get_size();
+            let size = variable.dof();
 
-            if self.ordering.should_eliminate(name, &manifold_type, size) {
-                structure
-                    .landmark_blocks
-                    .push((name.clone(), start_col, size));
+            if schur_landmark_keys.contains(&key) {
+                structure.landmark_blocks.push((key, start_col, size));
                 structure.landmark_dof += size;
 
                 if size != 3 {
                     return Err(LinAlgError::InvalidInput(format!(
-                        "Landmark {} has DOF {}, expected 3",
-                        name, size
+                        "Landmark {:?} has DOF {}, expected 3",
+                        key, size
                     )));
                 }
                 structure.num_landmarks += 1;
             } else {
-                structure
-                    .camera_blocks
-                    .push((name.clone(), start_col, size));
+                structure.camera_blocks.push((key, start_col, size));
                 structure.camera_dof += size;
             }
         }
@@ -1096,16 +1097,19 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::VarKey;
     use crate::core::variable::Variable;
-    use apex_manifolds::{rn, se3};
+    use apex_manifolds::{LieGroup, rn, se3};
+    use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     type TestSetup = (
-        HashMap<String, VariableEnum>,
-        HashMap<String, usize>,
+        SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        SecondaryMap<VarKey, usize>,
         SparseColMat<usize, f64>,
         faer::Mat<f64>,
+        std::collections::HashSet<VarKey>,
     );
 
     /// Build the same 2-camera + 3-landmark test setup used in explicit_schur tests.
@@ -1114,34 +1118,23 @@ mod tests {
         let se3_id = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let pt_zero = DVector::from_vec(vec![0.0, 0.0, 0.0]);
 
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "cam_0".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
-        );
-        variables.insert(
-            "cam_1".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
-        );
-        variables.insert(
-            "pt_0".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
-        variables.insert(
-            "pt_1".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
-        variables.insert(
-            "pt_2".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let cam0 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_id.as_slice(),
+        ))));
+        let cam1 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_id.as_slice(),
+        ))));
+        let pt0 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
+        let pt1 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
+        let pt2 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
 
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("cam_0".to_string(), 0);
-        variable_index_map.insert("cam_1".to_string(), 6);
-        variable_index_map.insert("pt_0".to_string(), 12);
-        variable_index_map.insert("pt_1".to_string(), 15);
-        variable_index_map.insert("pt_2".to_string(), 18);
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(cam0, 0);
+        variable_index_map.insert(cam1, 6);
+        variable_index_map.insert(pt0, 12);
+        variable_index_map.insert(pt1, 15);
+        variable_index_map.insert(pt2, 18);
 
         // Jacobian: 2 cameras × 3 landmarks × 6 rows_per_obs = 36 rows, 21 cols
         let cam_cols = [0usize, 6];
@@ -1160,7 +1153,18 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(36, 21, &triplets)?;
         let residuals = faer::Mat::from_fn(36, 1, |i, _| (i % 5) as f64 * 0.1);
 
-        Ok((variables, variable_index_map, jacobian, residuals))
+        let mut landmark_keys = std::collections::HashSet::new();
+        landmark_keys.insert(pt0);
+        landmark_keys.insert(pt1);
+        landmark_keys.insert(pt2);
+
+        Ok((
+            variables,
+            variable_index_map,
+            jacobian,
+            residuals,
+            landmark_keys,
+        ))
     }
 
     #[test]
@@ -1211,9 +1215,9 @@ mod tests {
     /// Test initialize_structure() partitions 2 cameras + 3 landmarks
     #[test]
     fn test_iterative_schur_initialize_structure() -> TestResult {
-        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let bs = solver
             .block_structure
@@ -1229,9 +1233,10 @@ mod tests {
     /// Test full solve_normal_equation pipeline
     #[test]
     fn test_iterative_schur_solve_normal_equation() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1243,9 +1248,10 @@ mod tests {
     /// Test solve_augmented_equation (LM damping) pipeline
     #[test]
     fn test_iterative_schur_solve_augmented_equation() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
@@ -1260,9 +1266,10 @@ mod tests {
     /// Test get_hessian() and get_gradient() after solve
     #[test]
     fn test_iterative_schur_get_hessian_gradient() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
         assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_none());
@@ -1283,9 +1290,10 @@ mod tests {
     /// Test landmark_block_inverses populated after solve
     #[test]
     fn test_iterative_schur_invert_landmark_blocks() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
@@ -1297,9 +1305,10 @@ mod tests {
     /// Test visibility index populated after solve
     #[test]
     fn test_iterative_schur_build_visibility_index() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
@@ -1314,9 +1323,10 @@ mod tests {
     /// Test workspace buffers are allocated after solve
     #[test]
     fn test_iterative_schur_workspace_init() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
@@ -1328,10 +1338,11 @@ mod tests {
     /// Test BlockDiagonal preconditioner path
     #[test]
     fn test_iterative_schur_block_diagonal_preconditioner() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver =
             IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::BlockDiagonal);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1342,10 +1353,11 @@ mod tests {
     /// Test SchurJacobi preconditioner path
     #[test]
     fn test_iterative_schur_schur_jacobi_preconditioner() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver =
             IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::SchurJacobi);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1356,9 +1368,10 @@ mod tests {
     /// Test None preconditioner path
     #[test]
     fn test_iterative_schur_no_preconditioner() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::None);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1369,16 +1382,17 @@ mod tests {
     /// Test two solves with different λ produce different updates
     #[test]
     fn test_iterative_schur_augmented_lambda_effect() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
 
         let mut s1 = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        s1.initialize_structure(&variables, &variable_index_map)?;
+        s1.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let d1 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut s1, &residuals, &jacobian, 0.001,
         )?;
 
         let mut s2 = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        s2.initialize_structure(&variables, &variable_index_map)?;
+        s2.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let d2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut s2, &residuals, &jacobian, 100.0,
         )?;
@@ -1413,9 +1427,10 @@ mod tests {
     /// Test apply_landmark_inverse applies the cached block inverses correctly.
     #[test]
     fn test_apply_landmark_inverse() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         // Run a solve to populate landmark_block_inverses
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
@@ -1436,9 +1451,10 @@ mod tests {
     /// Test extract_camera_landmark_transpose_mvp produces a landmark-DOF output.
     #[test]
     fn test_extract_camera_landmark_transpose_mvp() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         let hessian = solver.hessian.as_ref().ok_or("hessian is None")?;
@@ -1456,9 +1472,10 @@ mod tests {
     /// Test extract_camera_landmark_mvp produces a camera-DOF output.
     #[test]
     fn test_extract_camera_landmark_mvp() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = IterativeSchurSolver::with_cg_params(500, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         let hessian = solver.hessian.as_ref().ok_or("hessian is None")?;
@@ -1476,10 +1493,11 @@ mod tests {
     /// Test apply_block_preconditioner produces correct-dimensional output.
     #[test]
     fn test_apply_block_preconditioner() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver =
             IterativeSchurSolver::with_config(500, 1e-6, SchurPreconditioner::BlockDiagonal);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Compute the block preconditioner blocks
@@ -1506,16 +1524,15 @@ mod tests {
         use apex_manifolds::rn;
         use nalgebra::DVector;
 
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "pt_0".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(DVector::zeros(3)))),
-        );
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("pt_0".to_string(), 0);
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let k = variables.insert(Box::new(Variable::new(rn::Rn::new(DVector::zeros(3)))));
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(k, 0);
+        let mut landmark_keys = std::collections::HashSet::new();
+        landmark_keys.insert(k);
 
         let mut solver = IterativeSchurSolver::new();
-        let result = solver.initialize_structure(&variables, &variable_index_map);
+        let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),
             "Expected Err when no camera variables present"
@@ -1527,20 +1544,17 @@ mod tests {
     fn test_implicit_initialize_structure_no_landmarks_returns_error() {
         use crate::core::variable::Variable;
         use apex_manifolds::se3;
-        use nalgebra::DVector;
 
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "cam_0".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(DVector::from_vec(vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            ])))),
-        );
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("cam_0".to_string(), 0);
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let _k = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(&[
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]))));
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(_k, 0);
+        let landmark_keys = std::collections::HashSet::<VarKey>::new(); // no landmarks
 
         let mut solver = IterativeSchurSolver::new();
-        let result = solver.initialize_structure(&variables, &variable_index_map);
+        let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),
             "Expected Err when no landmark variables present"

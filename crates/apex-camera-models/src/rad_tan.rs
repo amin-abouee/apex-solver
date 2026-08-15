@@ -1,54 +1,9 @@
-//! Radial-Tangential Distortion Camera Model.
+//! Radial-Tangential (Brown-Conrady) camera model.
 //!
-//! The standard OpenCV camera model combining radial and tangential distortion.
-//! This model is widely used for narrow to moderate field-of-view cameras.
-//!
-//! # Mathematical Model
-//!
-//! ## Projection (3D → 2D)
-//!
-//! For a 3D point p = (x, y, z) in camera coordinates:
-//!
-//! ```text
-//! x' = x/z,  y' = y/z  (normalized coordinates)
-//! r² = x'² + y'²
-//!
-//! Radial distortion:
-//! r' = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
-//!
-//! Tangential distortion:
-//! dx = 2·p₁·x'·y' + p₂·(r² + 2·x'²)
-//! dy = p₁·(r² + 2·y'²) + 2·p₂·x'·y'
-//!
-//! Distorted coordinates:
-//! x'' = r'·x' + dx
-//! y'' = r'·y' + dy
-//!
-//! Final projection:
-//! u = fx·x'' + cx
-//! v = fy·y'' + cy
-//! ```
-//!
-//! ## Unprojection (2D → 3D)
-//!
-//! Iterative Jacobian-based method to solve the non-linear inverse equations.
-//!
-//! # Parameters
-//!
-//! - **Intrinsics**: fx, fy, cx, cy
-//! - **Distortion**: k₁, k₂, p₁, p₂, k₃ (9 parameters total)
-//!
-//! # Use Cases
-//!
-//! - Standard narrow FOV cameras
-//! - OpenCV-calibrated cameras
-//! - Robotics and AR/VR applications
-//! - Most conventional lenses
-//!
-//! # References
-//!
-//! - Brown, "Decentering Distortion of Lenses", 1966
-//! - OpenCV Camera Calibration Documentation
+//! Standard OpenCV distortion model combining radial and tangential terms, suitable for narrow
+//! to moderate field-of-view lenses. Has 9 intrinsic parameters. See the
+//! [rad-tan cookbook chapter](../doc/cookbook/src/rad-tan.html) for the full projection,
+//! unprojection, and Jacobian derivations.
 
 use crate::{CameraModel, CameraModelError, DistortionModel, PinholeParams};
 use nalgebra::{DVector, Matrix2, SMatrix, Vector2, Vector3};
@@ -63,15 +18,22 @@ pub struct RadTanCamera {
 impl RadTanCamera {
     /// Creates a new Radial-Tangential (Brown-Conrady) camera.
     ///
-    /// # Arguments
-    ///
-    /// * `pinhole` - The pinhole parameters (fx, fy, cx, cy).
-    /// * `distortion` - The distortion model. This must be `DistortionModel::BrownConrady` with parameters { k1, k2, p1, p2, k3 }.
-    ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not [`DistortionModel::BrownConrady`].
-    #[must_use]
+    /// Returns [`CameraModelError::InvalidParams`] if `distortion` is not
+    /// [`DistortionModel::BrownConrady`].
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, DistortionModel, PinholeParams, RadTanCamera};
+    ///
+    /// let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+    /// let distortion = DistortionModel::BrownConrady { k1: 0.1, k2: 0.01, p1: 0.001, p2: 0.002, k3: 0.001 };
+    /// let camera = RadTanCamera::new(pinhole, distortion)?;
+    /// assert_eq!(camera.get_model_name(), "rad_tan");
+    /// # Ok::<(), apex_camera_models::CameraModelError>(())
+    /// ```
     pub fn new(
         pinhole: PinholeParams,
         distortion: DistortionModel,
@@ -84,25 +46,13 @@ impl RadTanCamera {
         Ok(camera)
     }
 
-    /// Checks if a 3D point satisfies the projection condition.
-    ///
-    /// # Arguments
-    ///
-    /// * `z` - The z-coordinate of the point in the camera frame.
-    ///
-    /// # Returns
-    ///
-    /// Returns `true` if `z >= crate::GEOMETRIC_PRECISION`, `false` otherwise.
+    /// Returns `true` if the point's z-coordinate is at or above [`crate::GEOMETRIC_PRECISION`].
     fn check_projection_condition(&self, z: f64) -> bool {
         z >= crate::GEOMETRIC_PRECISION
     }
 
-    /// Helper method to extract distortion parameters.
-    ///
-    /// # Returns
-    ///
-    /// Returns a tuple `(k1, k2, p1, p2, k3)` containing the Brown-Conrady distortion parameters.
-    /// If the distortion model is not Brown-Conrady, returns `(0.0, 0.0, 0.0, 0.0, 0.0)`.
+    /// Returns the Brown-Conrady distortion parameters as `(k1, k2, p1, p2, k3)`.
+    /// Returns zeros if the model is not Brown-Conrady.
     fn distortion_params(&self) -> (f64, f64, f64, f64, f64) {
         match self.distortion {
             DistortionModel::BrownConrady { k1, k2, p1, p2, k3 } => (k1, k2, p1, p2, k3),
@@ -110,20 +60,9 @@ impl RadTanCamera {
         }
     }
 
-    /// Performs linear estimation to initialize distortion parameters from point correspondences.
-    ///
-    /// This method estimates the radial distortion coefficients [k1, k2, k3] using a linear
-    /// least squares approach given 3D-2D point correspondences. Tangential distortion parameters
-    /// (p1, p2) are set to 0.0. It assumes the intrinsic parameters (fx, fy, cx, cy) are already set.
-    ///
-    /// # Arguments
-    ///
-    /// * `points_3d`: Matrix3xX<f64> - 3D points in camera coordinates (each column is a point)
-    /// * `points_2d`: Matrix2xX<f64> - Corresponding 2D points in image coordinates
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(())` on success or a `CameraModelError` if the estimation fails.
+    /// Initializes `[k1, k2, k3]` via linear least-squares given 3D–2D correspondences.
+    /// Tangential parameters `[p1, p2]` are reset to zero. Requires the intrinsics
+    /// `[fx, fy, cx, cy]` to already be set; needs at least 3 correspondences.
     pub fn linear_estimation(
         &mut self,
         points_3d: &nalgebra::Matrix3xX<f64>,
@@ -142,11 +81,9 @@ impl RadTanCamera {
             ));
         }
 
-        // Set up the linear system to estimate distortion coefficients
-        let mut a = nalgebra::DMatrix::zeros(num_points * 2, 3); // Only estimate k1, k2, k3
+        let mut a = nalgebra::DMatrix::zeros(num_points * 2, 3);
         let mut b = nalgebra::DVector::zeros(num_points * 2);
 
-        // Extract intrinsics
         let fx = self.pinhole.fx;
         let fy = self.pinhole.fy;
         let cx = self.pinhole.cx;
@@ -159,31 +96,27 @@ impl RadTanCamera {
             let u = points_2d[(0, i)];
             let v = points_2d[(1, i)];
 
-            // Project to normalized coordinates
             let x_norm = x / z;
             let y_norm = y / z;
             let r2 = x_norm * x_norm + y_norm * y_norm;
             let r4 = r2 * r2;
             let r6 = r4 * r2;
 
-            // Predicted undistorted pixel coordinates
             let u_undist = fx * x_norm + cx;
             let v_undist = fy * y_norm + cy;
 
-            // Set up linear system for distortion coefficients
-            a[(i * 2, 0)] = fx * x_norm * r2; // k1 term
-            a[(i * 2, 1)] = fx * x_norm * r4; // k2 term
-            a[(i * 2, 2)] = fx * x_norm * r6; // k3 term
+            a[(i * 2, 0)] = fx * x_norm * r2;
+            a[(i * 2, 1)] = fx * x_norm * r4;
+            a[(i * 2, 2)] = fx * x_norm * r6;
 
-            a[(i * 2 + 1, 0)] = fy * y_norm * r2; // k1 term
-            a[(i * 2 + 1, 1)] = fy * y_norm * r4; // k2 term
-            a[(i * 2 + 1, 2)] = fy * y_norm * r6; // k3 term
+            a[(i * 2 + 1, 0)] = fy * y_norm * r2;
+            a[(i * 2 + 1, 1)] = fy * y_norm * r4;
+            a[(i * 2 + 1, 2)] = fy * y_norm * r6;
 
             b[i * 2] = u - u_undist;
             b[i * 2 + 1] = v - v_undist;
         }
 
-        // Solve the linear system using SVD
         let svd = a.svd(true, true);
         let distortion_coeffs = match svd.solve(&b, 1e-10) {
             Ok(sol) => sol,
@@ -195,7 +128,6 @@ impl RadTanCamera {
             }
         };
 
-        // Update distortion coefficients (keep p1, p2 as zero for linear estimation)
         self.distortion = DistortionModel::BrownConrady {
             k1: distortion_coeffs[0],
             k2: distortion_coeffs[1],
@@ -209,11 +141,8 @@ impl RadTanCamera {
     }
 }
 
-/// Converts the camera parameters to a dynamic vector.
-///
-/// # Layout
-///
-/// The parameters are ordered as: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
+/// Converts the camera parameters to a dynamic vector with layout
+/// `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`.
 impl From<&RadTanCamera> for DVector<f64> {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera.distortion_params();
@@ -231,11 +160,8 @@ impl From<&RadTanCamera> for DVector<f64> {
     }
 }
 
-/// Converts the camera parameters to a fixed-size array.
-///
-/// # Layout
-///
-/// The parameters are ordered as: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
+/// Converts the camera parameters to a fixed-size array with layout
+/// `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`.
 impl From<&RadTanCamera> for [f64; 9] {
     fn from(camera: &RadTanCamera) -> Self {
         let (k1, k2, p1, p2, k3) = camera.distortion_params();
@@ -253,15 +179,9 @@ impl From<&RadTanCamera> for [f64; 9] {
     }
 }
 
-/// Creates a camera from a slice of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
-///
-/// # Panics
-///
-/// Panics if the slice has fewer than 9 elements.
+/// Creates a camera from a slice of intrinsic parameters with layout
+/// `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`. Returns an error if the slice
+/// has fewer than 9 elements.
 impl TryFrom<&[f64]> for RadTanCamera {
     type Error = CameraModelError;
 
@@ -290,11 +210,8 @@ impl TryFrom<&[f64]> for RadTanCamera {
     }
 }
 
-/// Creates a camera from a fixed-size array of intrinsic parameters.
-///
-/// # Layout
-///
-/// Expected parameter order: `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`
+/// Creates a camera from a fixed-size array with layout
+/// `[fx, fy, cx, cy, k1, k2, p1, p2, k3]`.
 impl From<[f64; 9]> for RadTanCamera {
     fn from(params: [f64; 9]) -> Self {
         Self {
@@ -315,15 +232,9 @@ impl From<[f64; 9]> for RadTanCamera {
     }
 }
 
-/// Creates a `RadTanCamera` from a parameter slice with validation.
-///
-/// Unlike `From<&[f64]>`, this constructor validates all parameters
-/// and returns a `Result` instead of panicking on invalid input.
-///
-/// # Errors
-///
-/// Returns `CameraModelError::InvalidParams` if fewer than 9 parameters are provided.
-/// Returns validation errors if focal lengths are non-positive or parameters are non-finite.
+/// Creates a `RadTanCamera` from a parameter slice with full validation.
+/// Unlike [`<RadTanCamera as TryFrom<&[f64]>>::try_from`], this also calls
+/// [`CameraModel::validate_params`] and returns any validation errors.
 pub fn try_from_params(params: &[f64]) -> Result<RadTanCamera, CameraModelError> {
     let camera = RadTanCamera::try_from(params)?;
     camera.validate_params()?;
@@ -336,19 +247,9 @@ impl CameraModel for RadTanCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    ///
-    /// # Mathematical Formula
-    ///
-    /// Combines radial distortion (k₁, k₂, k₃) and tangential distortion (p₁, p₂).
-    ///
-    /// # Arguments
-    ///
-    /// * `p_cam` - The 3D point in the camera coordinate frame.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(uv)` - The 2D image coordinates if valid.
-    /// - `Err` - If the point is at or behind the camera.
+    /// Returns [`CameraModelError::PointBehindCamera`] if the point lies at or behind
+    /// the camera, and [`CameraModelError::PointOutsideImage`] if the radial polynomial
+    /// becomes non-positive (the model cannot represent such rays).
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         if !self.check_projection_condition(p_cam.z) {
             return Err(CameraModelError::PointBehindCamera {
@@ -367,15 +268,19 @@ impl CameraModel for RadTanCamera {
 
         let (k1, k2, p1, p2, k3) = self.distortion_params();
 
-        // Radial distortion: r' = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
-        // Tangential distortion
+        if radial <= crate::GEOMETRIC_PRECISION {
+            return Err(CameraModelError::PointOutsideImage {
+                x: x_prime,
+                y: y_prime,
+            });
+        }
+
         let xy = x_prime * y_prime;
         let dx = 2.0 * p1 * xy + p2 * (r2 + 2.0 * x_prime * x_prime);
         let dy = p1 * (r2 + 2.0 * y_prime * y_prime) + 2.0 * p2 * xy;
 
-        // Distorted coordinates
         let x_distorted = radial * x_prime + dx;
         let y_distorted = radial * y_prime + dy;
 
@@ -385,30 +290,13 @@ impl CameraModel for RadTanCamera {
         ))
     }
 
-    /// Unprojects a 2D image point to a 3D ray.
-    ///
-    /// # Algorithm
-    ///
-    /// Iterative Newton-Raphson with Jacobian matrix:
-    /// 1. Start with the undistorted estimate.
-    /// 2. Compute distortion and Jacobian.
-    /// 3. Update estimate: p′ = p′ − J⁻¹ · f(p′).
-    /// 4. Repeat until convergence.
-    ///
-    /// # Arguments
-    ///
-    /// * `point_2d` - The 2D point in image coordinates.
-    ///
-    /// # Returns
-    ///
-    /// - `Ok(ray)` - The normalized 3D ray direction.
-    /// - `Err` - If the iteration fails to converge.
+    /// Unprojects a 2D image point to a unit 3D ray. Uses Newton-Raphson on the
+    /// distortion residual; returns [`CameraModelError::NumericalError`] on singular
+    /// Jacobian or non-convergence.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
-        // Validate unprojection condition if needed (always true for RadTan generally)
         let u = point_2d.x;
         let v = point_2d.y;
 
-        // Initial estimate (undistorted)
         let x_distorted = (u - self.pinhole.cx) / self.pinhole.fx;
         let y_distorted = (v - self.pinhole.cy) / self.pinhole.fy;
         let target_distorted_point = Vector2::new(x_distorted, y_distorted);
@@ -428,19 +316,15 @@ impl CameraModel for RadTanCamera {
             let r4 = r2 * r2;
             let r6 = r4 * r2;
 
-            // Radial distortion
             let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
 
-            // Tangential distortion
             let xy = x * y;
             let dx = 2.0 * p1 * xy + p2 * (r2 + 2.0 * x * x);
             let dy = p1 * (r2 + 2.0 * y * y) + 2.0 * p2 * xy;
 
-            // Distorted point
             let x_dist = radial * x + dx;
             let y_dist = radial * y + dy;
 
-            // Residual
             let fx = x_dist - target_distorted_point.x;
             let fy = y_dist - target_distorted_point.y;
 
@@ -448,24 +332,15 @@ impl CameraModel for RadTanCamera {
                 break;
             }
 
-            // Jacobian matrix
             let dradial_dr2 = k1 + 2.0 * k2 * r2 + 3.0 * k3 * r4;
 
-            // ∂(radial·x + dx)/∂x
             let dfx_dx = radial + 2.0 * x * dradial_dr2 * x + 2.0 * p1 * y + 2.0 * p2 * (3.0 * x);
-
-            // ∂(radial·x + dx)/∂y
             let dfx_dy = 2.0 * x * dradial_dr2 * y + 2.0 * p1 * x + 2.0 * p2 * y;
-
-            // ∂(radial·y + dy)/∂x
             let dfy_dx = 2.0 * y * dradial_dr2 * x + 2.0 * p1 * x + 2.0 * p2 * y;
-
-            // ∂(radial·y + dy)/∂y
             let dfy_dy = radial + 2.0 * y * dradial_dr2 * y + 2.0 * p1 * (3.0 * y) + 2.0 * p2 * x;
 
             let jacobian = Matrix2::new(dfx_dx, dfx_dy, dfy_dx, dfy_dy);
 
-            // Solve: J·Δp = -f
             let det = jacobian[(0, 0)] * jacobian[(1, 1)] - jacobian[(0, 1)] * jacobian[(1, 0)];
 
             if det.abs() < crate::GEOMETRIC_PRECISION {
@@ -490,7 +365,6 @@ impl CameraModel for RadTanCamera {
             }
         }
 
-        // Normalize to unit ray
         let r2 = point.x * point.x + point.y * point.y;
         let norm = (1.0 + r2).sqrt();
         let norm_inv = 1.0 / norm;
@@ -502,132 +376,8 @@ impl CameraModel for RadTanCamera {
         ))
     }
 
-    /// Computes the Jacobian of the projection with respect to the 3D point coordinates (2×3).
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// For the Radial-Tangential (Brown-Conrady) model, projection is:
-    ///
-    /// ```text
-    /// x' = x/z,  y' = y/z  (normalized coordinates)
-    /// r² = x'² + y'²
-    /// radial = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
-    /// dx = 2·p₁·x'·y' + p₂·(r² + 2·x'²)  (tangential distortion)
-    /// dy = p₁·(r² + 2·y'²) + 2·p₂·x'·y'  (tangential distortion)
-    /// x'' = radial·x' + dx
-    /// y'' = radial·y' + dy
-    /// u = fx·x'' + cx
-    /// v = fy·y'' + cy
-    /// ```
-    ///
-    /// ## Chain Rule Application
-    ///
-    /// This is the most complex Jacobian due to coupled radial + tangential distortion.
-    /// The chain rule must be applied through multiple stages:
-    ///
-    /// 1. ∂(x',y')/∂(x,y,z): Normalized coordinate derivatives
-    /// 2. ∂(x'',y'')/∂(x',y'): Distortion derivatives (radial + tangential)
-    /// 3. ∂(u,v)/∂(x'',y''): Final projection derivatives
-    ///
-    /// Normalized coordinate derivatives (x' = x/z, y' = y/z):
-    /// ```text
-    /// ∂x'/∂x = 1/z,   ∂x'/∂y = 0,     ∂x'/∂z = -x/z²
-    /// ∂y'/∂x = 0,     ∂y'/∂y = 1/z,   ∂y'/∂z = -y/z²
-    /// ```
-    ///
-    /// Distortion derivatives:
-    ///
-    /// The distorted coordinates are: x'' = radial·x' + dx, y'' = radial·y' + dy
-    ///
-    /// #### Radial Distortion Component
-    ///
-    /// ```text
-    /// radial = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
-    /// ∂radial/∂r² = k₁ + 2k₂·r² + 3k₃·r⁴
-    /// ∂r²/∂x' = 2x',  ∂r²/∂y' = 2y'
-    /// ```
-    ///
-    /// #### Tangential Distortion Component
-    ///
-    /// For dx = 2p₁x'y' + p₂(r² + 2x'²):
-    ///
-    /// ```text
-    /// ∂dx/∂x' = 2p₁y' + p₂(2x' + 4x') = 2p₁y' + 6p₂x'
-    /// ∂dx/∂y' = 2p₁x' + 2p₂y'
-    /// ```
-    ///
-    /// For dy = p₁(r² + 2y'²) + 2p₂x'y':
-    ///
-    /// ```text
-    /// ∂dy/∂x' = 2p₁x' + 2p₂y'
-    /// ∂dy/∂y' = p₁(2y' + 4y') + 2p₂x' = 6p₁y' + 2p₂x'
-    /// ```
-    ///
-    /// #### Combined Distorted Coordinate Derivatives
-    ///
-    /// For x'' = radial·x' + dx:
-    ///
-    /// ```text
-    /// ∂x''/∂x' = radial + x'·∂radial/∂r²·∂r²/∂x' + ∂dx/∂x'
-    ///          = radial + x'·dradial_dr2·2x' + 2p₁y' + 6p₂x'
-    ///          = radial + 2x'²·dradial_dr2 + 2p₁y' + 6p₂x'
-    ///
-    /// ∂x''/∂y' = x'·∂radial/∂r²·∂r²/∂y' + ∂dx/∂y'
-    ///          = x'·dradial_dr2·2y' + 2p₁x' + 2p₂y'
-    ///          = 2x'y'·dradial_dr2 + 2p₁x' + 2p₂y'
-    /// ```
-    ///
-    /// For y'' = radial·y' + dy:
-    ///
-    /// ```text
-    /// ∂y''/∂x' = y'·∂radial/∂r²·∂r²/∂x' + ∂dy/∂x'
-    ///          = y'·dradial_dr2·2x' + 2p₁x' + 2p₂y'
-    ///          = 2x'y'·dradial_dr2 + 2p₁x' + 2p₂y'
-    ///
-    /// ∂y''/∂y' = radial + y'·∂radial/∂r²·∂r²/∂y' + ∂dy/∂y'
-    ///          = radial + y'·dradial_dr2·2y' + 6p₁y' + 2p₂x'
-    ///          = radial + 2y'²·dradial_dr2 + 6p₁y' + 2p₂x'
-    /// ```
-    ///
-    /// Final projection derivatives (u = fx·x'' + cx, v = fy·y'' + cy):
-    /// ```text
-    /// ∂u/∂x'' = fx,  ∂u/∂y'' = 0
-    /// ∂v/∂x'' = 0,   ∂v/∂y'' = fy
-    /// ```
-    ///
-    /// Chain rule:
-    ///
-    /// ```text
-    /// ∂u/∂x = fx·(∂x''/∂x'·∂x'/∂x + ∂x''/∂y'·∂y'/∂x)
-    ///       = fx·(∂x''/∂x'·1/z + 0)
-    ///       = fx·∂x''/∂x'·1/z
-    ///
-    /// ∂u/∂y = fx·(∂x''/∂x'·∂x'/∂y + ∂x''/∂y'·∂y'/∂y)
-    ///       = fx·(0 + ∂x''/∂y'·1/z)
-    ///       = fx·∂x''/∂y'·1/z
-    ///
-    /// ∂u/∂z = fx·(∂x''/∂x'·∂x'/∂z + ∂x''/∂y'·∂y'/∂z)
-    ///       = fx·(∂x''/∂x'·(-x'/z) + ∂x''/∂y'·(-y'/z))
-    /// ```
-    ///
-    /// Similar derivations apply for ∂v/∂x, ∂v/∂y, ∂v/∂z.
-    ///
-    /// ## Matrix Form
-    ///
-    /// ```text
-    /// J = [ ∂u/∂x  ∂u/∂y  ∂u/∂z ]
-    ///     [ ∂v/∂x  ∂v/∂y  ∂v/∂z ]
-    /// ```
-    ///
-    /// ## References
-    ///
-    /// - Brown, "Decentering Distortion of Lenses", Photogrammetric Engineering 1966
-    /// - OpenCV Camera Calibration Documentation
-    /// - Hartley & Zisserman, "Multiple View Geometry", Chapter 7
-    ///
-    /// ## Numerical Verification
-    ///
-    /// Verified against numerical differentiation in `test_jacobian_point_numerical()`.
+    /// 2×3 Jacobian ∂(u,v)/∂(x,y,z). See the
+    /// [cookbook](../doc/cookbook/src/rad-tan.html#jacobians) for the full derivation.
     fn jacobian_point(&self, p_cam: &Vector3<f64>) -> Self::PointJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_prime = p_cam.x * inv_z;
@@ -642,40 +392,21 @@ impl CameraModel for RadTanCamera {
         let radial = 1.0 + k1 * r2 + k2 * r4 + k3 * r6;
         let dradial_dr2 = k1 + 2.0 * k2 * r2 + 3.0 * k3 * r4;
 
-        // Derivatives of distorted coordinates w.r.t. normalized coordinates
-        // x_dist = radial·x' + dx where dx = 2p₁x'y' + p₂(r² + 2x'²)
-        // ∂x_dist/∂x' = radial + x'·∂radial/∂r²·∂r²/∂x' + ∂dx/∂x'
-        //             = radial + x'·dradial_dr2·2x' + (2p₁y' + p₂·(2x' + 4x'))
-        //             = radial + 2x'²·dradial_dr2 + 2p₁y' + 6p₂x'
         let dx_dist_dx_prime = radial
             + 2.0 * x_prime * x_prime * dradial_dr2
             + 2.0 * p1 * y_prime
             + 6.0 * p2 * x_prime;
 
-        // ∂x_dist/∂y' = x'·∂radial/∂r²·∂r²/∂y' + ∂dx/∂y'
-        //             = x'·dradial_dr2·2y' + (2p₁x' + 2p₂y')
         let dx_dist_dy_prime =
             2.0 * x_prime * y_prime * dradial_dr2 + 2.0 * p1 * x_prime + 2.0 * p2 * y_prime;
 
-        // y_dist = radial·y' + dy where dy = p₁(r² + 2y'²) + 2p₂x'y'
-        // ∂y_dist/∂x' = y'·∂radial/∂r²·∂r²/∂x' + ∂dy/∂x'
-        //             = y'·dradial_dr2·2x' + (p₁·2x' + 2p₂y')
         let dy_dist_dx_prime =
             2.0 * y_prime * x_prime * dradial_dr2 + 2.0 * p1 * x_prime + 2.0 * p2 * y_prime;
 
-        // ∂y_dist/∂y' = radial + y'·∂radial/∂r²·∂r²/∂y' + ∂dy/∂y'
-        //             = radial + y'·dradial_dr2·2y' + (p₁·(2y' + 4y') + 2p₂x')
-        //             = radial + 2y'²·dradial_dr2 + 6p₁y' + 2p₂x'
         let dy_dist_dy_prime = radial
             + 2.0 * y_prime * y_prime * dradial_dr2
             + 6.0 * p1 * y_prime
             + 2.0 * p2 * x_prime;
-
-        // Derivatives of normalized coordinates w.r.t. camera coordinates
-        // x' = x/z => ∂x'/∂x = 1/z, ∂x'/∂y = 0, ∂x'/∂z = -x/z²
-        // y' = y/z => ∂y'/∂x = 0, ∂y'/∂y = 1/z, ∂y'/∂z = -y/z²
-
-        // Chain rule: ∂(u,v)/∂(x,y,z) = ∂(u,v)/∂(x_dist,y_dist) · ∂(x_dist,y_dist)/∂(x',y') · ∂(x',y')/∂(x,y,z)
 
         let du_dx = self.pinhole.fx * (dx_dist_dx_prime * inv_z);
         let du_dy = self.pinhole.fx * (dx_dist_dy_prime * inv_z);
@@ -690,97 +421,8 @@ impl CameraModel for RadTanCamera {
         SMatrix::<f64, 2, 3>::new(du_dx, du_dy, du_dz, dv_dx, dv_dy, dv_dz)
     }
 
-    /// Computes the Jacobian of the projection with respect to intrinsic parameters (2×9).
-    ///
-    /// # Mathematical Derivation
-    ///
-    /// The Radial-Tangential camera has 9 intrinsic parameters: [fx, fy, cx, cy, k₁, k₂, p₁, p₂, k₃]
-    ///
-    /// ## Projection Equations
-    ///
-    /// ```text
-    /// x' = x/z,  y' = y/z
-    /// r² = x'² + y'²
-    /// radial = 1 + k₁·r² + k₂·r⁴ + k₃·r⁶
-    /// dx = 2·p₁·x'·y' + p₂·(r² + 2·x'²)
-    /// dy = p₁·(r² + 2·y'²) + 2·p₂·x'·y'
-    /// x'' = radial·x' + dx
-    /// y'' = radial·y' + dy
-    /// u = fx·x'' + cx
-    /// v = fy·y'' + cy
-    /// ```
-    ///
-    /// ## Jacobian Structure
-    ///
-    /// ```text
-    /// J = [ ∂u/∂fx  ∂u/∂fy  ∂u/∂cx  ∂u/∂cy  ∂u/∂k₁  ∂u/∂k₂  ∂u/∂p₁  ∂u/∂p₂  ∂u/∂k₃ ]
-    ///     [ ∂v/∂fx  ∂v/∂fy  ∂v/∂cx  ∂v/∂cy  ∂v/∂k₁  ∂v/∂k₂  ∂v/∂p₁  ∂v/∂p₂  ∂v/∂k₃ ]
-    /// ```
-    ///
-    /// Linear parameters (fx, fy, cx, cy):
-    /// ```text
-    /// ∂u/∂fx = x'',  ∂u/∂fy = 0,   ∂u/∂cx = 1,  ∂u/∂cy = 0
-    /// ∂v/∂fx = 0,    ∂v/∂fy = y'', ∂v/∂cx = 0,  ∂v/∂cy = 1
-    /// ```
-    ///
-    /// Radial distortion coefficients (k₁, k₂, k₃):
-    ///
-    /// Each k_i affects the radial distortion component:
-    ///
-    /// ```text
-    /// ∂radial/∂k₁ = r²
-    /// ∂radial/∂k₂ = r⁴
-    /// ∂radial/∂k₃ = r⁶
-    /// ```
-    ///
-    /// By chain rule (x'' = radial·x' + dx, y'' = radial·y' + dy):
-    ///
-    /// ```text
-    /// ∂x''/∂k₁ = x'·r²
-    /// ∂x''/∂k₂ = x'·r⁴
-    /// ∂x''/∂k₃ = x'·r⁶
-    ///
-    /// ∂y''/∂k₁ = y'·r²
-    /// ∂y''/∂k₂ = y'·r⁴
-    /// ∂y''/∂k₃ = y'·r⁶
-    /// ```
-    ///
-    /// Then:
-    ///
-    /// ```text
-    /// ∂u/∂k₁ = fx·x'·r²
-    /// ∂u/∂k₂ = fx·x'·r⁴
-    /// ∂u/∂k₃ = fx·x'·r⁶
-    ///
-    /// ∂v/∂k₁ = fy·y'·r²
-    /// ∂v/∂k₂ = fy·y'·r⁴
-    /// ∂v/∂k₃ = fy·y'·r⁶
-    /// ```
-    ///
-    /// Tangential distortion coefficients (p₁, p₂):
-    /// ```text
-    /// ∂dx/∂p₁ = 2x'y',  ∂dy/∂p₁ = r² + 2y'²
-    /// ∂u/∂p₁ = fx·2x'y',  ∂v/∂p₁ = fy·(r² + 2y'²)
-    /// ∂dx/∂p₂ = r² + 2x'²,  ∂dy/∂p₂ = 2x'y'
-    /// ∂u/∂p₂ = fx·(r² + 2x'²),  ∂v/∂p₂ = fy·2x'y'
-    /// ```
-    ///
-    /// Matrix form:
-    ///
-    /// ```text
-    /// J = [ x''  0   1  0  fx·x'·r²  fx·x'·r⁴  fx·2x'y'    fx·(r²+2x'²)  fx·x'·r⁶ ]
-    ///     [  0  y''  0  1  fy·y'·r²  fy·y'·r⁴  fy·(r²+2y'²) fy·2x'y'      fy·y'·r⁶ ]
-    /// ```
-    ///
-    /// ## References
-    ///
-    /// - Brown, "Decentering Distortion of Lenses", 1966
-    /// - OpenCV Camera Calibration Documentation
-    /// - Hartley & Zisserman, "Multiple View Geometry", Chapter 7
-    ///
-    /// ## Numerical Verification
-    ///
-    /// Verified in `test_jacobian_intrinsics_numerical()` with tolerance < 1e-5.
+    /// 2×9 Jacobian ∂(u,v)/∂[fx, fy, cx, cy, k1, k2, p1, p2, k3]. See the
+    /// [cookbook](../doc/cookbook/src/rad-tan.html#jacobians) for the full derivation.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian {
         let inv_z = 1.0 / p_cam.z;
         let x_prime = p_cam.x * inv_z;
@@ -801,10 +443,6 @@ impl CameraModel for RadTanCamera {
         let x_distorted = radial * x_prime + dx;
         let y_distorted = radial * y_prime + dy;
 
-        // ∂u/∂fx = x_distorted, ∂u/∂fy = 0, ∂u/∂cx = 1, ∂u/∂cy = 0
-        // ∂v/∂fx = 0, ∂v/∂fy = y_distorted, ∂v/∂cx = 0, ∂v/∂cy = 1
-
-        // Distortion parameter derivatives
         let du_dk1 = self.pinhole.fx * x_prime * r2;
         let du_dk2 = self.pinhole.fx * x_prime * r4;
         let du_dp1 = self.pinhole.fx * 2.0 * xy;
@@ -843,42 +481,29 @@ impl CameraModel for RadTanCamera {
     ///
     /// # Validation Rules
     ///
-    /// - fx, fy must be positive (> 0)
-    /// - fx, fy must be finite
-    /// - cx, cy must be finite
-    /// - k₁, k₂, p₁, p₂, k₃ must be finite
+    /// - `fx`, `fy` must be positive (> 0) and finite
+    /// - `cx`, `cy` must be finite
+    /// - `k₁`, `k₂`, `p₁`, `p₂`, `k₃` must be finite
     ///
     /// # Errors
     ///
-    /// Returns [`CameraModelError`] if any parameter violates validation rules.
+    /// Returns [`CameraModelError`] if any rule is violated.
     fn validate_params(&self) -> Result<(), CameraModelError> {
         self.pinhole.validate()?;
         self.get_distortion().validate()
     }
 
     /// Returns the pinhole parameters.
-    ///
-    /// # Returns
-    ///
-    /// A [`PinholeParams`] struct containing the focal lengths (fx, fy) and principal point (cx, cy).
     fn get_pinhole_params(&self) -> PinholeParams {
         self.pinhole
     }
 
-    /// Returns the distortion model parameters.
-    ///
-    /// # Returns
-    ///
-    /// The [`DistortionModel`] associated with this camera (typically [`DistortionModel::BrownConrady`]).
+    /// Returns the distortion model (must be [`DistortionModel::BrownConrady`]).
     fn get_distortion(&self) -> DistortionModel {
         self.distortion
     }
 
-    /// Returns the name of the camera model.
-    ///
-    /// # Returns
-    ///
-    /// The string `"rad_tan"`.
+    /// Returns the model name: `"rad_tan"`.
     fn get_model_name(&self) -> &'static str {
         "rad_tan"
     }
@@ -995,9 +620,8 @@ mod tests {
             params_plus[i] += eps;
             params_minus[i] -= eps;
 
-            let cam_plus = RadTanCamera::from(<[f64; 9]>::try_from(params_plus.as_slice())?);
-            let cam_minus =
-                RadTanCamera::from(<[f64; 9]>::try_from(params_minus.as_slice())?);
+            let cam_plus = RadTanCamera::try_from(params_plus.as_slice())?;
+            let cam_minus = RadTanCamera::try_from(params_minus.as_slice())?;
 
             let uv_plus = cam_plus.project(&p_cam)?;
             let uv_minus = cam_minus.project(&p_cam)?;
@@ -1129,8 +753,8 @@ mod tests {
 
         // Verify reprojection error
         for i in 0..valid {
-            let p3d = pts_3d.column(i).into_owned();
-            let projected = camera.project(&Vector3::new(p3d.x, p3d.y, p3d.z))?;
+            let col = pts_3d.column(i);
+            let projected = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
             let err = ((projected.x - pts_2d[(0, i)]).powi(2)
                 + (projected.y - pts_2d[(1, i)]).powi(2))
             .sqrt();
@@ -1201,6 +825,102 @@ mod tests {
         if let Ok(uv) = camera.project(&p_min) {
             assert!(uv.x.is_finite() && uv.y.is_finite());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_projection_off_axis() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: 0.01,
+            p1: 0.001,
+            p2: 0.002,
+            k3: 0.001,
+        };
+        let camera = RadTanCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.3, 0.0, 1.0);
+        let uv = camera.project(&p_cam)?;
+        assert!(
+            uv.x > 320.0,
+            "off-axis point should project right of principal point"
+        );
+        assert!(
+            (uv.y - 240.0).abs() < 5.0,
+            "y should be close to cy for horizontal offset"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_unproject_center_pixel() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: 0.01,
+            p1: 0.0,
+            p2: 0.0,
+            k3: 0.001,
+        };
+        let camera = RadTanCamera::new(pinhole, distortion)?;
+        let uv = Vector2::new(320.0, 240.0);
+        let ray = camera.unproject(&uv)?;
+        assert!(ray.x.abs() < 1e-5, "x should be ~0, got {}", ray.x);
+        assert!(ray.y.abs() < 1e-5, "y should be ~0, got {}", ray.y);
+        assert!((ray.z - 1.0).abs() < 1e-5, "z should be ~1, got {}", ray.z);
+        Ok(())
+    }
+
+    #[test]
+    fn test_batch_projection_matches_individual() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: 0.01,
+            p1: 0.001,
+            p2: 0.002,
+            k3: 0.001,
+        };
+        let camera = RadTanCamera::new(pinhole, distortion)?;
+        let pts = Matrix3xX::from_columns(&[
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(0.3, 0.2, 1.5),
+            Vector3::new(-0.4, 0.1, 2.0),
+        ]);
+        let batch = camera.project_batch(&pts);
+        for i in 0..3 {
+            let col = pts.column(i);
+            let p = camera.project(&Vector3::new(col[0], col[1], col[2]))?;
+            assert!(
+                (batch[(0, i)] - p.x).abs() < 1e-10,
+                "batch u mismatch at col {i}"
+            );
+            assert!(
+                (batch[(1, i)] - p.y).abs() < 1e-10,
+                "batch v mismatch at col {i}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_jacobian_dimensions() -> TestResult {
+        let pinhole = PinholeParams::new(300.0, 300.0, 320.0, 240.0)?;
+        let distortion = DistortionModel::BrownConrady {
+            k1: 0.1,
+            k2: 0.01,
+            p1: 0.001,
+            p2: 0.002,
+            k3: 0.001,
+        };
+        let camera = RadTanCamera::new(pinhole, distortion)?;
+        let p_cam = Vector3::new(0.1, 0.2, 1.0);
+        let jac_point = camera.jacobian_point(&p_cam);
+        assert_eq!(jac_point.nrows(), 2);
+        assert_eq!(jac_point.ncols(), 3);
+        let jac_intr = camera.jacobian_intrinsics(&p_cam);
+        assert_eq!(jac_intr.nrows(), 2);
+        assert_eq!(jac_intr.ncols(), 9); // RadTanCamera::INTRINSIC_DIM = 9
         Ok(())
     }
 }

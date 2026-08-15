@@ -25,23 +25,28 @@
 //! ```no_run
 //! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
 //! # use apex_solver::linalg::StructureAware;
-//! # use std::collections::HashMap;
+//! # use apex_solver::core::VarKey;
+//! # use apex_solver::core::variable::ManifoldVariable;
+//! # use slotmap::{SlotMap, SecondaryMap};
+//! # use std::collections::HashSet;
 //! # fn example() -> Result<(), Box<dyn std::error::Error>> {
-//! # let variables = HashMap::new();
-//! # let variable_index_map = HashMap::new();
+//! # let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+//! # let variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+//! # let landmark_keys: HashSet<VarKey> = HashSet::new();
 //! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
 //! use apex_solver::linalg::StructureAware;
 //!
 //! let mut solver = SparseSchurComplementSolver::new()
 //!     .with_variant(SchurVariant::Sparse) // Explicit Schur with Cholesky
 //!     .with_preconditioner(SchurPreconditioner::None);
-//! solver.initialize_structure(&variables, &variable_index_map)?;
+//! solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 //! # Ok(())
 //! # }
 //! ```
 
 use super::implicit_schur::IterativeSchurSolver;
-use crate::core::problem::VariableEnum;
+use crate::core::VarKey;
+use crate::core::variable::ManifoldVariable;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
@@ -51,8 +56,8 @@ use faer::{
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
 use nalgebra::Matrix3;
-use std::collections::HashMap;
-use tracing::{debug, info};
+use slotmap::{SecondaryMap, SlotMap};
+use tracing::debug;
 
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -102,42 +107,26 @@ impl SchurOrdering {
 
     /// Check if a variable should be eliminated (treated as landmark).
     ///
-    /// Uses variable name pattern matching for robust classification:
-    /// - Variables starting with "pt_" are landmarks (must be RN with 3 DOF)
-    /// - All other variables are camera parameters (poses, intrinsics)
-    ///
-    /// This correctly handles shared intrinsics (single RN variable for all cameras)
-    /// without misclassifying them as landmarks.
-    pub fn should_eliminate(&self, name: &str, manifold_type: &ManifoldType, size: usize) -> bool {
-        // Use explicit name pattern matching
-        if name.starts_with("pt_") {
-            // This is a landmark - verify constraints
-            if !self.eliminate_types.contains(manifold_type) {
-                // Invalid manifold type for landmark - return false instead of panicking
-                return false;
-            }
-
-            // Check size constraint if specified
-            if self
-                .eliminate_rn_size
-                .is_some_and(|required_size| size != required_size)
-            {
-                // Size mismatch - return false instead of panicking
-                return false;
-            }
-            true
-        } else {
-            // Camera parameter (pose, intrinsic, etc.) - keep in camera block
-            false
+    /// Classification is based solely on manifold type and DOF size.
+    /// By default, RN variables with exactly 3 DOF are treated as landmarks.
+    pub fn should_eliminate(&self, manifold_type: &ManifoldType, size: usize) -> bool {
+        if !self.eliminate_types.contains(manifold_type) {
+            return false;
         }
+        if let Some(required_size) = self.eliminate_rn_size {
+            if size != required_size {
+                return false;
+            }
+        }
+        true
     }
 }
 
 /// Block structure for Schur complement solver
 #[derive(Debug, Clone)]
 pub struct SchurBlockStructure {
-    pub camera_blocks: Vec<(String, usize, usize)>,
-    pub landmark_blocks: Vec<(String, usize, usize)>,
+    pub camera_blocks: Vec<(VarKey, usize, usize)>,
+    pub landmark_blocks: Vec<(VarKey, usize, usize)>,
     pub camera_dof: usize,
     pub landmark_dof: usize,
     pub num_landmarks: usize,
@@ -243,31 +232,24 @@ impl SparseSchurComplementSolver {
 
     fn build_block_structure(
         &mut self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
+        schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
         let mut structure = SchurBlockStructure::new();
 
-        for (name, variable) in variables {
-            let start_col = *variable_index_map.get(name).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("Variable {} not found in index map", name))
+        for (key, variable) in variables {
+            let start_col = *variable_index_map.get(key).ok_or_else(|| {
+                LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key))
             })?;
-            let size = variable.get_size();
-            let manifold_type = variable.manifold_type();
+            let size = variable.dof();
 
-            // Use name-based classification via SchurOrdering
-            if self.ordering.should_eliminate(name, &manifold_type, size) {
-                // Landmark - to be eliminated
-                structure
-                    .landmark_blocks
-                    .push((name.clone(), start_col, size));
+            if schur_landmark_keys.contains(&key) {
+                structure.landmark_blocks.push((key, start_col, size));
                 structure.landmark_dof += size;
                 structure.num_landmarks += 1;
             } else {
-                // Camera parameter - kept in reduced system
-                structure
-                    .camera_blocks
-                    .push((name.clone(), start_col, size));
+                structure.camera_blocks.push((key, start_col, size));
                 structure.camera_dof += size;
             }
         }
@@ -287,13 +269,13 @@ impl SparseSchurComplementSolver {
         }
 
         // Log block structure for diagnostics
-        info!("Schur complement block structure:");
-        info!(
+        debug!("Schur complement block structure:");
+        debug!(
             "  Camera blocks: {} variables, {} total DOF",
             structure.camera_blocks.len(),
             structure.camera_dof
         );
-        info!(
+        debug!(
             "  Landmark blocks: {} variables, {} total DOF",
             structure.landmark_blocks.len(),
             structure.landmark_dof
@@ -303,7 +285,7 @@ impl SparseSchurComplementSolver {
             "  Landmark column range: {:?}",
             structure.landmark_col_range()
         );
-        info!(
+        debug!(
             "  Schur complement S size: {} × {}",
             structure.camera_dof, structure.camera_dof
         );
@@ -1038,18 +1020,19 @@ impl Default for SparseSchurComplementSolver {
 impl StructureAware for SparseSchurComplementSolver {
     fn initialize_structure(
         &mut self,
-        variables: &HashMap<String, VariableEnum>,
-        variable_index_map: &HashMap<String, usize>,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        variable_index_map: &SecondaryMap<VarKey, usize>,
+        schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
         // Build block structure for all variants
-        self.build_block_structure(variables, variable_index_map)?;
+        self.build_block_structure(variables, variable_index_map, schur_landmark_keys)?;
 
         // Initialize delegate solver based on variant
         match self.variant {
             SchurVariant::Iterative => {
                 let mut solver =
                     IterativeSchurSolver::with_cg_params(self.cg_max_iterations, self.cg_tolerance);
-                solver.initialize_structure(variables, variable_index_map)?;
+                solver.initialize_structure(variables, variable_index_map, schur_landmark_keys)?;
                 self.iterative_solver = Some(solver);
             }
             SchurVariant::Sparse => {
@@ -1282,22 +1265,25 @@ impl SparseSchurComplementSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::VarKey;
     use crate::core::variable::Variable;
-    use apex_manifolds::{rn, se3};
+    use apex_manifolds::{LieGroup, rn, se3};
     use nalgebra::DVector;
+    use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
     // Type alias for the test setup tuple
     type TestSetup = (
-        HashMap<String, VariableEnum>,
-        HashMap<String, usize>,
+        SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        SecondaryMap<VarKey, usize>,
         SparseColMat<usize, f64>,
         Mat<f64>,
+        std::collections::HashSet<VarKey>,
     );
 
     /// Build a minimal BA-style test setup:
-    /// 2 SE3 cameras ("cam_0", "cam_1") + 3 Rn landmarks ("pt_0", "pt_1", "pt_2")
+    /// 2 SE3 cameras + 3 Rn landmarks
     /// Jacobian: 36 rows × 21 cols
     ///
     /// Structure guarantees H_cc = 3·I₁₂ and H_pp = 4·I₃ (positive definite).
@@ -1305,36 +1291,24 @@ mod tests {
         let se3_id = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
         let pt_zero = DVector::from_vec(vec![0.0, 0.0, 0.0]);
 
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "cam_0".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
-        );
-        variables.insert(
-            "cam_1".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(se3_id.clone()))),
-        );
-        variables.insert(
-            "pt_0".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
-        variables.insert(
-            "pt_1".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
-        variables.insert(
-            "pt_2".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(pt_zero.clone()))),
-        );
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let cam0 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_id.as_slice(),
+        ))));
+        let cam1 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_id.as_slice(),
+        ))));
+        let pt0 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
+        let pt1 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
+        let pt2 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_zero.clone()))));
 
-        // Column offsets in sorted alphabetical order:
-        // cam_0 → 0..5, cam_1 → 6..11, pt_0 → 12..14, pt_1 → 15..17, pt_2 → 18..20
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("cam_0".to_string(), 0);
-        variable_index_map.insert("cam_1".to_string(), 6);
-        variable_index_map.insert("pt_0".to_string(), 12);
-        variable_index_map.insert("pt_1".to_string(), 15);
-        variable_index_map.insert("pt_2".to_string(), 18);
+        // cam0 → 0..5, cam1 → 6..11, pt0 → 12..14, pt1 → 15..17, pt2 → 18..20
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(cam0, 0);
+        variable_index_map.insert(cam1, 6);
+        variable_index_map.insert(pt0, 12);
+        variable_index_map.insert(pt1, 15);
+        variable_index_map.insert(pt2, 18);
 
         // Jacobian: 2 cameras × 3 landmarks × 6 rows_per_obs = 36 rows, 21 cols
         // For observation (cam_i, pt_j), row_base = (ci * 3 + li) * 6
@@ -1359,82 +1333,47 @@ mod tests {
         let jacobian = SparseColMat::try_new_from_triplets(n_rows, n_cols, &triplets)?;
         let residuals = Mat::from_fn(n_rows, 1, |i, _| (i % 5) as f64 * 0.1);
 
-        Ok((variables, variable_index_map, jacobian, residuals))
+        let mut landmark_keys = std::collections::HashSet::new();
+        landmark_keys.insert(pt0);
+        landmark_keys.insert(pt1);
+        landmark_keys.insert(pt2);
+
+        Ok((
+            variables,
+            variable_index_map,
+            jacobian,
+            residuals,
+            landmark_keys,
+        ))
     }
 
     #[test]
-    fn test_schur_ordering_shared_intrinsics() {
+    fn test_schur_ordering_rn3_eliminated() {
         let ordering = SchurOrdering::default();
-
-        // Landmarks should be eliminated
-        assert!(ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3));
-        assert!(ordering.should_eliminate("pt_12345", &ManifoldType::RN, 3));
-
-        // Camera poses should NOT be eliminated
-        assert!(!ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6));
-        assert!(!ordering.should_eliminate("cam_0042", &ManifoldType::SE3, 6));
-
-        // Shared intrinsics (RN, 3 DOF) should NOT be eliminated - KEY TEST!
-        assert!(!ordering.should_eliminate("shared_intrinsics", &ManifoldType::RN, 3));
-
-        // Per-camera intrinsics should NOT be eliminated
-        assert!(!ordering.should_eliminate("intr_0000", &ManifoldType::RN, 3));
-        assert!(!ordering.should_eliminate("intr_0042", &ManifoldType::RN, 3));
+        // Default: RN(3) is eliminated (landmark)
+        assert!(ordering.should_eliminate(&ManifoldType::RN, 3));
     }
 
     #[test]
-    fn test_schur_ordering_multiple_intrinsic_groups() {
+    fn test_schur_ordering_se3_not_eliminated() {
         let ordering = SchurOrdering::default();
-
-        // Test that multiple intrinsic groups are NOT eliminated (camera parameters)
-        assert!(
-            !ordering.should_eliminate("intr_group_0000", &ManifoldType::RN, 3),
-            "Intrinsic group 0 should be camera parameter (not eliminated)"
-        );
-        assert!(
-            !ordering.should_eliminate("intr_group_0001", &ManifoldType::RN, 3),
-            "Intrinsic group 1 should be camera parameter (not eliminated)"
-        );
-        assert!(
-            !ordering.should_eliminate("intr_group_0005", &ManifoldType::RN, 3),
-            "Intrinsic group 5 should be camera parameter (not eliminated)"
-        );
-        assert!(
-            !ordering.should_eliminate("intr_group_0042", &ManifoldType::RN, 3),
-            "Intrinsic group 42 should be camera parameter (not eliminated)"
-        );
-
-        // Verify landmarks are still eliminated
-        assert!(
-            ordering.should_eliminate("pt_00000", &ManifoldType::RN, 3),
-            "Landmarks should still be eliminated"
-        );
-
-        // Verify camera poses are not eliminated
-        assert!(
-            !ordering.should_eliminate("cam_0000", &ManifoldType::SE3, 6),
-            "Camera poses should not be eliminated"
-        );
+        // SE3 variables are never eliminated (camera)
+        assert!(!ordering.should_eliminate(&ManifoldType::SE3, 6));
     }
 
     #[test]
-    fn test_schur_ordering_invalid_landmark_type() {
+    fn test_schur_ordering_wrong_type_not_eliminated() {
         let ordering = SchurOrdering::default();
-        // Landmark with wrong manifold type should return false
-        assert!(
-            !ordering.should_eliminate("pt_00000", &ManifoldType::SE3, 6),
-            "Landmark with invalid manifold type should not be eliminated"
-        );
+        // SE3(6) is not in eliminate_types
+        assert!(!ordering.should_eliminate(&ManifoldType::SE3, 6));
     }
 
     #[test]
-    fn test_schur_ordering_invalid_landmark_size() {
+    fn test_schur_ordering_wrong_size_not_eliminated() {
         let ordering = SchurOrdering::default();
-        // Landmark with wrong size should return false
-        assert!(
-            !ordering.should_eliminate("pt_00000", &ManifoldType::RN, 6),
-            "Landmark with invalid size should not be eliminated"
-        );
+        // RN with size != 3 is not eliminated
+        assert!(!ordering.should_eliminate(&ManifoldType::RN, 6));
+        assert!(!ordering.should_eliminate(&ManifoldType::RN, 2));
     }
 
     #[test]
@@ -1606,10 +1545,13 @@ mod tests {
         assert_eq!(s.camera_col_range(), (0, 0));
         assert_eq!(s.landmark_col_range(), (0, 0));
 
-        // Populate with known values
-        s.camera_blocks.push(("cam_0".to_string(), 0, 6));
+        // Populate with known values (use dummy VarKeys from a temp SlotMap)
+        let mut tmp: SlotMap<VarKey, ()> = SlotMap::with_key();
+        let cam_key = tmp.insert(());
+        let pt_key = tmp.insert(());
+        s.camera_blocks.push((cam_key, 0, 6));
         s.camera_dof = 6;
-        s.landmark_blocks.push(("pt_0".to_string(), 6, 3));
+        s.landmark_blocks.push((pt_key, 6, 3));
         s.landmark_dof = 3;
 
         assert_eq!(s.camera_col_range(), (0, 6));
@@ -1619,11 +1561,11 @@ mod tests {
     /// Test block_structure() getter after initialize_structure
     #[test]
     fn test_block_structure_getter() -> TestResult {
-        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
 
         assert!(solver.block_structure().is_none());
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         assert!(solver.block_structure().is_some());
         Ok(())
     }
@@ -1665,9 +1607,9 @@ mod tests {
     /// Test initialize_structure() correctly partitions 2 cameras + 3 landmarks
     #[test]
     fn test_explicit_schur_initialize_structure() -> TestResult {
-        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let bs = solver.block_structure().ok_or("block_structure is None")?;
         assert_eq!(bs.camera_blocks.len(), 2);
@@ -1680,9 +1622,9 @@ mod tests {
     /// Test extract_gradient_blocks() splits gradient correctly
     #[test]
     fn test_extract_gradient_blocks() -> TestResult {
-        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Gradient over full variable space (21 DOF)
         let gradient = Mat::from_fn(21, 1, |i, _| i as f64);
@@ -1696,9 +1638,10 @@ mod tests {
     /// Test full Schur solve pipeline with Sparse (Cholesky) variant
     #[test]
     fn test_explicit_schur_solve_normal_equation() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1710,9 +1653,10 @@ mod tests {
     /// Test full Schur augmented solve (LM damping) with Sparse variant
     #[test]
     fn test_explicit_schur_solve_augmented_equation() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
@@ -1727,11 +1671,12 @@ mod tests {
     /// Test Schur solve with Iterative (PCG) variant exercises solve_with_pcg path
     #[test]
     fn test_explicit_schur_solve_iterative_variant() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new()
             .with_variant(SchurVariant::Iterative)
             .with_cg_params(200, 1e-6);
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
@@ -1742,9 +1687,10 @@ mod tests {
     /// Test get_hessian() and get_gradient() trait methods after solve
     #[test]
     fn test_explicit_schur_get_hessian_gradient() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
         assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_none());
@@ -1765,10 +1711,11 @@ mod tests {
     /// Test two solves with different λ produce different updates
     #[test]
     fn test_explicit_schur_augmented_lambda_effect() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
 
         let mut solver1 = SparseSchurComplementSolver::new();
-        solver1.initialize_structure(&variables, &variable_index_map)?;
+        solver1.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let delta1 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver1,
             &residuals,
@@ -1777,7 +1724,7 @@ mod tests {
         )?;
 
         let mut solver2 = SparseSchurComplementSolver::new();
-        solver2.initialize_structure(&variables, &variable_index_map)?;
+        solver2.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let delta2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver2,
             &residuals,
@@ -1799,9 +1746,9 @@ mod tests {
     /// Test combine_updates() merges camera and landmark deltas at correct offsets
     #[test]
     fn test_combine_updates() -> TestResult {
-        let (variables, variable_index_map, _, _) = create_schur_test_setup()?;
+        let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Camera delta: 12×1, landmark delta: 9×1
         let delta_c = Mat::from_fn(12, 1, |_, _| 1.0);
@@ -1852,16 +1799,17 @@ mod tests {
     /// Test extract_camera_block produces a square matrix of camera DOF.
     #[test]
     fn test_extract_camera_block() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Build Hessian H = J^T J
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
         let mut fresh = SparseSchurComplementSolver::new();
-        fresh.initialize_structure(&variables, &variable_index_map)?;
+        fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let h_cc = fresh.extract_camera_block(&hessian)?;
 
         // camera DOF = 12 (2 cameras × 6)
@@ -1873,15 +1821,16 @@ mod tests {
     /// Test extract_coupling_block produces a matrix with camera rows × landmark cols.
     #[test]
     fn test_extract_coupling_block() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
         let mut fresh = SparseSchurComplementSolver::new();
-        fresh.initialize_structure(&variables, &variable_index_map)?;
+        fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let h_cp = fresh.extract_coupling_block(&hessian)?;
 
         // H_cp: camera DOF rows × landmark DOF cols = 12 × 9
@@ -1893,15 +1842,16 @@ mod tests {
     /// Test extract_landmark_blocks produces one 3×3 block per landmark.
     #[test]
     fn test_extract_landmark_blocks() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals) = create_schur_test_setup()?;
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+            create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
-        solver.initialize_structure(&variables, &variable_index_map)?;
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
         let mut fresh = SparseSchurComplementSolver::new();
-        fresh.initialize_structure(&variables, &variable_index_map)?;
+        fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let blocks = fresh.extract_landmark_blocks(&hessian)?;
 
         // 3 landmarks → 3 blocks
@@ -1965,17 +1915,15 @@ mod tests {
         use apex_manifolds::rn;
         use nalgebra::DVector;
 
-        // Only landmark variables ("pt_" prefix)
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "pt_0".to_string(),
-            VariableEnum::Rn(Variable::new(rn::Rn::from(DVector::zeros(3)))),
-        );
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("pt_0".to_string(), 0);
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let k = variables.insert(Box::new(Variable::new(rn::Rn::new(DVector::zeros(3)))));
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(k, 0);
+        let mut landmark_keys = std::collections::HashSet::new();
+        landmark_keys.insert(k);
 
         let mut solver = SparseSchurComplementSolver::new();
-        let result = solver.initialize_structure(&variables, &variable_index_map);
+        let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),
             "Expected Err when no camera variables present"
@@ -1987,21 +1935,17 @@ mod tests {
     fn test_initialize_structure_no_landmarks_returns_error() {
         use crate::core::variable::Variable;
         use apex_manifolds::se3;
-        use nalgebra::DVector;
 
-        // Only camera variables (no "pt_" prefix)
-        let mut variables: HashMap<String, VariableEnum> = HashMap::new();
-        variables.insert(
-            "cam_0".to_string(),
-            VariableEnum::SE3(Variable::new(se3::SE3::from(DVector::from_vec(vec![
-                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-            ])))),
-        );
-        let mut variable_index_map: HashMap<String, usize> = HashMap::new();
-        variable_index_map.insert("cam_0".to_string(), 0);
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let _k = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(&[
+            1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+        ]))));
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        variable_index_map.insert(_k, 0);
+        let landmark_keys = std::collections::HashSet::<VarKey>::new(); // no landmarks
 
         let mut solver = SparseSchurComplementSolver::new();
-        let result = solver.initialize_structure(&variables, &variable_index_map);
+        let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),
             "Expected Err when no landmark variables present"

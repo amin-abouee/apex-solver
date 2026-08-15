@@ -1,6 +1,7 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
-use nalgebra::{DMatrix, DVector, Matrix2xX, Matrix3xX};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix2xX, Matrix3xX};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
 use tracing::warn;
@@ -35,7 +36,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Type Parameters
 ///
 /// - `CAM`: Camera model implementing [`CameraModel`] trait
-/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](apex_camera_models::BundleAdjustment))
+/// - `OP`: Optimization configuration (e.g., [`BundleAdjustment`](crate::factors::BundleAdjustment))
 ///
 /// # Examples
 ///
@@ -180,37 +181,17 @@ where
         self.observations.ncols()
     }
 
-    /// Internal evaluation function that computes residuals and Jacobians.
+    /// Internal evaluation function that writes residuals and Jacobians directly
+    /// into the provided buffers — no temporary allocations.
     fn evaluate_internal(
         &self,
         pose: &SE3,
         landmarks: &Matrix3xX<f64>,
         camera: &CAM,
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        residual: &mut [f64],
+        mut jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         let n = self.observations.ncols();
-        let residual_dim = n * 2;
-
-        // Allocate residuals
-        let mut residuals = DVector::zeros(residual_dim);
-
-        // Calculate total Jacobian dimension
-        let mut jacobian_cols = 0;
-        if OP::POSE {
-            jacobian_cols += 6; // SE3 tangent space
-        }
-        if OP::LANDMARK {
-            jacobian_cols += n * 3; // 3D landmarks
-        }
-        if OP::INTRINSIC {
-            jacobian_cols += CAM::INTRINSIC_DIM;
-        }
-
-        let mut jacobian_matrix = if compute_jacobian {
-            Some(DMatrix::zeros(residual_dim, jacobian_cols))
-        } else {
-            None
-        };
 
         // Process each observation
         for i in 0..n {
@@ -226,27 +207,24 @@ where
             // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
                 Ok(proj) => proj,
-                Err(_) => {
+                Err(cam_err) => {
                     if self.verbose_cheirality {
-                        warn!(
-                            "Point {} behind camera or invalid: p_cam = ({}, {}, {})",
-                            i, p_cam.x, p_cam.y, p_cam.z
-                        );
+                        warn!("Invalid projection for point {}: {}", i, cam_err);
                     }
                     // Invalid projection: use zero residual (matches Ceres convention)
-                    residuals[i * 2] = 0.0;
-                    residuals[i * 2 + 1] = 0.0;
+                    residual[i * 2] = 0.0;
+                    residual[i * 2 + 1] = 0.0;
                     // Jacobian rows remain zero
                     continue;
                 }
             };
 
             // Compute residual
-            residuals[i * 2] = uv.x - observation.x;
-            residuals[i * 2 + 1] = uv.y - observation.y;
+            residual[i * 2] = uv.x - observation.x;
+            residual[i * 2 + 1] = uv.y - observation.y;
 
             // Compute Jacobians if requested
-            if let Some(ref mut jac) = jacobian_matrix {
+            if let Some(ref mut jac) = jacobian {
                 let mut col_offset = 0;
 
                 // Jacobian w.r.t. pose (world-to-camera convention)
@@ -255,7 +233,7 @@ where
                     let d_uv_d_pose = d_uv_d_pcam * d_pcam_d_pose;
                     for r in 0..2 {
                         for c in 0..6 {
-                            jac[(i * 2 + r, col_offset + c)] = d_uv_d_pose[(r, c)];
+                            *jac.rb_mut().get_mut(i * 2 + r, col_offset + c) = d_uv_d_pose[(r, c)];
                         }
                     }
                     col_offset += 6;
@@ -273,7 +251,8 @@ where
 
                     for r in 0..2 {
                         for c in 0..3 {
-                            jac[(i * 2 + r, col_offset + i * 3 + c)] = d_uv_d_landmark[(r, c)];
+                            *jac.rb_mut().get_mut(i * 2 + r, col_offset + i * 3 + c) =
+                                d_uv_d_landmark[(r, c)];
                         }
                     }
                 }
@@ -288,14 +267,13 @@ where
                     let d_uv_d_intrinsics = camera.jacobian_intrinsics(&p_cam);
                     for r in 0..2 {
                         for c in 0..CAM::INTRINSIC_DIM {
-                            jac[(i * 2 + r, col_offset + c)] = d_uv_d_intrinsics[(r, c)];
+                            *jac.rb_mut().get_mut(i * 2 + r, col_offset + c) =
+                                d_uv_d_intrinsics[(r, c)];
                         }
                     }
                 }
             }
         }
-
-        (residuals, jacobian_matrix)
     }
 }
 
@@ -308,51 +286,39 @@ where
 {
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         let mut param_idx = 0;
 
-        // Get pose (from params if optimized, else from fixed_pose)
         let pose: SE3 = if OP::POSE {
-            params
-                .get(param_idx)
-                .map(|p| {
-                    param_idx += 1;
-                    SE3::from(p.clone())
-                })
-                .unwrap_or_else(SE3::identity)
+            let p = SE3::from_param_slice(params[param_idx]);
+            param_idx += 1;
+            p
         } else {
             self.fixed_pose.clone().unwrap_or_else(SE3::identity)
         };
 
-        // Get landmarks (3×N)
         let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
-            params
-                .get(param_idx)
-                .map(|flat| {
-                    let n = flat.len() / 3;
-                    param_idx += 1;
-                    Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
-                })
-                .unwrap_or_else(|| Matrix3xX::zeros(0))
+            let flat = params[param_idx];
+            let n = flat.len() / 3;
+            param_idx += 1;
+            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
         } else {
             self.fixed_landmarks
                 .clone()
                 .unwrap_or_else(|| Matrix3xX::zeros(0))
         };
 
-        // Get camera intrinsics
         let camera: CAM = if OP::INTRINSIC {
-            params
-                .get(param_idx)
-                .and_then(|p| CAM::try_from(p.as_slice()).ok())
+            CAM::try_from(params[param_idx])
+                .ok()
                 .unwrap_or_else(|| self.camera.clone())
         } else {
             self.camera.clone()
         };
 
-        // Verify dimensions
         let n = self.observations.ncols();
         assert_eq!(
             landmarks.ncols(),
@@ -362,12 +328,27 @@ where
             n
         );
 
-        // Compute residuals and Jacobians
-        self.evaluate_internal(&pose, &landmarks, &camera, compute_jacobian)
+        // Write directly into caller-provided buffers — zero temporary allocation.
+        self.evaluate_internal(&pose, &landmarks, &camera, residual, jacobian);
     }
 
-    fn get_dimension(&self) -> usize {
+    fn residual_dim(&self) -> usize {
         self.observations.ncols() * 2
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        let n = self.observations.ncols();
+        let mut cols = 0;
+        if OP::POSE {
+            cols += 6;
+        }
+        if OP::LANDMARK {
+            cols += n * 3;
+        }
+        if OP::INTRINSIC {
+            cols += CAM::INTRINSIC_DIM;
+        }
+        (n * 2, cols)
     }
 }
 
@@ -376,21 +357,40 @@ mod tests {
     use super::*;
     use crate::factors::{BundleAdjustment, OnlyIntrinsics, SelfCalibration};
     use apex_camera_models::PinholeCamera;
-    use nalgebra::{Vector2, Vector3};
+    use nalgebra::{DMatrix, DVector, Vector2, Vector3};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn call_linearize(
+        factor: &impl Factor,
+        params: &[DVector<f64>],
+        with_jacobian: bool,
+    ) -> (Vec<f64>, Option<DMatrix<f64>>) {
+        let param_slices: Vec<&[f64]> = params.iter().map(|p| p.as_slice()).collect();
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        if with_jacobian {
+            let (rows, cols) = factor.jacobian_shape();
+            let mut jac_buf = vec![0.0f64; rows * cols];
+            let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+            factor.linearize(&param_slices, &mut residual, Some(jac_mut));
+            let jac = DMatrix::from_column_slice(rows, cols, &jac_buf);
+            (residual, Some(jac))
+        } else {
+            factor.linearize(&param_slices, &mut residual, None);
+            (residual, None)
+        }
+    }
 
     #[test]
     fn test_projection_factor_creation() -> TestResult {
         let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
 
-        // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
             ProjectionFactor::new(observations, camera);
 
         assert_eq!(factor.num_observations(), 1);
-        assert_eq!(factor.get_dimension(), 2);
+        assert_eq!(factor.residual_dim(), 2);
 
         Ok(())
     }
@@ -399,33 +399,26 @@ mod tests {
     fn test_bundle_adjustment_factor() -> TestResult {
         let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
 
-        // Create known landmark and observation
-        // World-to-camera convention: p_cam = R * p_world + t
-        // With identity pose: p_cam = p_world
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
-        // Project to get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam)?;
 
         let observations = Matrix2xX::from_columns(&[uv]);
 
-        // Bundle adjustment: optimize pose + landmarks (intrinsics fixed)
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
             ProjectionFactor::new(observations, camera);
 
-        // Linearize
-        let pose_vec: DVector<f64> = pose.clone().into();
+        let pose_vec = DVector::from_column_slice(pose.as_param_slice());
         let landmarks_vec = DVector::from_vec(vec![p_world.x, p_world.y, p_world.z]);
         let params = vec![pose_vec, landmarks_vec];
 
-        let (residual, jacobian) = factor.linearize(&params, true);
+        let (residual, jacobian) = call_linearize(&factor, &params, true);
 
-        // Residual should be near zero
-        assert!(residual.norm() < 1e-10, "Residual: {:?}", residual);
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-10, "Residual: {:?}", residual);
 
-        // Jacobian dimensions: 2×(6+3) = 2×9
         let jac = jacobian.ok_or("Jacobian should be Some")?;
         assert_eq!(jac.nrows(), 2);
         assert_eq!(jac.ncols(), 9);
@@ -439,7 +432,6 @@ mod tests {
         let p_world = Vector3::new(0.1, 0.2, 1.0);
         let pose = SE3::identity();
 
-        // Get observation using world-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam)?;
 
@@ -447,17 +439,16 @@ mod tests {
         let factor: ProjectionFactor<PinholeCamera, SelfCalibration> =
             ProjectionFactor::new(observations, camera);
 
-        // Linearize with all parameters
-        let pose_vec: DVector<f64> = pose.into();
+        let pose_vec = DVector::from_column_slice(pose.as_param_slice());
         let landmarks_vec = DVector::from_vec(vec![p_world.x, p_world.y, p_world.z]);
         let intrinsics_vec = DVector::from_vec(vec![500.0, 500.0, 320.0, 240.0]);
         let params = vec![pose_vec, landmarks_vec, intrinsics_vec];
 
-        let (residual, jacobian) = factor.linearize(&params, true);
+        let (residual, jacobian) = call_linearize(&factor, &params, true);
 
-        assert!(residual.norm() < 1e-10);
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-10);
 
-        // Jacobian dimensions: 2×(6+3+4) = 2×13
         let jac = jacobian.ok_or("Jacobian should be Some")?;
         assert_eq!(jac.nrows(), 2);
         assert_eq!(jac.ncols(), 13);
@@ -471,7 +462,6 @@ mod tests {
         let pose = SE3::identity();
         let p_world = Vector3::new(0.1, 0.2, 1.0);
 
-        // World-to-camera convention
         let p_cam = pose.act(&p_world, None, None);
         let uv = camera.project(&p_cam)?;
 
@@ -483,15 +473,14 @@ mod tests {
                 .with_fixed_pose(pose)
                 .with_fixed_landmarks(landmarks);
 
-        // Only intrinsics are optimized
         let intrinsics_vec = DVector::from_vec(vec![500.0, 500.0, 320.0, 240.0]);
         let params = vec![intrinsics_vec];
 
-        let (residual, jacobian) = factor.linearize(&params, true);
+        let (residual, jacobian) = call_linearize(&factor, &params, true);
 
-        assert!(residual.norm() < 1e-10);
+        let res_norm: f64 = residual.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!(res_norm < 1e-10);
 
-        // Jacobian dimensions: 2×4 (only intrinsics)
         let jac = jacobian.ok_or("Jacobian should be Some")?;
         assert_eq!(jac.nrows(), 2);
         assert_eq!(jac.ncols(), 4);
@@ -508,16 +497,12 @@ mod tests {
             ProjectionFactor::new(observations, camera).with_verbose_cheirality();
 
         let pose = SE3::identity();
-        // Landmark behind camera
-        let _landmarks = Matrix3xX::from_columns(&[Vector3::new(0.0, 0.0, -1.0)]);
-
-        let pose_vec: DVector<f64> = pose.into();
+        let pose_vec = DVector::from_column_slice(pose.as_param_slice());
         let landmarks_vec = DVector::from_vec(vec![0.0, 0.0, -1.0]);
         let params = vec![pose_vec, landmarks_vec];
 
-        let (residual, _) = factor.linearize(&params, false);
+        let (residual, _) = call_linearize(&factor, &params, false);
 
-        // Invalid projections should have zero residual (Ceres convention)
         assert!(residual[0].abs() < 1e-10);
         assert!(residual[1].abs() < 1e-10);
 
