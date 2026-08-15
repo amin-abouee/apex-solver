@@ -31,7 +31,8 @@
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::se23::{SE23, SE23Tangent};
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use faer::prelude::ReborrowMut;
+use nalgebra::{DVector, Matrix3, SMatrix, Vector3};
 
 use super::preintegration::ImuPreintegration;
 use crate::factors::Factor;
@@ -60,10 +61,6 @@ impl CombinedImuFactor {
 }
 
 impl Factor for CombinedImuFactor {
-    fn get_dimension(&self) -> usize {
-        15
-    }
-
     /// Compute the weighted 15D residual and optional 15×30 Jacobian.
     ///
     /// # Residual
@@ -85,9 +82,10 @@ impl Factor for CombinedImuFactor {
     /// [`ImuFactor`]: super::imu_factor::ImuFactor
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(
             params.len(),
             6,
@@ -103,12 +101,12 @@ impl Factor for CombinedImuFactor {
         let preint = &self.preintegration;
 
         // ── Parse parameters ──────────────────────────────────────────────
-        let pose_i = SE3::from(params[0].clone());
+        let pose_i = SE3::from_param_slice(params[0]);
         let v_i = Vector3::new(params[1][0], params[1][1], params[1][2]);
         let b_g_i = Vector3::new(params[2][0], params[2][1], params[2][2]);
         let b_a_i = Vector3::new(params[2][3], params[2][4], params[2][5]);
 
-        let pose_j = SE3::from(params[3].clone());
+        let pose_j = SE3::from_param_slice(params[3]);
         let v_j = Vector3::new(params[4][0], params[4][1], params[4][2]);
         let b_g_j = Vector3::new(params[5][0], params[5][1], params[5][2]);
         let b_a_j = Vector3::new(params[5][3], params[5][4], params[5][5]);
@@ -184,16 +182,15 @@ impl Factor for CombinedImuFactor {
         residual_raw[14] = r_ba.z;
 
         let sqrt_info = preint.square_root_information();
-        let weighted = DVector::from_iterator(
-            15,
-            (sqrt_info * nalgebra::SVector::<f64, 15>::from_iterator(residual_raw.iter().copied()))
-                .iter()
-                .copied(),
-        );
-
-        if !compute_jacobian {
-            return (weighted, None);
+        let weighted =
+            sqrt_info * nalgebra::SVector::<f64, 15>::from_iterator(residual_raw.iter().copied());
+        for i in 0..15 {
+            residual[i] = weighted[i];
         }
+
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians ─────────────────────────────────────────────────────
         let jac_pred_wrt_gc: SMatrix<f64, 9, 9> = -predicted.inverse(None).adjoint();
@@ -299,9 +296,19 @@ impl Factor for CombinedImuFactor {
             .copy_from(&(-Matrix3::identity())); // d/d(ba_j)
 
         let j_weighted = sqrt_info * j_full;
-        let jac_dmat = DMatrix::from_iterator(15, 30, j_weighted.iter().copied());
+        for row in 0..15 {
+            for col in 0..30 {
+                *jac.rb_mut().get_mut(row, col) = j_weighted[(row, col)];
+            }
+        }
+    }
 
-        (weighted, Some(jac_dmat))
+    fn residual_dim(&self) -> usize {
+        15
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (15, 30)
     }
 }
 
@@ -320,8 +327,9 @@ fn se23_tangent_data(t: &SE23Tangent) -> nalgebra::SVector<f64, 9> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::{SE3, SE3Tangent};
-    use nalgebra::Vector3;
+    use nalgebra::{DMatrix, Vector3};
 
     use super::super::preintegration::ImuPreintegration;
     use super::super::types::{
@@ -363,16 +371,58 @@ mod tests {
         (pose, vel, bias)
     }
 
-    fn perturb_se3(pose: &DVector<f64>, tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from(pose.clone());
-        let tan = SE3Tangent::from(DVector::from_vec(tangent.to_vec()));
-        DVector::from(se3.right_plus(&tan, None, None))
+    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
+        let se3 = SE3::from_param_slice(pose);
+        let tan = SE3Tangent::from_slice(tangent);
+        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
     }
 
-    fn perturb_vec(v: &DVector<f64>, idx: usize, eps: f64) -> DVector<f64> {
-        let mut out = v.clone();
+    fn perturb_vec(v: &[f64], idx: usize, eps: f64) -> DVector<f64> {
+        let mut out = DVector::from_column_slice(v);
         out[idx] += eps;
         out
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_residual(
+        factor: &CombinedImuFactor,
+        pose_i: &[f64],
+        vel_i: &[f64],
+        bias_i: &[f64],
+        pose_j: &[f64],
+        vel_j: &[f64],
+        bias_j: &[f64],
+    ) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(
+            &[pose_i, vel_i, bias_i, pose_j, vel_j, bias_j],
+            &mut residual,
+            None,
+        );
+        residual
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_with_jacobian(
+        factor: &CombinedImuFactor,
+        pose_i: &[f64],
+        vel_i: &[f64],
+        bias_i: &[f64],
+        pose_j: &[f64],
+        vel_j: &[f64],
+        bias_j: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(
+            &[pose_i, vel_i, bias_i, pose_j, vel_j, bias_j],
+            &mut residual,
+            Some(jac_mut),
+        );
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
     }
 
     // ── Test 1: zero residual for stationary ground truth ─────────────────
@@ -401,18 +451,18 @@ mod tests {
         let factor = CombinedImuFactor::new(preint);
 
         let (pose, vel, bias) = identity_blocks();
-        let params = vec![
-            pose.clone(),
-            vel.clone(),
-            bias.clone(),
-            pose.clone(),
-            vel.clone(),
-            bias.clone(),
-        ];
-        let (residual, _) = factor.linearize(&params, false);
+        let residual = compute_residual(
+            &factor,
+            pose.as_slice(),
+            vel.as_slice(),
+            bias.as_slice(),
+            pose.as_slice(),
+            vel.as_slice(),
+            bias.as_slice(),
+        );
 
-        for i in 9..15 {
-            assert!(residual[i].abs() < 1e-12, "bias residual[{i}] nonzero");
+        for (i, ri) in residual.iter().enumerate().take(15).skip(9) {
+            assert!(ri.abs() < 1e-12, "bias residual[{i}] nonzero");
         }
 
         let sqrt_info = factor.preintegration().square_root_information();
@@ -454,29 +504,30 @@ mod tests {
 
         let factor = CombinedImuFactor::new(preint);
 
-        let pose_i = DVector::from(SE3::identity());
-        let pose_j = DVector::from(t_ws_j);
+        let pose_i = DVector::from_column_slice(SE3::identity().as_param_slice());
+        let pose_j = DVector::from_column_slice(t_ws_j.as_param_slice());
         let vj = sb_j.velocity();
 
         let (_, sb_j_bias) = sb_to_blocks(&sb_j);
         let vel_j = DVector::from_vec(vec![vj.x, vj.y, vj.z]);
         let (_, zero_bias) = sb_to_blocks(&sb_zero);
+        let vel_i = DVector::zeros(3);
 
-        let params = vec![
-            pose_i,
-            DVector::zeros(3),
-            zero_bias.clone(),
-            pose_j,
-            vel_j,
-            sb_j_bias,
-        ];
-        let (residual, _) = factor.linearize(&params, false);
+        let residual = compute_residual(
+            &factor,
+            pose_i.as_slice(),
+            vel_i.as_slice(),
+            zero_bias.as_slice(),
+            pose_j.as_slice(),
+            vel_j.as_slice(),
+            sb_j_bias.as_slice(),
+        );
 
-        for i in 9..15 {
-            assert!(residual[i].abs() < 1e-14, "bias residual[{i}] nonzero");
+        for (i, ri) in residual.iter().enumerate().take(15).skip(9) {
+            assert!(ri.abs() < 1e-14, "bias residual[{i}] nonzero");
         }
 
-        let kin_norm = residual.rows(0, 9).norm();
+        let kin_norm: f64 = residual[0..9].iter().map(|x| x * x).sum::<f64>().sqrt();
         assert!(
             kin_norm < 1.0,
             "kinematic residual too large: {kin_norm:.4}"
@@ -515,25 +566,23 @@ mod tests {
 
         let factor = CombinedImuFactor::new(preint);
 
-        let pose_i_vec = DVector::from(SE3::identity());
-        let pose_j_vec = DVector::from(t_ws_j);
+        let pose_i_vec = DVector::from_column_slice(SE3::identity().as_param_slice());
+        let pose_j_vec = DVector::from_column_slice(t_ws_j.as_param_slice());
         let vj = sb_j.velocity();
         let vel_i_vec = DVector::zeros(3);
         let vel_j_vec = DVector::from_vec(vec![vj.x, vj.y, vj.z]);
         let bias_i_vec = DVector::zeros(6);
         let bias_j_vec = DVector::zeros(6);
 
-        let nominal = vec![
-            pose_i_vec.clone(),
-            vel_i_vec.clone(),
-            bias_i_vec.clone(),
-            pose_j_vec.clone(),
-            vel_j_vec.clone(),
-            bias_j_vec.clone(),
-        ];
-
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian should be computed");
+        let (r0, jac) = compute_with_jacobian(
+            &factor,
+            pose_i_vec.as_slice(),
+            vel_i_vec.as_slice(),
+            bias_i_vec.as_slice(),
+            pose_j_vec.as_slice(),
+            vel_j_vec.as_slice(),
+            bias_j_vec.as_slice(),
+        );
 
         const EPS: f64 = 1e-6;
         const TOL: f64 = 1e-3;
@@ -542,51 +591,72 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&pose_i_vec, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_i_p = perturb_se3(pose_i_vec.as_slice(), &tan);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_p.as_slice(),
+                vel_i_vec.as_slice(),
+                bias_i_vec.as_slice(),
+                pose_j_vec.as_slice(),
+                vel_j_vec.as_slice(),
+                bias_j_vec.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, col)]).abs();
                 assert!(
                     err < TOL,
                     "J_pose_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 1: vel_i (3 DOF, cols 6..9)
         for col in 0..3 {
-            let mut p = nominal.clone();
-            p[1] = perturb_vec(&vel_i_vec, col, EPS);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let vel_i_p = perturb_vec(vel_i_vec.as_slice(), col, EPS);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_vec.as_slice(),
+                vel_i_p.as_slice(),
+                bias_i_vec.as_slice(),
+                pose_j_vec.as_slice(),
+                vel_j_vec.as_slice(),
+                bias_j_vec.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, 6 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 6 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_vel_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 6 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 2: bias_i (6 DOF, cols 9..15)
         for col in 0..6 {
-            let mut p = nominal.clone();
-            p[2] = perturb_vec(&bias_i_vec, col, EPS);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let bias_i_p = perturb_vec(bias_i_vec.as_slice(), col, EPS);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_vec.as_slice(),
+                vel_i_vec.as_slice(),
+                bias_i_p.as_slice(),
+                pose_j_vec.as_slice(),
+                vel_j_vec.as_slice(),
+                bias_j_vec.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, 9 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 9 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_bias_i[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 9 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
@@ -595,51 +665,72 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[3] = perturb_se3(&pose_j_vec, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_j_p = perturb_se3(pose_j_vec.as_slice(), &tan);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_vec.as_slice(),
+                vel_i_vec.as_slice(),
+                bias_i_vec.as_slice(),
+                pose_j_p.as_slice(),
+                vel_j_vec.as_slice(),
+                bias_j_vec.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, 15 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 15 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_pose_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 15 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 4: vel_j (3 DOF, cols 21..24)
         for col in 0..3 {
-            let mut p = nominal.clone();
-            p[4] = perturb_vec(&vel_j_vec, col, EPS);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let vel_j_p = perturb_vec(vel_j_vec.as_slice(), col, EPS);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_vec.as_slice(),
+                vel_i_vec.as_slice(),
+                bias_i_vec.as_slice(),
+                pose_j_vec.as_slice(),
+                vel_j_p.as_slice(),
+                bias_j_vec.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, 21 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 21 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_vel_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 21 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 5: bias_j (6 DOF, cols 24..30)
         for col in 0..6 {
-            let mut p = nominal.clone();
-            p[5] = perturb_vec(&bias_j_vec, col, EPS);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let bias_j_p = perturb_vec(bias_j_vec.as_slice(), col, EPS);
+            let r_pert = compute_residual(
+                &factor,
+                pose_i_vec.as_slice(),
+                vel_i_vec.as_slice(),
+                bias_i_vec.as_slice(),
+                pose_j_vec.as_slice(),
+                vel_j_vec.as_slice(),
+                bias_j_p.as_slice(),
+            );
             for row in 0..15 {
-                let err = (fd[row] - jac[(row, 24 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 24 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_bias_j[{row},{col}]: analytical={:.6} fd={:.6} err={err:.2e}",
                     jac[(row, 24 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
