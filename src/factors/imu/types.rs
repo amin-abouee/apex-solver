@@ -125,3 +125,50 @@ impl ImuMeasurement {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn speed_and_bias_ext_splits_velocity_gyro_accel() {
+        let sb: SpeedAndBias = SVector::from_row_slice(&[
+            1.0, 2.0, 3.0, // velocity
+            4.0, 5.0, 6.0, // gyro bias
+            7.0, 8.0, 9.0, // accel bias
+        ]);
+
+        assert_eq!(sb.velocity(), Vector3::new(1.0, 2.0, 3.0));
+        assert_eq!(sb.gyro_bias(), Vector3::new(4.0, 5.0, 6.0));
+        assert_eq!(sb.accel_bias(), Vector3::new(7.0, 8.0, 9.0));
+    }
+
+    #[test]
+    fn imu_parameters_default_matches_documented_values() {
+        let params = ImuParameters::default();
+
+        assert!(params.use_imu);
+        assert_eq!(params.a_max, 176.0);
+        assert_eq!(params.g_max, 7.8);
+        assert_eq!(params.g, 9.81);
+        assert_eq!(params.g0, Vector3::zeros());
+        assert_eq!(params.a0, Vector3::zeros());
+        assert_eq!(params.s_a, Vector3::new(1.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn imu_measurement_new_stores_timestamp_and_readings() {
+        let readings = ImuSensorReadings {
+            gyroscopes: Vector3::new(0.1, 0.2, 0.3),
+            accelerometers: Vector3::new(0.4, 0.5, 0.6),
+        };
+        let measurement = ImuMeasurement::new(1.5, readings.clone());
+
+        assert_eq!(measurement.timestamp, 1.5);
+        assert_eq!(measurement.measurement.gyroscopes, readings.gyroscopes);
+        assert_eq!(
+            measurement.measurement.accelerometers,
+            readings.accelerometers
+        );
+    }
+}
