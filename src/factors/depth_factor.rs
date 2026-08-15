@@ -27,7 +27,8 @@
 //!
 //! Derived from OKVIS `DepthError.hpp`, using right SE3 perturbation model.
 
-use nalgebra::{DMatrix, DVector, Matrix3, Matrix4, SMatrix, Vector3, Vector4};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix3, Matrix4, SMatrix, Vector3, Vector4};
 
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
@@ -75,15 +76,12 @@ impl<const ONESIDED: bool> DepthFactor<ONESIDED> {
 }
 
 impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
-    fn get_dimension(&self) -> usize {
-        1
-    }
-
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(params.len(), 3, "DepthFactor expects 3 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(
@@ -93,9 +91,9 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         );
         debug_assert_eq!(params[2].len(), 7, "params[2] must be SE3 (7D)");
 
-        let t_ws = SE3::from(params[0].clone());
+        let t_ws = SE3::from_param_slice(params[0]);
         let hp_w = Vector4::new(params[1][0], params[1][1], params[1][2], params[1][3]);
-        let t_sc = SE3::from(params[2].clone());
+        let t_sc = SE3::from_param_slice(params[2]);
 
         // Build 4×4 transformation matrices
         let t_sw: Matrix4<f64> = t_ws.inverse(None).matrix();
@@ -105,33 +103,35 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         let hp_s: Vector4<f64> = t_sw * hp_w;
         let hp_c: Vector4<f64> = t_cs * hp_s;
 
-        // Check for degenerate homogeneous coordinate
-        let zero_residual = DVector::zeros(1);
-        let zero_jac = || DMatrix::zeros(1, 16);
-
-        if hp_c[3].abs() < 1e-16 {
-            if compute_jacobian {
-                return (zero_residual, Some(zero_jac()));
+        let zero_out = |residual: &mut [f64], jacobian: Option<faer::mat::MatMut<'_, f64>>| {
+            residual[0] = 0.0;
+            if let Some(mut jac) = jacobian {
+                for col in 0..16 {
+                    *jac.rb_mut().get_mut(0, col) = 0.0;
+                }
             }
-            return (zero_residual, None);
+        };
+
+        // Check for degenerate homogeneous coordinate
+        if hp_c[3].abs() < 1e-16 {
+            zero_out(residual, jacobian);
+            return;
         }
 
         let depth = hp_c[2] / hp_c[3];
 
         // One-sided: ignore if depth > measurement
         if ONESIDED && depth > self.measurement {
-            if compute_jacobian {
-                return (zero_residual, Some(zero_jac()));
-            }
-            return (zero_residual, None);
+            zero_out(residual, jacobian);
+            return;
         }
 
         let error = self.measurement - depth;
-        let residual = DVector::from_element(1, self.sqrt_information * error);
+        residual[0] = self.sqrt_information * error;
 
-        if !compute_jacobian {
-            return (residual, None);
-        }
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians (right SE3 perturbation, apex-solver convention) ──────────
         //
@@ -223,18 +223,26 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         j_full.fixed_view_mut::<1, 4>(0, 6).copy_from(&j_hp_w);
         j_full.fixed_view_mut::<1, 6>(0, 10).copy_from(&j_t_sc);
 
-        let jac = DMatrix::from_iterator(1, 16, j_full.iter().copied());
+        for col in 0..16 {
+            *jac.rb_mut().get_mut(0, col) = j_full[(0, col)];
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        1
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (1, 16)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::LieGroup;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use nalgebra::{UnitQuaternion, Vector3};
+    use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
     fn identity_pose() -> DVector<f64> {
         DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
@@ -245,21 +253,47 @@ mod tests {
         DVector::from_vec(vec![tx, ty, tz, q.w, q.i, q.j, q.k])
     }
 
-    fn perturb_se3(pose: &DVector<f64>, tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from(pose.clone());
-        let tan = SE3Tangent::from(DVector::from_vec(tangent.to_vec()));
-        DVector::from(se3.right_plus(&tan, None, None))
+    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
+        let se3 = SE3::from_param_slice(pose);
+        let tan = SE3Tangent::from_slice(tangent);
+        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
     }
 
     /// Compute ground-truth depth for given params.
-    fn compute_depth(t_ws: &DVector<f64>, hp_w: &DVector<f64>, t_sc: &DVector<f64>) -> f64 {
-        let ws = SE3::from(t_ws.clone());
-        let sc = SE3::from(t_sc.clone());
+    fn compute_depth(t_ws: &[f64], hp_w: &[f64], t_sc: &[f64]) -> f64 {
+        let ws = SE3::from_param_slice(t_ws);
+        let sc = SE3::from_param_slice(t_sc);
         let t_sw = ws.inverse(None).matrix();
         let t_cs = sc.inverse(None).matrix();
         let hp = Vector4::new(hp_w[0], hp_w[1], hp_w[2], hp_w[3]);
         let hp_c = t_cs * t_sw * hp;
         hp_c[2] / hp_c[3]
+    }
+
+    fn compute_residual<const ONESIDED: bool>(
+        factor: &DepthFactor<ONESIDED>,
+        pose_ws: &[f64],
+        hp_w: &[f64],
+        pose_sc: &[f64],
+    ) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[pose_ws, hp_w, pose_sc], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian<const ONESIDED: bool>(
+        factor: &DepthFactor<ONESIDED>,
+        pose_ws: &[f64],
+        hp_w: &[f64],
+        pose_sc: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[pose_ws, hp_w, pose_sc], &mut residual, Some(jac_mut));
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
     }
 
     // ── Test 1: zero residual ───────────────────────────────────────────────
@@ -280,10 +314,15 @@ mod tests {
 
         let hp_w = DVector::from_vec(vec![5.0, 3.0, 1.0, 1.0]);
 
-        let depth = compute_depth(&pose_ws, &hp_w, &pose_sc);
+        let depth = compute_depth(pose_ws.as_slice(), hp_w.as_slice(), pose_sc.as_slice());
 
         let factor = RegularDepthFactor::new_from_stdev(depth, 0.5);
-        let (r, _) = factor.linearize(&[pose_ws, hp_w, pose_sc], false);
+        let r = compute_residual(
+            &factor,
+            pose_ws.as_slice(),
+            hp_w.as_slice(),
+            pose_sc.as_slice(),
+        );
 
         assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
     }
@@ -299,7 +338,12 @@ mod tests {
 
         // Measurement is 3.0, but depth is 5.0 → should be ignored
         let factor = OneSidedDepthFactor::new_from_stdev(3.0, 1.0);
-        let (r, _) = factor.linearize(&[pose_ws, hp_w, pose_sc], false);
+        let r = compute_residual(
+            &factor,
+            pose_ws.as_slice(),
+            hp_w.as_slice(),
+            pose_sc.as_slice(),
+        );
 
         assert!(r[0].abs() < 1e-16, "one-sided residual should be zero");
     }
@@ -314,7 +358,12 @@ mod tests {
 
         // Measurement is 5.0, depth is 2.0 → should penalize
         let factor = OneSidedDepthFactor::new_from_stdev(5.0, 1.0);
-        let (r, _) = factor.linearize(&[pose_ws, hp_w, pose_sc], false);
+        let r = compute_residual(
+            &factor,
+            pose_ws.as_slice(),
+            hp_w.as_slice(),
+            pose_sc.as_slice(),
+        );
 
         assert!(
             (r[0] - 3.0).abs() < 1e-10,
@@ -341,12 +390,15 @@ mod tests {
 
         let hp_w = DVector::from_vec(vec![3.0, 2.0, 4.0, 0.8]);
 
-        let depth = compute_depth(&pose_ws, &hp_w, &pose_sc);
+        let depth = compute_depth(pose_ws.as_slice(), hp_w.as_slice(), pose_sc.as_slice());
         let factor = RegularDepthFactor::new_from_stdev(depth + 0.1, 0.3);
 
-        let nominal = vec![pose_ws.clone(), hp_w.clone(), pose_sc.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian(
+            &factor,
+            pose_ws.as_slice(),
+            hp_w.as_slice(),
+            pose_sc.as_slice(),
+        );
 
         const EPS: f64 = 1e-7;
         const TOL: f64 = 1e-4;
@@ -355,9 +407,13 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&pose_ws, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
+            let pose_ws_p = perturb_se3(pose_ws.as_slice(), &tan);
+            let r_pert = compute_residual(
+                &factor,
+                pose_ws_p.as_slice(),
+                hp_w.as_slice(),
+                pose_sc.as_slice(),
+            );
             let fd = (r_pert[0] - r0[0]) / EPS;
             let err = (fd - jac[(0, col)]).abs();
             assert!(
@@ -370,10 +426,14 @@ mod tests {
 
         // Block 1: hp_W (4D, cols 6–9)
         for col in 0..4 {
-            let mut p = nominal.clone();
-            p[1] = hp_w.clone();
-            p[1][col] += EPS;
-            let (r_pert, _) = factor.linearize(&p, false);
+            let mut hp_w_p = hp_w.clone();
+            hp_w_p[col] += EPS;
+            let r_pert = compute_residual(
+                &factor,
+                pose_ws.as_slice(),
+                hp_w_p.as_slice(),
+                pose_sc.as_slice(),
+            );
             let fd = (r_pert[0] - r0[0]) / EPS;
             let err = (fd - jac[(0, 6 + col)]).abs();
             assert!(
@@ -388,9 +448,13 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[2] = perturb_se3(&pose_sc, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
+            let pose_sc_p = perturb_se3(pose_sc.as_slice(), &tan);
+            let r_pert = compute_residual(
+                &factor,
+                pose_ws.as_slice(),
+                hp_w.as_slice(),
+                pose_sc_p.as_slice(),
+            );
             let fd = (r_pert[0] - r0[0]) / EPS;
             let err = (fd - jac[(0, 10 + col)]).abs();
             assert!(
@@ -411,11 +475,16 @@ mod tests {
         // hp = [0, 0, 10, 2] → p = [0, 0, 5], depth = 5
         let hp_w = DVector::from_vec(vec![0.0, 0.0, 10.0, 2.0]);
 
-        let depth = compute_depth(&pose_ws, &hp_w, &pose_sc);
+        let depth = compute_depth(pose_ws.as_slice(), hp_w.as_slice(), pose_sc.as_slice());
         assert!((depth - 5.0).abs() < 1e-10);
 
         let factor = RegularDepthFactor::new_from_stdev(depth, 1.0);
-        let (r, _) = factor.linearize(&[pose_ws, hp_w, pose_sc], false);
+        let r = compute_residual(
+            &factor,
+            pose_ws.as_slice(),
+            hp_w.as_slice(),
+            pose_sc.as_slice(),
+        );
         assert!(r[0].abs() < 1e-10);
     }
 }
