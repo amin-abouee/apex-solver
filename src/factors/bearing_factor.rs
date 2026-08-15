@@ -25,8 +25,10 @@
 //!
 //! Using right SE3 perturbation and chain rule through unit-vector normalization.
 
-use nalgebra::{DMatrix, DVector, Matrix3, SMatrix, Vector3};
+use faer::prelude::ReborrowMut;
+use nalgebra::{Matrix3, SMatrix, Vector3};
 
+use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
@@ -88,20 +90,17 @@ impl BearingFactor {
 }
 
 impl Factor for BearingFactor {
-    fn get_dimension(&self) -> usize {
-        2
-    }
-
     fn linearize(
         &self,
-        params: &[DVector<f64>],
-        compute_jacobian: bool,
-    ) -> (DVector<f64>, Option<DMatrix<f64>>) {
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
         debug_assert_eq!(params.len(), 2, "BearingFactor expects 2 parameter blocks");
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 3, "params[1] must be 3D point");
 
-        let t_i = SE3::from(params[0].clone());
+        let t_i = SE3::from_param_slice(params[0]);
         let p_j = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
         let r_i = t_i.rotation_so3().rotation_matrix();
@@ -113,11 +112,16 @@ impl Factor for BearingFactor {
 
         // Degenerate case: point at the pose origin
         if norm < 1e-16 {
-            let zero_res = DVector::zeros(2);
-            if compute_jacobian {
-                return (zero_res, Some(DMatrix::zeros(2, 9)));
+            residual[0] = 0.0;
+            residual[1] = 0.0;
+            if let Some(mut jac) = jacobian {
+                for row in 0..2 {
+                    for col in 0..9 {
+                        *jac.rb_mut().get_mut(row, col) = 0.0;
+                    }
+                }
             }
-            return (zero_res, None);
+            return;
         }
 
         // Estimated bearing (unit vector)
@@ -129,11 +133,12 @@ impl Factor for BearingFactor {
 
         // Weighted residual
         let weighted = self.sqrt_information * e_2d;
-        let residual = DVector::from_iterator(2, weighted.iter().copied());
+        residual[0] = weighted[0];
+        residual[1] = weighted[1];
 
-        if !compute_jacobian {
-            return (residual, None);
-        }
+        let Some(mut jac) = jacobian else {
+            return;
+        };
 
         // ── Jacobians ─────────────────────────────────────────────────────────
         //
@@ -182,37 +187,67 @@ impl Factor for BearingFactor {
         j_full.fixed_view_mut::<2, 3>(0, 3).copy_from(&j_theta);
         j_full.fixed_view_mut::<2, 3>(0, 6).copy_from(&j_pj);
 
-        let jac = DMatrix::from_iterator(2, 9, j_full.iter().copied());
+        for row in 0..2 {
+            for col in 0..9 {
+                *jac.rb_mut().get_mut(row, col) = j_full[(row, col)];
+            }
+        }
+    }
 
-        (residual, Some(jac))
+    fn residual_dim(&self) -> usize {
+        2
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (2, 9)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::LieGroup;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-    use nalgebra::{UnitQuaternion, Vector3};
+    use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
     fn make_pose(tx: f64, ty: f64, tz: f64, q: UnitQuaternion<f64>) -> DVector<f64> {
         let q = q.quaternion();
         DVector::from_vec(vec![tx, ty, tz, q.w, q.i, q.j, q.k])
     }
 
-    fn perturb_se3(pose: &DVector<f64>, tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from(pose.clone());
-        let tan = SE3Tangent::from(DVector::from_vec(tangent.to_vec()));
-        DVector::from(se3.right_plus(&tan, None, None))
+    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
+        let se3 = SE3::from_param_slice(pose);
+        let tan = SE3Tangent::from_slice(tangent);
+        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
     }
 
     /// Compute the body-frame bearing from pose to point.
-    fn compute_bearing(pose: &DVector<f64>, point: &Vector3<f64>) -> Vector3<f64> {
-        let t_i = SE3::from(pose.clone());
+    fn compute_bearing(pose: &[f64], point: &Vector3<f64>) -> Vector3<f64> {
+        let t_i = SE3::from_param_slice(pose);
         let r_i = t_i.rotation_so3().rotation_matrix();
         let t_pos = t_i.translation();
         let p_body = r_i.transpose() * (point - t_pos);
         p_body.normalize()
+    }
+
+    fn compute_residual(factor: &BearingFactor, pose: &[f64], point: &[f64]) -> Vec<f64> {
+        let mut residual = vec![0.0f64; factor.residual_dim()];
+        factor.linearize(&[pose, point], &mut residual, None);
+        residual
+    }
+
+    fn compute_with_jacobian(
+        factor: &BearingFactor,
+        pose: &[f64],
+        point: &[f64],
+    ) -> (Vec<f64>, DMatrix<f64>) {
+        let (rows, cols) = factor.jacobian_shape();
+        let mut residual = vec![0.0f64; rows];
+        let mut jac_buf = vec![0.0f64; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
+        factor.linearize(&[pose, point], &mut residual, Some(jac_mut));
+        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
+        (residual, jacobian)
     }
 
     // ── Test 1: zero residual ───────────────────────────────────────────────
@@ -227,16 +262,12 @@ mod tests {
         let point = Vector3::new(5.0, 3.0, 1.0);
         let point_dv = DVector::from_iterator(3, point.iter().copied());
 
-        let bearing = compute_bearing(&pose, &point);
+        let bearing = compute_bearing(pose.as_slice(), &point);
         let factor = BearingFactor::new_isotropic(bearing, 1.0);
-        let (r, _) = factor.linearize(&[pose, point_dv], false);
+        let r = compute_residual(&factor, pose.as_slice(), point_dv.as_slice());
 
-        for i in 0..2 {
-            assert!(
-                r[i].abs() < 1e-10,
-                "residual[{i}] = {} should be zero",
-                r[i]
-            );
+        for (i, ri) in r.iter().enumerate().take(2) {
+            assert!(ri.abs() < 1e-10, "residual[{i}] = {} should be zero", ri);
         }
     }
 
@@ -249,10 +280,10 @@ mod tests {
 
         let bearing = Vector3::new(0.0, 0.0, 1.0);
         let factor = BearingFactor::new_isotropic(bearing, 1.0);
-        let (r, _) = factor.linearize(&[pose, point], false);
+        let r = compute_residual(&factor, pose.as_slice(), point.as_slice());
 
-        for i in 0..2 {
-            assert!(r[i].abs() < 1e-10, "residual[{i}] = {}", r[i]);
+        for (i, ri) in r.iter().enumerate().take(2) {
+            assert!(ri.abs() < 1e-10, "residual[{i}] = {}", ri);
         }
     }
 
@@ -269,12 +300,10 @@ mod tests {
         let point_dv = DVector::from_iterator(3, point.iter().copied());
 
         // Use a slightly different bearing to get non-zero residual
-        let bearing = compute_bearing(&pose, &(point + Vector3::new(0.1, -0.05, 0.02)));
+        let bearing = compute_bearing(pose.as_slice(), &(point + Vector3::new(0.1, -0.05, 0.02)));
         let factor = BearingFactor::new_isotropic(bearing, 0.5);
 
-        let nominal = vec![pose.clone(), point_dv.clone()];
-        let (r0, jac_opt) = factor.linearize(&nominal, true);
-        let jac = jac_opt.expect("Jacobian must be computed");
+        let (r0, jac) = compute_with_jacobian(&factor, pose.as_slice(), point_dv.as_slice());
 
         const EPS: f64 = 1e-7;
         const TOL: f64 = 1e-4;
@@ -283,35 +312,33 @@ mod tests {
         for col in 0..6 {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
-            let mut p = nominal.clone();
-            p[0] = perturb_se3(&pose, &tan);
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let pose_p = perturb_se3(pose.as_slice(), &tan);
+            let r_pert = compute_residual(&factor, pose_p.as_slice(), point_dv.as_slice());
             for row in 0..2 {
-                let err = (fd[row] - jac[(row, col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, col)]).abs();
                 assert!(
                     err < TOL,
                     "J_T_i[{row},{col}]: analytical={:.8} fd={:.8} err={err:.2e}",
                     jac[(row, col)],
-                    fd[row]
+                    fd
                 );
             }
         }
 
         // Block 1: p_j (3D, cols 6–8)
         for col in 0..3 {
-            let mut p = nominal.clone();
-            p[1] = point_dv.clone();
-            p[1][col] += EPS;
-            let (r_pert, _) = factor.linearize(&p, false);
-            let fd = (&r_pert - &r0) / EPS;
+            let mut point_p = point_dv.clone();
+            point_p[col] += EPS;
+            let r_pert = compute_residual(&factor, pose.as_slice(), point_p.as_slice());
             for row in 0..2 {
-                let err = (fd[row] - jac[(row, 6 + col)]).abs();
+                let fd = (r_pert[row] - r0[row]) / EPS;
+                let err = (fd - jac[(row, 6 + col)]).abs();
                 assert!(
                     err < TOL,
                     "J_p_j[{row},{col}]: analytical={:.8} fd={:.8} err={err:.2e}",
                     jac[(row, 6 + col)],
-                    fd[row]
+                    fd
                 );
             }
         }
@@ -350,6 +377,6 @@ mod tests {
     #[test]
     fn dimension_is_two() {
         let factor = BearingFactor::new_isotropic(Vector3::z(), 1.0);
-        assert_eq!(factor.get_dimension(), 2);
+        assert_eq!(factor.residual_dim(), 2);
     }
 }
