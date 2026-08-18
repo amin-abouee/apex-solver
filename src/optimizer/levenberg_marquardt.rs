@@ -146,9 +146,9 @@ use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
-    SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver,
-    SparseSchurComplementSolver, StructureAware,
+    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
+    LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode,
+    SparseQRSolver, SparseSchurComplementSolver, StructureAware,
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
@@ -269,12 +269,25 @@ pub struct LevenbergMarquardtConfig {
     pub use_jacobi_scaling: bool,
     /// Compute per-variable covariance matrices (uncertainty estimation)
     ///
-    /// When enabled, computes covariance by inverting the Hessian matrix after
+    /// When enabled, computes covariance by re-linearizing the problem at the
+    /// solution and inverting the Gauss-Newton Hessian `H = JᵀJ` after
     /// convergence. The full covariance matrix is extracted into per-variable
     /// blocks stored in both Variable structs and SolverResult.
     ///
+    /// Scaled (σ̂²·H⁻¹) versus unscaled (H⁻¹) covariance, the factorization
+    /// algorithm, and the pseudo-inverse cutoff are configured through
+    /// [`covariance_options`](Self::covariance_options).
+    ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
+    /// Options for covariance estimation when `compute_covariances` is enabled.
+    ///
+    /// Defaults to unscaled `H⁻¹` via sparse Cholesky — the correct choice when
+    /// residuals are whitened by their measurement information matrix. Set
+    /// `apply_variance_scaling` for unweighted least squares, where the noise
+    /// scale `σ̂² = 2·cost/(m−n)` must be estimated from the fit. See
+    /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
+    pub covariance_options: CovarianceOptions,
     /// Schur complement solver variant (for bundle adjustment problems)
     ///
     /// When using LinearSolverType::SparseSchurComplement, this determines which
@@ -333,6 +346,7 @@ impl Default for LevenbergMarquardtConfig {
             // Enable manually for Cholesky/QR solvers on mixed-scale problems
             use_jacobi_scaling: false,
             compute_covariances: false,
+            covariance_options: CovarianceOptions::default(),
             // Schur complement parameters
             schur_variant: SchurVariant::default(),
             schur_preconditioner: SchurPreconditioner::default(),
@@ -407,7 +421,7 @@ impl LevenbergMarquardtConfig {
     /// `radius` is ignored: this Levenberg-Marquardt implementation controls step
     /// size through `damping` (Nielsen's update rule), not through a trust-region
     /// radius, and the radius was never read by the algorithm. See
-    /// `cov_issues/06-dead-code-issue-40.md`.
+    /// <https://github.com/amin-abouee/apex-solver/issues/40>.
     #[deprecated(
         since = "1.5.0",
         note = "the `radius` argument is ignored — Levenberg-Marquardt here is damping-controlled. \
@@ -434,7 +448,7 @@ impl LevenbergMarquardtConfig {
     /// This value was never read by the algorithm. Unlike Ceres, where
     /// `min_trust_region_radius` terminates the solve when the radius collapses,
     /// this implementation is damping-controlled and has no radius to compare
-    /// against. See `cov_issues/06-dead-code-issue-40.md`.
+    /// against. See <https://github.com/amin-abouee/apex-solver/issues/40>.
     #[deprecated(
         since = "1.5.0",
         note = "no-op: Levenberg-Marquardt here is damping-controlled and never read this value. \
@@ -478,6 +492,17 @@ impl LevenbergMarquardtConfig {
     /// after convergence, then extracts per-variable covariance blocks.
     pub fn with_compute_covariances(mut self, compute_covariances: bool) -> Self {
         self.compute_covariances = compute_covariances;
+        self
+    }
+
+    /// Set the options used for covariance estimation.
+    ///
+    /// Controls scaled (`σ̂²·H⁻¹`) versus unscaled (`H⁻¹`) covariance, the
+    /// factorization algorithm (sparse Cholesky or dense SVD pseudo-inverse),
+    /// and the singular-value cutoff. Only takes effect when
+    /// `compute_covariances` is enabled.
+    pub fn with_covariance_options(mut self, options: CovarianceOptions) -> Self {
+        self.covariance_options = options;
         self
     }
 
@@ -1013,7 +1038,10 @@ impl LevenbergMarquardt {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances(&mut state.variables)
+                    problem.compute_and_set_covariances(
+                        &mut state.variables,
+                        self.config.covariance_options,
+                    )
                 } else {
                     None
                 };
