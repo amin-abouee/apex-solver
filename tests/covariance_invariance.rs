@@ -7,9 +7,6 @@
 //! uncertainty, so neither may appear in the returned covariance. Before the fix,
 //! the solvers returned `(D·JᵀJ·D + λI)⁻¹`, which changed by orders of magnitude
 //! when either knob moved.
-//!
-//! See `cov_issues/01-covariance-absorbs-damping.md` and
-//! `cov_issues/02-covariance-absorbs-jacobi-scaling.md`.
 
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::ManifoldType;
@@ -198,11 +195,150 @@ fn flag_path_matches_explicit_api() -> TestResult {
     )
     .optimize(&mut problem)?;
 
-    let from_flag = result.covariances.clone().ok_or("covariances populated")?;
+    let from_flag = result.covariances.ok_or("covariances populated")?;
     let from_api = Covariance::compute(CovarianceOptions::default(), &problem, &result.parameters)?
         .per_variable();
 
     assert_covariances_match(&from_flag, &from_api, &keys, 1e-12, "flag vs explicit API");
+    Ok(())
+}
+
+/// The solver-level covariance flag must honor `covariance_options`: the flag
+/// path and the explicit API, run with the same options, must agree exactly —
+/// here with variance scaling enabled.
+#[test]
+fn flag_path_honors_covariance_options() -> TestResult {
+    let (mut problem, keys) = pose_graph();
+    let options = CovarianceOptions::new().with_variance_scaling(true);
+    let result = LevenbergMarquardt::with_config(
+        LevenbergMarquardtConfig::new()
+            .with_max_iterations(200)
+            .with_cost_tolerance(1e-14)
+            .with_parameter_tolerance(1e-14)
+            .with_compute_covariances(true)
+            .with_covariance_options(options),
+    )
+    .optimize(&mut problem)?;
+
+    let from_flag = result.covariances.ok_or("covariances populated")?;
+    let from_api = Covariance::compute(options, &problem, &result.parameters)?.per_variable();
+
+    assert_covariances_match(
+        &from_flag,
+        &from_api,
+        &keys,
+        1e-12,
+        "flag vs explicit API (variance-scaled)",
+    );
+    Ok(())
+}
+
+/// Scaled and unscaled covariance must both be reachable from the solver
+/// config, and they must differ by exactly the estimated noise scale
+/// `σ̂² = 2·cost / (m − n)`.
+#[test]
+fn scaled_and_unscaled_covariance_configurable_from_solver_config() -> TestResult {
+    let (mut problem, keys) = pose_graph();
+
+    let base = || {
+        LevenbergMarquardtConfig::new()
+            .with_max_iterations(200)
+            .with_cost_tolerance(1e-14)
+            .with_parameter_tolerance(1e-14)
+            .with_compute_covariances(true)
+    };
+
+    let unscaled_result = LevenbergMarquardt::with_config(base()).optimize(&mut problem)?;
+    let unscaled = unscaled_result
+        .covariances
+        .ok_or("unscaled covariances populated")?;
+
+    let scaled_result = LevenbergMarquardt::with_config(
+        base().with_covariance_options(CovarianceOptions::new().with_variance_scaling(true)),
+    )
+    .optimize(&mut problem)?;
+
+    // The pose graph is deliberately inconsistent (odometry disagrees with the
+    // loop closure), so the solution has positive cost and σ̂² is a meaningful,
+    // non-unit scale.
+    assert!(
+        scaled_result.final_cost > 1e-6,
+        "expected an inconsistent graph, final cost {}",
+        scaled_result.final_cost
+    );
+    let scaled = scaled_result
+        .covariances
+        .ok_or("scaled covariances populated")?;
+
+    // m = 15 (4 BetweenFactor blocks + 1 prior, 3 residuals each),
+    // n = 12 (4 SE2 poses × 3 tangent DOF).
+    let m = problem.total_residual_dimension();
+    let n: usize = keys.len() * 3;
+    assert_eq!((m, n), (15, 12));
+
+    let sigma_squared = 2.0 * scaled_result.final_cost / (m - n) as f64;
+    let expected: SecondaryMap<VarKey, Mat<f64>> = keys
+        .iter()
+        .map(|&k| {
+            let block = &unscaled[k];
+            (
+                k,
+                Mat::from_fn(block.nrows(), block.ncols(), |i, j| {
+                    sigma_squared * block[(i, j)]
+                }),
+            )
+        })
+        .collect();
+
+    assert_covariances_match(&scaled, &expected, &keys, 1e-9, "scaled vs σ̂²·unscaled");
+    Ok(())
+}
+
+/// Gauss-Newton and Dog Leg must plumb `covariance_options` through as well:
+/// for each, the flag path with variance scaling enabled must agree with the
+/// explicit API called with the same options at that solver's solution.
+#[test]
+fn gauss_newton_and_dog_leg_honor_covariance_options() -> TestResult {
+    let (mut problem, keys) = pose_graph();
+    let options = CovarianceOptions::new().with_variance_scaling(true);
+
+    let gn = GaussNewton::with_config(
+        GaussNewtonConfig::new()
+            .with_max_iterations(200)
+            .with_cost_tolerance(1e-14)
+            .with_parameter_tolerance(1e-14)
+            .with_compute_covariances(true)
+            .with_covariance_options(options),
+    )
+    .optimize(&mut problem)?;
+    let gn_flag = gn.covariances.ok_or("GN covariances populated")?;
+    let gn_api = Covariance::compute(options, &problem, &gn.parameters)?.per_variable();
+    assert_covariances_match(
+        &gn_flag,
+        &gn_api,
+        &keys,
+        1e-12,
+        "Gauss-Newton flag vs explicit API (variance-scaled)",
+    );
+
+    let dl = DogLeg::with_config(
+        DogLegConfig::new()
+            .with_max_iterations(200)
+            .with_cost_tolerance(1e-14)
+            .with_parameter_tolerance(1e-14)
+            .with_compute_covariances(true)
+            .with_covariance_options(options),
+    )
+    .optimize(&mut problem)?;
+    let dl_flag = dl.covariances.ok_or("Dog Leg covariances populated")?;
+    let dl_api = Covariance::compute(options, &problem, &dl.parameters)?.per_variable();
+    assert_covariances_match(
+        &dl_flag,
+        &dl_api,
+        &keys,
+        1e-12,
+        "Dog Leg flag vs explicit API (variance-scaled)",
+    );
     Ok(())
 }
 
@@ -246,8 +382,6 @@ fn dense_svd_matches_cholesky_when_full_rank() -> TestResult {
 /// bipartite camera/landmark structure and rejects a plain pose graph before any
 /// covariance question arises; bundle adjustment coverage lives in
 /// `tests/bundle_adjustment_integration.rs`.
-///
-/// See `cov_issues/03-covariance-stale-and-silent.md`.
 #[test]
 fn covariance_available_for_every_linear_solver() -> TestResult {
     let (_, keys) = pose_graph();
