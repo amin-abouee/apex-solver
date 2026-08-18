@@ -167,8 +167,7 @@ pub(crate) fn compute_block_into(
     //
     // Note this produces the corrected residual/Jacobian that drive the linear
     // system. The *cost* is not derivable from them — see
-    // `Problem::compute_residual_and_cost_sparse` and
-    // `cov_issues/05-robust-cost-mismatch.md`.
+    // `Problem::compute_residual_and_cost_sparse`.
     if let Some(loss_func) = &residual_block.loss_func {
         let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
         let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
