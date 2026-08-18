@@ -194,7 +194,7 @@ impl Corrector {
     ///
     /// This is the value the optimizer must use as the block's cost. Squaring the
     /// corrected residual instead gives `0.5·ρ'(s)/(1−α)²·s`, which is a different
-    /// function — see `cov_issues/05-robust-cost-mismatch.md`.
+    /// function.
     pub fn robust_cost(&self) -> f64 {
         self.robust_cost
     }

@@ -210,7 +210,7 @@ impl Problem {
     /// the linear system — while the cost is the true robust cost `0.5·ρ(‖r‖²)`.
     /// Squaring the corrected residual gives a different function, which is what
     /// made every reported cost and every trust-region ratio wrong for robust
-    /// problems. See `cov_issues/05-robust-cost-mismatch.md`.
+    /// problems.
     ///
     /// For blocks with no loss function the two coincide at `0.5·‖r‖²`.
     pub fn compute_residual_and_cost_sparse(
@@ -367,6 +367,11 @@ impl Problem {
     /// which are internal solver details and must not appear in the result. See
     /// [`crate::linalg::covariance`].
     ///
+    /// `options` selects the factorization algorithm and whether the result is
+    /// multiplied by the estimated noise variance `σ̂²` (scaled) or returned as
+    /// the raw `H⁻¹` (unscaled). Optimizers pass their `covariance_options`
+    /// here.
+    ///
     /// Returns `None` if covariance estimation fails (most commonly a
     /// rank-deficient `H` from unfixed gauge freedom), after logging the reason.
     /// Callers that need to handle the failure should use
@@ -375,18 +380,16 @@ impl Problem {
     pub fn compute_and_set_covariances(
         &self,
         variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        options: crate::linalg::covariance::CovarianceOptions,
     ) -> Option<SecondaryMap<VarKey, Mat<f64>>> {
-        let covariance = match crate::linalg::covariance::Covariance::compute(
-            crate::linalg::covariance::CovarianceOptions::default(),
-            self,
-            variables,
-        ) {
-            Ok(covariance) => covariance,
-            Err(e) => {
-                tracing::error!("Covariance estimation failed: {e}");
-                return None;
-            }
-        };
+        let covariance =
+            match crate::linalg::covariance::Covariance::compute(options, self, variables) {
+                Ok(covariance) => covariance,
+                Err(e) => {
+                    tracing::error!("Covariance estimation failed: {e}");
+                    return None;
+                }
+            };
 
         let per_var = covariance.per_variable();
         for (key, cov) in &per_var {
@@ -673,7 +676,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Robust cost (cov_issues/05-robust-cost-mismatch.md)
+    // Robust cost
     // -------------------------------------------------------------------------
 
     /// `r = x`, a single scalar residual — lets a test dial ‖r‖ exactly.
