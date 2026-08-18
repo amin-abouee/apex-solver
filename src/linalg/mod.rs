@@ -17,6 +17,8 @@ pub use sparse::{
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
 
+pub use covariance::{Covariance, CovarianceAlgorithm, CovarianceError, CovarianceOptions};
+
 pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
 
 // ============================================================================

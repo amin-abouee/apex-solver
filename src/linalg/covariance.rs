@@ -87,7 +87,9 @@ pub enum CovarianceAlgorithm {
 }
 
 /// Configuration for [`Covariance::compute`].
-#[derive(Debug, Clone)]
+///
+/// All fields are plain values, so this is `Copy` and passed by value.
+#[derive(Debug, Clone, Copy)]
 pub struct CovarianceOptions {
     /// Factorization strategy. See [`CovarianceAlgorithm`].
     pub algorithm: CovarianceAlgorithm,
@@ -224,8 +226,7 @@ impl Covariance {
             warn!(
                 "Covariance requested for a problem with fixed variable indices. Fixed degrees \
                  of freedom are currently included in H, so the reported blocks are marginals \
-                 rather than conditionals and over-state uncertainty on the free parameters. \
-                 See cov_issues/07-fixed-variables-and-covariance.md"
+                 rather than conditionals and over-state uncertainty on the free parameters."
             );
         }
 
