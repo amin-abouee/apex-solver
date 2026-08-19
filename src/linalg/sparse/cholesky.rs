@@ -11,8 +11,6 @@ use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
-    factorizer: Option<Llt<usize, f64>>,
-
     /// Cached symbolic factorization for reuse across iterations.
     ///
     /// This is computed once and reused when the sparsity pattern doesn't change,
@@ -28,28 +26,14 @@ pub struct SparseCholeskySolver {
     ///
     /// This is `None` if the gradient could not be computed.
     gradient: Option<Mat<f64>>,
-
-    /// The parameter covariance matrix, computed as `(J^T * J)^-1`.
-    ///
-    /// This is `None` if the Hessian is singular or ill-conditioned.
-    covariance_matrix: Option<Mat<f64>>,
-    /// Asymptotic standard errors of the parameters.
-    ///
-    /// This is `None` if the covariance matrix could not be computed.
-    /// Each error is the square root of the corresponding diagonal element
-    /// of the covariance matrix.
-    standard_errors: Option<Mat<f64>>,
 }
 
 impl SparseCholeskySolver {
     pub fn new() -> Self {
         SparseCholeskySolver {
-            factorizer: None,
             symbolic_factorization: None,
             hessian: None,
             gradient: None,
-            covariance_matrix: None,
-            standard_errors: None,
         }
     }
 
@@ -59,38 +43,6 @@ impl SparseCholeskySolver {
 
     pub fn gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
-    }
-
-    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
-        // Ensure covariance matrix is computed first
-        if self.covariance_matrix.is_none() {
-            LinearSolver::<SparseMode>::compute_covariance_matrix(self);
-        }
-
-        // Return None if hessian is not available (solver not initialized)
-        let hessian = self.hessian.as_ref()?;
-        let n = hessian.ncols();
-        // Compute standard errors as sqrt of diagonal elements
-        if let Some(cov) = &self.covariance_matrix {
-            let mut std_errors = Mat::zeros(n, 1);
-            for i in 0..n {
-                let diag_val = cov[(i, i)];
-                if diag_val >= 0.0 {
-                    std_errors[(i, 0)] = diag_val.sqrt();
-                } else {
-                    // Negative diagonal indicates numerical issues
-                    return None;
-                }
-            }
-            self.standard_errors = Some(std_errors);
-        }
-        self.standard_errors.as_ref()
-    }
-
-    /// Reset covariance computation state (useful for iterative optimization)
-    pub fn reset_covariance(&mut self) {
-        self.covariance_matrix = None;
-        self.standard_errors = None;
     }
 }
 
@@ -151,7 +103,6 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(cholesky);
 
         Ok(dx)
     }
@@ -224,7 +175,6 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         let dx = cholesky.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(cholesky);
 
         Ok(dx)
     }
@@ -235,28 +185,6 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
 
     fn get_gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
-    }
-
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        // Only compute if we have a factorizer and hessian, but no covariance matrix yet
-        if self.factorizer.is_some()
-            && self.hessian.is_some()
-            && self.covariance_matrix.is_none()
-            && let (Some(factorizer), Some(hessian)) = (&self.factorizer, &self.hessian)
-        {
-            let n = hessian.ncols();
-            // Create identity matrix
-            let identity = Mat::identity(n, n);
-
-            // Solve H * X = I to get X = H^(-1) = covariance matrix
-            let cov_matrix = factorizer.solve(&identity);
-            self.covariance_matrix = Some(cov_matrix);
-        }
-        self.covariance_matrix.as_ref()
-    }
-
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        self.covariance_matrix.as_ref()
     }
 }
 
@@ -300,10 +228,12 @@ mod tests {
     #[test]
     fn test_solver_creation() {
         let solver = SparseCholeskySolver::new();
-        assert!(solver.factorizer.is_none());
+        assert!(solver.hessian.is_none());
+        assert!(solver.gradient.is_none());
 
         let default_solver = SparseCholeskySolver::default();
-        assert!(default_solver.factorizer.is_none());
+        assert!(default_solver.hessian.is_none());
+        assert!(default_solver.gradient.is_none());
     }
 
     /// Test normal equation solving with well-conditioned matrix
@@ -318,7 +248,6 @@ mod tests {
         assert_eq!(solution.ncols(), 1);
 
         // Verify the symbolic pattern was cached
-        assert!(solver.factorizer.is_some());
         Ok(())
     }
 
@@ -331,7 +260,6 @@ mod tests {
         // First solve
         let sol1 =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let sol2 =
@@ -471,147 +399,8 @@ mod tests {
     fn test_solver_clone() {
         let solver1 = SparseCholeskySolver::new();
         let solver2 = solver1.clone();
-
-        assert!(solver1.factorizer.is_none());
-        assert!(solver2.factorizer.is_none());
-    }
-
-    /// Test covariance matrix computation
-    #[test]
-    fn test_cholesky_covariance_computation() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve to set up factorizer and hessian
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // Now compute covariance matrix
-        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov_matrix.is_some());
-
-        if let Some(cov) = cov_matrix {
-            assert_eq!(cov.nrows(), 3); // Should be n x n where n is number of variables
-            assert_eq!(cov.ncols(), 3);
-
-            // Covariance matrix should be symmetric
-            for i in 0..3 {
-                for j in 0..3 {
-                    assert!(
-                        (cov[(i, j)] - cov[(j, i)]).abs() < TOLERANCE,
-                        "Covariance matrix should be symmetric"
-                    );
-                }
-            }
-
-            // Diagonal elements should be positive (variances)
-            for i in 0..3 {
-                assert!(
-                    cov[(i, i)] > 0.0,
-                    "Diagonal elements (variances) should be positive"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Test standard errors computation
-    #[test]
-    fn test_cholesky_standard_errors_computation() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve to set up factorizer and hessian
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // Compute covariance matrix first (this also computes standard errors)
-        solver.compute_standard_errors();
-
-        // Now check that both covariance matrix and standard errors are available
-        assert!(solver.covariance_matrix.is_some());
-        assert!(solver.standard_errors.is_some());
-
-        if let (Some(cov), Some(errors)) = (&solver.covariance_matrix, &solver.standard_errors) {
-            assert_eq!(errors.nrows(), 3); // Should be n x 1 where n is number of variables
-            assert_eq!(errors.ncols(), 1);
-
-            // All standard errors should be positive
-            for i in 0..3 {
-                assert!(errors[(i, 0)] > 0.0, "Standard errors should be positive");
-            }
-
-            // Verify relationship: std_error = sqrt(covariance_diagonal)
-            for i in 0..3 {
-                let expected_std_error = cov[(i, i)].sqrt();
-                assert!(
-                    (errors[(i, 0)] - expected_std_error).abs() < TOLERANCE,
-                    "Standard error should equal sqrt of covariance diagonal"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Test covariance computation with well-conditioned positive definite system
-    #[test]
-    fn test_cholesky_covariance_positive_definite() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-
-        // Create a well-conditioned positive definite system
-        let triplets = vec![
-            Triplet::new(0, 0, 3.0),
-            Triplet::new(0, 1, 1.0),
-            Triplet::new(1, 0, 1.0),
-            Triplet::new(1, 1, 2.0),
-        ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov_matrix.is_some());
-
-        if let Some(cov) = cov_matrix {
-            // For this system, H = J^T * W * J = [[10, 5], [5, 5]]
-            // Covariance = H^(-1) = (1/25) * [[5, -5], [-5, 10]] = [[0.2, -0.2], [-0.2, 0.4]]
-            assert!((cov[(0, 0)] - 0.2).abs() < TOLERANCE);
-            assert!((cov[(1, 1)] - 0.4).abs() < TOLERANCE);
-            assert!((cov[(0, 1)] - (-0.2)).abs() < TOLERANCE);
-            assert!((cov[(1, 0)] - (-0.2)).abs() < TOLERANCE);
-        }
-        Ok(())
-    }
-
-    /// Test covariance computation caching
-    #[test]
-    fn test_cholesky_covariance_caching() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // First covariance computation
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(solver.covariance_matrix.is_some());
-
-        // Get pointer to first computation
-        if let Some(cov1) = &solver.covariance_matrix {
-            let cov1_ptr = cov1.as_ptr();
-
-            // Second covariance computation should return cached result
-            LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-            assert!(solver.covariance_matrix.is_some());
-
-            // Get pointer to second computation
-            if let Some(cov2) = &solver.covariance_matrix {
-                let cov2_ptr = cov2.as_ptr();
-
-                // Should be the same pointer (cached)
-                assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
-            }
-        }
-        Ok(())
+        assert!(solver2.hessian.is_none());
+        assert!(solver2.gradient.is_none());
     }
 
     /// Test Cholesky decomposition properties
@@ -627,7 +416,6 @@ mod tests {
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         // Verify that we have a factorizer and hessian
-        assert!(solver.factorizer.is_some());
         assert!(solver.hessian.is_some());
 
         // The hessian should be positive definite for Cholesky to work
@@ -665,24 +453,6 @@ mod tests {
             );
         }
 
-        // Covariance should be identity matrix (inverse of identity)
-        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov_matrix.is_some());
-        if let Some(cov) = cov_matrix {
-            for i in 0..3 {
-                for j in 0..3 {
-                    let expected = if i == j { 1.0 } else { 0.0 };
-                    assert!(
-                        (cov[(i, j)] - expected).abs() < TOLERANCE,
-                        "Covariance[{}, {}] expected {}, got {}",
-                        i,
-                        j,
-                        expected,
-                        cov[(i, j)]
-                    );
-                }
-            }
-        }
         Ok(())
     }
 
@@ -712,22 +482,6 @@ mod tests {
         Ok(())
     }
 
-    /// Test reset_covariance() clears the cached covariance
-    #[test]
-    fn test_cholesky_reset_covariance() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(solver.covariance_matrix.is_some());
-
-        solver.reset_covariance();
-        assert!(solver.covariance_matrix.is_none());
-        assert!(solver.standard_errors.is_none());
-        Ok(())
-    }
-
     /// Test get_hessian() trait method returns Some after solve
     #[test]
     fn test_cholesky_get_hessian_trait() -> TestResult {
@@ -752,39 +506,5 @@ mod tests {
 
         assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_some());
         Ok(())
-    }
-
-    /// Test get_covariance_matrix() getter matches compute result
-    #[test]
-    fn test_cholesky_get_covariance_matrix_getter() -> TestResult {
-        let mut solver = SparseCholeskySolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-
-        let via_getter = LinearSolver::<SparseMode>::get_covariance_matrix(&solver);
-        assert!(via_getter.is_some());
-
-        if let Some(cov) = via_getter {
-            assert_eq!(cov.nrows(), 3);
-            assert_eq!(cov.ncols(), 3);
-        }
-        Ok(())
-    }
-
-    /// Test that `compute_standard_errors()` returns `None` when called before any solve.
-    ///
-    /// Covers the early-return `?` at the `let hessian = self.hessian.as_ref()?;` line:
-    /// a freshly-created solver has no hessian, so the method returns `None`.
-    #[test]
-    fn test_compute_standard_errors_before_solve_returns_none() {
-        let mut solver = SparseCholeskySolver::new();
-        // No solve has been performed → hessian is None → should return None
-        let result = solver.compute_standard_errors();
-        assert!(
-            result.is_none(),
-            "compute_standard_errors on uninitialized solver (no hessian) should return None"
-        );
     }
 }

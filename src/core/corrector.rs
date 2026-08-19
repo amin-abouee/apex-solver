@@ -107,6 +107,7 @@ pub struct Corrector {
     sqrt_rho1: f64,
     residual_scaling: f64,
     alpha_sq_norm: f64,
+    robust_cost: f64,
 }
 
 impl Corrector {
@@ -153,11 +154,19 @@ impl Corrector {
 
         // Handle special cases (common case: rho[2] <= 0)
         // This occurs when the loss function has no curvature correction needed
+        // The robust cost of this block is 0.5·ρ(s) — NOT 0.5·‖r̃‖² computed from
+        // the corrected residual. The corrected residual exists so that J̃ᵀJ̃ and
+        // J̃ᵀr̃ reproduce the Gauss-Newton approximation of the robust Hessian and
+        // gradient; its norm is not the cost. Matches Ceres, which sets
+        // `*cost = 0.5 * rho[0]` in `ResidualBlock::Evaluate`.
+        let robust_cost = 0.5 * rho[0];
+
         if sq_norm == 0.0 || rho_2 <= 0.0 {
             return Self {
                 sqrt_rho1,
                 residual_scaling: sqrt_rho1,
                 alpha_sq_norm: 0.0,
+                robust_cost,
             };
         }
 
@@ -177,7 +186,17 @@ impl Corrector {
             sqrt_rho1,
             residual_scaling: sqrt_rho1 / (1.0 - alpha),
             alpha_sq_norm: alpha / sq_norm,
+            robust_cost,
         }
+    }
+
+    /// The robust cost `0.5·ρ(s)` contributed by this residual block.
+    ///
+    /// This is the value the optimizer must use as the block's cost. Squaring the
+    /// corrected residual instead gives `0.5·ρ'(s)/(1−α)²·s`, which is a different
+    /// function.
+    pub fn robust_cost(&self) -> f64 {
+        self.robust_cost
     }
 
     /// Apply correction to the Jacobian matrix.

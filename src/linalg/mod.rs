@@ -1,3 +1,4 @@
+pub mod covariance;
 pub mod dense;
 pub mod sparse;
 pub mod utils;
@@ -15,6 +16,8 @@ pub use sparse::{
 };
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
+
+pub use covariance::{Covariance, CovarianceAlgorithm, CovarianceError, CovarianceOptions};
 
 pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
 
@@ -161,63 +164,12 @@ pub trait LinearSolver<M: LinearizationMode> {
 
     /// Get the cached gradient vector (J^T · r) from the last solve
     fn get_gradient(&self) -> Option<&Mat<f64>>;
-
-    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian.
-    ///
-    /// Returns `None` for solvers that do not support covariance estimation
-    /// (e.g., QR solvers, Schur complement solvers). Only Cholesky-based
-    /// solvers provide a real implementation.
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        None
-    }
-
-    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian.
-    ///
-    /// Returns `None` if covariance has not been computed or is not supported.
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        None
-    }
-}
-
-// ============================================================================
-// Utility functions
-// ============================================================================
-
-/// Extract per-variable covariance blocks from the full covariance matrix.
-///
-/// Given the full covariance matrix H^{-1} (inverse of information matrix),
-/// this function extracts the diagonal blocks corresponding to each individual variable.
-pub(crate) fn extract_variable_covariances(
-    full_covariance: &Mat<f64>,
-    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    variable_index_map: &SecondaryMap<VarKey, usize>,
-) -> SecondaryMap<VarKey, Mat<f64>> {
-    let mut result = SecondaryMap::new();
-
-    for (key, var) in variables {
-        if let Some(&start_idx) = variable_index_map.get(key) {
-            let dim = var.dof();
-            let mut var_cov = Mat::zeros(dim, dim);
-            for i in 0..dim {
-                for j in 0..dim {
-                    var_cov[(i, j)] = full_covariance[(start_idx + i, start_idx + j)];
-                }
-            }
-            result.insert(key, var_cov);
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::variable::{ManifoldVariable, Variable};
     use crate::error::ErrorLogging;
-    use apex_manifolds::rn::Rn;
-    use faer::Mat;
-    use nalgebra::dvector;
 
     // -------------------------------------------------------------------------
     // JacobianMode
@@ -338,74 +290,5 @@ mod tests {
     fn test_lin_alg_result_err() {
         let r: LinAlgResult<i32> = Err(LinAlgError::InvalidInput("oops".into()));
         assert!(r.is_err());
-    }
-
-    // -------------------------------------------------------------------------
-    // extract_variable_covariances
-    // -------------------------------------------------------------------------
-
-    fn make_rn_var(val: f64) -> Box<dyn ManifoldVariable> {
-        Box::new(Variable::new(Rn::new(dvector![val])))
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_single_variable() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let kx = variables.insert(make_rn_var(1.0));
-        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        index_map.insert(kx, 0);
-
-        let full_cov = Mat::from_fn(1, 1, |_, _| 2.5);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert_eq!(result.len(), 1);
-        assert!((result[kx][(0, 0)] - 2.5).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_two_variables() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let ka = variables.insert(make_rn_var(1.0));
-        let kb = variables.insert(make_rn_var(2.0));
-        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        index_map.insert(ka, 0);
-        index_map.insert(kb, 1);
-
-        let full_cov = Mat::from_fn(2, 2, |i, j| if i == j { [3.0, 7.0][i] } else { 0.0 });
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert_eq!(result.len(), 2);
-        assert!((result[ka][(0, 0)] - 3.0).abs() < 1e-12);
-        assert!((result[kb][(0, 0)] - 7.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_empty_variables() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        let full_cov = Mat::zeros(0, 0);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_var_not_in_index_map() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        variables.insert(make_rn_var(1.0));
-        let index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new(); // empty
-
-        let full_cov = Mat::from_fn(1, 1, |_, _| 5.0);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert!(result.is_empty());
     }
 }

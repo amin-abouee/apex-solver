@@ -196,8 +196,8 @@ use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
-    SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
+    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -327,12 +327,26 @@ pub struct DogLegConfig {
 
     /// Compute per-variable covariance matrices (uncertainty estimation)
     ///
-    /// When enabled, computes covariance by inverting the Hessian matrix after
+    /// When enabled, computes covariance by re-linearizing the problem at the
+    /// solution and inverting the Gauss-Newton Hessian `H = JᵀJ` after
     /// convergence. The full covariance matrix is extracted into per-variable
     /// blocks stored in both Variable structs and optimizer::SolverResult.
     ///
+    /// Scaled (σ̂²·H⁻¹) versus unscaled (H⁻¹) covariance, the factorization
+    /// algorithm, and the pseudo-inverse cutoff are configured through
+    /// [`covariance_options`](Self::covariance_options).
+    ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
+
+    /// Options for covariance estimation when `compute_covariances` is enabled.
+    ///
+    /// Defaults to unscaled `H⁻¹` via sparse Cholesky — the correct choice when
+    /// residuals are whitened by their measurement information matrix. Set
+    /// `apply_variance_scaling` for unweighted least squares, where the noise
+    /// scale `σ̂² = 2·cost/(m−n)` must be estimated from the fit. See
+    /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
+    pub covariance_options: CovarianceOptions,
 
     /// Enable real-time visualization (graphical debugging).
     ///
@@ -387,6 +401,7 @@ impl Default for DogLegConfig {
             min_relative_decrease: 1e-3,
 
             compute_covariances: false,
+            covariance_options: CovarianceOptions::default(),
             #[cfg(feature = "visualization")]
             enable_visualization: false,
         }
@@ -530,6 +545,17 @@ impl DogLegConfig {
     /// after convergence, then extracts per-variable covariance blocks.
     pub fn with_compute_covariances(mut self, compute_covariances: bool) -> Self {
         self.compute_covariances = compute_covariances;
+        self
+    }
+
+    /// Set the options used for covariance estimation.
+    ///
+    /// Controls scaled (`σ̂²·H⁻¹`) versus unscaled (`H⁻¹`) covariance, the
+    /// factorization algorithm (sparse Cholesky or dense SVD pseudo-inverse),
+    /// and the singular-value cutoff. Only takes effect when
+    /// `compute_covariances` is enabled.
+    pub fn with_covariance_options(mut self, options: CovarianceOptions) -> Self {
+        self.covariance_options = options;
         self
     }
 
@@ -1094,8 +1120,8 @@ impl DogLeg {
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_cost = optimizer::compute_cost(&new_residual);
+        let (_new_residual, new_cost) =
+            problem.compute_residual_and_cost_sparse(&state.variables)?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
@@ -1311,10 +1337,9 @@ impl DogLeg {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances_generic::<M>(
-                        linear_solver,
+                    problem.compute_and_set_covariances(
                         &mut state.variables,
-                        &state.variable_index_map,
+                        self.config.covariance_options,
                     )
                 } else {
                     None
