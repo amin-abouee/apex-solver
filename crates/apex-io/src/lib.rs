@@ -18,9 +18,11 @@ use apex_manifolds::{se2::SE2, se3::SE3};
 // Module declarations
 pub mod asl;
 pub mod bal;
+mod csv;
 pub mod g2o;
 pub mod logger;
 pub mod toro;
+pub mod trajectory;
 pub mod utils;
 
 pub mod rosbag;
@@ -49,6 +51,11 @@ pub use asl::{AslDataset, AslReader, AslStream};
 pub use bal::{BalCamera, BalDataset, BalLoader, BalObservation, BalPoint};
 pub use g2o::G2oLoader;
 pub use toro::ToroLoader;
+pub use trajectory::{
+    AslLayout, AslTrajectoryLoader, InertialState, Trajectory, TrajectoryError, TrajectoryFormat,
+    TrajectoryLoader, TrajectoryPose, TumLoader, load_mav0_trajectory, load_trajectory,
+    load_trajectory_as,
+};
 
 /// Errors that can occur during graph file parsing
 #[derive(Error, Debug)]

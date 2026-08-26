@@ -137,15 +137,22 @@ impl AslReader {
 
         let mut cameras: Vec<CameraData> = Vec::new();
         let mut imu_measurements: Vec<ImuMeasurement> = Vec::new();
-        let mut ground_truth: Option<Vec<GroundTruthPose>> = None;
+        let mut ground_truth: Option<(GroundTruthSource, Vec<GroundTruthPose>)> = None;
 
         for result in results {
             match result? {
                 LoadedSensor::Camera(cam_data) => cameras.push(cam_data),
                 LoadedSensor::Imu(measurements) => imu_measurements = measurements,
-                LoadedSensor::GroundTruth(poses) => ground_truth = Some(poses),
+                LoadedSensor::GroundTruth(source, poses) => {
+                    // Prefer the richer source deterministically; `read_dir`
+                    // order must not decide which track a sequence reports.
+                    if ground_truth.as_ref().is_none_or(|(seen, _)| source > *seen) {
+                        ground_truth = Some((source, poses));
+                    }
+                }
             }
         }
+        let ground_truth = ground_truth.map(|(_, poses)| poses);
 
         cameras.sort_by_key(|c| c.index);
 
@@ -226,15 +233,38 @@ fn resolve_mav0(path: &Path) -> std::borrow::Cow<'_, Path> {
 // ---------------------------------------------------------------------------
 
 enum SensorEntry {
-    Camera { index: usize, path: PathBuf },
-    Imu { path: PathBuf },
-    GroundTruth { path: PathBuf },
+    Camera {
+        index: usize,
+        path: PathBuf,
+    },
+    Imu {
+        path: PathBuf,
+    },
+    GroundTruth {
+        source: GroundTruthSource,
+        path: PathBuf,
+    },
+}
+
+/// Which directory a ground-truth track came from.
+///
+/// A sequence can ship more than one — EuRoC's Vicon rooms carry both
+/// `state_groundtruth_estimate0` and, on some releases, `mocap0`. Ordering
+/// makes the winner deterministic rather than dependent on `read_dir` order,
+/// and the preference matches [`crate::trajectory::load_mav0_trajectory`] so
+/// the two entry points never disagree about the same directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum GroundTruthSource {
+    /// `mocap<N>/` — pose only.
+    Mocap,
+    /// `state_groundtruth_estimate<N>/` — pose plus velocity and biases.
+    StateEstimate,
 }
 
 enum LoadedSensor {
     Camera(CameraData),
     Imu(Vec<ImuMeasurement>),
-    GroundTruth(Vec<GroundTruthPose>),
+    GroundTruth(GroundTruthSource, Vec<GroundTruthPose>),
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +293,22 @@ fn discover_sensors(mav0: &Path) -> Result<Vec<SensorEntry>> {
             });
         } else if parse_sensor_index(&name, "mocap").is_some() {
             entries.push(SensorEntry::GroundTruth {
+                source: GroundTruthSource::Mocap,
+                path: dir_entry.path(),
+            });
+        } else if name == "state_groundtruth_estimate0"
+            || parse_sensor_index(&name, "state_groundtruth_estimate").is_some()
+        {
+            // EuRoC's ground truth. Without this arm it is silently skipped and
+            // every EuRoC sequence reports `ground_truth: None`.
+            //
+            // The match list stays exact on purpose. EuRoC's MH and V sequences
+            // also ship `leica0/`, which is **position only, 4 columns**; a
+            // generous "anything ground-truth-shaped" rule would feed it to the
+            // 8-column parser and turn `AslReader::load` on those sequences
+            // from working into a column-count error.
+            entries.push(SensorEntry::GroundTruth {
+                source: GroundTruthSource::StateEstimate,
                 path: dir_entry.path(),
             });
         }
@@ -302,10 +348,10 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
             let measurements = parse_imu_csv(&csv_path)?;
             Ok(LoadedSensor::Imu(measurements))
         }
-        SensorEntry::GroundTruth { path } => {
+        SensorEntry::GroundTruth { source, path } => {
             let csv_path = path.join("data.csv");
             let poses = parse_ground_truth_csv(&csv_path)?;
-            Ok(LoadedSensor::GroundTruth(poses))
+            Ok(LoadedSensor::GroundTruth(*source, poses))
         }
     }
 }
@@ -611,6 +657,71 @@ mod tests {
             .count();
         assert_eq!(cam_count, 2);
         assert_eq!(imu_count, 1);
+    }
+
+    /// A ground-truth row, w-first, 8 columns.
+    const GT_ROW: &str = "1000,1.0,2.0,3.0,1.0,0.0,0.0,0.0\n";
+
+    /// Build a sensor directory holding `data.csv`.
+    fn sensor_dir(root: &Path, name: &str, content: &str) -> PathBuf {
+        let dir = root.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_file(&dir, "data.csv", content);
+        dir
+    }
+
+    /// EuRoC ships `state_groundtruth_estimate0`, which went unmatched — so
+    /// every EuRoC sequence reported no ground truth at all.
+    #[test]
+    fn discover_sensors_finds_state_groundtruth_estimate0() {
+        let tmp = TempDir::new().unwrap();
+        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW);
+
+        let entries = discover_sensors(tmp.path()).unwrap();
+        assert!(
+            entries.iter().any(|e| matches!(
+                e,
+                SensorEntry::GroundTruth {
+                    source: GroundTruthSource::StateEstimate,
+                    ..
+                }
+            )),
+            "state_groundtruth_estimate0 must be discovered"
+        );
+    }
+
+    /// With both present the richer source must win, and must do so
+    /// deterministically rather than by `read_dir` order.
+    #[test]
+    fn discover_sensors_prefers_state_estimate_over_mocap() {
+        let tmp = TempDir::new().unwrap();
+        sensor_dir(tmp.path(), "mocap0", GT_ROW);
+        sensor_dir(tmp.path(), "state_groundtruth_estimate0", GT_ROW);
+        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n");
+
+        let dataset = AslReader::load(tmp.path()).unwrap();
+        assert!(dataset.has_ground_truth());
+        assert!(
+            GroundTruthSource::StateEstimate > GroundTruthSource::Mocap,
+            "the ordering that makes the merge deterministic must hold"
+        );
+    }
+
+    /// EuRoC MH and V sequences ship `leica0/`, which is **position only, 4
+    /// columns**. Matching it as ground truth would feed it to the 8-column
+    /// parser and turn `AslReader::load` on those sequences from working into a
+    /// column-count error. It must stay skipped.
+    #[test]
+    fn discover_sensors_ignores_leica0() {
+        let tmp = TempDir::new().unwrap();
+        sensor_dir(tmp.path(), "leica0", "1000,1.0,2.0,3.0\n");
+        sensor_dir(tmp.path(), "imu0", "1000,0,0,0,0,0,0\n");
+
+        let dataset = AslReader::load(tmp.path()).unwrap();
+        assert!(
+            !dataset.has_ground_truth(),
+            "leica0 is position-only and must not be read as ground truth"
+        );
     }
 
     #[test]

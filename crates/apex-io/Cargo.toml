@@ -59,6 +59,10 @@ path = "tests/rosbag_ros1_integration_tests.rs"
 name = "asl_integration_tests"
 path = "tests/asl_integration_tests.rs"
 
+[[test]]
+name = "trajectory_integration_tests"
+path = "tests/trajectory_integration_tests.rs"
+
 [dependencies]
 apex-manifolds.workspace = true
 nalgebra.workspace = true
