@@ -2,26 +2,29 @@
 //!
 //! ```text
 //! mocap0 (8):   ts_ns, p_x, p_y, p_z, q_w, q_x, q_y, q_z
-//! EuRoC (17):   ... then v_x, v_y, v_z, bw_x, bw_y, bw_z, ba_x, ba_y, ba_z
+//! EuRoC (17):   ... then v_x, v_y, v_z, b_w_x, b_w_y, b_w_z, b_a_x, b_a_y, b_a_z
 //! ```
 //!
 //! Both store the quaternion **w first**, and the timestamp as bare integer
 //! nanoseconds. The 17-column layout is EuRoC's `state_groundtruth_estimate0`;
 //! the 8-column one is TUM VI's `mocap0`.
 //!
-//! A row is accepted only at exactly one of those two widths. Reading the first
-//! eight fields of a wider row is precisely how the velocity and bias columns
-//! went unread for so long.
+//! The layout is pinned by the first data row and every following row must
+//! agree. Accepting a 9-column row by reading its first eight fields is exactly
+//! how the inertial columns went unnoticed for so long, and zero-filling the
+//! inertial columns of an 8-column row inside a 17-column file would claim
+//! measurements nobody made.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
+use apex_manifolds::so3::SO3;
 use nalgebra::Vector3;
 
-use super::error::{Result, TrajectoryError};
-use super::quaternion;
-use super::types::AslLayout;
-use super::{InertialState, Trajectory, TrajectoryLoader, TrajectoryPose};
+use super::super::trajectory::{
+    InertialState, Result, Trajectory, TrajectoryError, TrajectoryLoader, TrajectoryPose,
+    parse_field, parse_u64_field, read_file, write_file,
+};
 use crate::csv;
 
 /// The EuRoC schema line, reproduced so a written file is readable by kalibr,
@@ -35,16 +38,33 @@ b_a_RS_S_x [m s^-2],b_a_RS_S_y [m s^-2],b_a_RS_S_z [m s^-2]";
 /// The `mocap0` schema line.
 const MOCAP_HEADER: &str = "#timestamp [ns],p_RS_R_x [m],p_RS_R_y [m],p_RS_R_z [m],q_RS_w [],q_RS_x [],q_RS_y [],q_RS_z []";
 
+/// Which on-disk layout an ASL ground-truth track uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AslLayout {
+    /// EuRoC `state_groundtruth_estimate0`: 17 columns, pose plus velocity and
+    /// both biases.
+    Euroc17,
+    /// TUM VI `mocap0`: 8 columns, pose only.
+    Mocap8,
+}
+
+impl AslLayout {
+    /// Number of columns this layout occupies.
+    pub fn columns(self) -> usize {
+        match self {
+            Self::Euroc17 => 17,
+            Self::Mocap8 => 8,
+        }
+    }
+}
+
 /// Loader for ASL/EuRoC trajectory CSV.
 pub struct AslTrajectoryLoader;
 
 impl TrajectoryLoader for AslTrajectoryLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|source| TrajectoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let content = read_file(path)?;
         Self::parse(&content, path)
     }
 
@@ -63,95 +83,103 @@ impl TrajectoryLoader for AslTrajectoryLoader {
 impl AslTrajectoryLoader {
     /// Parse ASL CSV text. `path` labels errors only.
     ///
+    /// The layout is pinned by the first data row; a later row of a different
+    /// width is an error, never zero-filled.
+    ///
     /// # Errors
     ///
     /// See [`TrajectoryError`].
     pub fn parse(text: &str, path: &Path) -> Result<Trajectory> {
         let rows = csv::split_rows(text, Some(','));
         let mut poses = Vec::with_capacity(rows.len());
-        let mut inertial = Vec::with_capacity(rows.len());
-        let mut any_inertial = false;
+        // Layout is unknown until the first row is seen.
+        let mut pinned: Option<AslLayout> = None;
+        let mut inertial: Option<Vec<InertialState>> = None;
 
         for (index, row) in rows.iter().enumerate() {
             let line = index + 1;
+
             let layout = match row.len() {
-                17 => AslLayout::Euroc17,
-                8 => AslLayout::Mocap8,
+                got if got == AslLayout::Euroc17.columns() => AslLayout::Euroc17,
+                got if got == AslLayout::Mocap8.columns() => AslLayout::Mocap8,
                 got => {
                     return Err(TrajectoryError::UnexpectedColumnCount {
                         path: path.to_path_buf(),
                         line,
                         got,
-                        a: 17,
-                        b: 8,
+                        a: AslLayout::Euroc17.columns(),
+                        b: AslLayout::Mocap8.columns(),
                     });
                 }
             };
 
-            let field = |i: usize, name: &str| -> Result<f64> {
-                let raw = row.get(i).map(String::as_str).unwrap_or_default();
-                raw.parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| TrajectoryError::InvalidNumber {
-                        path: path.to_path_buf(),
-                        line,
-                        field: name.to_owned(),
-                        value: raw.to_owned(),
-                    })
-            };
+            // A later row disagreeing with the pinned layout is a mixed file:
+            // reject rather than zero-fill. `MissingColumns` keeps the message
+            // accurate — the row has the file's width, it does not have the
+            // width every row of this file must have.
+            if let Some(first) = pinned
+                && first != layout
+            {
+                return Err(TrajectoryError::MissingColumns {
+                    path: path.to_path_buf(),
+                    line,
+                    expected: first.columns(),
+                    got: layout.columns(),
+                });
+            }
+            pinned = Some(layout);
 
-            let raw_stamp = row.first().map(String::as_str).unwrap_or_default();
-            let timestamp_ns =
-                raw_stamp
-                    .parse::<u64>()
-                    .map_err(|_| TrajectoryError::InvalidNumber {
-                        path: path.to_path_buf(),
-                        line,
-                        field: "timestamp".to_owned(),
-                        value: raw_stamp.to_owned(),
-                    })?;
+            let timestamp_ns = parse_u64_field(row[0], "timestamp", path, line)?;
 
-            // w FIRST — see `quaternion`, the only module allowed to know this.
-            let orientation = quaternion::from_wxyz(
-                path,
-                line,
-                field(4, "q_w")?,
-                field(5, "q_x")?,
-                field(6, "q_y")?,
-                field(7, "q_z")?,
-            )?;
+            let qw = parse_field(row, 4, "q_w", path, line)?;
+            let qx = parse_field(row, 5, "q_x", path, line)?;
+            let qy = parse_field(row, 6, "q_y", path, line)?;
+            let qz = parse_field(row, 7, "q_z", path, line)?;
+            // ASL stores w FIRST.
+            let orientation = SO3::try_from_quaternion_wxyz(qw, qx, qy, qz).ok_or_else(|| {
+                TrajectoryError::InvalidQuaternion {
+                    path: path.to_path_buf(),
+                    line,
+                    norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
+                }
+            })?;
 
             poses.push(TrajectoryPose::new(
                 timestamp_ns,
-                Vector3::new(field(1, "p_x")?, field(2, "p_y")?, field(3, "p_z")?),
+                Vector3::new(
+                    parse_field(row, 1, "p_x", path, line)?,
+                    parse_field(row, 2, "p_y", path, line)?,
+                    parse_field(row, 3, "p_z", path, line)?,
+                ),
                 orientation,
             ));
 
             if layout == AslLayout::Euroc17 {
-                any_inertial = true;
-                inertial.push(InertialState {
-                    velocity: Vector3::new(field(8, "v_x")?, field(9, "v_y")?, field(10, "v_z")?),
-                    gyro_bias: Vector3::new(
-                        field(11, "b_w_x")?,
-                        field(12, "b_w_y")?,
-                        field(13, "b_w_z")?,
-                    ),
-                    accel_bias: Vector3::new(
-                        field(14, "b_a_x")?,
-                        field(15, "b_a_y")?,
-                        field(16, "b_a_z")?,
-                    ),
-                });
-            } else {
-                inertial.push(InertialState::default());
+                inertial
+                    .get_or_insert_with(|| Vec::with_capacity(rows.len()))
+                    .push(InertialState {
+                        velocity: Vector3::new(
+                            parse_field(row, 8, "v_x", path, line)?,
+                            parse_field(row, 9, "v_y", path, line)?,
+                            parse_field(row, 10, "v_z", path, line)?,
+                        ),
+                        gyro_bias: Vector3::new(
+                            parse_field(row, 11, "b_w_x", path, line)?,
+                            parse_field(row, 12, "b_w_y", path, line)?,
+                            parse_field(row, 13, "b_w_z", path, line)?,
+                        ),
+                        accel_bias: Vector3::new(
+                            parse_field(row, 14, "b_a_x", path, line)?,
+                            parse_field(row, 15, "b_a_y", path, line)?,
+                            parse_field(row, 16, "b_a_z", path, line)?,
+                        ),
+                    });
             }
         }
 
-        if any_inertial {
-            Trajectory::from_poses_and_inertial(poses, inertial)
-        } else {
-            Ok(Trajectory::from_poses(poses))
+        match inertial {
+            Some(states) => Trajectory::from_poses_and_inertial(poses, states),
+            None => Ok(Trajectory::from_poses(poses)),
         }
     }
 
@@ -169,10 +197,7 @@ impl AslTrajectoryLoader {
     ) -> Result<()> {
         let path = path.as_ref();
         let text = Self::render(trajectory, layout)?;
-        std::fs::write(path, text).map_err(|source| TrajectoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+        write_file(path, &text)
     }
 
     /// Render ASL CSV in the requested layout.
@@ -194,7 +219,8 @@ impl AslTrajectoryLoader {
 
         let inertial = trajectory.inertial();
         for (index, sample) in trajectory.poses().iter().enumerate() {
-            let [qw, qx, qy, qz] = quaternion::to_wxyz(&sample.orientation);
+            // ASL stores w FIRST — `coeffs` is [w, x, y, z].
+            let [qw, qx, qy, qz] = sample.orientation.coeffs();
             let p = sample.position;
             let _ = write!(
                 out,
@@ -221,7 +247,8 @@ impl AslTrajectoryLoader {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use nalgebra::UnitQuaternion;
+    use apex_manifolds::so3::SO3;
+    use std::path::Path;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -270,8 +297,7 @@ mod tests {
     /// field 4 (the first quaternion column) must be the large one.
     #[test]
     fn the_file_is_w_first() -> TestResult {
-        let axis = nalgebra::Unit::new_normalize(Vector3::x());
-        let q = UnitQuaternion::from_axis_angle(&axis, 0.2); // w ~ 0.995
+        let q = SO3::from_axis_angle(&Vector3::x(), 0.2); // w ~ 0.995
         let t = Trajectory::from_poses(vec![TrajectoryPose::new(0, Vector3::zeros(), q)]);
 
         let text = AslTrajectoryLoader::render(&t, AslLayout::Mocap8)?;
@@ -393,6 +419,53 @@ mod tests {
         let text = AslTrajectoryLoader::render(&t, AslLayout::Euroc17)?;
         let parsed = AslTrajectoryLoader::parse(&text, path())?;
         assert_eq!(parsed.poses()[0].timestamp_ns, 1_403_636_579_763_555_584);
+        Ok(())
+    }
+
+    /// A 17-column file where the second row arrives as 8 columns: the mixed
+    /// file must be refused, not zero-filled — the inertial columns of the
+    /// wide rows would otherwise pair with zeros nobody measured.
+    #[test]
+    fn a_mixed_layout_file_is_rejected() -> TestResult {
+        let text = "1000,1,2,3,1,0,0,0,4,5,6,7,8,9,10,11,12\n\
+                    2000,1,2,3,1,0,0,0\n";
+        let Err(TrajectoryError::MissingColumns { expected, got, .. }) =
+            AslTrajectoryLoader::parse(text, path())
+        else {
+            return Err("a mixed-layout file must be refused".into());
+        };
+        assert_eq!((expected, got), (17, 8));
+        Ok(())
+    }
+
+    /// The mirror case: an 8-column file with a 17-column interloper.
+    #[test]
+    fn a_mixed_layout_file_wide_row_is_rejected() -> TestResult {
+        let text = "1000,1,2,3,1,0,0,0\n\
+                    1000,1,2,3,1,0,0,0,4,5,6,7,8,9,10,11,12\n";
+        let Err(TrajectoryError::MissingColumns { expected, got, .. }) =
+            AslTrajectoryLoader::parse(text, path())
+        else {
+            return Err("a mixed-layout file must be refused".into());
+        };
+        assert_eq!((expected, got), (8, 17));
+        Ok(())
+    }
+
+    /// A 17-column file parsed with rows out of timestamp order keeps pose↔
+    /// inertial pairing through the sort — the parse-level twin of
+    /// `unsorted_input_keeps_poses_and_inertial_aligned`.
+    #[test]
+    fn unsorted_17_column_rows_keep_pose_and_inertial_paired() -> TestResult {
+        let text = "2000,2,0,0,1,0,0,0,20,0,0,200,0,0,0,0,0\n\
+                    1000,1,0,0,1,0,0,0,10,0,0,100,0,0,0,0,0\n";
+        let t = AslTrajectoryLoader::parse(text, path())?;
+        let states = t.inertial().ok_or("inertial must be present")?;
+
+        assert!((t.poses()[0].position.x - 1.0).abs() < 1e-12);
+        assert!((states[0].velocity.x - 10.0).abs() < 1e-12);
+        assert!((t.poses()[1].position.x - 2.0).abs() < 1e-12);
+        assert!((states[1].velocity.x - 20.0).abs() < 1e-12);
         Ok(())
     }
 }

@@ -1,7 +1,9 @@
 pub mod error;
+pub mod ground_truth;
 pub mod types;
 
 pub use error::{AslError, Result};
+pub use ground_truth::{AslLayout, AslTrajectoryLoader};
 pub use types::{AslDataset, CameraData, CameraFrame, GroundTruthPose, ImuMeasurement};
 
 /// Cursor-based streaming interface over one camera and the IMU in an ASL dataset.
@@ -114,9 +116,11 @@ impl AslStream {
     }
 }
 
-use nalgebra::{Quaternion, UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 use rayon::prelude::*;
 use std::path::{Path, PathBuf};
+
+use crate::trajectory::{Trajectory, TrajectoryLoader};
 
 pub struct AslReader;
 
@@ -226,6 +230,34 @@ fn resolve_mav0(path: &Path) -> std::borrow::Cow<'_, Path> {
     } else {
         std::borrow::Cow::Borrowed(path)
     }
+}
+
+/// Locate and load whichever ground truth a `mav0` directory ships.
+///
+/// Prefers `state_groundtruth_estimate0/data.csv` (17 columns, with velocity
+/// and biases) over `mocap0/data.csv` (8 columns). Accepts either the dataset
+/// root or the `mav0` directory itself. This preference must match
+/// [`AslReader`]'s, which orders its `GroundTruthSource` for the same reason.
+///
+/// # Returns
+///
+/// `Ok(None)` when the sequence ships neither. A file that exists but is
+/// malformed is an error, never a silent `None`.
+///
+/// # Errors
+///
+/// Whatever [`AslTrajectoryLoader`] raises on a malformed file.
+pub fn load_mav0_trajectory<P: AsRef<Path>>(mav0: P) -> Result<Option<Trajectory>> {
+    let base = resolve_mav0(mav0.as_ref());
+    for sensor in ["state_groundtruth_estimate0", "mocap0"] {
+        let candidate = base.join(sensor).join("data.csv");
+        if candidate.is_file() {
+            return AslTrajectoryLoader::load(&candidate)
+                .map(Some)
+                .map_err(AslError::GroundTruth);
+        }
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------
@@ -350,8 +382,11 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
         }
         SensorEntry::GroundTruth { source, path } => {
             let csv_path = path.join("data.csv");
-            let poses = parse_ground_truth_csv(&csv_path)?;
-            Ok(LoadedSensor::GroundTruth(*source, poses))
+            let trajectory = AslTrajectoryLoader::load(&csv_path).map_err(AslError::GroundTruth)?;
+            Ok(LoadedSensor::GroundTruth(
+                *source,
+                trajectory.poses().to_vec(),
+            ))
         }
     }
 }
@@ -359,23 +394,6 @@ fn load_sensor(entry: &SensorEntry) -> Result<LoadedSensor> {
 // ---------------------------------------------------------------------------
 // Shared CSV helper
 // ---------------------------------------------------------------------------
-
-fn parse_csv_rows(path: &Path) -> Result<Vec<Vec<String>>> {
-    let content = std::fs::read_to_string(path)?;
-    let rows = content
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            !trimmed.is_empty() && !trimmed.starts_with('#')
-        })
-        .map(|line| {
-            line.split(',')
-                .map(|field| field.trim().to_owned())
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    Ok(rows)
-}
 
 fn parse_f64(path: &Path, line: usize, field: &str, value: &str) -> Result<f64> {
     value.parse::<f64>().map_err(|_| AslError::InvalidNumber {
@@ -400,7 +418,8 @@ fn parse_u64(path: &Path, line: usize, field: &str, value: &str) -> Result<u64> 
 // ---------------------------------------------------------------------------
 
 fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
-    let rows = parse_csv_rows(csv_path)?;
+    let content = std::fs::read_to_string(csv_path)?;
+    let rows = crate::csv::split_rows(&content, Some(','));
     let mut measurements = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
@@ -413,13 +432,13 @@ fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
                 got: fields.len(),
             });
         }
-        let timestamp_ns = parse_u64(csv_path, line, "timestamp", &fields[0])?;
-        let wx = parse_f64(csv_path, line, "wx", &fields[1])?;
-        let wy = parse_f64(csv_path, line, "wy", &fields[2])?;
-        let wz = parse_f64(csv_path, line, "wz", &fields[3])?;
-        let ax = parse_f64(csv_path, line, "ax", &fields[4])?;
-        let ay = parse_f64(csv_path, line, "ay", &fields[5])?;
-        let az = parse_f64(csv_path, line, "az", &fields[6])?;
+        let timestamp_ns = parse_u64(csv_path, line, "timestamp", fields[0])?;
+        let wx = parse_f64(csv_path, line, "wx", fields[1])?;
+        let wy = parse_f64(csv_path, line, "wy", fields[2])?;
+        let wz = parse_f64(csv_path, line, "wz", fields[3])?;
+        let ax = parse_f64(csv_path, line, "ax", fields[4])?;
+        let ay = parse_f64(csv_path, line, "ay", fields[5])?;
+        let az = parse_f64(csv_path, line, "az", fields[6])?;
 
         measurements.push(ImuMeasurement {
             timestamp_ns,
@@ -432,7 +451,8 @@ fn parse_imu_csv(csv_path: &Path) -> Result<Vec<ImuMeasurement>> {
 }
 
 fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>> {
-    let rows = parse_csv_rows(csv_path)?;
+    let content = std::fs::read_to_string(csv_path)?;
+    let rows = crate::csv::split_rows(&content, Some(','));
     let mut frames = Vec::with_capacity(rows.len());
 
     for (row_idx, fields) in rows.iter().enumerate() {
@@ -445,8 +465,8 @@ fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>
                 got: fields.len(),
             });
         }
-        let timestamp_ns = parse_u64(csv_path, line, "timestamp", &fields[0])?;
-        let image_path = data_dir.join(&fields[1]);
+        let timestamp_ns = parse_u64(csv_path, line, "timestamp", fields[0])?;
+        let image_path = data_dir.join(fields[1]);
 
         frames.push(CameraFrame {
             timestamp_ns,
@@ -455,50 +475,6 @@ fn parse_camera_csv(csv_path: &Path, data_dir: &Path) -> Result<Vec<CameraFrame>
     }
 
     Ok(frames)
-}
-
-fn parse_ground_truth_csv(csv_path: &Path) -> Result<Vec<GroundTruthPose>> {
-    let rows = parse_csv_rows(csv_path)?;
-    let mut poses = Vec::with_capacity(rows.len());
-
-    for (row_idx, fields) in rows.iter().enumerate() {
-        let line = row_idx + 1;
-        if fields.len() < 8 {
-            return Err(AslError::MissingCsvColumns {
-                path: csv_path.to_path_buf(),
-                line,
-                expected: 8,
-                got: fields.len(),
-            });
-        }
-        let timestamp_ns = parse_u64(csv_path, line, "timestamp", &fields[0])?;
-        let px = parse_f64(csv_path, line, "px", &fields[1])?;
-        let py = parse_f64(csv_path, line, "py", &fields[2])?;
-        let pz = parse_f64(csv_path, line, "pz", &fields[3])?;
-        let qw = parse_f64(csv_path, line, "qw", &fields[4])?;
-        let qx = parse_f64(csv_path, line, "qx", &fields[5])?;
-        let qy = parse_f64(csv_path, line, "qy", &fields[6])?;
-        let qz = parse_f64(csv_path, line, "qz", &fields[7])?;
-
-        // nalgebra::Quaternion::new(w, i, j, k)
-        let q = Quaternion::new(qw, qx, qy, qz);
-        let norm = q.norm();
-        if (norm - 1.0).abs() > 0.01 {
-            return Err(AslError::InvalidQuaternion {
-                path: csv_path.to_path_buf(),
-                line,
-                norm,
-            });
-        }
-
-        poses.push(GroundTruthPose {
-            timestamp_ns,
-            position: Vector3::new(px, py, pz),
-            orientation: UnitQuaternion::from_quaternion(q.normalize()),
-        });
-    }
-
-    Ok(poses)
 }
 
 // ---------------------------------------------------------------------------
@@ -612,29 +588,16 @@ mod tests {
 
     // --- Ground truth CSV ---
 
+    /// Ground-truth parsing is delegated to `AslTrajectoryLoader`; a malformed
+    /// file must surface as an error, not a silently empty track.
     #[test]
-    fn parse_ground_truth_valid() {
+    fn ground_truth_parse_errors_surface() {
         let tmp = TempDir::new().unwrap();
-        let csv = write_file(
-            tmp.path(),
-            "data.csv",
-            "#timestamp,px,py,pz,qw,qx,qy,qz\n\
-             100,1.0,2.0,3.0,1.0,0.0,0.0,0.0\n",
-        );
-        let poses = parse_ground_truth_csv(&csv).unwrap();
-        assert_eq!(poses.len(), 1);
-        assert_eq!(poses[0].timestamp_ns, 100);
-        assert!((poses[0].position.x - 1.0).abs() < 1e-10);
-        // identity quaternion
-        assert!((poses[0].orientation.quaternion().w - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn parse_ground_truth_invalid_quaternion_returns_error() {
-        let tmp = TempDir::new().unwrap();
-        let csv = write_file(tmp.path(), "data.csv", "100,0.0,0.0,0.0,0.1,0.0,0.0,0.0\n");
-        let result = parse_ground_truth_csv(&csv);
-        assert!(matches!(result, Err(AslError::InvalidQuaternion { .. })));
+        let dir = sensor_dir(tmp.path(), "mocap0", "1000,1,2\n");
+        use crate::trajectory::TrajectoryLoader as _;
+        let result = AslTrajectoryLoader::load(dir.join("data.csv"));
+        assert!(result.is_err(), "a 3-column GT row must be refused");
+        let _ = dir;
     }
 
     // --- Sensor discovery ---
