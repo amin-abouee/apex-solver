@@ -5,6 +5,9 @@
 //! embedded separators and no escapes, so splitting on the separator is both
 //! sufficient and faster than a general reader. Pulling in a full CSV crate
 //! would buy nothing these formats can use.
+//!
+//! Rows borrow from `content`: a large EuRoC ground-truth file parses without
+//! allocating a string per field.
 
 /// Split `content` into rows of trimmed fields, skipping blank and `#` lines.
 ///
@@ -16,7 +19,7 @@
 ///
 /// * `content` — the whole file.
 /// * `separator` — `,` for ASL CSV, whitespace-splitting when `None` (TUM).
-pub(crate) fn split_rows(content: &str, separator: Option<char>) -> Vec<Vec<String>> {
+pub(crate) fn split_rows(content: &str, separator: Option<char>) -> Vec<Vec<&str>> {
     content
         .lines()
         .filter(|line| {
@@ -24,14 +27,8 @@ pub(crate) fn split_rows(content: &str, separator: Option<char>) -> Vec<Vec<Stri
             !trimmed.is_empty() && !trimmed.starts_with('#')
         })
         .map(|line| match separator {
-            Some(sep) => line
-                .split(sep)
-                .map(|field| field.trim().to_owned())
-                .collect(),
-            None => line
-                .split_whitespace()
-                .map(|field| field.to_owned())
-                .collect(),
+            Some(sep) => line.split(sep).map(str::trim).collect(),
+            None => line.split_whitespace().collect(),
         })
         .collect()
 }
@@ -67,5 +64,14 @@ mod tests {
     fn a_hash_after_the_first_column_is_not_a_comment() {
         let rows = split_rows("1,2#3\n", Some(','));
         assert_eq!(rows, vec![vec!["1", "2#3"]]);
+    }
+
+    /// Rows borrow from the input: parsing a large file must not allocate a
+    /// string per field.
+    #[test]
+    fn rows_borrow_from_the_input() {
+        let content = String::from("1,2,3\n");
+        let rows = split_rows(&content, Some(','));
+        assert_eq!(rows[0][0].as_ptr(), content.as_ptr());
     }
 }
