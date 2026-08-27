@@ -8,12 +8,13 @@
 
 use std::path::Path;
 
+use apex_io::asl::{AslLayout, AslTrajectoryLoader, load_mav0_trajectory};
 use apex_io::trajectory::{
-    AslLayout, AslTrajectoryLoader, Trajectory, TrajectoryError, TrajectoryFormat,
-    TrajectoryLoader, TrajectoryPose, TumLoader, load_mav0_trajectory, load_trajectory,
-    load_trajectory_as,
+    Trajectory, TrajectoryError, TrajectoryFormat, TrajectoryLoader, TrajectoryPose, TumLoader,
+    load_trajectory, load_trajectory_as,
 };
-use nalgebra::{UnitQuaternion, Vector3};
+use apex_manifolds::so3::SO3;
+use nalgebra::Vector3;
 use tempfile::TempDir;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -33,9 +34,9 @@ macro_rules! require_dataset {
 
 /// A rotation with four distinct components of different magnitude, so any
 /// permutation of the quaternion fields is detectable.
-fn asymmetric_rotation() -> UnitQuaternion<f64> {
-    let axis = nalgebra::Unit::new_normalize(Vector3::new(0.3, 0.7, 0.1));
-    UnitQuaternion::from_axis_angle(&axis, 0.7)
+fn asymmetric_rotation() -> SO3 {
+    let axis = Vector3::new(0.3, 0.7, 0.1);
+    SO3::from_axis_angle(&axis, 0.7)
 }
 
 fn sample_trajectory() -> Trajectory {
@@ -48,7 +49,7 @@ fn sample_trajectory() -> Trajectory {
         TrajectoryPose::new(
             1_403_636_579_813_555_584,
             Vector3::new(1.5, -2.5, 3.5),
-            UnitQuaternion::identity(),
+            SO3::identity(),
         ),
     ])
 }
@@ -74,7 +75,7 @@ fn cross_format_round_trip_preserves_rotation() -> TestResult {
 
     assert_eq!(via_tum.len(), via_asl.len());
     for (a, b) in via_tum.poses().iter().zip(via_asl.poses().iter()) {
-        let angle = a.orientation.angle_to(&b.orientation);
+        let angle = a.orientation.distance(&b.orientation);
         assert!(
             angle < 1e-8,
             "the two codecs disagree by {angle:e} rad — one of them has its \
