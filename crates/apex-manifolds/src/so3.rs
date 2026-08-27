@@ -44,7 +44,7 @@ use std::{
 /// Stored as a flat `SVector<f64, 4>` = [qw, qx, qy, qz] for contiguous memory
 /// compatible with zero-copy faer views. UnitQuaternion is constructed on-the-fly
 /// for math operations.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SO3 {
     /// Flat parameter storage: [qw, qx, qy, qz]
     params: SVector<f64, 4>,
@@ -115,27 +115,11 @@ impl SO3 {
         }
     }
 
-    /// Create SO(3) from quaternion coefficients in G2O convention `[x, y, z, w]`.
-    ///
-    /// This parameter order matches the G2O file format where quaternion components
-    /// are stored as `(qx, qy, qz, qw)`. For nalgebra's `(w, x, y, z)` convention,
-    /// use [`from_quaternion_wxyz()`](Self::from_quaternion_wxyz).
-    ///
-    /// # Arguments
-    /// * `x` - i component of quaternion
-    /// * `y` - j component of quaternion
-    /// * `z` - k component of quaternion
-    /// * `w` - w (real) component of quaternion
-    pub fn from_quaternion_coeffs(x: f64, y: f64, z: f64, w: f64) -> Self {
-        let q = UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z));
-        Self::from_unit_quaternion(q)
-    }
-
     /// Create SO(3) from quaternion coefficients in nalgebra convention `[w, x, y, z]`.
     ///
-    /// This parameter order matches nalgebra's `Quaternion::new(w, x, y, z)`.
-    /// For G2O file format order `(qx, qy, qz, qw)`, use
-    /// [`from_quaternion_coeffs()`](Self::from_quaternion_coeffs).
+    /// This parameter order matches nalgebra's `Quaternion::new(w, x, y, z)` and
+    /// the checked [`try_from_quaternion_wxyz`](Self::try_from_quaternion_wxyz).
+    /// For G2O file format order `(qx, qy, qz, qw)`, reorder at the call site.
     ///
     /// # Arguments
     /// * `w` - w (real) component of quaternion
@@ -145,6 +129,29 @@ impl SO3 {
     pub fn from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> Self {
         let q = UnitQuaternion::from_quaternion(Quaternion::new(w, x, y, z));
         Self::from_unit_quaternion(q)
+    }
+
+    /// Accepted deviation from unit norm in [`Self::try_from_quaternion_wxyz`].
+    pub const QUATERNION_NORM_TOLERANCE: f64 = 1e-6;
+
+    /// Create SO(3) from `[w, x, y, z]`, refusing a non-unit or non-finite input.
+    ///
+    /// Returns `None` instead of silently normalising: a quaternion far from
+    /// unit norm means the columns were read in the wrong order or the data is
+    /// corrupt, and repairing it hides both. For unchecked input use
+    /// [`Self::from_quaternion_wxyz`], which normalises.
+    ///
+    /// # Arguments
+    /// * `w` - w (real) component of quaternion
+    /// * `x` - i component of quaternion
+    /// * `y` - j component of quaternion
+    /// * `z` - k component of quaternion
+    pub fn try_from_quaternion_wxyz(w: f64, x: f64, y: f64, z: f64) -> Option<Self> {
+        let norm = (w * w + x * x + y * y + z * z).sqrt();
+        if !norm.is_finite() || (norm - 1.0).abs() > Self::QUATERNION_NORM_TOLERANCE {
+            return None;
+        }
+        Some(Self::from_quaternion_wxyz(w, x, y, z))
     }
 
     /// Create SO(3) from Euler angles (roll, pitch, yaw).
@@ -249,6 +256,15 @@ impl SO3 {
     /// of the relative rotation between the two elements.
     pub fn distance(&self, other: &Self) -> f64 {
         self.between(other, None, None).log(None).angle()
+    }
+
+    /// Spherical linear interpolation between two rotations.
+    ///
+    /// `t = 0` yields `self`, `t = 1` yields `other`. Takes the short arc:
+    /// componentwise interpolation of unit quaternions cannot produce a
+    /// mid-rotation for a 180° turn, and this can.
+    pub fn slerp(&self, other: &Self, t: f64) -> Self {
+        Self::from_quaternion(self.quaternion().slerp(&other.quaternion(), t))
     }
 }
 
@@ -789,7 +805,7 @@ mod tests {
 
     #[test]
     fn test_so3_constructor_datatype() {
-        let so3 = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
+        let so3 = SO3::from_quaternion_wxyz(1.0, 0.0, 0.0, 0.0);
         assert_eq!(0.0, so3.x());
         assert_eq!(0.0, so3.y());
         assert_eq!(0.0, so3.z());
@@ -827,7 +843,7 @@ mod tests {
     #[test]
     fn test_so3_coeffs() {
         // Create from normalized coefficients
-        let so3 = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
+        let so3 = SO3::from_quaternion_wxyz(1.0, 0.0, 0.0, 0.0);
         let coeffs = so3.coeffs();
         assert!((coeffs[0] - 1.0).abs() < TOLERANCE); // w
         assert!((coeffs[1] - 0.0).abs() < TOLERANCE); // x
@@ -835,7 +851,7 @@ mod tests {
         assert!((coeffs[3] - 0.0).abs() < TOLERANCE); // z
 
         // Test with non-normalized input - should get normalized output
-        let so3 = SO3::from_quaternion_coeffs(0.1, 0.2, 0.3, 0.4);
+        let so3 = SO3::from_quaternion_wxyz(0.4, 0.1, 0.2, 0.3);
         let coeffs = so3.coeffs();
         let original_quat = Quaternion::new(0.4, 0.1, 0.2, 0.3);
         let normalized_quat = original_quat.normalize();
@@ -1121,7 +1137,7 @@ mod tests {
 
     #[test]
     fn test_so3_normalize() {
-        let mut so3 = SO3::from_quaternion_coeffs(0.5, 0.5, 0.5, 0.5);
+        let mut so3 = SO3::from_quaternion_wxyz(0.5, 0.5, 0.5, 0.5);
         so3.normalize();
         assert!(so3.is_valid(TOLERANCE));
     }
@@ -1189,7 +1205,7 @@ mod tests {
 
     #[test]
     fn test_so3_from_components() {
-        let so3 = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
+        let so3 = SO3::from_quaternion_wxyz(1.0, 0.0, 0.0, 0.0);
         assert_eq!(so3.x(), 0.0);
         assert_eq!(so3.y(), 0.0);
         assert_eq!(so3.z(), 0.0);
@@ -1551,15 +1567,15 @@ mod tests {
 
     #[test]
     fn test_so3_from_quaternion_wxyz() {
-        // Identity quaternion: w=1, x=y=z=0
-        let so3_wxyz = SO3::from_quaternion_wxyz(1.0, 0.0, 0.0, 0.0);
-        let so3_xyzw = SO3::from_quaternion_coeffs(0.0, 0.0, 0.0, 1.0);
-        assert!(so3_wxyz.is_approx(&so3_xyzw, 1e-12));
-
-        // Non-trivial quaternion: verify swapped argument order gives same result
-        let so3_wxyz = SO3::from_quaternion_wxyz(0.4, 0.1, 0.2, 0.3);
-        let so3_xyzw = SO3::from_quaternion_coeffs(0.1, 0.2, 0.3, 0.4);
-        assert!(so3_wxyz.is_approx(&so3_xyzw, 1e-12));
+        // Unit-norm input with four distinct components, so each argument can
+        // be traced to the component its name says and a swap would be
+        // measurable. (144, 96, 72, 83) has norm exactly 205.
+        let (w, x, y, z) = (144. / 205., 96. / 205., 72. / 205., 83. / 205.);
+        let so3 = SO3::from_quaternion_wxyz(w, x, y, z);
+        assert_eq!(so3.w(), w);
+        assert_eq!(so3.x(), x);
+        assert_eq!(so3.y(), y);
+        assert_eq!(so3.z(), z);
     }
 
     #[test]
@@ -1809,5 +1825,65 @@ mod tests {
         let slice_expected = so3_expected.as_param_slice();
         let so3_actual = SO3::from_param_slice(slice_expected);
         assert!(so3_expected.is_approx(&so3_actual, 1e-14));
+    }
+
+    /// Halfway between identity and a 180° turn is 90°; a componentwise lerp
+    /// cannot produce it, so this pins slerp to the geodesic.
+    #[test]
+    fn slerp_halfway_between_identity_and_half_turn_is_quarter_turn() {
+        let half_turn = SO3::from_axis_angle(&Vector3::x(), std::f64::consts::PI);
+        let mid = SO3::identity().slerp(&half_turn, 0.5);
+        let quarter = SO3::from_axis_angle(&Vector3::x(), std::f64::consts::FRAC_PI_2);
+        assert!(mid.distance(&quarter) < 1e-12);
+    }
+
+    /// Checked constructor: a norm slightly inside the tolerance is accepted
+    /// (and stored normalised, like every other constructor).
+    #[test]
+    fn try_from_quaternion_wxyz_accepts_a_near_unit_norm() {
+        // Norm 1 + 5e-7, inside the 1e-6 tolerance.
+        let scale = (1.0f64 + 5e-7).sqrt();
+        let q = match SO3::try_from_quaternion_wxyz(scale, 0.0, 0.0, 0.0) {
+            Some(q) => q,
+            None => panic!("a norm within tolerance must be accepted"),
+        };
+        assert!((q.w() - 1.0).abs() < 1e-9);
+    }
+
+    /// Checked constructor: a far-from-unit quaternion is refused, not
+    /// silently normalised — a wrong column order looks exactly like this.
+    #[test]
+    fn try_from_quaternion_wxyz_rejects_a_non_unit_norm() {
+        assert!(SO3::try_from_quaternion_wxyz(2.0, 0.0, 0.0, 0.0).is_none());
+        assert!(SO3::try_from_quaternion_wxyz(0.0, 0.0, 0.0, 0.0).is_none());
+    }
+
+    /// Checked constructor: a non-finite component is refused.
+    #[test]
+    fn try_from_quaternion_wxyz_rejects_a_non_finite_component() {
+        assert!(SO3::try_from_quaternion_wxyz(f64::NAN, 0.0, 0.0, 0.0).is_none());
+        assert!(SO3::try_from_quaternion_wxyz(f64::INFINITY, 0.0, 0.0, 0.0).is_none());
+    }
+
+    /// Checked and unchecked constructors agree on valid input.
+    #[test]
+    fn try_from_quaternion_wxyz_matches_the_unchecked_constructor() {
+        let q = match SO3::try_from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.)
+        {
+            Some(q) => q,
+            None => panic!("a unit-norm quaternion must be accepted"),
+        };
+        assert!(q.is_approx(
+            &SO3::from_quaternion_wxyz(144. / 205., 96. / 205., 72. / 205., 83. / 205.),
+            1e-15
+        ));
+    }
+
+    #[test]
+    fn slerp_endpoints_return_the_operands() {
+        let a = SO3::from_euler_angles(0.1, 0.2, 0.3);
+        let b = SO3::from_euler_angles(0.4, 0.5, 0.6);
+        assert!(a.slerp(&b, 0.0).distance(&a) < 1e-12);
+        assert!(a.slerp(&b, 1.0).distance(&b) < 1e-12);
     }
 }
