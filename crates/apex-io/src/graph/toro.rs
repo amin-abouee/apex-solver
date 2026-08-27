@@ -1,4 +1,4 @@
-use crate::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
+use super::{EdgeSE2, Graph, GraphLoader, IoError, VertexSE2};
 use std::{fs, io::Write, path::Path};
 
 /// TORO format loader
@@ -248,7 +248,7 @@ impl ToroLoader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{EdgeSE3, VertexSE3};
+    use crate::graph::{EdgeSE3, VertexSE3};
     use nalgebra::{Matrix3, UnitQuaternion, Vector3};
     use std::io::Write;
     use tempfile::NamedTempFile;
