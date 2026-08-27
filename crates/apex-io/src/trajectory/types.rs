@@ -2,24 +2,24 @@
 
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
-use nalgebra::{UnitQuaternion, Vector3};
+use nalgebra::Vector3;
 
-/// Nanoseconds in one second.
+/// Nanoseconds in one second, for `f64` conversion paths.
 pub(crate) const NANOS_PER_SECOND: f64 = 1e9;
+
+/// Nanoseconds in one second, for exact integer paths.
+pub(crate) const NANOS_PER_SEC: u64 = 1_000_000_000;
 
 /// One pose sample from a trajectory file.
 ///
 /// Position and orientation are stored separately rather than as an [`SE3`],
-/// for three reasons:
+/// for two reasons:
 ///
 /// 1. `SE3` derives neither `Debug` nor `Default`, so a sample holding one
 ///    could not `#[derive(Debug)]`, and nor could any consumer struct
 ///    embedding a sample — a failing assert would print nothing.
-/// 2. `SE3::from_translation_quaternion` normalises its input. Building a
-///    sample through `SE3` would silently repair exactly the malformed
+/// 2. Building through `SE3` would silently repair exactly the malformed
 ///    quaternions these readers exist to reject.
-/// 3. It is field-for-field identical to [`crate::asl::GroundTruthPose`],
-///    making the bridge to the dataset reader a copy rather than a conversion.
 ///
 /// `SE3` is available at the boundary through [`Self::se3`] and
 /// [`Self::from_se3`] — free for consumers that want it, mandatory for none.
@@ -30,16 +30,12 @@ pub struct TrajectoryPose {
     /// Body position in the world frame \[m\].
     pub position: Vector3<f64>,
     /// Body orientation in the world frame.
-    pub orientation: UnitQuaternion<f64>,
+    pub orientation: SO3,
 }
 
 impl TrajectoryPose {
     /// Build a sample from its parts.
-    pub fn new(
-        timestamp_ns: u64,
-        position: Vector3<f64>,
-        orientation: UnitQuaternion<f64>,
-    ) -> Self {
+    pub fn new(timestamp_ns: u64, position: Vector3<f64>, orientation: SO3) -> Self {
         Self {
             timestamp_ns,
             position,
@@ -52,13 +48,13 @@ impl TrajectoryPose {
         Self {
             timestamp_ns,
             position: pose.translation(),
-            orientation: pose.rotation_quaternion(),
+            orientation: pose.rotation_so3(),
         }
     }
 
     /// This sample as an [`SE3`].
     pub fn se3(&self) -> SE3 {
-        SE3::from_translation_so3(self.position, SO3::new(self.orientation))
+        SE3::from_translation_so3(self.position, self.orientation.clone())
     }
 
     /// Timestamp in seconds.
@@ -83,31 +79,11 @@ pub struct InertialState {
     pub accel_bias: Vector3<f64>,
 }
 
-/// Which on-disk layout an ASL trajectory uses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AslLayout {
-    /// EuRoC `state_groundtruth_estimate0`: 17 columns, pose plus velocity and
-    /// both biases.
-    Euroc17,
-    /// TUM VI `mocap0`: 8 columns, pose only.
-    Mocap8,
-}
-
-impl AslLayout {
-    /// Number of columns this layout occupies.
-    pub fn columns(self) -> usize {
-        match self {
-            Self::Euroc17 => 17,
-            Self::Mocap8 => 8,
-        }
-    }
-}
-
 /// Which file format a trajectory is stored in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrajectoryFormat {
     /// TUM: whitespace-separated, `timestamp tx ty tz qx qy qz qw`.
     Tum,
-    /// ASL/EuRoC CSV, either layout of [`AslLayout`].
+    /// ASL/EuRoC CSV, either layout of [`AslLayout`](crate::asl::AslLayout).
     Asl,
 }

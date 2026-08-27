@@ -1,16 +1,17 @@
-//! Trajectory reading and writing: TUM and ASL/EuRoC.
+//! Trajectory reading and writing: TUM and the ASL pose CSV (via [`crate::asl`]).
 //!
 //! | Loader | Format | Quaternion | Separator |
 //! |---|---|---|---|
 //! | [`TumLoader`] | `timestamp tx ty tz qx qy qz qw` | **w last** | whitespace |
-//! | [`AslTrajectoryLoader`] | EuRoC 17-column or `mocap0` 8-column CSV | **w first** | `,` |
+//! | [`crate::asl::AslTrajectoryLoader`] | EuRoC 17-column or `mocap0` 8-column CSV | **w first** | `,` |
 //!
 //! One implementation shared by every consumer of this crate, replacing the
 //! per-project trajectory readers that had drifted apart.
 //!
 //! # Timestamps are `u64` nanoseconds
 //!
-//! Matching [`crate::asl`], and matching what both ASL layouts store on disk.
+//! Matching the ASL dataset reader, and matching what both ASL layouts store
+//! on disk.
 //! `f64` seconds is a *presentation* format belonging to the TUM codec, which
 //! is the only place in this module that converts. That matters: near epoch
 //! magnitudes (~1.4e9 s) an `f64` second has an ulp of about **476 ns**, so a
@@ -24,9 +25,7 @@
 //! orientation *of* the body *in* the world. Neither file says which body frame
 //! or which world; that is the dataset's business, not this module's.
 
-pub mod asl;
 pub mod error;
-pub mod quaternion;
 pub mod tum;
 pub mod types;
 
@@ -35,10 +34,9 @@ use std::path::Path;
 use apex_manifolds::se3::SE3;
 use nalgebra::Vector3;
 
-pub use asl::AslTrajectoryLoader;
 pub use error::{Result, TrajectoryError};
 pub use tum::TumLoader;
-pub use types::{AslLayout, InertialState, TrajectoryFormat, TrajectoryPose};
+pub use types::{InertialState, TrajectoryFormat, TrajectoryPose};
 
 use types::NANOS_PER_SECOND;
 
@@ -120,16 +118,10 @@ impl Trajectory {
         }
 
         let mut order: Vec<usize> = (0..poses.len()).collect();
-        order.sort_by_key(|&i| poses.get(i).map(|p| p.timestamp_ns).unwrap_or(0));
+        order.sort_by_key(|&i| poses[i].timestamp_ns);
 
-        let sorted_poses = order
-            .iter()
-            .filter_map(|&i| poses.get(i).cloned())
-            .collect();
-        let sorted_inertial = order
-            .iter()
-            .filter_map(|&i| inertial.get(i).cloned())
-            .collect();
+        let sorted_poses = order.iter().map(|&i| poses[i].clone()).collect();
+        let sorted_inertial = order.iter().map(|&i| inertial[i].clone()).collect();
 
         Ok(Self {
             poses: sorted_poses,
@@ -344,32 +336,66 @@ impl Trajectory {
 }
 
 // ---------------------------------------------------------------------------
-// Bridge to the ASL dataset reader's legacy pose type
+// Shared parsing and IO helpers for the trajectory codecs
+// ---------------------------------------------------------------------------
+
+/// Read a trajectory file into memory, mapping failure to [`TrajectoryError::Io`].
+pub(crate) fn read_file(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).map_err(|source| TrajectoryError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Write trajectory text to `path`, mapping failure to [`TrajectoryError::Io`].
+pub(crate) fn write_file(path: &Path, text: &str) -> Result<()> {
+    std::fs::write(path, text).map_err(|source| TrajectoryError::Io {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Parse row field `index` as a finite `f64`, named for error messages.
+pub(crate) fn parse_field(
+    row: &[&str],
+    index: usize,
+    name: &str,
+    path: &Path,
+    line: usize,
+) -> Result<f64> {
+    let raw = row.get(index).copied().unwrap_or_default();
+    raw.parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .ok_or_else(|| TrajectoryError::InvalidNumber {
+            path: path.to_path_buf(),
+            line,
+            field: name.to_owned(),
+            value: raw.to_owned(),
+        })
+}
+
+/// Parse row field `index` as a `u64`, named for error messages.
+///
+/// ASL timestamps are integer nanoseconds, so a fractional stamp is refused
+/// rather than silently rounded.
+pub(crate) fn parse_u64_field(raw: &str, name: &str, path: &Path, line: usize) -> Result<u64> {
+    raw.parse::<u64>()
+        .map_err(|_| TrajectoryError::InvalidNumber {
+            path: path.to_path_buf(),
+            line,
+            field: name.to_owned(),
+            value: raw.to_owned(),
+        })
+}
+
+// ---------------------------------------------------------------------------
+// Bridge to the ASL dataset reader's pose type
 // ---------------------------------------------------------------------------
 
 impl From<&[crate::asl::GroundTruthPose]> for Trajectory {
     fn from(poses: &[crate::asl::GroundTruthPose]) -> Self {
-        Self::from_poses(
-            poses
-                .iter()
-                .map(|p| TrajectoryPose::new(p.timestamp_ns, p.position, p.orientation))
-                .collect(),
-        )
-    }
-}
-
-impl Trajectory {
-    /// Project to the dataset reader's pose-only type, dropping any inertial
-    /// columns.
-    pub fn to_ground_truth_poses(&self) -> Vec<crate::asl::GroundTruthPose> {
-        self.poses
-            .iter()
-            .map(|p| crate::asl::GroundTruthPose {
-                timestamp_ns: p.timestamp_ns,
-                position: p.position,
-                orientation: p.orientation,
-            })
-            .collect()
+        Self::from_poses(poses.to_vec())
     }
 }
 
@@ -398,7 +424,7 @@ pub fn load_trajectory<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
 
     match extension.as_str() {
         "tum" | "txt" => TumLoader::load(path),
-        "csv" => AslTrajectoryLoader::load(path),
+        "csv" => crate::asl::AslTrajectoryLoader::load(path),
         other => Err(TrajectoryError::UnsupportedFormat(other.to_owned())),
     }
 }
@@ -411,51 +437,20 @@ pub fn load_trajectory<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
 pub fn load_trajectory_as<P: AsRef<Path>>(path: P, format: TrajectoryFormat) -> Result<Trajectory> {
     match format {
         TrajectoryFormat::Tum => TumLoader::load(path),
-        TrajectoryFormat::Asl => AslTrajectoryLoader::load(path),
+        TrajectoryFormat::Asl => crate::asl::AslTrajectoryLoader::load(path),
     }
-}
-
-/// Locate and load whichever ground truth a `mav0` directory ships.
-///
-/// Prefers `state_groundtruth_estimate0/data.csv` (17 columns, with velocity
-/// and biases) over `mocap0/data.csv` (8 columns). Accepts either the dataset
-/// root or the `mav0` directory itself.
-///
-/// # Returns
-///
-/// `Ok(None)` when the sequence ships neither. A file that exists but is
-/// malformed is an error, never a silent `None`.
-///
-/// # Errors
-///
-/// Whatever [`AslTrajectoryLoader`] raises on a malformed file.
-pub fn load_mav0_trajectory<P: AsRef<Path>>(mav0: P) -> Result<Option<Trajectory>> {
-    let root = mav0.as_ref();
-    let base = if root.join("mav0").is_dir() {
-        root.join("mav0")
-    } else {
-        root.to_path_buf()
-    };
-
-    for sensor in ["state_groundtruth_estimate0", "mocap0"] {
-        let candidate = base.join(sensor).join("data.csv");
-        if candidate.is_file() {
-            return AslTrajectoryLoader::load(&candidate).map(Some);
-        }
-    }
-    Ok(None)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use nalgebra::UnitQuaternion;
+    use apex_manifolds::so3::SO3;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
     fn pose(ns: u64, x: f64) -> TrajectoryPose {
-        TrajectoryPose::new(ns, Vector3::new(x, 0.0, 0.0), UnitQuaternion::identity())
+        TrajectoryPose::new(ns, Vector3::new(x, 0.0, 0.0), SO3::identity())
     }
 
     fn two_sample() -> Trajectory {
@@ -483,15 +478,14 @@ mod tests {
     /// identity and a 180° turn is 90°; a component lerp cannot produce it.
     #[test]
     fn rotation_is_slerped_not_lerped() -> TestResult {
-        let axis = nalgebra::Unit::new_normalize(Vector3::x());
-        let half_turn = UnitQuaternion::from_axis_angle(&axis, std::f64::consts::PI);
+        let half_turn = SO3::from_axis_angle(&Vector3::x(), std::f64::consts::PI);
         let t = Trajectory::from_poses(vec![
-            TrajectoryPose::new(0, Vector3::zeros(), UnitQuaternion::identity()),
+            TrajectoryPose::new(0, Vector3::zeros(), SO3::identity()),
             TrajectoryPose::new(1_000, Vector3::zeros(), half_turn),
         ]);
 
         let mid = t.pose_at(500).ok_or("midpoint")?;
-        let angle = mid.orientation.angle();
+        let angle = mid.orientation.quaternion().angle();
         assert!(
             (angle - std::f64::consts::FRAC_PI_2).abs() < 1e-9,
             "expected 90 deg, got {} deg",
@@ -631,12 +625,12 @@ mod tests {
         Ok(())
     }
 
+    /// The bridge from the dataset reader's pose type still builds a
+    /// trajectory by copy.
     #[test]
-    fn ground_truth_pose_bridge_round_trips() -> TestResult {
+    fn ground_truth_pose_slice_builds_a_trajectory() -> TestResult {
         let t = two_sample();
-        let legacy = t.to_ground_truth_poses();
-        assert_eq!(legacy.len(), 2);
-        let back = Trajectory::from(legacy.as_slice());
+        let back = Trajectory::from(t.poses());
         assert_eq!(back.len(), 2);
         assert!((back.poses()[1].position.x - 10.0).abs() < 1e-12);
         Ok(())
@@ -644,13 +638,12 @@ mod tests {
 
     #[test]
     fn se3_conversion_preserves_position_and_rotation() -> TestResult {
-        let axis = nalgebra::Unit::new_normalize(Vector3::new(0.3, 0.7, 0.1));
-        let q = UnitQuaternion::from_axis_angle(&axis, 0.7);
+        let q = SO3::from_scaled_axis(Vector3::new(0.3, 0.7, 0.1));
         let sample = TrajectoryPose::new(42, Vector3::new(1.0, -2.0, 3.0), q);
 
         let round = TrajectoryPose::from_se3(42, &sample.se3());
         assert!((round.position - sample.position).norm() < 1e-15);
-        assert!(round.orientation.angle_to(&sample.orientation) < 1e-15);
+        assert!(round.orientation.distance(&sample.orientation) < 1e-15);
         Ok(())
     }
 

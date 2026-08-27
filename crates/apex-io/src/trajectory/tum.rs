@@ -19,10 +19,11 @@ use std::path::Path;
 
 use nalgebra::Vector3;
 
+use apex_manifolds::so3::SO3;
+
 use super::error::{Result, TrajectoryError};
-use super::quaternion;
-use super::types::NANOS_PER_SECOND;
-use super::{Trajectory, TrajectoryLoader, TrajectoryPose};
+use super::types::{NANOS_PER_SEC, NANOS_PER_SECOND};
+use super::{Trajectory, TrajectoryLoader, TrajectoryPose, parse_field, read_file, write_file};
 use crate::csv;
 
 /// Fields in one TUM row.
@@ -42,19 +43,12 @@ pub struct TumLoader;
 impl TrajectoryLoader for TumLoader {
     fn load<P: AsRef<Path>>(path: P) -> Result<Trajectory> {
         let path = path.as_ref();
-        let content = std::fs::read_to_string(path).map_err(|source| TrajectoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let content = read_file(path)?;
         Self::parse(&content, path)
     }
 
     fn write<P: AsRef<Path>>(trajectory: &Trajectory, path: P) -> Result<()> {
-        let path = path.as_ref();
-        std::fs::write(path, Self::render(trajectory)).map_err(|source| TrajectoryError::Io {
-            path: path.to_path_buf(),
-            source,
-        })
+        write_file(path.as_ref(), &Self::render(trajectory))
     }
 }
 
@@ -79,35 +73,27 @@ impl TumLoader {
                 });
             }
 
-            let field = |i: usize, name: &str| -> Result<f64> {
-                let raw = row.get(i).map(String::as_str).unwrap_or_default();
-                raw.parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| TrajectoryError::InvalidNumber {
-                        path: path.to_path_buf(),
-                        line,
-                        field: name.to_owned(),
-                        value: raw.to_owned(),
-                    })
-            };
+            let timestamp_ns = parse_timestamp(row[0], path, line)?;
 
-            let stamp = row.first().map(String::as_str).unwrap_or_default();
-            let timestamp_ns = parse_timestamp(stamp, path, line)?;
-
-            // w LAST — see `quaternion`, the only module allowed to know this.
-            let orientation = quaternion::from_xyzw(
-                path,
-                line,
-                field(4, "qx")?,
-                field(5, "qy")?,
-                field(6, "qz")?,
-                field(7, "qw")?,
-            )?;
+            let qx = parse_field(row, 4, "qx", path, line)?;
+            let qy = parse_field(row, 5, "qy", path, line)?;
+            let qz = parse_field(row, 6, "qz", path, line)?;
+            let qw = parse_field(row, 7, "qw", path, line)?;
+            let orientation = SO3::try_from_quaternion_wxyz(qw, qx, qy, qz).ok_or_else(|| {
+                TrajectoryError::InvalidQuaternion {
+                    path: path.to_path_buf(),
+                    line,
+                    norm: (qw * qw + qx * qx + qy * qy + qz * qz).sqrt(),
+                }
+            })?;
 
             poses.push(TrajectoryPose::new(
                 timestamp_ns,
-                Vector3::new(field(1, "tx")?, field(2, "ty")?, field(3, "tz")?),
+                Vector3::new(
+                    parse_field(row, 1, "tx", path, line)?,
+                    parse_field(row, 2, "ty", path, line)?,
+                    parse_field(row, 3, "tz", path, line)?,
+                ),
                 orientation,
             ));
         }
@@ -128,9 +114,10 @@ impl TumLoader {
         out.push_str("# timestamp tx ty tz qx qy qz qw\n");
 
         for sample in trajectory.poses() {
-            let [qx, qy, qz, qw] = quaternion::to_xyzw(&sample.orientation);
-            let seconds = sample.timestamp_ns / 1_000_000_000;
-            let nanos = sample.timestamp_ns % 1_000_000_000;
+            // TUM stores w LAST.
+            let [qw, qx, qy, qz] = sample.orientation.coeffs();
+            let seconds = sample.timestamp_ns / NANOS_PER_SEC;
+            let nanos = sample.timestamp_ns % NANOS_PER_SEC;
             let p = sample.position;
             let _ = writeln!(
                 out,
@@ -183,13 +170,13 @@ fn parse_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
                 fraction.parse::<u64>().map_err(|_| invalid())? * scale
             };
             return seconds
-                .checked_mul(1_000_000_000)
+                .checked_mul(NANOS_PER_SEC)
                 .and_then(|s| s.checked_add(nanos))
                 .ok_or_else(invalid);
         }
     } else if raw.bytes().all(|b| b.is_ascii_digit()) && !raw.is_empty() {
         let seconds: u64 = raw.parse().map_err(|_| invalid())?;
-        return seconds.checked_mul(1_000_000_000).ok_or_else(invalid);
+        return seconds.checked_mul(NANOS_PER_SEC).ok_or_else(invalid);
     }
 
     // Foreign notation: lossy, but readable.
@@ -208,7 +195,7 @@ fn parse_timestamp(raw: &str, path: &Path, line: usize) -> Result<u64> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use nalgebra::UnitQuaternion;
+    use apex_manifolds::so3::SO3;
 
     type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
 
@@ -217,17 +204,17 @@ mod tests {
     }
 
     fn sample_trajectory() -> Trajectory {
-        let axis = nalgebra::Unit::new_normalize(Vector3::new(0.3, 0.7, 0.1));
+        let axis = Vector3::new(0.3, 0.7, 0.1);
         Trajectory::from_poses(vec![
             TrajectoryPose::new(
                 1_403_636_579_763_555_584,
                 Vector3::new(1.0, -2.0, 3.0),
-                UnitQuaternion::from_axis_angle(&axis, 0.7),
+                SO3::from_axis_angle(&axis, 0.7),
             ),
             TrajectoryPose::new(
                 1_403_636_579_813_555_584,
                 Vector3::new(1.5, -2.5, 3.5),
-                UnitQuaternion::from_axis_angle(&axis, 0.9),
+                SO3::from_axis_angle(&axis, 0.9),
             ),
         ])
     }
@@ -248,9 +235,9 @@ mod tests {
             // any sensor this reads, and the price of emitting the fixed-point
             // columns evo and the TUM scripts expect.
             assert!(
-                a.orientation.angle_to(&b.orientation) < 1e-8,
+                a.orientation.distance(&b.orientation) < 1e-8,
                 "round-trip rotation error {:e} exceeds the 9-decimal format bound",
-                a.orientation.angle_to(&b.orientation)
+                a.orientation.distance(&b.orientation)
             );
         }
         Ok(())
@@ -260,8 +247,7 @@ mod tests {
     /// the last field must be the largest and the fourth must not be.
     #[test]
     fn the_file_is_w_last() -> TestResult {
-        let axis = nalgebra::Unit::new_normalize(Vector3::x());
-        let q = UnitQuaternion::from_axis_angle(&axis, 0.2); // w ~ 0.995
+        let q = SO3::from_axis_angle(&Vector3::x(), 0.2); // w ~ 0.995
         let t = Trajectory::from_poses(vec![TrajectoryPose::new(0, Vector3::zeros(), q)]);
 
         let text = TumLoader::render(&t);
@@ -294,7 +280,7 @@ mod tests {
         let t = Trajectory::from_poses(vec![TrajectoryPose::new(
             ns,
             Vector3::zeros(),
-            UnitQuaternion::identity(),
+            SO3::identity(),
         )]);
         let parsed = TumLoader::parse(&TumLoader::render(&t), path())?;
         assert_eq!(parsed.poses()[0].timestamp_ns, ns);
@@ -390,11 +376,7 @@ mod tests {
 
     #[test]
     fn writing_drops_inertial_columns_without_error() -> TestResult {
-        let poses = vec![TrajectoryPose::new(
-            0,
-            Vector3::zeros(),
-            UnitQuaternion::identity(),
-        )];
+        let poses = vec![TrajectoryPose::new(0, Vector3::zeros(), SO3::identity())];
         let t = Trajectory::from_poses_and_inertial(
             poses,
             vec![super::super::InertialState::default()],
