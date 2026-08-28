@@ -25,10 +25,11 @@
 pub mod cpu;
 pub mod gpu;
 
+use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 
 use faer::Mat;
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::SparseColMat;
 use smallvec::SmallVec;
 use thiserror::Error;
 
@@ -308,6 +309,7 @@ impl AssemblyBackend for SparseMode {
         let ncols = jacobian.ncols();
         let sparse_ref = jacobian.as_ref();
         (0..ncols)
+            .into_par_iter()
             .map(|c| {
                 let col_norm_squared: f64 =
                     sparse_ref.val_of_col(c).iter().map(|&val| val * val).sum();
@@ -320,14 +322,34 @@ impl AssemblyBackend for SparseMode {
         jacobian: &SparseColMat<usize, f64>,
         scaling: &[f64],
     ) -> SparseColMat<usize, f64> {
+        // Scale the value array column-by-column in parallel. The sparsity
+        // pattern is unchanged, so no triplet build, sort or sparse product is
+        // needed — the previous diagonal-matrix product did exactly that.
         let ncols = jacobian.ncols();
-        let triplets: Vec<Triplet<usize, usize, f64>> =
-            (0..ncols).map(|c| Triplet::new(c, c, scaling[c])).collect();
-        let scaling_mat = match SparseColMat::try_new_from_triplets(ncols, ncols, &triplets) {
-            Ok(mat) => mat,
+        let col_ptr = jacobian.symbolic().col_ptr();
+        let mut values = jacobian.as_ref().val().to_vec();
+        let offsets_lens: Vec<(usize, usize)> = (0..ncols)
+            .map(|c| (col_ptr[c], col_ptr[c + 1] - col_ptr[c]))
+            .collect();
+
+        let columns = split_by_row_offsets_mut(&mut values, &offsets_lens);
+        columns
+            .into_par_iter()
+            .zip((0..ncols).into_par_iter())
+            .for_each(|(column, c)| {
+                let s = scaling[c];
+                for v in column {
+                    *v *= s;
+                }
+            });
+
+        let symbolic = match jacobian.symbolic().to_owned() {
+            Ok(symbolic) => symbolic,
+            // Fall back to the unscaled Jacobian — mirrors the old behavior
+            // when the diagonal scaling matrix could not be built.
             Err(_) => return jacobian.clone(),
         };
-        jacobian * &scaling_mat
+        SparseColMat::new(symbolic, values)
     }
 
     fn apply_inverse_scaling(step: &Mat<f64>, scaling: &[f64]) -> Mat<f64> {
