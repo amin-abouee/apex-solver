@@ -585,6 +585,7 @@ impl IterativeSchurSolver {
 
     /// Solve S*x = b using Preconditioned Conjugate Gradients with block preconditioner
     /// Uses optimized Schur operator with workspace buffers to minimize allocations.
+    /// Reductions and vector updates run through faer's SIMD kernels.
     fn solve_pcg_block(
         &self,
         b: &Mat<f64>,
@@ -602,34 +603,23 @@ impl IterativeSchurSolver {
         let mut z = self.apply_block_preconditioner(&r, precond_blocks)?;
 
         let mut p = z.clone();
-        let mut rz_old = 0.0;
-        for i in 0..cam_dof {
-            rz_old += r[(i, 0)] * z[(i, 0)];
-        }
+        let mut rz_old: f64 = (r.transpose() * &z)[(0, 0)];
 
         // Compute initial residual norm for relative convergence
-        let b_norm: f64 = (0..cam_dof)
-            .map(|i| b[(i, 0)] * b[(i, 0)])
-            .sum::<f64>()
-            .sqrt();
+        let b_norm = b.norm_l2();
         let tol = self.cg_tolerance * b_norm.max(1.0);
 
         // Ap buffer (reused each iteration)
         let mut ap = Mat::<f64>::zeros(cam_dof, 1);
 
         for iter in 0..self.max_cg_iterations {
-            // Ap = S * p (using fast operator with workspace buffers)
-            // Reset ap to zeros
-            for i in 0..cam_dof {
-                ap[(i, 0)] = 0.0;
-            }
+            // Ap = S * p (using fast operator with workspace buffers; the
+            // operator accumulates, so reset ap first)
+            ap.fill(0.0);
             self.apply_schur_operator_fast(&p, &mut ap, workspace_lm, workspace_cam)?;
 
             // alpha = (r^T z) / (p^T Ap)
-            let mut p_ap = 0.0;
-            for i in 0..cam_dof {
-                p_ap += p[(i, 0)] * ap[(i, 0)];
-            }
+            let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
 
             if p_ap.abs() < 1e-20 {
                 tracing::debug!("PCG: p^T*A*p near zero at iteration {}", iter);
@@ -639,26 +629,17 @@ impl IterativeSchurSolver {
             let alpha = rz_old / p_ap;
 
             // x = x + alpha * p
-            for i in 0..cam_dof {
-                x[(i, 0)] += alpha * p[(i, 0)];
-            }
+            faer::zip!(&mut x, &p).for_each(|faer::unzip!(x, p)| *x += alpha * p);
 
             // r = r - alpha * Ap
-            for i in 0..cam_dof {
-                r[(i, 0)] -= alpha * ap[(i, 0)];
-            }
+            faer::zip!(&mut r, &ap).for_each(|faer::unzip!(r, ap)| *r -= alpha * ap);
 
             // Check convergence
-            let r_norm: f64 = (0..cam_dof)
-                .map(|i| r[(i, 0)] * r[(i, 0)])
-                .sum::<f64>()
-                .sqrt();
-
-            if r_norm < tol {
+            if r.norm_l2() < tol {
                 tracing::debug!(
                     "PCG converged in {} iterations (residual={:.2e})",
                     iter + 1,
-                    r_norm
+                    r.norm_l2()
                 );
                 break;
             }
@@ -667,10 +648,7 @@ impl IterativeSchurSolver {
             z = self.apply_block_preconditioner(&r, precond_blocks)?;
 
             // beta = (r_{k+1}^T z_{k+1}) / (r_k^T z_k)
-            let mut rz_new = 0.0;
-            for i in 0..cam_dof {
-                rz_new += r[(i, 0)] * z[(i, 0)];
-            }
+            let rz_new: f64 = (r.transpose() * &z)[(0, 0)];
 
             if rz_old.abs() < 1e-30 {
                 break;
@@ -679,9 +657,7 @@ impl IterativeSchurSolver {
             let beta = rz_new / rz_old;
 
             // p = z + beta * p
-            for i in 0..cam_dof {
-                p[(i, 0)] = z[(i, 0)] + beta * p[(i, 0)];
-            }
+            faer::zip!(&mut p, &z).for_each(|faer::unzip!(p, z)| *p = *z + beta * *p);
 
             rz_old = rz_new;
         }
