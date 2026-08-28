@@ -32,7 +32,7 @@ use faer::sparse::{SparseColMat, Triplet};
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::core::VarKey;
+use crate::core::{FactorKey, VarKey};
 use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
 use crate::{
@@ -126,6 +126,64 @@ pub(crate) fn split_by_row_offsets_mut<'a>(
     result
 }
 
+/// Static per-solve assembly data, built once and reused by every iteration.
+///
+/// The set of residual blocks and their layout is fixed for the lifetime of a
+/// solve, so the block ordering, slice offsets and scratch buffers are computed
+/// a single time instead of being rebuilt (collected, sorted, allocated) on
+/// each linearization.
+pub struct AssemblyWorkspace {
+    /// Residual block keys ordered by `residual_row_start_idx`.
+    pub(crate) block_order: Vec<FactorKey>,
+    /// `(row_start, len)` per ordered block — drives residual slice splitting.
+    pub(crate) offsets_lens: Vec<(usize, usize)>,
+    /// Flat per-block Jacobian scratch arena, sized `Σ rows·cols`.
+    pub(crate) jac_arena: Vec<f64>,
+    /// `(start, len)` per ordered block into `jac_arena` — contiguous.
+    pub(crate) jac_offsets: Vec<(usize, usize)>,
+    /// Reusable global residual buffer.
+    pub(crate) residual_buf: Vec<f64>,
+}
+
+impl AssemblyWorkspace {
+    /// Build the workspace for `problem`. Call once per solve.
+    pub(crate) fn build(problem: &Problem) -> Self {
+        let mut blocks: Vec<(FactorKey, &ResidualBlock)> =
+            problem.residual_blocks().iter().collect();
+        blocks.sort_by_key(|(_, b)| b.residual_row_start_idx);
+
+        let mut offsets_lens = Vec::with_capacity(blocks.len());
+        let mut jac_offsets = Vec::with_capacity(blocks.len());
+        let mut total_jac_len = 0usize;
+        for (_, block) in &blocks {
+            offsets_lens.push((block.residual_row_start_idx, block.factor.residual_dim()));
+            let (r, c) = block.factor.jacobian_shape();
+            jac_offsets.push((total_jac_len, r * c));
+            total_jac_len += r * c;
+        }
+
+        AssemblyWorkspace {
+            block_order: blocks.into_iter().map(|(k, _)| k).collect(),
+            offsets_lens,
+            jac_arena: vec![0.0; total_jac_len],
+            jac_offsets,
+            residual_buf: vec![0.0; problem.total_residual_dimension],
+        }
+    }
+
+    /// Empty workspace for degenerate problems and tests.
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        AssemblyWorkspace {
+            block_order: Vec::new(),
+            offsets_lens: Vec::new(),
+            jac_arena: Vec::new(),
+            jac_offsets: Vec::new(),
+            residual_buf: Vec::new(),
+        }
+    }
+}
+
 /// Evaluate a single residual block: call `factor.linearize()`, apply loss correction,
 /// write the corrected residual into the provided slice, return the Jacobian buffer.
 ///
@@ -199,12 +257,16 @@ pub(crate) fn compute_block_into(
 /// giving zero-cost static dispatch through the entire pipeline.
 pub trait AssemblyBackend: LinearizationMode {
     /// Assemble residuals and Jacobian from the problem.
+    ///
+    /// Reuses the per-solve [`AssemblyWorkspace`] scratch buffers; the workspace
+    /// must have been built from the same `problem`.
     fn assemble(
         problem: &Problem,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
+        workspace: &mut AssemblyWorkspace,
     ) -> LinearizerResult<(Mat<f64>, Self::Jacobian)>;
 
     /// Compute column norms of the Jacobian (for Jacobi scaling).
@@ -228,11 +290,18 @@ impl AssemblyBackend for SparseMode {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: Option<&SymbolicStructure>,
         _total_dof: usize,
+        workspace: &mut AssemblyWorkspace,
     ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
         let sym = symbolic_structure.ok_or_else(|| {
             LinearizerError::InvalidInput("SparseMode requires symbolic structure".to_string())
         })?;
-        crate::linearizer::cpu::sparse::assemble_sparse(problem, variables, variable_index_map, sym)
+        crate::linearizer::cpu::sparse::assemble_sparse(
+            problem,
+            variables,
+            variable_index_map,
+            sym,
+            workspace,
+        )
     }
 
     fn compute_column_norms(jacobian: &SparseColMat<usize, f64>) -> Vec<f64> {
@@ -282,12 +351,14 @@ impl AssemblyBackend for DenseMode {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         _symbolic_structure: Option<&SymbolicStructure>,
         total_dof: usize,
+        workspace: &mut AssemblyWorkspace,
     ) -> LinearizerResult<(Mat<f64>, Mat<f64>)> {
         crate::linearizer::cpu::dense::assemble_dense(
             problem,
             variables,
             variable_index_map,
             total_dof,
+            workspace,
         )
     }
 
@@ -487,8 +558,14 @@ mod tests {
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
         )?;
-        let (residual, _) =
-            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
+        let (residual, _) = SparseMode::assemble(
+            &problem,
+            &variables,
+            &index_map,
+            Some(&sym),
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }
@@ -497,7 +574,7 @@ mod tests {
     fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
         let (problem, _k) = one_var_problem();
         let (variables, index_map, total_dof) = make_index_map(&problem);
-        let result = SparseMode::assemble(&problem, &variables, &index_map, None, total_dof);
+        let result = SparseMode::assemble(&problem, &variables, &index_map, None, total_dof, &mut AssemblyWorkspace::build(&problem));
         assert!(result.is_err());
         Ok(())
     }
@@ -509,8 +586,10 @@ mod tests {
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
         )?;
-        let (_, jacobian) =
-            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
+        let (_, jacobian) = SparseMode::assemble(
+            &problem, &variables, &index_map, Some(&sym), total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         let norms = SparseMode::compute_column_norms(&jacobian);
         assert_eq!(norms.len(), 1);
         assert!((norms[0] - 1.0).abs() < 1e-12);
@@ -524,8 +603,10 @@ mod tests {
         let sym = crate::linearizer::cpu::sparse::build_symbolic_structure(
             &problem, &variables, &index_map, total_dof,
         )?;
-        let (_, jacobian) =
-            SparseMode::assemble(&problem, &variables, &index_map, Some(&sym), total_dof)?;
+        let (_, jacobian) = SparseMode::assemble(
+            &problem, &variables, &index_map, Some(&sym), total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         let scaling = vec![0.5_f64];
         let scaled = SparseMode::apply_column_scaling(&jacobian, &scaling);
         let val = scaled.as_ref().val_of_col(0)[0];
@@ -561,7 +642,14 @@ mod tests {
         let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
         let (variables, index_map, total_dof) = make_index_map(&problem);
-        let (residual, _) = DenseMode::assemble(&problem, &variables, &index_map, None, total_dof)?;
+        let (residual, _) = DenseMode::assemble(
+            &problem,
+            &variables,
+            &index_map,
+            None,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }

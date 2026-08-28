@@ -11,7 +11,7 @@ use slotmap::{SecondaryMap, SlotMap};
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linearizer::{
-    BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
+    AssemblyWorkspace, BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
     split_by_row_offsets_mut,
 };
 
@@ -19,41 +19,32 @@ use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
 
 /// Assemble residuals and dense Jacobian from the current variable values.
+///
+/// Reuses the block ordering, slice offsets and scratch buffers cached in
+/// `workspace` — nothing static is rebuilt or reallocated per call.
 pub fn assemble_dense(
     problem: &Problem,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     variable_index_map: &SecondaryMap<VarKey, usize>,
     total_dof: usize,
+    workspace: &mut AssemblyWorkspace,
 ) -> LinearizerResult<(Mat<f64>, Mat<f64>)> {
-    // Collect and sort blocks by residual_row_start_idx so pre-split is contiguous
-    let mut blocks: Vec<&crate::core::residual_block::ResidualBlock> =
-        problem.residual_blocks().values().collect();
-    blocks.sort_by_key(|b| b.residual_row_start_idx);
+    // Reset the residual buffer, then split it (and the Jacobian arena) into
+    // non-overlapping slices in the pre-computed block order.
+    workspace.residual_buf.fill(0.0);
+    let residual_slices =
+        split_by_row_offsets_mut(&mut workspace.residual_buf, &workspace.offsets_lens);
+    let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
+    let residual_blocks = problem.residual_blocks();
 
-    // Pre-allocate the global residual buffer and split into non-overlapping slices
-    let mut residual_buf = vec![0.0f64; problem.total_residual_dimension];
-    let offsets_lens: Vec<(usize, usize)> = blocks
-        .iter()
-        .map(|b| (b.residual_row_start_idx, b.factor.residual_dim()))
-        .collect();
-    let residual_slices = split_by_row_offsets_mut(&mut residual_buf, &offsets_lens);
-
-    // Pre-allocate one Jacobian buffer per block — see sparse.rs for rationale.
-    let mut jacobian_buffers: Vec<Vec<f64>> = blocks
-        .iter()
-        .map(|b| {
-            let (r, c) = b.factor.jacobian_shape();
-            vec![0.0f64; r * c]
-        })
-        .collect();
-
-    let block_results: Vec<LinearizerResult<BlockLinearization>> = jacobian_buffers
-        .par_iter_mut()
-        .zip(residual_slices.into_par_iter())
-        .zip(blocks.par_iter())
-        .map(|((jac_buf, res_slice), block)| {
+    let block_results: Vec<LinearizerResult<BlockLinearization>> = residual_slices
+        .into_par_iter()
+        .zip(jac_slices)
+        .zip(workspace.block_order.par_iter())
+        .map(|((res_slice, jac_buf), key)| {
+            let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, jac_buf.as_mut_slice())
+            compute_block_into(block, variables, res_slice, jac_buf)
         })
         .collect();
 
@@ -61,19 +52,23 @@ pub fn assemble_dense(
         .into_iter()
         .collect::<LinearizerResult<Vec<_>>>()?;
 
+    // Re-split the arena to read the corrected Jacobian blocks back for scattering.
+    let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
+
     // Scatter Jacobian blocks into dense matrix (serial)
     let mut jacobian_dense = Mat::<f64>::zeros(problem.total_residual_dimension, total_dof);
-    for ((bl, block), jac_buf) in block_results
+    for ((bl, key), jac_buf) in block_results
         .iter()
-        .zip(blocks.iter())
-        .zip(jacobian_buffers.iter())
+        .zip(workspace.block_order.iter())
+        .zip(jac_slices.iter())
     {
+        let block = &residual_blocks[*key];
         scatter_dense_block(bl, block, variable_index_map, jac_buf, &mut jacobian_dense)?;
     }
 
     // Convert residual buffer to faer Mat
     let n = problem.total_residual_dimension;
-    let residual_faer = Mat::from_fn(n, 1, |i, _| residual_buf[i]);
+    let residual_faer = Mat::from_fn(n, 1, |i, _| workspace.residual_buf[i]);
 
     Ok((residual_faer, jacobian_dense))
 }
@@ -161,7 +156,7 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         assert!((jacobian[(0, 0)] - 1.0).abs() < 1e-12);
         Ok(())
@@ -172,7 +167,7 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
         assert_eq!(residual.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian.ncols(), total_dof);
@@ -185,7 +180,7 @@ mod tests {
         let k = problem.add_variable(ManifoldType::RN, dvector![3.0]);
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
         assert!(residual[(0, 0)].abs() < 1e-12);
         Ok(())
     }
@@ -199,7 +194,7 @@ mod tests {
         problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
         assert_eq!(jacobian.nrows(), 2);
         assert_eq!(jacobian.ncols(), 2);
         let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
@@ -211,7 +206,7 @@ mod tests {
     fn test_assemble_dense_residual_faer_shape() -> TestResult {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
         assert_eq!(residual.nrows(), 1);
         assert_eq!(residual.ncols(), 1);
         Ok(())
@@ -259,7 +254,7 @@ mod tests {
         );
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
 
         assert_eq!(residual.nrows(), 2);
         assert_eq!(jacobian.nrows(), 2);
@@ -284,7 +279,13 @@ mod tests {
         let (_, total_dof) = build_index_map(&problem);
 
         let empty: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        let result = assemble_dense(&problem, &problem.variables, &empty, total_dof);
+        let result = assemble_dense(
+            &problem,
+            &problem.variables,
+            &empty,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        );
         assert!(
             result.is_err(),
             "missing variable key should produce an Err"
@@ -300,7 +301,7 @@ mod tests {
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 4.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof)?;
+            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
 
         assert_eq!(residual.nrows(), 2);
 

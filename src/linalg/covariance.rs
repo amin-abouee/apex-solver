@@ -236,8 +236,13 @@ impl Covariance {
         let symbolic = crate::linearizer::cpu::sparse::build_symbolic_structure(
             problem, variables, &index_map, total_dof,
         )?;
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(problem);
         let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
-            problem, variables, &index_map, &symbolic,
+            problem,
+            variables,
+            &index_map,
+            &symbolic,
+            &mut workspace,
         )?;
 
         // H = JᵀJ. No damping term, no column scaling.
