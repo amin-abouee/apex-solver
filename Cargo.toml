@@ -64,6 +64,11 @@ factrs = "0.2.0"
 tiny-solver = "0.17"
 csv = "1.4"
 
+[workspace.lints.rust]
+# Neither this crate nor its workspace members contain any unsafe code today,
+# so forbidding it costs nothing and keeps it that way.
+unsafe_code = "forbid"
+
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
