@@ -40,6 +40,9 @@
 //! - This matches the timing approach in optimize_*_graph.rs binaries
 //! - One sample per invocation; `benches/tools/run_repeated.sh` supplies the repetitions
 //!
+//! ### Rust-only mode:
+//! - Set `APEX_BENCH_RUST_ONLY=1` to skip the C++ solvers (g2o, GTSAM, Ceres)
+//!
 //! ### Gauge Freedom Handling:
 //! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
 //! - factrs/tiny-solver: Use their default gauge freedom handling
@@ -981,6 +984,12 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
 /// Run all available C++ benchmarks and return combined results
 fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let mut all_results = Vec::new();
+
+    // Skip C++ solvers when APEX_BENCH_RUST_ONLY is set (fast apex-only iteration runs).
+    if std::env::var_os("APEX_BENCH_RUST_ONLY").is_some() {
+        info!("APEX_BENCH_RUST_ONLY set: skipping C++ benchmarks");
+        return all_results;
+    }
 
     // Try to build C++ benchmarks
     let build_dir = match build_cpp_benchmarks() {
