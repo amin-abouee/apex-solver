@@ -48,6 +48,7 @@ use super::implicit_schur::IterativeSchurSolver;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -182,6 +183,9 @@ pub struct SparseSchurComplementSolver {
     cg_max_iterations: usize,
     cg_tolerance: f64,
 
+    // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
+
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
@@ -199,6 +203,7 @@ impl SparseSchurComplementSolver {
             preconditioner: SchurPreconditioner::default(),
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
+            ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
             iterative_solver: None,
@@ -1050,7 +1055,6 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        use std::ops::Mul;
         let jacobians = jacobian;
 
         if self.block_structure.is_none() {
@@ -1064,13 +1068,9 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         // - Sparse: Cholesky factorization
         // - Iterative: PCG
 
-        // 1. Build H = J^T * J and g = -J^T * r
-        let jt = jacobians
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let hessian = jt.mul(jacobians);
-        let gradient = jacobians.transpose().mul(residuals);
+        // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1115,7 +1115,6 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         jacobian: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
-        use std::ops::Mul;
         let jacobians = jacobian;
 
         if self.block_structure.is_none() {
@@ -1125,13 +1124,9 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         }
 
         // Sparse and Iterative variants use the same Schur complement formation with damping
-        // 1. Build H = J^T * J and g = -J^T * r
-        let jt = jacobians
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let hessian = jt.mul(jacobians);
-        let gradient = jacobians.transpose().mul(residuals);
+        // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];

@@ -2,12 +2,12 @@ use faer::{
     Mat, Side,
     linalg::solvers::Solve,
     sparse::linalg::solvers::{Llt, SymbolicLlt},
-    sparse::{SparseColMat, Triplet},
+    sparse::SparseColMat,
 };
-use std::ops::Mul;
 
 use crate::error::ErrorLogging;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
@@ -16,6 +16,9 @@ pub struct SparseCholeskySolver {
     /// This is computed once and reused when the sparsity pattern doesn't change,
     /// providing a 10-15% performance improvement for iterative optimization.
     symbolic_factorization: Option<SymbolicLlt<usize>>,
+
+    /// Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
 
     /// The Hessian matrix, computed as `(J^T *  J)`.
     ///
@@ -32,6 +35,7 @@ impl SparseCholeskySolver {
     pub fn new() -> Self {
         SparseCholeskySolver {
             symbolic_factorization: None,
+            ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
         }
@@ -57,20 +61,10 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // Form the normal equations: H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
+        // Form the normal equations: H = JᵀJ, g = Jᵀr (parallel faer kernels,
+        // symbolic product cached across iterations).
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
 
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
@@ -113,35 +107,12 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
-        let n = jacobians.ncols();
+        // H = JᵀJ, g = Jᵀr (parallel faer kernels)
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
 
-        // H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
-
-        // H_aug = H + lambda * I
-        let mut lambda_i_triplets = Vec::with_capacity(n);
-        for i in 0..n {
-            lambda_i_triplets.push(Triplet::new(i, i, lambda));
-        }
-        let lambda_i =
-            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
-                LinAlgError::SparseMatrixCreation("Failed to create lambda*I matrix".to_string())
-                    .log_with_source(e)
-            })?;
-
-        let augmented_hessian = &hessian + lambda_i;
+        // H_aug = H + λI — diagonal edit on the cached product pattern.
+        let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;
 
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
@@ -191,6 +162,7 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faer::sparse::Triplet;
 
     const TOLERANCE: f64 = 1e-10;
 

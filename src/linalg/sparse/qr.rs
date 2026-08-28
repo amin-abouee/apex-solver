@@ -1,13 +1,8 @@
-use faer::{
-    Mat,
-    linalg::solvers::Solve,
-    sparse::linalg::solvers::{Qr, SymbolicQr},
-    sparse::{SparseColMat, Triplet},
-};
-use std::ops::Mul;
+use faer::{Mat, linalg::solvers::Solve, sparse::linalg::solvers::{Qr, SymbolicQr}, sparse::SparseColMat};
 
 use crate::error::ErrorLogging;
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
@@ -18,6 +13,9 @@ pub struct SparseQRSolver {
     /// For augmented systems where only lambda changes, the sparsity pattern
     /// remains the same (adding diagonal lambda*I doesn't change the pattern).
     symbolic_factorization: Option<SymbolicQr<usize>>,
+
+    /// Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
 
     /// The Hessian matrix, computed as `(J^T * W * J)`.
     ///
@@ -34,6 +32,7 @@ impl SparseQRSolver {
     pub fn new() -> Self {
         SparseQRSolver {
             symbolic_factorization: None,
+            ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
         }
@@ -60,20 +59,10 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // Form the normal equations explicitly: H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r (stored as positive, will negate when solving)
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
+        // Form the normal equations: H = JᵀJ, g = Jᵀr (parallel faer kernels,
+        // symbolic product cached across iterations).
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
 
         // Check if we can reuse the cached symbolic factorization
         // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
@@ -116,35 +105,12 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         jacobians: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
-        let n = jacobians.ncols();
+        // H = JᵀJ, g = Jᵀr (parallel faer kernels)
+        let NormalEquations { hessian, gradient } =
+            self.ne_cache.compute(residuals, jacobians)?;
 
-        // H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
-
-        // H_aug = H + lambda * I
-        let mut lambda_i_triplets = Vec::with_capacity(n);
-        for i in 0..n {
-            lambda_i_triplets.push(Triplet::new(i, i, lambda));
-        }
-        let lambda_i =
-            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
-                LinAlgError::SparseMatrixCreation("Failed to create lambda*I matrix".to_string())
-                    .log_with_source(e)
-            })?;
-
-        let augmented_hessian = hessian.as_ref() + lambda_i;
+        // H_aug = H + λI — diagonal edit on the cached product pattern.
+        let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;
 
         // Check if we can reuse the cached symbolic factorization
         // For augmented systems, the sparsity pattern remains the same
@@ -192,6 +158,7 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faer::sparse::Triplet;
 
     const TOLERANCE: f64 = 1e-10;
 
