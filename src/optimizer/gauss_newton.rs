@@ -229,13 +229,18 @@ pub struct GaussNewtonConfig {
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
 
-    /// Enable real-time visualization (graphical debugging).
+    /// Deprecated: never read. Visualization goes through the observer pattern.
     ///
-    /// When enabled, optimization progress is logged to a Rerun viewer.
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    /// Setting this has no effect. Attach an observer to the solver instead:
+    /// `solver.add_observer(RerunObserver::new(true)?)`, which is how
+    /// Levenberg-Marquardt has always done it and works for every optimizer.
     ///
     /// Default: false
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "never read; attach a `RerunObserver` with `add_observer` instead"
+    )]
     pub enable_visualization: bool,
 }
 
@@ -260,6 +265,7 @@ impl Default for GaussNewtonConfig {
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
             #[cfg(feature = "visualization")]
+            #[allow(deprecated)]
             enable_visualization: false,
         }
     }
@@ -365,14 +371,13 @@ impl GaussNewtonConfig {
         self
     }
 
-    /// Enable real-time visualization.
-    ///
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable visualization
+    /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "no-op; attach a `RerunObserver` with `add_observer` instead"
+    )]
+    #[allow(deprecated)]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
@@ -907,7 +912,7 @@ mod tests {
         problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
         // Configure Gauss-Newton optimizer
-        let config = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let config = GaussNewtonConfig::new()
             .with_max_iterations(100)
             .with_cost_tolerance(1e-8)
             .with_parameter_tolerance(1e-8)
@@ -983,25 +988,16 @@ mod tests {
         prob
     }
 
-    /// `max_condition_number` detects a variable no residual constrains.
-    #[test]
-    fn gauss_newton_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
-        let mut problem = rosenbrock_problem();
-        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
-
-        let result = GaussNewton::with_config(
-            GaussNewtonConfig::new()
-                .with_max_iterations(10)
-                .with_max_condition_number(1e12),
-        )
-        .optimize(&mut problem)?;
-
-        assert_eq!(
-            result.status,
-            optimizer::OptimizationStatus::IllConditionedJacobian
-        );
-        Ok(())
+    fn linear_problem(start: f64) -> problem::Problem {
+        let mut prob = problem::Problem::new(JacobianMode::Sparse);
+        let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
+        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
+        prob
     }
+
+    // -------------------------------------------------------------------------
+    // Ceres-compatibility config fields
+    // -------------------------------------------------------------------------
 
     /// A rank-deficient `JᵀJ` is solvable with the regularizer and not without.
     ///
@@ -1073,11 +1069,24 @@ mod tests {
         Ok(())
     }
 
-    fn linear_problem(start: f64) -> problem::Problem {
-        let mut prob = problem::Problem::new(JacobianMode::Sparse);
-        let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
-        prob.add_residual_block(&[x], Box::new(LinearFactor { target: 0.0 }), None);
-        prob
+    /// `max_condition_number` detects a variable no residual constrains.
+    #[test]
+    fn gauss_newton_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+
+        let result = GaussNewton::with_config(
+            GaussNewtonConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
     }
 
     // -------------------------------------------------------------------------
@@ -1096,7 +1105,7 @@ mod tests {
     #[test]
     fn test_gn_config_builders() {
         use crate::linalg::LinearSolverType;
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_max_iterations(15)
             .with_cost_tolerance(1e-5)
             .with_parameter_tolerance(1e-6)
@@ -1127,8 +1136,8 @@ mod tests {
 
     #[test]
     fn test_gn_with_config_method() {
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(3);
-        let _solver = optimizer::GaussNewton::with_config(cfg);
+        let cfg = GaussNewtonConfig::new().with_max_iterations(3);
+        let _solver = GaussNewton::with_config(cfg);
     }
 
     // -------------------------------------------------------------------------
@@ -1138,8 +1147,8 @@ mod tests {
     #[test]
     fn test_gn_max_iterations_termination() -> TestResult {
         let mut problem = rosenbrock_problem();
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new().with_max_iterations(2);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let cfg = GaussNewtonConfig::new().with_max_iterations(2);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
@@ -1151,11 +1160,11 @@ mod tests {
     #[test]
     fn test_gn_gradient_tolerance_convergence() -> TestResult {
         let mut problem = linear_problem(1.0);
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_gradient_tolerance(1e3)
             .with_cost_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
@@ -1167,11 +1176,11 @@ mod tests {
     #[test]
     fn test_gn_cost_tolerance_convergence() -> TestResult {
         let mut problem = rosenbrock_problem();
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_cost_tolerance(1e2) // very loose
             .with_gradient_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert!(matches!(
             result.status,
@@ -1187,10 +1196,10 @@ mod tests {
     fn test_gn_qr_solver() -> TestResult {
         use crate::linalg::LinearSolverType;
         let mut problem = rosenbrock_problem();
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_linear_solver_type(LinearSolverType::SparseQR)
             .with_max_iterations(100);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
@@ -1199,10 +1208,10 @@ mod tests {
     #[test]
     fn test_gn_jacobi_scaling_enabled() -> TestResult {
         let mut problem = rosenbrock_problem();
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_jacobi_scaling(true)
             .with_max_iterations(100);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
@@ -1211,12 +1220,12 @@ mod tests {
     #[test]
     fn test_gn_min_cost_threshold() -> TestResult {
         let mut problem = rosenbrock_problem();
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
+        let cfg = GaussNewtonConfig::new()
             .with_min_cost_threshold(1e10)
             .with_cost_tolerance(1e-20)
             .with_gradient_tolerance(1e-20)
             .with_parameter_tolerance(1e-20);
-        let mut solver = optimizer::GaussNewton::with_config(cfg);
+        let mut solver = GaussNewton::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert_eq!(
             result.status,
@@ -1246,8 +1255,7 @@ mod tests {
 
     #[test]
     fn test_gn_timeout_config() {
-        let cfg = optimizer::gauss_newton::GaussNewtonConfig::new()
-            .with_timeout(std::time::Duration::from_secs(60));
+        let cfg = GaussNewtonConfig::new().with_timeout(std::time::Duration::from_secs(60));
         assert!(cfg.timeout.is_some());
     }
 }

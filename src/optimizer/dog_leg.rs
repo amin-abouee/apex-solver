@@ -276,7 +276,17 @@ pub struct DogLegConfig {
     pub trust_region_increase_factor: f64,
     /// Trust region decrease factor (for poor steps, rho < 0.25)
     pub trust_region_decrease_factor: f64,
-    /// Minimum step quality for acceptance (typically 0.0)
+    /// Deprecated: superseded by
+    /// [`min_relative_decrease`](Self::min_relative_decrease).
+    ///
+    /// Both named the same thing — the ρ below which a step is rejected — and
+    /// only one can be the gate. `min_relative_decrease` won because it carries
+    /// Ceres' name and semantics and exists on the Levenberg-Marquardt config
+    /// too, so the acceptance rule is the same across optimizers.
+    #[deprecated(
+        since = "1.6.0",
+        note = "never read; the acceptance threshold is `min_relative_decrease`"
+    )]
     pub min_step_quality: f64,
     /// Good step quality threshold (typically 0.75)
     pub good_step_quality: f64,
@@ -348,17 +358,23 @@ pub struct DogLegConfig {
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
 
-    /// Enable real-time visualization (graphical debugging).
+    /// Deprecated: never read. Visualization goes through the observer pattern.
     ///
-    /// When enabled, optimization progress is logged to a Rerun viewer.
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    /// Setting this has no effect. Attach an observer to the solver instead:
+    /// `solver.add_observer(RerunObserver::new(true)?)`, which is how
+    /// Levenberg-Marquardt has always done it and works for every optimizer.
     ///
     /// Default: false
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "never read; attach a `RerunObserver` with `add_observer` instead"
+    )]
     pub enable_visualization: bool,
 }
 
 impl Default for DogLegConfig {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             linear_solver_type: linalg::LinearSolverType::default(),
@@ -403,6 +419,7 @@ impl Default for DogLegConfig {
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
             #[cfg(feature = "visualization")]
+            #[allow(deprecated)]
             enable_visualization: false,
         }
     }
@@ -470,7 +487,13 @@ impl DogLegConfig {
         self
     }
 
-    /// Set the trust region quality thresholds
+    /// Set the trust region quality thresholds.
+    ///
+    /// `min_quality` is accepted for source compatibility but has no effect —
+    /// see [`DogLegConfig::min_step_quality`]. Use
+    /// [`with_min_relative_decrease`](Self::with_min_relative_decrease) to move
+    /// the acceptance threshold.
+    #[allow(deprecated)]
     pub fn with_step_quality_thresholds(
         mut self,
         min_quality: f64,
@@ -559,20 +582,20 @@ impl DogLegConfig {
         self
     }
 
-    /// Enable real-time visualization.
-    ///
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable visualization
+    /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "no-op; attach a `RerunObserver` with `add_observer` instead"
+    )]
+    #[allow(deprecated)]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
     }
 
     /// Print configuration parameters (info level logging)
+    #[allow(deprecated)]
     pub fn print_configuration(&self) {
         debug!(
             "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
@@ -1608,29 +1631,9 @@ mod tests {
         prob
     }
 
-    /// The radius is run state, so a reused solver reproduces its first result.
-    #[test]
-    fn dogleg_repeated_optimize_calls_are_reproducible() -> TestResult {
-        let mut solver = DogLeg::with_config(DogLegConfig::new().with_max_iterations(100));
-
-        let mut first_problem = rosenbrock_problem();
-        let first = solver.optimize(&mut first_problem)?;
-        let mut second_problem = rosenbrock_problem();
-        let second = solver.optimize(&mut second_problem)?;
-
-        assert_eq!(
-            first.iterations, second.iterations,
-            "reusing a solver changed the iteration count: {} then {}",
-            first.iterations, second.iterations
-        );
-        assert!(
-            (first.final_cost - second.final_cost).abs() < 1e-15,
-            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
-            first.final_cost,
-            second.final_cost
-        );
-        Ok(())
-    }
+    // -------------------------------------------------------------------------
+    // Ceres-compatibility config fields
+    // -------------------------------------------------------------------------
 
     /// `min_relative_decrease` replaces the hardcoded `rho > 1e-4` gate.
     #[test]
@@ -1657,26 +1660,6 @@ mod tests {
              strict {:.3e} vs permissive {:.3e}",
             strict.final_cost,
             permissive.final_cost
-        );
-        Ok(())
-    }
-
-    /// `max_condition_number` detects a variable no residual constrains.
-    #[test]
-    fn dogleg_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
-        let mut problem = rosenbrock_problem();
-        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
-
-        let result = DogLeg::with_config(
-            DogLegConfig::new()
-                .with_max_iterations(10)
-                .with_max_condition_number(1e12),
-        )
-        .optimize(&mut problem)?;
-
-        assert_eq!(
-            result.status,
-            optimizer::OptimizationStatus::IllConditionedJacobian
         );
         Ok(())
     }
@@ -1713,6 +1696,50 @@ mod tests {
         Ok(())
     }
 
+    /// The radius is run state, so a reused solver reproduces its first result.
+    #[test]
+    fn dogleg_repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = DogLeg::with_config(DogLegConfig::new().with_max_iterations(100));
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
+    }
+
+    /// `max_condition_number` detects a variable no residual constrains.
+    #[test]
+    fn dogleg_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+
+        let result = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
+    }
+
     fn linear_problem(start: f64) -> problem::Problem {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
@@ -1735,6 +1762,9 @@ mod tests {
     }
 
     #[test]
+    // Asserts that the deprecated `min_step_quality` setter still stores its
+    // value; the field is no longer read by the algorithm.
+    #[allow(deprecated)]
     fn test_dl_config_builders() {
         use crate::linalg::LinearSolverType;
         let cfg = DogLegConfig::new()
@@ -1911,6 +1941,9 @@ mod tests {
     }
 
     #[test]
+    // Asserts that the deprecated `min_step_quality` setter still stores its
+    // value; the field is no longer read by the algorithm.
+    #[allow(deprecated)]
     fn test_dl_step_quality_thresholds() {
         let cfg = DogLegConfig::new().with_step_quality_thresholds(0.05, 0.25, 0.8);
         assert!((cfg.min_step_quality - 0.05).abs() < 1e-15);
