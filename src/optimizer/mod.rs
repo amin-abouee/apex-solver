@@ -694,10 +694,27 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
 /// by the local quadratic model.
 ///
 /// Returns `ρ = actual_reduction / predicted_reduction`, handling
-/// near-zero predicted reduction gracefully.
+/// degenerate predicted reductions.
+///
+/// # Non-positive predicted reduction
+///
+/// A *negative* predicted reduction means the trial step increases the local
+/// quadratic model — the model is not a descent direction and the ratio is
+/// meaningless. Worse, it is actively misleading: a negative actual reduction
+/// divided by a negative predicted reduction yields `ρ > 0`, so a step that
+/// raised the cost would be accepted. Ceres treats a non-positive
+/// `model_cost_change` as an invalid step; `-1.0` is returned here so every
+/// acceptance threshold rejects it.
+///
+/// A predicted reduction that is merely *near zero* is different: at the
+/// solution both reductions vanish legitimately, so the historic behaviour
+/// (accept when the cost actually fell) is kept — rejecting there would inflate
+/// the damping just as the solver converges.
 pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reduction: f64) -> f64 {
     let actual_reduction = current_cost - new_cost;
-    if predicted_reduction.abs() < 1e-15 {
+    if predicted_reduction < -1e-15 {
+        -1.0
+    } else if predicted_reduction.abs() <= 1e-15 {
         if actual_reduction > 0.0 { 1.0 } else { 0.0 }
     } else {
         actual_reduction / predicted_reduction
@@ -1014,6 +1031,54 @@ mod tests {
     use std::time::Duration;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // -------------------------------------------------------------------------
+    // compute_step_quality — the non-positive predicted-reduction guard
+    // -------------------------------------------------------------------------
+
+    /// A negative predicted reduction must reject, not accept.
+    ///
+    /// The trap: a cost that *rose* gives a negative actual reduction, and
+    /// dividing two negatives yields ρ > 0. Without the guard the solver accepts
+    /// a step that made the objective worse, every time the quadratic model
+    /// points uphill.
+    #[test]
+    fn step_quality_rejects_when_the_model_predicts_an_increase() {
+        // cost rose 10 → 12, and the model predicted a rise too.
+        let rho = compute_step_quality(10.0, 12.0, -1.0);
+        assert!(
+            rho <= 0.0,
+            "a negative predicted reduction must not produce a positive ρ, got {rho}"
+        );
+        // Under every acceptance threshold in the crate this rejects.
+        assert!(
+            rho < 1e-3,
+            "ρ = {rho} would pass the default min_relative_decrease"
+        );
+    }
+
+    /// A vanishing predicted reduction still accepts a genuine improvement.
+    ///
+    /// At the solution both reductions go to zero legitimately; rejecting there
+    /// would inflate the damping exactly as the solver converges.
+    #[test]
+    fn step_quality_accepts_a_real_decrease_when_prediction_underflows() {
+        let rho = compute_step_quality(10.0, 9.999_999_999, 1e-20);
+        assert!((rho - 1.0).abs() < 1e-12, "expected ρ = 1.0, got {rho}");
+
+        let rho_no_gain = compute_step_quality(10.0, 10.5, 1e-20);
+        assert!(
+            (rho_no_gain).abs() < 1e-12,
+            "expected ρ = 0.0, got {rho_no_gain}"
+        );
+    }
+
+    /// The ordinary case is untouched.
+    #[test]
+    fn step_quality_is_the_plain_ratio_for_a_positive_prediction() {
+        let rho = compute_step_quality(10.0, 6.0, 8.0);
+        assert!((rho - 0.5).abs() < 1e-12, "expected ρ = 0.5, got {rho}");
+    }
 
     // -------------------------------------------------------------------------
     // compute_cost
