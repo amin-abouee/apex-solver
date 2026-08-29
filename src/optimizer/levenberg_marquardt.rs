@@ -511,7 +511,6 @@ impl LevenbergMarquardtConfig {
         self
     }
 
-
     /// Set the step-quality band used by [`DampingUpdate::Marquardt`].
     ///
     /// λ is decreased at or above `good_quality` and increased at or below
@@ -895,7 +894,7 @@ impl LevenbergMarquardt {
             .solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
-        // Get cached gradient from the solver
+        // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
@@ -946,8 +945,10 @@ impl LevenbergMarquardt {
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let (_new_residual, new_cost) = problem
-            .compute_residual_and_cost_sparse_with_workspace(&state.variables, &mut state.workspace)?;
+        let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
+            &state.variables,
+            &mut state.workspace,
+        )?;
 
         // Compute step quality
         let rho = crate::optimizer::compute_step_quality(
@@ -1818,13 +1819,13 @@ mod tests {
         assert_eq!(cfg.max_iterations, 50);
         assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
         assert!((cfg.damping - 1e-4).abs() < 1e-15);
+        assert!(!cfg.use_jacobi_scaling);
+        assert!(!cfg.compute_covariances);
         // Ceres' min_lm_diagonal / max_lm_diagonal.
         assert!((cfg.min_diagonal - 1e-6).abs() < 1e-15);
         assert!((cfg.max_diagonal - 1e32).abs() < 1e17);
         assert!((cfg.min_relative_decrease - 1e-3).abs() < 1e-15);
         assert_eq!(cfg.damping_update, DampingUpdate::Nielsen);
-        assert!(!cfg.use_jacobi_scaling);
-        assert!(!cfg.compute_covariances);
     }
 
     #[test]
