@@ -1,0 +1,239 @@
+//! Contract tests for the [`LinearSolver`] trait, checked across every backend.
+//!
+//! `get_gradient` and `get_hessian` are documented to publish `+Jᵀr` and the
+//! **un-damped** `JᵀJ`. Both are consumed by the optimizers to build the local
+//! quadratic model, so a backend that quietly publishes `−Jᵀr` (or the augmented
+//! Hessian) inverts every step-quality ratio ρ computed from it — the solve
+//! itself still looks fine, which is exactly what makes the bug survive
+//! per-backend testing. These tests pin the contract for all six backends at
+//! once, so a new backend cannot get it wrong silently.
+
+use apex_solver::linalg::{
+    DenseCholeskySolver, DenseMode, DenseQRSolver, LinearSolver, SparseCholeskySolver, SparseMode,
+    SparseQRSolver,
+};
+use faer::Mat;
+use faer::sparse::{SparseColMat, Triplet};
+
+type TestResult = Result<(), Box<dyn std::error::Error>>;
+type SparseSystem = Result<(SparseColMat<usize, f64>, Mat<f64>), Box<dyn std::error::Error>>;
+
+/// A small overdetermined least-squares problem: 4 residuals, 3 parameters.
+///
+/// Deliberately asymmetric and full rank so that `Jᵀr` has no zero entries and a
+/// sign flip cannot hide behind a symmetry.
+fn dense_system() -> (Mat<f64>, Mat<f64>) {
+    let j = Mat::from_fn(4, 3, |i, k| match (i, k) {
+        (0, 0) => 1.0,
+        (0, 1) => 2.0,
+        (0, 2) => 0.0,
+        (1, 0) => 0.0,
+        (1, 1) => 1.0,
+        (1, 2) => 3.0,
+        (2, 0) => 4.0,
+        (2, 1) => 0.0,
+        (2, 2) => 1.0,
+        (3, 0) => 1.0,
+        (3, 1) => 1.0,
+        (3, 2) => 1.0,
+        _ => 0.0,
+    });
+    let r = Mat::from_fn(4, 1, |i, _| [0.5, -1.5, 2.0, -0.25][i]);
+    (j, r)
+}
+
+fn sparse_system() -> SparseSystem {
+    let (dense_j, r) = dense_system();
+    let mut triplets = Vec::new();
+    for i in 0..dense_j.nrows() {
+        for k in 0..dense_j.ncols() {
+            if dense_j[(i, k)] != 0.0 {
+                triplets.push(Triplet::new(i, k, dense_j[(i, k)]));
+            }
+        }
+    }
+    Ok((
+        SparseColMat::try_new_from_triplets(dense_j.nrows(), dense_j.ncols(), &triplets)?,
+        r,
+    ))
+}
+
+/// Reference values computed directly from the dense `J` and `r`.
+fn expected_gradient_and_hessian() -> (Mat<f64>, Mat<f64>) {
+    let (j, r) = dense_system();
+    (j.transpose() * &r, j.transpose() * &j)
+}
+
+fn assert_publishes_contract(
+    name: &str,
+    gradient: &Mat<f64>,
+    hessian_diagonal: &[f64],
+) -> TestResult {
+    let (expected_g, expected_h) = expected_gradient_and_hessian();
+
+    for i in 0..expected_g.nrows() {
+        let got = gradient[(i, 0)];
+        let want = expected_g[(i, 0)];
+        assert!(
+            (got - want).abs() < 1e-9,
+            "{name}: get_gradient() must publish +Jᵀr. Entry {i} is {got}, expected {want}\
+             {}",
+            if (got + want).abs() < 1e-9 {
+                " — this is exactly -Jᵀr, i.e. the sign convention is inverted"
+            } else {
+                ""
+            }
+        );
+    }
+
+    for i in 0..expected_h.nrows() {
+        let got = hessian_diagonal[i];
+        let want = expected_h[(i, i)];
+        assert!(
+            (got - want).abs() < 1e-9,
+            "{name}: get_hessian() must publish the un-damped JᵀJ. Diagonal entry \
+             {i} is {got}, expected {want} — a larger value means the damping term \
+             leaked into the published Hessian"
+        );
+    }
+    Ok(())
+}
+
+fn sparse_diagonal(h: &SparseColMat<usize, f64>) -> Vec<f64> {
+    (0..h.ncols())
+        .map(|col| {
+            let rows = h.symbolic().row_idx_of_col_raw(col);
+            let vals = h.val_of_col(col);
+            rows.iter()
+                .position(|&r| r == col)
+                .map(|k| vals[k])
+                .unwrap_or(0.0)
+        })
+        .collect()
+}
+
+/// A λ large enough that a leaked damping term cannot hide in the tolerance.
+fn probe_damping() -> f64 {
+    10.0
+}
+
+/// The same contract holds for the un-damped entry point, which Gauss-Newton
+/// uses when `min_diagonal` is zero.
+#[test]
+fn sparse_backends_publish_the_contract_from_solve_normal_equation() -> TestResult {
+    let (j, r) = sparse_system()?;
+
+    let mut cholesky = SparseCholeskySolver::new();
+    LinearSolver::<SparseMode>::solve_normal_equation(&mut cholesky, &r, &j)?;
+    assert_publishes_contract(
+        "SparseCholeskySolver::solve_normal_equation",
+        LinearSolver::<SparseMode>::get_gradient(&cholesky).ok_or("no gradient")?,
+        &sparse_diagonal(LinearSolver::<SparseMode>::get_hessian(&cholesky).ok_or("no hessian")?),
+    )?;
+
+    let mut qr = SparseQRSolver::new();
+    LinearSolver::<SparseMode>::solve_normal_equation(&mut qr, &r, &j)?;
+    assert_publishes_contract(
+        "SparseQRSolver::solve_normal_equation",
+        LinearSolver::<SparseMode>::get_gradient(&qr).ok_or("no gradient")?,
+        &sparse_diagonal(LinearSolver::<SparseMode>::get_hessian(&qr).ok_or("no hessian")?),
+    )
+}
+
+#[test]
+fn dense_backends_publish_the_contract_from_solve_normal_equation() -> TestResult {
+    let (j, r) = dense_system();
+
+    let mut cholesky = DenseCholeskySolver::new();
+    LinearSolver::<DenseMode>::solve_normal_equation(&mut cholesky, &r, &j)?;
+    let h = LinearSolver::<DenseMode>::get_hessian(&cholesky).ok_or("no hessian")?;
+    let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
+    assert_publishes_contract(
+        "DenseCholeskySolver::solve_normal_equation",
+        LinearSolver::<DenseMode>::get_gradient(&cholesky).ok_or("no gradient")?,
+        &diag,
+    )?;
+
+    let mut qr = DenseQRSolver::new();
+    LinearSolver::<DenseMode>::solve_normal_equation(&mut qr, &r, &j)?;
+    let h = LinearSolver::<DenseMode>::get_hessian(&qr).ok_or("no hessian")?;
+    let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
+    assert_publishes_contract(
+        "DenseQRSolver::solve_normal_equation",
+        LinearSolver::<DenseMode>::get_gradient(&qr).ok_or("no gradient")?,
+        &diag,
+    )
+}
+
+#[test]
+fn sparse_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
+    let (j, r) = sparse_system()?;
+    let mut solver = SparseCholeskySolver::new();
+    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
+    let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
+    assert_publishes_contract("SparseCholeskySolver", g, &sparse_diagonal(h))
+}
+
+#[test]
+fn sparse_qr_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
+    let (j, r) = sparse_system()?;
+    let mut solver = SparseQRSolver::new();
+    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
+    let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
+    assert_publishes_contract("SparseQRSolver", g, &sparse_diagonal(h))
+}
+
+#[test]
+fn dense_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
+    let (j, r) = dense_system();
+    let mut solver = DenseCholeskySolver::new();
+    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    let g = LinearSolver::<DenseMode>::get_gradient(&solver).ok_or("no gradient")?;
+    let h = LinearSolver::<DenseMode>::get_hessian(&solver).ok_or("no hessian")?;
+    let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
+    assert_publishes_contract("DenseCholeskySolver", g, &diag)
+}
+
+#[test]
+fn dense_qr_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
+    let (j, r) = dense_system();
+    let mut solver = DenseQRSolver::new();
+    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    let g = LinearSolver::<DenseMode>::get_gradient(&solver).ok_or("no gradient")?;
+    let h = LinearSolver::<DenseMode>::get_hessian(&solver).ok_or("no hessian")?;
+    let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
+    assert_publishes_contract("DenseQRSolver", g, &diag)
+}
+
+/// The augmented solve must satisfy `(JᵀJ + λI)·dx = −Jᵀr`.
+///
+/// This is what ties the two published quantities together: it fails if the
+/// right-hand side uses `+Jᵀr` instead of `−Jᵀr`, and it fails if the damping
+/// applied inside is not the λ that was asked for.
+#[test]
+fn augmented_solve_satisfies_its_own_normal_equations() -> TestResult {
+    let (dense_j, r) = dense_system();
+    let (j, _) = sparse_system()?;
+    let lambda = 0.25;
+
+    let mut solver = SparseCholeskySolver::new();
+    let dx = LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, lambda)?;
+
+    let h = dense_j.transpose() * &dense_j;
+    let g = dense_j.transpose() * &r;
+    for i in 0..h.nrows() {
+        let mut lhs = lambda * dx[(i, 0)];
+        for k in 0..h.ncols() {
+            lhs += h[(i, k)] * dx[(k, 0)];
+        }
+        assert!(
+            (lhs + g[(i, 0)]).abs() < 1e-8,
+            "row {i}: (JᵀJ + λI)·dx should equal −Jᵀr, got {lhs} vs {}",
+            -g[(i, 0)]
+        );
+    }
+    Ok(())
+}
+
