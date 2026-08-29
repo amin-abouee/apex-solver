@@ -47,8 +47,8 @@
 use super::implicit_schur::IterativeSchurSolver;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -1045,8 +1045,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         // - Iterative: PCG
 
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1101,8 +1100,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
 
         // Sparse and Iterative variants use the same Schur complement formation with damping
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];

@@ -1,8 +1,13 @@
-use faer::{Mat, linalg::solvers::Solve, sparse::linalg::solvers::{Qr, SymbolicQr}, sparse::SparseColMat};
+use faer::{
+    Mat,
+    linalg::solvers::Solve,
+    sparse::SparseColMat,
+    sparse::linalg::solvers::{Qr, SymbolicQr},
+};
 
 use crate::error::ErrorLogging;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
@@ -61,8 +66,7 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
     ) -> LinAlgResult<Mat<f64>> {
         // Form the normal equations: H = JᵀJ, g = Jᵀr (parallel faer kernels,
         // symbolic product cached across iterations).
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
         // Check if we can reuse the cached symbolic factorization
         // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
@@ -106,8 +110,7 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = Jᵀr (parallel faer kernels)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
         // H_aug = H + λI — diagonal edit on the cached product pattern.
         let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;

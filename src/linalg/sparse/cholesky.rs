@@ -1,13 +1,13 @@
 use faer::{
     Mat, Side,
     linalg::solvers::Solve,
-    sparse::linalg::solvers::{Llt, SymbolicLlt},
     sparse::SparseColMat,
+    sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
 
 use crate::error::ErrorLogging;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
@@ -63,8 +63,7 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
     ) -> LinAlgResult<Mat<f64>> {
         // Form the normal equations: H = JᵀJ, g = Jᵀr (parallel faer kernels,
         // symbolic product cached across iterations).
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
@@ -108,8 +107,7 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = Jᵀr (parallel faer kernels)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
         // H_aug = H + λI — diagonal edit on the cached product pattern.
         let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;

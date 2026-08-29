@@ -53,8 +53,8 @@
 use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::SparseColMat;
 use nalgebra::{DMatrix, DVector, Matrix3};
@@ -997,8 +997,7 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobian)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1018,8 +1017,10 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian: _, gradient } =
-            self.ne_cache.compute(residuals, jacobian)?;
+        let NormalEquations {
+            hessian: _,
+            gradient,
+        } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1050,9 +1051,9 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
 mod tests {
     use super::*;
     use crate::core::VarKey;
-    use faer::sparse::Triplet;
     use crate::core::variable::Variable;
     use apex_manifolds::{LieGroup, rn, se3};
+    use faer::sparse::Triplet;
     use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;

@@ -23,16 +23,15 @@
 
 use dyn_stack::MemStack;
 use faer::{
-    Accum, Mat,
-    get_global_parallelism,
+    Accum, Mat, get_global_parallelism,
     prelude::Reborrow,
-    sparse::{
-        SparseColMat, SparseColMatMut, SparseColMatRef, SymbolicSparseColMat,
-        SymbolicSparseColMatRef,
-    },
     sparse::linalg::matmul::{
         SparseMatMulInfo, sparse_dense_matmul, sparse_sparse_matmul_numeric,
         sparse_sparse_matmul_numeric_scratch, sparse_sparse_matmul_symbolic,
+    },
+    sparse::{
+        SparseColMat, SparseColMatMut, SparseColMatRef, SymbolicSparseColMat,
+        SymbolicSparseColMatRef,
     },
 };
 use rayon::prelude::*;
@@ -162,8 +161,10 @@ impl NormalEquationsCache {
             })
             .collect();
 
-        let scratch_req =
-            sparse_sparse_matmul_numeric_scratch::<usize, f64>(product_symbolic.rb(), get_global_parallelism());
+        let scratch_req = sparse_sparse_matmul_numeric_scratch::<usize, f64>(
+            product_symbolic.rb(),
+            get_global_parallelism(),
+        );
 
         Ok(Self {
             jt_values: vec![0.0; jt_pattern.compute_nnz()],

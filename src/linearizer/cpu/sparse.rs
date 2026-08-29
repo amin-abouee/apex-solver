@@ -260,7 +260,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }
@@ -270,7 +276,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (_, jacobian) = assemble_sparse(&problem, &problem.variables, &index_map, &sym, &mut AssemblyWorkspace::build(&problem))?;
+        let (_, jacobian) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         let val = jacobian.as_ref().val_of_col(0)[0];
         assert!((val - 1.0).abs() < 1e-12);
         Ok(())
@@ -283,7 +295,13 @@ mod tests {
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!(residual[(0, 0)].abs() < 1e-12);
         Ok(())
     }
@@ -293,7 +311,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, jacobian) = assemble_sparse(&problem, &problem.variables, &index_map, &sym, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), 1);
         assert_eq!(residual.ncols(), 1);
         assert_eq!(jacobian.nrows(), 1);
@@ -310,7 +334,13 @@ mod tests {
         problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), 2);
         let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
         assert!((rsum - 9.0).abs() < 1e-12);
