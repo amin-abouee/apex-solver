@@ -14,7 +14,6 @@ use crate::{
     core::CoreResult,
     core::{
         CoreError, FactorKey, VarKey,
-        corrector::Corrector,
         loss_functions::LossFunction,
         residual_block::ResidualBlock,
         variable::{ManifoldVariable, Variable},
@@ -334,27 +333,10 @@ impl Problem {
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         residual_slice: &mut [f64],
     ) -> CoreResult<f64> {
-        let mut param_slices: smallvec::SmallVec<[&[f64]; 8]> = smallvec::SmallVec::new();
-        for &k in &residual_block.variable_keys {
-            if let Some(v) = variables.get(k) {
-                param_slices.push(v.as_param_slice());
-            }
-        }
-
-        residual_block
-            .factor
-            .linearize(&param_slices, residual_slice, None);
-
-        let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
-        let cost = match &residual_block.loss_func {
-            Some(loss_func) => {
-                let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-                corrector.correct_residual_in_place(residual_slice);
-                corrector.robust_cost()
-            }
-            None => 0.5 * squared_norm,
-        };
-
+        // Single source of truth for block evaluation — the linearizer's
+        // shared `compute_block_into` (Jacobian-less here, cost only).
+        let (_, cost) =
+            crate::linearizer::compute_block_into(residual_block, variables, residual_slice, None)?;
         Ok(cost)
     }
 
