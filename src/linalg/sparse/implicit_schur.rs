@@ -53,8 +53,8 @@
 use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::SparseColMat;
 use nalgebra::{DMatrix, DVector, Matrix3};
@@ -79,7 +79,16 @@ pub struct IterativeSchurSolver {
 
     // Cached for matrix-vector products
     landmark_block_inverses: Vec<Matrix3<f64>>,
+    /// The un-damped `JᵀJ`, published through [`LinearSolver::get_hessian`].
+    ///
+    /// The optimizers build the true quadratic model from this, so it must never
+    /// carry the damping term — see `system_hessian` for the matrix the solve
+    /// itself operates on.
     hessian: Option<SparseColMat<usize, f64>>,
+    /// The matrix the Schur operator and preconditioners are applied to:
+    /// `JᵀJ + λI` for a damped solve, plain `JᵀJ` otherwise.
+    system_hessian: Option<SparseColMat<usize, f64>>,
+    /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
 
     // Workspace buffers for Schur operator (avoid repeated allocations)
@@ -105,6 +114,7 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
+            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -123,6 +133,7 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
+            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -145,6 +156,7 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
+            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -184,7 +196,7 @@ impl IterativeSchurSolver {
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
         let hessian = self
-            .hessian
+            .system_hessian
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
@@ -367,7 +379,7 @@ impl IterativeSchurSolver {
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
         let hessian = self
-            .hessian
+            .system_hessian
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
@@ -471,7 +483,7 @@ impl IterativeSchurSolver {
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
 
         let hessian = self
-            .hessian
+            .system_hessian
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
@@ -817,20 +829,20 @@ impl IterativeSchurSolver {
         Ok(())
     }
 
-    /// Internal solve using the already-cached Hessian and gradient.
-    /// This avoids rebuilding the Hessian which would lose the damping from solve_augmented_equation.
-    fn solve_with_cached_hessian(&mut self) -> LinAlgResult<Mat<f64>> {
-        let hessian = self
-            .hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not cached".into()))?
-            .clone();
-        let gradient = self
-            .gradient
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Gradient not cached".into()))?
-            .clone();
-
+    /// Internal solve against an explicit system.
+    ///
+    /// `hessian` is the *damped* `JᵀJ + λI` (or the plain `JᵀJ` for an
+    /// undamped solve) and `gradient` is `−Jᵀr`, the right-hand side of
+    /// `H·dx = −Jᵀr`. Both are passed explicitly rather than read back from
+    /// `self.hessian` / `self.gradient`, because those two fields carry the
+    /// *published* quantities required by [`LinearSolver::get_hessian`] and
+    /// [`LinearSolver::get_gradient`] — the un-damped Hessian and `+Jᵀr` — which
+    /// the optimizers use to build the true quadratic model.
+    fn solve_with_system(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+        gradient: &Mat<f64>,
+    ) -> LinAlgResult<Mat<f64>> {
         // Extract structure info
         let structure = self
             .block_structure
@@ -842,10 +854,10 @@ impl IterativeSchurSolver {
         let (lm_start, _lm_end) = structure.landmark_col_range();
 
         // Invert landmark blocks
-        self.invert_landmark_blocks(&hessian)?;
+        self.invert_landmark_blocks(hessian)?;
 
         // Build visibility index for efficient preconditioner computation
-        self.build_visibility_index(&hessian)?;
+        self.build_visibility_index(hessian)?;
 
         // Extract reduced RHS: g_c - H_cp * H_pp^{-1} * g_p
         let mut g_reduced = Mat::<f64>::zeros(cam_dof, 1);
@@ -861,7 +873,7 @@ impl IterativeSchurSolver {
         let mut temp = Mat::<f64>::zeros(lm_dof, 1);
         self.apply_landmark_inverse(&g_lm, &mut temp)?;
 
-        let correction = self.extract_camera_landmark_mvp(&hessian, &temp)?;
+        let correction = self.extract_camera_landmark_mvp(hessian, &temp)?;
         for i in 0..cam_dof {
             g_reduced[(i, 0)] -= correction[(i, 0)];
         }
@@ -908,7 +920,7 @@ impl IterativeSchurSolver {
         self.workspace_cam = workspace_cam;
 
         // Back-substitute for landmarks
-        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(&hessian, &delta_cam)?;
+        let hcp_t_delta_cam = self.extract_camera_landmark_transpose_mvp(hessian, &delta_cam)?;
 
         let mut rhs_lm = Mat::<f64>::zeros(lm_dof, 1);
         for i in 0..lm_dof {
@@ -996,19 +1008,19 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobian)?;
+        // H = JᵀJ, g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        self.hessian = Some(hessian);
-        self.gradient = Some(neg_gradient);
+        // Undamped solve: the operator matrix and the published Hessian coincide.
+        self.system_hessian = Some(hessian.clone());
+        self.hessian = Some(hessian.clone());
+        self.gradient = Some(gradient);
 
-        // Solve using the cached Hessian
-        self.solve_with_cached_hessian()
+        self.solve_with_system(&hessian, &neg_gradient)
     }
 
     fn solve_augmented_equation(
@@ -1017,9 +1029,8 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         jacobian: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
-        // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian: _, gradient } =
-            self.ne_cache.compute(residuals, jacobian)?;
+        // H = JᵀJ, g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1027,14 +1038,15 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
 
         // H_aug = H + λI — diagonal edit on the cached product pattern
         // (no per-call triplet rebuild + sparse sum).
-        let hessian = self.ne_cache.damped_hessian(lambda)?;
+        let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;
 
+        // Publish the *un-damped* system, per the LinearSolver contract; the
+        // damped copy drives the Schur operator and the preconditioners.
+        self.system_hessian = Some(augmented_hessian.clone());
         self.hessian = Some(hessian);
-        self.gradient = Some(neg_gradient);
+        self.gradient = Some(gradient);
 
-        // Solve using the cached damped Hessian (don't call solve_normal_equation
-        // which would rebuild the Hessian without damping)
-        self.solve_with_cached_hessian()
+        self.solve_with_system(&augmented_hessian, &neg_gradient)
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
@@ -1050,9 +1062,9 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
 mod tests {
     use super::*;
     use crate::core::VarKey;
-    use faer::sparse::Triplet;
     use crate::core::variable::Variable;
     use apex_manifolds::{LieGroup, rn, se3};
+    use faer::sparse::Triplet;
     use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -1341,13 +1353,19 @@ mod tests {
         let mut s1 = IterativeSchurSolver::with_cg_params(500, 1e-6);
         s1.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let d1 = LinearSolver::<SparseMode>::solve_augmented_equation(
-            &mut s1, &residuals, &jacobian, 0.001,
+            &mut s1,
+            &residuals,
+            &jacobian,
+            0.001,
         )?;
 
         let mut s2 = IterativeSchurSolver::with_cg_params(500, 1e-6);
         s2.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let d2 = LinearSolver::<SparseMode>::solve_augmented_equation(
-            &mut s2, &residuals, &jacobian, 100.0,
+            &mut s2,
+            &residuals,
+            &jacobian,
+            100.0,
         )?;
 
         let norm_diff: f64 = (0..21).map(|i| (d1[(i, 0)] - d2[(i, 0)]).powi(2)).sum();
