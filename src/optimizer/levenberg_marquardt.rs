@@ -809,8 +809,10 @@ impl LevenbergMarquardt {
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse(&state.variables)?;
+        let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
+            &state.variables,
+            &mut state.workspace,
+        )?;
 
         // Compute step quality
         let rho = crate::optimizer::compute_step_quality(
@@ -892,6 +894,7 @@ impl LevenbergMarquardt {
                 &state.variable_index_map,
                 state.symbolic_structure.as_ref(),
                 state.total_dof,
+                &mut state.workspace,
             )?;
             jacobian_evaluations += 1;
 
@@ -1345,13 +1348,14 @@ mod tests {
             .with_jacobi_scaling(use_jacobi_scaling);
         let mut solver = LevenbergMarquardt::with_config(config);
 
-        let state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
         let (residuals, jacobian) = SparseMode::assemble(
             &problem,
             &state.variables,
             &state.variable_index_map,
             state.symbolic_structure.as_ref(),
             state.total_dof,
+            &mut state.workspace,
         )?;
 
         let solver_jacobian = if use_jacobi_scaling {

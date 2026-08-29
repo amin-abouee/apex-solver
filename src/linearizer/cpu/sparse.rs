@@ -10,7 +10,7 @@ use slotmap::{SecondaryMap, SlotMap};
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linearizer::{
-    BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
+    AssemblyWorkspace, BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
     split_by_row_offsets_mut,
 };
 
@@ -75,47 +75,36 @@ pub fn build_symbolic_structure(
 }
 
 /// Assemble residuals and sparse Jacobian from the current variable values.
+///
+/// Reuses the block ordering, slice offsets and scratch buffers cached in
+/// `workspace` — nothing static is rebuilt or reallocated per call.
 pub fn assemble_sparse(
     problem: &Problem,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     variable_index_map: &SecondaryMap<VarKey, usize>,
     symbolic_structure: &SymbolicStructure,
+    workspace: &mut AssemblyWorkspace,
 ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
     let total_nnz = symbolic_structure.pattern.compute_nnz();
 
-    // Collect and sort blocks by residual_row_start_idx so pre-split is contiguous
-    let mut blocks: Vec<&crate::core::residual_block::ResidualBlock> =
-        problem.residual_blocks().values().collect();
-    blocks.sort_by_key(|b| b.residual_row_start_idx);
-
-    // Pre-allocate the global residual buffer and split into non-overlapping slices
-    let mut residual_buf = vec![0.0f64; problem.total_residual_dimension];
-    let offsets_lens: Vec<(usize, usize)> = blocks
-        .iter()
-        .map(|b| (b.residual_row_start_idx, b.factor.residual_dim()))
-        .collect();
-    let residual_slices = split_by_row_offsets_mut(&mut residual_buf, &offsets_lens);
-
-    // Pre-allocate one Jacobian buffer per block (sized to factor.jacobian_shape).
-    // These buffers are reused as scratch for the in-place factor write and the
-    // in-place loss correction — no per-block allocation inside the parallel loop.
-    let mut jacobian_buffers: Vec<Vec<f64>> = blocks
-        .iter()
-        .map(|b| {
-            let (r, c) = b.factor.jacobian_shape();
-            vec![0.0f64; r * c]
-        })
-        .collect();
+    // Reset the residual buffer, then split it (and the Jacobian arena) into
+    // non-overlapping slices in the pre-computed block order.
+    workspace.residual_buf.fill(0.0);
+    let residual_slices =
+        split_by_row_offsets_mut(&mut workspace.residual_buf, &workspace.offsets_lens);
+    let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
+    let residual_blocks = problem.residual_blocks();
 
     // Parallel evaluation: each task gets a unique residual slice and a unique
     // Jacobian buffer (mutable, non-aliasing) — pure zero-copy through factor.linearize.
-    let block_results: Vec<LinearizerResult<BlockLinearization>> = jacobian_buffers
-        .par_iter_mut()
-        .zip(residual_slices.into_par_iter())
-        .zip(blocks.par_iter())
-        .map(|((jac_buf, res_slice), block)| {
+    let block_results: Vec<LinearizerResult<BlockLinearization>> = residual_slices
+        .into_par_iter()
+        .zip(jac_slices)
+        .zip(workspace.block_order.par_iter())
+        .map(|((res_slice, jac_buf), key)| {
+            let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, jac_buf.as_mut_slice())
+            compute_block_into(block, variables, res_slice, jac_buf)
         })
         .collect();
 
@@ -123,19 +112,23 @@ pub fn assemble_sparse(
         .into_iter()
         .collect::<LinearizerResult<Vec<_>>>()?;
 
+    // Re-split the arena to read the corrected Jacobian blocks back for scattering.
+    let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
+
     // Scatter Jacobian blocks into CSC value array (serial, pre-computed positions).
     let mut jacobian_values = Vec::with_capacity(total_nnz);
-    for ((bl, block), jac_buf) in block_results
+    for ((bl, key), jac_buf) in block_results
         .iter()
-        .zip(blocks.iter())
-        .zip(jacobian_buffers.iter())
+        .zip(workspace.block_order.iter())
+        .zip(jac_slices.iter())
     {
+        let block = &residual_blocks[*key];
         scatter_sparse_block(bl, block, variable_index_map, jac_buf, &mut jacobian_values)?;
     }
 
     // Convert residual buffer to faer Mat
     let n = problem.total_residual_dimension;
-    let residual_faer = faer::Mat::from_fn(n, 1, |i, _| residual_buf[i]);
+    let residual_faer = faer::Mat::from_fn(n, 1, |i, _| workspace.residual_buf[i]);
 
     let jacobian_sparse = SparseColMat::new_from_argsort(
         symbolic_structure.pattern.clone(),
@@ -267,7 +260,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym)?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         Ok(())
     }
@@ -277,7 +276,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (_, jacobian) = assemble_sparse(&problem, &problem.variables, &index_map, &sym)?;
+        let (_, jacobian) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         let val = jacobian.as_ref().val_of_col(0)[0];
         assert!((val - 1.0).abs() < 1e-12);
         Ok(())
@@ -290,7 +295,13 @@ mod tests {
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym)?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!(residual[(0, 0)].abs() < 1e-12);
         Ok(())
     }
@@ -300,7 +311,13 @@ mod tests {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, jacobian) = assemble_sparse(&problem, &problem.variables, &index_map, &sym)?;
+        let (residual, jacobian) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), 1);
         assert_eq!(residual.ncols(), 1);
         assert_eq!(jacobian.nrows(), 1);
@@ -317,7 +334,13 @@ mod tests {
         problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
-        let (residual, _) = assemble_sparse(&problem, &problem.variables, &index_map, &sym)?;
+        let (residual, _) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), 2);
         let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
         assert!((rsum - 9.0).abs() < 1e-12);
@@ -333,7 +356,13 @@ mod tests {
             build_symbolic_structure(&problem, &problem.variables, &index_map_full, total_dof)?;
 
         let empty: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        let result = assemble_sparse(&problem, &problem.variables, &empty, &sym);
+        let result = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &empty,
+            &sym,
+            &mut AssemblyWorkspace::build(&problem),
+        );
         assert!(result.is_err(), "expected Err for missing variable key");
         Ok(())
     }

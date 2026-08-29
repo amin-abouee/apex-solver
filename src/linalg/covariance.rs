@@ -55,7 +55,6 @@ use faer::{
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
 use slotmap::{SecondaryMap, SlotMap};
-use std::ops::Mul;
 use thiserror::Error;
 use tracing::warn;
 
@@ -236,21 +235,24 @@ impl Covariance {
         let symbolic = crate::linearizer::cpu::sparse::build_symbolic_structure(
             problem, variables, &index_map, total_dof,
         )?;
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(problem);
         let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
-            problem, variables, &index_map, &symbolic,
+            problem,
+            variables,
+            &index_map,
+            &symbolic,
+            &mut workspace,
         )?;
 
-        // H = JᵀJ. No damping term, no column scaling.
-        let hessian = jacobian
-            .as_ref()
-            .transpose()
-            .to_col_major()
-            .map_err(|e| {
-                CovarianceError::Assembly(format!(
-                    "failed to convert transposed Jacobian to column-major: {e:?}"
-                ))
-            })?
-            .mul(jacobian.as_ref());
+        // H = JᵀJ via parallel faer kernels with cached symbolic structure.
+        // No damping term, no column scaling.
+        let hessian = {
+            let mut ne_cache = crate::linalg::sparse::normal_eq::LazyNormalEquations::default();
+            ne_cache
+                .compute(&residuals, &jacobian)
+                .map_err(|e| CovarianceError::Assembly(format!("failed to form H = JᵀJ: {e}")))?
+                .hessian
+        };
 
         let mut matrix = match options.algorithm {
             CovarianceAlgorithm::SparseCholesky => invert_via_cholesky(&hessian, total_dof)?,

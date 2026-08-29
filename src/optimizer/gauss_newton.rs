@@ -613,6 +613,7 @@ impl GaussNewton {
                 &state.variable_index_map,
                 state.symbolic_structure.as_ref(),
                 state.total_dof,
+                &mut state.workspace,
             )?;
             jacobian_evaluations += 1;
 

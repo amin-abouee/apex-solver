@@ -53,14 +53,14 @@
 use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::SparseColMat;
 use nalgebra::{DMatrix, DVector, Matrix3};
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashMap;
-use std::ops::Mul;
 
 /// Iterative Schur complement solver using Preconditioned Conjugate Gradients
 #[derive(Debug, Clone)]
@@ -73,6 +73,9 @@ pub struct IterativeSchurSolver {
 
     // Preconditioner type
     preconditioner_type: SchurPreconditioner,
+
+    // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
 
     // Cached for matrix-vector products
     landmark_block_inverses: Vec<Matrix3<f64>>,
@@ -99,6 +102,7 @@ impl IterativeSchurSolver {
             max_cg_iterations: 500, // More iterations for large BA problems
             cg_tolerance: 1e-9,     // Tighter tolerance for accurate steps
             preconditioner_type: SchurPreconditioner::SchurJacobi,
+            ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
@@ -116,6 +120,7 @@ impl IterativeSchurSolver {
             max_cg_iterations: max_iterations,
             cg_tolerance: tolerance,
             preconditioner_type: SchurPreconditioner::SchurJacobi,
+            ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
@@ -137,6 +142,7 @@ impl IterativeSchurSolver {
             max_cg_iterations: max_iterations,
             cg_tolerance: tolerance,
             preconditioner_type: preconditioner,
+            ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
             gradient: None,
@@ -579,6 +585,7 @@ impl IterativeSchurSolver {
 
     /// Solve S*x = b using Preconditioned Conjugate Gradients with block preconditioner
     /// Uses optimized Schur operator with workspace buffers to minimize allocations.
+    /// Reductions and vector updates run through faer's SIMD kernels.
     fn solve_pcg_block(
         &self,
         b: &Mat<f64>,
@@ -596,34 +603,23 @@ impl IterativeSchurSolver {
         let mut z = self.apply_block_preconditioner(&r, precond_blocks)?;
 
         let mut p = z.clone();
-        let mut rz_old = 0.0;
-        for i in 0..cam_dof {
-            rz_old += r[(i, 0)] * z[(i, 0)];
-        }
+        let mut rz_old: f64 = (r.transpose() * &z)[(0, 0)];
 
         // Compute initial residual norm for relative convergence
-        let b_norm: f64 = (0..cam_dof)
-            .map(|i| b[(i, 0)] * b[(i, 0)])
-            .sum::<f64>()
-            .sqrt();
+        let b_norm = b.norm_l2();
         let tol = self.cg_tolerance * b_norm.max(1.0);
 
         // Ap buffer (reused each iteration)
         let mut ap = Mat::<f64>::zeros(cam_dof, 1);
 
         for iter in 0..self.max_cg_iterations {
-            // Ap = S * p (using fast operator with workspace buffers)
-            // Reset ap to zeros
-            for i in 0..cam_dof {
-                ap[(i, 0)] = 0.0;
-            }
+            // Ap = S * p (using fast operator with workspace buffers; the
+            // operator accumulates, so reset ap first)
+            ap.fill(0.0);
             self.apply_schur_operator_fast(&p, &mut ap, workspace_lm, workspace_cam)?;
 
             // alpha = (r^T z) / (p^T Ap)
-            let mut p_ap = 0.0;
-            for i in 0..cam_dof {
-                p_ap += p[(i, 0)] * ap[(i, 0)];
-            }
+            let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
 
             if p_ap.abs() < 1e-20 {
                 tracing::debug!("PCG: p^T*A*p near zero at iteration {}", iter);
@@ -633,26 +629,17 @@ impl IterativeSchurSolver {
             let alpha = rz_old / p_ap;
 
             // x = x + alpha * p
-            for i in 0..cam_dof {
-                x[(i, 0)] += alpha * p[(i, 0)];
-            }
+            faer::zip!(&mut x, &p).for_each(|faer::unzip!(x, p)| *x += alpha * p);
 
             // r = r - alpha * Ap
-            for i in 0..cam_dof {
-                r[(i, 0)] -= alpha * ap[(i, 0)];
-            }
+            faer::zip!(&mut r, &ap).for_each(|faer::unzip!(r, ap)| *r -= alpha * ap);
 
             // Check convergence
-            let r_norm: f64 = (0..cam_dof)
-                .map(|i| r[(i, 0)] * r[(i, 0)])
-                .sum::<f64>()
-                .sqrt();
-
-            if r_norm < tol {
+            if r.norm_l2() < tol {
                 tracing::debug!(
                     "PCG converged in {} iterations (residual={:.2e})",
                     iter + 1,
-                    r_norm
+                    r.norm_l2()
                 );
                 break;
             }
@@ -661,10 +648,7 @@ impl IterativeSchurSolver {
             z = self.apply_block_preconditioner(&r, precond_blocks)?;
 
             // beta = (r_{k+1}^T z_{k+1}) / (r_k^T z_k)
-            let mut rz_new = 0.0;
-            for i in 0..cam_dof {
-                rz_new += r[(i, 0)] * z[(i, 0)];
-            }
+            let rz_new: f64 = (r.transpose() * &z)[(0, 0)];
 
             if rz_old.abs() < 1e-30 {
                 break;
@@ -673,9 +657,7 @@ impl IterativeSchurSolver {
             let beta = rz_new / rz_old;
 
             // p = z + beta * p
-            for i in 0..cam_dof {
-                p[(i, 0)] = z[(i, 0)] + beta * p[(i, 0)];
-            }
+            faer::zip!(&mut p, &z).for_each(|faer::unzip!(p, z)| *p = *z + beta * *p);
 
             rz_old = rz_new;
         }
@@ -1014,20 +996,15 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // Build H = J^T * J, g = -J^T * r
-        let jt = jacobian
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let hessian = jt.mul(jacobian);
-        let jtr = jacobian.transpose().mul(residuals);
-        let mut gradient = Mat::<f64>::zeros(jtr.nrows(), 1);
-        for i in 0..jtr.nrows() {
-            gradient[(i, 0)] = -jtr[(i, 0)];
+        // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
+        let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
+        for i in 0..gradient.nrows() {
+            neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
         self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
+        self.gradient = Some(neg_gradient);
 
         // Solve using the cached Hessian
         self.solve_with_cached_hessian()
@@ -1039,46 +1016,22 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         jacobian: &SparseColMat<usize, f64>,
         lambda: f64,
     ) -> LinAlgResult<Mat<f64>> {
-        // Build H = J^T * J + λI
-        let jt = jacobian
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let jtr = jt.mul(residuals);
-        let mut hessian = jacobian
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?
-            .mul(jacobian);
-
-        // Add damping to diagonal
-        let n = hessian.ncols();
-        let symbolic = hessian.symbolic();
-        let mut triplets = Vec::new();
-
-        for col in 0..n {
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = hessian.val_of_col(col);
-
-            for (idx, &row) in row_indices.iter().enumerate() {
-                triplets.push(Triplet::new(row, col, col_values[idx]));
-            }
-
-            // Add lambda to diagonal
-            triplets.push(Triplet::new(col, col, lambda));
+        // H = JᵀJ, g = -Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations {
+            hessian: _,
+            gradient,
+        } = self.ne_cache.compute(residuals, jacobian)?;
+        let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
+        for i in 0..gradient.nrows() {
+            neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        hessian = SparseColMat::try_new_from_triplets(n, n, &triplets).map_err(|e| {
-            LinAlgError::InvalidInput(format!("Failed to build damped Hessian: {:?}", e))
-        })?;
-
-        let mut gradient = Mat::<f64>::zeros(jtr.nrows(), 1);
-        for i in 0..jtr.nrows() {
-            gradient[(i, 0)] = -jtr[(i, 0)];
-        }
+        // H_aug = H + λI — diagonal edit on the cached product pattern
+        // (no per-call triplet rebuild + sparse sum).
+        let hessian = self.ne_cache.damped_hessian(lambda)?;
 
         self.hessian = Some(hessian);
-        self.gradient = Some(gradient.clone());
+        self.gradient = Some(neg_gradient);
 
         // Solve using the cached damped Hessian (don't call solve_normal_equation
         // which would rebuild the Hessian without damping)
@@ -1100,6 +1053,7 @@ mod tests {
     use crate::core::VarKey;
     use crate::core::variable::Variable;
     use apex_manifolds::{LieGroup, rn, se3};
+    use faer::sparse::Triplet;
     use slotmap::{SecondaryMap, SlotMap};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;

@@ -23,6 +23,10 @@ apex-camera-models = { path = "crates/apex-camera-models", version = "0.3.0" }
 slotmap = "1.0"
 nalgebra = { version = "0.33" }
 faer = { version = "0.24", features = ["sparse"] }
+# faer's numeric sparse kernels take a `MemStack` scratch, but faer keeps
+# `MemStack` crate-private; dyn-stack is faer's own support crate (same version
+# already resolved in the lockfile), so we depend on it directly.
+dyn-stack = "0.13"
 rayon = "1.12"
 thiserror = "2.0.18"
 rand = "0.9.4"
@@ -133,6 +137,7 @@ apex-camera-models.workspace = true
 slotmap.workspace = true
 nalgebra.workspace = true
 faer.workspace = true
+dyn-stack.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 rand.workspace = true

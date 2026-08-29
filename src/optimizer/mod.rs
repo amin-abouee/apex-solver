@@ -460,6 +460,9 @@ pub struct InitializedState {
     pub variable_index_map: SecondaryMap<VarKey, usize>,
     pub sorted_vars: Vec<VarKey>,
     pub symbolic_structure: Option<SymbolicStructure>,
+    /// Static per-solve assembly scratch (block order, offsets, buffers),
+    /// built once here and reused by every iteration.
+    pub workspace: crate::linearizer::AssemblyWorkspace,
     pub total_dof: usize,
     pub current_cost: f64,
     pub initial_cost: f64,
@@ -569,7 +572,12 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
         JacobianMode::Dense => None,
     };
 
-    let (_residual, current_cost) = problem.compute_residual_and_cost_sparse(&variables)?;
+    // Static per-solve assembly data: block order, slice offsets and scratch
+    // buffers, computed once and reused by every linearization below.
+    let mut workspace = crate::linearizer::AssemblyWorkspace::build(problem);
+
+    let (_residual, current_cost) =
+        problem.compute_residual_and_cost_sparse_with_workspace(&variables, &mut workspace)?;
     let initial_cost = current_cost;
 
     Ok(InitializedState {
@@ -577,6 +585,7 @@ pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<I
         variable_index_map,
         sorted_vars,
         symbolic_structure,
+        workspace,
         total_dof,
         current_cost,
         initial_cost,
@@ -1462,6 +1471,7 @@ mod tests {
             variable_index_map: SecondaryMap::new(),
             sorted_vars: vec![k],
             symbolic_structure: None,
+            workspace: crate::linearizer::AssemblyWorkspace::empty(),
             total_dof: 1,
             current_cost: 0.1,
             initial_cost: 5.0,

@@ -217,30 +217,40 @@ impl Problem {
         &self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> CoreResult<(Mat<f64>, f64)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
+        self.compute_residual_and_cost_sparse_with_workspace(variables, &mut workspace)
+    }
+
+    /// [`Problem::compute_residual_and_cost_sparse`] reusing a per-solve workspace.
+    ///
+    /// The block ordering and scratch buffers are static for the lifetime of a
+    /// solve, so hot paths (per-iteration step evaluation) pass a workspace built
+    /// once by [`crate::optimizer::initialize_optimization_state`].
+    pub(crate) fn compute_residual_and_cost_sparse_with_workspace(
+        &self,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        workspace: &mut crate::linearizer::AssemblyWorkspace,
+    ) -> CoreResult<(Mat<f64>, f64)> {
         use crate::linearizer::split_by_row_offsets_mut;
 
-        let mut blocks: Vec<&crate::core::residual_block::ResidualBlock> =
-            self.residual_blocks.values().collect();
-        blocks.sort_by_key(|b| b.residual_row_start_idx);
-
-        let mut residual_buf = vec![0.0f64; self.total_residual_dimension];
-        let offsets_lens: Vec<(usize, usize)> = blocks
-            .iter()
-            .map(|b| (b.residual_row_start_idx, b.factor.residual_dim()))
-            .collect();
-        let residual_slices = split_by_row_offsets_mut(&mut residual_buf, &offsets_lens);
+        workspace.residual_buf.fill(0.0);
+        let residual_slices =
+            split_by_row_offsets_mut(&mut workspace.residual_buf, &workspace.offsets_lens);
 
         // Accumulate the per-block cost on the existing parallel pass rather than
         // making a second traversal.
         let results: Vec<CoreResult<f64>> = residual_slices
             .into_par_iter()
-            .zip(blocks.par_iter())
-            .map(|(slice, block)| self.compute_residual_block(block, variables, slice))
+            .zip(workspace.block_order.par_iter())
+            .map(|(slice, key)| {
+                let block = &self.residual_blocks[*key];
+                self.compute_residual_block(block, variables, slice)
+            })
             .collect();
         let cost: f64 = results.into_iter().sum::<CoreResult<f64>>()?;
 
         let n = self.total_residual_dimension;
-        Ok((Mat::from_fn(n, 1, |i, _| residual_buf[i]), cost))
+        Ok((Mat::from_fn(n, 1, |i, _| workspace.residual_buf[i]), cost))
     }
 
     /// Compute residuals and sparse Jacobian.
@@ -250,11 +260,13 @@ impl Problem {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> CoreResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
         Ok(crate::linearizer::cpu::sparse::assemble_sparse(
             self,
             variables,
             variable_index_map,
             symbolic_structure,
+            &mut workspace,
         )?)
     }
 
@@ -265,11 +277,13 @@ impl Problem {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         total_dof: usize,
     ) -> CoreResult<(Mat<f64>, Mat<f64>)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
         Ok(crate::linearizer::cpu::dense::assemble_dense(
             self,
             variables,
             variable_index_map,
             total_dof,
+            &mut workspace,
         )?)
     }
 

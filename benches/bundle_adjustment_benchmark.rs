@@ -12,6 +12,9 @@
 //! cargo bench --bench bundle_adjustment_comparison
 //! ```
 //!
+//! Set `APEX_BENCH_RUST_ONLY=1` to skip the C++ solvers (Ceres, GTSAM, g2o) and run
+//! the apex-solver rows only.
+//!
 //! ## Datasets Tested
 //!
 //! - **Ladybug**: 89 cameras, 110,973 landmarks, 562,976 observations
@@ -708,9 +711,13 @@ fn run_benchmark_comparison() {
         let apex_result = apex_solver_ba(&dataset.name, &dataset.path);
         all_results.push(apex_result);
 
-        // Phase 2: C++ Solvers
-        let cpp_results = run_cpp_ba_benchmarks(&dataset.name, &dataset.path);
-        all_results.extend(cpp_results);
+        // Phase 2: C++ Solvers (skipped when APEX_BENCH_RUST_ONLY is set)
+        if std::env::var_os("APEX_BENCH_RUST_ONLY").is_some() {
+            info!("APEX_BENCH_RUST_ONLY set: skipping C++ benchmarks");
+        } else {
+            let cpp_results = run_cpp_ba_benchmarks(&dataset.name, &dataset.path);
+            all_results.extend(cpp_results);
+        }
     }
 
     // Save results to CSV in output/ folder
