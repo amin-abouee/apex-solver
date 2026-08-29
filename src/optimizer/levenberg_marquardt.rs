@@ -1358,35 +1358,9 @@ mod tests {
         }
     }
 
-    /// λ and ν are run state, so a second `optimize()` reproduces the first.
-    ///
-    /// Before they were separated from the config, the second call inherited the
-    /// λ the first run ended on and silently produced a different answer.
-    #[test]
-    fn repeated_optimize_calls_are_reproducible() -> TestResult {
-        let mut solver = LevenbergMarquardt::with_config(
-            LevenbergMarquardtConfig::new().with_max_iterations(100),
-        );
-
-        let mut first_problem = rosenbrock_problem();
-        let first = solver.optimize(&mut first_problem)?;
-
-        let mut second_problem = rosenbrock_problem();
-        let second = solver.optimize(&mut second_problem)?;
-
-        assert_eq!(
-            first.iterations, second.iterations,
-            "reusing a solver changed the iteration count: {} then {}",
-            first.iterations, second.iterations
-        );
-        assert!(
-            (first.final_cost - second.final_cost).abs() < 1e-15,
-            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
-            first.final_cost,
-            second.final_cost
-        );
-        Ok(())
-    }
+    // -------------------------------------------------------------------------
+    // Ceres-compatibility config fields: behaviour, not builder round-trips
+    // -------------------------------------------------------------------------
 
     /// `min_relative_decrease` gates step acceptance.
     ///
@@ -1418,6 +1392,47 @@ mod tests {
              leave the cost higher: strict {:.3e} vs permissive {:.3e}",
             strict.final_cost,
             permissive.final_cost
+        );
+        Ok(())
+    }
+
+    /// `min_diagonal` / `max_diagonal` change the damped system.
+    ///
+    /// Clamping both to 1.0 turns `λ·D` into `λI`; that must produce a
+    /// different iterate sequence from the Marquardt default on a problem whose
+    /// columns have unequal norms, which Rosenbrock's do.
+    #[test]
+    fn diagonal_bounds_select_between_marquardt_and_identity_damping() -> TestResult {
+        let mut marquardt_problem = rosenbrock_problem();
+        let marquardt = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(100),
+        )
+        .optimize(&mut marquardt_problem)?;
+
+        let mut identity_problem = rosenbrock_problem();
+        let identity = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_diagonal_bounds(1.0, 1.0),
+        )
+        .optimize(&mut identity_problem)?;
+
+        assert_ne!(
+            marquardt.iterations, identity.iterations,
+            "λ·D and λI should not produce identical iterate counts on a \
+             problem with unequal column norms — the bounds are being ignored"
+        );
+        // Both still solve Rosenbrock; the point is that they differ, not that
+        // one is better on this particular problem.
+        assert!(
+            marquardt.final_cost < 1e-8,
+            "marquardt cost {:.3e}",
+            marquardt.final_cost
+        );
+        assert!(
+            identity.final_cost < 1e-8,
+            "identity cost {:.3e}",
+            identity.final_cost
         );
         Ok(())
     }
@@ -1484,6 +1499,36 @@ mod tests {
             default_solver.damping,
             retuned_solver.damping
         );
+    }
+
+    /// λ and ν are run state, so a second `optimize()` reproduces the first.
+    ///
+    /// Before they were separated from the config, the second call inherited the
+    /// λ the first run ended on and silently produced a different answer.
+    #[test]
+    fn repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(100),
+        );
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
     }
 
     /// `max_condition_number` terminates on a variable no residual constrains.
