@@ -275,15 +275,21 @@ impl ResidualBlock {
         self.factor
             .linearize(&param_slices, &mut residual_buf, Some(jac_mut));
 
-        let mut residual = DVector::from_vec(residual_buf);
-        let mut jacobian = DMatrix::from_column_slice(jac_rows, jac_cols, &jacobian_buf);
-
         if let Some(loss_func) = self.loss_func.as_ref() {
-            let squared_norm = residual.norm_squared();
+            let squared_norm: f64 = residual_buf.iter().map(|x| x * x).sum();
             let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-            corrector.correct_jacobian(&residual, &mut jacobian);
-            corrector.correct_residuals(&mut residual);
+            // Jacobian correction must read the original (un-corrected) residual.
+            corrector.correct_jacobian_in_place(
+                &residual_buf,
+                &mut jacobian_buf,
+                jac_rows,
+                jac_cols,
+            );
+            corrector.correct_residual_in_place(&mut residual_buf);
         }
+
+        let residual = DVector::from_vec(residual_buf);
+        let jacobian = DMatrix::from_column_slice(jac_rows, jac_cols, &jacobian_buf);
 
         Ok((residual, jacobian))
     }

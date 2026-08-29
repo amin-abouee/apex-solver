@@ -71,12 +71,14 @@
 //! // Create corrector
 //! let corrector = Corrector::new(&loss, squared_norm);
 //!
-//! // Apply corrections
-//! let mut corrected_jacobian = jacobian.clone();
+//! // Apply corrections (flat column-major buffers)
+//! let rows = 3;
+//! let cols = 2;
+//! let mut jac_flat: Vec<f64> = jacobian.as_slice().to_vec();
 //! let mut corrected_residual = residual.clone();
 //!
-//! corrector.correct_jacobian(&residual, &mut corrected_jacobian);
-//! corrector.correct_residuals(&mut corrected_residual);
+//! corrector.correct_jacobian_in_place(residual.as_slice(), &mut jac_flat, rows, cols);
+//! corrector.correct_residual_in_place(corrected_residual.as_mut_slice());
 //!
 //! // The corrected values now account for the robust loss function
 //! // Outliers have been downweighted appropriately
@@ -86,7 +88,6 @@
 //! ```
 
 use crate::core::loss_functions::LossFunction;
-use nalgebra::{DMatrix, DVector};
 
 /// Corrector for applying robust loss functions via residual and Jacobian adjustment.
 ///
@@ -199,125 +200,7 @@ impl Corrector {
         self.robust_cost
     }
 
-    /// Apply correction to the Jacobian matrix.
-    ///
-    /// Transforms the Jacobian `J` into `J̃` according to the Ceres Solver corrector algorithm:
-    ///
-    /// ```text
-    /// J̃ = √(ρ'(s)) · (J - α²·r·r^T·J)
-    /// ```
-    ///
-    /// where:
-    /// - `√(ρ'(s))` scales the Jacobian by the loss function weight
-    /// - `α` is computed by solving the quadratic equation: 0.5·α² - α - (ρ''/ρ')·s = 0
-    /// - The subtractive term `α²·r·r^T·J` is a rank-1 curvature correction
-    ///
-    /// # Arguments
-    ///
-    /// * `residual` - The original residual vector `r`
-    /// * `jacobian` - Mutable reference to the Jacobian matrix (modified in-place)
-    ///
-    /// # Implementation Notes
-    ///
-    /// The correction is applied in-place for efficiency. The algorithm:
-    /// 1. Scales all Jacobian entries by `√(ρ'(s))`
-    /// 2. Adds the outer product correction: `α · (J^T r) · r^T / ||r||`
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
-    /// use nalgebra::{DVector, DMatrix};
-    /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
-    ///
-    /// let loss = HuberLoss::new(1.0)?;
-    /// let residual = DVector::from_vec(vec![2.0, 1.0]);
-    /// let squared_norm = residual.dot(&residual);
-    ///
-    /// let corrector = Corrector::new(&loss, squared_norm);
-    ///
-    /// let mut jacobian = DMatrix::from_row_slice(2, 3, &[
-    ///     1.0, 0.0, 1.0,
-    ///     0.0, 1.0, 1.0,
-    /// ]);
-    ///
-    /// corrector.correct_jacobian(&residual, &mut jacobian);
-    /// // jacobian is now corrected to account for the robust loss
-    /// # Ok(())
-    /// # }
-    /// # example().unwrap();
-    /// ```
-    pub fn correct_jacobian(&self, residual: &DVector<f64>, jacobian: &mut DMatrix<f64>) {
-        // Common case (rho[2] <= 0): only apply first-order correction
-        // This is the most common scenario for well-behaved loss functions
-        if self.alpha_sq_norm == 0.0 {
-            *jacobian *= self.sqrt_rho1;
-            return;
-        }
-
-        // Full correction with curvature term:
-        // J̃ = √ρ₁ · (J - α²·r·r^T·J)
-        //
-        // This is the correct Ceres Solver algorithm:
-        // 1. Compute r·r^T·J (outer product of residual with Jacobian)
-        // 2. Subtract α²·r·r^T·J from J
-        // 3. Scale result by √ρ₁
-        //
-        // Reference: Ceres Solver corrector.cc
-        // https://github.com/ceres-solver/ceres-solver/blob/master/internal/ceres/corrector.cc
-
-        let r_rtj = residual * residual.transpose() * &*jacobian;
-        *jacobian = (&*jacobian - r_rtj * self.alpha_sq_norm) * self.sqrt_rho1;
-    }
-
-    /// Apply correction to the residual vector.
-    ///
-    /// Transforms the residual `r` into `r̃` by scaling:
-    ///
-    /// ```text
-    /// r̃ = √(ρ'(s)) · r
-    /// ```
-    ///
-    /// This ensures that `||r̃||² ≈ ρ(||r||²)`, i.e., the squared norm of the corrected
-    /// residual approximates the robust cost.
-    ///
-    /// # Arguments
-    ///
-    /// * `residual` - Mutable reference to the residual vector (modified in-place)
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use apex_solver::core::corrector::Corrector;
-    /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
-    /// use nalgebra::DVector;
-    /// # use apex_solver::core::CoreResult;
-    /// # fn example() -> CoreResult<()> {
-    ///
-    /// let loss = HuberLoss::new(1.0)?;
-    /// let mut residual = DVector::from_vec(vec![2.0, 3.0, 1.0]);
-    /// let squared_norm = residual.dot(&residual);
-    ///
-    /// let corrector = Corrector::new(&loss, squared_norm);
-    ///
-    /// corrector.correct_residuals(&mut residual);
-    /// // Outlier residuals are scaled down
-    /// # Ok(())
-    /// # }
-    /// # example().unwrap();
-    /// ```
-    pub fn correct_residuals(&self, residual: &mut DVector<f64>) {
-        // Simple scaling: r̃ = √(ρ'(s)) · r
-        //
-        // This downweights outliers (where ρ'(s) < 1) and leaves inliers
-        // approximately unchanged (where ρ'(s) ≈ 1)
-        *residual *= self.residual_scaling;
-    }
-
-    /// In-place residual correction over a flat slice. Equivalent to
-    /// `correct_residuals` but does not require a `DVector` wrapper.
+    /// In-place residual correction over a flat slice: `r̃ = √(ρ'(s)) · r`.
     #[inline]
     pub fn correct_residual_in_place(&self, residual: &mut [f64]) {
         let s = self.residual_scaling;
@@ -373,6 +256,7 @@ impl Corrector {
 mod tests {
     use super::*;
     use crate::core::loss_functions::{CauchyLoss, HuberLoss};
+    use nalgebra::{DMatrix, DVector};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -391,7 +275,7 @@ mod tests {
 
         // Corrected residual should be nearly unchanged
         let mut corrected_residual = residual.clone();
-        corrector.correct_residuals(&mut corrected_residual);
+        corrector.correct_residual_in_place(corrected_residual.as_mut_slice());
         assert!((corrected_residual - residual).norm() < 1e-10);
 
         Ok(())
@@ -412,7 +296,7 @@ mod tests {
 
         // Corrected residual should be downweighted
         let mut corrected_residual = residual.clone();
-        corrector.correct_residuals(&mut corrected_residual);
+        corrector.correct_residual_in_place(corrected_residual.as_mut_slice());
         assert!(corrected_residual.norm() < residual.norm());
 
         Ok(())
@@ -432,7 +316,7 @@ mod tests {
         assert!(corrector.sqrt_rho1 > 0.0);
 
         let mut corrected_residual = residual.clone();
-        corrector.correct_residuals(&mut corrected_residual);
+        corrector.correct_residual_in_place(corrected_residual.as_mut_slice());
         assert!(corrected_residual.norm() < residual.norm());
 
         Ok(())
@@ -447,13 +331,20 @@ mod tests {
 
         let corrector = Corrector::new(&loss, squared_norm);
 
-        let mut jacobian = DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
+        let jacobian = DMatrix::from_row_slice(2, 3, &[1.0, 0.0, 1.0, 0.0, 1.0, 1.0]);
 
         let original_jacobian = jacobian.clone();
-        corrector.correct_jacobian(&residual, &mut jacobian);
+        let mut corrected = jacobian.clone();
+        let (rows, cols) = (corrected.nrows(), corrected.ncols());
+        corrector.correct_jacobian_in_place(
+            residual.as_slice(),
+            corrected.as_mut_slice(),
+            rows,
+            cols,
+        );
 
         // Jacobian should be modified
-        assert!(jacobian != original_jacobian);
+        assert!(corrected != original_jacobian);
 
         // Each element should be scaled and corrected
         // (Exact values depend on loss function derivatives)
