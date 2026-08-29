@@ -616,6 +616,12 @@ struct StepResult {
     step: faer::Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
+    /// ‖step‖ measured in the space the trust-region radius bounds.
+    ///
+    /// Equal to `‖step‖` when Jacobi scaling is off; when it is on, the radius
+    /// constrains the scaled step, so the radius update has to be fed this norm
+    /// and not the un-scaled one.
+    scaled_step_norm: f64,
 }
 
 /// Type of step taken
@@ -927,11 +933,19 @@ impl DogLeg {
         (dog_leg, StepType::DogLeg)
     }
 
-    /// Update trust region radius based on step quality (Ceres-style)
-    fn update_trust_region(&mut self, rho: f64, step_norm: f64) -> bool {
+    /// Update the trust-region radius from the step quality (Ceres-style).
+    ///
+    /// `scaled_step_norm` must be measured in the same space the radius bounds —
+    /// the *scaled* space when Jacobi scaling is on, which is Dog Leg's default.
+    /// Feeding the un-scaled norm here would compare two different units and
+    /// grow the radius by an arbitrary factor.
+    fn update_trust_region(&mut self, rho: f64, scaled_step_norm: f64) -> bool {
         if rho > self.config.good_step_quality {
-            // Good step, increase trust region (Ceres-style: max(radius, 3*step_norm))
-            let new_radius = self.trust_region_radius.max(3.0 * step_norm);
+            // Good step: grow the region to at least `increase_factor` times the
+            // step that just succeeded (Ceres' `max(radius, 3·‖step‖)`).
+            let new_radius = self
+                .trust_region_radius
+                .max(self.config.trust_region_increase_factor * scaled_step_norm);
             self.trust_region_radius = new_radius.min(self.config.trust_region_max);
 
             // Decrease mu on successful step (Ceres-style adaptive regularization)
@@ -1007,6 +1021,7 @@ impl DogLeg {
                 self.trust_region_radius,
             );
 
+            let scaled_step_norm = scaled_step.norm_l2();
             let step = if self.config.use_jacobi_scaling {
                 let scaling = self.jacobi_scaling.as_ref()?;
                 M::apply_inverse_scaling(&scaled_step, scaling)
@@ -1024,6 +1039,7 @@ impl DogLeg {
                 step,
                 gradient_norm,
                 predicted_reduction,
+                scaled_step_norm,
             });
         }
 
@@ -1079,6 +1095,7 @@ impl DogLeg {
         );
 
         // 6. Apply inverse Jacobi scaling if enabled
+        let scaled_step_norm = scaled_step.norm_l2();
         let step = if self.config.use_jacobi_scaling {
             let scaling = self.jacobi_scaling.as_ref()?;
             M::apply_inverse_scaling(&scaled_step, scaling)
@@ -1100,6 +1117,7 @@ impl DogLeg {
             step,
             gradient_norm,
             predicted_reduction,
+            scaled_step_norm,
         })
     }
 
@@ -1111,7 +1129,7 @@ impl DogLeg {
         problem: &problem::Problem,
     ) -> error::ApexSolverResult<StepEvaluation> {
         // Apply parameter updates
-        let step_norm = optimizer::apply_parameter_step(
+        let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
@@ -1133,7 +1151,7 @@ impl DogLeg {
         // worth keeping, `update_trust_region` says how far to trust the model
         // next time.
         let accepted = rho > self.config.min_relative_decrease;
-        self.update_trust_region(rho, step_norm);
+        self.update_trust_region(rho, step_result.scaled_step_norm);
 
         let cost_reduction = if accepted {
             let reduction = state.current_cost - new_cost;
@@ -1659,6 +1677,38 @@ mod tests {
         assert_eq!(
             result.status,
             optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
+    }
+
+    /// `trust_region_increase_factor` drives the radius growth that used to be a
+    /// hardcoded `3.0`.
+    ///
+    /// The initial radius has to be small for this to be observable: the growth
+    /// rule is `radius ← max(radius, factor · ‖step‖)`, so while the radius
+    /// still dwarfs the step — as it does from the default 1e4 on this problem —
+    /// the factor is multiplied by a number that never wins the `max`.
+    #[test]
+    fn dogleg_trust_region_increase_factor_is_read() -> TestResult {
+        let run = |factor: f64| -> Result<usize, Box<dyn std::error::Error>> {
+            let mut problem = rosenbrock_problem();
+            let result = DogLeg::with_config(
+                DogLegConfig::new()
+                    .with_max_iterations(200)
+                    .with_trust_region_radius(1e-3)
+                    .with_trust_region_factors(factor, 0.5),
+            )
+            .optimize(&mut problem)?;
+            Ok(result.iterations)
+        };
+
+        let fast = run(50.0)?;
+        let slow = run(1.0)?;
+
+        assert!(
+            fast < slow,
+            "a 50x radius growth factor should reach the solution in fewer \
+             iterations than a 1x (never-grow) factor: {fast} vs {slow}"
         );
         Ok(())
     }
