@@ -617,6 +617,27 @@ impl GaussNewton {
             )?;
             jacobian_evaluations += 1;
 
+            // Conditioning check on the *un-scaled* Jacobian, before Jacobi
+            // scaling equalises the column norms this bound is read from.
+            if let Some(status) = optimizer::check_jacobian_conditioning::<M>(
+                &jacobian,
+                self.config.max_condition_number,
+            ) {
+                let elapsed = start_time.elapsed();
+                self.observers.notify_complete(&state.variables, iteration);
+                return Ok(optimizer::build_solver_result(
+                    status,
+                    iteration,
+                    state,
+                    elapsed,
+                    0.0,
+                    0.0,
+                    cost_evaluations,
+                    jacobian_evaluations,
+                    None,
+                ));
+            }
+
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
                 optimizer::process_jacobian_generic::<M>(
@@ -796,6 +817,7 @@ impl optimizer::Optimizer for GaussNewton {
 
 #[cfg(test)]
 mod tests {
+    use super::{GaussNewton, GaussNewtonConfig};
     use crate::{core::problem, factors, linalg::JacobianMode, optimizer};
     use apex_manifolds as manifold;
     use faer::prelude::ReborrowMut;
@@ -948,6 +970,26 @@ mod tests {
         prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
         prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
         prob
+    }
+
+    /// `max_condition_number` detects a variable no residual constrains.
+    #[test]
+    fn gauss_newton_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+
+        let result = GaussNewton::with_config(
+            GaussNewtonConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
     }
 
     fn linear_problem(start: f64) -> problem::Problem {

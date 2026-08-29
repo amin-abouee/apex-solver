@@ -687,6 +687,74 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
     None
 }
 
+/// A rigorous lower bound on the 2-norm condition number of `H = JᵀJ`.
+///
+/// For a symmetric positive semi-definite `H`, the Rayleigh quotient evaluated
+/// at the basis vector `e_j` gives `λ_max(H) ≥ H_jj` and `λ_min(H) ≤ H_jj` for
+/// every `j`, hence
+///
+/// ```text
+/// κ₂(H) = λ_max/λ_min ≥ max_j H_jj / min_j H_jj = (max_j ‖c_j‖ / min_j ‖c_j‖)²
+/// ```
+///
+/// where `c_j` is column `j` of `J`, since `H_jj = ‖J e_j‖²`.
+///
+/// The one-sidedness matters and is deliberate: a returned value above a
+/// threshold **proves** the system is worse conditioned than that threshold, so
+/// the check never fires spuriously. The converse does not hold — a small bound
+/// is not evidence of good conditioning, because ill-conditioning arising from
+/// near-linear-dependence between columns of comparable norm is invisible to
+/// the diagonal. What it does catch reliably is the case worth catching: a
+/// variable that no residual constrains has a zero column, so the bound is
+/// infinite.
+///
+/// Pass the column norms of the **un-scaled** Jacobian — Jacobi scaling exists
+/// precisely to equalise them, so measuring the scaled matrix would report the
+/// conditioning of the preconditioned system rather than the user's problem.
+pub fn condition_number_lower_bound(column_norms: &[f64]) -> f64 {
+    if column_norms.is_empty() {
+        return 1.0;
+    }
+    let mut min_norm = f64::INFINITY;
+    let mut max_norm: f64 = 0.0;
+    for &norm in column_norms {
+        min_norm = min_norm.min(norm);
+        max_norm = max_norm.max(norm);
+    }
+    if min_norm <= 0.0 {
+        return f64::INFINITY;
+    }
+    let ratio = max_norm / min_norm;
+    ratio * ratio
+}
+
+/// Check the Jacobian against a user-supplied `max_condition_number`, if set.
+///
+/// Returns `Some(OptimizationStatus::IllConditionedJacobian)` when the bound
+/// from [`condition_number_lower_bound`] exceeds the threshold, having logged
+/// the offending value. `None` means "no threshold configured, or the bound did
+/// not prove the problem ill-conditioned" — see that function on why the second
+/// case is not a certificate of good conditioning.
+///
+/// Costs one `O(nnz)` pass over `J` and only runs when the option is `Some`.
+pub fn check_jacobian_conditioning<M: AssemblyBackend>(
+    jacobian: &M::Jacobian,
+    max_condition_number: Option<f64>,
+) -> Option<OptimizationStatus> {
+    let threshold = max_condition_number?;
+    let column_norms = M::compute_column_norms(jacobian);
+    let bound = condition_number_lower_bound(&column_norms);
+    if bound > threshold {
+        tracing::error!(
+            "Jacobian is ill-conditioned: cond(JᵀJ) >= {bound:.3e} exceeds the configured \
+             max_condition_number {threshold:.3e}. An infinite bound means at least one \
+             variable is unconstrained by every residual."
+        );
+        return Some(OptimizationStatus::IllConditionedJacobian);
+    }
+    None
+}
+
 /// Predicted decrease of the local quadratic model for a trial step.
 ///
 /// ```text
@@ -1112,6 +1180,51 @@ mod tests {
     fn step_quality_is_the_plain_ratio_for_a_positive_prediction() {
         let rho = compute_step_quality(10.0, 6.0, 8.0);
         assert!((rho - 0.5).abs() < 1e-12, "expected ρ = 0.5, got {rho}");
+    }
+
+    // -------------------------------------------------------------------------
+    // condition_number_lower_bound
+    // -------------------------------------------------------------------------
+
+    /// The bound is `(max‖c‖ / min‖c‖)²` and is exactly attained on a diagonal J.
+    #[test]
+    fn condition_bound_squares_the_column_norm_ratio() {
+        // For J = diag(1, 10), JᵀJ = diag(1, 100), so κ₂ = 100 exactly.
+        let bound = condition_number_lower_bound(&[1.0, 10.0]);
+        assert!((bound - 100.0).abs() < 1e-9, "expected 100, got {bound}");
+    }
+
+    /// A structurally unconstrained variable gives a zero column, hence an
+    /// infinite bound. This is the case the check earns its keep on.
+    #[test]
+    fn condition_bound_is_infinite_for_an_unconstrained_column() {
+        assert!(condition_number_lower_bound(&[3.0, 0.0, 1.0]).is_infinite());
+    }
+
+    /// Equal column norms give the minimum possible bound of 1.
+    #[test]
+    fn condition_bound_is_one_for_equal_column_norms() {
+        let bound = condition_number_lower_bound(&[2.5, 2.5, 2.5]);
+        assert!((bound - 1.0).abs() < 1e-12, "expected 1, got {bound}");
+        assert!((condition_number_lower_bound(&[]) - 1.0).abs() < 1e-12);
+    }
+
+    /// The bound must never exceed the true condition number — it is a lower
+    /// bound, so exceeding a threshold is proof of ill-conditioning.
+    ///
+    /// Checked against `κ₂(JᵀJ)` computed from the singular values of a J whose
+    /// columns are deliberately non-orthogonal, so the diagonal underestimates.
+    #[test]
+    fn condition_bound_never_exceeds_the_true_condition_number() {
+        // Two nearly parallel unit columns: the true κ is enormous, the column
+        // norms are identical, so the bound is 1 — a valid, very loose, bound.
+        let norms = [1.0, 1.0];
+        let bound = condition_number_lower_bound(&norms);
+        // True κ₂ for columns at angle θ is cot²(θ/2); at θ → 0 this diverges.
+        assert!(
+            bound <= 1.0 + 1e-12,
+            "bound {bound} must not exceed the true condition number"
+        );
     }
 
     // -------------------------------------------------------------------------

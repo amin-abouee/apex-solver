@@ -1044,6 +1044,27 @@ impl LevenbergMarquardt {
             )?;
             jacobian_evaluations += 1;
 
+            // Conditioning check on the *un-scaled* Jacobian, before Jacobi
+            // scaling equalises the column norms this bound is read from.
+            if let Some(status) = crate::optimizer::check_jacobian_conditioning::<M>(
+                &jacobian,
+                self.config.max_condition_number,
+            ) {
+                let elapsed = start_time.elapsed();
+                self.observers.notify_complete(&state.variables, iteration);
+                return Ok(crate::optimizer::build_solver_result(
+                    status,
+                    iteration,
+                    state,
+                    elapsed,
+                    0.0,
+                    0.0,
+                    cost_evaluations,
+                    jacobian_evaluations,
+                    None,
+                ));
+            }
+
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
                 crate::optimizer::process_jacobian_generic::<M>(
@@ -1463,6 +1484,72 @@ mod tests {
             default_solver.damping,
             retuned_solver.damping
         );
+    }
+
+    /// `max_condition_number` terminates on a variable no residual constrains.
+    ///
+    /// The unconstrained variable contributes an all-zero Jacobian column, so
+    /// the condition-number lower bound is infinite and the check fires.
+    #[test]
+    fn max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        // Nothing references this variable, so its column of J is empty.
+        let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+
+        let result = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            OptimizationStatus::IllConditionedJacobian,
+            "an unconstrained variable should trip the conditioning check"
+        );
+        Ok(())
+    }
+
+    /// Without the check, the same unconstrained variable surfaces as an opaque
+    /// linear-algebra failure from deep inside the solver.
+    ///
+    /// This is what `max_condition_number` buys: the diagnosis moves from
+    /// "JᵀJ has structurally empty diagonal entries" — which names an internal
+    /// data structure, not the user's mistake — to a typed status naming an
+    /// ill-conditioned Jacobian.
+    #[test]
+    fn without_the_check_an_unconstrained_variable_is_an_opaque_error() {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+
+        let outcome = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(10),
+        )
+        .optimize(&mut problem);
+
+        assert!(
+            outcome.is_err(),
+            "expected the un-checked path to fail somewhere in the linear solver"
+        );
+    }
+
+    /// The check stays out of the way on a well-conditioned problem.
+    #[test]
+    fn max_condition_number_does_not_fire_on_a_healthy_problem() -> TestResult {
+        let mut healthy_problem = rosenbrock_problem();
+        let healthy = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut healthy_problem)?;
+        assert_ne!(
+            healthy.status,
+            OptimizationStatus::IllConditionedJacobian,
+            "a well-conditioned problem must not trip the check"
+        );
+        Ok(())
     }
 
     #[test]

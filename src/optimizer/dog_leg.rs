@@ -1214,6 +1214,27 @@ impl DogLeg {
             )?;
             jacobian_evaluations += 1;
 
+            // Conditioning check on the *un-scaled* Jacobian, before Jacobi
+            // scaling equalises the column norms this bound is read from.
+            if let Some(status) = optimizer::check_jacobian_conditioning::<M>(
+                &jacobian,
+                self.config.max_condition_number,
+            ) {
+                let elapsed = start_time.elapsed();
+                self.observers.notify_complete(&state.variables, iteration);
+                return Ok(optimizer::build_solver_result(
+                    status,
+                    iteration,
+                    state,
+                    elapsed,
+                    0.0,
+                    0.0,
+                    cost_evaluations,
+                    jacobian_evaluations,
+                    None,
+                ));
+            }
+
             // Process Jacobian (apply scaling if enabled)
             let scaled_jacobian = if self.config.use_jacobi_scaling {
                 optimizer::process_jacobian_generic::<M>(
@@ -1618,6 +1639,26 @@ mod tests {
              strict {:.3e} vs permissive {:.3e}",
             strict.final_cost,
             permissive.final_cost
+        );
+        Ok(())
+    }
+
+    /// `max_condition_number` detects a variable no residual constrains.
+    #[test]
+    fn dogleg_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+
+        let result = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::IllConditionedJacobian
         );
         Ok(())
     }
