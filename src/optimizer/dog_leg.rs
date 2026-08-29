@@ -715,6 +715,14 @@ pub struct DogLeg {
     min_mu: f64,
     max_mu: f64,
     mu_increase_factor: f64,
+    /// Run state: the live trust-region radius, seeded from
+    /// `config.trust_region_radius` at the start of every solve.
+    ///
+    /// The radius is iteration state, not configuration. Keeping it here rather
+    /// than mutating `config` in place means a second `optimize()` call on the
+    /// same solver starts from the configured radius instead of inheriting
+    /// whatever the previous run collapsed to.
+    trust_region_radius: f64,
 
     // Step reuse mechanism (Ceres-style efficiency optimization)
     reuse_step_on_rejection: bool,
@@ -745,6 +753,7 @@ impl DogLeg {
             min_mu: config.min_mu,
             max_mu: config.max_mu,
             mu_increase_factor: config.mu_increase_factor,
+            trust_region_radius: config.trust_region_radius,
 
             // Initialize step reuse mechanism (disabled initially, enabled after first rejection)
             reuse_step_on_rejection: false,
@@ -922,8 +931,8 @@ impl DogLeg {
     fn update_trust_region(&mut self, rho: f64, step_norm: f64) -> bool {
         if rho > self.config.good_step_quality {
             // Good step, increase trust region (Ceres-style: max(radius, 3*step_norm))
-            let new_radius = self.config.trust_region_radius.max(3.0 * step_norm);
-            self.config.trust_region_radius = new_radius.min(self.config.trust_region_max);
+            let new_radius = self.trust_region_radius.max(3.0 * step_norm);
+            self.trust_region_radius = new_radius.min(self.config.trust_region_max);
 
             // Decrease mu on successful step (Ceres-style adaptive regularization)
             self.mu = (self.mu / (0.5 * self.mu_increase_factor)).max(self.min_mu);
@@ -939,7 +948,7 @@ impl DogLeg {
             true
         } else if rho < self.config.poor_step_quality {
             // Poor step, decrease trust region
-            self.config.trust_region_radius = (self.config.trust_region_radius
+            self.trust_region_radius = (self.trust_region_radius
                 * self.config.trust_region_decrease_factor)
                 .max(self.config.trust_region_min);
 
@@ -995,7 +1004,7 @@ impl DogLeg {
                 &steepest_descent,
                 cached_cauchy,
                 cached_gn,
-                self.config.trust_region_radius,
+                self.trust_region_radius,
             );
 
             let step = if self.config.use_jacobi_scaling {
@@ -1066,7 +1075,7 @@ impl DogLeg {
             &steepest_descent,
             &cauchy_point,
             &scaled_gn_step,
-            self.config.trust_region_radius,
+            self.trust_region_radius,
         );
 
         // 6. Apply inverse Jacobi scaling if enabled
@@ -1160,6 +1169,19 @@ impl DogLeg {
 
         let mut state = optimizer::initialize_optimization_state(problem)?;
 
+        // Seed the run state from the configuration. The radius, μ and the step
+        // cache all evolve during the solve; resetting them here keeps
+        // `optimize()` idempotent when the same solver instance is reused.
+        self.trust_region_radius = self.config.trust_region_radius;
+        self.mu = self.config.initial_mu;
+        self.reuse_step_on_rejection = false;
+        self.cached_gn_step = None;
+        self.cached_cauchy_point = None;
+        self.cached_gradient = None;
+        self.cached_alpha = None;
+        self.cache_reuse_count = 0;
+        self.jacobi_scaling = None;
+
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
@@ -1246,7 +1268,7 @@ impl DogLeg {
                     gradient_norm: step_result.gradient_norm,
                     step_norm,
                     tr_ratio: step_eval.rho,
-                    tr_radius: self.config.trust_region_radius,
+                    tr_radius: self.trust_region_radius,
                     ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
@@ -1266,7 +1288,7 @@ impl DogLeg {
                 iteration,
                 state.current_cost,
                 step_result.gradient_norm,
-                Some(self.config.trust_region_radius),
+                Some(self.trust_region_radius),
                 step_norm,
                 Some(step_eval.rho),
                 linear_solver,
@@ -1298,7 +1320,7 @@ impl DogLeg {
                 cost_tolerance: self.config.cost_tolerance,
                 min_cost_threshold: self.config.min_cost_threshold,
                 timeout: self.config.timeout,
-                trust_region_radius: Some(self.config.trust_region_radius),
+                trust_region_radius: Some(self.trust_region_radius),
                 min_trust_region_radius: Some(self.config.trust_region_min),
             }) {
                 // Print summary only if debug level is enabled
@@ -1319,7 +1341,7 @@ impl DogLeg {
                         iteration_stats.clone(),
                         status.clone(),
                         None,
-                        Some(self.config.trust_region_radius),
+                        Some(self.trust_region_radius),
                         None,
                     );
                     debug!("{}", summary);
@@ -1543,6 +1565,30 @@ mod tests {
         prob.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
         prob.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
         prob
+    }
+
+    /// The radius is run state, so a reused solver reproduces its first result.
+    #[test]
+    fn dogleg_repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = DogLeg::with_config(DogLegConfig::new().with_max_iterations(100));
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
     }
 
     fn linear_problem(start: f64) -> problem::Problem {

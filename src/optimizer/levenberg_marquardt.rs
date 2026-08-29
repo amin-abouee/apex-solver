@@ -686,6 +686,16 @@ pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<Vec<f64>>,
     observers: OptObserverVec,
+    /// Run state: the live damping λ, seeded from `config.damping` at the start
+    /// of every solve.
+    ///
+    /// λ and ν are iteration state, not configuration. Keeping them here rather
+    /// than mutating `config` in place means a second `optimize()` call on the
+    /// same solver starts from the configured λ instead of inheriting whatever
+    /// the previous run happened to end on.
+    damping: f64,
+    /// Run state: Nielsen's ν, seeded from `config.damping_nu`.
+    damping_nu: f64,
 }
 
 impl Default for LevenbergMarquardt {
@@ -703,6 +713,8 @@ impl LevenbergMarquardt {
     /// Create a new Levenberg-Marquardt solver with the given configuration.
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
         Self {
+            damping: config.damping,
+            damping_nu: config.damping_nu,
             config,
             jacobi_scaling: None,
             observers: OptObserverVec::new(),
@@ -750,15 +762,15 @@ impl LevenbergMarquardt {
         if rho > 0.0 {
             // Step accepted - decrease damping
             let coff = 2.0 * rho - 1.0;
-            self.config.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
-            self.config.damping = self.config.damping.max(self.config.damping_min);
-            self.config.damping_nu = 2.0;
+            self.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
+            self.damping = self.damping.max(self.config.damping_min);
+            self.damping_nu = self.config.damping_nu;
             true
         } else {
             // Step rejected - increase damping
-            self.config.damping *= self.config.damping_nu;
-            self.config.damping_nu *= 2.0;
-            self.config.damping = self.config.damping.min(self.config.damping_max);
+            self.damping *= self.damping_nu;
+            self.damping_nu *= 2.0;
+            self.damping = self.damping.min(self.config.damping_max);
             false
         }
     }
@@ -772,7 +784,7 @@ impl LevenbergMarquardt {
     ) -> Result<StepResult, OptimizerError> {
         // Solve the augmented equation (J̃ᵀJ̃ + λ·D)·dx̃ = −J̃ᵀr.
         let damping = Damping::new(
-            self.config.damping,
+            self.damping,
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
@@ -887,6 +899,13 @@ impl LevenbergMarquardt {
         // Initialize optimization state
         let mut state = crate::optimizer::initialize_optimization_state(problem)?;
 
+        // Seed the run state from the configuration. λ and ν evolve during the
+        // solve; resetting them here keeps `optimize()` idempotent when the same
+        // solver instance is reused.
+        self.damping = self.config.damping;
+        self.damping_nu = self.config.damping_nu;
+        self.jacobi_scaling = None;
+
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
@@ -967,7 +986,7 @@ impl LevenbergMarquardt {
                     gradient_norm: step_result.gradient_norm,
                     step_norm,
                     tr_ratio: step_eval.rho,
-                    tr_radius: self.config.damping,
+                    tr_radius: self.damping,
                     ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
@@ -987,7 +1006,7 @@ impl LevenbergMarquardt {
                 iteration,
                 state.current_cost,
                 step_result.gradient_norm,
-                Some(self.config.damping),
+                Some(self.damping),
                 step_norm,
                 Some(step_eval.rho),
                 linear_solver,
@@ -1030,7 +1049,7 @@ impl LevenbergMarquardt {
                 // raises damping and the next step succeeds. Only once damping has also
                 // saturated at `damping_max` can it no longer shrink the step further, so
                 // the state is provably stuck and the remaining iterations are wasted.
-                let damping_saturated = self.config.damping >= self.config.damping_max;
+                let damping_saturated = self.damping >= self.config.damping_max;
                 let stalled = consecutive_rejected >= self.config.max_consecutive_rejected_steps
                     && damping_saturated;
                 stalled.then_some(crate::optimizer::OptimizationStatus::StalledNoProgress)
@@ -1053,7 +1072,7 @@ impl LevenbergMarquardt {
                         elapsed,
                         iteration_stats.clone(),
                         status.clone(),
-                        Some(self.config.damping),
+                        Some(self.damping),
                         None,
                         Some(step_eval.rho),
                     );
@@ -1210,6 +1229,36 @@ mod tests {
         fn jacobian_shape(&self) -> (usize, usize) {
             (1, 1)
         }
+    }
+
+    /// λ and ν are run state, so a second `optimize()` reproduces the first.
+    ///
+    /// Before they were separated from the config, the second call inherited the
+    /// λ the first run ended on and silently produced a different answer.
+    #[test]
+    fn repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(100),
+        );
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
     }
 
     #[test]
@@ -1699,23 +1748,23 @@ mod tests {
             .with_damping(1e-2)
             .with_damping_bounds(1e-15, 1e15);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let initial_damping = solver.config.damping;
+        let initial_damping = solver.damping;
 
         // rho = 0.8 > 0 → accepted branch
         let accepted = solver.update_damping(0.8);
 
         assert!(accepted, "rho > 0 should return true (step accepted)");
         assert!(
-            solver.config.damping < initial_damping,
+            solver.damping < initial_damping,
             "accepted step should decrease damping: {} < {}",
-            solver.config.damping,
+            solver.damping,
             initial_damping
         );
         // damping_nu should be reset to 2.0 on acceptance
         assert!(
-            (solver.config.damping_nu - 2.0).abs() < 1e-15,
+            (solver.damping_nu - 2.0).abs() < 1e-15,
             "damping_nu should be reset to 2.0 after accepted step, got {}",
-            solver.config.damping_nu
+            solver.damping_nu
         );
     }
 
@@ -1727,24 +1776,24 @@ mod tests {
             .with_damping_bounds(1e-15, 1e15);
         let initial_nu = cfg.damping_nu; // default 2.0
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let initial_damping = solver.config.damping;
+        let initial_damping = solver.damping;
 
         // rho = -0.5 <= 0 → rejected branch
         let rejected = solver.update_damping(-0.5);
 
         assert!(!rejected, "rho <= 0 should return false (step rejected)");
         assert!(
-            solver.config.damping > initial_damping,
+            solver.damping > initial_damping,
             "rejected step should increase damping: {} > {}",
-            solver.config.damping,
+            solver.damping,
             initial_damping
         );
         // damping_nu doubles on rejection
         assert!(
-            (solver.config.damping_nu - initial_nu * 2.0).abs() < 1e-15,
+            (solver.damping_nu - initial_nu * 2.0).abs() < 1e-15,
             "damping_nu should double on rejected step: expected {}, got {}",
             initial_nu * 2.0,
-            solver.config.damping_nu
+            solver.damping_nu
         );
     }
 
