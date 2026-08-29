@@ -23,7 +23,6 @@
 //! ```
 
 pub mod cpu;
-pub mod gpu;
 
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
