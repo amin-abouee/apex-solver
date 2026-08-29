@@ -755,6 +755,59 @@ pub fn check_jacobian_conditioning<M: AssemblyBackend>(
     None
 }
 
+/// The per-iteration preamble shared by LM, Gauss-Newton and Dog-Leg:
+/// assemble → conditioning check → Jacobi scaling.
+pub(crate) enum IterationPreamble<M: AssemblyBackend> {
+    /// Normal equations are ready for the optimizer's step computation.
+    Proceed {
+        residuals: Mat<f64>,
+        scaled_jacobian: M::Jacobian,
+    },
+    /// The conditioning check terminated the solve; the caller notifies its
+    /// observers and builds the final [`SolverResult`].
+    EarlyExit(OptimizationStatus),
+}
+
+/// Run the shared iteration preamble for one optimizer iteration.
+pub(crate) fn iteration_preamble<M: AssemblyBackend>(
+    problem: &Problem,
+    state: &mut InitializedState,
+    jacobi_scaling: &mut Option<Vec<f64>>,
+    use_jacobi_scaling: bool,
+    iteration: usize,
+    max_condition_number: Option<f64>,
+    jacobian_evaluations: &mut usize,
+) -> Result<IterationPreamble<M>, crate::error::ApexSolverError> {
+    // Evaluate residuals and Jacobian using the assembly mode
+    let (residuals, jacobian) = M::assemble(
+        problem,
+        &state.variables,
+        &state.variable_index_map,
+        state.symbolic_structure.as_ref(),
+        state.total_dof,
+        &mut state.workspace,
+    )?;
+    *jacobian_evaluations += 1;
+
+    // Conditioning check on the *un-scaled* Jacobian, before Jacobi
+    // scaling equalises the column norms this bound is read from.
+    if let Some(status) = check_jacobian_conditioning::<M>(&jacobian, max_condition_number) {
+        return Ok(IterationPreamble::EarlyExit(status));
+    }
+
+    // Process Jacobian (apply scaling if enabled)
+    let scaled_jacobian = if use_jacobi_scaling {
+        process_jacobian_generic::<M>(&jacobian, jacobi_scaling, iteration)?
+    } else {
+        jacobian
+    };
+
+    Ok(IterationPreamble::Proceed {
+        residuals,
+        scaled_jacobian,
+    })
+}
+
 /// Predicted decrease of the local quadratic model for a trial step.
 ///
 /// ```text
@@ -823,10 +876,15 @@ pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reductio
     }
 }
 
-/// Create the appropriate linear solver based on configuration.
+/// Create a sparse linear solver for the given solver type.
 ///
-/// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
-/// solver creation logic due to special Schur complement adapter requirements.
+/// Never referenced by the optimizers — each dispatches its own supported
+/// solver/mode combinations and rejects the rest. Superseded; scheduled for
+/// removal.
+#[deprecated(
+    since = "1.5.0",
+    note = "no optimizer calls this; construct the desired solver directly"
+)]
 pub fn create_linear_solver(
     solver_type: &linalg::LinearSolverType,
 ) -> Box<dyn LinearSolver<SparseMode>> {
@@ -834,8 +892,8 @@ pub fn create_linear_solver(
         linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
         _ => {
-            // SparseSchurComplement requires special handling; DenseCholesky/DenseQR are
-            // dispatched via the dense path in each optimizer — all fall back to Cholesky here.
+            // Schur requires StructureAware initialization; dense solvers live
+            // behind the dense dispatch. Callers get plain Cholesky here.
             Box::new(SparseCholeskySolver::new())
         }
     }
@@ -1561,9 +1619,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // create_linear_solver
+    // create_linear_solver (deprecated)
     // -------------------------------------------------------------------------
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_cholesky() {
         let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseCholesky);
@@ -1571,12 +1630,14 @@ mod tests {
         let _ = solver.get_hessian();
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_qr() {
         let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseQR);
         let _ = solver.get_hessian();
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_fallback_for_schur() {
         // SparseSchurComplement is special; falls back to Cholesky in create_linear_solver

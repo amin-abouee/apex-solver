@@ -1244,47 +1244,35 @@ impl DogLeg {
         loop {
             let iter_start = time::Instant::now();
 
-            // Evaluate residuals and Jacobian using the assembly mode
-            let (residuals, jacobian) = M::assemble(
+            // Shared preamble: assemble, conditioning check, Jacobi scaling
+            let (residuals, scaled_jacobian) = match optimizer::iteration_preamble::<M>(
                 problem,
-                &state.variables,
-                &state.variable_index_map,
-                state.symbolic_structure.as_ref(),
-                state.total_dof,
-                &mut state.workspace,
-            )?;
-            jacobian_evaluations += 1;
-
-            // Conditioning check on the *un-scaled* Jacobian, before Jacobi
-            // scaling equalises the column norms this bound is read from.
-            if let Some(status) = optimizer::check_jacobian_conditioning::<M>(
-                &jacobian,
+                &mut state,
+                &mut self.jacobi_scaling,
+                self.config.use_jacobi_scaling,
+                iteration,
                 self.config.max_condition_number,
-            ) {
-                let elapsed = start_time.elapsed();
-                self.observers.notify_complete(&state.variables, iteration);
-                return Ok(optimizer::build_solver_result(
-                    status,
-                    iteration,
-                    state,
-                    elapsed,
-                    0.0,
-                    0.0,
-                    cost_evaluations,
-                    jacobian_evaluations,
-                    None,
-                ));
-            }
-
-            // Process Jacobian (apply scaling if enabled)
-            let scaled_jacobian = if self.config.use_jacobi_scaling {
-                optimizer::process_jacobian_generic::<M>(
-                    &jacobian,
-                    &mut self.jacobi_scaling,
-                    iteration,
-                )?
-            } else {
-                jacobian
+                &mut jacobian_evaluations,
+            )? {
+                optimizer::IterationPreamble::Proceed {
+                    residuals,
+                    scaled_jacobian,
+                } => (residuals, scaled_jacobian),
+                optimizer::IterationPreamble::EarlyExit(status) => {
+                    let elapsed = start_time.elapsed();
+                    self.observers.notify_complete(&state.variables, iteration);
+                    return Ok(optimizer::build_solver_result(
+                        status,
+                        iteration,
+                        state,
+                        elapsed,
+                        0.0,
+                        0.0,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                        None,
+                    ));
+                }
             };
 
             // Compute dog leg step
