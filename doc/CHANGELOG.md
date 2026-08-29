@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`LinearSolver::solve_augmented_equation` takes `&Damping` instead of `lambda: f64`.**
+  Custom `LinearSolver` implementations must update the signature. The augmented system it
+  describes is now `(JᵀJ + λ·D)·dx = −Jᵀr` with `D_jj = clamp(JᵀJ_jj, min_diagonal,
+  max_diagonal)` — Ceres' `LevenbergMarquardtStrategy`. `Damping::identity(lambda)` reproduces
+  the previous uniform `λI` behaviour exactly:
+  ```rust
+  // before
+  solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
+
+  // after — same numerics
+  solver.solve_augmented_equation(&residuals, &jacobian, &Damping::identity(lambda))?;
+  ```
+
+- **Levenberg-Marquardt now damps with `λ·D` and starts from `λ = 1e-4`** (was `λI` and
+  `1e-3`). Iterates change on every problem. Measurements across ten pose graphs, two BAL
+  datasets and three camera-calibration problems are in
+  [`ceres-params-validation.md`](ceres-params-validation.md): order-of-magnitude wins wherever
+  parameter scales are heterogeneous (calibration, bundle adjustment), bounded constant-factor
+  costs on homogeneous pose graphs. To restore the old behaviour:
+  `LevenbergMarquardtConfig::new().with_diagonal_bounds(1.0, 1.0).with_damping(1e-3)`.
+
+- **Step acceptance is now gated on `min_relative_decrease`** in both Levenberg-Marquardt
+  (was a hardcoded `rho > 0.0`) and Dog Leg (was `rho > 1e-4`). The default of `1e-3` matches
+  Ceres, so marginal steps that used to be accepted are now rejected and the damping raised.
+
+### Fixed
+
+- **`IterativeSchurSolver` published `−Jᵀr` from `get_gradient`** while every other backend
+  published `+Jᵀr`, the documented contract. Levenberg-Marquardt and Dog Leg build their
+  predicted cost reduction from that vector, so on the implicit-Schur path the step-quality
+  ratio ρ came out sign-inverted. It also cached the *damped* `JᵀJ + λI` as `get_hessian`,
+  which Dog Leg uses for the Cauchy point and the true quadratic model. `tests/
+  linear_solver_contract.rs` now pins both conventions across all six backends.
+
+- **`compute_step_quality` accepted steps that increased the cost.** A negative predicted
+  reduction divided by a negative actual reduction yields ρ > 0, so a step the quadratic model
+  itself expected to make things worse was accepted. Ceres treats a non-positive
+  `model_cost_change` as an invalid step; it is now rejected. The near-zero case is unchanged,
+  since at the solution both reductions legitimately vanish.
+
+- **λ, ν, the trust-region radius and μ were stored in the config and mutated during a solve**,
+  so a second `optimize()` call on the same solver silently started from wherever the previous
+  run finished. They are now solver run state, re-seeded from the configuration on every solve.
+
+### Changed
+
+Eleven configuration fields were declared, documented, given builder setters — and never read.
+Each now drives behaviour or is deprecated:
+
+- `min_diagonal` / `max_diagonal` (LM) — the Marquardt damping diagonal, plus the
+  `with_diagonal_bounds` setter they never had.
+- `min_relative_decrease` (LM, Dog Leg) — the step-acceptance threshold.
+- `max_condition_number` (LM, GN, Dog Leg) — checks `κ₂(JᵀJ) ≥ max_j H_jj / min_j H_jj`, a
+  rigorous lower bound computed from the column norms already available, and terminates with
+  `OptimizationStatus::IllConditionedJacobian` — a variant nothing previously constructed.
+  Exceeding the threshold is proof of ill-conditioning; staying below it is not proof of the
+  converse, and the doc says so. Its most useful case is a variable no residual constrains,
+  which gives a zero column and an infinite bound; that previously surfaced as an opaque
+  "JᵀJ has structurally empty diagonal entries" from inside the linear solver.
+- `damping_increase_factor` / `damping_decrease_factor` / `min_step_quality` /
+  `good_step_quality` (LM) — read by the new `DampingUpdate::Marquardt` policy. The default
+  `DampingUpdate::Nielsen` derives both directions from ρ and ignores them, which is why they
+  were inert; each field's doc now names the policy that reads it.
+- `min_diagonal` (GN) — the uniform regularizer its doc-comment always promised, applied as
+  `(JᵀJ + min_diagonal·I)`. Set to `0.0` for the un-regularized normal equations.
+- `trust_region_increase_factor` (Dog Leg) — replaces the hardcoded `3.0` in the radius
+  growth rule (same default, so unchanged behaviour). The radius growth now measures the step
+  in the *scaled* space the radius bounds; previously it mixed the scaled radius with an
+  un-scaled step norm whenever Jacobi scaling was on, which is Dog Leg's default.
+- `min_step_quality` (Dog Leg) and `enable_visualization` (GN, Dog Leg) are `#[deprecated]`:
+  the first duplicates `min_relative_decrease`, the second is superseded by the observer
+  pattern (`solver.add_observer(RerunObserver::new(true)?)`).
+
+Also: Dog Leg's `update_trust_region` return value was discarded, so a rejected step with
+`0 < ρ < 1e-4` took the "moderate" branch and cleared the step-reuse cache as though it had
+been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-specific identity
+`½·δᵀ(λδ − g)` to the policy-independent `−δᵀg − ½·δᵀHδ`, shared with Dog Leg.
+
 ## [1.4.0] - 2026-07-30
 
 ### Breaking Changes
