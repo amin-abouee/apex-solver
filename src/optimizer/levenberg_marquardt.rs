@@ -736,16 +736,6 @@ impl LevenbergMarquardt {
         }
     }
 
-    /// Compute predicted cost reduction from linear model
-    /// Standard LM formula: 0.5 * step^T * (damping * step - gradient)
-    fn compute_predicted_reduction(&self, step: &Mat<f64>, gradient: &Mat<f64>) -> f64 {
-        // Standard Levenberg-Marquardt predicted reduction formula
-        // predicted_reduction = -step^T * gradient - 0.5 * step^T * H * step
-        //                     = 0.5 * step^T * (damping * step - gradient)
-        let diff = self.config.damping * step - gradient;
-        (0.5 * step.transpose() * &diff)[(0, 0)]
-    }
-
     /// Compute optimization step by solving the augmented system (generic over assembly mode).
     fn compute_step_generic<M: AssemblyBackend>(
         &self,
@@ -764,17 +754,18 @@ impl LevenbergMarquardt {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
         let gradient_norm = gradient.norm_l2();
+        let hessian = linear_solver.get_hessian().ok_or_else(|| {
+            OptimizerError::NumericalInstability("Hessian not available".into()).log()
+        })?;
 
-        // Compute the predicted reduction BEFORE un-scaling the step.
-        //
-        // The identity `pred = ½·dxᵀ(λ·dx − g)` is derived by substituting the
-        // augmented normal equations `(H + λI)·dx = −g`, so it is only valid when
-        // the step and the gradient live in the *same* space. The solver's cached
-        // gradient is `g̃ = J̃ᵀ·r` — the scaled one — so the scaled step must be
-        // used here. The predicted reduction is a scalar value of the quadratic
-        // model and is invariant under the change of variables, so this is
-        // equally the predicted reduction for the un-scaled step below.
-        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, gradient);
+        // Compute the predicted reduction BEFORE un-scaling the step: the
+        // solver's cached gradient and Hessian are the *scaled* ones, and all
+        // three vectors have to live in the same space. The predicted reduction
+        // is a value of the quadratic model and is invariant under that change
+        // of variables, so it is equally the predicted reduction of the
+        // un-scaled step below.
+        let predicted_reduction =
+            crate::optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {

@@ -687,6 +687,40 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
     None
 }
 
+/// Predicted decrease of the local quadratic model for a trial step.
+///
+/// ```text
+/// pred = −δᵀg − ½·δᵀHδ
+/// ```
+///
+/// where `g = Jᵀr` and `H = JᵀJ` are the *un-damped* normal equations, i.e.
+/// exactly what [`LinearSolver::get_gradient`] and
+/// [`LinearSolver::get_hessian`] publish.
+///
+/// Written this way the formula is independent of how the step was produced.
+/// The shorter Levenberg-Marquardt identity `pred = ½·δᵀ(λδ − g)` is obtained
+/// by substituting `(H + λI)δ = −g` into the above, so it silently assumes
+/// *uniform* `λI` damping and is wrong for the Marquardt diagonal
+/// `λ·D` (see [`Damping`](crate::linalg::Damping)) — and wrong for Dog Leg's
+/// steps, which do not solve that system at all. One extra sparse mat-vec per
+/// iteration buys correctness under every damping policy.
+///
+/// The step, gradient and Hessian must all live in the same space: when Jacobi
+/// column scaling is enabled, pass the *scaled* step, since the solver's cached
+/// gradient and Hessian are the scaled ones. The predicted reduction is a value
+/// of the quadratic model and is invariant under that change of variables, so
+/// the result is equally the predicted reduction of the un-scaled step.
+pub fn compute_predicted_reduction<M: AssemblyBackend>(
+    step: &Mat<f64>,
+    gradient: &Mat<f64>,
+    hessian: &M::Hessian,
+) -> f64 {
+    let hessian_step = M::hessian_vec_product(hessian, step);
+    let linear_term = (step.transpose() * gradient)[(0, 0)];
+    let quadratic_term = (step.transpose() * &hessian_step)[(0, 0)];
+    -linear_term - 0.5 * quadratic_term
+}
+
 /// Compute step quality ratio (actual vs predicted reduction).
 ///
 /// Used by Levenberg-Marquardt and Dog Leg optimizers to evaluate

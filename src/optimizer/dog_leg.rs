@@ -961,21 +961,6 @@ impl DogLeg {
         }
     }
 
-    /// Compute predicted cost reduction from linear model (generic over assembly mode).
-    fn compute_predicted_reduction_generic<M: AssemblyBackend>(
-        &self,
-        step: &faer::Mat<f64>,
-        gradient: &faer::Mat<f64>,
-        hessian: &M::Hessian,
-    ) -> f64 {
-        // Dog Leg predicted reduction: -step^T * gradient - 0.5 * step^T * H * step
-        let linear_term = step.transpose() * gradient;
-        let hessian_step = M::hessian_vec_product(hessian, step);
-        let quadratic_term = step.transpose() * &hessian_step;
-
-        -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)]
-    }
-
     /// Compute dog leg optimization step (generic over assembly mode).
     fn compute_optimization_step_generic<M: AssemblyBackend>(
         &mut self,
@@ -1024,7 +1009,7 @@ impl DogLeg {
             // Use hessian from linear solver if available.
             let hessian = linear_solver.get_hessian()?;
             let predicted_reduction =
-                self.compute_predicted_reduction_generic::<M>(&scaled_step, cached_grad, hessian);
+                optimizer::compute_predicted_reduction::<M>(&scaled_step, cached_grad, hessian);
 
             return Some(StepResult {
                 step,
@@ -1090,7 +1075,7 @@ impl DogLeg {
 
         // 7. Compute predicted reduction
         let predicted_reduction =
-            self.compute_predicted_reduction_generic::<M>(&scaled_step, gradient, hessian);
+            optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
 
         // 8. Cache step components for potential reuse (Ceres-style)
         self.cached_gn_step = Some(scaled_gn_step.clone());
