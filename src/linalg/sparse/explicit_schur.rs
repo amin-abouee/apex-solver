@@ -121,6 +121,16 @@ impl SchurOrdering {
         }
         true
     }
+
+    /// [`Self::should_eliminate`] for a variable identified by its manifold's
+    /// [`LieGroup::NAME`] string (`"Rn"`, `"SE3"`, …), as reported by
+    /// [`ManifoldVariable::manifold_type_name`]. Unknown names never eliminate.
+    pub fn should_eliminate_by_name(&self, name: &str, size: usize) -> bool {
+        match ManifoldType::from_name(name) {
+            Some(manifold_type) => self.should_eliminate(&manifold_type, size),
+            None => false,
+        }
+    }
 }
 
 /// Block structure for Schur complement solver
@@ -235,6 +245,22 @@ impl SparseSchurComplementSolver {
         self.block_structure.as_ref()
     }
 
+    /// Union of the manually marked landmark keys and the variables
+    /// auto-classified as landmarks by the configured [`SchurOrdering`].
+    fn effective_landmark_keys(
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        schur_landmark_keys: &std::collections::HashSet<VarKey>,
+        ordering: &SchurOrdering,
+    ) -> std::collections::HashSet<VarKey> {
+        let mut keys = schur_landmark_keys.clone();
+        for (key, variable) in variables {
+            if ordering.should_eliminate_by_name(variable.manifold_type_name(), variable.dof()) {
+                keys.insert(key);
+            }
+        }
+        keys
+    }
+
     fn build_block_structure(
         &mut self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
@@ -242,7 +268,6 @@ impl SparseSchurComplementSolver {
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
         let mut structure = SchurBlockStructure::new();
-
         for (key, variable) in variables {
             let start_col = *variable_index_map.get(key).ok_or_else(|| {
                 LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key))
@@ -1005,15 +1030,21 @@ impl StructureAware for SparseSchurComplementSolver {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
+        // Effective landmark set: manual marks plus the SchurOrdering
+        // auto-classification, so both the outer structure and the delegate
+        // solver partition identically.
+        let effective_keys =
+            Self::effective_landmark_keys(variables, schur_landmark_keys, &self.ordering);
+
         // Build block structure for all variants
-        self.build_block_structure(variables, variable_index_map, schur_landmark_keys)?;
+        self.build_block_structure(variables, variable_index_map, &effective_keys)?;
 
         // Initialize delegate solver based on variant
         match self.variant {
             SchurVariant::Iterative => {
                 let mut solver =
                     IterativeSchurSolver::with_cg_params(self.cg_max_iterations, self.cg_tolerance);
-                solver.initialize_structure(variables, variable_index_map, schur_landmark_keys)?;
+                solver.initialize_structure(variables, variable_index_map, &effective_keys)?;
                 self.iterative_solver = Some(solver);
             }
             SchurVariant::Sparse => {
@@ -1345,6 +1376,65 @@ mod tests {
         // RN with size != 3 is not eliminated
         assert!(!ordering.should_eliminate(&ManifoldType::RN, 6));
         assert!(!ordering.should_eliminate(&ManifoldType::RN, 2));
+    }
+
+    #[test]
+    fn test_schur_ordering_by_name_matches_type() {
+        let ordering = SchurOrdering::default();
+        assert!(ordering.should_eliminate_by_name("Rn", 3));
+        assert!(!ordering.should_eliminate_by_name("SE3", 6));
+        assert!(!ordering.should_eliminate_by_name("NotAManifold", 3));
+    }
+
+    #[test]
+    fn test_auto_elimination_activates_ordering() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::core::variable::Variable;
+        use apex_manifolds::{rn, se3};
+        use nalgebra::DVector;
+        use slotmap::SlotMap;
+
+        // Two SE3 cameras and two Rn(3) landmarks, none marked manually.
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let se3_data = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let cam0 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_data.as_slice(),
+        ))));
+        let cam1 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_data.as_slice(),
+        ))));
+        let pt_data = DVector::from_vec(vec![0.0, 0.0, 0.0]);
+        let pt0 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_data.clone()))));
+        let pt1 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_data.clone()))));
+
+        let mut index_map = SecondaryMap::new();
+        index_map.insert(cam0, 0);
+        index_map.insert(cam1, 6);
+        index_map.insert(pt0, 12);
+        index_map.insert(pt1, 15);
+
+        let empty_marks = std::collections::HashSet::new();
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &index_map, &empty_marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert_eq!(
+            structure.num_landmarks, 2,
+            "Rn(3) variables must auto-eliminate"
+        );
+        assert_eq!(
+            structure.camera_blocks.len(),
+            2,
+            "SE3 variables must stay cameras"
+        );
+
+        // Manual marks still eliminate regardless of type/size.
+        let mut marks = std::collections::HashSet::new();
+        marks.insert(cam1);
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &index_map, &marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert!(structure.landmark_blocks.iter().any(|(k, _, _)| *k == cam1));
+
+        Ok(())
     }
 
     #[test]
