@@ -90,6 +90,14 @@ pub struct SchurOrdering {
     /// Only eliminate RN variables with this exact size (default: 3 for 3D landmarks)
     /// This prevents intrinsic variables (6 DOF) from being eliminated
     pub eliminate_rn_size: Option<usize>,
+    /// Auto-classify *unmarked* variables as landmarks when their type and size
+    /// match [`Self::should_eliminate`].
+    ///
+    /// Off by default: `Rn(3)` is also how self-calibration represents intrinsic
+    /// parameters (`[focal, k1, k2]`), and eliminating those as landmarks
+    /// silently corrupts the Schur complement. Manual marks via
+    /// `Problem::mark_as_schur_landmark` always apply, with or without this flag.
+    pub auto_detect: bool,
 }
 
 impl Default for SchurOrdering {
@@ -97,6 +105,7 @@ impl Default for SchurOrdering {
         Self {
             eliminate_types: vec![ManifoldType::RN],
             eliminate_rn_size: Some(3), // Only eliminate 3D landmarks, not intrinsics
+            auto_detect: false,
         }
     }
 }
@@ -104,6 +113,12 @@ impl Default for SchurOrdering {
 impl SchurOrdering {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable auto-classification of unmarked variables (see [`Self::auto_detect`]).
+    pub fn with_auto_detect(mut self, enabled: bool) -> Self {
+        self.auto_detect = enabled;
+        self
     }
 
     /// Check if a variable should be eliminated (treated as landmark).
@@ -245,17 +260,21 @@ impl SparseSchurComplementSolver {
         self.block_structure.as_ref()
     }
 
-    /// Union of the manually marked landmark keys and the variables
-    /// auto-classified as landmarks by the configured [`SchurOrdering`].
+    /// Union of the manually marked landmark keys and — when
+    /// [`SchurOrdering::auto_detect`] is enabled — the variables matching the
+    /// configured ordering.
     fn effective_landmark_keys(
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
         ordering: &SchurOrdering,
     ) -> std::collections::HashSet<VarKey> {
         let mut keys = schur_landmark_keys.clone();
-        for (key, variable) in variables {
-            if ordering.should_eliminate_by_name(variable.manifold_type_name(), variable.dof()) {
-                keys.insert(key);
+        if ordering.auto_detect {
+            for (key, variable) in variables {
+                if ordering.should_eliminate_by_name(variable.manifold_type_name(), variable.dof())
+                {
+                    keys.insert(key);
+                }
             }
         }
         keys
@@ -1387,7 +1406,7 @@ mod tests {
     }
 
     #[test]
-    fn test_auto_elimination_activates_ordering() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_auto_elimination_is_opt_in() -> Result<(), Box<dyn std::error::Error>> {
         use crate::core::variable::Variable;
         use apex_manifolds::{rn, se3};
         use nalgebra::DVector;
@@ -1413,7 +1432,25 @@ mod tests {
         index_map.insert(pt1, 15);
 
         let empty_marks = std::collections::HashSet::new();
+
+        // Default ordering: auto-classification stays off — Rn(3) is ambiguous
+        // (landmarks vs self-calibration intrinsics), so only pt0 is eliminated
+        // and the unmarked pt1 stays a camera.
+        let mut marks = std::collections::HashSet::new();
+        marks.insert(pt0);
         let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &index_map, &marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert_eq!(
+            structure.num_landmarks, 1,
+            "auto-detection must be off by default"
+        );
+        assert_eq!(structure.camera_blocks.len(), 3);
+        assert!(structure.camera_blocks.iter().any(|(k, _, _)| *k == pt1));
+
+        // Opt-in: unmarked Rn(3) variables are eliminated as landmarks.
+        let ordering = SchurOrdering::default().with_auto_detect(true);
+        let mut solver = SparseSchurComplementSolver::new().with_ordering(ordering);
         solver.initialize_structure(&variables, &index_map, &empty_marks)?;
         let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
         assert_eq!(
@@ -1637,6 +1674,7 @@ mod tests {
         let ordering = SchurOrdering {
             eliminate_types: vec![ManifoldType::RN],
             eliminate_rn_size: Some(3),
+            auto_detect: false,
         };
         let solver = SparseSchurComplementSolver::new().with_ordering(ordering);
         assert_eq!(solver.ordering.eliminate_rn_size, Some(3));
