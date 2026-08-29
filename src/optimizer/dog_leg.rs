@@ -196,8 +196,8 @@ use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
+    LinearSolver, LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -1026,10 +1026,14 @@ impl DogLeg {
 
         // Try to solve with current mu, increasing if necessary
         while mu_attempts < 10 && self.mu <= self.max_mu {
-            let damping = self.mu;
+            // μ is a numerical stabiliser for the Gauss-Newton solve, not a
+            // trust region — the region is enforced geometrically by the dog-leg
+            // construction — so it is applied as uniform λI rather than the
+            // Marquardt diagonal.
+            let damping = Damping::identity(self.mu);
 
             if let Ok(step) =
-                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, damping)
+                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
             {
                 scaled_gn_step = Some(step);
                 break;

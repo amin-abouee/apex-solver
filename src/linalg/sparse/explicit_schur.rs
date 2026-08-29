@@ -47,8 +47,8 @@
 use super::implicit_schur::IterativeSchurSolver;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
@@ -1045,8 +1045,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         // - Iterative: PCG
 
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1089,7 +1088,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         let jacobians = jacobian;
 
@@ -1101,8 +1100,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
 
         // Sparse and Iterative variants use the same Schur complement formation with damping
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } =
-            self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1137,7 +1135,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let cam_size = structure.camera_dof;
 
-        // Add λI to H_cc
+        // Add λ·D to H_cc, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
         let mut h_cc_triplets = Vec::new();
         let h_cc_symbolic = h_cc.symbolic();
         for col in 0..h_cc.ncols() {
@@ -1149,20 +1147,22 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         }
         for i in 0..cam_size {
             if let Some(entry) = h_cc_triplets.iter_mut().find(|t| t.row == i && t.col == i) {
-                *entry = Triplet::new(i, i, entry.val + lambda);
+                *entry = Triplet::new(i, i, entry.val + damping.diagonal_term(entry.val));
             } else {
-                h_cc_triplets.push(Triplet::new(i, i, lambda));
+                // Structurally absent diagonal — H_ii is zero, so the clamp floors
+                // the damping at λ·min_diagonal.
+                h_cc_triplets.push(Triplet::new(i, i, damping.diagonal_term(0.0)));
             }
         }
         let h_cc_damped =
             SparseColMat::try_new_from_triplets(cam_size, cam_size, &h_cc_triplets)
                 .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Damped H_cc: {:?}", e)))?;
 
-        // Add λI to H_pp blocks
+        // Add λ·D to H_pp blocks (same clamped-diagonal rule as H_cc)
         for block in &mut hpp_blocks {
-            block[(0, 0)] += lambda;
-            block[(1, 1)] += lambda;
-            block[(2, 2)] += lambda;
+            for k in 0..3 {
+                block[(k, k)] += damping.diagonal_term(block[(k, k)]);
+            }
         }
 
         // 4. Invert damped H_pp blocks
@@ -1633,7 +1633,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            0.1,
+            &Damping::identity(0.1),
         )?;
         assert_eq!(delta.nrows(), 21);
         Ok(())
@@ -1691,7 +1691,7 @@ mod tests {
             &mut solver1,
             &residuals,
             &jacobian,
-            0.001,
+            &Damping::identity(0.001),
         )?;
 
         let mut solver2 = SparseSchurComplementSolver::new();
@@ -1700,7 +1700,7 @@ mod tests {
             &mut solver2,
             &residuals,
             &jacobian,
-            100.0,
+            &Damping::identity(100.0),
         )?;
 
         // Different λ values should produce different updates

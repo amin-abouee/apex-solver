@@ -146,9 +146,9 @@ use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
-    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode,
-    SparseQRSolver, SparseSchurComplementSolver, StructureAware,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
+    LinearSolver, LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver,
+    SparseMode, SparseQRSolver, SparseSchurComplementSolver, StructureAware,
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
@@ -232,9 +232,21 @@ pub struct LevenbergMarquardtConfig {
     pub min_step_quality: f64,
     /// Good step quality threshold
     pub good_step_quality: f64,
-    /// Minimum diagonal value for regularization
+    /// Lower clamp on the Marquardt damping diagonal (Ceres' `min_lm_diagonal`).
+    ///
+    /// The augmented system is `(JᵀJ + λ·D)·dx = −Jᵀr` with
+    /// `D_jj = clamp(JᵀJ_jj, min_diagonal, max_diagonal)`. Bounding `D` away
+    /// from zero guarantees that even a direction with negligible curvature is
+    /// damped. Setting `min_diagonal == max_diagonal == 1.0` gives `D = I`, i.e.
+    /// classic uniform `λI` damping.
+    ///
+    /// Default: 1e-6 (Ceres-compatible). See [`Damping`].
     pub min_diagonal: f64,
-    /// Maximum diagonal value for regularization
+    /// Upper clamp on the Marquardt damping diagonal (Ceres' `max_lm_diagonal`).
+    ///
+    /// Keeps one very stiff column from dominating the damped system.
+    ///
+    /// Default: 1e32 (Ceres-compatible). See [`Damping`].
     pub max_diagonal: f64,
     /// Minimum objective function cutoff (optional early termination)
     ///
@@ -326,7 +338,11 @@ impl Default for LevenbergMarquardtConfig {
             // Note: Typically should be 1e-4 * cost_tolerance per Ceres docs
             gradient_tolerance: 1e-10,
             timeout: None,
-            damping: 1e-3, // Increased from 1e-4 for better initial convergence on BA
+            // Ceres-equivalent: its default `initial_trust_region_radius` of 1e4
+            // corresponds to λ = 1/radius = 1e-4. The previous 1e-3 was hand-tuned
+            // against uniform λI damping, where λ alone had to absorb the problem
+            // scale; with the Marquardt diagonal the scale lives in D instead.
+            damping: 1e-4,
             damping_min: 1e-12,
             damping_max: 1e12,
             damping_increase_factor: 10.0,
@@ -413,6 +429,17 @@ impl LevenbergMarquardtConfig {
     pub fn with_damping_factors(mut self, increase: f64, decrease: f64) -> Self {
         self.damping_increase_factor = increase;
         self.damping_decrease_factor = decrease;
+        self
+    }
+
+    /// Set the clamp range for the Marquardt damping diagonal.
+    ///
+    /// The augmented system becomes `(JᵀJ + λ·D)·dx = −Jᵀr` with
+    /// `D_jj = clamp(JᵀJ_jj, min, max)`. Pass `(1.0, 1.0)` for classic uniform
+    /// `λI` damping.
+    pub fn with_diagonal_bounds(mut self, min: f64, max: f64) -> Self {
+        self.min_diagonal = min;
+        self.max_diagonal = max;
         self
     }
 
@@ -743,10 +770,15 @@ impl LevenbergMarquardt {
         scaled_jacobian: &M::Jacobian,
         linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<StepResult, OptimizerError> {
-        // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
+        // Solve the augmented equation (J̃ᵀJ̃ + λ·D)·dx̃ = −J̃ᵀr.
+        let damping = Damping::new(
+            self.config.damping,
+            self.config.min_diagonal,
+            self.config.max_diagonal,
+        )?;
         let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
-            .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.damping)
+            .solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
         // Get cached gradient from the solver
@@ -1400,7 +1432,10 @@ mod tests {
         let cfg = LevenbergMarquardtConfig::default();
         assert_eq!(cfg.max_iterations, 50);
         assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
-        assert!((cfg.damping - 1e-3).abs() < 1e-15);
+        assert!((cfg.damping - 1e-4).abs() < 1e-15);
+        // Ceres' min_lm_diagonal / max_lm_diagonal.
+        assert!((cfg.min_diagonal - 1e-6).abs() < 1e-15);
+        assert!((cfg.max_diagonal - 1e32).abs() < 1e17);
         assert!(!cfg.use_jacobi_scaling);
         assert!(!cfg.compute_covariances);
     }

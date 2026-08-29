@@ -23,23 +23,22 @@
 
 use dyn_stack::MemStack;
 use faer::{
-    Accum, Mat,
-    get_global_parallelism,
+    Accum, Mat, get_global_parallelism,
     prelude::Reborrow,
-    sparse::{
-        SparseColMat, SparseColMatMut, SparseColMatRef, SymbolicSparseColMat,
-        SymbolicSparseColMatRef,
-    },
     sparse::linalg::matmul::{
         SparseMatMulInfo, sparse_dense_matmul, sparse_sparse_matmul_numeric,
         sparse_sparse_matmul_numeric_scratch, sparse_sparse_matmul_symbolic,
+    },
+    sparse::{
+        SparseColMat, SparseColMatMut, SparseColMatRef, SymbolicSparseColMat,
+        SymbolicSparseColMatRef,
     },
 };
 use rayon::prelude::*;
 use std::mem::MaybeUninit;
 
 use crate::error::ErrorLogging;
-use crate::linalg::{LinAlgError, LinAlgResult};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult};
 
 /// Cached symbolic machinery for forming the normal equations of a fixed
 /// Jacobian sparsity pattern.
@@ -116,11 +115,11 @@ impl LazyNormalEquations {
         }
     }
 
-    /// `H + λI` on the cached product pattern — see
+    /// `H + λ·D` on the cached product pattern — see
     /// [`NormalEquationsCache::damped_hessian`].
-    pub fn damped_hessian(&self, lambda: f64) -> LinAlgResult<SparseColMat<usize, f64>> {
+    pub fn damped_hessian(&self, damping: &Damping) -> LinAlgResult<SparseColMat<usize, f64>> {
         match self.0.as_ref() {
-            Some(cache) => cache.damped_hessian(lambda),
+            Some(cache) => cache.damped_hessian(damping),
             None => Err(LinAlgError::InvalidState(
                 "normal equations cache not initialized".to_string(),
             )),
@@ -162,8 +161,10 @@ impl NormalEquationsCache {
             })
             .collect();
 
-        let scratch_req =
-            sparse_sparse_matmul_numeric_scratch::<usize, f64>(product_symbolic.rb(), get_global_parallelism());
+        let scratch_req = sparse_sparse_matmul_numeric_scratch::<usize, f64>(
+            product_symbolic.rb(),
+            get_global_parallelism(),
+        );
 
         Ok(Self {
             jt_values: vec![0.0; jt_pattern.compute_nnz()],
@@ -247,21 +248,26 @@ impl NormalEquationsCache {
         Ok(NormalEquations { hessian, gradient })
     }
 
-    /// `H + λI` as an owned sparse matrix on the cached product pattern.
+    /// `H + λ·D` as an owned sparse matrix on the cached product pattern.
+    ///
+    /// `D_jj = clamp(H_jj, min_diagonal, max_diagonal)` — see [`Damping`]. Each
+    /// diagonal position is visited exactly once, so `values[*pos]` still holds
+    /// the un-damped `H_jj` when the clamp reads it.
     ///
     /// Errors if any diagonal entry is structurally absent — the augmented
     /// system's pattern must coincide with the cached product pattern for the
     /// cached factorization symbolics to remain valid.
-    pub fn damped_hessian(&self, lambda: f64) -> LinAlgResult<SparseColMat<usize, f64>> {
+    pub fn damped_hessian(&self, damping: &Damping) -> LinAlgResult<SparseColMat<usize, f64>> {
         if self.diag_pos.iter().any(Option::is_none) {
             return Err(LinAlgError::InvalidInput(
-                "JᵀJ has structurally empty diagonal entries; cannot apply λI in place".to_string(),
+                "JᵀJ has structurally empty diagonal entries; cannot apply damping in place"
+                    .to_string(),
             )
             .log());
         }
         let mut values = self.hessian_values.clone();
         for pos in self.diag_pos.iter().flatten() {
-            values[*pos] += lambda;
+            values[*pos] += damping.diagonal_term(values[*pos]);
         }
         Ok(SparseColMat::new(self.product_symbolic.clone(), values))
     }
@@ -416,7 +422,7 @@ mod tests {
         let mut cache = NormalEquationsCache::try_new(&j)?;
         let ne = cache.compute(&residuals, &j)?;
 
-        let damped = cache.damped_hessian(0.5)?;
+        let damped = cache.damped_hessian(&Damping::identity(0.5))?;
         for col in 0..damped.ncols() {
             let rows = damped.symbolic().row_idx_of_col_raw(col);
             let pos = rows

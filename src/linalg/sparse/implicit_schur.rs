@@ -54,7 +54,7 @@ use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
 use faer::sparse::SparseColMat;
 use nalgebra::{DMatrix, DVector, Matrix3};
@@ -86,7 +86,7 @@ pub struct IterativeSchurSolver {
     /// itself operates on.
     hessian: Option<SparseColMat<usize, f64>>,
     /// The matrix the Schur operator and preconditioners are applied to:
-    /// `JᵀJ + λI` for a damped solve, plain `JᵀJ` otherwise.
+    /// `JᵀJ + λ·D` for a damped solve, plain `JᵀJ` otherwise.
     system_hessian: Option<SparseColMat<usize, f64>>,
     /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
@@ -831,7 +831,7 @@ impl IterativeSchurSolver {
 
     /// Internal solve against an explicit system.
     ///
-    /// `hessian` is the *damped* `JᵀJ + λI` (or the plain `JᵀJ` for an
+    /// `hessian` is the *damped* `JᵀJ + λ·D` (or the plain `JᵀJ` for an
     /// undamped solve) and `gradient` is `−Jᵀr`, the right-hand side of
     /// `H·dx = −Jᵀr`. Both are passed explicitly rather than read back from
     /// `self.hessian` / `self.gradient`, because those two fields carry the
@@ -1027,7 +1027,7 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = Jᵀr (parallel faer kernels, cached symbolic)
         let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
@@ -1036,9 +1036,9 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        // H_aug = H + λI — diagonal edit on the cached product pattern
+        // H_aug = H + λ·D — diagonal edit on the cached product pattern
         // (no per-call triplet rebuild + sparse sum).
-        let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;
+        let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
 
         // Publish the *un-damped* system, per the LinearSolver contract; the
         // damped copy drives the Schur operator and the preconditioners.
@@ -1222,7 +1222,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            0.1,
+            &Damping::identity(0.1),
         )?;
         assert_eq!(delta.nrows(), 21);
         Ok(())
@@ -1356,7 +1356,7 @@ mod tests {
             &mut s1,
             &residuals,
             &jacobian,
-            0.001,
+            &Damping::identity(0.001),
         )?;
 
         let mut s2 = IterativeSchurSolver::with_cg_params(500, 1e-6);
@@ -1365,7 +1365,7 @@ mod tests {
             &mut s2,
             &residuals,
             &jacobian,
-            100.0,
+            &Damping::identity(100.0),
         )?;
 
         let norm_diff: f64 = (0..21).map(|i| (d1[(i, 0)] - d2[(i, 0)]).powi(2)).sum();

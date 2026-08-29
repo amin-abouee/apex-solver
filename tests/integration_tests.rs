@@ -385,10 +385,16 @@ fn test_sphere2500_se3_converges() -> Result<(), Box<dyn std::error::Error>> {
         result.improvement_pct
     );
 
-    // Verify iterations
+    // Verify iterations.
+    //
+    // 30, not 20: Marquardt damping (`JᵀJ + λ·D`) trades a few extra iterations
+    // on homogeneous pose graphs — where every column has a similar norm, so
+    // `D ≈ cI` and the change amounts to a rescaling of λ — for large wins where
+    // the parameter scales differ (bundle adjustment, self-calibration). The
+    // >99% cost reduction asserted above is unchanged.
     assert!(
-        result.iterations < 20,
-        "Should complete in < 20 iterations: {}",
+        result.iterations < 30,
+        "Should complete in < 30 iterations: {}",
         result.iterations
     );
 
@@ -445,10 +451,16 @@ fn test_parking_garage_se3_converges() -> Result<(), Box<dyn std::error::Error>>
         result.improvement_pct
     );
 
-    // Verify iterations
+    // Verify iterations.
+    //
+    // 30, not 20: Marquardt damping (`JᵀJ + λ·D`) trades a few extra iterations
+    // on homogeneous pose graphs — where every column has a similar norm, so
+    // `D ≈ cI` and the change amounts to a rescaling of λ — for large wins where
+    // the parameter scales differ (bundle adjustment, self-calibration). The
+    // >99% cost reduction asserted above is unchanged.
     assert!(
-        result.iterations < 20,
-        "Should complete in < 20 iterations: {}",
+        result.iterations < 30,
+        "Should complete in < 30 iterations: {}",
         result.iterations
     );
 

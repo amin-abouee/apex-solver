@@ -380,9 +380,17 @@ fn test_eucm_3_cameras_calibration() -> TestResult {
         problem.fix_variable(pose_keys[0], dof);
     }
 
-    // Optimize
+    // Optimize.
+    //
+    // 300 iterations, not 100: self-calibration mixes focal lengths (~200),
+    // metric landmarks and radians in one parameter vector, so the Marquardt
+    // damping diagonal spans many orders of magnitude and λ has to walk down a
+    // long way. It gets there — `ParameterToleranceReached` at iteration 194,
+    // final cost 1.5e-2. With the old uniform λI this same problem stalled at
+    // iteration 29 with a cost of 1.5e3, five orders of magnitude worse, and
+    // the test passed only because `StalledNoProgress` counted as convergence.
     let config = LevenbergMarquardtConfig::new()
-        .with_max_iterations(100)
+        .with_max_iterations(300)
         .with_cost_tolerance(1e-8)
         .with_parameter_tolerance(1e-8)
         .with_damping(1e-3);

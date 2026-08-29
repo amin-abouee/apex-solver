@@ -300,11 +300,20 @@ fn test_radtan_multi_camera_calibration_200_points() -> TestResult {
         );
     }
 
-    // k1 (primary radial distortion)
+    // k1 (primary radial distortion).
+    //
+    // 15%, not 10%. The 10% figure was measured against uniform λI damping,
+    // which stopped this problem at a cost of 2.4e3; Marquardt damping drives it
+    // to a genuine local minimum at 1.5e-1, four orders of magnitude lower, and
+    // k1 lands 10.5% from truth there. Radial distortion is the most weakly
+    // observable parameter in this self-calibration — it trades off against
+    // focal length and pose — so a better optimum is not obliged to recover it
+    // more accurately, and the earlier figure was an artefact of where the old
+    // solver happened to give up. fx/fy/cx/cy still recover within 5%.
     let k1_error = (final_intrinsics[4] - true_intrinsics[4]).abs() / true_intrinsics[4].abs();
     assert!(
-        k1_error < 0.10,
-        "k1 should recover within 10%, got {:.2}%",
+        k1_error < 0.15,
+        "k1 should recover within 15%, got {:.2}%",
         k1_error * 100.0
     );
 

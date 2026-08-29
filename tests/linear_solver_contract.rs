@@ -9,10 +9,11 @@
 //! once, so a new backend cannot get it wrong silently.
 
 use apex_solver::linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, LinearSolver, SparseCholeskySolver, SparseMode,
-    SparseQRSolver,
+    Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, LinearSolver, SparseCholeskySolver,
+    SparseMode, SparseQRSolver,
 };
 use faer::Mat;
+use faer::linalg::solvers::Solve;
 use faer::sparse::{SparseColMat, Triplet};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -112,9 +113,9 @@ fn sparse_diagonal(h: &SparseColMat<usize, f64>) -> Vec<f64> {
         .collect()
 }
 
-/// A λ large enough that a leaked damping term cannot hide in the tolerance.
-fn probe_damping() -> f64 {
-    10.0
+/// Damping strong enough that a leaked damping term cannot hide in the tolerance.
+fn probe_damping() -> Damping {
+    Damping::identity(10.0)
 }
 
 /// The same contract holds for the un-damped entry point, which Gauss-Newton
@@ -169,7 +170,7 @@ fn dense_backends_publish_the_contract_from_solve_normal_equation() -> TestResul
 fn sparse_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
     let (j, r) = sparse_system()?;
     let mut solver = SparseCholeskySolver::new();
-    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, &probe_damping())?;
     let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
     let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
     assert_publishes_contract("SparseCholeskySolver", g, &sparse_diagonal(h))
@@ -179,7 +180,7 @@ fn sparse_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestRes
 fn sparse_qr_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
     let (j, r) = sparse_system()?;
     let mut solver = SparseQRSolver::new();
-    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, &probe_damping())?;
     let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
     let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
     assert_publishes_contract("SparseQRSolver", g, &sparse_diagonal(h))
@@ -189,7 +190,7 @@ fn sparse_qr_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
 fn dense_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
     let (j, r) = dense_system();
     let mut solver = DenseCholeskySolver::new();
-    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, &probe_damping())?;
     let g = LinearSolver::<DenseMode>::get_gradient(&solver).ok_or("no gradient")?;
     let h = LinearSolver::<DenseMode>::get_hessian(&solver).ok_or("no hessian")?;
     let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
@@ -200,40 +201,76 @@ fn dense_cholesky_publishes_positive_gradient_and_undamped_hessian() -> TestResu
 fn dense_qr_publishes_positive_gradient_and_undamped_hessian() -> TestResult {
     let (j, r) = dense_system();
     let mut solver = DenseQRSolver::new();
-    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, probe_damping())?;
+    LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, &probe_damping())?;
     let g = LinearSolver::<DenseMode>::get_gradient(&solver).ok_or("no gradient")?;
     let h = LinearSolver::<DenseMode>::get_hessian(&solver).ok_or("no hessian")?;
     let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
     assert_publishes_contract("DenseQRSolver", g, &diag)
 }
 
-/// The augmented solve must satisfy `(JᵀJ + λI)·dx = −Jᵀr`.
+/// The augmented solve must satisfy `(JᵀJ + λ·D)·dx = −Jᵀr`.
 ///
 /// This is what ties the two published quantities together: it fails if the
-/// right-hand side uses `+Jᵀr` instead of `−Jᵀr`, and it fails if the damping
-/// applied inside is not the λ that was asked for.
+/// right-hand side uses `+Jᵀr`, and it fails if the damping applied inside
+/// differs from what `Damping` describes.
 #[test]
 fn augmented_solve_satisfies_its_own_normal_equations() -> TestResult {
     let (dense_j, r) = dense_system();
     let (j, _) = sparse_system()?;
-    let lambda = 0.25;
+    let damping = Damping::new(0.25, 1e-6, 1e32)?;
 
     let mut solver = SparseCholeskySolver::new();
-    let dx = LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, lambda)?;
+    let dx = LinearSolver::<SparseMode>::solve_augmented_equation(&mut solver, &r, &j, &damping)?;
 
     let h = dense_j.transpose() * &dense_j;
     let g = dense_j.transpose() * &r;
     for i in 0..h.nrows() {
-        let mut lhs = lambda * dx[(i, 0)];
+        let mut lhs = damping.diagonal_term(h[(i, i)]) * dx[(i, 0)];
         for k in 0..h.ncols() {
             lhs += h[(i, k)] * dx[(k, 0)];
         }
         assert!(
             (lhs + g[(i, 0)]).abs() < 1e-8,
-            "row {i}: (JᵀJ + λI)·dx should equal −Jᵀr, got {lhs} vs {}",
+            "row {i}: (JᵀJ + λ·D)·dx should equal −Jᵀr, got {lhs} vs {}",
             -g[(i, 0)]
         );
     }
     Ok(())
 }
 
+/// `Damping::identity` must reproduce classic uniform `λI` damping exactly.
+///
+/// This is the escape hatch documented on [`Damping`]: it lets a caller opt out
+/// of Marquardt scaling entirely, so it has to be bit-for-bit the old behaviour
+/// rather than merely close.
+#[test]
+fn identity_damping_adds_lambda_to_every_diagonal() -> TestResult {
+    let (dense_j, r) = dense_system();
+    let (j, _) = sparse_system()?;
+    let lambda = 0.75;
+
+    let mut solver = SparseCholeskySolver::new();
+    let dx = LinearSolver::<SparseMode>::solve_augmented_equation(
+        &mut solver,
+        &r,
+        &j,
+        &Damping::identity(lambda),
+    )?;
+
+    let mut h = dense_j.transpose() * &dense_j;
+    for i in 0..h.nrows() {
+        h[(i, i)] += lambda;
+    }
+    let g = dense_j.transpose() * &r;
+    let expected = h.as_ref().llt(faer::Side::Lower)?.solve(-&g);
+
+    for i in 0..expected.nrows() {
+        assert!(
+            (dx[(i, 0)] - expected[(i, 0)]).abs() < 1e-10,
+            "entry {i}: identity damping should match H + λI exactly, got {} vs {}",
+            dx[(i, 0)],
+            expected[(i, 0)]
+        );
+    }
+    Ok(())
+}
