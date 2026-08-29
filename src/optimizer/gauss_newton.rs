@@ -118,8 +118,8 @@ use std::time;
 use tracing::debug;
 
 use crate::linalg::{
-    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
+    LinearSolver, LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -179,11 +179,12 @@ pub struct GaussNewtonConfig {
     ///
     /// Default: false (Gauss-Newton is typically used on well-conditioned problems)
     pub use_jacobi_scaling: bool,
-    /// Small regularization to ensure J^T·J is positive definite
+    /// Uniform diagonal regularization added to `JᵀJ` before each solve.
     ///
-    /// Pure Gauss-Newton (λ=0) can fail when J^T·J is singular or near-singular.
-    /// Adding a tiny diagonal regularization (e.g., 1e-10) ensures numerical stability
-    /// while maintaining the fast convergence of Gauss-Newton.
+    /// Pure Gauss-Newton (λ=0) fails outright when `JᵀJ` is singular. Solving
+    /// `(JᵀJ + min_diagonal·I)·Δx = −Jᵀr` instead keeps the factorization well
+    /// posed at a cost that is invisible against any real curvature. Set to
+    /// `0.0` for the un-regularized normal equations.
     ///
     /// Default: 1e-10 (very small, practically identical to pure Gauss-Newton)
     pub min_diagonal: f64,
@@ -510,13 +511,23 @@ impl GaussNewton {
         scaled_jacobian: &M::Jacobian,
         linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<StepResult, optimizer::OptimizerError> {
-        // Solve the Gauss-Newton equation: J^T·J·Δx = -J^T·r
+        // Solve the Gauss-Newton equation: (JᵀJ + min_diagonal·I)·Δx = −Jᵀr.
+        //
+        // The regularizer is uniform λI, not the Marquardt diagonal: it is a
+        // guard against an exactly singular JᵀJ, not a trust region, and at the
+        // default of 1e-10 it is numerically invisible next to any real
+        // curvature. `min_diagonal = 0` selects the un-regularized normal
+        // equations, i.e. textbook Gauss-Newton.
         let residuals_owned = residuals.as_ref().to_owned();
-        let scaled_step = linear_solver
-            .solve_normal_equation(&residuals_owned, scaled_jacobian)
-            .map_err(|e| {
-                optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
-            })?;
+        let scaled_step = if self.config.min_diagonal > 0.0 {
+            let damping = Damping::identity(self.config.min_diagonal);
+            linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+        } else {
+            linear_solver.solve_normal_equation(&residuals_owned, scaled_jacobian)
+        }
+        .map_err(|e| {
+            optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
+        })?;
 
         // Get gradient from the solver (J^T * r)
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
@@ -988,6 +999,76 @@ mod tests {
         assert_eq!(
             result.status,
             optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
+    }
+
+    /// A rank-deficient `JᵀJ` is solvable with the regularizer and not without.
+    ///
+    /// Two variables enter the residual only through their sum, so `JᵀJ` is
+    /// exactly singular: the un-regularized normal equations have no unique
+    /// solution. `min_diagonal` is what the doc-comment always promised and what
+    /// the solver never applied.
+    #[test]
+    fn gauss_newton_min_diagonal_regularizes_a_singular_hessian() -> TestResult {
+        /// r = (x + y) - 1, so ∂r/∂x = ∂r/∂y = 1 and JᵀJ = [[1,1],[1,1]].
+        #[derive(Debug)]
+        struct SumFactor;
+        impl crate::factors::Factor for SumFactor {
+            fn linearize(
+                &self,
+                params: &[&[f64]],
+                residual: &mut [f64],
+                jacobian: Option<faer::mat::MatMut<'_, f64>>,
+            ) {
+                residual[0] = params[0][0] + params[1][0] - 1.0;
+                if let Some(mut jac) = jacobian {
+                    use faer::prelude::ReborrowMut;
+                    *jac.rb_mut().get_mut(0, 0) = 1.0;
+                    *jac.rb_mut().get_mut(0, 1) = 1.0;
+                }
+            }
+            fn residual_dim(&self) -> usize {
+                1
+            }
+            fn jacobian_shape(&self) -> (usize, usize) {
+                (1, 2)
+            }
+        }
+
+        let build = || {
+            let mut prob = problem::Problem::new(JacobianMode::Sparse);
+            let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+            let y = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+            prob.add_residual_block(&[x, y], Box::new(SumFactor), None);
+            prob
+        };
+
+        let mut regularized_problem = build();
+        let regularized = GaussNewton::with_config(
+            GaussNewtonConfig::new()
+                .with_max_iterations(20)
+                .with_min_diagonal(1e-10),
+        )
+        .optimize(&mut regularized_problem)?;
+        assert!(
+            regularized.final_cost < 1e-12,
+            "with regularization the singular system should still reach the \
+             minimum-norm solution, got cost {:.3e}",
+            regularized.final_cost
+        );
+
+        let mut unregularized_problem = build();
+        let unregularized = GaussNewton::with_config(
+            GaussNewtonConfig::new()
+                .with_max_iterations(20)
+                .with_min_diagonal(0.0),
+        )
+        .optimize(&mut unregularized_problem);
+        assert!(
+            unregularized.is_err(),
+            "without regularization the exactly singular JᵀJ should fail to \
+             factorize, but the solve returned Ok — min_diagonal is not being read"
         );
         Ok(())
     }
