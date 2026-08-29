@@ -758,20 +758,18 @@ impl LevenbergMarquardt {
     /// Update damping parameter based on step quality using trust region approach
     /// Reference: Introduction to Optimization and Data Fitting
     /// Algorithm 6.18
-    fn update_damping(&mut self, rho: f64) -> bool {
-        if rho > 0.0 {
+    fn update_damping(&mut self, rho: f64, accepted: bool) {
+        if accepted {
             // Step accepted - decrease damping
             let coff = 2.0 * rho - 1.0;
             self.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
             self.damping = self.damping.max(self.config.damping_min);
             self.damping_nu = self.config.damping_nu;
-            true
         } else {
             // Step rejected - increase damping
             self.damping *= self.damping_nu;
             self.damping_nu *= 2.0;
             self.damping = self.damping.min(self.config.damping_max);
-            false
         }
     }
 
@@ -854,8 +852,12 @@ impl LevenbergMarquardt {
             step_result.predicted_reduction,
         );
 
-        // Update damping and decide whether to accept step
-        let accepted = self.update_damping(rho);
+        // Accept on step quality, then adapt λ. Ceres' TrustRegionMinimizer keeps
+        // these two decisions separate for the same reason: the acceptance
+        // threshold is a property of the problem, the damping update a property
+        // of the chosen policy.
+        let accepted = rho > self.config.min_relative_decrease;
+        self.update_damping(rho, accepted);
 
         let cost_reduction = if accepted {
             // Accept the step - parameters already updated
@@ -1261,6 +1263,40 @@ mod tests {
         Ok(())
     }
 
+    /// `min_relative_decrease` gates step acceptance.
+    ///
+    /// Set just below 1.0, essentially no step qualifies — ρ reaches 1 only when
+    /// the quadratic model is exact — so the solver must reject its way to a
+    /// stall instead of converging. This is the check that the field is read at
+    /// all: before it was wired up, both configurations produced identical runs.
+    #[test]
+    fn min_relative_decrease_gates_acceptance() -> TestResult {
+        let mut permissive_problem = rosenbrock_problem();
+        let permissive = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(1e-3),
+        )
+        .optimize(&mut permissive_problem)?;
+
+        let mut strict_problem = rosenbrock_problem();
+        let strict = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(0.999_999),
+        )
+        .optimize(&mut strict_problem)?;
+
+        assert!(
+            strict.final_cost > permissive.final_cost,
+            "a near-1.0 acceptance threshold should reject nearly every step and \
+             leave the cost higher: strict {:.3e} vs permissive {:.3e}",
+            strict.final_cost,
+            permissive.final_cost
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_rosenbrock_optimization() -> TestResult {
         // Rosenbrock function test:
@@ -1485,6 +1521,7 @@ mod tests {
         // Ceres' min_lm_diagonal / max_lm_diagonal.
         assert!((cfg.min_diagonal - 1e-6).abs() < 1e-15);
         assert!((cfg.max_diagonal - 1e32).abs() < 1e17);
+        assert!((cfg.min_relative_decrease - 1e-3).abs() < 1e-15);
         assert!(!cfg.use_jacobi_scaling);
         assert!(!cfg.compute_covariances);
     }
@@ -1741,7 +1778,7 @@ mod tests {
     // update_damping() direct unit tests
     // -------------------------------------------------------------------------
 
-    /// `update_damping(rho > 0)` should accept the step, decrease damping, and reset nu.
+    /// Nielsen: an accepted step decreases λ and resets ν.
     #[test]
     fn test_update_damping_accepted_step() {
         let cfg = LevenbergMarquardtConfig::new()
@@ -1750,17 +1787,14 @@ mod tests {
         let mut solver = LevenbergMarquardt::with_config(cfg);
         let initial_damping = solver.damping;
 
-        // rho = 0.8 > 0 → accepted branch
-        let accepted = solver.update_damping(0.8);
+        solver.update_damping(0.8, true);
 
-        assert!(accepted, "rho > 0 should return true (step accepted)");
         assert!(
             solver.damping < initial_damping,
             "accepted step should decrease damping: {} < {}",
             solver.damping,
             initial_damping
         );
-        // damping_nu should be reset to 2.0 on acceptance
         assert!(
             (solver.damping_nu - 2.0).abs() < 1e-15,
             "damping_nu should be reset to 2.0 after accepted step, got {}",
@@ -1768,7 +1802,7 @@ mod tests {
         );
     }
 
-    /// `update_damping(rho <= 0)` should reject the step, increase damping, and double nu.
+    /// Nielsen: a rejected step increases λ and doubles ν.
     #[test]
     fn test_update_damping_rejected_step() {
         let cfg = LevenbergMarquardtConfig::new()
@@ -1778,17 +1812,14 @@ mod tests {
         let mut solver = LevenbergMarquardt::with_config(cfg);
         let initial_damping = solver.damping;
 
-        // rho = -0.5 <= 0 → rejected branch
-        let rejected = solver.update_damping(-0.5);
+        solver.update_damping(-0.5, false);
 
-        assert!(!rejected, "rho <= 0 should return false (step rejected)");
         assert!(
             solver.damping > initial_damping,
             "rejected step should increase damping: {} > {}",
             solver.damping,
             initial_damping
         );
-        // damping_nu doubles on rejection
         assert!(
             (solver.damping_nu - initial_nu * 2.0).abs() < 1e-15,
             "damping_nu should double on rejected step: expected {}, got {}",

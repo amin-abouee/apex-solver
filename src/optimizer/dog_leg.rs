@@ -1128,10 +1128,12 @@ impl DogLeg {
             step_result.predicted_reduction,
         );
 
-        // Update trust region and decide acceptance
-        // Filter out numerical noise with small threshold
-        let accepted = rho > 1e-4;
-        let _trust_region_updated = self.update_trust_region(rho, step_norm);
+        // Accept on step quality, then resize the trust region. The two are
+        // separate decisions: `min_relative_decrease` says whether the step was
+        // worth keeping, `update_trust_region` says how far to trust the model
+        // next time.
+        let accepted = rho > self.config.min_relative_decrease;
+        self.update_trust_region(rho, step_norm);
 
         let cost_reduction = if accepted {
             let reduction = state.current_cost - new_cost;
@@ -1587,6 +1589,35 @@ mod tests {
             "reusing a solver changed the final cost: {:.17e} then {:.17e}",
             first.final_cost,
             second.final_cost
+        );
+        Ok(())
+    }
+
+    /// `min_relative_decrease` replaces the hardcoded `rho > 1e-4` gate.
+    #[test]
+    fn dogleg_min_relative_decrease_gates_acceptance() -> TestResult {
+        let mut permissive_problem = rosenbrock_problem();
+        let permissive = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(1e-3),
+        )
+        .optimize(&mut permissive_problem)?;
+
+        let mut strict_problem = rosenbrock_problem();
+        let strict = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(0.999_999),
+        )
+        .optimize(&mut strict_problem)?;
+
+        assert!(
+            strict.final_cost > permissive.final_cost,
+            "a near-1.0 acceptance threshold should leave the cost higher: \
+             strict {:.3e} vs permissive {:.3e}",
+            strict.final_cost,
+            permissive.final_cost
         );
         Ok(())
     }
