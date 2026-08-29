@@ -33,9 +33,9 @@ use faer::sparse::SparseColMat;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use crate::core::{FactorKey, VarKey};
 use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
+use crate::core::{FactorKey, VarKey};
 use crate::{
     core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
@@ -596,7 +596,14 @@ mod tests {
     fn test_sparse_backend_assemble_no_symbolic_returns_error() -> TestResult {
         let (problem, _k) = one_var_problem();
         let (variables, index_map, total_dof) = make_index_map(&problem);
-        let result = SparseMode::assemble(&problem, &variables, &index_map, None, total_dof, &mut AssemblyWorkspace::build(&problem));
+        let result = SparseMode::assemble(
+            &problem,
+            &variables,
+            &index_map,
+            None,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        );
         assert!(result.is_err());
         Ok(())
     }
@@ -609,7 +616,11 @@ mod tests {
             &problem, &variables, &index_map, total_dof,
         )?;
         let (_, jacobian) = SparseMode::assemble(
-            &problem, &variables, &index_map, Some(&sym), total_dof,
+            &problem,
+            &variables,
+            &index_map,
+            Some(&sym),
+            total_dof,
             &mut AssemblyWorkspace::build(&problem),
         )?;
         let norms = SparseMode::compute_column_norms(&jacobian);
@@ -626,7 +637,11 @@ mod tests {
             &problem, &variables, &index_map, total_dof,
         )?;
         let (_, jacobian) = SparseMode::assemble(
-            &problem, &variables, &index_map, Some(&sym), total_dof,
+            &problem,
+            &variables,
+            &index_map,
+            Some(&sym),
+            total_dof,
             &mut AssemblyWorkspace::build(&problem),
         )?;
         let scaling = vec![0.5_f64];

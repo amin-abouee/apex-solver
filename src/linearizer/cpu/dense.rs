@@ -155,8 +155,13 @@ mod tests {
     fn test_assemble_dense_basic() -> TestResult {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!((residual[(0, 0)] - 5.0).abs() < 1e-12);
         assert!((jacobian[(0, 0)] - 1.0).abs() < 1e-12);
         Ok(())
@@ -166,8 +171,13 @@ mod tests {
     fn test_assemble_dense_jacobian_dimensions() -> TestResult {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian.nrows(), problem.total_residual_dimension);
         assert_eq!(jacobian.ncols(), total_dof);
@@ -180,7 +190,13 @@ mod tests {
         let k = problem.add_variable(ManifoldType::RN, dvector![3.0]);
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 3.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, _) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert!(residual[(0, 0)].abs() < 1e-12);
         Ok(())
     }
@@ -193,8 +209,13 @@ mod tests {
         problem.add_residual_block(&[kx], Box::new(LinearFactor { target: 0.0 }), None);
         problem.add_residual_block(&[ky], Box::new(LinearFactor { target: 0.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(jacobian.nrows(), 2);
         assert_eq!(jacobian.ncols(), 2);
         let rsum = residual[(0, 0)].abs() + residual[(1, 0)].abs();
@@ -206,7 +227,13 @@ mod tests {
     fn test_assemble_dense_residual_faer_shape() -> TestResult {
         let (problem, _) = one_var_problem();
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, _) = assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, _) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
         assert_eq!(residual.nrows(), 1);
         assert_eq!(residual.ncols(), 1);
         Ok(())
@@ -253,8 +280,13 @@ mod tests {
             None,
         );
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
 
         assert_eq!(residual.nrows(), 2);
         assert_eq!(jacobian.nrows(), 2);
@@ -300,8 +332,13 @@ mod tests {
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 1.0 }), None);
         problem.add_residual_block(&[k], Box::new(LinearFactor { target: 4.0 }), None);
         let (index_map, total_dof) = build_index_map(&problem);
-        let (residual, jacobian) =
-            assemble_dense(&problem, &problem.variables, &index_map, total_dof, &mut AssemblyWorkspace::build(&problem))?;
+        let (residual, jacobian) = assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut AssemblyWorkspace::build(&problem),
+        )?;
 
         assert_eq!(residual.nrows(), 2);
 
