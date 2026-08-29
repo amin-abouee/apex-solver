@@ -274,3 +274,158 @@ fn identity_damping_adds_lambda_to_every_diagonal() -> TestResult {
     }
     Ok(())
 }
+
+// -----------------------------------------------------------------------------
+// Optimizer dispatch: no silent solver substitution
+// -----------------------------------------------------------------------------
+//
+// Requesting a solver an optimizer cannot run used to silently fall back to
+// plain Cholesky, making Schur-vs-Cholesky comparisons under GN/DogLeg report
+// identical numbers. The dispatch must reject unsupported combinations.
+
+mod dispatch {
+    use apex_solver::ManifoldType;
+    use apex_solver::core::problem::Problem;
+    use apex_solver::linalg::JacobianMode;
+    use apex_solver::linalg::LinearSolverType;
+    use apex_solver::optimizer::dog_leg::{DogLeg, DogLegConfig};
+    use apex_solver::optimizer::gauss_newton::{GaussNewton, GaussNewtonConfig};
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    fn small_problem(mode: JacobianMode) -> Problem {
+        let mut problem = Problem::new(mode);
+        let a = problem.add_variable(ManifoldType::RN, nalgebra::dvector![1.0]);
+        let b = problem.add_variable(ManifoldType::RN, nalgebra::dvector![2.0]);
+        problem.add_residual_block(&[a], Box::new(OffsetFactor { target: 0.5 }), None);
+        problem.add_residual_block(&[b], Box::new(OffsetFactor { target: 1.5 }), None);
+        problem
+    }
+
+    struct OffsetFactor {
+        target: f64,
+    }
+
+    impl apex_solver::Factor for OffsetFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            _jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            // Jacobian left at zero: the optimizer errors out before any solve.
+        }
+        fn residual_dim(&self) -> usize {
+            1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+    }
+
+    fn gn(solver: LinearSolverType) -> GaussNewton {
+        GaussNewton::with_config(GaussNewtonConfig::new().with_linear_solver_type(solver))
+    }
+
+    fn dl(solver: LinearSolverType) -> DogLeg {
+        DogLeg::with_config(DogLegConfig::new().with_linear_solver_type(solver))
+    }
+
+    fn assert_rejected(
+        mut optimizer: impl apex_solver::Optimizer,
+        mode: JacobianMode,
+        label: &str,
+    ) -> TestResult {
+        let mut problem = small_problem(mode);
+        let err = optimizer
+            .optimize(&mut problem)
+            .err()
+            .ok_or_else(|| format!("{label} should be rejected"))?;
+        assert!(
+            err.to_string().contains("supports"),
+            "{label}: unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gn_rejects_schur_under_sparse_mode() -> TestResult {
+        assert_rejected(
+            gn(LinearSolverType::SparseSchurComplement),
+            JacobianMode::Sparse,
+            "GN + Schur (sparse)",
+        )
+    }
+
+    #[test]
+    fn gn_rejects_dense_cholesky_under_sparse_mode() -> TestResult {
+        assert_rejected(
+            gn(LinearSolverType::DenseCholesky),
+            JacobianMode::Sparse,
+            "GN + DenseCholesky (sparse)",
+        )
+    }
+
+    #[test]
+    fn gn_rejects_sparse_solvers_under_dense_mode() -> TestResult {
+        assert_rejected(
+            gn(LinearSolverType::SparseCholesky),
+            JacobianMode::Dense,
+            "GN + SparseCholesky (dense)",
+        )?;
+        assert_rejected(
+            gn(LinearSolverType::SparseSchurComplement),
+            JacobianMode::Dense,
+            "GN + Schur (dense)",
+        )
+    }
+
+    #[test]
+    fn dog_leg_rejects_schur_under_sparse_mode() -> TestResult {
+        assert_rejected(
+            dl(LinearSolverType::SparseSchurComplement),
+            JacobianMode::Sparse,
+            "DogLeg + Schur (sparse)",
+        )
+    }
+
+    #[test]
+    fn dog_leg_rejects_sparse_solvers_under_dense_mode() -> TestResult {
+        assert_rejected(
+            dl(LinearSolverType::SparseQR),
+            JacobianMode::Dense,
+            "DogLeg + SparseQR (dense)",
+        )
+    }
+
+    #[test]
+    fn gn_accepts_supported_combinations() -> TestResult {
+        // Supported combos must dispatch without the rejection error. The factor
+        // has a zero Jacobian, so the solve fails numerically — any error other
+        // than the dispatch rejection is fine here.
+        for (solver, mode, label) in [
+            (
+                LinearSolverType::SparseCholesky,
+                JacobianMode::Sparse,
+                "GN sparse+cholesky",
+            ),
+            (
+                LinearSolverType::DenseCholesky,
+                JacobianMode::Dense,
+                "GN dense+cholesky",
+            ),
+        ] {
+            let mut optimizer = gn(solver);
+            let mut problem = small_problem(mode);
+            let result = optimizer.optimize(&mut problem);
+            if let Err(e) = result {
+                assert!(
+                    !e.to_string().contains("supports"),
+                    "{label}: dispatch must accept this combination, got {e}"
+                );
+            }
+        }
+        Ok(())
+    }
+}

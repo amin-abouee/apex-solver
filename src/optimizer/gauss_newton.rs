@@ -797,6 +797,10 @@ impl GaussNewton {
     }
 
     /// Run optimization, automatically selecting sparse or dense path based on config.
+    ///
+    /// Only solver/mode combinations that match are dispatched; anything else
+    /// returns an error rather than silently substituting a different solver
+    /// (requesting Schur under Gauss-Newton previously ran plain Cholesky).
     pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
@@ -804,22 +808,30 @@ impl GaussNewton {
                     let mut solver = DenseQRSolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
-                _ => {
+                LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
+                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
+                    "Gauss-Newton in dense Jacobian mode supports DenseCholesky and DenseQR only; \
+                     requested {other}"
+                ))
+                .into()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
-                _ => {
-                    // SparseCholesky (default), SparseSchurComplement or DenseCholesky with
-                    // sparse mode → SparseCholeskySolver
+                linalg::LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
+                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
+                    "Gauss-Newton in sparse Jacobian mode supports SparseCholesky and SparseQR \
+                     only; requested {other}. Use Levenberg-Marquardt for the Schur complement."
+                ))
+                .into()),
             },
         }
     }
