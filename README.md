@@ -1,10 +1,16 @@
 <div align="center">
 
-  <img src="assets/logo.png" alt="Apex Solver Logo" width="140" />
-
-  # Apex Solver
-
-  **A high-performance Rust library for nonlinear least squares optimization in SLAM & Computer Vision.**
+  <table>
+    <tr>
+      <td align="center" width="150">
+        <img src="assets/logo.png" alt="Apex Solver Logo" width="130" />
+      </td>
+      <td align="left" valign="middle">
+        <h1>Apex Solver</h1>
+        <b>A high-performance Rust library for nonlinear least squares optimization in SLAM &amp; Computer Vision.</b>
+      </td>
+    </tr>
+  </table>
 
   [![Crates.io Version](https://img.shields.io/crates/v/apex-solver.svg?style=flat-square&logo=rust)](https://crates.io/crates/apex-solver)
   [![Docs.rs](https://img.shields.io/docsrs/apex-solver?style=flat-square&logo=docsdotrs)](https://docs.rs/apex-solver)
