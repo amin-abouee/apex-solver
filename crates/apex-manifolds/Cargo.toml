@@ -19,6 +19,7 @@ exclude = ["tests/", "benches/"]
 nalgebra.workspace = true
 rand.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

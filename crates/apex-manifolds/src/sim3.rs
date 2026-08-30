@@ -65,6 +65,44 @@ impl Display for Sim3 {
     }
 }
 
+/// Tikhonov-regularized inverse for numerically singular Sim(3) blocks.
+///
+/// A σ ≈ 0 tangent element makes the V/Jacobian blocks singular mid-solve.
+/// Returning identity (the old fallback) silently corrupts the step to a
+/// generic identity map; the regularized inverse keeps the block's structure
+/// so the step degrades gracefully, and the event is surfaced.
+fn regularized_inverse_3(m: &Matrix3<f64>, what: &str) -> Matrix3<f64> {
+    if let Some(inv) = m.try_inverse() {
+        return inv;
+    }
+    let eps = 1e-9 * (m.trace().abs() + 1.0) / 3.0;
+    tracing::warn!(
+        "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
+    );
+    (*m + Matrix3::identity() * eps)
+        .try_inverse()
+        .unwrap_or_else(|| {
+            tracing::error!("Sim(3) {what}: regularized inverse also failed; using identity");
+            Matrix3::identity()
+        })
+}
+
+fn regularized_inverse_7(m: &Matrix7<f64>, what: &str) -> Matrix7<f64> {
+    if let Some(inv) = m.try_inverse() {
+        return inv;
+    }
+    let eps = 1e-9 * (m.trace().abs() + 1.0) / 7.0;
+    tracing::warn!(
+        "Sim(3) {what} is numerically singular; using Tikhonov-regularized inverse (eps = {eps:.3e})"
+    );
+    (*m + Matrix7::identity() * eps)
+        .try_inverse()
+        .unwrap_or_else(|| {
+            tracing::error!("Sim(3) {what}: regularized inverse also failed; using identity");
+            Matrix7::identity()
+        })
+}
+
 impl Sim3 {
     /// Space dimension - dimension of the ambient space
     pub const DIM: usize = 3;
@@ -422,10 +460,7 @@ impl Sim3 {
     /// Compute the inverse of the V matrix for Sim(3) logarithm.
     fn compute_v_inv(theta: &SO3Tangent, sigma: f64) -> Matrix3<f64> {
         let v = Sim3Tangent::v_matrix(theta, sigma);
-        // SAFETY: V is non-singular for all valid Sim(3) elements (non-zero scale).
-        // The identity fallback is only reached in degenerate near-zero-scale cases,
-        // which are outside the valid domain of Sim(3).
-        v.try_inverse().unwrap_or(Matrix3::identity())
+        regularized_inverse_3(&v, "V⁻¹")
     }
 }
 
@@ -660,20 +695,12 @@ impl Tangent<Sim3> for Sim3Tangent {
 
     /// Inverse of right Jacobian.
     fn right_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        // SAFETY: The right Jacobian is non-singular for valid Sim(3) tangent elements.
-        // Identity fallback only occurs at degenerate inputs outside the valid domain.
-        self.right_jacobian()
-            .try_inverse()
-            .unwrap_or(Matrix7::identity())
+        regularized_inverse_7(&self.right_jacobian(), "right-Jacobian⁻¹")
     }
 
     /// Inverse of left Jacobian.
     fn left_jacobian_inv(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        // SAFETY: The left Jacobian is non-singular for valid Sim(3) tangent elements.
-        // Identity fallback only occurs at degenerate inputs outside the valid domain.
-        self.left_jacobian()
-            .try_inverse()
-            .unwrap_or(Matrix7::identity())
+        regularized_inverse_7(&self.left_jacobian(), "left-Jacobian⁻¹")
     }
 
     /// Hat operator: maps tangent vector to Lie algebra matrix (4x4).
@@ -1562,5 +1589,36 @@ mod tests {
         let t = Sim3Tangent::random();
         let recovered = Sim3Tangent::from_slice(t.as_slice());
         assert!(t.is_approx(&recovered, 1e-14));
+    }
+}
+
+#[cfg(test)]
+mod regularized_inverse_tests {
+    use super::*;
+    use nalgebra::Matrix3;
+
+    #[test]
+    fn regular_matrix_inverts_unchanged() {
+        let m = Matrix3::new(2.0, 1.0, 0.0, 1.0, 3.0, 1.0, 0.0, 1.0, 2.0);
+        let inv = regularized_inverse_3(&m, "test");
+        let identity = m * inv;
+        assert!((identity - Matrix3::identity()).norm() < 1e-12);
+    }
+
+    #[test]
+    fn singular_matrix_warns_and_regularizes() {
+        // Rank-1 matrix: try_inverse returns None, the helper must NOT return
+        // identity (the old silent corruption) — the regularized inverse keeps
+        // the block's row structure.
+        let singular = Matrix3::from_columns(&[
+            Vector3::new(1.0, 2.0, 3.0),
+            Vector3::new(2.0, 4.0, 6.0),
+            Vector3::zeros(),
+        ]);
+        let inv = regularized_inverse_3(&singular, "test");
+        assert!(
+            (inv - Matrix3::identity()).norm() > 1e-3,
+            "regularized inverse must not silently fall back to identity"
+        );
     }
 }
