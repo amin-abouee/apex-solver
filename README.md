@@ -41,7 +41,6 @@
 
   [![GitHub Stars](https://img.shields.io/github/stars/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/stargazers)
   [![GitHub Forks](https://img.shields.io/github/forks/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/network/members)
-  [![GitHub last commit](https://img.shields.io/github/last-commit/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/commits/main)
   [![Discussions](https://img.shields.io/badge/GitHub-Discussions-blue?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/discussions)
 
 </div>
