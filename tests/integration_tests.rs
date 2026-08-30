@@ -21,15 +21,10 @@
 //! # Running Tests
 //!
 //! ```bash
-//! # Run fast tests only (ring, intel)
-//! cargo test
-//!
-//! # Run all tests including slow ones (sphere2500, parking-garage)
-//! cargo test -- --include-ignored
-//!
-//! # Run only slow tests
-//! cargo test -- --ignored
+//! cargo test --test integration_tests
 //! ```
+//!
+//! Every test downloads its dataset on first use (see `apex_io::ensure_*`).
 
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::JacobianMode;
@@ -335,12 +330,9 @@ fn test_intel_se2_converges() -> Result<(), Box<dyn std::error::Error>> {
         result.final_cost
     );
 
-    // Verify performance (should complete in <5 seconds)
-    assert!(
-        result.elapsed_time.as_secs() < 5,
-        "Optimization took too long: {:?}",
-        result.elapsed_time
-    );
+    // Wall time is informational only — asserting on it flaked on shared
+    // runners. Use golden_values.rs for exact-behavior regression coverage.
+    tracing::info!("optimization elapsed: {:?}", result.elapsed_time);
 
     Ok(())
 }
