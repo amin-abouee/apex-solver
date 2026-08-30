@@ -12,7 +12,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/amin-abouee/apex-solver"
 homepage = "https://github.com/amin-abouee/apex-solver"
-rust-version = "1.85"
+rust-version = "1.93"
 
 [workspace.dependencies]
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.3.0" }
@@ -181,6 +181,10 @@ workspace = true
 split-debuginfo = "unpacked"
 debug = 1
 
+# Tests run under the release profile: debug builds are ~50x slower on the
+# large-graph integration tests. Trade-off: `debug_assert!` checks and integer
+# overflow detection are NOT exercised by `cargo test` — run a debug
+# `cargo run` / `cargo check` when debugging correctness patterns.
 [profile.test]
 inherits = "release"
 split-debuginfo = "unpacked"
@@ -193,3 +197,7 @@ debug = true
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[[bench]]
+name = "micro_kernels"
+harness = false

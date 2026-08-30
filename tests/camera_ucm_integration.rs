@@ -322,10 +322,13 @@ fn test_ucm_3_cameras_calibration() -> TestResult {
         let mut cam_obs = Vec::new();
         for landmark in &true_landmarks {
             let p_cam = pose.act(landmark, None, None);
-            if let Ok(uv) = true_camera.project(&p_cam) {
-                if uv.x >= 0.0 && uv.x < img_width && uv.y >= 0.0 && uv.y < img_height {
-                    cam_obs.push(uv);
-                }
+            if let Ok(uv) = true_camera.project(&p_cam)
+                && uv.x >= 0.0
+                && uv.x < img_width
+                && uv.y >= 0.0
+                && uv.y < img_height
+            {
+                cam_obs.push(uv);
             }
         }
         all_observations.push(cam_obs);

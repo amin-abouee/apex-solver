@@ -69,6 +69,12 @@ struct Args {
     /// Enable detailed profiling output with timing breakdown
     #[arg(long)]
     profile: bool,
+
+    /// Disable the built-in per-dataset tolerance/iteration overrides
+    /// (manhattanOlson3500, grid3D — which caps iterations at 30 —, rim,
+    /// torus3D) and use the CLI values verbatim for every dataset.
+    #[arg(long)]
+    no_dataset_overrides: bool,
 }
 
 // ============================================================================
@@ -322,15 +328,26 @@ fn test_se2_dataset(
         dataset_name
     );
 
-    // Apply dataset-specific optimizations
-    let (cost_tol, param_tol, max_iter) = match dataset_name {
-        "manhattanOlson3500" => (1e-3, 1e-3, args.max_iterations),
-        _ => (
+    // Apply dataset-specific optimizations (disable with --no-dataset-overrides)
+    let (cost_tol, param_tol, max_iter) = if args.no_dataset_overrides {
+        (
             args.cost_tolerance,
             args.parameter_tolerance,
             args.max_iterations,
-        ),
+        )
+    } else {
+        match dataset_name {
+            "manhattanOlson3500" => (1e-3, 1e-3, args.max_iterations),
+            _ => (
+                args.cost_tolerance,
+                args.parameter_tolerance,
+                args.max_iterations,
+            ),
+        }
     };
+    info!(
+        "Effective SE2 settings: cost_tol={cost_tol:e} param_tol={param_tol:e} max_iter={max_iter}"
+    );
 
     let load_start = Instant::now();
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
@@ -673,19 +690,33 @@ fn test_se3_dataset(
         dataset_name
     );
 
-    let (cost_tol, param_tol, max_iter) = match dataset_name {
-        "grid3D" => {
-            info!("Note: grid3D requires very relaxed tolerances due to high complexity");
-            (1e-1, 1e-1, 30)
-        }
-        "rim" => (1e-3, 1e-3, args.max_iterations),
-        "torus3D" => (1e-5, 1e-5, args.max_iterations),
-        _ => (
+    let (cost_tol, param_tol, max_iter) = if args.no_dataset_overrides {
+        (
             args.cost_tolerance,
             args.parameter_tolerance,
             args.max_iterations,
-        ),
+        )
+    } else {
+        match dataset_name {
+            "grid3D" => {
+                info!(
+                    "Note: grid3D requires very relaxed tolerances due to high complexity \
+                     (hard 30-iteration cap; disable with --no-dataset-overrides)"
+                );
+                (1e-1, 1e-1, 30)
+            }
+            "rim" => (1e-3, 1e-3, args.max_iterations),
+            "torus3D" => (1e-5, 1e-5, args.max_iterations),
+            _ => (
+                args.cost_tolerance,
+                args.parameter_tolerance,
+                args.max_iterations,
+            ),
+        }
     };
+    info!(
+        "Effective SE3 settings: cost_tol={cost_tol:e} param_tol={param_tol:e} max_iter={max_iter}"
+    );
 
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
@@ -1001,9 +1032,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             se3_run.push(args.dataset.as_str());
         }
         if se2_run.is_empty() && se3_run.is_empty() {
-            warn!("Unknown dataset: {}", args.dataset);
-            warn!("Using default: running all datasets");
-            (se2_datasets, se3_datasets)
+            // Any dataset file on disk is runnable standalone (grid3D, rim, …).
+            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, args.dataset);
+            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, args.dataset);
+            if std::path::Path::new(&se2_path).exists() {
+                se2_run.push(args.dataset.as_str());
+                (se2_run, se3_run)
+            } else if std::path::Path::new(&se3_path).exists() {
+                se3_run.push(args.dataset.as_str());
+                (se2_run, se3_run)
+            } else {
+                warn!("Unknown dataset: {}", args.dataset);
+                warn!("Using default: running all datasets");
+                (se2_datasets, se3_datasets)
+            }
         } else {
             (se2_run, se3_run)
         }

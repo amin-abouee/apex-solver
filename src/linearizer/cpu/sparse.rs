@@ -44,15 +44,15 @@ pub fn build_symbolic_structure(
         }
 
         for (i, &var_key) in block.variable_keys.iter().enumerate() {
-            if let Some(&global_col) = variable_index_map.get(var_key) {
-                if let Some((_, var_size)) = var_local_sizes.get(i) {
-                    for row in 0..block.factor.residual_dim() {
-                        for col in 0..*var_size {
-                            indices.push(Pair::new(
-                                block.residual_row_start_idx + row,
-                                global_col + col,
-                            ));
-                        }
+            if let Some(&global_col) = variable_index_map.get(var_key)
+                && let Some((_, var_size)) = var_local_sizes.get(i)
+            {
+                for row in 0..block.factor.residual_dim() {
+                    for col in 0..*var_size {
+                        indices.push(Pair::new(
+                            block.residual_row_start_idx + row,
+                            global_col + col,
+                        ));
                     }
                 }
             }

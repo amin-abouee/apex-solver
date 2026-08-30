@@ -261,10 +261,10 @@ impl Covariance {
             }
         };
 
-        if options.apply_variance_scaling {
-            if let Some(sigma_squared) = estimate_variance(problem, &residuals, total_dof) {
-                matrix *= faer::Scale(sigma_squared);
-            }
+        if options.apply_variance_scaling
+            && let Some(sigma_squared) = estimate_variance(problem, &residuals, total_dof)
+        {
+            matrix *= faer::Scale(sigma_squared);
         }
 
         let dofs = variables.iter().map(|(k, v)| (k, v.dof())).collect();

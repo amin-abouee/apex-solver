@@ -126,18 +126,18 @@ impl SqliteReader {
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
         let mut conditions = Vec::new();
 
-        if let Some(conns) = connections {
-            if !conns.is_empty() {
-                let topic_names: Vec<&str> = conns.iter().map(|c| c.topic.as_str()).collect();
-                let placeholders = topic_names
-                    .iter()
-                    .map(|_| "?")
-                    .collect::<Vec<_>>()
-                    .join(",");
-                conditions.push(format!("topics.name IN ({placeholders})"));
-                for topic in topic_names {
-                    params.push(Box::new(topic.to_string()));
-                }
+        if let Some(conns) = connections
+            && !conns.is_empty()
+        {
+            let topic_names: Vec<&str> = conns.iter().map(|c| c.topic.as_str()).collect();
+            let placeholders = topic_names
+                .iter()
+                .map(|_| "?")
+                .collect::<Vec<_>>()
+                .join(",");
+            conditions.push(format!("topics.name IN ({placeholders})"));
+            for topic in topic_names {
+                params.push(Box::new(topic.to_string()));
             }
         }
 

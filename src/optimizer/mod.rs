@@ -630,10 +630,10 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
     }
 
     // Timeout
-    if let Some(timeout) = params.timeout {
-        if params.elapsed >= timeout {
-            return Some(OptimizationStatus::Timeout);
-        }
+    if let Some(timeout) = params.timeout
+        && params.elapsed >= timeout
+    {
+        return Some(OptimizationStatus::Timeout);
     }
 
     // Maximum Iterations
@@ -669,19 +669,18 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
     }
 
     // Objective Function Cutoff (optional early stopping)
-    if let Some(min_cost) = params.min_cost_threshold {
-        if params.new_cost < min_cost {
-            return Some(OptimizationStatus::MinCostThresholdReached);
-        }
+    if let Some(min_cost) = params.min_cost_threshold
+        && params.new_cost < min_cost
+    {
+        return Some(OptimizationStatus::MinCostThresholdReached);
     }
 
     // Trust Region Radius (LM and DogLeg only)
     if let (Some(radius), Some(min_radius)) =
         (params.trust_region_radius, params.min_trust_region_radius)
+        && radius < min_radius
     {
-        if radius < min_radius {
-            return Some(OptimizationStatus::TrustRegionRadiusTooSmall);
-        }
+        return Some(OptimizationStatus::TrustRegionRadiusTooSmall);
     }
 
     None
@@ -916,12 +915,11 @@ pub fn notify_observers(
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
-    if !observers.is_empty() {
-        if let (Some(hessian), Some(gradient)) =
+    if !observers.is_empty()
+        && let (Some(hessian), Some(gradient)) =
             (linear_solver.get_hessian(), linear_solver.get_gradient())
-        {
-            observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
-        }
+    {
+        observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
     }
 
     observers.notify(variables, iteration);

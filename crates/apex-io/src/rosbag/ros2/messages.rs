@@ -958,7 +958,7 @@ mod tests {
     /// which matched the decoder's own defect and so made these fixtures agree
     /// with the implementation rather than with the standard.
     fn pad_to(buf: &mut Vec<u8>, n: usize) {
-        while (buf.len() - 4) % n != 0 {
+        while !(buf.len() - 4).is_multiple_of(n) {
             buf.push(0x00);
         }
     }
@@ -995,7 +995,7 @@ mod tests {
 
     /// Align the buffer, measured from the body — see [`pad_to`].
     fn align_to(buf: &mut Vec<u8>, align: usize) {
-        while (buf.len() - 4) % align != 0 {
+        while !(buf.len() - 4).is_multiple_of(align) {
             buf.push(0x00);
         }
     }

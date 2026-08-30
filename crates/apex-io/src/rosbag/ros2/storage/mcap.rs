@@ -131,10 +131,10 @@ impl StorageReader for McapStorageReader {
             for message_result in message_stream {
                 match message_result {
                     Ok(message) => {
-                        if let Some(conns) = connections {
-                            if !conns.iter().any(|c| c.topic == message.channel.topic) {
-                                continue;
-                            }
+                        if let Some(conns) = connections
+                            && !conns.iter().any(|c| c.topic == message.channel.topic)
+                        {
+                            continue;
                         }
 
                         let timestamp = message.log_time;
@@ -210,10 +210,10 @@ impl StorageReader for McapStorageReader {
             for message_result in message_stream {
                 match message_result {
                     Ok(message) => {
-                        if let Some(conns) = connections {
-                            if !conns.iter().any(|c| c.topic == message.channel.topic) {
-                                continue;
-                            }
+                        if let Some(conns) = connections
+                            && !conns.iter().any(|c| c.topic == message.channel.topic)
+                        {
+                            continue;
                         }
 
                         let timestamp = message.log_time;
@@ -280,10 +280,10 @@ impl StorageReader for McapStorageReader {
             for message_result in message_stream {
                 match message_result {
                     Ok(message) => {
-                        if let Some(conns) = connections {
-                            if !conns.iter().any(|c| c.topic == message.channel.topic) {
-                                continue;
-                            }
+                        if let Some(conns) = connections
+                            && !conns.iter().any(|c| c.topic == message.channel.topic)
+                        {
+                            continue;
                         }
 
                         let timestamp = message.log_time;
