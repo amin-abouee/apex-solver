@@ -27,12 +27,11 @@
   [![Examples](https://img.shields.io/badge/examples-runnable-brightgreen?style=flat-square&logo=rust)](examples/)
   [![Benchmarks](https://img.shields.io/badge/benchmarks-Criterion.rs-blue?style=flat-square&logo=rust)](benches/)
   [![Visualization: Rerun](https://img.shields.io/badge/viz-Rerun%20integrated-purple?style=flat-square)](https://rerun.io)
-  [![Powered by: faer](https://img.shields.io/badge/backend-faer%20%7C%20nalgebra-informational?style=flat-square)](https://github.com/sarah-ek/faer-rs)
+  [![Powered by: faer](https://img.shields.io/badge/backend-faer%20%7C%20nalgebra-informational?style=flat-square)](https://codeberg.org/sarah-quinones/faer)
 
   [![GitHub Stars](https://img.shields.io/github/stars/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/stargazers)
   [![GitHub Forks](https://img.shields.io/github/forks/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/network/members)
   [![GitHub last commit](https://img.shields.io/github/last-commit/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/commits/main)
-  [![Lines of Code](https://img.shields.io/tokei/lines/github/amin-abouee/apex-solver?style=flat-square)](https://github.com/amin-abouee/apex-solver)
   [![Recent Downloads](https://img.shields.io/crates/dr/apex-solver?label=recent%20downloads&style=flat-square)](https://crates.io/crates/apex-solver)
   [![Discussions](https://img.shields.io/badge/GitHub-Discussions-blue?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/discussions)
 
@@ -462,7 +461,7 @@ Apex Solver draws inspiration and reference implementations from:
 - **[GTSAM](https://gtsam.org/)** - Georgia Tech Smoothing and Mapping library
 - **[tiny-solver](https://github.com/ceres-solver/tiny-solver)** - Lightweight nonlinear least squares solver
 - **[factrs](https://github.com/msabate00/factrs)** - Rust factor graph optimization library
-- **[faer](https://github.com/sarah-ek/faer-rs)** - High-performance linear algebra library for Rust
+- **[faer](https://codeberg.org/sarah-quinones/faer)** - High-performance linear algebra library for Rust
 - **[manif](https://github.com/artivis/manif)** - C++ Lie theory library (for manifold conventions)
 - **[nalgebra](https://nalgebra.org/)** - Geometry and linear algebra primitives
 
