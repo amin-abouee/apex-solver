@@ -1,0 +1,13 @@
+# cargo-audit configuration.
+# Warnings (unmaintained/unsound/yanked crates) are informational and do not
+# fail the job. Ignored advisories below are unreachable through our build.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0195 / RUSTSEC-2026-0194 — quick-xml DoS in NsReader.
+    # quick-xml 0.36/0.39 are pinned by rerun 0.26 (re_sdk ^0.36); the
+    # vulnerable namespace parsing is not exercised by our Rerun usage.
+    # Re-evaluate when rerun ships a release on quick-xml >= 0.41.
+    "RUSTSEC-2026-0195",
+    "RUSTSEC-2026-0194",
+]
