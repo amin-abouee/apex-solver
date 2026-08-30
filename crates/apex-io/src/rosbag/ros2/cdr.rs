@@ -379,7 +379,7 @@ impl CdrSerializer {
     /// previously did the latter, so round-trips passed while real ROS 2 bags
     /// failed to decode.
     fn align(&mut self, n: usize) {
-        while (self.buf.len() - ENCAPSULATION_HEADER_LEN) % n != 0 {
+        while !(self.buf.len() - ENCAPSULATION_HEADER_LEN).is_multiple_of(n) {
             self.buf.push(0);
         }
     }

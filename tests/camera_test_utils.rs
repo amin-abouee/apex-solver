@@ -187,7 +187,9 @@ pub fn unflatten_landmarks(flat: &DVector<f64>) -> Vec<Vector3<f64>> {
     );
 
     flat.as_slice()
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|chunk| Vector3::new(chunk[0], chunk[1], chunk[2]))
         .collect()
 }

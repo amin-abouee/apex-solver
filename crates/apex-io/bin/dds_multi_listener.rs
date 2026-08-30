@@ -23,7 +23,7 @@ fn log_message(tag: &'static str, count: u64, msg: &ReceivedMessage) {
         bytes           = msg.bytes,
         "{tag}"
     );
-    if count == 1 || count % SUMMARY_EVERY == 0 {
+    if count == 1 || count.is_multiple_of(SUMMARY_EVERY) {
         tracing::info!(
             count,
             topic           = %msg.topic,

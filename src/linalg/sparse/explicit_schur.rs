@@ -129,10 +129,10 @@ impl SchurOrdering {
         if !self.eliminate_types.contains(manifold_type) {
             return false;
         }
-        if let Some(required_size) = self.eliminate_rn_size {
-            if size != required_size {
-                return false;
-            }
+        if let Some(required_size) = self.eliminate_rn_size
+            && size != required_size
+        {
+            return false;
         }
         true
     }

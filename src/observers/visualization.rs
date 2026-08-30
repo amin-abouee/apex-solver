@@ -1037,80 +1037,75 @@ impl RerunObserver {
 
         for (i, (_, var)) in values.iter().enumerate() {
             let var_name = format!("var_{i}");
-            if self.config.show_cameras {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
-                    // Apply pose inversion if configured (for BA: T_wc -> T_cw)
-                    let pose = if self.config.invert_camera_poses {
-                        v.value.inverse(None)
-                    } else {
-                        v.value.clone()
-                    };
+            if self.config.show_cameras
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>()
+            {
+                // Apply pose inversion if configured (for BA: T_wc -> T_cw)
+                let pose = if self.config.invert_camera_poses {
+                    v.value.inverse(None)
+                } else {
+                    v.value.clone()
+                };
 
-                    let trans = pose.translation();
-                    let rot = pose.rotation_quaternion();
+                let trans = pose.translation();
+                let rot = pose.rotation_quaternion();
 
-                    let position = rerun::external::glam::Vec3::new(
-                        trans.x as f32,
-                        trans.y as f32,
-                        trans.z as f32,
-                    );
+                let position = rerun::external::glam::Vec3::new(
+                    trans.x as f32,
+                    trans.y as f32,
+                    trans.z as f32,
+                );
 
-                    let nq = rot.as_ref();
-                    let rotation = rerun::external::glam::Quat::from_xyzw(
-                        nq.i as f32,
-                        nq.j as f32,
-                        nq.k as f32,
-                        nq.w as f32,
-                    );
+                let nq = rot.as_ref();
+                let rotation = rerun::external::glam::Quat::from_xyzw(
+                    nq.i as f32,
+                    nq.j as f32,
+                    nq.k as f32,
+                    nq.w as f32,
+                );
 
-                    let transform =
-                        rerun::Transform3D::from_translation_rotation(position, rotation);
+                let transform = rerun::Transform3D::from_translation_rotation(position, rotation);
 
-                    let entity_path = format!("final_graph/cameras/{}", var_name);
-                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-
-                    rec.log(
-                        entity_path.as_str(),
-                        &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
-                            self.config.camera_fov,
-                            self.config.camera_aspect_ratio,
-                        )
-                        .with_image_plane_distance(self.config.camera_frustum_scale),
-                    )
-                    .map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-
-                    camera_count += 1;
-                }
-            }
-            if self.config.show_se2_poses {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
-                    final_se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
-                    se2_count += 1;
-                }
-            }
-            if self.config.show_landmarks {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
-                    // Handle 3D landmarks (Rn with dimension 3)
-                    let data = v.value.data();
-                    if data.len() == 3 {
-                        final_landmark_positions.push([
-                            data[0] as f32,
-                            data[1] as f32,
-                            data[2] as f32,
-                        ]);
+                let entity_path = format!("final_graph/cameras/{}", var_name);
+                rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
                     }
+                    .log_with_source(e)
+                })?;
+
+                rec.log(
+                    entity_path.as_str(),
+                    &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
+                        self.config.camera_fov,
+                        self.config.camera_aspect_ratio,
+                    )
+                    .with_image_plane_distance(self.config.camera_frustum_scale),
+                )
+                .map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
+                    }
+                    .log_with_source(e)
+                })?;
+
+                camera_count += 1;
+            }
+            if self.config.show_se2_poses
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>()
+            {
+                final_se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
+                se2_count += 1;
+            }
+            if self.config.show_landmarks
+                && let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>()
+            {
+                // Handle 3D landmarks (Rn with dimension 3)
+                let data = v.value.data();
+                if data.len() == 3 {
+                    final_landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
                 }
             }
         }
@@ -1424,71 +1419,70 @@ impl RerunObserver {
 
         for (i, (_, var)) in variables.iter().enumerate() {
             let var_name = format!("var_{i}");
-            if self.config.show_cameras {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
-                    let pose = if self.config.invert_camera_poses {
-                        v.value.inverse(None)
-                    } else {
-                        v.value.clone()
-                    };
+            if self.config.show_cameras
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>()
+            {
+                let pose = if self.config.invert_camera_poses {
+                    v.value.inverse(None)
+                } else {
+                    v.value.clone()
+                };
 
-                    let trans = pose.translation();
-                    let rot = pose.rotation_quaternion();
+                let trans = pose.translation();
+                let rot = pose.rotation_quaternion();
 
-                    let position = rerun::external::glam::Vec3::new(
-                        trans.x as f32,
-                        trans.y as f32,
-                        trans.z as f32,
-                    );
+                let position = rerun::external::glam::Vec3::new(
+                    trans.x as f32,
+                    trans.y as f32,
+                    trans.z as f32,
+                );
 
-                    let nq = rot.as_ref();
-                    let rotation = rerun::external::glam::Quat::from_xyzw(
-                        nq.i as f32,
-                        nq.j as f32,
-                        nq.k as f32,
-                        nq.w as f32,
-                    );
+                let nq = rot.as_ref();
+                let rotation = rerun::external::glam::Quat::from_xyzw(
+                    nq.i as f32,
+                    nq.j as f32,
+                    nq.k as f32,
+                    nq.w as f32,
+                );
 
-                    let transform =
-                        rerun::Transform3D::from_translation_rotation(position, rotation);
+                let transform = rerun::Transform3D::from_translation_rotation(position, rotation);
 
-                    let entity_path = format!("initial_graph/cameras/{}", var_name);
-                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-
-                    rec.log(
-                        entity_path.as_str(),
-                        &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
-                            self.config.camera_fov,
-                            self.config.camera_aspect_ratio,
-                        )
-                        .with_image_plane_distance(self.config.camera_frustum_scale),
-                    )
-                    .map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-                }
-            }
-            if self.config.show_se2_poses {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
-                    se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
-                }
-            }
-            if self.config.show_landmarks {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
-                    let data = v.value.data();
-                    if data.len() == 3 {
-                        landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
+                let entity_path = format!("initial_graph/cameras/{}", var_name);
+                rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
                     }
+                    .log_with_source(e)
+                })?;
+
+                rec.log(
+                    entity_path.as_str(),
+                    &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
+                        self.config.camera_fov,
+                        self.config.camera_aspect_ratio,
+                    )
+                    .with_image_plane_distance(self.config.camera_frustum_scale),
+                )
+                .map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
+                    }
+                    .log_with_source(e)
+                })?;
+            }
+            if self.config.show_se2_poses
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>()
+            {
+                se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
+            }
+            if self.config.show_landmarks
+                && let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>()
+            {
+                let data = v.value.data();
+                if data.len() == 3 {
+                    landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
                 }
             }
         }
@@ -1553,75 +1547,74 @@ impl RerunObserver {
 
         for (i, (_, var)) in variables.iter().enumerate() {
             let var_name = format!("var_{i}");
-            if self.config.show_cameras {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>() {
-                    // Apply pose inversion if configured (for BA: T_wc -> T_cw)
-                    let pose = if self.config.invert_camera_poses {
-                        v.value.inverse(None)
-                    } else {
-                        v.value.clone()
-                    };
+            if self.config.show_cameras
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE3>>()
+            {
+                // Apply pose inversion if configured (for BA: T_wc -> T_cw)
+                let pose = if self.config.invert_camera_poses {
+                    v.value.inverse(None)
+                } else {
+                    v.value.clone()
+                };
 
-                    let trans = pose.translation();
-                    let rot = pose.rotation_quaternion();
+                let trans = pose.translation();
+                let rot = pose.rotation_quaternion();
 
-                    let position = rerun::external::glam::Vec3::new(
-                        trans.x as f32,
-                        trans.y as f32,
-                        trans.z as f32,
-                    );
+                let position = rerun::external::glam::Vec3::new(
+                    trans.x as f32,
+                    trans.y as f32,
+                    trans.z as f32,
+                );
 
-                    let nq = rot.as_ref();
-                    let rotation = rerun::external::glam::Quat::from_xyzw(
-                        nq.i as f32,
-                        nq.j as f32,
-                        nq.k as f32,
-                        nq.w as f32,
-                    );
+                let nq = rot.as_ref();
+                let rotation = rerun::external::glam::Quat::from_xyzw(
+                    nq.i as f32,
+                    nq.j as f32,
+                    nq.k as f32,
+                    nq.w as f32,
+                );
 
-                    let transform =
-                        rerun::Transform3D::from_translation_rotation(position, rotation);
+                let transform = rerun::Transform3D::from_translation_rotation(position, rotation);
 
-                    let entity_path = format!("optimized_graph/cameras/{}", var_name);
-                    rec.log(entity_path.as_str(), &transform).map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-
-                    rec.log(
-                        entity_path.as_str(),
-                        &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
-                            self.config.camera_fov,
-                            self.config.camera_aspect_ratio,
-                        )
-                        .with_image_plane_distance(self.config.camera_frustum_scale),
-                    )
-                    .map_err(|e| {
-                        ObserverError::LoggingFailed {
-                            entity_path: entity_path.clone(),
-                            reason: format!("{}", e),
-                        }
-                        .log_with_source(e)
-                    })?;
-                }
-            }
-            if self.config.show_se2_poses {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>() {
-                    se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
-                }
-            }
-            if self.config.show_landmarks {
-                if let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>() {
-                    // Handle 3D landmarks (Rn with dimension 3)
-                    let data = v.value.data();
-                    if data.len() == 3 {
-                        landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
+                let entity_path = format!("optimized_graph/cameras/{}", var_name);
+                rec.log(entity_path.as_str(), &transform).map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
                     }
-                    // Skip non-3D Rn variables (e.g., camera intrinsics)
+                    .log_with_source(e)
+                })?;
+
+                rec.log(
+                    entity_path.as_str(),
+                    &rerun::archetypes::Pinhole::from_fov_and_aspect_ratio(
+                        self.config.camera_fov,
+                        self.config.camera_aspect_ratio,
+                    )
+                    .with_image_plane_distance(self.config.camera_frustum_scale),
+                )
+                .map_err(|e| {
+                    ObserverError::LoggingFailed {
+                        entity_path: entity_path.clone(),
+                        reason: format!("{}", e),
+                    }
+                    .log_with_source(e)
+                })?;
+            }
+            if self.config.show_se2_poses
+                && let Some(v) = var.as_any().downcast_ref::<Variable<SE2>>()
+            {
+                se2_positions.push([v.value.x() as f32, v.value.y() as f32]);
+            }
+            if self.config.show_landmarks
+                && let Some(v) = var.as_any().downcast_ref::<Variable<Rn>>()
+            {
+                // Handle 3D landmarks (Rn with dimension 3)
+                let data = v.value.data();
+                if data.len() == 3 {
+                    landmark_positions.push([data[0] as f32, data[1] as f32, data[2] as f32]);
                 }
+                // Skip non-3D Rn variables (e.g., camera intrinsics)
             }
         }
 
@@ -1825,10 +1818,10 @@ impl OptObserver for RerunObserver {
         }
 
         // Log initial state once before any optimization updates
-        if !self.initial_state_logged.get() {
-            if let Err(e) = self.log_initial_state(values) {
-                let _ = e.log();
-            }
+        if !self.initial_state_logged.get()
+            && let Err(e) = self.log_initial_state(values)
+        {
+            let _ = e.log();
         }
 
         let metrics = self.iteration_metrics.borrow();
