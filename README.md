@@ -12,27 +12,36 @@
     </tr>
   </table>
 
-  [![Crates.io Version](https://img.shields.io/crates/v/apex-solver.svg?style=flat-square&logo=rust)](https://crates.io/crates/apex-solver)
-  [![Docs.rs](https://img.shields.io/docsrs/apex-solver?style=flat-square&logo=docsdotrs)](https://docs.rs/apex-solver)
+  **Build & CI**
+
   [![CI Build](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/ci.yml)
   [![Clippy](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/clippy.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/clippy.yml)
   [![Security Audit](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/audit.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/audit.yml)
   [![Coverage](https://img.shields.io/codecov/c/github/amin-abouee/apex-solver?style=flat-square&logo=codecov)](https://codecov.io/gh/amin-abouee/apex-solver)
   ![Platform Support](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%7C%2024.04%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)
   ![Rust Version](https://img.shields.io/badge/Rust-1.85%2B-orange?style=flat-square&logo=rust)
-  [![unsafe forbidden](https://img.shields.io/badge/unsafe_code-forbidden-success?style=flat-square)](https://github.com/rust-secure-code/safety-dance/)
-  [![License](https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square)](LICENSE)
 
+  **Package & Docs**
+
+  [![Crates.io Version](https://img.shields.io/crates/v/apex-solver.svg?style=flat-square&logo=rust)](https://crates.io/crates/apex-solver)
+  [![Recent Downloads](https://img.shields.io/crates/dr/apex-solver?label=downloads&style=flat-square)](https://crates.io/crates/apex-solver)
+  [![Docs.rs](https://img.shields.io/docsrs/apex-solver?style=flat-square&logo=docsdotrs)](https://docs.rs/apex-solver)
   [![Cookbook](https://img.shields.io/badge/docs-cookbooks-blueviolet?style=flat-square&logo=gitbook&logoColor=white)](https://amin-abouee.github.io/apex-solver/)
   [![Examples](https://img.shields.io/badge/examples-runnable-brightgreen?style=flat-square&logo=rust)](examples/)
   [![Benchmarks](https://img.shields.io/badge/benchmarks-Criterion.rs-blue?style=flat-square&logo=rust)](benches/)
+
+  **Quality & Ecosystem**
+
+  [![unsafe forbidden](https://img.shields.io/badge/unsafe_code-forbidden-success?style=flat-square)](https://github.com/rust-secure-code/safety-dance/)
+  [![License](https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square)](LICENSE)
   [![Visualization: Rerun](https://img.shields.io/badge/viz-Rerun%20integrated-purple?style=flat-square)](https://rerun.io)
   [![Powered by: faer](https://img.shields.io/badge/backend-faer%20%7C%20nalgebra-informational?style=flat-square)](https://codeberg.org/sarah-quinones/faer)
+
+  **Community**
 
   [![GitHub Stars](https://img.shields.io/github/stars/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/stargazers)
   [![GitHub Forks](https://img.shields.io/github/forks/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/network/members)
   [![GitHub last commit](https://img.shields.io/github/last-commit/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/commits/main)
-  [![Recent Downloads](https://img.shields.io/crates/dr/apex-solver?label=recent%20downloads&style=flat-square)](https://crates.io/crates/apex-solver)
   [![Discussions](https://img.shields.io/badge/GitHub-Discussions-blue?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/discussions)
 
 </div>
