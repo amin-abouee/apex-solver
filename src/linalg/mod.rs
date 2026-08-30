@@ -4,6 +4,7 @@ pub mod sparse;
 pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};
+use crate::error::ErrorLogging;
 use faer::Mat;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashSet;
@@ -67,6 +68,106 @@ impl Display for LinearSolverType {
             LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
             LinearSolverType::DenseQR => write!(f, "Dense QR"),
         }
+    }
+}
+
+// ============================================================================
+// Damping
+// ============================================================================
+
+/// Damping applied to the normal equations by a trust-region optimizer.
+///
+/// The augmented system solved by [`LinearSolver::solve_augmented_equation`] is
+///
+/// ```text
+/// (JᵀJ + λ·D) · dx = −Jᵀr,     D_jj = clamp(JᵀJ_jj, min_diagonal, max_diagonal)
+/// ```
+///
+/// This is Ceres' `LevenbergMarquardtStrategy`: damping each column in
+/// proportion to that column's own curvature makes the damped step invariant to
+/// a rescaling of the parameters, which uniform `λI` damping is not. `D` is
+/// formed from the Hessian the solver actually receives — so when Jacobi column
+/// scaling is enabled upstream, `D` is the diagonal of the *scaled* `J̃ᵀJ̃`,
+/// matching Ceres.
+///
+/// [`Damping::identity`] sets `min_diagonal == max_diagonal == 1.0`, giving
+/// `D = I` and recovering plain `λI` damping exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Damping {
+    /// The damping parameter λ. Must be finite and non-negative.
+    pub lambda: f64,
+    /// Lower clamp on the damping diagonal (Ceres' `min_lm_diagonal`, 1e-6).
+    ///
+    /// Bounds the damping away from zero for columns with little curvature —
+    /// without it, an unconstrained direction would receive no damping at all.
+    pub min_diagonal: f64,
+    /// Upper clamp on the damping diagonal (Ceres' `max_lm_diagonal`, 1e32).
+    ///
+    /// Keeps a single very stiff column from dominating the damped system.
+    pub max_diagonal: f64,
+}
+
+impl Damping {
+    /// Marquardt damping with an explicit clamp range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinAlgError::InvalidInput`] if `lambda` is negative or not
+    /// finite, if either bound is not finite or non-positive, or if
+    /// `min_diagonal > max_diagonal` — `f64::clamp` panics on an inverted range,
+    /// so the check has to happen at construction.
+    pub fn new(lambda: f64, min_diagonal: f64, max_diagonal: f64) -> LinAlgResult<Self> {
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "damping lambda must be finite and non-negative, got {lambda}"
+            ))
+            .log());
+        }
+        if !min_diagonal.is_finite() || min_diagonal <= 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "min_diagonal must be finite and positive, got {min_diagonal}"
+            ))
+            .log());
+        }
+        if max_diagonal.is_nan() || max_diagonal <= 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "max_diagonal must be positive, got {max_diagonal}"
+            ))
+            .log());
+        }
+        if min_diagonal > max_diagonal {
+            return Err(LinAlgError::InvalidInput(format!(
+                "min_diagonal ({min_diagonal}) must not exceed max_diagonal ({max_diagonal})"
+            ))
+            .log());
+        }
+        Ok(Self {
+            lambda,
+            min_diagonal,
+            max_diagonal,
+        })
+    }
+
+    /// Uniform `λI` damping — the classic Levenberg form.
+    ///
+    /// Used where λ is a numerical stabiliser rather than a trust region: Dog
+    /// Leg's μ regularisation of the Gauss-Newton step, and Gauss-Newton's own
+    /// `min_diagonal` guard against an exactly singular `JᵀJ`.
+    pub fn identity(lambda: f64) -> Self {
+        Self {
+            lambda,
+            min_diagonal: 1.0,
+            max_diagonal: 1.0,
+        }
+    }
+
+    /// The damping to add to diagonal entry `(j, j)`, given `JᵀJ_jj`.
+    ///
+    /// `JᵀJ_jj = ‖J e_j‖² ≥ 0`, so the clamp is well defined for every input a
+    /// Gauss-Newton Hessian can produce.
+    #[inline]
+    pub fn diagonal_term(&self, hessian_diagonal: f64) -> f64 {
+        self.lambda * hessian_diagonal.clamp(self.min_diagonal, self.max_diagonal)
     }
 }
 
@@ -151,18 +252,30 @@ pub trait LinearSolver<M: LinearizationMode> {
         jacobian: &M::Jacobian,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Solve the augmented equations: (J^T · J + λI) · dx = −J^T · r
+    /// Solve the augmented equations: `(JᵀJ + λ·D) · dx = −Jᵀr`.
+    ///
+    /// See [`Damping`] for the definition of `D`. Pass
+    /// [`Damping::identity`] for classic uniform `λI` damping.
     fn solve_augmented_equation(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &M::Jacobian,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Get the cached Hessian matrix (J^T · J) from the last solve
+    /// The **un-damped** Hessian `JᵀJ` from the last solve.
+    ///
+    /// Implementations must not return the augmented `JᵀJ + λ·D` here: the
+    /// optimizers use this to evaluate the true quadratic model — Dog Leg's
+    /// Cauchy point and every predicted cost reduction — and damping it would
+    /// corrupt the step-quality ratio ρ.
     fn get_hessian(&self) -> Option<&M::Hessian>;
 
-    /// Get the cached gradient vector (J^T · r) from the last solve
+    /// The gradient `+Jᵀr` from the last solve.
+    ///
+    /// Note the sign: this is `Jᵀr`, **not** the right-hand side `−Jᵀr`.
+    /// Predicted-reduction formulas depend on it, so a backend that publishes
+    /// the negated vector silently inverts every ρ computed from it.
     fn get_gradient(&self) -> Option<&Mat<f64>>;
 }
 

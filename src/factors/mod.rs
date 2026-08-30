@@ -44,6 +44,7 @@
 //!
 //! This information is used by the optimizer to compute parameter updates via Newton-type methods.
 
+use crate::core::variable::ManifoldVariable;
 use thiserror::Error;
 
 // Pose factors
@@ -192,6 +193,17 @@ pub trait Factor: Send + Sync {
 
     /// `(rows, cols)` of the Jacobian — `rows == residual_dim()`, `cols == sum of variable DOFs`.
     fn jacobian_shape(&self) -> (usize, usize);
+
+    /// Validate this factor against the variables it is being registered with.
+    ///
+    /// Called once by [`Problem::try_add_residual_block`](crate::core::problem::Problem::try_add_residual_block)
+    /// before the block is stored, so mismatched variable shapes surface as a
+    /// typed registration error instead of a mid-evaluation panic inside the
+    /// parallel assembly. `variables` is parallel to the `variable_keys`
+    /// passed to registration.
+    fn validate_variables(&self, _variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

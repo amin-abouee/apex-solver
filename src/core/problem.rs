@@ -13,8 +13,7 @@ use tracing::warn;
 use crate::{
     core::CoreResult,
     core::{
-        FactorKey, VarKey,
-        corrector::Corrector,
+        CoreError, FactorKey, VarKey,
         loss_functions::LossFunction,
         residual_block::ResidualBlock,
         variable::{ManifoldVariable, Variable},
@@ -80,13 +79,49 @@ impl Problem {
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> FactorKey {
+        self.try_add_residual_block(variable_keys, factor, loss_func)
+            .unwrap_or_else(|e| panic!("invalid residual block: {e}"))
+    }
+
+    /// Register a residual block, validating it against the referenced
+    /// variables first.
+    ///
+    /// Runs the factor's [`Factor::validate_variables`] hook so shape
+    /// mismatches (e.g. a landmark variable whose parameter count disagrees
+    /// with the factor's observations) surface as a typed registration error
+    /// instead of a panic inside the parallel assembly. Unknown variable keys
+    /// are rejected as well — they would otherwise be silently skipped during
+    /// linearization.
+    pub fn try_add_residual_block(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+    ) -> CoreResult<FactorKey> {
+        let mut variables: Vec<&dyn ManifoldVariable> = Vec::with_capacity(variable_keys.len());
+        for &key in variable_keys {
+            let variable = self
+                .variables
+                .get(key)
+                .ok_or_else(|| {
+                    CoreError::Variable(format!(
+                        "residual block references unknown variable key {key:?}"
+                    ))
+                })?
+                .as_ref();
+            variables.push(variable);
+        }
+        factor
+            .validate_variables(&variables)
+            .map_err(CoreError::DimensionMismatch)?;
+
         let new_residual_dimension = factor.residual_dim();
         let row_start = self.total_residual_dimension;
         let fk = self.residual_blocks.insert_with_key(|fk| {
             ResidualBlock::new(fk, row_start, variable_keys, factor, loss_func)
         });
         self.total_residual_dimension += new_residual_dimension;
-        fk
+        Ok(fk)
     }
 
     pub fn remove_residual_block(&mut self, block_id: FactorKey) -> Option<ResidualBlock> {
@@ -298,27 +333,10 @@ impl Problem {
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         residual_slice: &mut [f64],
     ) -> CoreResult<f64> {
-        let mut param_slices: smallvec::SmallVec<[&[f64]; 8]> = smallvec::SmallVec::new();
-        for &k in &residual_block.variable_keys {
-            if let Some(v) = variables.get(k) {
-                param_slices.push(v.as_param_slice());
-            }
-        }
-
-        residual_block
-            .factor
-            .linearize(&param_slices, residual_slice, None);
-
-        let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
-        let cost = match &residual_block.loss_func {
-            Some(loss_func) => {
-                let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-                corrector.correct_residual_in_place(residual_slice);
-                corrector.robust_cost()
-            }
-            None => 0.5 * squared_norm,
-        };
-
+        // Single source of truth for block evaluation — the linearizer's
+        // shared `compute_block_into` (Jacobian-less here, cost only).
+        let (_, cost) =
+            crate::linearizer::compute_block_into(residual_block, variables, residual_slice, None)?;
         Ok(cost)
     }
 
@@ -867,5 +885,94 @@ mod tests {
         assert!((vec[0] - 5.0).abs() < 1e-10);
         assert!((vec[1] - 6.0).abs() < 1e-10);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Registration-time factor validation
+    // -------------------------------------------------------------------------
+
+    mod validation {
+        use super::*;
+        use crate::factors::projection_factor::ProjectionFactor;
+        use crate::factors::{BundleAdjustment, Factor};
+        use apex_camera_models::PinholeCamera;
+        use nalgebra::Matrix2xX;
+        use rn::Rn;
+
+        fn ba_factor(n_landmarks: usize) -> Box<dyn Factor + Send> {
+            let observations = Matrix2xX::from_fn(n_landmarks, |r, c| (r + c) as f64);
+            Box::new(ProjectionFactor::<PinholeCamera, BundleAdjustment>::new(
+                observations,
+                PinholeCamera::from([500.0, 500.0, 320.0, 240.0]),
+            ))
+        }
+
+        fn pose_and_landmarks(problem: &mut Problem, n_landmark_params: usize) -> (VarKey, VarKey) {
+            let pose = problem.add_variable(
+                ManifoldType::SE3,
+                dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            );
+            let landmarks = problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_element(n_landmark_params, 1.0),
+            );
+            (pose, landmarks)
+        }
+
+        #[test]
+        fn try_add_accepts_matching_landmark_variable() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 9);
+            let key = problem.try_add_residual_block(&[pose, landmarks], ba_factor(3), None)?;
+            assert_eq!(problem.residual_blocks().len(), 1);
+            assert_eq!(problem.total_residual_dimension(), 6);
+            let _ = key;
+            Ok(())
+        }
+
+        #[test]
+        fn try_add_rejects_mismatched_landmark_variable() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
+            let err = problem
+                .try_add_residual_block(&[pose, landmarks], ba_factor(3), None)
+                .err()
+                .ok_or("mismatched landmark count must be rejected")?;
+            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            Ok(())
+        }
+
+        #[test]
+        fn add_residual_block_panics_on_invalid_registration() {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                problem.add_residual_block(&[pose, landmarks], ba_factor(3), None);
+            }));
+            assert!(result.is_err(), "registration panic expected");
+        }
+
+        #[test]
+        fn try_add_rejects_unknown_variable_key() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, _landmarks) = pose_and_landmarks(&mut problem, 9);
+
+            // A key from a different, larger slot map: its slot index is out of
+            // bounds for the problem's store, so it can never resolve.
+            let mut other_store: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+            let mut foreign_key = None;
+            for i in 0..5 {
+                foreign_key =
+                    Some(other_store.insert(Box::new(Variable::new(Rn::new(dvector![i as f64])))));
+            }
+            let foreign_key = foreign_key.ok_or("inserted five keys")?;
+
+            let err = problem
+                .try_add_residual_block(&[pose, foreign_key], ba_factor(3), None)
+                .err()
+                .ok_or("unknown variable key must be rejected")?;
+            assert!(matches!(err, CoreError::Variable(_)), "{err}");
+            Ok(())
+        }
     }
 }

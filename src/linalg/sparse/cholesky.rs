@@ -7,7 +7,7 @@ use faer::{
 
 use crate::error::ErrorLogging;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseCholeskySolver {
@@ -104,13 +104,13 @@ impl LinearSolver<SparseMode> for SparseCholeskySolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         // H = JᵀJ, g = Jᵀr (parallel faer kernels)
         let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
-        // H_aug = H + λI — diagonal edit on the cached product pattern.
-        let augmented_hessian = self.ne_cache.damped_hessian(lambda)?;
+        // H_aug = H + λ·D — diagonal edit on the cached product pattern.
+        let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
 
         let sym = if let Some(ref cached_sym) = self.symbolic_factorization {
             // Reuse cached symbolic factorization
@@ -253,7 +253,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            lambda,
+            &Damping::identity(lambda),
         )?;
         assert_eq!(solution.nrows(), 3);
         assert_eq!(solution.ncols(), 1);
@@ -273,13 +273,13 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            lambda1,
+            &Damping::identity(lambda1),
         )?;
         let sol2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
-            lambda2,
+            &Damping::identity(lambda2),
         )?;
 
         // Solutions should be different due to different regularization

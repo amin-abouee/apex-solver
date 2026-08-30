@@ -23,7 +23,6 @@
 //! ```
 
 pub mod cpu;
-pub mod gpu;
 
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
@@ -197,8 +196,8 @@ pub(crate) fn compute_block_into(
     residual_block: &ResidualBlock,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     residual_slice: &mut [f64],
-    jacobian_buf: &mut [f64],
-) -> LinearizerResult<BlockLinearization> {
+    mut jacobian_buf: Option<&mut [f64]>,
+) -> LinearizerResult<(BlockLinearization, f64)> {
     let mut param_slices: SmallVec<[&[f64]; 8]> = SmallVec::new();
     let mut variable_local_idx_size_list: SmallVec<[(usize, usize); 8]> = SmallVec::new();
     let mut count_variable_local_idx: usize = 0;
@@ -213,33 +212,44 @@ pub(crate) fn compute_block_into(
     }
 
     let (rows, cols) = residual_block.factor.jacobian_shape();
-    debug_assert_eq!(jacobian_buf.len(), rows * cols);
-    {
-        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(jacobian_buf, rows, cols);
-        residual_block
+    match jacobian_buf.as_deref_mut() {
+        Some(buf) => {
+            debug_assert_eq!(buf.len(), rows * cols);
+            let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(buf, rows, cols);
+            residual_block
+                .factor
+                .linearize(&param_slices, residual_slice, Some(jac_mut));
+        }
+        None => residual_block
             .factor
-            .linearize(&param_slices, residual_slice, Some(jac_mut));
+            .linearize(&param_slices, residual_slice, None),
     }
 
-    // Apply robust-loss correction in-place: no heap allocation, math identical to
-    // `Corrector::correct_jacobian` / `correct_residuals` on `DVector`/`DMatrix`.
+    // Apply robust-loss correction in-place: no heap allocation.
     //
-    // Note this produces the corrected residual/Jacobian that drive the linear
-    // system. The *cost* is not derivable from them — see
-    // `Problem::compute_residual_and_cost_sparse`.
-    if let Some(loss_func) = &residual_block.loss_func {
-        let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
+    // The corrected residual/Jacobian drive the linear system; the returned
+    // cost is the true robust cost `0.5·ρ(‖r‖²)`, not the corrected norm.
+    let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
+    let cost = if let Some(loss_func) = &residual_block.loss_func {
         let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-        // Jacobian correction must read the original (un-scaled) residual.
-        corrector.correct_jacobian_in_place(residual_slice, jacobian_buf, rows, cols);
+        // Jacobian correction must read the original (un-corrected) residual.
+        if let Some(buf) = &mut jacobian_buf {
+            corrector.correct_jacobian_in_place(residual_slice, buf, rows, cols);
+        }
         corrector.correct_residual_in_place(residual_slice);
-    }
+        corrector.robust_cost()
+    } else {
+        0.5 * squared_norm
+    };
 
-    Ok(BlockLinearization {
-        variable_local_idx_size_list,
-        residual_row_start_idx: residual_block.residual_row_start_idx,
-        residual_dim: rows,
-    })
+    Ok((
+        BlockLinearization {
+            variable_local_idx_size_list,
+            residual_row_start_idx: residual_block.residual_row_start_idx,
+            residual_dim: rows,
+        },
+        cost,
+    ))
 }
 
 // ============================================================================
@@ -500,7 +510,7 @@ mod tests {
             .ok_or("no blocks")?;
         let mut residual_slice = vec![0.0f64; 1];
         let mut jac_buf = vec![0.0f64; 1];
-        compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
+        compute_block_into(block, &variables, &mut residual_slice, Some(&mut jac_buf))?;
         assert!((residual_slice[0] - 5.0).abs() < 1e-12);
         Ok(())
     }
@@ -516,7 +526,8 @@ mod tests {
             .ok_or("no blocks")?;
         let mut residual_slice = vec![0.0f64; 1];
         let mut jac_buf = vec![0.0f64; 1];
-        let result = compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
+        let (result, _cost) =
+            compute_block_into(block, &variables, &mut residual_slice, Some(&mut jac_buf))?;
         assert_eq!(result.residual_dim, 1);
         assert_eq!(jac_buf.len(), 1); // 1×1
         Ok(())
@@ -533,7 +544,8 @@ mod tests {
             .ok_or("no blocks")?;
         let mut residual_slice = vec![0.0f64; 1];
         let mut jac_buf = vec![0.0f64; 1];
-        let result = compute_block_into(block, &variables, &mut residual_slice, &mut jac_buf)?;
+        let (result, _cost) =
+            compute_block_into(block, &variables, &mut residual_slice, Some(&mut jac_buf))?;
         assert_eq!(result.variable_local_idx_size_list.len(), 1);
         let (local_idx, size) = result.variable_local_idx_size_list[0];
         assert_eq!(local_idx, 0);

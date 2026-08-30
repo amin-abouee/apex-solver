@@ -687,6 +687,161 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
     None
 }
 
+/// A rigorous lower bound on the 2-norm condition number of `H = JᵀJ`.
+///
+/// For a symmetric positive semi-definite `H`, the Rayleigh quotient evaluated
+/// at the basis vector `e_j` gives `λ_max(H) ≥ H_jj` and `λ_min(H) ≤ H_jj` for
+/// every `j`, hence
+///
+/// ```text
+/// κ₂(H) = λ_max/λ_min ≥ max_j H_jj / min_j H_jj = (max_j ‖c_j‖ / min_j ‖c_j‖)²
+/// ```
+///
+/// where `c_j` is column `j` of `J`, since `H_jj = ‖J e_j‖²`.
+///
+/// The one-sidedness matters and is deliberate: a returned value above a
+/// threshold **proves** the system is worse conditioned than that threshold, so
+/// the check never fires spuriously. The converse does not hold — a small bound
+/// is not evidence of good conditioning, because ill-conditioning arising from
+/// near-linear-dependence between columns of comparable norm is invisible to
+/// the diagonal. What it does catch reliably is the case worth catching: a
+/// variable that no residual constrains has a zero column, so the bound is
+/// infinite.
+///
+/// Pass the column norms of the **un-scaled** Jacobian — Jacobi scaling exists
+/// precisely to equalise them, so measuring the scaled matrix would report the
+/// conditioning of the preconditioned system rather than the user's problem.
+pub fn condition_number_lower_bound(column_norms: &[f64]) -> f64 {
+    if column_norms.is_empty() {
+        return 1.0;
+    }
+    let mut min_norm = f64::INFINITY;
+    let mut max_norm: f64 = 0.0;
+    for &norm in column_norms {
+        min_norm = min_norm.min(norm);
+        max_norm = max_norm.max(norm);
+    }
+    if min_norm <= 0.0 {
+        return f64::INFINITY;
+    }
+    let ratio = max_norm / min_norm;
+    ratio * ratio
+}
+
+/// Check the Jacobian against a user-supplied `max_condition_number`, if set.
+///
+/// Returns `Some(OptimizationStatus::IllConditionedJacobian)` when the bound
+/// from [`condition_number_lower_bound`] exceeds the threshold, having logged
+/// the offending value. `None` means "no threshold configured, or the bound did
+/// not prove the problem ill-conditioned" — see that function on why the second
+/// case is not a certificate of good conditioning.
+///
+/// Costs one `O(nnz)` pass over `J` and only runs when the option is `Some`.
+pub fn check_jacobian_conditioning<M: AssemblyBackend>(
+    jacobian: &M::Jacobian,
+    max_condition_number: Option<f64>,
+) -> Option<OptimizationStatus> {
+    let threshold = max_condition_number?;
+    let column_norms = M::compute_column_norms(jacobian);
+    let bound = condition_number_lower_bound(&column_norms);
+    if bound > threshold {
+        tracing::error!(
+            "Jacobian is ill-conditioned: cond(JᵀJ) >= {bound:.3e} exceeds the configured \
+             max_condition_number {threshold:.3e}. An infinite bound means at least one \
+             variable is unconstrained by every residual."
+        );
+        return Some(OptimizationStatus::IllConditionedJacobian);
+    }
+    None
+}
+
+/// The per-iteration preamble shared by LM, Gauss-Newton and Dog-Leg:
+/// assemble → conditioning check → Jacobi scaling.
+pub(crate) enum IterationPreamble<M: AssemblyBackend> {
+    /// Normal equations are ready for the optimizer's step computation.
+    Proceed {
+        residuals: Mat<f64>,
+        scaled_jacobian: M::Jacobian,
+    },
+    /// The conditioning check terminated the solve; the caller notifies its
+    /// observers and builds the final [`SolverResult`].
+    EarlyExit(OptimizationStatus),
+}
+
+/// Run the shared iteration preamble for one optimizer iteration.
+pub(crate) fn iteration_preamble<M: AssemblyBackend>(
+    problem: &Problem,
+    state: &mut InitializedState,
+    jacobi_scaling: &mut Option<Vec<f64>>,
+    use_jacobi_scaling: bool,
+    iteration: usize,
+    max_condition_number: Option<f64>,
+    jacobian_evaluations: &mut usize,
+) -> Result<IterationPreamble<M>, crate::error::ApexSolverError> {
+    // Evaluate residuals and Jacobian using the assembly mode
+    let (residuals, jacobian) = M::assemble(
+        problem,
+        &state.variables,
+        &state.variable_index_map,
+        state.symbolic_structure.as_ref(),
+        state.total_dof,
+        &mut state.workspace,
+    )?;
+    *jacobian_evaluations += 1;
+
+    // Conditioning check on the *un-scaled* Jacobian, before Jacobi
+    // scaling equalises the column norms this bound is read from.
+    if let Some(status) = check_jacobian_conditioning::<M>(&jacobian, max_condition_number) {
+        return Ok(IterationPreamble::EarlyExit(status));
+    }
+
+    // Process Jacobian (apply scaling if enabled)
+    let scaled_jacobian = if use_jacobi_scaling {
+        process_jacobian_generic::<M>(&jacobian, jacobi_scaling, iteration)?
+    } else {
+        jacobian
+    };
+
+    Ok(IterationPreamble::Proceed {
+        residuals,
+        scaled_jacobian,
+    })
+}
+
+/// Predicted decrease of the local quadratic model for a trial step.
+///
+/// ```text
+/// pred = −δᵀg − ½·δᵀHδ
+/// ```
+///
+/// where `g = Jᵀr` and `H = JᵀJ` are the *un-damped* normal equations, i.e.
+/// exactly what [`LinearSolver::get_gradient`] and
+/// [`LinearSolver::get_hessian`] publish.
+///
+/// Written this way the formula is independent of how the step was produced.
+/// The shorter Levenberg-Marquardt identity `pred = ½·δᵀ(λδ − g)` is obtained
+/// by substituting `(H + λI)δ = −g` into the above, so it silently assumes
+/// *uniform* `λI` damping and is wrong for the Marquardt diagonal
+/// `λ·D` (see [`Damping`](crate::linalg::Damping)) — and wrong for Dog Leg's
+/// steps, which do not solve that system at all. One extra sparse mat-vec per
+/// iteration buys correctness under every damping policy.
+///
+/// The step, gradient and Hessian must all live in the same space: when Jacobi
+/// column scaling is enabled, pass the *scaled* step, since the solver's cached
+/// gradient and Hessian are the scaled ones. The predicted reduction is a value
+/// of the quadratic model and is invariant under that change of variables, so
+/// the result is equally the predicted reduction of the un-scaled step.
+pub fn compute_predicted_reduction<M: AssemblyBackend>(
+    step: &Mat<f64>,
+    gradient: &Mat<f64>,
+    hessian: &M::Hessian,
+) -> f64 {
+    let hessian_step = M::hessian_vec_product(hessian, step);
+    let linear_term = (step.transpose() * gradient)[(0, 0)];
+    let quadratic_term = (step.transpose() * &hessian_step)[(0, 0)];
+    -linear_term - 0.5 * quadratic_term
+}
+
 /// Compute step quality ratio (actual vs predicted reduction).
 ///
 /// Used by Levenberg-Marquardt and Dog Leg optimizers to evaluate
@@ -694,20 +849,42 @@ pub fn check_convergence(params: &ConvergenceParams) -> Option<OptimizationStatu
 /// by the local quadratic model.
 ///
 /// Returns `ρ = actual_reduction / predicted_reduction`, handling
-/// near-zero predicted reduction gracefully.
+/// degenerate predicted reductions.
+///
+/// # Non-positive predicted reduction
+///
+/// A *negative* predicted reduction means the trial step increases the local
+/// quadratic model — the model is not a descent direction and the ratio is
+/// meaningless. Worse, it is actively misleading: a negative actual reduction
+/// divided by a negative predicted reduction yields `ρ > 0`, so a step that
+/// raised the cost would be accepted. Ceres treats a non-positive
+/// `model_cost_change` as an invalid step; `-1.0` is returned here so every
+/// acceptance threshold rejects it.
+///
+/// A predicted reduction that is merely *near zero* is different: at the
+/// solution both reductions vanish legitimately, so the historic behaviour
+/// (accept when the cost actually fell) is kept — rejecting there would inflate
+/// the damping just as the solver converges.
 pub fn compute_step_quality(current_cost: f64, new_cost: f64, predicted_reduction: f64) -> f64 {
     let actual_reduction = current_cost - new_cost;
-    if predicted_reduction.abs() < 1e-15 {
+    if predicted_reduction < -1e-15 {
+        -1.0
+    } else if predicted_reduction.abs() <= 1e-15 {
         if actual_reduction > 0.0 { 1.0 } else { 0.0 }
     } else {
         actual_reduction / predicted_reduction
     }
 }
 
-/// Create the appropriate linear solver based on configuration.
+/// Create a sparse linear solver for the given solver type.
 ///
-/// Used by Gauss-Newton and Dog Leg optimizers. Levenberg-Marquardt has its own
-/// solver creation logic due to special Schur complement adapter requirements.
+/// Never referenced by the optimizers — each dispatches its own supported
+/// solver/mode combinations and rejects the rest. Superseded; scheduled for
+/// removal.
+#[deprecated(
+    since = "1.5.0",
+    note = "no optimizer calls this; construct the desired solver directly"
+)]
 pub fn create_linear_solver(
     solver_type: &linalg::LinearSolverType,
 ) -> Box<dyn LinearSolver<SparseMode>> {
@@ -715,8 +892,8 @@ pub fn create_linear_solver(
         linalg::LinearSolverType::SparseCholesky => Box::new(SparseCholeskySolver::new()),
         linalg::LinearSolverType::SparseQR => Box::new(SparseQRSolver::new()),
         _ => {
-            // SparseSchurComplement requires special handling; DenseCholesky/DenseQR are
-            // dispatched via the dense path in each optimizer — all fall back to Cholesky here.
+            // Schur requires StructureAware initialization; dense solvers live
+            // behind the dense dispatch. Callers get plain Cholesky here.
             Box::new(SparseCholeskySolver::new())
         }
     }
@@ -1014,6 +1191,99 @@ mod tests {
     use std::time::Duration;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    // -------------------------------------------------------------------------
+    // compute_step_quality — the non-positive predicted-reduction guard
+    // -------------------------------------------------------------------------
+
+    /// A negative predicted reduction must reject, not accept.
+    ///
+    /// The trap: a cost that *rose* gives a negative actual reduction, and
+    /// dividing two negatives yields ρ > 0. Without the guard the solver accepts
+    /// a step that made the objective worse, every time the quadratic model
+    /// points uphill.
+    #[test]
+    fn step_quality_rejects_when_the_model_predicts_an_increase() {
+        // cost rose 10 → 12, and the model predicted a rise too.
+        let rho = compute_step_quality(10.0, 12.0, -1.0);
+        assert!(
+            rho <= 0.0,
+            "a negative predicted reduction must not produce a positive ρ, got {rho}"
+        );
+        // Under every acceptance threshold in the crate this rejects.
+        assert!(
+            rho < 1e-3,
+            "ρ = {rho} would pass the default min_relative_decrease"
+        );
+    }
+
+    /// A vanishing predicted reduction still accepts a genuine improvement.
+    ///
+    /// At the solution both reductions go to zero legitimately; rejecting there
+    /// would inflate the damping exactly as the solver converges.
+    #[test]
+    fn step_quality_accepts_a_real_decrease_when_prediction_underflows() {
+        let rho = compute_step_quality(10.0, 9.999_999_999, 1e-20);
+        assert!((rho - 1.0).abs() < 1e-12, "expected ρ = 1.0, got {rho}");
+
+        let rho_no_gain = compute_step_quality(10.0, 10.5, 1e-20);
+        assert!(
+            (rho_no_gain).abs() < 1e-12,
+            "expected ρ = 0.0, got {rho_no_gain}"
+        );
+    }
+
+    /// The ordinary case is untouched.
+    #[test]
+    fn step_quality_is_the_plain_ratio_for_a_positive_prediction() {
+        let rho = compute_step_quality(10.0, 6.0, 8.0);
+        assert!((rho - 0.5).abs() < 1e-12, "expected ρ = 0.5, got {rho}");
+    }
+
+    // -------------------------------------------------------------------------
+    // condition_number_lower_bound
+    // -------------------------------------------------------------------------
+
+    /// The bound is `(max‖c‖ / min‖c‖)²` and is exactly attained on a diagonal J.
+    #[test]
+    fn condition_bound_squares_the_column_norm_ratio() {
+        // For J = diag(1, 10), JᵀJ = diag(1, 100), so κ₂ = 100 exactly.
+        let bound = condition_number_lower_bound(&[1.0, 10.0]);
+        assert!((bound - 100.0).abs() < 1e-9, "expected 100, got {bound}");
+    }
+
+    /// A structurally unconstrained variable gives a zero column, hence an
+    /// infinite bound. This is the case the check earns its keep on.
+    #[test]
+    fn condition_bound_is_infinite_for_an_unconstrained_column() {
+        assert!(condition_number_lower_bound(&[3.0, 0.0, 1.0]).is_infinite());
+    }
+
+    /// Equal column norms give the minimum possible bound of 1.
+    #[test]
+    fn condition_bound_is_one_for_equal_column_norms() {
+        let bound = condition_number_lower_bound(&[2.5, 2.5, 2.5]);
+        assert!((bound - 1.0).abs() < 1e-12, "expected 1, got {bound}");
+        assert!((condition_number_lower_bound(&[]) - 1.0).abs() < 1e-12);
+    }
+
+    /// The bound must never exceed the true condition number — it is a lower
+    /// bound, so exceeding a threshold is proof of ill-conditioning.
+    ///
+    /// Checked against `κ₂(JᵀJ)` computed from the singular values of a J whose
+    /// columns are deliberately non-orthogonal, so the diagonal underestimates.
+    #[test]
+    fn condition_bound_never_exceeds_the_true_condition_number() {
+        // Two nearly parallel unit columns: the true κ is enormous, the column
+        // norms are identical, so the bound is 1 — a valid, very loose, bound.
+        let norms = [1.0, 1.0];
+        let bound = condition_number_lower_bound(&norms);
+        // True κ₂ for columns at angle θ is cot²(θ/2); at θ → 0 this diverges.
+        assert!(
+            bound <= 1.0 + 1e-12,
+            "bound {bound} must not exceed the true condition number"
+        );
+    }
 
     // -------------------------------------------------------------------------
     // compute_cost
@@ -1349,9 +1619,10 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // create_linear_solver
+    // create_linear_solver (deprecated)
     // -------------------------------------------------------------------------
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_cholesky() {
         let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseCholesky);
@@ -1359,12 +1630,14 @@ mod tests {
         let _ = solver.get_hessian();
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_qr() {
         let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseQR);
         let _ = solver.get_hessian();
     }
 
+    #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_fallback_for_schur() {
         // SparseSchurComplement is special; falls back to Cholesky in create_linear_solver

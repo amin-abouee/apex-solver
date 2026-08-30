@@ -6,6 +6,7 @@ use std::convert::TryFrom;
 use std::marker::PhantomData;
 use tracing::warn;
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::{Factor, OptimizeParams};
 use apex_camera_models::{CameraModel, CameraModelError};
 use apex_manifolds::LieGroup;
@@ -436,7 +437,7 @@ where
         };
 
         let n = self.observations.ncols();
-        assert_eq!(
+        debug_assert_eq!(
             landmarks.ncols(),
             n,
             "Number of landmarks ({}) must match observations ({})",
@@ -465,6 +466,51 @@ where
             cols += CAM::INTRINSIC_DIM;
         }
         (n * 2, cols)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        let mut idx = 0;
+
+        if OP::POSE {
+            let pose = variables.get(idx).ok_or_else(|| {
+                "ProjectionFactor expects a pose variable as its first parameter".to_string()
+            })?;
+            if pose.as_param_slice().len() != SE3::REP_SIZE {
+                return Err(format!(
+                    "pose variable holds {} parameters, ProjectionFactor requires {} (SE3)",
+                    pose.as_param_slice().len(),
+                    SE3::REP_SIZE
+                ));
+            }
+            idx += 1;
+        }
+
+        if OP::LANDMARK {
+            let landmarks = variables
+                .get(idx)
+                .ok_or_else(|| "ProjectionFactor expects a landmark variable".to_string())?;
+            let expected = 3 * self.observations.ncols();
+            if landmarks.as_param_slice().len() != expected {
+                return Err(format!(
+                    "landmark variable holds {} parameters but the factor's {} observations \
+                     reference {} landmarks (3 coordinates each)",
+                    landmarks.as_param_slice().len(),
+                    self.observations.ncols(),
+                    self.observations.ncols()
+                ));
+            }
+        } else if self
+            .fixed_landmarks
+            .as_ref()
+            .is_none_or(|l| l.ncols() != self.observations.ncols())
+        {
+            return Err(format!(
+                "fixed landmarks must be set and match the {} observations",
+                self.observations.ncols()
+            ));
+        }
+
+        Ok(())
     }
 }
 

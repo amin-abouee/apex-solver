@@ -1,6 +1,6 @@
 use faer::{Mat, linalg::solvers::Solve};
 
-use crate::linalg::{DenseMode, LinAlgResult, LinearSolver};
+use crate::linalg::{Damping, DenseMode, LinAlgResult, LinearSolver};
 
 /// Dense QR (column-pivoting) linear solver for CPU.
 ///
@@ -60,18 +60,18 @@ impl DenseQRSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &Mat<f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         // H = J^T · J
         let hessian = jacobian.transpose() * jacobian;
         // g = J^T · r
         let gradient = jacobian.transpose() * residuals;
 
-        // H_aug = H + λI
+        // H_aug = H + λ·D, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
         let n = hessian.nrows();
         let mut augmented = hessian.clone();
         for i in 0..n {
-            augmented[(i, i)] += lambda;
+            augmented[(i, i)] += damping.diagonal_term(hessian[(i, i)]);
         }
 
         // QR factorization on augmented system
@@ -111,9 +111,9 @@ impl LinearSolver<DenseMode> for DenseQRSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &Mat<f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
-        self.solve_dense_augmented(residuals, jacobian, lambda)
+        self.solve_dense_augmented(residuals, jacobian, damping)
     }
 
     fn get_hessian(&self) -> Option<&Mat<f64>> {
@@ -197,7 +197,12 @@ mod tests {
         let lambda = 0.1;
         let mut solver = DenseQRSolver::new();
 
-        let dx = LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, lambda)?;
+        let dx = LinearSolver::<DenseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &Damping::identity(lambda),
+        )?;
 
         // Verify: (J^T·J + λI)·dx ≈ -J^T·r
         let mut jtj = j.transpose() * &j;
@@ -223,8 +228,18 @@ mod tests {
         let (j, r) = create_test_data();
         let mut solver = DenseQRSolver::new();
 
-        let dx1 = LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, 0.01)?;
-        let dx2 = LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, 1.0)?;
+        let dx1 = LinearSolver::<DenseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &Damping::identity(0.01),
+        )?;
+        let dx2 = LinearSolver::<DenseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &Damping::identity(1.0),
+        )?;
 
         let mut different = false;
         for i in 0..dx1.nrows() {
@@ -311,8 +326,12 @@ mod tests {
         let mut solver = DenseQRSolver::new();
 
         let normal_dx = LinearSolver::<DenseMode>::solve_normal_equation(&mut solver, &r, &j)?;
-        let augmented_dx =
-            LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, 0.0)?;
+        let augmented_dx = LinearSolver::<DenseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &Damping::identity(0.0),
+        )?;
 
         for i in 0..normal_dx.nrows() {
             assert!(

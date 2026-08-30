@@ -100,6 +100,24 @@ pub enum ManifoldType {
     SO3,
 }
 
+impl ManifoldType {
+    /// The manifold type whose [`LieGroup::NAME`] is `name` (`"Rn"`, `"SE3"`, …),
+    /// or `None` if the name does not match a known manifold.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Rn" => Some(Self::RN),
+            "SE2" => Some(Self::SE2),
+            "SE3" => Some(Self::SE3),
+            "SE23" => Some(Self::SE23),
+            "SGal3" => Some(Self::SGal3),
+            "Sim3" => Some(Self::Sim3),
+            "SO2" => Some(Self::SO2),
+            "SO3" => Some(Self::SO3),
+            _ => None,
+        }
+    }
+}
+
 impl Display for ManifoldError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {

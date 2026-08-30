@@ -104,7 +104,7 @@ pub fn assemble_sparse(
         .map(|((res_slice, jac_buf), key)| {
             let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, jac_buf)
+            compute_block_into(block, variables, res_slice, Some(jac_buf)).map(|(bl, _)| bl)
         })
         .collect();
 

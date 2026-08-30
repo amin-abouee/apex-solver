@@ -146,9 +146,9 @@ use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
-    CovarianceOptions, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver,
-    LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver, SparseMode,
-    SparseQRSolver, SparseSchurComplementSolver, StructureAware,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
+    LinearSolver, LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver,
+    SparseMode, SparseQRSolver, SparseSchurComplementSolver, StructureAware,
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
@@ -157,6 +157,44 @@ use crate::optimizer::{
 use faer::Mat;
 use std::time::{Duration, Instant};
 use tracing::debug;
+
+/// Policy for adapting the damping parameter λ between iterations.
+///
+/// Both policies use the same acceptance test —
+/// `ρ > `[`min_relative_decrease`](LevenbergMarquardtConfig::min_relative_decrease) —
+/// and differ only in how λ moves afterwards. They read disjoint sets of
+/// configuration fields, so the doc for each variant is also the list of knobs
+/// that have any effect under it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum DampingUpdate {
+    /// Nielsen's rule (default).
+    ///
+    /// On an accepted step `λ ← λ · max(1/3, 1 − (2ρ − 1)³)` and ν resets to
+    /// [`damping_nu`](LevenbergMarquardtConfig::damping_nu); on a rejected step
+    /// `λ ← λ·ν` and `ν ← 2ν`, so consecutive failures escalate geometrically.
+    /// The cubic makes λ shrink smoothly with step quality rather than by a
+    /// fixed factor, which is why it is the default and what Ceres uses.
+    ///
+    /// Reads `damping_nu`. Ignores `damping_increase_factor`,
+    /// `damping_decrease_factor`, `min_step_quality`, `good_step_quality`.
+    #[default]
+    Nielsen,
+    /// Marquardt's classic three-band rule.
+    ///
+    /// `λ ← λ · damping_decrease_factor` when `ρ ≥ good_step_quality`,
+    /// `λ ← λ · damping_increase_factor` when `ρ ≤ min_step_quality` or the step
+    /// was rejected, and λ is left alone in between. Deterministic and easy to
+    /// reason about, at the cost of reacting to step quality in coarse steps.
+    ///
+    /// Reads `damping_increase_factor`, `damping_decrease_factor`,
+    /// `min_step_quality`, `good_step_quality`. Ignores `damping_nu`.
+    ///
+    /// Note that at the default `min_step_quality` of 0.0 the third branch is
+    /// unreachable, because a step with `ρ ≤ 0` is rejected before it is
+    /// consulted. Raise it above `min_relative_decrease` (0.25 is the textbook
+    /// value) to make the middle band do anything.
+    Marquardt,
+}
 
 /// Configuration parameters for the Levenberg-Marquardt optimizer.
 ///
@@ -220,22 +258,53 @@ pub struct LevenbergMarquardtConfig {
     pub damping_min: f64,
     /// Maximum damping parameter
     pub damping_max: f64,
-    /// Damping increase factor (when step rejected)
+    /// Factor λ is multiplied by when a step is rejected, or when
+    /// `ρ <= min_step_quality`.
+    ///
+    /// Read only under [`DampingUpdate::Marquardt`]. Default: 10.0
     pub damping_increase_factor: f64,
-    /// Damping decrease factor (when step accepted)
+    /// Factor λ is multiplied by when `ρ >= good_step_quality`.
+    ///
+    /// Read only under [`DampingUpdate::Marquardt`]. Default: 0.3
     pub damping_decrease_factor: f64,
-    /// Damping nu parameter
+    /// Nielsen's ν: the initial and reset value of the rejection escalation
+    /// factor.
+    ///
+    /// Read only under [`DampingUpdate::Nielsen`]. Default: 2.0
     pub damping_nu: f64,
     /// Stop after this many consecutive rejected steps.
     pub max_consecutive_rejected_steps: usize,
-    /// Minimum step quality for acceptance
+    /// Step quality at or below which λ is increased even though the step was
+    /// accepted.
+    ///
+    /// Read only under [`DampingUpdate::Marquardt`]. At the default of 0.0 this
+    /// band is unreachable — every step with `ρ <= 0` has already been rejected
+    /// by [`min_relative_decrease`](Self::min_relative_decrease). Default: 0.0
     pub min_step_quality: f64,
-    /// Good step quality threshold
+    /// Step quality at or above which λ is decreased.
+    ///
+    /// Read only under [`DampingUpdate::Marquardt`]. Default: 0.75
     pub good_step_quality: f64,
-    /// Minimum diagonal value for regularization
+    /// Lower clamp on the Marquardt damping diagonal (Ceres' `min_lm_diagonal`).
+    ///
+    /// The augmented system is `(JᵀJ + λ·D)·dx = −Jᵀr` with
+    /// `D_jj = clamp(JᵀJ_jj, min_diagonal, max_diagonal)`. Bounding `D` away
+    /// from zero guarantees that even a direction with negligible curvature is
+    /// damped. Setting `min_diagonal == max_diagonal == 1.0` gives `D = I`, i.e.
+    /// classic uniform `λI` damping.
+    ///
+    /// Default: 1e-6 (Ceres-compatible). See [`Damping`].
     pub min_diagonal: f64,
-    /// Maximum diagonal value for regularization
+    /// Upper clamp on the Marquardt damping diagonal (Ceres' `max_lm_diagonal`).
+    ///
+    /// Keeps one very stiff column from dominating the damped system.
+    ///
+    /// Default: 1e32 (Ceres-compatible). See [`Damping`].
     pub max_diagonal: f64,
+    /// How λ is adapted between iterations.
+    ///
+    /// Default: [`DampingUpdate::Nielsen`]
+    pub damping_update: DampingUpdate,
     /// Minimum objective function cutoff (optional early termination)
     ///
     /// If set, optimization terminates when cost falls below this threshold.
@@ -326,7 +395,11 @@ impl Default for LevenbergMarquardtConfig {
             // Note: Typically should be 1e-4 * cost_tolerance per Ceres docs
             gradient_tolerance: 1e-10,
             timeout: None,
-            damping: 1e-3, // Increased from 1e-4 for better initial convergence on BA
+            // Ceres-equivalent: its default `initial_trust_region_radius` of 1e4
+            // corresponds to λ = 1/radius = 1e-4. The previous 1e-3 was hand-tuned
+            // against uniform λI damping, where λ alone had to absorb the problem
+            // scale; with the Marquardt diagonal the scale lives in D instead.
+            damping: 1e-4,
             damping_min: 1e-12,
             damping_max: 1e12,
             damping_increase_factor: 10.0,
@@ -337,6 +410,7 @@ impl Default for LevenbergMarquardtConfig {
             good_step_quality: 0.75,
             min_diagonal: 1e-6,
             max_diagonal: 1e32,
+            damping_update: DampingUpdate::default(),
             // New Ceres-compatible parameters
             min_cost_threshold: None,
             max_condition_number: None,
@@ -409,10 +483,42 @@ impl LevenbergMarquardtConfig {
         self
     }
 
-    /// Set the damping adjustment factors.
+    /// Set the damping adjustment factors used by [`DampingUpdate::Marquardt`].
+    ///
+    /// These have no effect under the default [`DampingUpdate::Nielsen`] policy,
+    /// which derives both directions from ρ; pair this with
+    /// [`with_damping_update`](Self::with_damping_update).
     pub fn with_damping_factors(mut self, increase: f64, decrease: f64) -> Self {
         self.damping_increase_factor = increase;
         self.damping_decrease_factor = decrease;
+        self
+    }
+
+    /// Select the policy that adapts λ between iterations.
+    pub fn with_damping_update(mut self, damping_update: DampingUpdate) -> Self {
+        self.damping_update = damping_update;
+        self
+    }
+
+    /// Set the clamp range for the Marquardt damping diagonal.
+    ///
+    /// The augmented system becomes `(JᵀJ + λ·D)·dx = −Jᵀr` with
+    /// `D_jj = clamp(JᵀJ_jj, min, max)`. Pass `(1.0, 1.0)` for classic uniform
+    /// `λI` damping.
+    pub fn with_diagonal_bounds(mut self, min: f64, max: f64) -> Self {
+        self.min_diagonal = min;
+        self.max_diagonal = max;
+        self
+    }
+
+    /// Set the step-quality band used by [`DampingUpdate::Marquardt`].
+    ///
+    /// λ is decreased at or above `good_quality` and increased at or below
+    /// `min_quality`; in between it is left alone. No effect under
+    /// [`DampingUpdate::Nielsen`].
+    pub fn with_step_quality(mut self, min_quality: f64, good_quality: f64) -> Self {
+        self.min_step_quality = min_quality;
+        self.good_step_quality = good_quality;
         self
     }
 
@@ -425,12 +531,11 @@ impl LevenbergMarquardtConfig {
     #[deprecated(
         since = "1.5.0",
         note = "the `radius` argument is ignored — Levenberg-Marquardt here is damping-controlled. \
-                Use `with_damping`/`with_damping_bounds` to control step size."
+                Use `with_damping`/`with_damping_bounds` to control step size, and \
+                `with_step_quality` for the quality thresholds."
     )]
-    pub fn with_trust_region(mut self, _radius: f64, min_quality: f64, good_quality: f64) -> Self {
-        self.min_step_quality = min_quality;
-        self.good_step_quality = good_quality;
-        self
+    pub fn with_trust_region(self, _radius: f64, min_quality: f64, good_quality: f64) -> Self {
+        self.with_step_quality(min_quality, good_quality)
     }
 
     /// Set minimum objective function cutoff for early termination.
@@ -659,6 +764,16 @@ pub struct LevenbergMarquardt {
     config: LevenbergMarquardtConfig,
     jacobi_scaling: Option<Vec<f64>>,
     observers: OptObserverVec,
+    /// Run state: the live damping λ, seeded from `config.damping` at the start
+    /// of every solve.
+    ///
+    /// λ and ν are iteration state, not configuration. Keeping them here rather
+    /// than mutating `config` in place means a second `optimize()` call on the
+    /// same solver starts from the configured λ instead of inheriting whatever
+    /// the previous run happened to end on.
+    damping: f64,
+    /// Run state: Nielsen's ν, seeded from `config.damping_nu`.
+    damping_nu: f64,
 }
 
 impl Default for LevenbergMarquardt {
@@ -676,6 +791,8 @@ impl LevenbergMarquardt {
     /// Create a new Levenberg-Marquardt solver with the given configuration.
     pub fn with_config(config: LevenbergMarquardtConfig) -> Self {
         Self {
+            damping: config.damping,
+            damping_nu: config.damping_nu,
             config,
             jacobi_scaling: None,
             observers: OptObserverVec::new(),
@@ -716,34 +833,47 @@ impl LevenbergMarquardt {
         self.observers.add(observer);
     }
 
-    /// Update damping parameter based on step quality using trust region approach
-    /// Reference: Introduction to Optimization and Data Fitting
-    /// Algorithm 6.18
-    fn update_damping(&mut self, rho: f64) -> bool {
-        if rho > 0.0 {
-            // Step accepted - decrease damping
-            let coff = 2.0 * rho - 1.0;
-            self.config.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
-            self.config.damping = self.config.damping.max(self.config.damping_min);
-            self.config.damping_nu = 2.0;
-            true
-        } else {
-            // Step rejected - increase damping
-            self.config.damping *= self.config.damping_nu;
-            self.config.damping_nu *= 2.0;
-            self.config.damping = self.config.damping.min(self.config.damping_max);
-            false
+    /// Adapt λ to the observed step quality `rho`.
+    ///
+    /// `accepted` is decided by the caller against
+    /// [`min_relative_decrease`](LevenbergMarquardtConfig::min_relative_decrease)
+    /// and passed in, so the acceptance threshold and the damping policy stay
+    /// independent — Ceres' `TrustRegionMinimizer` separates them the same way.
+    ///
+    /// Which fields are read depends on
+    /// [`damping_update`](LevenbergMarquardtConfig::damping_update); see
+    /// [`DampingUpdate`].
+    fn update_damping(&mut self, rho: f64, accepted: bool) {
+        match self.config.damping_update {
+            DampingUpdate::Nielsen => {
+                if accepted {
+                    // λ ← λ · max(1/3, 1 − (2ρ − 1)³), and ν resets.
+                    // Reference: Introduction to Optimization and Data Fitting,
+                    // Algorithm 6.18.
+                    let coff = 2.0 * rho - 1.0;
+                    self.damping *= (1.0_f64 / 3.0).max(1.0 - coff * coff * coff);
+                    self.damping_nu = self.config.damping_nu;
+                } else {
+                    self.damping *= self.damping_nu;
+                    self.damping_nu *= 2.0;
+                }
+            }
+            DampingUpdate::Marquardt => {
+                if !accepted {
+                    // A rejected step must always tighten the damping, whatever
+                    // ρ was: leaving λ unchanged would recompute the identical
+                    // step next iteration and stall.
+                    self.damping *= self.config.damping_increase_factor;
+                } else if rho >= self.config.good_step_quality {
+                    self.damping *= self.config.damping_decrease_factor;
+                } else if rho <= self.config.min_step_quality {
+                    self.damping *= self.config.damping_increase_factor;
+                }
+            }
         }
-    }
-
-    /// Compute predicted cost reduction from linear model
-    /// Standard LM formula: 0.5 * step^T * (damping * step - gradient)
-    fn compute_predicted_reduction(&self, step: &Mat<f64>, gradient: &Mat<f64>) -> f64 {
-        // Standard Levenberg-Marquardt predicted reduction formula
-        // predicted_reduction = -step^T * gradient - 0.5 * step^T * H * step
-        //                     = 0.5 * step^T * (damping * step - gradient)
-        let diff = self.config.damping * step - gradient;
-        (0.5 * step.transpose() * &diff)[(0, 0)]
+        self.damping = self
+            .damping
+            .clamp(self.config.damping_min, self.config.damping_max);
     }
 
     /// Compute optimization step by solving the augmented system (generic over assembly mode).
@@ -753,28 +883,34 @@ impl LevenbergMarquardt {
         scaled_jacobian: &M::Jacobian,
         linear_solver: &mut dyn LinearSolver<M>,
     ) -> Result<StepResult, OptimizerError> {
-        // Solve augmented equation: (J_scaled^T * J_scaled + λI) * dx_scaled = -J_scaled^T * r
+        // Solve the augmented equation (J̃ᵀJ̃ + λ·D)·dx̃ = −J̃ᵀr.
+        let damping = Damping::new(
+            self.damping,
+            self.config.min_diagonal,
+            self.config.max_diagonal,
+        )?;
         let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
-            .solve_augmented_equation(&residuals_owned, scaled_jacobian, self.config.damping)
+            .solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
-        // Get cached gradient from the solver
+        // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
         let gradient_norm = gradient.norm_l2();
+        let hessian = linear_solver.get_hessian().ok_or_else(|| {
+            OptimizerError::NumericalInstability("Hessian not available".into()).log()
+        })?;
 
-        // Compute the predicted reduction BEFORE un-scaling the step.
-        //
-        // The identity `pred = ½·dxᵀ(λ·dx − g)` is derived by substituting the
-        // augmented normal equations `(H + λI)·dx = −g`, so it is only valid when
-        // the step and the gradient live in the *same* space. The solver's cached
-        // gradient is `g̃ = J̃ᵀ·r` — the scaled one — so the scaled step must be
-        // used here. The predicted reduction is a scalar value of the quadratic
-        // model and is invariant under the change of variables, so this is
-        // equally the predicted reduction for the un-scaled step below.
-        let predicted_reduction = self.compute_predicted_reduction(&scaled_step, gradient);
+        // Compute the predicted reduction BEFORE un-scaling the step: the
+        // solver's cached gradient and Hessian are the *scaled* ones, and all
+        // three vectors have to live in the same space. The predicted reduction
+        // is a value of the quadratic model and is invariant under that change
+        // of variables, so it is equally the predicted reduction of the
+        // un-scaled step below.
+        let predicted_reduction =
+            crate::optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
@@ -821,8 +957,12 @@ impl LevenbergMarquardt {
             step_result.predicted_reduction,
         );
 
-        // Update damping and decide whether to accept step
-        let accepted = self.update_damping(rho);
+        // Accept on step quality, then adapt λ. Ceres' TrustRegionMinimizer keeps
+        // these two decisions separate for the same reason: the acceptance
+        // threshold is a property of the problem, the damping update a property
+        // of the chosen policy.
+        let accepted = rho > self.config.min_relative_decrease;
+        self.update_damping(rho, accepted);
 
         let cost_reduction = if accepted {
             // Accept the step - parameters already updated
@@ -866,6 +1006,13 @@ impl LevenbergMarquardt {
         // Initialize optimization state
         let mut state = crate::optimizer::initialize_optimization_state(problem)?;
 
+        // Seed the run state from the configuration. λ and ν evolve during the
+        // solve; resetting them here keeps `optimize()` idempotent when the same
+        // solver instance is reused.
+        self.damping = self.config.damping;
+        self.damping_nu = self.config.damping_nu;
+        self.jacobi_scaling = None;
+
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
@@ -887,26 +1034,35 @@ impl LevenbergMarquardt {
         loop {
             let iter_start = Instant::now();
 
-            // Evaluate residuals and Jacobian using the assembly mode
-            let (residuals, jacobian) = M::assemble(
+            // Shared preamble: assemble, conditioning check, Jacobi scaling
+            let (residuals, scaled_jacobian) = match crate::optimizer::iteration_preamble::<M>(
                 problem,
-                &state.variables,
-                &state.variable_index_map,
-                state.symbolic_structure.as_ref(),
-                state.total_dof,
-                &mut state.workspace,
-            )?;
-            jacobian_evaluations += 1;
-
-            // Process Jacobian (apply scaling if enabled)
-            let scaled_jacobian = if self.config.use_jacobi_scaling {
-                crate::optimizer::process_jacobian_generic::<M>(
-                    &jacobian,
-                    &mut self.jacobi_scaling,
-                    iteration,
-                )?
-            } else {
-                jacobian
+                &mut state,
+                &mut self.jacobi_scaling,
+                self.config.use_jacobi_scaling,
+                iteration,
+                self.config.max_condition_number,
+                &mut jacobian_evaluations,
+            )? {
+                crate::optimizer::IterationPreamble::Proceed {
+                    residuals,
+                    scaled_jacobian,
+                } => (residuals, scaled_jacobian),
+                crate::optimizer::IterationPreamble::EarlyExit(status) => {
+                    let elapsed = start_time.elapsed();
+                    self.observers.notify_complete(&state.variables, iteration);
+                    return Ok(crate::optimizer::build_solver_result(
+                        status,
+                        iteration,
+                        state,
+                        elapsed,
+                        0.0,
+                        0.0,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                        None,
+                    ));
+                }
             };
 
             // Compute optimization step
@@ -946,7 +1102,7 @@ impl LevenbergMarquardt {
                     gradient_norm: step_result.gradient_norm,
                     step_norm,
                     tr_ratio: step_eval.rho,
-                    tr_radius: self.config.damping,
+                    tr_radius: self.damping,
                     ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
@@ -966,7 +1122,7 @@ impl LevenbergMarquardt {
                 iteration,
                 state.current_cost,
                 step_result.gradient_norm,
-                Some(self.config.damping),
+                Some(self.damping),
                 step_norm,
                 Some(step_eval.rho),
                 linear_solver,
@@ -1009,7 +1165,7 @@ impl LevenbergMarquardt {
                 // raises damping and the next step succeeds. Only once damping has also
                 // saturated at `damping_max` can it no longer shrink the step further, so
                 // the state is provably stuck and the remaining iterations are wasted.
-                let damping_saturated = self.config.damping >= self.config.damping_max;
+                let damping_saturated = self.damping >= self.config.damping_max;
                 let stalled = consecutive_rejected >= self.config.max_consecutive_rejected_steps
                     && damping_saturated;
                 stalled.then_some(crate::optimizer::OptimizationStatus::StalledNoProgress)
@@ -1032,7 +1188,7 @@ impl LevenbergMarquardt {
                         elapsed,
                         iteration_stats.clone(),
                         status.clone(),
-                        Some(self.config.damping),
+                        Some(self.damping),
                         None,
                         Some(step_eval.rho),
                     );
@@ -1189,6 +1345,245 @@ mod tests {
         fn jacobian_shape(&self) -> (usize, usize) {
             (1, 1)
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Ceres-compatibility config fields: behaviour, not builder round-trips
+    // -------------------------------------------------------------------------
+
+    /// `min_relative_decrease` gates step acceptance.
+    ///
+    /// Set just below 1.0, essentially no step qualifies — ρ reaches 1 only when
+    /// the quadratic model is exact — so the solver must reject its way to a
+    /// stall instead of converging. This is the check that the field is read at
+    /// all: before it was wired up, both configurations produced identical runs.
+    #[test]
+    fn min_relative_decrease_gates_acceptance() -> TestResult {
+        let mut permissive_problem = rosenbrock_problem();
+        let permissive = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(1e-3),
+        )
+        .optimize(&mut permissive_problem)?;
+
+        let mut strict_problem = rosenbrock_problem();
+        let strict = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(0.999_999),
+        )
+        .optimize(&mut strict_problem)?;
+
+        assert!(
+            strict.final_cost > permissive.final_cost,
+            "a near-1.0 acceptance threshold should reject nearly every step and \
+             leave the cost higher: strict {:.3e} vs permissive {:.3e}",
+            strict.final_cost,
+            permissive.final_cost
+        );
+        Ok(())
+    }
+
+    /// `min_diagonal` / `max_diagonal` change the damped system.
+    ///
+    /// Clamping both to 1.0 turns `λ·D` into `λI`; that must produce a
+    /// different iterate sequence from the Marquardt default on a problem whose
+    /// columns have unequal norms, which Rosenbrock's do.
+    #[test]
+    fn diagonal_bounds_select_between_marquardt_and_identity_damping() -> TestResult {
+        let mut marquardt_problem = rosenbrock_problem();
+        let marquardt = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(100),
+        )
+        .optimize(&mut marquardt_problem)?;
+
+        let mut identity_problem = rosenbrock_problem();
+        let identity = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_diagonal_bounds(1.0, 1.0),
+        )
+        .optimize(&mut identity_problem)?;
+
+        assert_ne!(
+            marquardt.iterations, identity.iterations,
+            "λ·D and λI should not produce identical iterate counts on a \
+             problem with unequal column norms — the bounds are being ignored"
+        );
+        // Both still solve Rosenbrock; the point is that they differ, not that
+        // one is better on this particular problem.
+        assert!(
+            marquardt.final_cost < 1e-8,
+            "marquardt cost {:.3e}",
+            marquardt.final_cost
+        );
+        assert!(
+            identity.final_cost < 1e-8,
+            "identity cost {:.3e}",
+            identity.final_cost
+        );
+        Ok(())
+    }
+
+    /// `DampingUpdate::Marquardt` follows the configured factors exactly.
+    ///
+    /// Nielsen derives both directions from ρ, so the two policies must not
+    /// produce the same λ trajectory from the same inputs.
+    #[test]
+    fn marquardt_policy_uses_the_configured_damping_factors() {
+        let config = LevenbergMarquardtConfig::new()
+            .with_damping(1.0)
+            .with_damping_bounds(1e-15, 1e15)
+            .with_damping_update(DampingUpdate::Marquardt)
+            .with_damping_factors(10.0, 0.3)
+            .with_step_quality(0.0, 0.75);
+
+        // Accepted, high quality → λ *= decrease_factor
+        let mut solver = LevenbergMarquardt::with_config(config.clone());
+        solver.update_damping(0.9, true);
+        assert!(
+            (solver.damping - 0.3).abs() < 1e-12,
+            "got λ = {}",
+            solver.damping
+        );
+
+        // Rejected → λ *= increase_factor, regardless of ρ
+        let mut solver = LevenbergMarquardt::with_config(config.clone());
+        solver.update_damping(0.9, false);
+        assert!(
+            (solver.damping - 10.0).abs() < 1e-12,
+            "got λ = {}",
+            solver.damping
+        );
+
+        // Accepted but mediocre (between min and good) → λ unchanged
+        let mut solver = LevenbergMarquardt::with_config(config.clone());
+        solver.update_damping(0.5, true);
+        assert!(
+            (solver.damping - 1.0).abs() < 1e-12,
+            "got λ = {}",
+            solver.damping
+        );
+    }
+
+    /// Nielsen is the default and is unaffected by the Marquardt factors.
+    #[test]
+    fn nielsen_policy_ignores_the_marquardt_factors() {
+        let base = LevenbergMarquardtConfig::new()
+            .with_damping(1.0)
+            .with_damping_bounds(1e-15, 1e15);
+
+        let mut default_solver = LevenbergMarquardt::with_config(base.clone());
+        default_solver.update_damping(0.9, true);
+
+        let mut retuned_solver =
+            LevenbergMarquardt::with_config(base.with_damping_factors(1e6, 1e-6));
+        retuned_solver.update_damping(0.9, true);
+
+        assert!(
+            (default_solver.damping - retuned_solver.damping).abs() < 1e-15,
+            "Nielsen must ignore damping_increase/decrease_factor, but λ differed: \
+             {} vs {}",
+            default_solver.damping,
+            retuned_solver.damping
+        );
+    }
+
+    /// λ and ν are run state, so a second `optimize()` reproduces the first.
+    ///
+    /// Before they were separated from the config, the second call inherited the
+    /// λ the first run ended on and silently produced a different answer.
+    #[test]
+    fn repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(100),
+        );
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
+    }
+
+    /// `max_condition_number` terminates on a variable no residual constrains.
+    ///
+    /// The unconstrained variable contributes an all-zero Jacobian column, so
+    /// the condition-number lower bound is infinite and the check fires.
+    #[test]
+    fn max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        // Nothing references this variable, so its column of J is empty.
+        let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+
+        let result = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            OptimizationStatus::IllConditionedJacobian,
+            "an unconstrained variable should trip the conditioning check"
+        );
+        Ok(())
+    }
+
+    /// Without the check, the same unconstrained variable surfaces as an opaque
+    /// linear-algebra failure from deep inside the solver.
+    ///
+    /// This is what `max_condition_number` buys: the diagnosis moves from
+    /// "JᵀJ has structurally empty diagonal entries" — which names an internal
+    /// data structure, not the user's mistake — to a typed status naming an
+    /// ill-conditioned Jacobian.
+    #[test]
+    fn without_the_check_an_unconstrained_variable_is_an_opaque_error() {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+
+        let outcome = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new().with_max_iterations(10),
+        )
+        .optimize(&mut problem);
+
+        assert!(
+            outcome.is_err(),
+            "expected the un-checked path to fail somewhere in the linear solver"
+        );
+    }
+
+    /// The check stays out of the way on a well-conditioned problem.
+    #[test]
+    fn max_condition_number_does_not_fire_on_a_healthy_problem() -> TestResult {
+        let mut healthy_problem = rosenbrock_problem();
+        let healthy = LevenbergMarquardt::with_config(
+            LevenbergMarquardtConfig::new()
+                .with_max_iterations(100)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut healthy_problem)?;
+        assert_ne!(
+            healthy.status,
+            OptimizationStatus::IllConditionedJacobian,
+            "a well-conditioned problem must not trip the check"
+        );
+        Ok(())
     }
 
     #[test]
@@ -1411,9 +1806,14 @@ mod tests {
         let cfg = LevenbergMarquardtConfig::default();
         assert_eq!(cfg.max_iterations, 50);
         assert!((cfg.cost_tolerance - 1e-6).abs() < 1e-15);
-        assert!((cfg.damping - 1e-3).abs() < 1e-15);
+        assert!((cfg.damping - 1e-4).abs() < 1e-15);
         assert!(!cfg.use_jacobi_scaling);
         assert!(!cfg.compute_covariances);
+        // Ceres' min_lm_diagonal / max_lm_diagonal.
+        assert!((cfg.min_diagonal - 1e-6).abs() < 1e-15);
+        assert!((cfg.max_diagonal - 1e32).abs() < 1e17);
+        assert!((cfg.min_relative_decrease - 1e-3).abs() < 1e-15);
+        assert_eq!(cfg.damping_update, DampingUpdate::Nielsen);
     }
 
     #[test]
@@ -1668,34 +2068,31 @@ mod tests {
     // update_damping() direct unit tests
     // -------------------------------------------------------------------------
 
-    /// `update_damping(rho > 0)` should accept the step, decrease damping, and reset nu.
+    /// Nielsen: an accepted step decreases λ and resets ν.
     #[test]
     fn test_update_damping_accepted_step() {
         let cfg = LevenbergMarquardtConfig::new()
             .with_damping(1e-2)
             .with_damping_bounds(1e-15, 1e15);
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let initial_damping = solver.config.damping;
+        let initial_damping = solver.damping;
 
-        // rho = 0.8 > 0 → accepted branch
-        let accepted = solver.update_damping(0.8);
+        solver.update_damping(0.8, true);
 
-        assert!(accepted, "rho > 0 should return true (step accepted)");
         assert!(
-            solver.config.damping < initial_damping,
+            solver.damping < initial_damping,
             "accepted step should decrease damping: {} < {}",
-            solver.config.damping,
+            solver.damping,
             initial_damping
         );
-        // damping_nu should be reset to 2.0 on acceptance
         assert!(
-            (solver.config.damping_nu - 2.0).abs() < 1e-15,
+            (solver.damping_nu - 2.0).abs() < 1e-15,
             "damping_nu should be reset to 2.0 after accepted step, got {}",
-            solver.config.damping_nu
+            solver.damping_nu
         );
     }
 
-    /// `update_damping(rho <= 0)` should reject the step, increase damping, and double nu.
+    /// Nielsen: a rejected step increases λ and doubles ν.
     #[test]
     fn test_update_damping_rejected_step() {
         let cfg = LevenbergMarquardtConfig::new()
@@ -1703,24 +2100,21 @@ mod tests {
             .with_damping_bounds(1e-15, 1e15);
         let initial_nu = cfg.damping_nu; // default 2.0
         let mut solver = LevenbergMarquardt::with_config(cfg);
-        let initial_damping = solver.config.damping;
+        let initial_damping = solver.damping;
 
-        // rho = -0.5 <= 0 → rejected branch
-        let rejected = solver.update_damping(-0.5);
+        solver.update_damping(-0.5, false);
 
-        assert!(!rejected, "rho <= 0 should return false (step rejected)");
         assert!(
-            solver.config.damping > initial_damping,
+            solver.damping > initial_damping,
             "rejected step should increase damping: {} > {}",
-            solver.config.damping,
+            solver.damping,
             initial_damping
         );
-        // damping_nu doubles on rejection
         assert!(
-            (solver.config.damping_nu - initial_nu * 2.0).abs() < 1e-15,
+            (solver.damping_nu - initial_nu * 2.0).abs() < 1e-15,
             "damping_nu should double on rejected step: expected {}, got {}",
             initial_nu * 2.0,
-            solver.config.damping_nu
+            solver.damping_nu
         );
     }
 
