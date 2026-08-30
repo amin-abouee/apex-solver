@@ -1,8 +1,8 @@
-<div align="center">
+<div align="left">
 
   <table>
     <tr>
-      <td align="center" width="150">
+      <td align="left" width="150">
         <img src="assets/logo.png" alt="Apex Solver Logo" width="130" />
       </td>
       <td align="left" valign="middle">
