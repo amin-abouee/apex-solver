@@ -47,11 +47,19 @@ jobs:
 
       - name: Aggregate site
         run: |
-          mkdir -p site
-          cp -r doc/cookbook/book/html/* site/
-          cp -r crates/apex-manifolds/doc/cookbook/book/html site/manifolds
-          cp -r crates/apex-camera-models/doc/cookbook/book/html site/camera-models
-          cp -r crates/apex-io/doc/cookbook/book/html site/io
+          # mdBook 0.5 writes HTML directly into build-dir; 0.4 used a html/
+          # subdirectory. Handle both so the workflow survives mdbook bumps.
+          copy_book() {
+            src="$1"
+            if [ -d "$src/html" ]; then src="$src/html"; fi
+            mkdir -p "$2"
+            cp -r "$src/." "$2/"
+          }
+          copy_book doc/cookbook/book site
+          copy_book crates/apex-manifolds/doc/cookbook/book site/manifolds
+          copy_book crates/apex-camera-models/doc/cookbook/book site/camera-models
+          copy_book crates/apex-io/doc/cookbook/book site/io
+          ls site | head
 
       - name: Configure Pages
         uses: actions/configure-pages@v5
