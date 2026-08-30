@@ -19,7 +19,7 @@
   [![Security Audit](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/audit.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/audit.yml)
   [![Coverage](https://img.shields.io/codecov/c/github/amin-abouee/apex-solver?style=flat-square&logo=codecov)](https://codecov.io/gh/amin-abouee/apex-solver)
   ![Platform Support](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%7C%2024.04%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)
-  ![Rust Version](https://img.shields.io/badge/Rust-1.85%2B-orange?style=flat-square&logo=rust)
+  ![Rust Version](https://img.shields.io/badge/Rust-1.93%2B-orange?style=flat-square&logo=rust)
 
   **Package & Docs**
 
