@@ -1,12 +1,40 @@
-# 🦀 Apex Solver
+<div align="center">
+
+  <img src="assets/logo.png" alt="Apex Solver Logo" width="140" />
+
+  # Apex Solver
+
+  **A high-performance Rust library for nonlinear least squares optimization in SLAM & Computer Vision.**
+
+  [![Crates.io Version](https://img.shields.io/crates/v/apex-solver.svg?style=flat-square&logo=rust)](https://crates.io/crates/apex-solver)
+  [![Docs.rs](https://img.shields.io/docsrs/apex-solver?style=flat-square&logo=docsdotrs)](https://docs.rs/apex-solver)
+  [![CI Build](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/ci.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/ci.yml)
+  [![Clippy](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/clippy.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/clippy.yml)
+  [![Security Audit](https://img.shields.io/github/actions/workflow/status/amin-abouee/apex-solver/audit.yml?branch=main&style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/actions/workflows/audit.yml)
+  [![Coverage](https://img.shields.io/codecov/c/github/amin-abouee/apex-solver?style=flat-square&logo=codecov)](https://codecov.io/gh/amin-abouee/apex-solver)
+  ![Platform Support](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%7C%2024.04%20%7C%20macOS%20%7C%20Windows-blue?style=flat-square)
+  ![Rust Version](https://img.shields.io/badge/Rust-1.85%2B-orange?style=flat-square&logo=rust)
+  [![unsafe forbidden](https://img.shields.io/badge/unsafe_code-forbidden-success?style=flat-square)](https://github.com/rust-secure-code/safety-dance/)
+  [![License](https://img.shields.io/badge/license-Apache--2.0-green?style=flat-square)](LICENSE)
+
+  [![Cookbook](https://img.shields.io/badge/docs-cookbooks-blueviolet?style=flat-square&logo=gitbook&logoColor=white)](https://amin-abouee.github.io/apex-solver/)
+  [![Examples](https://img.shields.io/badge/examples-runnable-brightgreen?style=flat-square&logo=rust)](examples/)
+  [![Benchmarks](https://img.shields.io/badge/benchmarks-Criterion.rs-blue?style=flat-square&logo=rust)](benches/)
+  [![Visualization: Rerun](https://img.shields.io/badge/viz-Rerun%20integrated-purple?style=flat-square)](https://rerun.io)
+  [![Powered by: faer](https://img.shields.io/badge/backend-faer%20%7C%20nalgebra-informational?style=flat-square)](https://github.com/sarah-ek/faer-rs)
+
+  [![GitHub Stars](https://img.shields.io/github/stars/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/stargazers)
+  [![GitHub Forks](https://img.shields.io/github/forks/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/network/members)
+  [![GitHub last commit](https://img.shields.io/github/last-commit/amin-abouee/apex-solver?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/commits/main)
+  [![Lines of Code](https://img.shields.io/tokei/lines/github/amin-abouee/apex-solver?style=flat-square)](https://github.com/amin-abouee/apex-solver)
+  [![Recent Downloads](https://img.shields.io/crates/dr/apex-solver?label=recent%20downloads&style=flat-square)](https://crates.io/crates/apex-solver)
+  [![Discussions](https://img.shields.io/badge/GitHub-Discussions-blue?style=flat-square&logo=github)](https://github.com/amin-abouee/apex-solver/discussions)
+
+</div>
 
 A high-performance Rust-based nonlinear least squares optimization library designed for computer vision applications including bundle adjustment, SLAM, and pose graph optimization. Built with focus on zero-cost abstractions, memory safety, and mathematical correctness.
 
 Apex Solver is a comprehensive optimization library that bridges the gap between theoretical robotics and practical implementation. It provides manifold-aware optimization for Lie groups commonly used in computer vision, multiple optimization algorithms with unified interfaces, flexible linear algebra backends supporting both sparse Cholesky and QR decompositions, and industry-standard file format support for seamless integration with existing workflows.
-
-[![Crates.io](https://img.shields.io/crates/v/apex-solver.svg)](https://crates.io/crates/apex-solver)
-[![Documentation](https://docs.rs/apex-solver/badge.svg)](https://docs.rs/apex-solver)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 
 ## ⚠️ Upgrading to 1.4.0 — breaking API changes
 
