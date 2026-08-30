@@ -44,6 +44,9 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           files: lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
-        # Tokenless upload works for public repositories; set the CODECOV_TOKEN
-        # repository secret for higher rate limits and authenticated reports.
+        # The repository upload token comes from the CODECOV_TOKEN secret
+        # (codecov.io → apex-solver → Settings). Tokenless uploads are
+        # rate-limited and typically rejected, so the badge stays "unknown"
+        # until the secret is set and the workflow re-runs.
