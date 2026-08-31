@@ -1227,8 +1227,15 @@ impl LevenbergMarquardt {
 
     /// Run optimization, dispatching based on `problem.jacobian_mode`.
     ///
-    /// - `JacobianMode::Dense` → always uses `DenseCholeskySolver`
-    /// - `JacobianMode::Sparse` → uses the solver selected by `config.linear_solver_type`
+    /// - `JacobianMode::Dense` → `DenseCholesky` or `DenseQR`
+    /// - `JacobianMode::Sparse` → `SparseCholesky`, `SparseQR` or
+    ///   `SparseSchurComplement`
+    ///
+    /// A solver that does not match the problem's Jacobian mode is rejected
+    /// with [`OptimizerError::InvalidParameters`] rather than silently replaced,
+    /// matching Gauss-Newton and Dog Leg. Previously a mismatch ran Cholesky in
+    /// the problem's own mode, so the solver actually used could differ from the
+    /// configured one with no signal.
     pub fn optimize(&mut self, problem: &mut Problem) -> crate::optimizer::OptimizeResult {
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
@@ -1236,10 +1243,15 @@ impl LevenbergMarquardt {
                     let mut solver = DenseQRSolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
-                _ => {
+                LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
+                other => Err(OptimizerError::InvalidParameters(format!(
+                    "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky and \
+                     DenseQR only; requested {other}"
+                ))
+                .into()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
@@ -1266,10 +1278,15 @@ impl LevenbergMarquardt {
                         })?;
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
-                _ => {
+                LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
+                other => Err(OptimizerError::InvalidParameters(format!(
+                    "Levenberg-Marquardt in sparse Jacobian mode supports SparseCholesky, \
+                     SparseQR and SparseSchurComplement only; requested {other}"
+                ))
+                .into()),
             },
         }
     }
@@ -2008,8 +2025,11 @@ mod tests {
         problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
         problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
 
-        // Default linear solver type (SparseCholesky) with Dense mode → DenseCholeskySolver
-        let cfg = LevenbergMarquardtConfig::new().with_max_iterations(100);
+        // The solver must match the problem's mode; a mismatch is now an error
+        // rather than a silent substitution, so ask for DenseCholesky by name.
+        let cfg = LevenbergMarquardtConfig::new()
+            .with_linear_solver_type(LinearSolverType::DenseCholesky)
+            .with_max_iterations(100);
         let mut solver = LevenbergMarquardt::with_config(cfg);
         let result = solver.optimize(&mut problem)?;
         assert!(
@@ -2186,6 +2206,81 @@ mod tests {
             count, 1,
             "on_optimization_complete should be called exactly once"
         );
+        Ok(())
+    }
+
+    /// A solver that does not match the problem's Jacobian mode must be
+    /// rejected, not silently swapped for Cholesky.
+    ///
+    /// Regression for the `_ =>` arms that made LM the only optimizer to
+    /// coerce a mismatch in silence.
+    #[test]
+    fn test_lm_rejects_solver_mode_mismatch() {
+        fn rosenbrock(mode: JacobianMode) -> Problem {
+            let mut problem = Problem::new(mode);
+            let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+            let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+            problem
+        }
+
+        // Dense problem, sparse solvers requested.
+        for solver_type in [
+            LinearSolverType::SparseCholesky,
+            LinearSolverType::SparseQR,
+            LinearSolverType::SparseSchurComplement,
+        ] {
+            let mut problem = rosenbrock(JacobianMode::Dense);
+            let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
+            let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
+                panic!("dense problem must reject sparse solver {solver_type}");
+            };
+            assert!(
+                err.to_string().contains("dense Jacobian mode"),
+                "unexpected error for {solver_type}: {err}"
+            );
+        }
+
+        // Sparse problem, dense solvers requested.
+        for solver_type in [
+            LinearSolverType::DenseCholesky,
+            LinearSolverType::DenseQR,
+        ] {
+            let mut problem = rosenbrock(JacobianMode::Sparse);
+            let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
+            let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
+                panic!("sparse problem must reject dense solver {solver_type}");
+            };
+            assert!(
+                err.to_string().contains("sparse Jacobian mode"),
+                "unexpected error for {solver_type}: {err}"
+            );
+        }
+    }
+
+    /// Every matching mode/solver pair must still run.
+    #[test]
+    fn test_lm_accepts_matching_solver_modes() -> TestResult {
+        for (mode, solver_type) in [
+            (JacobianMode::Dense, LinearSolverType::DenseCholesky),
+            (JacobianMode::Dense, LinearSolverType::DenseQR),
+            (JacobianMode::Sparse, LinearSolverType::SparseCholesky),
+            (JacobianMode::Sparse, LinearSolverType::SparseQR),
+        ] {
+            let mut problem = Problem::new(mode);
+            let x1 = problem.add_variable(ManifoldType::RN, dvector![-1.2]);
+            let x2 = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+            problem.add_residual_block(&[x1, x2], Box::new(RosenbrockFactor1), None);
+            problem.add_residual_block(&[x1], Box::new(RosenbrockFactor2), None);
+
+            let config = LevenbergMarquardtConfig::new()
+                .with_max_iterations(50)
+                .with_linear_solver_type(solver_type);
+            LevenbergMarquardt::with_config(config)
+                .optimize(&mut problem)
+                .map_err(|e| format!("{mode:?} + {solver_type} should be accepted: {e}"))?;
+        }
         Ok(())
     }
 }
