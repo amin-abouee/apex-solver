@@ -87,16 +87,25 @@ impl Display for RnTangent {
 }
 
 impl Rn {
-    /// Space dimension - dimension of the ambient space that the group acts on
-    /// Note: For Rⁿ this is dynamic and determined at runtime
+    /// Sentinel: Rⁿ has no compile-time ambient dimension. The runtime value
+    /// is the data length; gate any branch with [`Rn::is_dynamic`].
+    #[deprecated(
+        note = "Rn is dynamic: this const is the 0 sentinel, not a dimension. Use is_dynamic() and tangent_dim()."
+    )]
     pub const DIM: usize = 0;
 
-    /// Degrees of freedom - dimension of the tangent space
-    /// Note: For Rⁿ this is dynamic and determined at runtime
+    /// Sentinel: Rⁿ has no compile-time DOF. The runtime value comes from
+    /// `tangent_dim()`.
+    #[deprecated(
+        note = "Rn is dynamic: this const is the 0 sentinel, not a DOF. Use tangent_dim()."
+    )]
     pub const DOF: usize = 0;
 
-    /// Representation size - size of the underlying data representation
-    /// Note: For Rⁿ this is dynamic and determined at runtime
+    /// Sentinel: Rⁿ has no compile-time representation size. The runtime
+    /// value is the data length.
+    #[deprecated(
+        note = "Rn is dynamic: this const is the 0 sentinel, not a size. Use as_param_slice().len()."
+    )]
     pub const REP_SIZE: usize = 0;
 
     /// Get the identity element of the group.

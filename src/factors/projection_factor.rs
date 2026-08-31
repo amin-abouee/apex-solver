@@ -339,6 +339,17 @@ where
     /// cheirality — that pushes the optimizer back toward `z_cam > min_z`.
     /// The intrinsics block is left at zero: `z_cam` does not depend on the
     /// intrinsic parameters.
+    ///
+    /// # Rank property (deliberate)
+    ///
+    /// Both rows carry the same scalar penalty, so their Jacobian rows are
+    /// identical and the block is rank-1. This is exact — the residual *is*
+    /// the same scalar in both rows — and intentional: the factor's row
+    /// layout is fixed at 2 rows per observation, and a violating point
+    /// contributes one scalar constraint however it is laid out. Under LM
+    /// damping the resulting singular normal block is harmless; under plain
+    /// Gauss–Newton a solve made only of cheirality blocks would be
+    /// rank-deficient by construction.
     #[allow(clippy::too_many_arguments)]
     fn write_cheirality_penalty(
         &self,

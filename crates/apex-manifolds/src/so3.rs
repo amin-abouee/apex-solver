@@ -373,7 +373,10 @@ impl LieGroup for SO3 {
 
             two_angle / sin_angle
         } else {
-            2.0
+            // Small-angle branch. The sign still matters near the double
+            // cover: for w < 0 the rotation is by −s (mod 2π), so the
+            // coefficient mirrors the large-angle atan2 negation above.
+            if q.w < 0.0 { -2.0 } else { 2.0 }
         };
 
         let axis_angle = SO3Tangent::new(Vector3::new(
@@ -1597,6 +1600,44 @@ mod tests {
             assert!(
                 (tangent.data - recovered.data).norm() < 1e-10,
                 "SO3 exp-log round-trip failed for angle = {angle}"
+            );
+        }
+    }
+
+    /// Regression test for the small-angle sign: for w < 0 the rotation is
+    /// by −s (mod 2π), so log must return −s, not +s. The old small-angle
+    /// branch returned +2 unconditionally and got this wrong for |s| < 2e-5.
+    #[test]
+    fn test_so3_log_negative_w_small_angle_sign() {
+        let cases = [1e-5_f64, 1e-6, 1e-7];
+        for &s in &cases {
+            // Rotation by 2π − s: the quaternion is (−cos(s/2), 0, 0, sin(s/2))
+            // — the double-cover partner with w < 0 — and represents the same
+            // physical rotation as −s, so log must return −s.
+            let q = SO3::from_quaternion_wxyz(-(s / 2.0).cos(), 0.0, 0.0, (s / 2.0).sin());
+            assert!(
+                q.unit_quaternion().quaternion().w < 0.0,
+                "fixture must exercise the negative-w branch"
+            );
+            let log = q.log(None);
+            let expected = Vector3::new(0.0, 0.0, -s);
+            assert!(
+                (log.data - expected).norm() < 1e-9,
+                "log of the w<0 rotation by -{s} must be -{s} in z, got {log}"
+            );
+            // exp(log(g)) must return the same ROTATION. exp canonicalizes
+            // the quaternion sign (w >= 0 for |theta| <= pi), so the correct
+            // criterion is matrix equality, not quaternion components: ±q are
+            // the same SO(3) element.
+            let round_trip = log.exp(None);
+            let rm_g = q.unit_quaternion().to_rotation_matrix().into_inner();
+            let rm_rt = round_trip
+                .unit_quaternion()
+                .to_rotation_matrix()
+                .into_inner();
+            assert!(
+                (rm_g - rm_rt).norm() < 1e-12,
+                "exp(log(g)) != g for w<0 near identity at s = {s}"
             );
         }
     }

@@ -15,6 +15,7 @@ use crate::{
     core::{
         CoreError, FactorKey, VarKey,
         loss_functions::LossFunction,
+        noise::NoiseModel,
         residual_block::ResidualBlock,
         variable::{ManifoldVariable, Variable},
     },
@@ -79,8 +80,44 @@ impl Problem {
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> FactorKey {
-        self.try_add_residual_block(variable_keys, factor, loss_func)
+        self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
+    }
+
+    /// Register a residual block with a measurement noise model, keeping the
+    /// validation behaviour of [`Self::try_add_residual_block`].
+    ///
+    /// The model carries the square-root information `S`; residuals and
+    /// Jacobians are whitened (`S·r`, `S·J`) before the robust-loss corrector,
+    /// so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted
+    /// objective g2o-style benchmarks report. Its dimension must equal the
+    /// factor's `residual_dim()`.
+    pub fn add_residual_block_with_noise(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> FactorKey {
+        self.try_add_residual_block_with_noise(variable_keys, factor, loss_func, noise)
             .unwrap_or_else(|e| panic!("invalid residual block: {e}"))
+    }
+
+    /// [`Self::add_residual_block_with_noise`] returning a typed error.
+    pub fn try_add_residual_block_with_noise(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> CoreResult<FactorKey> {
+        if noise.dim() != 0 && noise.dim() != factor.residual_dim() {
+            return Err(CoreError::DimensionMismatch(format!(
+                "noise model covers {} residual rows but the factor produces {}",
+                noise.dim(),
+                factor.residual_dim()
+            )));
+        }
+        self.try_add_residual_block_impl(variable_keys, factor, loss_func, noise)
     }
 
     /// Register a residual block, validating it against the referenced
@@ -97,6 +134,16 @@ impl Problem {
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
+    ) -> CoreResult<FactorKey> {
+        self.try_add_residual_block_impl(variable_keys, factor, loss_func, NoiseModel::Null)
+    }
+
+    fn try_add_residual_block_impl(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
         let mut variables: Vec<&dyn ManifoldVariable> = Vec::with_capacity(variable_keys.len());
         for &key in variable_keys {
@@ -118,7 +165,7 @@ impl Problem {
         let new_residual_dimension = factor.residual_dim();
         let row_start = self.total_residual_dimension;
         let fk = self.residual_blocks.insert_with_key(|fk| {
-            ResidualBlock::new(fk, row_start, variable_keys, factor, loss_func)
+            ResidualBlock::with_noise(fk, row_start, variable_keys, factor, loss_func, noise)
         });
         self.total_residual_dimension += new_residual_dimension;
         Ok(fk)
@@ -492,9 +539,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 
@@ -554,9 +599,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE3>::new(SE3::identity())),
             None,
         );
 
@@ -624,9 +667,7 @@ mod tests {
         );
         let fk2 = p.add_residual_block(
             &[k0],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 

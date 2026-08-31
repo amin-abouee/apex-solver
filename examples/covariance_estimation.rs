@@ -55,9 +55,7 @@ fn main() {
     // example fixes the gauge properly.
     problem.add_residual_block(
         &[x0],
-        Box::new(PriorFactor {
-            data: dvector![0.0, 0.0, 0.0],
-        }),
+        Box::new(PriorFactor::<SE2>::new(SE2::identity())),
         None,
     );
 
