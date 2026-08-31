@@ -286,6 +286,11 @@ impl LieGroup for Rn {
         jacobian_self: Option<&mut Self::JacobianMatrix>,
         jacobian_vector: Option<&mut Matrix3<f64>>,
     ) -> Vector3<f64> {
+        debug_assert_eq!(
+            self.data.len(),
+            3,
+            "Rn::act is the translation action on R³ and is only defined for Rn(3)"
+        );
         if let Some(jac_self) = jacobian_self {
             *jac_self = DMatrix::identity(3, 3);
         }
@@ -324,6 +329,17 @@ impl LieGroup for Rn {
     fn zero_jacobian() -> Self::JacobianMatrix {
         // Default to 3D zero matrix for compatibility
         DMatrix::zeros(3, 3)
+    }
+
+    /// Identity sized from this element's runtime dimension.
+    ///
+    /// `Rn` is dynamically sized, so the associated
+    /// [`jacobian_identity`](LieGroup::jacobian_identity) cannot produce a
+    /// conformant block — it returns 3×3 for every dimension. Chain-rule
+    /// products built from it (e.g. `BetweenFactor<Rn>` via the default
+    /// [`LieGroup::between`]) then panic in nalgebra for any `dim != 3`.
+    fn jacobian_identity_for(&self) -> Self::JacobianMatrix {
+        Rn::jacobian_identity_with_dim(self.dim())
     }
 
     fn normalize(&mut self) {

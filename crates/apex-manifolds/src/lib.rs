@@ -259,6 +259,21 @@ pub trait LieGroup: Clone + PartialEq {
     /// This is used to initialize Jacobian matrices before optimization computations.
     fn zero_jacobian() -> Self::JacobianMatrix;
 
+    /// Identity Jacobian sized for *this element's* tangent space.
+    ///
+    /// [`Self::jacobian_identity`] is an associated function, so it cannot see
+    /// the runtime dimension of a dynamically sized manifold — `Rn` has to
+    /// guess, and guesses wrong for every dimension but one. Any operation that
+    /// needs an identity block conformant with a concrete element must use this
+    /// method instead.
+    ///
+    /// The default forwards to [`Self::jacobian_identity`], which is correct for
+    /// every fixed-size group (SE2, SE3, SO2, SO3, Sim3, SE23, SGal3); `Rn`
+    /// overrides it with its runtime dimension.
+    fn jacobian_identity_for(&self) -> Self::JacobianMatrix {
+        Self::jacobian_identity()
+    }
+
     /// Normalize/project the element to the manifold.
     ///
     /// Ensures the element satisfies manifold constraints (e.g., orthogonality for rotations).
@@ -446,7 +461,10 @@ pub trait LieGroup: Clone + PartialEq {
         }
 
         if let Some(jac_other) = jacobian_other {
-            *jac_other = Self::jacobian_identity();
+            // Sized from `self`, not from the type: `other` shares this
+            // element's tangent dimension, and for dynamically sized manifolds
+            // the type alone cannot supply it.
+            *jac_other = self.jacobian_identity_for();
         }
 
         result

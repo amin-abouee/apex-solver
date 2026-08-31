@@ -228,6 +228,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use apex_manifolds::rn::Rn;
     use apex_manifolds::se2::{SE2, SE2Tangent};
     use apex_manifolds::se3::SE3;
     use apex_manifolds::so2::SO2;
@@ -270,6 +271,83 @@ mod tests {
         );
         let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
         (residual, jacobian)
+    }
+
+    /// `BetweenFactor<Rn>` is a documented supported combination, but `Rn` is
+    /// dynamically sized, so its Jacobian blocks must follow the element's
+    /// runtime dimension rather than a hardcoded 3×3.
+    ///
+    /// Regression for the dimension-mismatch panic inside `linearize`.
+    #[test]
+    fn test_between_factor_rn_jacobian_matches_dimension() -> TestResult {
+        for dim in [1usize, 2, 3, 4, 7] {
+            let relative = Rn::from_slice(&vec![0.25f64; dim]);
+            let factor = BetweenFactor::new(relative);
+
+            let pose_i = DVector::from_vec(vec![0.0f64; dim]);
+            let pose_j = DVector::from_vec(vec![1.0f64; dim]);
+
+            let (rows, cols) = factor.jacobian_shape();
+            assert_eq!(rows, dim, "residual rows for Rn({dim})");
+            assert_eq!(cols, 2 * dim, "jacobian cols for Rn({dim})");
+
+            let (residual, jacobian) = compute_with_jacobian(&factor, &pose_i, &pose_j);
+            assert_eq!(residual.len(), dim);
+            assert_eq!(jacobian.nrows(), dim);
+            assert_eq!(jacobian.ncols(), 2 * dim);
+            assert!(
+                jacobian.iter().all(|v| v.is_finite()),
+                "non-finite Jacobian entry for Rn({dim})"
+            );
+        }
+        Ok(())
+    }
+
+    /// The Rⁿ between-factor residual is `(x_i - x_j) + measurement`, and the
+    /// Jacobian blocks are ∓I. Verified against finite differences so the
+    /// dimension fix cannot silently produce a wrong-but-well-shaped block.
+    #[test]
+    fn test_between_factor_rn_jacobian_matches_finite_differences() -> TestResult {
+        for dim in [2usize, 4] {
+            let relative = Rn::from_slice(&vec![0.5f64; dim]);
+            let factor = BetweenFactor::new(relative);
+
+            let pose_i = DVector::from_vec((0..dim).map(|k| 0.1 * k as f64).collect::<Vec<_>>());
+            let pose_j = DVector::from_vec((0..dim).map(|k| 1.0 - 0.2 * k as f64).collect::<Vec<_>>());
+
+            let (_, analytic) = compute_with_jacobian(&factor, &pose_i, &pose_j);
+
+            for (block, pose) in [(0usize, &pose_i), (1usize, &pose_j)] {
+                for c in 0..dim {
+                    let mut plus = pose.clone();
+                    let mut minus = pose.clone();
+                    plus[c] += FD_EPSILON;
+                    minus[c] -= FD_EPSILON;
+
+                    let (rp, rm) = if block == 0 {
+                        (
+                            compute_residual(&factor, &plus, &pose_j),
+                            compute_residual(&factor, &minus, &pose_j),
+                        )
+                    } else {
+                        (
+                            compute_residual(&factor, &pose_i, &plus),
+                            compute_residual(&factor, &pose_i, &minus),
+                        )
+                    };
+
+                    for r in 0..dim {
+                        let fd = (rp[r] - rm[r]) / (2.0 * FD_EPSILON);
+                        let an = analytic[(r, block * dim + c)];
+                        assert!(
+                            (fd - an).abs() < 1e-6,
+                            "Rn({dim}) block {block} entry ({r},{c}): analytic {an}, fd {fd}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]
