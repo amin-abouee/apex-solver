@@ -254,9 +254,36 @@ fn dimension_mismatch_is_rejected() -> TestResult {
 }
 
 #[test]
-fn non_positive_information_is_rejected() {
+fn non_positive_information_is_rejected() -> TestResult {
     assert!(NoiseModel::from_sigmas(&[1.0, 0.0]).is_err());
     assert!(NoiseModel::from_sigmas(&[-1.0]).is_err());
-    let singular = DMatrix::zeros(2, 2);
-    assert!(NoiseModel::from_information(singular).is_err());
+
+    // Rank-deficient (all-zero) Ω is ACCEPTED by design: rank-deficient
+    // directions whiten to zero (they carry no information) — this is what
+    // makes real g2o graphs with partially-unobserved DOFs usable.
+    let zero_block = NoiseModel::from_information(DMatrix::zeros(2, 2)).expect("PSD ok");
+    match &zero_block {
+        NoiseModel::Dense(m) => assert!(m.iter().all(|v| *v == 0.0)),
+        _ => return Err("expected dense model".into()),
+    }
+
+    // Indefinite Ω (negative eigenvalue) is CLAMPED with a warning — matching
+    // g2o/GTSAM behaviour on real datasets: the negative direction carries no
+    // information and whitens to zero.
+    let indefinite =
+        NoiseModel::from_information(DMatrix::from_column_slice(2, 2, &[1.0, 0.0, 0.0, -4.0]))?;
+    match &indefinite {
+        NoiseModel::Dense(m) => {
+            // S must be PSD: all diagonal entries >= 0 for the symmetric sqrt.
+            assert!(m[(0, 0)] >= 0.0 && m[(1, 1)] >= 0.0);
+            let st_s = m.clone() * m;
+            let evals = st_s.symmetric_eigenvalues();
+            assert!(
+                evals.iter().all(|&l| l >= -1e-12),
+                "clamped SᵀS must be PSD: {evals}"
+            );
+        }
+        _ => return Err("expected dense model".into()),
+    }
+    Ok(())
 }

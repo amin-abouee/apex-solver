@@ -602,8 +602,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             // Weight with the edge's information matrix so the optimized
             // objective equals the harness-reported Ω-weighted χ².
             let noise = NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
-                3,
-                3,
+                6,
+                6,
                 edge.information.as_slice(),
             ))
             .unwrap_or_else(|e| panic!("g2o information matrix must be PD: {e:?}"));

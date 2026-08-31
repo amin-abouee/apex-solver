@@ -326,6 +326,7 @@ dependencies = [
  "nalgebra",
  "rand 0.9.5",
  "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]

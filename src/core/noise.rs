@@ -63,8 +63,13 @@ impl NoiseModel {
         Ok(NoiseModel::Diagonal(DVector::from_column_slice(sqrt_info)))
     }
 
-    /// Dense model from an information matrix `Ω`. The square-root factor is
-    /// the lower-triangular Cholesky factor of `Ω`; a non-PD `Ω` is an error.
+    /// Dense model from an information matrix `Ω`.
+    ///
+    /// `Ω` must be symmetric PSD. Real g2o graphs frequently carry
+    /// rank-deficient Ω (unobserved DOFs, e.g. zero roll/pitch information),
+    /// so negative eigenvalues are clamped to zero — the corresponding
+    /// residual directions carry no information and whiten to zero. The
+    /// square root is the symmetric `S = V·√Λ⁺·Vᵀ`, satisfying `SᵀS = Ω`.
     pub fn from_information(info: DMatrix<f64>) -> CoreResult<Self> {
         let n = info.nrows();
         if !info.is_square() || n == 0 {
@@ -77,14 +82,28 @@ impl NoiseModel {
                 "information matrix must be finite".to_string(),
             ));
         }
-        let llt = info.clone().cholesky().ok_or_else(|| {
-            CoreError::InvalidInput("information matrix is not positive definite".to_string())
-        })?;
-        // info = L·Lᵀ with L lower; sqrt-info S = Lᵀ (upper) satisfies SᵀS = Ω.
+        let sym = (&info + &info.transpose()) * 0.5;
+        let se = nalgebra::linalg::SymmetricEigen::new(sym);
+        // Tolerate fp-noise negatives on rank-deficient directions; reject a
+        // genuinely negative eigenvalue — negative information is meaningless.
+        let lam_max = se.eigenvalues.iter().copied().fold(f64::MIN, f64::max);
+        let tol = lam_max.abs() * 1e-9 + 1e-12;
+        if se.eigenvalues.iter().any(|&lam| lam < -tol) {
+            return Err(CoreError::InvalidInput(
+                "information matrix is not positive semidefinite (negative eigenvalue)".to_string(),
+            ));
+        }
         let mut s = DMatrix::zeros(n, n);
-        for c in 0..n {
-            for r in 0..=c {
-                s[(r, c)] = llt.l()[(c, r)];
+        for i in 0..n {
+            let lam = se.eigenvalues[i].max(0.0);
+            if lam == 0.0 {
+                continue;
+            }
+            let root = lam.sqrt();
+            for r in 0..n {
+                for c in 0..n {
+                    s[(r, c)] += root * se.eigenvectors[(r, i)] * se.eigenvectors[(c, i)];
+                }
             }
         }
         Ok(NoiseModel::Dense(s))
