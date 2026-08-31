@@ -225,10 +225,18 @@ pub(crate) fn compute_block_into(
             .linearize(&param_slices, residual_slice, None),
     }
 
+    // Whiten by the block's noise model (r̃ = S·r, J̃ = S·J) BEFORE the robust
+    // corrector, so Triggs math, cost accounting and covariance all see the
+    // weighted problem. Null is a zero-cost no-op.
+    residual_block.noise.whiten_residual(residual_slice);
+    if let Some(buf) = jacobian_buf.as_deref_mut() {
+        residual_block.noise.whiten_jacobian(buf, rows, cols);
+    }
+
     // Apply robust-loss correction in-place: no heap allocation.
     //
     // The corrected residual/Jacobian drive the linear system; the returned
-    // cost is the true robust cost `0.5·ρ(‖r‖²)`, not the corrected norm.
+    // cost is the true robust cost `0.5·ρ(‖S·r‖²)`, not the corrected norm.
     let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
     let cost = if let Some(loss_func) = &residual_block.loss_func {
         let corrector = Corrector::new(loss_func.as_ref(), squared_norm);

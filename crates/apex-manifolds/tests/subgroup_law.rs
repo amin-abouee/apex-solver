@@ -8,20 +8,13 @@
 //! Reference: the defect that motivated this suite (SGal(3)) is documented in
 //! `doc/claude_review/02-confirmed-critical.md` §1.
 
-use apex_manifolds::rn::{Rn, RnTangent};
-use apex_manifolds::se2::SE2;
+use apex_manifolds::rn::RnTangent;
 use apex_manifolds::se2::SE2Tangent;
-use apex_manifolds::se3::SE3;
 use apex_manifolds::se3::SE3Tangent;
-use apex_manifolds::se23::SE23;
 use apex_manifolds::se23::SE23Tangent;
-use apex_manifolds::sgal3::SGal3;
 use apex_manifolds::sgal3::SGal3Tangent;
-use apex_manifolds::sim3::Sim3;
 use apex_manifolds::sim3::Sim3Tangent;
-use apex_manifolds::so2::SO2;
 use apex_manifolds::so2::SO2Tangent;
-use apex_manifolds::so3::SO3;
 use apex_manifolds::so3::SO3Tangent;
 use apex_manifolds::{LieGroup, Tangent};
 use nalgebra::{DVector, Vector3};

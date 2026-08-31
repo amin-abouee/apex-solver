@@ -336,7 +336,7 @@ impl CameraModel for KannalaBrandtCamera {
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
-        let mut ru = (mx * mx + my * my).sqrt();
+        let ru = (mx * mx + my * my).sqrt();
 
         // Out-of-domain guard: pixels whose undistorted radius exceeds the
         // model's valid field of view are REJECTED rather than silently

@@ -9,6 +9,7 @@
 
 pub mod corrector;
 pub mod loss_functions;
+pub mod noise;
 pub mod problem;
 pub mod residual_block;
 pub mod variable;

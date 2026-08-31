@@ -80,7 +80,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::core::{
     CoreResult, FactorKey, VarKey, corrector::Corrector, loss_functions::LossFunction,
-    variable::Variable,
+    noise::NoiseModel, variable::Variable,
 };
 use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
@@ -129,6 +129,9 @@ pub struct ResidualBlock {
     /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
     /// is applied to downweight outliers.
     pub loss_func: Option<Box<dyn LossFunction + Send>>,
+
+    /// Measurement noise model; whitened before the robust-loss corrector.
+    pub noise: NoiseModel,
 }
 
 impl ResidualBlock {
@@ -185,12 +188,34 @@ impl ResidualBlock {
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> Self {
+        Self::with_noise(
+            residual_block_id,
+            residual_row_start_idx,
+            variable_keys,
+            factor,
+            loss_func,
+            NoiseModel::Null,
+        )
+    }
+
+    /// Like [`Self::new`], with a measurement noise model. The whitened
+    /// residual and Jacobian drive both the linear system and the reported
+    /// cost (`½·ρ(‖S·r‖²)`).
+    pub fn with_noise(
+        residual_block_id: FactorKey,
+        residual_row_start_idx: usize,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> Self {
         ResidualBlock {
             residual_block_id,
             residual_row_start_idx,
             variable_keys: variable_keys.to_vec(),
             factor,
             loss_func,
+            noise,
         }
     }
 
@@ -274,6 +299,12 @@ impl ResidualBlock {
             faer::mat::MatMut::from_column_major_slice_mut(&mut jacobian_buf, jac_rows, jac_cols);
         self.factor
             .linearize(&param_slices, &mut residual_buf, Some(jac_mut));
+
+        // Whiten by the noise model before the robust corrector (same
+        // ordering as `compute_block_into`).
+        self.noise.whiten_residual(&mut residual_buf);
+        self.noise
+            .whiten_jacobian(&mut jacobian_buf, jac_rows, jac_cols);
 
         if let Some(loss_func) = self.loss_func.as_ref() {
             let squared_norm: f64 = residual_buf.iter().map(|x| x * x).sum();

@@ -220,11 +220,6 @@ impl Factor for EuclideanPriorFactor {
 }
 
 #[cfg(test)]
-fn T_dbg_zero<T: LieGroup>() -> T::JacobianMatrix {
-    T::zero_jacobian()
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::factors::BetweenFactor;
@@ -315,78 +310,6 @@ mod tests {
         factor.linearize(&[x.as_param_slice()], &mut res_buf, Some(jac_mut));
 
         let fd = fd_jacobian_se3(&factor, &x);
-        if std::env::var("PRIOR_DEBUG").is_ok() {
-            use nalgebra::Matrix3;
-            let eps = 1e-6;
-            let prior_dbg = prior;
-            // FD coupling C (rows 0..3, cols 3..6) via theta perturbation.
-            let mut c_fd = Matrix3::zeros();
-            for k in 0..3 {
-                let mut rho = Vector3::zeros();
-                let mut theta = Vector3::zeros();
-                theta[k] = eps;
-                let sp = SE3Tangent::new(rho, theta);
-                let sm = SE3Tangent::new(-rho, -theta);
-                let tp = prior_dbg
-                    .between(&x.plus(&sp, None, None), None, None)
-                    .log(None);
-                let tm = prior_dbg
-                    .between(&x.plus(&sm, None, None), None, None)
-                    .log(None);
-                for r in 0..3 {
-                    c_fd[(r, k)] = (tp.as_slice()[r] - tm.as_slice()[r]) / (2.0 * eps);
-                }
-            }
-            // FD top-left A via rho perturbation.
-            let mut a_fd = Matrix3::zeros();
-            for k in 0..3 {
-                let mut rho = Vector3::zeros();
-                let mut theta = Vector3::zeros();
-                rho[k] = eps;
-                let sp = SE3Tangent::new(rho, theta);
-                let sm = SE3Tangent::new(-rho, -theta);
-                let tp = prior_dbg
-                    .between(&x.plus(&sp, None, None), None, None)
-                    .log(None);
-                let tm = prior_dbg
-                    .between(&x.plus(&sm, None, None), None, None)
-                    .log(None);
-                for r in 0..3 {
-                    a_fd[(r, k)] = (tp.as_slice()[r] - tm.as_slice()[r]) / (2.0 * eps);
-                }
-            }
-            let d = prior_dbg.between(&x, None, None);
-            let rho_d = d.translation();
-            let so3_d = apex_manifolds::so3::SO3::from_quaternion_wxyz(
-                d.rotation_quaternion().w,
-                d.rotation_quaternion().i,
-                d.rotation_quaternion().j,
-                d.rotation_quaternion().k,
-            );
-            let theta_d = Vector3::from_column_slice(so3_d.log(None).as_slice());
-            let a3 = apex_manifolds::so3::SO3Tangent::new(theta_d).left_jacobian_inv();
-            let a_inv3 = a3.try_inverse().expect("A invertible");
-            let cols = |m: &nalgebra::Matrix3<f64>| {
-                (0..3)
-                    .map(|k| (0..3).map(|r| m[(r, k)]).collect::<Vec<_>>())
-                    .collect::<Vec<_>>()
-            };
-            eprintln!("A_fd:  {:?}", cols(&a_fd));
-            eprintln!("A_inv: {:?}", cols(&a_inv3));
-            eprintln!("A_inv*C_fd: {:?}", cols(&(a_inv3 * c_fd)));
-            eprintln!(
-                "Q(+r,+t):   {:?}",
-                cols(&SE3Tangent::q_block_jacobian_matrix(rho_d, theta_d))
-            );
-            eprintln!(
-                "Q(-r,-t):   {:?}",
-                cols(&SE3Tangent::q_block_jacobian_matrix(-rho_d, -theta_d))
-            );
-            let t_skew = Matrix3::new(
-                0.0, -rho_d.z, rho_d.y, rho_d.z, 0.0, -rho_d.x, -rho_d.y, rho_d.x, 0.0,
-            );
-            eprintln!("skew(rho):  {:?}", cols(&t_skew));
-        }
         for i in 0..rows {
             for k in 0..cols {
                 let analytic = jac_buf[k * rows + i]; // column-major
@@ -487,7 +410,7 @@ mod tests {
 
         let factor = EuclideanPriorFactor::new(DVector::from_element(7, 0.0));
         let err = factor
-            .validate_variables(&[variables.get(key).expect("key").as_ref()])
+            .validate_variables(&[variables.get(key).ok_or("key missing")?.as_ref()])
             .err()
             .ok_or("expected rejection")?;
         assert!(err.contains("Rn"), "rejection must name Rn: {err}");
