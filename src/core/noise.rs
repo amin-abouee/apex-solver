@@ -84,14 +84,19 @@ impl NoiseModel {
         }
         let sym = (&info + &info.transpose()) * 0.5;
         let se = nalgebra::linalg::SymmetricEigen::new(sym);
-        // Tolerate fp-noise negatives on rank-deficient directions; reject a
-        // genuinely negative eigenvalue — negative information is meaningless.
+        // Negative eigenvalues are clamped to zero (matching g2o/GTSAM, whose
+        // pivoting LDLᵀ tolerates indefinite Ω): fp-noise negatives arise on
+        // rank-deficient directions, and some real datasets carry slightly
+        // indefinite Ω. A genuinely large negative is surfaced as a warning —
+        // it means ill-formed measurement information, not a crash.
         let lam_max = se.eigenvalues.iter().copied().fold(f64::MIN, f64::max);
         let tol = lam_max.abs() * 1e-9 + 1e-12;
         if se.eigenvalues.iter().any(|&lam| lam < -tol) {
-            return Err(CoreError::InvalidInput(
-                "information matrix is not positive semidefinite (negative eigenvalue)".to_string(),
-            ));
+            tracing::warn!(
+                "information matrix has a negative eigenvalue (min = {:.3e}); \
+                 clamping to zero — the edge may be ill-formed",
+                se.eigenvalues.iter().copied().fold(f64::MAX, f64::min)
+            );
         }
         let mut s = DMatrix::zeros(n, n);
         for i in 0..n {

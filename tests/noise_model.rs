@@ -261,7 +261,8 @@ fn non_positive_information_is_rejected() -> TestResult {
     // Rank-deficient (all-zero) Ω is ACCEPTED by design: rank-deficient
     // directions whiten to zero (they carry no information) — this is what
     // makes real g2o graphs with partially-unobserved DOFs usable.
-    let zero_block = NoiseModel::from_information(DMatrix::zeros(2, 2)).expect("PSD ok");
+    let zero_block = NoiseModel::from_information(DMatrix::zeros(2, 2))
+        .unwrap_or_else(|e| panic!("PSD must be accepted: {e:?}"));
     match &zero_block {
         NoiseModel::Dense(m) => assert!(m.iter().all(|v| *v == 0.0)),
         _ => return Err("expected dense model".into()),
