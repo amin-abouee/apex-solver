@@ -204,10 +204,15 @@ where
 
     /// Internal evaluation function that writes residuals and Jacobians directly
     /// into the provided buffers — no temporary allocations.
+    /// `landmarks` is a flat column-major `[x0, y0, z0, x1, y1, z1, …]` buffer.
+    ///
+    /// That is the layout of both sources — the optimizer's parameter slice and
+    /// `Matrix3xX::as_slice` — so neither caller has to build an owned matrix
+    /// on the hot path.
     fn evaluate_internal(
         &self,
         pose: &SE3,
-        landmarks: &Matrix3xX<f64>,
+        landmarks: &[f64],
         camera: &CAM,
         residual: &mut [f64],
         mut jacobian: Option<faer::mat::MatMut<'_, f64>>,
@@ -217,7 +222,8 @@ where
         // Process each observation
         for i in 0..n {
             let observation = self.observations.column(i);
-            let p_world = landmarks.column(i).into_owned();
+            let p_world =
+                Vector3::new(landmarks[3 * i], landmarks[3 * i + 1], landmarks[3 * i + 2]);
 
             // Transform point to camera frame
             // World-to-camera convention: pose is T_wc where p_cam = R * p_world + t
@@ -428,36 +434,40 @@ where
             self.fixed_pose.clone().unwrap_or_else(SE3::identity)
         };
 
-        let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
+        // Both landmark sources are already column-major triples, so this
+        // borrows rather than materializing a `Matrix3xX` per call — this
+        // factor is evaluated once per observation per iteration.
+        let landmarks: &[f64] = if OP::LANDMARK {
             let flat = params[param_idx];
-            let n = flat.len() / 3;
             param_idx += 1;
-            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+            flat
         } else {
             self.fixed_landmarks
-                .clone()
-                .unwrap_or_else(|| Matrix3xX::zeros(0))
+                .as_ref()
+                .map_or(&[][..], |fixed| fixed.as_slice())
         };
 
-        let camera: CAM = if OP::INTRINSIC {
-            CAM::try_from(params[param_idx])
-                .ok()
-                .unwrap_or_else(|| self.camera.clone())
+        // Decode intrinsics only when they are being optimized; otherwise (and
+        // on a decode failure) fall back to the constructor-time camera by
+        // reference instead of cloning it.
+        let decoded_camera: Option<CAM> = if OP::INTRINSIC {
+            CAM::try_from(params[param_idx]).ok()
         } else {
-            self.camera.clone()
+            None
         };
+        let camera: &CAM = decoded_camera.as_ref().unwrap_or(&self.camera);
 
         let n = self.observations.ncols();
         debug_assert_eq!(
-            landmarks.ncols(),
-            n,
+            landmarks.len(),
+            3 * n,
             "Number of landmarks ({}) must match observations ({})",
-            landmarks.ncols(),
+            landmarks.len() / 3,
             n
         );
 
         // Write directly into caller-provided buffers — zero temporary allocation.
-        self.evaluate_internal(&pose, &landmarks, &camera, residual, jacobian);
+        self.evaluate_internal(&pose, landmarks, camera, residual, jacobian);
     }
 
     fn residual_dim(&self) -> usize {
