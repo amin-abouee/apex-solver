@@ -915,12 +915,18 @@ impl SparseSchurComplementSolver {
             }
         }
 
-        // Convert dense matrix to sparse (filtering near-zeros)
-        // Use slightly larger threshold to avoid numerical noise issues
-        let mut s_triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
-        for col in 0..cam_size {
-            for row in 0..cam_size {
-                let val = s_dense[row * cam_size + col];
+        // Convert dense matrix to sparse (filtering near-zeros).
+        //
+        // `s_dense` is row-major, so the row index must be the *outer* loop:
+        // iterating columns first strides by `cam_size` on every element and
+        // misses the cache on a buffer that is O(cam_size²).
+        // `try_new_from_triplets` sorts, so the emission order is free.
+        let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
+            Vec::with_capacity(cam_size.saturating_mul(8));
+        for row in 0..cam_size {
+            let row_base = row * cam_size;
+            for col in 0..cam_size {
+                let val = s_dense[row_base + col];
                 if val.abs() > 1e-12 {
                     s_triplets.push(Triplet::new(row, col, val));
                 }
