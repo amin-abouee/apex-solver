@@ -989,10 +989,17 @@ impl LevenbergMarquardt {
     ///
     /// This is the core generic optimization loop. The public `optimize()` method
     /// dispatches to this based on `LinearSolverType`.
+    /// `state` is built once by [`Self::optimize`] and handed over here.
+    ///
+    /// Constructing it clones the variable slotmap, rebuilds the symbolic
+    /// structure, allocates the assembly workspace and runs a full residual and
+    /// cost evaluation, so the Schur path — which needs the variable index map
+    /// to size its block structure — used to pay for all of that twice.
     fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &mut Problem,
         linear_solver: &mut dyn LinearSolver<M>,
+        mut state: crate::optimizer::InitializedState,
     ) -> crate::optimizer::OptimizeResult {
         let start_time = Instant::now();
         let mut iteration = 0;
@@ -1001,9 +1008,6 @@ impl LevenbergMarquardt {
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
         let mut consecutive_rejected = 0;
-
-        // Initialize optimization state
-        let mut state = crate::optimizer::initialize_optimization_state(problem)?;
 
         // Seed the run state from the configuration. λ and ν evolve during the
         // solve; resetting them here keeps `optimize()` idempotent when the same
@@ -1237,15 +1241,21 @@ impl LevenbergMarquardt {
     /// the problem's own mode, so the solver actually used could differ from the
     /// configured one with no signal.
     pub fn optimize(&mut self, problem: &mut Problem) -> crate::optimizer::OptimizeResult {
+        // Built once here and moved into the chosen arm: the Schur solver needs
+        // the variable index map to size its block structure, and rebuilding
+        // the state inside `optimize_with_mode` would repeat the symbolic
+        // construction and the initial cost evaluation.
+        let state = crate::optimizer::initialize_optimization_state(problem)?;
+
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
                 LinearSolverType::DenseQR => {
                     let mut solver = DenseQRSolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 other => Err(OptimizerError::InvalidParameters(format!(
                     "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky and \
@@ -1256,10 +1266,9 @@ impl LevenbergMarquardt {
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseSchurComplement => {
-                    let state = crate::optimizer::initialize_optimization_state(problem)?;
                     let mut solver = SparseSchurComplementSolver::new()
                         .with_variant(self.config.schur_variant)
                         .with_preconditioner(self.config.schur_preconditioner);
@@ -1276,11 +1285,11 @@ impl LevenbergMarquardt {
                             ))
                             .log()
                         })?;
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 other => Err(OptimizerError::InvalidParameters(format!(
                     "Levenberg-Marquardt in sparse Jacobian mode supports SparseCholesky, \
