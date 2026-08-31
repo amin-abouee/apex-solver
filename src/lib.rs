@@ -68,7 +68,7 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
-pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
+pub use factors::{BetweenFactor, EuclideanPriorFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
 pub use linalg::{

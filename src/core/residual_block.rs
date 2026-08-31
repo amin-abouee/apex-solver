@@ -302,6 +302,7 @@ mod tests {
         loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
+    use crate::factors::EuclideanPriorFactor;
     use crate::factors::{BetweenFactor, PriorFactor};
     use apex_manifolds::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
@@ -336,9 +337,7 @@ mod tests {
     #[test]
     fn test_residual_block_without_loss() -> TestResult {
         let (fk, keys) = make_keys(1);
-        let factor = Box::new(PriorFactor {
-            data: dvector![0.0, 0.0, 0.0],
-        });
+        let factor = Box::new(EuclideanPriorFactor::new(dvector![0.0, 0.0, 0.0]));
 
         let block = ResidualBlock::new(fk, 3, &keys, factor, None);
 
@@ -405,7 +404,9 @@ mod tests {
     fn test_residual_block_se3_between_factor() -> TestResult {
         let (fk, keys) = make_keys(1);
         let se3_data = dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0];
-        let factor = Box::new(PriorFactor { data: se3_data });
+        let factor = Box::new(PriorFactor::<SE3>::new(SE3::from_param_slice(
+            se3_data.as_slice(),
+        )));
         let block = ResidualBlock::new(fk, 0, &keys, factor, None);
 
         let var0 = Variable::new(SE3::from_translation_quaternion(
@@ -416,9 +417,15 @@ mod tests {
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables)?;
 
-        assert_eq!(residual.len(), 7);
-        assert_eq!(jacobian.nrows(), 7);
-        assert!(jacobian.ncols() == 6 || jacobian.ncols() == 7);
+        // Tangent-space prior: 6-dim residual and Jacobian on the SE(3)
+        // variable (the old ambient prior produced 7 of each).
+        assert_eq!(residual.len(), 6);
+        assert_eq!(jacobian.nrows(), 6);
+        assert_eq!(jacobian.ncols(), 6);
+
+        // Variable is identity-rotation pose at (1, 0.5, 0.2); prior is the
+        // same translation with identity rotation → zero residual.
+        assert!(residual.norm() < 1e-12);
 
         Ok(())
     }
@@ -439,9 +446,7 @@ mod tests {
         let factors: Vec<Box<dyn Factor + Send>> = vec![
             Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
             Box::new(BetweenFactor::new(SE2::from_xy_angle(0.8, 0.2, -0.05))),
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(EuclideanPriorFactor::new(dvector![0.0, 0.0, 0.0])),
         ];
 
         let blocks: Vec<ResidualBlock> = configs

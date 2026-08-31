@@ -133,11 +133,7 @@ fn build_se3_problem(
     if let Some(&first_id) = vertex_ids.first()
         && let Some(v) = graph.vertices_se3.get(&first_id)
     {
-        let q = v.pose.rotation_quaternion();
-        let t = v.pose.translation();
-        let prior = PriorFactor {
-            data: dvector![t.x, t.y, t.z, q.w, q.i, q.j, q.k],
-        };
+        let prior = PriorFactor::new(v.pose.clone());
         let loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
         problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));
@@ -179,9 +175,7 @@ fn build_se2_problem(
     if let Some(&first_id) = vertex_ids.first()
         && let Some(v) = graph.vertices_se2.get(&first_id)
     {
-        let prior = PriorFactor {
-            data: dvector![v.pose.x(), v.pose.y(), v.pose.angle()],
-        };
+        let prior = PriorFactor::new(v.pose.clone());
         let loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
         problem.add_residual_block(&[first_key], Box::new(prior), Some(Box::new(loss)));

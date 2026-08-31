@@ -492,9 +492,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 
@@ -554,9 +552,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE3>::new(SE3::identity())),
             None,
         );
 
@@ -624,9 +620,7 @@ mod tests {
         );
         let fk2 = p.add_residual_block(
             &[k0],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 
