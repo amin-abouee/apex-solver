@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
+use apex_solver::NoiseModel;
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
 };
@@ -75,6 +76,13 @@ struct Args {
     /// torus3D) and use the CLI values verbatim for every dataset.
     #[arg(long)]
     no_dataset_overrides: bool,
+
+    /// Ignore the per-edge information matrices parsed from the G2O file and
+    /// optimize the unweighted objective (legacy behaviour). By default the
+    /// Ω matrices whiten every edge so the optimized objective equals the
+    /// reported χ².
+    #[arg(long)]
+    no_noise: bool,
 }
 
 // ============================================================================
@@ -442,9 +450,28 @@ fn test_se2_dataset(
         } else {
             None
         };
+        let edge_noise = if args.no_noise {
+            NoiseModel::null()
+        } else {
+            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                3,
+                3,
+                edge.information.as_slice(),
+            ))
+            .map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?
+        };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                edge_loss,
+                edge_noise,
+            );
         }
     }
 
@@ -796,9 +823,28 @@ fn test_se3_dataset(
         } else {
             None
         };
+        let edge_noise = if args.no_noise {
+            NoiseModel::null()
+        } else {
+            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                6,
+                6,
+                edge.information.as_slice(),
+            ))
+            .map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?
+        };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                edge_loss,
+                edge_noise,
+            );
         }
     }
 
