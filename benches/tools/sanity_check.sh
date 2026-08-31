@@ -86,3 +86,10 @@ probe "odom/ring/dl"        parse_pose_graph "$PG" --dataset ring        --optim
 probe "ba/trafalgar/implicit" parse_ba "$BA" "$TRAFALGAR" -s implicit -t bundle-adjustment
 probe "ba/trafalgar/explicit" parse_ba "$BA" "$TRAFALGAR" -s explicit -t bundle-adjustment
 probe "ba/trafalgar/selfcal"  parse_ba "$BA" "$TRAFALGAR" -s implicit -t self-calibration
+
+# --- heavy probes: large camera block, exercises Schur scaling. Opt in with
+# --- APEX_SANITY_HEAVY=1 (adds ~1 min per run).
+if [[ "${APEX_SANITY_HEAVY:-0}" == "1" && -f "$LADYBUG" ]]; then
+    probe "ba/ladybug8k/explicit" parse_ba "$BA" "$LADYBUG" -s explicit -t bundle-adjustment -n 8000
+    probe "ba/ladybug8k/implicit" parse_ba "$BA" "$LADYBUG" -s implicit -t bundle-adjustment -n 8000
+fi

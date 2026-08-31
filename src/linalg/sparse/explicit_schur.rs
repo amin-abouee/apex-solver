@@ -1193,27 +1193,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         let cam_size = structure.camera_dof;
 
         // Add λ·D to H_cc, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
-        let mut h_cc_triplets = Vec::new();
-        let h_cc_symbolic = h_cc.symbolic();
-        for col in 0..h_cc.ncols() {
-            let row_indices = h_cc_symbolic.row_idx_of_col_raw(col);
-            let col_values = h_cc.val_of_col(col);
-            for (idx, &row) in row_indices.iter().enumerate() {
-                h_cc_triplets.push(Triplet::new(row, col, col_values[idx]));
-            }
-        }
-        for i in 0..cam_size {
-            if let Some(entry) = h_cc_triplets.iter_mut().find(|t| t.row == i && t.col == i) {
-                *entry = Triplet::new(i, i, entry.val + damping.diagonal_term(entry.val));
-            } else {
-                // Structurally absent diagonal — H_ii is zero, so the clamp floors
-                // the damping at λ·min_diagonal.
-                h_cc_triplets.push(Triplet::new(i, i, damping.diagonal_term(0.0)));
-            }
-        }
-        let h_cc_damped =
-            SparseColMat::try_new_from_triplets(cam_size, cam_size, &h_cc_triplets)
-                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Damped H_cc: {:?}", e)))?;
+        let h_cc_damped = damp_camera_block(&h_cc, cam_size, damping)?;
 
         // Add λ·D to H_pp blocks (same clamped-diagonal rule as H_cc)
         for block in &mut hpp_blocks {
@@ -1288,6 +1268,77 @@ impl SparseSchurComplementSolver {
 
         Ok(delta)
     }
+}
+
+/// `H_cc + λ·D` with `D_jj = clamp(H_jj, min_diagonal, max_diagonal)`.
+///
+/// Damping only ever touches the diagonal, so when every diagonal entry is
+/// already present in the pattern this is a value-only edit: clone the CSC
+/// value array and add λ·D at the cached diagonal offsets. That is O(nnz),
+/// against the O(cam_size × nnz) linear `find` over a freshly built triplet
+/// list that this replaces, and it skips the triplet sort entirely.
+///
+/// A camera observed by no landmark has a structurally empty diagonal, which
+/// damping must materialize. That grows the pattern, so it falls back to
+/// rebuilding from triplets — still a single O(nnz) pass, with the missing
+/// diagonals appended.
+///
+/// Mirrors [`NormalEquationsCache::damped_hessian`](crate::linalg::sparse::normal_eq)
+/// so both damping sites share one rule.
+fn damp_camera_block(
+    h_cc: &SparseColMat<usize, f64>,
+    cam_size: usize,
+    damping: &Damping,
+) -> LinAlgResult<SparseColMat<usize, f64>> {
+    let symbolic = h_cc.symbolic();
+
+    // Absolute offsets of each column's diagonal entry in the flat value array.
+    let diag_pos: Vec<Option<usize>> = (0..h_cc.ncols())
+        .map(|col| {
+            let col_start = symbolic.col_range(col).start;
+            symbolic
+                .row_idx_of_col_raw(col)
+                .iter()
+                .position(|&row| row == col)
+                .map(|local| col_start + local)
+        })
+        .collect();
+
+    if diag_pos.iter().all(Option::is_some) {
+        let owned = symbolic.to_owned().map_err(|e| {
+            LinAlgError::SparseMatrixCreation(format!("Damped H_cc symbolic: {e:?}"))
+        })?;
+        let mut values = h_cc.as_ref().val().to_vec();
+        for pos in diag_pos.iter().flatten() {
+            values[*pos] += damping.diagonal_term(values[*pos]);
+        }
+        return Ok(SparseColMat::new(owned, values));
+    }
+
+    // Slow path: at least one diagonal must be created.
+    let mut triplets = Vec::with_capacity(h_cc.compute_nnz() + cam_size);
+    for col in 0..h_cc.ncols() {
+        let row_indices = symbolic.row_idx_of_col_raw(col);
+        let col_values = h_cc.val_of_col(col);
+        for (idx, &row) in row_indices.iter().enumerate() {
+            let val = col_values[idx];
+            let val = if row == col {
+                val + damping.diagonal_term(val)
+            } else {
+                val
+            };
+            triplets.push(Triplet::new(row, col, val));
+        }
+    }
+    for (i, pos) in diag_pos.iter().enumerate().take(cam_size) {
+        if pos.is_none() {
+            // H_ii is structurally zero, so the clamp floors the damping at
+            // λ·min_diagonal.
+            triplets.push(Triplet::new(i, i, damping.diagonal_term(0.0)));
+        }
+    }
+    SparseColMat::try_new_from_triplets(cam_size, cam_size, &triplets)
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Damped H_cc: {e:?}")))
 }
 
 #[cfg(test)]
@@ -2056,5 +2107,62 @@ mod tests {
             result.is_err(),
             "Expected Err when no landmark variables present"
         );
+    }
+
+    /// Dense read-back helper for the damping tests.
+    fn dense_of(m: &SparseColMat<usize, f64>) -> Vec<Vec<f64>> {
+        let mut out = vec![vec![0.0; m.ncols()]; m.nrows()];
+        for col in 0..m.ncols() {
+            let rows = m.symbolic().row_idx_of_col_raw(col);
+            let vals = m.val_of_col(col);
+            for (i, &r) in rows.iter().enumerate() {
+                out[r][col] = vals[i];
+            }
+        }
+        out
+    }
+
+    /// Fully populated diagonal: damping takes the value-only fast path and
+    /// must leave every off-diagonal untouched.
+    #[test]
+    fn test_damp_camera_block_full_diagonal() -> TestResult {
+        let triplets = vec![
+            Triplet::new(0usize, 0usize, 4.0_f64),
+            Triplet::new(1, 0, 1.0),
+            Triplet::new(0, 1, 1.0),
+            Triplet::new(1, 1, 9.0),
+        ];
+        let h_cc = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
+        let damping = Damping::new(0.5, 1e-6, 1e32)?;
+
+        let damped = dense_of(&damp_camera_block(&h_cc, 2, &damping)?);
+
+        assert!((damped[0][0] - (4.0 + 0.5 * 4.0)).abs() < 1e-12);
+        assert!((damped[1][1] - (9.0 + 0.5 * 9.0)).abs() < 1e-12);
+        assert!((damped[0][1] - 1.0).abs() < 1e-12, "off-diagonal changed");
+        assert!((damped[1][0] - 1.0).abs() < 1e-12, "off-diagonal changed");
+        Ok(())
+    }
+
+    /// A camera with no landmark observations has a structurally empty
+    /// diagonal. Damping must materialize it at λ·min_diagonal rather than
+    /// silently skipping the column.
+    #[test]
+    fn test_damp_camera_block_missing_diagonal() -> TestResult {
+        // Column 1 carries only an off-diagonal entry.
+        let triplets = vec![
+            Triplet::new(0usize, 0usize, 4.0_f64),
+            Triplet::new(0, 1, 2.0),
+        ];
+        let h_cc = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
+        let damping = Damping::new(0.5, 1e-3, 1e32)?;
+
+        let damped = dense_of(&damp_camera_block(&h_cc, 2, &damping)?);
+
+        assert!((damped[0][0] - (4.0 + 0.5 * 4.0)).abs() < 1e-12);
+        // clamp(0, 1e-3, 1e32) * 0.5
+        assert!((damped[1][1] - 0.5 * 1e-3).abs() < 1e-12);
+        assert!((damped[0][1] - 2.0).abs() < 1e-12, "off-diagonal changed");
+        Ok(())
     }
 }
