@@ -82,12 +82,12 @@ pub struct IterativeSchurSolver {
     /// The un-damped `JᵀJ`, published through [`LinearSolver::get_hessian`].
     ///
     /// The optimizers build the true quadratic model from this, so it must never
-    /// carry the damping term — see `system_hessian` for the matrix the solve
-    /// itself operates on.
+    /// carry the damping term. The damped matrix the solve itself operates on is
+    /// passed down the call chain rather than stored, which keeps it out of this
+    /// struct and avoids copying a full `JᵀJ` every iteration.
     hessian: Option<SparseColMat<usize, f64>>,
     /// The matrix the Schur operator and preconditioners are applied to:
     /// `JᵀJ + λ·D` for a damped solve, plain `JᵀJ` otherwise.
-    system_hessian: Option<SparseColMat<usize, f64>>,
     /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
 
@@ -117,7 +117,6 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -137,7 +136,6 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -161,7 +159,6 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
@@ -191,6 +188,7 @@ impl IterativeSchurSolver {
     /// Uses workspace buffers to avoid allocations during PCG iterations.
     fn apply_schur_operator_fast(
         &self,
+        hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
         result: &mut Mat<f64>,
         temp_lm: &mut [f64],
@@ -200,11 +198,6 @@ impl IterativeSchurSolver {
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
         let (cam_start, cam_end) = structure.camera_col_range();
@@ -378,16 +371,14 @@ impl IterativeSchurSolver {
     /// NOTE: This is NOT the true Schur-Jacobi preconditioner. It only uses
     /// diagonal blocks of H_cc, not the Schur complement S. For better convergence,
     /// use `compute_schur_jacobi_preconditioner()` instead.
-    fn compute_block_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
+    fn compute_block_preconditioner(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
         let structure = self
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
 
@@ -482,16 +473,14 @@ impl IterativeSchurSolver {
     ///
     /// This preconditioner captures the effect of point elimination on each camera block,
     /// leading to much faster PCG convergence (typically 20-40 iterations vs 100+).
-    fn compute_schur_jacobi_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
+    fn compute_schur_jacobi_preconditioner(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
         let structure = self
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
 
@@ -606,6 +595,7 @@ impl IterativeSchurSolver {
     /// Reductions and vector updates run through faer's SIMD kernels.
     fn solve_pcg_block(
         &self,
+        hessian: &SparseColMat<usize, f64>,
         b: &Mat<f64>,
         precond_blocks: &[DMatrix<f64>],
         workspace_lm: &mut [f64],
@@ -634,7 +624,7 @@ impl IterativeSchurSolver {
             // Ap = S * p (using fast operator with workspace buffers; the
             // operator accumulates, so reset ap first)
             ap.fill(0.0);
-            self.apply_schur_operator_fast(&p, &mut ap, workspace_lm, workspace_cam)?;
+            self.apply_schur_operator_fast(hessian, &p, &mut ap, workspace_lm, workspace_cam)?;
 
             // alpha = (r^T z) / (p^T Ap)
             let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
@@ -908,11 +898,11 @@ impl IterativeSchurSolver {
         let precond_blocks = match self.preconditioner_type {
             SchurPreconditioner::SchurJacobi => {
                 // True Schur-Jacobi: diagonal blocks of S (Ceres-style, best convergence)
-                self.compute_schur_jacobi_preconditioner()?
+                self.compute_schur_jacobi_preconditioner(hessian)?
             }
             SchurPreconditioner::BlockDiagonal => {
                 // Block diagonal of H_cc only (faster to compute, worse convergence)
-                self.compute_block_preconditioner()?
+                self.compute_block_preconditioner(hessian)?
             }
             SchurPreconditioner::None => {
                 // Identity preconditioner (for debugging)
@@ -932,6 +922,7 @@ impl IterativeSchurSolver {
         let mut workspace_cam = std::mem::take(&mut self.workspace_cam);
 
         let delta_cam = self.solve_pcg_block(
+            hessian,
             &g_reduced,
             &precond_blocks,
             &mut workspace_lm,
@@ -1038,12 +1029,13 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        // Undamped solve: the operator matrix and the published Hessian coincide.
-        self.system_hessian = Some(hessian.clone());
-        self.hessian = Some(hessian.clone());
+        // Undamped solve: the operator and the published Hessian coincide, so
+        // the solve borrows the local and it is moved into place afterwards.
         self.gradient = Some(gradient);
 
-        self.solve_with_system(&hessian, &neg_gradient)
+        let delta = self.solve_with_system(&hessian, &neg_gradient);
+        self.hessian = Some(hessian);
+        delta
     }
 
     fn solve_augmented_equation(
@@ -1063,9 +1055,9 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         // (no per-call triplet rebuild + sparse sum).
         let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
 
-        // Publish the *un-damped* system, per the LinearSolver contract; the
-        // damped copy drives the Schur operator and the preconditioners.
-        self.system_hessian = Some(augmented_hessian.clone());
+        // Publish the *un-damped* system, per the LinearSolver contract. The
+        // damped matrix drives the Schur operator and the preconditioners and is
+        // handed down by reference, so it is never copied.
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
 
@@ -1494,8 +1486,12 @@ mod tests {
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        // Compute the block preconditioner blocks
-        let precond_blocks = solver.compute_block_preconditioner()?;
+        // Compute the block preconditioner blocks. The undamped solve publishes
+        // the same matrix the operator ran against, so it doubles as the input.
+        let hessian = LinearSolver::<SparseMode>::get_hessian(&solver)
+            .ok_or("solve_normal_equation must publish the Hessian")?
+            .clone();
+        let precond_blocks = solver.compute_block_preconditioner(&hessian)?;
         // Should have one block per camera (2 cameras)
         assert_eq!(precond_blocks.len(), 2);
 
