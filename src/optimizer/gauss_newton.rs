@@ -523,12 +523,11 @@ impl GaussNewton {
         // default of 1e-10 it is numerically invisible next to any real
         // curvature. `min_diagonal = 0` selects the un-regularized normal
         // equations, i.e. textbook Gauss-Newton.
-        let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = if self.config.min_diagonal > 0.0 {
             let damping = Damping::identity(self.config.min_diagonal);
-            linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+            linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
         } else {
-            linear_solver.solve_normal_equation(&residuals_owned, scaled_jacobian)
+            linear_solver.solve_normal_equation(residuals, scaled_jacobian)
         }
         .map_err(|e| {
             optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)

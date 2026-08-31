@@ -1068,7 +1068,6 @@ impl DogLeg {
 
         // Not reusing, compute fresh step
         // 1. Solve for Gauss-Newton step with adaptive mu regularization (Ceres-style)
-        let residuals_owned = residuals.as_ref().to_owned();
         let mut scaled_gn_step = None;
         let mut mu_attempts = 0;
 
@@ -1081,7 +1080,7 @@ impl DogLeg {
             let damping = Damping::identity(self.mu);
 
             if let Ok(step) =
-                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+                linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
             {
                 scaled_gn_step = Some(step);
                 break;

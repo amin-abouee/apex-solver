@@ -889,9 +889,8 @@ impl LevenbergMarquardt {
             self.config.min_diagonal,
             self.config.max_diagonal,
         )?;
-        let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = linear_solver
-            .solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+            .solve_augmented_equation(residuals, scaled_jacobian, &damping)
             .map_err(|e| OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e))?;
 
         // Get the cached gradient (Jᵀr) and un-damped Hessian (JᵀJ) from the solver
