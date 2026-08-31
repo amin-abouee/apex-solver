@@ -98,6 +98,9 @@ pub struct IterativeSchurSolver {
     // Visibility index: camera_block_idx -> Vec<landmark_block_idx>
     // This avoids O(cameras * landmarks) iteration in preconditioner computation
     camera_to_landmark_visibility: Vec<Vec<usize>>,
+    /// `(nrows, ncols, nnz)` of the Hessian `camera_to_landmark_visibility` was
+    /// built from, so it is rebuilt only when the sparsity actually changes.
+    visibility_fingerprint: Option<(usize, usize, usize)>,
 }
 
 impl IterativeSchurSolver {
@@ -119,6 +122,7 @@ impl IterativeSchurSolver {
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -138,6 +142,7 @@ impl IterativeSchurSolver {
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -161,6 +166,7 @@ impl IterativeSchurSolver {
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -780,7 +786,23 @@ impl IterativeSchurSolver {
     ///
     /// This scans the Hessian to find which landmarks each camera observes,
     /// enabling O(observations) preconditioner computation instead of O(cameras * landmarks).
+    ///
+    /// The index depends only on the Hessian's sparsity pattern and the block
+    /// structure, both of which are fixed for the duration of a solve, so it is
+    /// built once and reused. The fingerprint guards against a caller reusing a
+    /// solver across problems with different patterns.
     fn build_visibility_index(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
+        let fingerprint = (
+            hessian.nrows(),
+            hessian.ncols(),
+            hessian.as_ref().compute_nnz(),
+        );
+        if self.visibility_fingerprint == Some(fingerprint)
+            && !self.camera_to_landmark_visibility.is_empty()
+        {
+            return Ok(());
+        }
+
         let structure = self
             .block_structure
             .as_ref()
@@ -826,6 +848,7 @@ impl IterativeSchurSolver {
         }
 
         self.camera_to_landmark_visibility = visibility;
+        self.visibility_fingerprint = Some(fingerprint);
         Ok(())
     }
 
