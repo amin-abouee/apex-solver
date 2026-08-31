@@ -1101,16 +1101,19 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        self.hessian = Some(hessian.clone());
-        // Store the positive gradient (J^T * r) for predicted reduction calculation
-        // The Schur solver internally uses neg_gradient (-J^T * r) for the solve
-        self.gradient = Some(gradient.clone());
-
         // 2. Extract blocks
         let h_cc = self.extract_camera_block(&hessian)?;
         let h_cp = self.extract_coupling_block(&hessian)?;
         let hpp_blocks = self.extract_landmark_blocks(&hessian)?;
         let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
+
+        // Publish H and g now that the block extraction has finished borrowing
+        // them, so neither has to be cloned.
+        //
+        // The stored gradient is the positive J^T*r used for predicted-reduction
+        // accounting; the solve below drives off `neg_gradient`.
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
 
         // 3. Invert H_pp blocks
         let hpp_inv_blocks = Self::invert_landmark_blocks(&hpp_blocks)?;
@@ -1156,11 +1159,6 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        self.hessian = Some(hessian.clone());
-        // Store the positive gradient (J^T * r) for predicted reduction calculation
-        // The Schur solver internally uses neg_gradient (-J^T * r) for the solve
-        self.gradient = Some(gradient.clone());
-
         // 2. Extract blocks
         let h_cc = self.extract_camera_block(&hessian)?;
         let h_cp = self.extract_coupling_block(&hessian)?;
@@ -1177,6 +1175,15 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         debug!("  H_cc (camera): {} × {}", h_cc.nrows(), h_cc.ncols());
         debug!("  H_cp (coupling): {} × {}", h_cp.nrows(), h_cp.ncols());
         debug!("  H_pp blocks: {} (3×3 each)", hpp_blocks.len());
+
+        // Publish the *un-damped* H and g now that nothing borrows them any
+        // more, so neither has to be cloned. Damping below operates on the
+        // extracted blocks, not on `hessian`.
+        //
+        // The stored gradient is the positive J^T*r used for predicted-reduction
+        // accounting; the solve below drives off `neg_gradient`.
+        self.hessian = Some(hessian);
+        self.gradient = Some(gradient);
 
         // 3. Add damping to H_cc and H_pp
         let structure = self
