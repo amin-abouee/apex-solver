@@ -143,21 +143,6 @@ pub enum OptimizerError {
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
 
-// State information during iterative optimization.
-// #[derive(Debug, Clone)]
-// pub struct IterativeState {
-//     /// Current iteration number
-//     pub iteration: usize,
-//     /// Current cost value
-//     pub cost: f64,
-//     /// Current gradient norm
-//     pub gradient_norm: f64,
-//     /// Current parameter update norm
-//     pub parameter_update_norm: f64,
-//     /// Time elapsed since start
-//     pub elapsed_time: Duration,
-// }
-
 /// Detailed convergence information.
 #[derive(Debug, Clone)]
 pub struct ConvergenceInfo {
@@ -481,6 +466,12 @@ pub fn compute_parameter_norm(variables: &SlotMap<VarKey, Box<dyn ManifoldVariab
 ///
 /// The scaling factor for each column is `1 / (1 + ||col||)`, which normalizes
 /// the columns to improve conditioning of the linear system.
+#[deprecated(
+    since = "1.6.0",
+    note = "quadratic in the number of columns; the optimizers use \
+            `AssemblyBackend::compute_column_norms` + `apply_column_scaling`, which are \
+            linear in nnz and parallel"
+)]
 pub fn create_jacobi_scaling(
     jacobian: &SparseColMat<usize, f64>,
 ) -> Result<SparseColMat<usize, f64>, OptimizerError> {
@@ -506,6 +497,12 @@ pub fn create_jacobi_scaling(
 ///
 /// On `iteration == 0`, creates the scaling matrix and stores it. On subsequent
 /// iterations, reuses the cached scaling.
+#[deprecated(
+    since = "1.6.0",
+    note = "builds a diagonal scaling matrix and multiplies; the optimizers scale the \
+            CSC values in place via `AssemblyBackend::apply_column_scaling`"
+)]
+#[allow(deprecated)]
 pub fn process_jacobian(
     jacobian: &SparseColMat<usize, f64>,
     jacobi_scaling: &mut Option<SparseColMat<usize, f64>>,
@@ -1173,6 +1170,7 @@ pub fn create_optimizer_summary(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // these tests exist to cover the deprecated helpers until removal
 mod tests {
     use super::*;
     use crate::core::VarKey;
