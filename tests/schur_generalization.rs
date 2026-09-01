@@ -296,3 +296,57 @@ fn different_elimination_choices_agree() -> TestResult {
     assert_steps_agree(&reference, &schur_c, "eliminate {points, depth}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Matrix-free (implicit) Schur
+// ---------------------------------------------------------------------------
+
+/// The matrix-free solver never forms `S`; it applies the Schur operator
+/// through `H_ke`/`H_ee⁻¹` products inside PCG. It must still land on the same
+/// step as a direct factorization of the full system.
+///
+/// PCG is iterative, so the tolerance here is looser than the direct
+/// comparisons above — but far tighter than any indexing mistake would survive.
+#[test]
+fn matrix_free_schur_matches_cholesky_on_bundle_adjustment_shape() -> TestResult {
+    use apex_solver::linalg::IterativeSchurSolver;
+
+    // Two 6-DOF poses kept, three 3-DOF points eliminated: the shape the
+    // matrix-free path was written for.
+    let system = build_system(
+        &[6, 6, 3, 3, 3],
+        &[(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)],
+    )?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3], system.keys[4]]
+        .into_iter()
+        .collect();
+
+    let mut cholesky = SparseCholeskySolver::new();
+    let reference = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut implicit = IterativeSchurSolver::with_cg_params(500, 1e-12);
+    implicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut implicit,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_eq!(reference.nrows(), step.nrows());
+    let scale = reference.norm_l2().max(1.0);
+    for i in 0..reference.nrows() {
+        let diff = (reference[(i, 0)] - step[(i, 0)]).abs();
+        assert!(
+            diff / scale < 1e-6,
+            "matrix-free component {i}: cholesky {}, implicit {} (rel {:.3e})",
+            reference[(i, 0)],
+            step[(i, 0)],
+            diff / scale
+        );
+    }
+    Ok(())
+}

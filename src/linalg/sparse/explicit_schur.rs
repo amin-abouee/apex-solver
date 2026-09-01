@@ -44,7 +44,6 @@
 //! # }
 //! ```
 
-use super::implicit_schur::IterativeSchurSolver;
 use super::schur_partition::{BlockSpan, EliminatedBlocks, SchurPartition};
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
@@ -64,11 +63,32 @@ use tracing::debug;
 /// Schur complement solver variant
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SchurVariant {
-    /// Standard: Direct sparse Cholesky factorization of S
+    /// Form `S` explicitly, then factorize it with sparse Cholesky.
+    ///
+    /// Most accurate and fastest per iteration, but `S` is accumulated into a
+    /// dense `kept_dof²` buffer, so memory grows quadratically in the retained
+    /// set. Equivalent to Ceres's `SPARSE_SCHUR`.
     #[default]
     Sparse,
-    /// Iterative: Conjugate Gradients on reduced system
+    /// Never form `S`: apply the Schur operator through `H_ke`/`H_ee⁻¹`
+    /// products inside PCG.
+    ///
+    /// Memory is linear in the problem size, which is what makes very large
+    /// camera sets tractable. Equivalent to Ceres's `ITERATIVE_SCHUR` in its
+    /// default (implicit) mode, and the variant that honours
+    /// [`SchurPreconditioner`].
+    ///
+    /// Requires 3-DOF eliminated blocks in contiguous column ranges; use
+    /// [`Self::Sparse`] or [`Self::ExplicitIterative`] otherwise.
     Iterative,
+    /// Form `S` explicitly, then solve it with PCG instead of Cholesky.
+    ///
+    /// Carries the same `kept_dof²` memory cost as [`Self::Sparse`] while
+    /// solving less exactly, so it is rarely the right choice — it exists
+    /// because it is what `Iterative` used to do, and it supports the general
+    /// partitions the matrix-free path does not. Equivalent to Ceres's
+    /// `ITERATIVE_SCHUR` with `use_explicit_schur_complement = true`.
+    ExplicitIterative,
 }
 
 /// Preconditioner type for iterative solvers
@@ -187,8 +207,6 @@ pub struct SparseSchurComplementSolver {
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
 
-    // Delegate solver for iterative variant
-    iterative_solver: Option<IterativeSchurSolver>,
 }
 
 impl SparseSchurComplementSolver {
@@ -205,7 +223,6 @@ impl SparseSchurComplementSolver {
             ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
-            iterative_solver: None,
         }
     }
 
@@ -889,22 +906,11 @@ impl StructureAware for SparseSchurComplementSolver {
         let effective_keys =
             Self::effective_landmark_keys(variables, schur_landmark_keys, &self.ordering);
 
-        // Build block structure for all variants
         self.build_partition(variables, variable_index_map, &effective_keys)?;
 
-        // Initialize delegate solver based on variant
-        match self.variant {
-            SchurVariant::Iterative => {
-                let mut solver =
-                    IterativeSchurSolver::with_cg_params(self.cg_max_iterations, self.cg_tolerance);
-                solver.initialize_structure(variables, variable_index_map, &effective_keys)?;
-                self.iterative_solver = Some(solver);
-            }
-            SchurVariant::Sparse => {
-                // No delegate solver needed for sparse variant
-            }
-        }
-
+        // `SchurVariant::Iterative` is handled by `IterativeSchurSolver`, which
+        // the optimizer constructs directly — this solver only ever forms S.
+        // A delegate used to be built here and then never read.
         Ok(())
     }
 }
@@ -1042,7 +1048,9 @@ impl SparseSchurComplementSolver {
         let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
         let delta_k = match self.variant {
-            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            SchurVariant::ExplicitIterative => self.solve_with_pcg(&s, &g_reduced)?,
+            // `Iterative` never reaches here — it is dispatched to the
+            // matrix-free solver before `S` is ever formed.
             _ => self.solve_with_cholesky(&s, &g_reduced)?,
         };
 

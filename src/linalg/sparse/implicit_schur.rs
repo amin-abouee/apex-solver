@@ -52,6 +52,7 @@
 
 use super::explicit_schur::SchurPreconditioner;
 use crate::core::VarKey;
+use crate::error::ErrorLogging;
 use crate::core::variable::ManifoldVariable;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
@@ -1043,7 +1044,38 @@ impl StructureAware for IterativeSchurSolver {
             ));
         }
 
+        // `camera_col_range`/`landmark_col_range` treat each side as one
+        // contiguous span, so a partition that interleaves them would address
+        // the wrong columns. The explicit solver lifted this restriction via
+        // `SchurPartition`; this path has not, so it must refuse rather than
+        // silently mis-index.
+        Self::require_contiguous(&structure.camera_blocks, "retained")?;
+        Self::require_contiguous(&structure.landmark_blocks, "eliminated")?;
+
         self.block_structure = Some(structure);
+        Ok(())
+    }
+}
+
+impl IterativeSchurSolver {
+    /// Error unless `blocks` covers one gap-free span of columns.
+    fn require_contiguous(blocks: &[(VarKey, usize, usize)], side: &str) -> LinAlgResult<()> {
+        let mut expected = match blocks.first() {
+            Some((_, col, _)) => *col,
+            None => return Ok(()),
+        };
+        for (key, col, size) in blocks {
+            if *col != expected {
+                return Err(LinAlgError::InvalidInput(format!(
+                    "the matrix-free Schur solver requires the {side} variables to occupy a \
+                     contiguous column range; {key:?} starts at column {col} but {expected} was \
+                     expected. Use SchurVariant::Sparse or ExplicitIterative for interleaved \
+                     partitions."
+                ))
+                .log());
+            }
+            expected += size;
+        }
         Ok(())
     }
 }

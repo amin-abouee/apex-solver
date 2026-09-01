@@ -38,7 +38,7 @@ use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::init_logger;
-use apex_solver::linalg::SchurVariant;
+use apex_solver::linalg::{SchurPreconditioner, SchurVariant};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -50,11 +50,15 @@ use tracing::info;
 /// Solver variant for Schur complement
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum SolverArg {
-    /// Explicit Schur: direct sparse Cholesky factorization
+    /// Form S explicitly, factorize with sparse Cholesky. Fastest per
+    /// iteration; memory is O(kept_dof^2)
     Explicit,
-    /// Implicit Schur: iterative PCG solver (default, most efficient)
+    /// Matrix-free PCG: never forms S, memory linear in problem size. Required
+    /// for very large camera sets
     #[default]
     Implicit,
+    /// Form S explicitly, then solve it with PCG. Mainly for comparison
+    ExplicitIterative,
 }
 
 impl From<SolverArg> for SchurVariant {
@@ -62,6 +66,29 @@ impl From<SolverArg> for SchurVariant {
         match arg {
             SolverArg::Explicit => SchurVariant::Sparse,
             SolverArg::Implicit => SchurVariant::Iterative,
+            SolverArg::ExplicitIterative => SchurVariant::ExplicitIterative,
+        }
+    }
+}
+
+/// PCG preconditioner, for the iterative variants
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum PreconditionerArg {
+    /// Unpreconditioned CG
+    None,
+    /// Block diagonal of H_kk
+    BlockDiagonal,
+    /// Block diagonal of S itself (Ceres SCHUR_JACOBI); best convergence
+    #[default]
+    SchurJacobi,
+}
+
+impl From<PreconditionerArg> for SchurPreconditioner {
+    fn from(arg: PreconditionerArg) -> Self {
+        match arg {
+            PreconditionerArg::None => SchurPreconditioner::None,
+            PreconditionerArg::BlockDiagonal => SchurPreconditioner::BlockDiagonal,
+            PreconditionerArg::SchurJacobi => SchurPreconditioner::SchurJacobi,
         }
     }
 }
@@ -108,6 +135,18 @@ struct Args {
     /// Solver variant for Schur complement
     #[arg(short = 's', long, value_enum, default_value = "implicit")]
     solver: SolverArg,
+
+    /// PCG preconditioner (iterative variants only)
+    #[arg(short = 'p', long, value_enum, default_value = "schur-jacobi")]
+    preconditioner: PreconditionerArg,
+
+    /// Maximum PCG iterations per linear solve (iterative variants only)
+    #[arg(long, default_value = "200")]
+    cg_max_iterations: usize,
+
+    /// PCG relative residual tolerance (iterative variants only)
+    #[arg(long, default_value = "1e-6")]
+    cg_tolerance: f64,
 
     /// Optimization type
     #[arg(short = 't', long, value_enum, default_value = "self-calibration")]
@@ -189,7 +228,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_bundle_adjustment(
         &dataset,
         num_points_to_use,
-        args.solver.into(),
+        SchurSettings {
+            variant: args.solver.into(),
+            preconditioner: args.preconditioner.into(),
+            cg_max_iterations: args.cg_max_iterations,
+            cg_tolerance: args.cg_tolerance,
+        },
         args.optimization_type,
         args.verbose,
         with_visualizer,
@@ -207,12 +251,21 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
     }
 }
 
+/// Schur solver settings gathered from the CLI.
+#[derive(Debug, Clone, Copy)]
+struct SchurSettings {
+    variant: SchurVariant,
+    preconditioner: SchurPreconditioner,
+    cg_max_iterations: usize,
+    cg_tolerance: f64,
+}
+
 /// Run bundle adjustment with specified solver and optimization type
 #[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
-    solver_variant: SchurVariant,
+    schur: SchurSettings,
     opt_type: OptimizationType,
     verbose: bool,
     with_visualizer: bool,
@@ -344,11 +397,24 @@ fn run_bundle_adjustment(
 
     // Configure solver
     let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
-    config.schur_variant = solver_variant;
+    config.schur_variant = schur.variant;
+    config.schur_preconditioner = schur.preconditioner;
+    config.schur_cg_max_iterations = schur.cg_max_iterations;
+    config.schur_cg_tolerance = schur.cg_tolerance;
 
     info!("");
     info!("Solver configuration:");
-    info!("  Solver variant: {:?}", solver_variant);
+    info!("  Solver variant: {:?}", schur.variant);
+    if matches!(
+        schur.variant,
+        SchurVariant::Iterative | SchurVariant::ExplicitIterative
+    ) {
+        info!("  Preconditioner: {:?}", schur.preconditioner);
+        info!(
+            "  PCG budget: {} iterations, tol {:.1e}",
+            schur.cg_max_iterations, schur.cg_tolerance
+        );
+    }
     info!("  Optimization type: {:?}", opt_type);
     info!("  Linear solver: {:?}", config.linear_solver_type);
     info!("  Preconditioner: {:?}", config.schur_preconditioner);

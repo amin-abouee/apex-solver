@@ -146,9 +146,10 @@ use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
-    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
-    LinearSolver, LinearSolverType, SchurPreconditioner, SchurVariant, SparseCholeskySolver,
-    SparseMode, SparseQRSolver, SparseSchurComplementSolver, StructureAware,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver,
+    IterativeSchurSolver, JacobianMode, LinearSolver, LinearSolverType, SchurPreconditioner,
+    SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver, SparseSchurComplementSolver,
+    StructureAware,
 };
 use crate::optimizer::{
     AssemblyBackend, ConvergenceParams, InitializedState, IterationStats, OptObserverVec,
@@ -361,21 +362,34 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// When using LinearSolverType::SparseSchurComplement, this determines which
     /// variant of the Schur complement method to use:
-    /// - Sparse: Direct sparse Cholesky factorization (most accurate, moderate speed)
-    /// - Iterative: Preconditioned Conjugate Gradients (memory efficient, good for large problems)
-    /// - PowerSeries: Power series approximation (fastest, less accurate)
+    /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
+    ///   memory is O(kept_dof²).
+    /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
+    ///   linear, which is what makes very large camera sets tractable.
+    /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
     ///
-    /// Default: Sparse
+    /// Default: `Sparse`
     pub schur_variant: SchurVariant,
-    /// Schur complement preconditioner type
+    /// Preconditioner for the PCG used by [`SchurVariant::Iterative`].
     ///
-    /// Determines the preconditioning strategy for iterative Schur methods:
-    /// - Diagonal: Simple diagonal preconditioner (fast, less effective)
-    /// - BlockDiagonal: Block-diagonal preconditioner (balanced)
-    /// - IncompleteCholesky: Incomplete Cholesky factorization (slower, more effective)
+    /// - [`SchurPreconditioner::None`]: unpreconditioned CG.
+    /// - [`SchurPreconditioner::BlockDiagonal`]: block diagonal of `H_kk`.
+    /// - [`SchurPreconditioner::SchurJacobi`]: block diagonal of `S` itself —
+    ///   Ceres's `SCHUR_JACOBI`, and usually the best convergence.
     ///
-    /// Default: Diagonal
+    /// Ignored by the direct variants, which factorize instead of iterating.
+    ///
+    /// Default: `SchurJacobi`
     pub schur_preconditioner: SchurPreconditioner,
+    /// Maximum PCG iterations per linear solve, for the iterative variants.
+    ///
+    /// Default: 200 (Ceres's default)
+    pub schur_cg_max_iterations: usize,
+    /// Relative residual tolerance ending a PCG solve, for the iterative
+    /// variants.
+    ///
+    /// Default: 1e-6
+    pub schur_cg_tolerance: f64,
     // Note: Visualization is now handled via the observer pattern.
     // Use `solver.add_observer(RerunObserver::new(true)?)` to enable visualization.
     // This provides cleaner separation of concerns and allows multiple observers.
@@ -424,6 +438,8 @@ impl Default for LevenbergMarquardtConfig {
             // Schur complement parameters
             schur_variant: SchurVariant::default(),
             schur_preconditioner: SchurPreconditioner::default(),
+            schur_cg_max_iterations: 200,
+            schur_cg_tolerance: 1e-6,
         }
     }
 }
@@ -620,6 +636,13 @@ impl LevenbergMarquardtConfig {
     /// Set Schur complement preconditioner
     pub fn with_schur_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
         self.schur_preconditioner = preconditioner;
+        self
+    }
+
+    /// PCG budget for the iterative Schur variants.
+    pub fn with_schur_cg_params(mut self, max_iterations: usize, tolerance: f64) -> Self {
+        self.schur_cg_max_iterations = max_iterations;
+        self.schur_cg_tolerance = tolerance;
         self
     }
 
@@ -1269,23 +1292,50 @@ impl LevenbergMarquardt {
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseSchurComplement => {
-                    let mut solver = SparseSchurComplementSolver::new()
-                        .with_variant(self.config.schur_variant)
-                        .with_preconditioner(self.config.schur_preconditioner);
-                    solver
-                        .initialize_structure(
-                            &state.variables,
-                            &state.variable_index_map,
-                            &problem.schur_landmark_keys,
-                        )
-                        .map_err(|e| {
-                            OptimizerError::LinearSolveFailed(format!(
-                                "Failed to initialize Schur solver: {}",
-                                e
-                            ))
-                            .log()
-                        })?;
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                    // `Iterative` is the matrix-free path: it never forms S, so
+                    // it is a different solver type rather than a mode of the
+                    // explicit one. Dispatching here is what keeps the
+                    // O(kept_dof²) buffer out of the picture entirely.
+                    let init = |e: crate::linalg::LinAlgError| {
+                        OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    match self.config.schur_variant {
+                        SchurVariant::Iterative => {
+                            let mut solver = IterativeSchurSolver::with_config(
+                                self.config.schur_cg_max_iterations,
+                                self.config.schur_cg_tolerance,
+                                self.config.schur_preconditioner,
+                            );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                        variant => {
+                            let mut solver = SparseSchurComplementSolver::new()
+                                .with_variant(variant)
+                                .with_preconditioner(self.config.schur_preconditioner)
+                                .with_cg_params(
+                                    self.config.schur_cg_max_iterations,
+                                    self.config.schur_cg_tolerance,
+                                );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                    }
                 }
                 LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
@@ -1570,27 +1620,31 @@ mod tests {
         Ok(())
     }
 
-    /// Without the check, the same unconstrained variable surfaces as an opaque
-    /// linear-algebra failure from deep inside the solver.
+    /// Without the check, the same unconstrained variable is *silently absorbed*
+    /// by damping: `λ·D` materializes the missing diagonal, the orphan takes a
+    /// near-zero step, and the solve runs to completion reporting success.
     ///
-    /// This is what `max_condition_number` buys: the diagnosis moves from
-    /// "JᵀJ has structurally empty diagonal entries" — which names an internal
-    /// data structure, not the user's mistake — to a typed status naming an
-    /// ill-conditioned Jacobian.
+    /// This is what `max_condition_number` buys, and it matters more than it
+    /// used to. Damping previously failed outright on a structurally empty
+    /// diagonal, so a rank-deficient problem announced itself as a linear-solver
+    /// error; now it converges quietly and the conditioning check is the only
+    /// thing that reports the rank deficiency.
     #[test]
-    fn without_the_check_an_unconstrained_variable_is_an_opaque_error() {
+    fn without_the_check_an_unconstrained_variable_is_absorbed_silently() -> TestResult {
         let mut problem = rosenbrock_problem();
         let _orphan = problem.add_variable(ManifoldType::RN, dvector![0.0]);
 
-        let outcome = LevenbergMarquardt::with_config(
+        let result = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new().with_max_iterations(10),
         )
-        .optimize(&mut problem);
+        .optimize(&mut problem)?;
 
-        assert!(
-            outcome.is_err(),
-            "expected the un-checked path to fail somewhere in the linear solver"
+        assert_ne!(
+            result.status,
+            OptimizationStatus::IllConditionedJacobian,
+            "without the check nothing should report the rank deficiency"
         );
+        Ok(())
     }
 
     /// The check stays out of the way on a well-conditioned problem.
