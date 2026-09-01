@@ -265,13 +265,27 @@ pub trait LinearSolver<M: LinearizationMode> {
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// The **un-damped** Hessian `JᵀJ` from the last solve.
+    /// `H·v` for the **un-damped** `H = JᵀJ` of the last solve.
     ///
-    /// Implementations must not return the augmented `JᵀJ + λ·D` here: the
-    /// optimizers use this to evaluate the true quadratic model — Dog Leg's
-    /// Cauchy point and every predicted cost reduction — and damping it would
-    /// corrupt the step-quality ratio ρ.
-    fn get_hessian(&self) -> Option<&M::Hessian>;
+    /// The optimizers evaluate the true quadratic model through this — Dog
+    /// Leg's Cauchy point and every predicted cost reduction — so it must never
+    /// carry the damping term `λ·D`, which would corrupt the step-quality
+    /// ratio ρ.
+    ///
+    /// This is the *action* of the Hessian rather than the matrix, because that
+    /// is all any consumer needs. A backend holding `JᵀJ` multiplies it; a
+    /// backend that never forms it can evaluate `Jᵀ(J·v)` from the Jacobian
+    /// alone, which is what makes chunk-wise Schur elimination expressible.
+    fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>>;
+
+    /// The **un-damped** `JᵀJ`, when this backend happens to hold one.
+    ///
+    /// Diagnostics and visualisation only. `None` is a valid answer — a backend
+    /// that eliminates straight from `J` never materializes `JᵀJ` — so callers
+    /// must degrade rather than fail.
+    fn get_hessian(&self) -> Option<&M::Hessian> {
+        None
+    }
 
     /// The gradient `+Jᵀr` from the last solve.
     ///

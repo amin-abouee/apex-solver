@@ -828,17 +828,19 @@ impl DogLeg {
     /// Returns (alpha, cauchy_point) where:
     /// - alpha: optimal step length α = ||g||² / (g^T H g)
     /// - cauchy_point: p_c = -α * g (the Cauchy point)
-    fn compute_cauchy_point_and_alpha_generic<M: AssemblyBackend>(
+    ///
+    /// `h_g` is `H·g`; only the Hessian's action is needed here, never the
+    /// matrix itself.
+    fn compute_cauchy_point_and_alpha_generic(
         &self,
         gradient: &faer::Mat<f64>,
-        hessian: &M::Hessian,
+        h_g: &faer::Mat<f64>,
     ) -> (f64, faer::Mat<f64>) {
         // Optimal step size along steepest descent: α = (g^T*g) / (g^T*H*g)
         let g_norm_sq_mat = gradient.transpose() * gradient;
         let g_norm_sq = g_norm_sq_mat[(0, 0)];
 
-        let h_g = M::hessian_vec_product(hessian, gradient);
-        let g_h_g_mat = gradient.transpose() * &h_g;
+        let g_h_g_mat = gradient.transpose() * h_g;
         let g_h_g = g_h_g_mat[(0, 0)];
 
         // Avoid division by zero
@@ -1054,9 +1056,9 @@ impl DogLeg {
 
             // For cached reuse, we need the hessian for predicted reduction.
             // Use hessian from linear solver if available.
-            let hessian = linear_solver.get_hessian()?;
+            let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
             let predicted_reduction =
-                optimizer::compute_predicted_reduction::<M>(&scaled_step, cached_grad, hessian);
+                optimizer::compute_predicted_reduction(&scaled_step, cached_grad, &hessian_step);
 
             return Some(StepResult {
                 step,
@@ -1095,7 +1097,6 @@ impl DogLeg {
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
         let gradient = linear_solver.get_gradient()?;
-        let hessian = linear_solver.get_hessian()?;
         let gradient_norm = gradient.norm_l2();
 
         // 3. Compute steepest descent direction: δ_sd = -gradient
@@ -1105,8 +1106,9 @@ impl DogLeg {
         }
 
         // 4. Compute Cauchy point and optimal step length
+        let h_g = linear_solver.hessian_vec_product(gradient)?;
         let (alpha, cauchy_point) =
-            self.compute_cauchy_point_and_alpha_generic::<M>(gradient, hessian);
+            self.compute_cauchy_point_and_alpha_generic(gradient, &h_g);
 
         // 5. Compute dog leg step based on trust region radius
         let (scaled_step, _step_type) = self.compute_dog_leg_step(
@@ -1126,8 +1128,9 @@ impl DogLeg {
         };
 
         // 7. Compute predicted reduction
+        let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
         let predicted_reduction =
-            optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
+            optimizer::compute_predicted_reduction(&scaled_step, gradient, &hessian_step);
 
         // 8. Cache step components for potential reuse (Ceres-style)
         self.cached_gn_step = Some(scaled_gn_step.clone());

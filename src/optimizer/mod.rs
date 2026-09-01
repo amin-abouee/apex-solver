@@ -836,14 +836,13 @@ pub(crate) fn iteration_preamble<M: AssemblyBackend>(
 /// gradient and Hessian are the scaled ones. The predicted reduction is a value
 /// of the quadratic model and is invariant under that change of variables, so
 /// the result is equally the predicted reduction of the un-scaled step.
-pub fn compute_predicted_reduction<M: AssemblyBackend>(
+pub fn compute_predicted_reduction(
     step: &Mat<f64>,
     gradient: &Mat<f64>,
-    hessian: &M::Hessian,
+    hessian_step: &Mat<f64>,
 ) -> f64 {
-    let hessian_step = M::hessian_vec_product(hessian, step);
     let linear_term = (step.transpose() * gradient)[(0, 0)];
-    let quadratic_term = (step.transpose() * &hessian_step)[(0, 0)];
+    let quadratic_term = (step.transpose() * hessian_step)[(0, 0)];
     -linear_term - 0.5 * quadratic_term
 }
 
@@ -921,11 +920,15 @@ pub fn notify_observers(
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
+    // Backends that eliminate straight from J never materialize JᵀJ, so the
+    // matrix view is best-effort; the gradient is always available.
     if !observers.is_empty()
-        && let (Some(hessian), Some(gradient)) =
-            (linear_solver.get_hessian(), linear_solver.get_gradient())
+        && let Some(gradient) = linear_solver.get_gradient()
     {
-        observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
+        observers.set_matrix_data(
+            linear_solver.get_hessian().cloned(),
+            Some(gradient.clone()),
+        );
     }
 
     observers.notify(variables, iteration);

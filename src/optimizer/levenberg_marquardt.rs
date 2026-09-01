@@ -921,7 +921,7 @@ impl LevenbergMarquardt {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
         let gradient_norm = gradient.norm_l2();
-        let hessian = linear_solver.get_hessian().ok_or_else(|| {
+        let hessian_step = linear_solver.hessian_vec_product(&scaled_step).ok_or_else(|| {
             OptimizerError::NumericalInstability("Hessian not available".into()).log()
         })?;
 
@@ -932,7 +932,7 @@ impl LevenbergMarquardt {
         // of variables, so it is equally the predicted reduction of the
         // un-scaled step below.
         let predicted_reduction =
-            crate::optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
+            crate::optimizer::compute_predicted_reduction(&scaled_step, gradient, &hessian_step);
 
         // Apply inverse Jacobi scaling to get final step (if enabled)
         let step = if self.config.use_jacobi_scaling {
