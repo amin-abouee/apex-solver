@@ -59,6 +59,9 @@ enum SolverArg {
     Implicit,
     /// Form S explicitly, then solve it with PCG. Mainly for comparison
     ExplicitIterative,
+    /// Form S chunk-wise straight from J, then Cholesky. Same answer as
+    /// `explicit` without ever building JtJ
+    Chunked,
 }
 
 impl From<SolverArg> for SchurVariant {
@@ -67,6 +70,7 @@ impl From<SolverArg> for SchurVariant {
             SolverArg::Explicit => SchurVariant::Sparse,
             SolverArg::Implicit => SchurVariant::Iterative,
             SolverArg::ExplicitIterative => SchurVariant::ExplicitIterative,
+            SolverArg::Chunked => SchurVariant::ChunkedSparse,
         }
     }
 }

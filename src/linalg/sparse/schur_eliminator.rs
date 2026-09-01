@@ -163,7 +163,7 @@ pub struct ReducedSystem {
 }
 
 /// Accumulates the reduced system chunk by chunk, reusing its scratch.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct ChunkedSchurEliminator {
     layout: ChunkLayout,
     // Per-chunk scratch, sized for the widest chunk and reused.
@@ -231,6 +231,18 @@ impl ChunkedSchurEliminator {
             &mut s,
             &mut g_reduced,
         );
+
+        // λ·D goes on `H_kk`, *before* the chunk corrections turn it into `S`.
+        // `D_jj = clamp(H_jj, …)` reads the un-eliminated diagonal, so damping
+        // `S` instead would clamp against a different matrix and give a
+        // different — wrong — step. This is the same order the direct paths use:
+        // damp the full system, then partition.
+        if let Some(damping) = damping {
+            for i in 0..kept_dof {
+                let pos = i * kept_dof + i;
+                s[pos] += damping.diagonal_term(s[pos]);
+            }
+        }
 
         // Pass 2: one chunk at a time, subtract that chunk's rank-`dof`
         // contribution. Nothing here is proportional to nnz(JᵀJ).
@@ -355,14 +367,6 @@ impl ChunkedSchurEliminator {
                     }
                     s[row_base + col_j] -= acc;
                 }
-            }
-        }
-
-        // Damping on the retained diagonal, matching the eliminated side.
-        if let Some(damping) = damping {
-            for i in 0..kept_dof {
-                let pos = i * kept_dof + i;
-                s[pos] += damping.diagonal_term(s[pos]);
             }
         }
 

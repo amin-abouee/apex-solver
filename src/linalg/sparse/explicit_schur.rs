@@ -89,6 +89,18 @@ pub enum SchurVariant {
     /// partitions the matrix-free path does not. Equivalent to Ceres's
     /// `ITERATIVE_SCHUR` with `use_explicit_schur_complement = true`.
     ExplicitIterative,
+    /// Form `S` chunk by chunk **directly from `J`**, then factorize with
+    /// sparse Cholesky.
+    ///
+    /// Algebraically identical to [`Self::Sparse`], but never materializes
+    /// `JᵀJ`, `Jᵀ`, or the value permutation forming it requires — on the
+    /// largest BAL problem those account for ~24 GB of the ~32 GB needed before
+    /// elimination can even start. This is Ceres's `SchurEliminator` strategy.
+    ///
+    /// Requires each eliminated variable's rows to be contiguous;
+    /// `Problem::group_rows_for_elimination` arranges that when a Schur solver
+    /// is selected.
+    ChunkedSparse,
 }
 
 /// Preconditioner type for iterative solvers
@@ -187,6 +199,15 @@ pub struct SparseSchurComplementSolver {
     partition: Option<SchurPartition>,
     /// Diagonal blocks of `H_ee`; allocated once per structure and reused.
     eliminated: EliminatedBlocks,
+    /// Chunk-wise eliminator, built lazily for [`SchurVariant::ChunkedSparse`].
+    chunked: Option<super::schur_eliminator::ChunkedSchurEliminator>,
+    /// `J` from the last chunked solve.
+    ///
+    /// The chunked path never forms `JᵀJ`, so the quadratic model is served as
+    /// `Jᵀ(J·v)` — which needs `J` after the solve returns. Holding it costs one
+    /// extra copy of the Jacobian; still far less than the `Jᵀ`, permutation and
+    /// `JᵀJ` that forming the normal equations would require.
+    chunked_jacobian: Option<SparseColMat<usize, f64>>,
     /// `(nrows, ncols, nnz)` of the Hessian whose block-diagonality was checked.
     ///
     /// The check is structural, so it only has to run when the sparsity
@@ -214,6 +235,8 @@ impl SparseSchurComplementSolver {
         Self {
             partition: None,
             eliminated: EliminatedBlocks::default(),
+            chunked: None,
+            chunked_jacobian: None,
             verified_pattern: None,
             ordering: SchurOrdering::default(),
             variant: SchurVariant::default(),
@@ -922,6 +945,9 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
         self.require_partition()?;
+        if self.variant == SchurVariant::ChunkedSparse {
+            return self.solve_chunked(residuals, jacobian, None);
+        }
 
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
         let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
@@ -967,6 +993,9 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         self.require_partition()?;
+        if self.variant == SchurVariant::ChunkedSparse {
+            return self.solve_chunked(residuals, jacobian, Some(damping));
+        }
 
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
         let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
@@ -1022,10 +1051,39 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
 
 
     fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
-        Some(<SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
-            self.hessian.as_ref()?,
-            v,
-        ))
+        if let Some(h) = self.hessian.as_ref() {
+            return Some(
+                <SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(h, v),
+            );
+        }
+        // Chunked path: `JᵀJ` was never formed, so evaluate `Jᵀ(J·v)` from `J`.
+        let j = self.chunked_jacobian.as_ref()?;
+        let symbolic = j.symbolic();
+
+        let mut jv = Mat::<f64>::zeros(j.nrows(), 1);
+        for col in 0..j.ncols() {
+            let x = v[(col, 0)];
+            if x == 0.0 {
+                continue;
+            }
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let vals = j.val_of_col(col);
+            for (i, &row) in rows.iter().enumerate() {
+                jv[(row, 0)] += vals[i] * x;
+            }
+        }
+
+        let mut out = Mat::<f64>::zeros(j.ncols(), 1);
+        for col in 0..j.ncols() {
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let vals = j.val_of_col(col);
+            let mut acc = 0.0;
+            for (i, &row) in rows.iter().enumerate() {
+                acc += vals[i] * jv[(row, 0)];
+            }
+            out[(col, 0)] = acc;
+        }
+        Some(out)
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
@@ -1039,6 +1097,158 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
 
 // Helper methods for SparseSchurComplementSolver
 impl SparseSchurComplementSolver {
+    /// Chunk-wise solve: `J` straight to the reduced system, no `JᵀJ`.
+    ///
+    /// The gradient published for the optimizers is `Jᵀr` over the *whole*
+    /// system, which the eliminator produces as a by-product; the Hessian is
+    /// not published at all, because it is never formed —
+    /// [`LinearSolver::hessian_vec_product`] serves the quadratic model as
+    /// `Jᵀ(J·v)` instead.
+    fn solve_chunked(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+        damping: Option<&Damping>,
+    ) -> LinAlgResult<Mat<f64>> {
+        // Rebuild the chunk layout only when the sparsity changes.
+        if self.chunked.as_ref().is_none_or(|c| !c.matches(jacobian)) {
+            let partition = self.require_partition()?;
+            self.chunked = Some(super::schur_eliminator::ChunkedSchurEliminator::new(
+                jacobian, partition,
+            )?);
+        }
+
+        let mut eliminator = match self.chunked.take() {
+            Some(e) => e,
+            None => {
+                return Err(LinAlgError::InvalidState(
+                    "chunk eliminator not initialized".to_string(),
+                )
+                .log());
+            }
+        };
+
+        // The optimizers need +Jᵀr and the action of the un-damped Hessian.
+        self.gradient = Some(Self::full_gradient(jacobian, residuals));
+        self.hessian = None;
+        self.chunked_jacobian = Some(jacobian.clone());
+
+        let outcome = (|| -> LinAlgResult<Mat<f64>> {
+            let partition = self.require_partition()?;
+            let reduced = eliminator.eliminate(jacobian, residuals, partition, damping)?;
+
+            // S is accumulated dense; hand Cholesky a sparse view of it.
+            let kept_dof = reduced.kept_dof;
+            let mut triplets: Vec<Triplet<usize, usize, f64>> =
+                Vec::with_capacity(kept_dof.saturating_mul(8));
+            for row in 0..kept_dof {
+                let base = row * kept_dof;
+                for col in 0..kept_dof {
+                    let v = reduced.s[base + col];
+                    if v.abs() > 1e-12 {
+                        triplets.push(Triplet::new(row, col, v));
+                    }
+                }
+            }
+            let s = SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets)
+                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {e:?}")))?;
+
+            // The eliminator returns +g; the reduced system solves S·δ = −g_red.
+            let mut rhs = Mat::<f64>::zeros(kept_dof, 1);
+            for i in 0..kept_dof {
+                rhs[(i, 0)] = -reduced.g_reduced[(i, 0)];
+            }
+            let delta_k = self.solve_with_cholesky(&s, &rhs)?;
+
+            // δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k); the eliminator already holds
+            // H_ee⁻¹·g_e, so only the coupling term is left to apply.
+            let delta_e =
+                self.back_substitute_chunked(&delta_k, &reduced, jacobian, partition)?;
+            self.combine_updates(&delta_k, &delta_e)
+        })();
+
+        self.chunked = Some(eliminator);
+        outcome
+    }
+
+    /// `Jᵀr` over the whole system, for the optimizers' gradient.
+    fn full_gradient(jacobian: &SparseColMat<usize, f64>, residuals: &Mat<f64>) -> Mat<f64> {
+        let symbolic = jacobian.symbolic();
+        let mut g = Mat::<f64>::zeros(jacobian.ncols(), 1);
+        for col in 0..jacobian.ncols() {
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let vals = jacobian.val_of_col(col);
+            let mut acc = 0.0;
+            for (i, &row) in rows.iter().enumerate() {
+                acc += vals[i] * residuals[(row, 0)];
+            }
+            g[(col, 0)] = acc;
+        }
+        g
+    }
+
+    /// `δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k)`, evaluated from `J` rather than `H_ke`.
+    fn back_substitute_chunked(
+        &self,
+        delta_k: &Mat<f64>,
+        reduced: &super::schur_eliminator::ReducedSystem,
+        jacobian: &SparseColMat<usize, f64>,
+        partition: &SchurPartition,
+    ) -> LinAlgResult<Mat<f64>> {
+        let symbolic = jacobian.symbolic();
+
+        // J·δ_k over the retained columns only, giving the coupling term's
+        // row-space vector without forming H_ke.
+        let mut j_delta = Mat::<f64>::zeros(jacobian.nrows(), 1);
+        let mut local = 0usize;
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let rows = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let x = delta_k[(local, 0)];
+                if x != 0.0 {
+                    for (i, &row) in rows.iter().enumerate() {
+                        j_delta[(row, 0)] += vals[i] * x;
+                    }
+                }
+                local += 1;
+            }
+        }
+
+        let mut delta_e = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let dof = block.dof;
+            let base = partition.eliminated_offset(block_idx);
+            let inv = reduced.eliminated_inverse.block(block_idx);
+
+            // Eᵀ·(J·δ_k) for this chunk.
+            let mut etjd = [0.0f64; 16];
+            let etjd = &mut etjd[..dof.min(16)];
+            for (a, slot) in etjd.iter_mut().enumerate() {
+                let col = block.col_start + a;
+                let rows = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let mut acc = 0.0;
+                for (i, &row) in rows.iter().enumerate() {
+                    acc += vals[i] * j_delta[(row, 0)];
+                }
+                *slot = acc;
+            }
+
+            // δ_e = −H_ee⁻¹·g_e − H_ee⁻¹·Eᵀ(J·δ_k)
+            for r in 0..dof {
+                let mut acc = -reduced.eliminated_rhs[(base + r, 0)];
+                for (c, &term) in etjd.iter().enumerate() {
+                    acc -= inv[c * dof + r] * term;
+                }
+                delta_e[(base + r, 0)] = acc;
+            }
+        }
+
+        Ok(delta_e)
+    }
+
     /// Eliminate, solve the reduced system, and back-substitute.
     ///
     /// Shared by the damped and undamped paths, which differ only in whether

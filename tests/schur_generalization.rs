@@ -350,3 +350,204 @@ fn matrix_free_schur_matches_cholesky_on_bundle_adjustment_shape() -> TestResult
     }
     Ok(())
 }
+
+/// Build a system whose rows are already grouped by eliminated variable, the
+/// layout `Problem::group_rows_for_elimination` produces.
+///
+/// Rows are emitted as: every prior on a *retained* column first, then, per
+/// eliminated variable, all of its coupling rows followed by its own prior
+/// rows. That keeps each eliminated variable's rows in one contiguous range,
+/// which chunk-wise elimination requires.
+fn build_grouped_system(
+    dofs: &[usize],
+    eliminated: &[usize],
+    couplings: &[(usize, usize)],
+) -> Result<System, Box<dyn std::error::Error>> {
+    let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+    let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+    let mut keys = Vec::new();
+    let mut col_starts = Vec::new();
+
+    let mut col = 0usize;
+    for &dof in dofs {
+        let key = variables.insert(Box::new(Variable::new(Rn::new(DVector::zeros(dof)))));
+        index_map.insert(key, col);
+        keys.push(key);
+        col_starts.push(col);
+        col += dof;
+    }
+
+    let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+    let mut row = 0usize;
+
+    let emit_coupling = |row: &mut usize,
+                             triplets: &mut Vec<Triplet<usize, usize, f64>>,
+                             pair_idx: usize,
+                             a: usize,
+                             b: usize| {
+        let rows_here = dofs[a].max(dofs[b]);
+        for r in 0..rows_here {
+            for k in 0..dofs[a] {
+                let v = 1.0 + ((pair_idx + r + k) % 7) as f64 * 0.37;
+                triplets.push(Triplet::new(*row + r, col_starts[a] + k, v));
+            }
+            for k in 0..dofs[b] {
+                let v = 0.5 + ((pair_idx * 3 + r + k) % 5) as f64 * 0.29;
+                triplets.push(Triplet::new(*row + r, col_starts[b] + k, v));
+            }
+        }
+        *row += rows_here;
+    };
+
+    // Priors on retained columns, ahead of every chunk.
+    for (v, &dof) in dofs.iter().enumerate() {
+        if eliminated.contains(&v) {
+            continue;
+        }
+        for k in 0..dof {
+            triplets.push(Triplet::new(row, col_starts[v] + k, 0.9 + (k % 3) as f64 * 0.15));
+            row += 1;
+        }
+    }
+
+    // Per eliminated variable: its couplings, then its own priors — contiguous.
+    for &e in eliminated {
+        for (pair_idx, &(a, b)) in couplings.iter().enumerate() {
+            if a == e || b == e {
+                emit_coupling(&mut row, &mut triplets, pair_idx, a, b);
+            }
+        }
+        for k in 0..dofs[e] {
+            triplets.push(Triplet::new(row, col_starts[e] + k, 0.9 + (k % 3) as f64 * 0.15));
+            row += 1;
+        }
+    }
+
+    let jacobian = SparseColMat::try_new_from_triplets(row, col, &triplets)?;
+    let residuals = Mat::from_fn(row, 1, |i, _| 0.1 + (i % 11) as f64 * 0.07);
+
+    Ok(System {
+        variables,
+        index_map,
+        jacobian,
+        residuals,
+        keys,
+    })
+}
+
+/// Chunk-wise elimination must give the same step as a direct factorization.
+///
+/// It forms the reduced system straight from `J`, never materializing `JᵀJ`, so
+/// this is the check that the reordered accumulation is still the same algebra.
+///
+/// The fixture's rows are already grouped by eliminated variable, which is what
+/// `Problem::group_rows_for_elimination` arranges for real problems.
+#[test]
+fn chunked_schur_matches_cholesky() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    // rows are emitted coupling-by-coupling, so listing each eliminated
+    // variable's couplings together makes its rows contiguous.
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut cholesky = SparseCholeskySolver::new();
+    let reference = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_steps_agree(&reference, &step, "chunked elimination");
+    Ok(())
+}
+
+/// The chunked path must serve the quadratic model without ever holding `JᵀJ`.
+#[test]
+fn chunked_schur_serves_hessian_action_without_the_matrix() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    // No matrix...
+    assert!(
+        LinearSolver::<SparseMode>::get_hessian(&chunked).is_none(),
+        "the chunked path must not materialize JtJ"
+    );
+
+    // ...but the action must still be right. Compare against the solver that
+    // does hold JtJ.
+    let mut cholesky = SparseCholeskySolver::new();
+    LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+    let want = LinearSolver::<SparseMode>::hessian_vec_product(&cholesky, &step)
+        .ok_or("cholesky must provide H*v")?;
+    let got = LinearSolver::<SparseMode>::hessian_vec_product(&chunked, &step)
+        .ok_or("chunked must provide H*v")?;
+
+    let scale = want.norm_l2().max(1.0);
+    for i in 0..want.nrows() {
+        assert!(
+            (want[(i, 0)] - got[(i, 0)]).abs() / scale < 1e-10,
+            "H*v[{i}]: cholesky {}, chunked {}",
+            want[(i, 0)],
+            got[(i, 0)]
+        );
+    }
+    Ok(())
+}
+
+/// The *damped* chunked solve must match the damped direct solve.
+///
+/// Regression: damping was first applied to `S` rather than to `H_kk`. Since
+/// `D_jj = clamp(H_jj, …)` reads the diagonal it is applied to, damping after
+/// elimination clamps against the wrong matrix. The undamped tests above could
+/// not see it — only a solve with `λ > 0` can.
+#[test]
+fn chunked_schur_matches_cholesky_when_damped() -> TestResult {
+    use apex_solver::linalg::{Damping, SchurVariant};
+
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+    let damping = Damping::new(1e-2, 1e-6, 1e32)?;
+
+    let mut cholesky = SparseCholeskySolver::new();
+    let reference = LinearSolver::<SparseMode>::solve_augmented_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+        &damping,
+    )?;
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_augmented_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+        &damping,
+    )?;
+
+    assert_steps_agree(&reference, &step, "chunked elimination, damped");
+    Ok(())
+}
