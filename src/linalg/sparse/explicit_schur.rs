@@ -2118,11 +2118,11 @@ mod tests {
     /// Dense read-back helper for the damping tests.
     fn dense_of(m: &SparseColMat<usize, f64>) -> Vec<Vec<f64>> {
         let mut out = vec![vec![0.0; m.ncols()]; m.nrows()];
-        for col in 0..m.ncols() {
+        for (col, out_col) in (0..m.ncols()).zip(0..m.ncols()) {
             let rows = m.symbolic().row_idx_of_col_raw(col);
             let vals = m.val_of_col(col);
             for (i, &r) in rows.iter().enumerate() {
-                out[r][col] = vals[i];
+                out[r][out_col] = vals[i];
             }
         }
         out

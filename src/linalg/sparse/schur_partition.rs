@@ -440,7 +440,7 @@ mod tests {
     use super::*;
     use crate::linalg::Damping;
     use faer::sparse::Triplet;
-    use slotmap::{Key, KeyData};
+    use slotmap::KeyData;
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -525,12 +525,15 @@ mod tests {
         assert!(gap.is_err(), "uncovered columns must be rejected");
     }
 
-    fn hessian_from(n: usize, entries: &[(usize, usize, f64)]) -> SparseColMat<usize, f64> {
+    fn hessian_from(
+        n: usize,
+        entries: &[(usize, usize, f64)],
+    ) -> Result<SparseColMat<usize, f64>, Box<dyn std::error::Error>> {
         let triplets: Vec<Triplet<usize, usize, f64>> = entries
             .iter()
             .map(|&(r, c, v)| Triplet::new(r, c, v))
             .collect();
-        SparseColMat::try_new_from_triplets(n, n, &triplets).expect("test hessian")
+        Ok(SparseColMat::try_new_from_triplets(n, n, &triplets)?)
     }
 
     /// Two eliminated variables sharing a factor make H_ee non-block-diagonal,
@@ -539,14 +542,15 @@ mod tests {
     fn verify_block_diagonal_rejects_coupled_eliminated_variables() -> TestResult {
         let p = SchurPartition::new(vec![span(0, 0, 1)], vec![span(1, 1, 1), span(2, 2, 1)])?;
 
-        let ok = hessian_from(3, &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0), (0, 1, 0.5), (1, 0, 0.5)]);
+        let ok =
+            hessian_from(3, &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0), (0, 1, 0.5), (1, 0, 0.5)])?;
         p.verify_block_diagonal(&ok)?;
 
         // A (1,2) entry couples the two eliminated variables.
         let bad = hessian_from(
             3,
             &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0), (1, 2, 0.5), (2, 1, 0.5)],
-        );
+        )?;
         let Err(err) = p.verify_block_diagonal(&bad) else {
             panic!("coupled eliminated variables must be rejected");
         };
@@ -571,7 +575,7 @@ mod tests {
                 (2, 3, 1.0),
                 (3, 2, 1.0),
             ],
-        );
+        )?;
 
         let mut blocks = EliminatedBlocks::new(&p);
         blocks.gather(&h, &p);
@@ -602,7 +606,7 @@ mod tests {
                 entries.push((1, 2, 0.5));
                 entries.push((2, 1, 0.5));
             }
-            let h = hessian_from(1 + dof, &entries);
+            let h = hessian_from(1 + dof, &entries)?;
 
             let mut blocks = EliminatedBlocks::new(&p);
             blocks.gather(&h, &p);
@@ -639,7 +643,7 @@ mod tests {
                 (2, 3, 3.0),
                 (3, 2, 3.0),
             ],
-        );
+        )?;
         let mut blocks = EliminatedBlocks::new(&p);
         blocks.gather(&h, &p);
         blocks.damp(&Damping::new(0.5, 1e-6, 1e32)?);
