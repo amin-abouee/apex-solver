@@ -120,7 +120,7 @@ fn null_noise_is_bit_identical_to_unweighted_path() -> TestResult {
     let build = |use_with_noise: bool| {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![1.0, 2.0, 3.0]);
-        let factor: Box<dyn Factor + Send> = Box::new(Linear3 {
+        let factor: Box<dyn Factor + Send + Sync> = Box::new(Linear3 {
             target: DVector::from_vec(vec![0.5, -1.0, 2.5]),
         });
         if use_with_noise {

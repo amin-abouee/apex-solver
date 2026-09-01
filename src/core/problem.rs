@@ -8,7 +8,6 @@ use faer::{Mat, sparse::SparseColMat};
 use nalgebra::DVector;
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
-use tracing::warn;
 
 use crate::{
     core::CoreResult,
@@ -77,7 +76,7 @@ impl Problem {
     pub fn add_residual_block(
         &mut self,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> FactorKey {
         self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
@@ -94,7 +93,7 @@ impl Problem {
     pub fn add_residual_block_with_noise(
         &mut self,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
         noise: NoiseModel,
     ) -> FactorKey {
@@ -106,7 +105,7 @@ impl Problem {
     pub fn try_add_residual_block_with_noise(
         &mut self,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
         noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
@@ -132,7 +131,7 @@ impl Problem {
     pub fn try_add_residual_block(
         &mut self,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> CoreResult<FactorKey> {
         self.try_add_residual_block_impl(variable_keys, factor, loss_func, NoiseModel::Null)
@@ -141,7 +140,7 @@ impl Problem {
     fn try_add_residual_block_impl(
         &mut self,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
         noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
@@ -180,20 +179,55 @@ impl Problem {
         }
     }
 
+    /// Hold tangent-space component `idx` of `var_key` fixed during solving.
+    ///
+    /// # Panics
+    /// If the key is unknown or `idx` is outside the variable's DOF. Use
+    /// [`Self::try_fix_variable`] to handle that as an error.
     pub fn fix_variable(&mut self, var_key: VarKey, idx: usize) {
+        self.try_fix_variable(var_key, idx)
+            .unwrap_or_else(|e| panic!("invalid variable constraint: {e}"))
+    }
+
+    /// [`Self::fix_variable`] returning a typed error.
+    ///
+    /// An out-of-range `idx` used to be accepted and then silently ignored
+    /// forever, because the constraint is only ever applied by index against a
+    /// tangent vector that never has that component.
+    pub fn try_fix_variable(&mut self, var_key: VarKey, idx: usize) -> CoreResult<()> {
+        let dof = self.variable_dof(var_key)?;
+        if idx >= dof {
+            return Err(CoreError::Variable(format!(
+                "cannot fix component {idx} of a {dof}-DOF variable"
+            )));
+        }
         if let Some(set) = self.fixed_variable_indexes.get_mut(var_key) {
             set.insert(idx);
         } else {
-            let mut s = HashSet::new();
-            s.insert(idx);
-            self.fixed_variable_indexes.insert(var_key, s);
+            self.fixed_variable_indexes
+                .insert(var_key, HashSet::from([idx]));
         }
+        Ok(())
+    }
+
+    /// Tangent-space dimension of `var_key`, or an error if the key is unknown.
+    fn variable_dof(&self, var_key: VarKey) -> CoreResult<usize> {
+        self.variables
+            .get(var_key)
+            .map(|v| v.dof())
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {var_key:?}")))
     }
 
     pub fn unfix_variable(&mut self, var_key: VarKey) {
         self.fixed_variable_indexes.remove(var_key);
     }
 
+    /// Constrain tangent-space component `idx` of `var_key` to `[lower, upper]`.
+    ///
+    /// # Panics
+    /// If the key is unknown, `idx` is outside the variable's DOF, or the range
+    /// is inverted. Use [`Self::try_set_variable_bounds`] to handle that as an
+    /// error.
     pub fn set_variable_bounds(
         &mut self,
         var_key: VarKey,
@@ -201,14 +235,39 @@ impl Problem {
         lower_bound: f64,
         upper_bound: f64,
     ) {
+        self.try_set_variable_bounds(var_key, idx, lower_bound, upper_bound)
+            .unwrap_or_else(|e| panic!("invalid variable bounds: {e}"))
+    }
+
+    /// [`Self::set_variable_bounds`] returning a typed error.
+    ///
+    /// An inverted range used to be warned about and then dropped, leaving the
+    /// caller unable to distinguish "bound set" from "bound rejected".
+    pub fn try_set_variable_bounds(
+        &mut self,
+        var_key: VarKey,
+        idx: usize,
+        lower_bound: f64,
+        upper_bound: f64,
+    ) -> CoreResult<()> {
+        let dof = self.variable_dof(var_key)?;
+        if idx >= dof {
+            return Err(CoreError::Variable(format!(
+                "cannot bound component {idx} of a {dof}-DOF variable"
+            )));
+        }
         if lower_bound > upper_bound {
-            warn!("lower bound is larger than upper bound");
-        } else if let Some(map) = self.variable_bounds.get_mut(var_key) {
+            return Err(CoreError::Variable(format!(
+                "lower bound {lower_bound} exceeds upper bound {upper_bound}"
+            )));
+        }
+        if let Some(map) = self.variable_bounds.get_mut(var_key) {
             map.insert(idx, (lower_bound, upper_bound));
         } else {
             self.variable_bounds
                 .insert(var_key, HashMap::from([(idx, (lower_bound, upper_bound))]));
         }
+        Ok(())
     }
 
     pub fn remove_variable_bounds(&mut self, var_key: VarKey) {
@@ -724,7 +783,34 @@ mod tests {
     fn test_set_variable_bounds_invalid_order() {
         let mut p = Problem::new(JacobianMode::Sparse);
         let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
-        p.set_variable_bounds(k, 0, 5.0, 1.0);
+
+        // An inverted range is rejected, not warned about and dropped: the
+        // caller could not previously tell the two apart.
+        let Err(err) = p.try_set_variable_bounds(k, 0, 5.0, 1.0) else {
+            panic!("inverted range must be rejected");
+        };
+        assert!(err.to_string().contains("exceeds upper bound"), "{err}");
+        assert!(!p.variable_bounds.contains_key(k));
+    }
+
+    /// A component index beyond the variable's DOF can never be applied, so it
+    /// must be rejected rather than stored and silently ignored forever.
+    #[test]
+    fn test_variable_constraints_reject_out_of_range_index() {
+        let mut p = Problem::new(JacobianMode::Sparse);
+        let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]); // 3 DOF
+
+        let Err(err) = p.try_fix_variable(k, 3) else {
+            panic!("index 3 is out of range for a 3-DOF variable");
+        };
+        assert!(err.to_string().contains("3-DOF"), "{err}");
+
+        let Err(err) = p.try_set_variable_bounds(k, 7, -1.0, 1.0) else {
+            panic!("index 7 is out of range for a 3-DOF variable");
+        };
+        assert!(err.to_string().contains("3-DOF"), "{err}");
+
+        assert!(!p.fixed_variable_indexes.contains_key(k));
         assert!(!p.variable_bounds.contains_key(k));
     }
 
@@ -940,7 +1026,7 @@ mod tests {
         use nalgebra::Matrix2xX;
         use rn::Rn;
 
-        fn ba_factor(n_landmarks: usize) -> Box<dyn Factor + Send> {
+        fn ba_factor(n_landmarks: usize) -> Box<dyn Factor + Send + Sync> {
             let observations = Matrix2xX::from_fn(n_landmarks, |r, c| (r + c) as f64);
             Box::new(ProjectionFactor::<PinholeCamera, BundleAdjustment>::new(
                 observations,

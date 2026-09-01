@@ -25,6 +25,14 @@ pub enum DdsError {
 
     #[error("Thread join failed: {0}")]
     ThreadJoin(String),
+
+    /// Failed to spawn the OS thread that drives the DDS reader loop.
+    #[error("Failed to spawn DDS reader thread: {0}")]
+    ThreadSpawn(String),
+
+    /// Failed to construct the tokio runtime the reader loop runs on.
+    #[error("Failed to create tokio runtime for DDS reader: {0}")]
+    RuntimeCreation(String),
 }
 
 pub type Result<T> = std::result::Result<T, DdsError>;

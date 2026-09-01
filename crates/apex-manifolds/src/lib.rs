@@ -41,10 +41,6 @@
 
 use nalgebra::{Matrix3, Vector3};
 use std::ops::{Mul, Neg};
-use std::{
-    error, fmt,
-    fmt::{Display, Formatter},
-};
 
 /// Threshold for switching between exact formulas and Taylor approximations
 /// in small-angle computations.
@@ -72,19 +68,25 @@ pub mod so2;
 pub mod so3;
 
 /// Errors that can occur during manifold operations.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ManifoldError {
     /// Invalid tangent vector dimension
+    #[error("Invalid tangent dimension: expected {expected}, got {actual}")]
     InvalidTangentDimension { expected: usize, actual: usize },
     /// Numerical instability in computation
+    #[error("Numerical instability: {0}")]
     NumericalInstability(String),
     /// Invalid manifold element
+    #[error("Invalid manifold element: {0}")]
     InvalidElement(String),
     /// Dimension validation failed during conversion
+    #[error("Dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
     /// NaN or Inf detected in manifold element
+    #[error("Invalid number: NaN or Inf detected")]
     InvalidNumber,
     /// Normalization failed for manifold element
+    #[error("Normalization failed: {0}")]
     NormalizationFailed(String),
 }
 
@@ -117,36 +119,6 @@ impl ManifoldType {
         }
     }
 }
-
-impl Display for ManifoldError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            ManifoldError::InvalidTangentDimension { expected, actual } => {
-                write!(
-                    f,
-                    "Invalid tangent dimension: expected {expected}, got {actual}"
-                )
-            }
-            ManifoldError::NumericalInstability(msg) => {
-                write!(f, "Numerical instability: {msg}")
-            }
-            ManifoldError::InvalidElement(msg) => {
-                write!(f, "Invalid manifold element: {msg}")
-            }
-            ManifoldError::DimensionMismatch { expected, actual } => {
-                write!(f, "Dimension mismatch: expected {expected}, got {actual}")
-            }
-            ManifoldError::InvalidNumber => {
-                write!(f, "Invalid number: NaN or Inf detected")
-            }
-            ManifoldError::NormalizationFailed(msg) => {
-                write!(f, "Normalization failed: {msg}")
-            }
-        }
-    }
-}
-
-impl error::Error for ManifoldError {}
 
 /// Result type for manifold operations.
 pub type ManifoldResult<T> = Result<T, ManifoldError>;

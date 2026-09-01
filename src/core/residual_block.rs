@@ -122,7 +122,7 @@ pub struct ResidualBlock {
     /// The factor that computes residuals and Jacobians
     ///
     /// Must implement the `Factor` trait and be thread-safe (`Send`).
-    pub factor: Box<dyn Factor + Send>,
+    pub factor: Box<dyn Factor + Send + Sync>,
 
     /// Optional robust loss function for outlier rejection
     ///
@@ -185,7 +185,7 @@ impl ResidualBlock {
         residual_block_id: FactorKey,
         residual_row_start_idx: usize,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> Self {
         Self::with_noise(
@@ -205,7 +205,7 @@ impl ResidualBlock {
         residual_block_id: FactorKey,
         residual_row_start_idx: usize,
         variable_keys: &[VarKey],
-        factor: Box<dyn Factor + Send>,
+        factor: Box<dyn Factor + Send + Sync>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
         noise: NoiseModel,
     ) -> Self {
@@ -474,7 +474,7 @@ mod tests {
             (fac_sm.insert(()), 6, vec![k0], false),
         ];
 
-        let factors: Vec<Box<dyn Factor + Send>> = vec![
+        let factors: Vec<Box<dyn Factor + Send + Sync>> = vec![
             Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
             Box::new(BetweenFactor::new(SE2::from_xy_angle(0.8, 0.2, -0.05))),
             Box::new(EuclideanPriorFactor::new(dvector![0.0, 0.0, 0.0])),
