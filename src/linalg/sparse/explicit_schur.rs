@@ -1139,12 +1139,13 @@ impl SparseSchurComplementSolver {
 
             // S is accumulated dense; hand Cholesky a sparse view of it.
             let kept_dof = reduced.kept_dof;
+            // faer's `Mat` is column-major, so walk columns outermost to keep
+            // the read sequential.
             let mut triplets: Vec<Triplet<usize, usize, f64>> =
                 Vec::with_capacity(kept_dof.saturating_mul(8));
-            for row in 0..kept_dof {
-                let base = row * kept_dof;
-                for col in 0..kept_dof {
-                    let v = reduced.s[base + col];
+            for col in 0..kept_dof {
+                for row in 0..kept_dof {
+                    let v = reduced.s[(row, col)];
                     if v.abs() > 1e-12 {
                         triplets.push(Triplet::new(row, col, v));
                     }

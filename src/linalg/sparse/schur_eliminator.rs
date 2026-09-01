@@ -196,7 +196,7 @@ pub struct ReducedSystem {
     /// Kept dense here for the same reason the other explicit path does: `S` is
     /// typically dense for bundle adjustment. Callers that factorize it convert
     /// to sparse.
-    pub s: Vec<f64>,
+    pub s: Mat<f64>,
     /// `g_red = g_k − H_ke·H_ee⁻¹·g_e`.
     pub g_reduced: Mat<f64>,
     /// `H_ee⁻¹` per chunk, retained for back-substitution.
@@ -259,7 +259,7 @@ impl ChunkedSchurEliminator {
         let kept_dof = partition.kept_dof();
         let symbolic = jacobian.symbolic();
 
-        let mut s = vec![0.0f64; kept_dof * kept_dof];
+        let mut s = Mat::<f64>::zeros(kept_dof, kept_dof);
         let mut g_k = Mat::<f64>::zeros(kept_dof, 1);
         let mut eliminated_inverse = EliminatedBlocks::new(partition);
         let mut eliminated_rhs = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
@@ -289,7 +289,6 @@ impl ChunkedSchurEliminator {
                 leading_end,
                 &mut s,
                 &mut g_k,
-                kept_dof,
             );
         }
 
@@ -312,7 +311,7 @@ impl ChunkedSchurEliminator {
         for &(chunk, row_start, row_end) in &chunk_spans {
             let dof = eliminated_inverse.dof(chunk);
             if dof == 0 || row_start >= row_end {
-                chunk_data.push(ChunkData::default());
+                chunk_data.push(ChunkData::empty());
                 continue;
             }
             let block = partition.eliminated_blocks()[chunk];
@@ -328,14 +327,13 @@ impl ChunkedSchurEliminator {
                 Some(&chunk_cols),
                 &mut s,
                 &mut g_k,
-                kept_dof,
             );
 
             // EᵀE, Eᵀr and EᵀF from the same row range.
             let ete = eliminated_inverse.block_mut(chunk);
             ete.fill(0.0);
-            let mut etr = vec![0.0f64; dof];
-            let mut etf = vec![0.0f64; cols.len() * dof];
+            let mut etr = Mat::<f64>::zeros(dof, 1);
+            let mut etf = Mat::<f64>::zeros(dof, cols.len());
 
             for a in 0..dof {
                 let col_a = block.col_start + a;
@@ -346,13 +344,12 @@ impl ChunkedSchurEliminator {
                         continue;
                     }
                     let e = vals_a[i];
-                    etr[a] += e * residuals[(row, 0)];
+                    etr[(a, 0)] += e * residuals[(row, 0)];
 
                     // EᵀF for this row, against the strip's dense row.
                     let local_row = row - row_start;
-                    let strip_row = &strip[local_row * cols.len()..(local_row + 1) * cols.len()];
-                    for (c, &f) in strip_row.iter().enumerate() {
-                        etf[c * dof + a] += e * f;
+                    for c in 0..cols.len() {
+                        etf[(a, c)] += e * strip[(local_row, c)];
                     }
 
                     // EᵀE
@@ -386,15 +383,13 @@ impl ChunkedSchurEliminator {
                 self.layout.nrows(),
                 &mut s,
                 &mut g_k,
-                kept_dof,
             );
         }
 
         // H_kk is complete: damp it, and each H_ee block, before eliminating.
         if let Some(damping) = damping {
             for i in 0..kept_dof {
-                let pos = i * kept_dof + i;
-                s[pos] += damping.diagonal_term(s[pos]);
+                s[(i, i)] += damping.diagonal_term(s[(i, i)]);
             }
             for chunk in 0..eliminated_inverse.len() {
                 let dof = eliminated_inverse.dof(chunk);
@@ -421,39 +416,36 @@ impl ChunkedSchurEliminator {
             // w = H_ee⁻¹·Eᵀr, retained for back-substitution.
             for r in 0..dof {
                 let mut acc = 0.0;
-                for (c, &etr_c) in data.etr.iter().enumerate() {
-                    acc += inv[c * dof + r] * etr_c;
+                for c in 0..dof {
+                    acc += inv[c * dof + r] * data.etr[(c, 0)];
                 }
                 eliminated_rhs[(base + r, 0)] = acc;
             }
 
+            let mut contrib = Mat::<f64>::zeros(dof, 1);
             for (i, &col_i) in data.cols.iter().enumerate() {
-                let etf_i = &data.etf[i * dof..(i + 1) * dof];
-                let mut contrib = vec![0.0f64; dof];
-                for (c, slot) in contrib.iter_mut().enumerate() {
+                // contrib = (Eᵀ F)_iᵀ · H_ee⁻¹
+                for c in 0..dof {
                     let inv_col = &inv[c * dof..(c + 1) * dof];
                     let mut acc = 0.0;
-                    for k in 0..dof {
-                        acc += etf_i[k] * inv_col[k];
+                    for (k, &inv_k) in inv_col.iter().enumerate().take(dof) {
+                        acc += data.etf[(k, i)] * inv_k;
                     }
-                    *slot = acc;
+                    contrib[(c, 0)] = acc;
                 }
 
-                let g_term: f64 = contrib
-                    .iter()
-                    .zip(data.etr.iter())
-                    .map(|(a, b)| a * b)
-                    .sum();
+                let mut g_term = 0.0;
+                for c in 0..dof {
+                    g_term += contrib[(c, 0)] * data.etr[(c, 0)];
+                }
                 g_reduced[(col_i, 0)] -= g_term;
 
-                let row_base = col_i * kept_dof;
                 for (j, &col_j) in data.cols.iter().enumerate() {
-                    let etf_j = &data.etf[j * dof..(j + 1) * dof];
                     let mut acc = 0.0;
                     for k in 0..dof {
-                        acc += contrib[k] * etf_j[k];
+                        acc += contrib[(k, 0)] * data.etf[(k, j)];
                     }
-                    s[row_base + col_j] -= acc;
+                    s[(col_i, col_j)] -= acc;
                 }
             }
         }
@@ -480,10 +472,9 @@ impl ChunkedSchurEliminator {
         row_start: usize,
         row_end: usize,
         candidate_cols: Option<&[u32]>,
-        s: &mut [f64],
+        s: &mut Mat<f64>,
         g_k: &mut Mat<f64>,
-        kept_dof: usize,
-    ) -> (Vec<usize>, Vec<f64>) {
+    ) -> (Vec<usize>, Mat<f64>) {
         let symbolic = jacobian.symbolic();
         let n_rows = row_end - row_start;
 
@@ -522,29 +513,29 @@ impl ChunkedSchurEliminator {
         }
 
         let width = cols.len();
-        let mut strip = vec![0.0f64; n_rows * width];
+        let mut strip = Mat::<f64>::zeros(n_rows, width);
         for (c, (&local, &(begin, end))) in cols.iter().zip(spans.iter()).enumerate() {
             let global = kept_global[local];
             let rows = symbolic.row_idx_of_col_raw(global);
             let vals = jacobian.val_of_col(global);
             for k in begin..end {
-                strip[(rows[k] - row_start) * width + c] = vals[k];
+                strip[(rows[k] - row_start, c)] = vals[k];
             }
         }
 
         // FᵀF and Fᵀr over this row range only.
         for r in 0..n_rows {
-            let row = &strip[r * width..(r + 1) * width];
             let residual = residuals[(row_start + r, 0)];
-            for (i, &vi) in row.iter().enumerate() {
+            for i in 0..width {
+                let vi = strip[(r, i)];
                 if vi == 0.0 {
                     continue;
                 }
                 g_k[(cols[i], 0)] += vi * residual;
-                let base = cols[i] * kept_dof;
-                for (j, &vj) in row.iter().enumerate() {
+                for j in 0..width {
+                    let vj = strip[(r, j)];
                     if vj != 0.0 {
-                        s[base + cols[j]] += vi * vj;
+                        s[(cols[i], cols[j])] += vi * vj;
                     }
                 }
             }
@@ -562,26 +553,37 @@ impl ChunkedSchurEliminator {
         kept_global: &[usize],
         row_start: usize,
         row_end: usize,
-        s: &mut [f64],
+        s: &mut Mat<f64>,
         g_k: &mut Mat<f64>,
-        kept_dof: usize,
     ) {
         let _ = self.gather_strip(
-            jacobian, residuals, kept_global, row_start, row_end, None, s, g_k, kept_dof,
+            jacobian, residuals, kept_global, row_start, row_end, None, s, g_k,
         );
     }
 }
 
 /// Per-chunk quantities carried from the gather phase to the correction phase.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct ChunkData {
     /// Retained columns this chunk touches.
     cols: Vec<usize>,
-    /// `Eᵀ F`, column-major over `cols`.
-    etf: Vec<f64>,
-    /// `Eᵀ r`.
-    etr: Vec<f64>,
+    /// `Eᵀ F`: `dof × cols.len()`.
+    etf: Mat<f64>,
+    /// `Eᵀ r`: `dof × 1`.
+    etr: Mat<f64>,
     dof: usize,
+}
+
+impl ChunkData {
+    /// A chunk with nothing to contribute (no rows, or a zero-DOF block).
+    fn empty() -> Self {
+        Self {
+            cols: Vec::new(),
+            etf: Mat::zeros(0, 0),
+            etr: Mat::zeros(0, 0),
+            dof: 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -731,9 +733,9 @@ mod tests {
             );
             for k in 0..4 {
                 assert!(
-                    (got.s[i * 4 + k] - want_s[i * 4 + k]).abs() < 1e-10,
+                    (got.s[(i, k)] - want_s[i * 4 + k]).abs() < 1e-10,
                     "S[{i},{k}]: got {}, want {}",
-                    got.s[i * 4 + k],
+                    got.s[(i, k)],
                     want_s[i * 4 + k]
                 );
             }
@@ -753,15 +755,14 @@ mod tests {
         let damped = elim.eliminate(&j, &r, &partition, Some(&damping))?;
 
         for i in 0..plain.kept_dof {
-            let d = i * plain.kept_dof + i;
             assert!(
-                damped.s[d] > plain.s[d],
+                damped.s[(i, i)] > plain.s[(i, i)],
                 "damping must raise S's diagonal at {i}"
             );
         }
         // Off-diagonals differ too, because H_ee was damped before inversion.
         assert!(
-            (damped.s[1] - plain.s[1]).abs() > 1e-12,
+            (damped.s[(0, 1)] - plain.s[(0, 1)]).abs() > 1e-12,
             "damping H_ee must change the Schur complement off-diagonal"
         );
         Ok(())

@@ -32,6 +32,7 @@
 //! checks this against the actual Hessian pattern rather than trusting the caller.
 
 use faer::sparse::SparseColMat;
+use faer::mat::{MatMut, MatRef};
 use nalgebra::{DMatrix, Matrix3};
 
 use crate::core::VarKey;
@@ -293,6 +294,15 @@ impl SchurPartition {
 
 /// The dense diagonal blocks of `H_ee`, packed into one arena.
 ///
+/// The flat buffer is deliberate and is the one place a raw `Vec<f64>` is the
+/// right container here: the blocks have *different* sizes, so no single matrix
+/// type can hold them, and one allocation per block would mean 4.5 million
+/// allocations per iteration on the largest BAL problem. It mirrors
+/// `AssemblyWorkspace::jac_arena`.
+///
+/// Callers work with [`MatRef`]/[`MatMut`] views over it via [`Self::block_ref`]
+/// and [`Self::block_mut_ref`] rather than the bare slices.
+///
 /// Block sizes vary per problem (1 for inverse depth, 3 for a point, 6 for a
 /// marginalized pose) and may be mixed within one problem, so a fixed-size
 /// matrix type will not do. A `Vec<DMatrix>` would heap-allocate once per block
@@ -340,10 +350,27 @@ impl EliminatedBlocks {
     }
 
     /// Column-major values of block `idx`.
+    ///
+    /// Prefer [`Self::block_ref`]; this stays for the inner products that index
+    /// the flat layout directly in hot loops.
     #[inline]
     pub fn block(&self, idx: usize) -> &[f64] {
         let (start, dof) = self.spans[idx];
         &self.values[start..start + dof * dof]
+    }
+
+    /// Block `idx` as a faer matrix view.
+    #[inline]
+    pub fn block_ref(&self, idx: usize) -> MatRef<'_, f64> {
+        let (start, dof) = self.spans[idx];
+        MatRef::from_column_major_slice(&self.values[start..start + dof * dof], dof, dof)
+    }
+
+    /// Block `idx` as a mutable faer matrix view.
+    #[inline]
+    pub fn block_mut_ref(&mut self, idx: usize) -> MatMut<'_, f64> {
+        let (start, dof) = self.spans[idx];
+        MatMut::from_column_major_slice_mut(&mut self.values[start..start + dof * dof], dof, dof)
     }
 
     /// Mutable column-major values of block `idx`.
