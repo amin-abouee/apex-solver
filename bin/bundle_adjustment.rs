@@ -406,27 +406,42 @@ fn run_bundle_adjustment(
     info!("Iterations: {}", result.iterations);
     info!("Time: {:.2} seconds", elapsed.as_secs_f64());
 
+    // A problem with no valid observations, or a zero initial cost, would turn
+    // these into NaN/inf in user-facing output; report "n/a" instead.
     let num_obs = valid_obs.len() as f64;
-    let initial_rmse = (result.initial_cost / num_obs).sqrt();
-    let final_rmse = (result.final_cost / num_obs).sqrt();
+    let rmse = |cost: f64| {
+        if num_obs > 0.0 {
+            format!("{:.3} pixels", (cost / num_obs).sqrt())
+        } else {
+            "n/a (no valid observations)".to_string()
+        }
+    };
+    let initial_rmse = rmse(result.initial_cost);
+    let final_rmse = rmse(result.final_cost);
 
     info!("");
     info!("Metrics:");
     info!("  Initial cost: {:.6e}", result.initial_cost);
     info!("  Final cost: {:.6e}", result.final_cost);
-    info!("  Initial RMSE: {:.3} pixels", initial_rmse);
-    info!("  Final RMSE: {:.3} pixels", final_rmse);
-    info!(
-        "  Improvement: {:.2}%",
-        (result.initial_cost - result.final_cost) / result.initial_cost * 100.0
-    );
+    info!("  Initial RMSE: {}", initial_rmse);
+    info!("  Final RMSE: {}", final_rmse);
+    if result.initial_cost > 0.0 {
+        info!(
+            "  Improvement: {:.2}%",
+            (result.initial_cost - result.final_cost) / result.initial_cost * 100.0
+        );
+    } else {
+        info!("  Improvement: n/a (initial cost is zero)");
+    }
 
     if verbose {
         info!("");
-        info!(
-            "  Per-iteration: {:.2}s",
-            elapsed.as_secs_f64() / result.iterations as f64
-        );
+        if result.iterations > 0 {
+            info!(
+                "  Per-iteration: {:.2}s",
+                elapsed.as_secs_f64() / result.iterations as f64
+            );
+        }
     }
 
     Ok(())

@@ -459,13 +459,9 @@ fn print_analysis(results: &[BenchmarkResult]) {
     info!("=== ANALYSIS AND RECOMMENDATIONS ===");
     info!("{}", "=".repeat(80));
 
-    let mut datasets_vec: Vec<String> = results
-        .iter()
-        .map(|r| r.dataset.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    let mut datasets_vec: Vec<String> = results.iter().map(|r| r.dataset.clone()).collect();
     datasets_vec.sort();
+    datasets_vec.dedup();
 
     for dataset in &datasets_vec {
         info!("Dataset: {}", dataset);

@@ -274,53 +274,37 @@ fn create_loss_function(
 ) -> Result<Option<Box<dyn LossFunction + Send>>, Box<dyn std::error::Error>> {
     let loss_lower = loss_name.to_lowercase();
 
-    let default_scale = match loss_lower.as_str() {
-        "l2" | "l1" => {
-            return Ok(match loss_lower.as_str() {
-                "l2" => Some(Box::new(L2Loss)),
-                "l1" => Some(Box::new(L1Loss)),
-                _ => None,
-            });
-        }
-        "huber" => 1.345,
-        "cauchy" => 2.3849,
-        "fair" => 1.3999,
-        "welsch" => 2.9846,
-        "tukey" => 4.6851,
-        "geman" | "gemanmcclure" => 1.0,
-        "andrews" => 1.339,
-        "ramsay" => 0.3,
-        "trimmed" | "trimmedmean" => 2.0,
-        "lp" => 1.5,
-        "barron0" | "barron1" | "barron-2" => 1.0,
-        "t-distribution" | "tdistribution" => 5.0,
-        "adaptive-barron" | "adaptivebarron" => 1.0,
-        _ => {
-            return Err(format!("Unknown loss function: {}. Valid options: l2, l1, huber, cauchy, fair, welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, barron-2, t-distribution, adaptive-barron", loss_name).into());
-        }
-    };
-
-    let scale_param = scale.unwrap_or(default_scale);
-
+    // One table: each arm picks its own default scale, so there is no second
+    // table to drift out of sync and no unreachable fallthrough between them.
+    // `scale` overrides the default where the loss takes one; L2 and L1 have no
+    // scale parameter.
+    let s = |default: f64| scale.unwrap_or(default);
     let loss: Box<dyn LossFunction + Send> = match loss_lower.as_str() {
-        "huber" => Box::new(HuberLoss::new(scale_param)?),
-        "cauchy" => Box::new(CauchyLoss::new(scale_param)?),
-        "fair" => Box::new(FairLoss::new(scale_param)?),
-        "welsch" => Box::new(WelschLoss::new(scale_param)?),
-        "tukey" => Box::new(TukeyBiweightLoss::new(scale_param)?),
-        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(scale_param)?),
-        "andrews" => Box::new(AndrewsWaveLoss::new(scale_param)?),
-        "ramsay" => Box::new(RamsayEaLoss::new(scale_param)?),
-        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(scale_param)?),
-        "lp" => Box::new(LpNormLoss::new(scale_param)?),
-        "barron0" => Box::new(BarronGeneralLoss::new(0.0, scale_param)?),
-        "barron1" => Box::new(BarronGeneralLoss::new(1.0, scale_param)?),
-        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, scale_param)?),
-        "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(scale_param)?),
-        "adaptive-barron" | "adaptivebarron" => {
-            Box::new(AdaptiveBarronLoss::new(0.0, scale_param)?)
+        "l2" => Box::new(L2Loss),
+        "l1" => Box::new(L1Loss),
+        "huber" => Box::new(HuberLoss::new(s(1.345))?),
+        "cauchy" => Box::new(CauchyLoss::new(s(2.3849))?),
+        "fair" => Box::new(FairLoss::new(s(1.3999))?),
+        "welsch" => Box::new(WelschLoss::new(s(2.9846))?),
+        "tukey" => Box::new(TukeyBiweightLoss::new(s(4.6851))?),
+        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(s(1.0))?),
+        "andrews" => Box::new(AndrewsWaveLoss::new(s(1.339))?),
+        "ramsay" => Box::new(RamsayEaLoss::new(s(0.3))?),
+        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(s(2.0))?),
+        "lp" => Box::new(LpNormLoss::new(s(1.5))?),
+        "barron0" => Box::new(BarronGeneralLoss::new(0.0, s(1.0))?),
+        "barron1" => Box::new(BarronGeneralLoss::new(1.0, s(1.0))?),
+        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, s(1.0))?),
+        "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(s(5.0))?),
+        "adaptive-barron" | "adaptivebarron" => Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?),
+        other => {
+            return Err(format!(
+                "Unknown loss function: {other}. Valid options: l2, l1, huber, cauchy, fair, \
+                 welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, \
+                 barron-2, t-distribution, adaptive-barron"
+            )
+            .into());
         }
-        _ => unreachable!(),
     };
 
     Ok(Some(loss))
