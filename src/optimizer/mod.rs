@@ -305,6 +305,19 @@ pub fn apply_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
 ) -> f64 {
+    apply_signed_parameter_step(variables, step, variable_order, 1.0)
+}
+
+/// Apply `sign · step`, the shared body of the forward and rollback paths.
+///
+/// The sign is folded into the per-variable copy that has to happen anyway, so
+/// a rollback does not allocate and fill a negated copy of the full step vector.
+fn apply_signed_parameter_step(
+    variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    step: MatRef<f64>,
+    variable_order: &[VarKey],
+    sign: f64,
+) -> f64 {
     let mut step_offset = 0;
 
     // SmallVec-backed buffer: inline for the common case (DOF ≤ 16, covering
@@ -319,7 +332,7 @@ pub fn apply_parameter_step(
             step_buf.clear();
             step_buf.resize(var_size, 0.0);
             for i in 0..var_size {
-                step_buf[i] = var_step[(i, 0)];
+                step_buf[i] = sign * var_step[(i, 0)];
             }
             var.apply_tangent_step(&step_buf);
             step_offset += var_size;
@@ -344,11 +357,7 @@ pub fn apply_negative_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
 ) {
-    let mut negative_step = Mat::zeros(step.nrows(), 1);
-    for i in 0..step.nrows() {
-        negative_step[(i, 0)] = -step[(i, 0)];
-    }
-    apply_parameter_step(variables, negative_step.as_ref(), variable_order);
+    apply_signed_parameter_step(variables, step, variable_order, -1.0);
 }
 
 pub fn compute_cost(residual: &Mat<f64>) -> f64 {

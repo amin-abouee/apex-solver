@@ -116,7 +116,11 @@ pub fn assemble_sparse(
     let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
 
     // Scatter Jacobian blocks into CSC value array (serial, pre-computed positions).
-    let mut jacobian_values = Vec::with_capacity(total_nnz);
+    // Reuse the workspace buffer; `scatter_sparse_block` pushes into it, so it
+    // must start empty while keeping its capacity across calls.
+    let mut jacobian_values = std::mem::take(&mut workspace.jacobian_values);
+    jacobian_values.clear();
+    jacobian_values.reserve(total_nnz);
     for ((bl, key), jac_buf) in block_results
         .iter()
         .zip(workspace.block_order.iter())
@@ -140,9 +144,12 @@ pub fn assemble_sparse(
             "Failed to create sparse Jacobian from argsort".to_string(),
         )
         .log_with_source(e)
-    })?;
+    });
 
-    Ok((residual_faer, jacobian_sparse))
+    // Return the buffer to the workspace before propagating any error.
+    workspace.jacobian_values = jacobian_values;
+
+    Ok((residual_faer, jacobian_sparse?))
 }
 
 fn scatter_sparse_block(

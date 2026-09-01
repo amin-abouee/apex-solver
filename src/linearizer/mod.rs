@@ -143,6 +143,8 @@ pub struct AssemblyWorkspace {
     pub(crate) jac_offsets: Vec<(usize, usize)>,
     /// Reusable global residual buffer.
     pub(crate) residual_buf: Vec<f64>,
+    /// Reusable CSC value array the Jacobian blocks scatter into.
+    pub(crate) jacobian_values: Vec<f64>,
 }
 
 impl AssemblyWorkspace {
@@ -168,6 +170,9 @@ impl AssemblyWorkspace {
             jac_arena: vec![0.0; total_jac_len],
             jac_offsets,
             residual_buf: vec![0.0; problem.total_residual_dimension],
+            // Sized on first use: nnz comes from the symbolic structure, which
+            // the workspace does not carry.
+            jacobian_values: Vec::new(),
         }
     }
 
@@ -180,6 +185,7 @@ impl AssemblyWorkspace {
             jac_arena: Vec::new(),
             jac_offsets: Vec::new(),
             residual_buf: Vec::new(),
+            jacobian_values: Vec::new(),
         }
     }
 }
