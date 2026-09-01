@@ -16,7 +16,10 @@ pub use sparse::{
     IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
     SparseCholeskySolver, SparseQRSolver, SparseSchurComplementSolver,
 };
-pub use sparse::{BlockSpan, ColSlot, EliminatedBlocks, SchurPartition};
+pub use sparse::{
+    BlockSpan, ChunkLayout, ChunkedSchurEliminator, ColSlot, EliminatedBlocks, ReducedSystem,
+    SchurPartition,
+};
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
 
