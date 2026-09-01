@@ -1264,6 +1264,17 @@ impl LevenbergMarquardt {
     /// the problem's own mode, so the solver actually used could differ from the
     /// configured one with no signal.
     pub fn optimize(&mut self, problem: &mut Problem) -> crate::optimizer::OptimizeResult {
+        // Chunk-wise elimination sweeps rows in chunk order, so each eliminated
+        // variable's rows must be adjacent. Regroup before any structure is
+        // built from the current layout — row order is a labelling, so this
+        // leaves the problem and its cost unchanged.
+        if matches!(
+            self.config.linear_solver_type,
+            LinearSolverType::SparseSchurComplement
+        ) {
+            problem.group_rows_for_elimination();
+        }
+
         // Built once here and moved into the chosen arm: the Schur solver needs
         // the variable index map to size its block structure, and rebuilding
         // the state inside `optimize_with_mode` would repeat the symbolic

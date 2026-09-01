@@ -191,6 +191,66 @@ impl Problem {
         Ok(fk)
     }
 
+    /// Reassign residual row offsets so each eliminated variable's rows form
+    /// one contiguous range.
+    ///
+    /// Chunk-wise Schur elimination sweeps chunks in increasing row order,
+    /// which requires the rows of any one eliminated variable to be adjacent.
+    /// Bundle-adjustment data is usually camera-major — BAL lists observations
+    /// camera by camera — so each landmark's rows arrive scattered across the
+    /// matrix and the sweep cannot run.
+    ///
+    /// Rows are a labelling, not part of the problem: permuting them permutes
+    /// `r` and the rows of `J` together, leaving `JᵀJ`, `Jᵀr` and hence the step
+    /// unchanged. The cost is a sum of squares, so it is unchanged too.
+    ///
+    /// Blocks touching no eliminated variable (priors on retained variables,
+    /// say) are placed first, ahead of every chunk, so they never fall inside a
+    /// chunk's range.
+    ///
+    /// Idempotent, and a no-op when nothing is marked for elimination.
+    /// Returns whether any offset actually moved.
+    pub(crate) fn group_rows_for_elimination(&mut self) -> bool {
+        if self.schur_landmark_keys.is_empty() {
+            return false;
+        }
+
+        // Order: unchunked blocks first, then blocks grouped by the eliminated
+        // variable they touch. Ties broken by the existing offset so the result
+        // is deterministic and idempotent.
+        let mut ordered: Vec<(Option<VarKey>, usize, FactorKey)> = self
+            .residual_blocks
+            .iter()
+            .map(|(key, block)| {
+                let eliminated = block
+                    .variable_keys
+                    .iter()
+                    .find(|k| self.schur_landmark_keys.contains(k))
+                    .copied();
+                (eliminated, block.residual_row_start_idx, key)
+            })
+            .collect();
+        // `None` sorts before `Some`, putting unchunked rows first.
+        ordered.sort_by_key(|(eliminated, offset, _)| (*eliminated, *offset));
+
+        let mut moved = false;
+        let mut row = 0usize;
+        for (_, _, key) in &ordered {
+            if let Some(block) = self.residual_blocks.get_mut(*key) {
+                if block.residual_row_start_idx != row {
+                    block.residual_row_start_idx = row;
+                    moved = true;
+                }
+                row += block.factor.residual_dim();
+            }
+        }
+        debug_assert_eq!(
+            row, self.total_residual_dimension,
+            "regrouping must preserve the total residual dimension"
+        );
+        moved
+    }
+
     pub fn remove_residual_block(&mut self, block_id: FactorKey) -> Option<ResidualBlock> {
         if let Some(block) = self.residual_blocks.remove(block_id) {
             self.total_residual_dimension -= block.factor.residual_dim();
@@ -780,6 +840,66 @@ mod tests {
         p.unfix_variable(k0);
         assert!(!p.fixed_variable_indexes.contains_key(k0));
         assert!(p.fixed_variable_indexes.contains_key(k1));
+    }
+
+    /// Regrouping rows for elimination must not change the problem.
+    ///
+    /// Row order is a labelling: permuting it permutes `r` and `J`'s rows
+    /// together, so the cost — a sum of squares — is invariant.
+    #[test]
+    fn test_group_rows_for_elimination_preserves_cost() -> TestResult {
+        use crate::linearizer::AssemblyWorkspace;
+
+        let mut p = Problem::new(JacobianMode::Sparse);
+        let a = p.add_variable(ManifoldType::SE2, dvector![0.1, 0.2, 0.05]);
+        let b = p.add_variable(ManifoldType::SE2, dvector![1.0, 0.1, 0.02]);
+        let p0 = p.add_variable(ManifoldType::RN, dvector![0.3, 0.4, 0.5]);
+        let p1 = p.add_variable(ManifoldType::RN, dvector![0.6, 0.7, 0.8]);
+
+        // Camera-major insertion: each landmark's rows end up scattered.
+        for (x, y) in [(a, p0), (a, p1), (b, p0), (b, p1)] {
+            p.add_residual_block(
+                &[x, y],
+                Box::new(crate::factors::BetweenFactor::new(
+                    apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
+                )),
+                None,
+            );
+        }
+        p.mark_for_elimination(p0);
+        p.mark_for_elimination(p1);
+
+        let variables = p.variables.clone();
+        let mut ws = AssemblyWorkspace::build(&p);
+        let (_, cost_before) = p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
+
+        assert!(p.group_rows_for_elimination(), "camera-major rows must move");
+
+        let mut ws = AssemblyWorkspace::build(&p);
+        let (_, cost_after) = p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
+        assert!(
+            (cost_before - cost_after).abs() < 1e-12,
+            "cost changed: {cost_before} -> {cost_after}"
+        );
+
+        // Each eliminated variable's rows are now one contiguous range.
+        for landmark in [p0, p1] {
+            let mut rows: Vec<usize> = p
+                .residual_blocks()
+                .values()
+                .filter(|b| b.variable_keys.contains(&landmark))
+                .flat_map(|b| {
+                    b.residual_row_start_idx..b.residual_row_start_idx + b.factor.residual_dim()
+                })
+                .collect();
+            rows.sort_unstable();
+            let contiguous = rows.windows(2).all(|w| w[1] == w[0] + 1);
+            assert!(contiguous, "rows for {landmark:?} are not contiguous: {rows:?}");
+        }
+
+        // Idempotent.
+        assert!(!p.group_rows_for_elimination(), "a second call must be a no-op");
+        Ok(())
     }
 
     #[test]
