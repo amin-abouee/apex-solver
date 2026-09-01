@@ -649,11 +649,17 @@ impl LevenbergMarquardtConfig {
     /// Configuration optimized for bundle adjustment problems.
     ///
     /// This preset uses settings tuned for large-scale bundle adjustment:
-    /// - **Schur complement solver** with iterative PCG (memory efficient)
-    /// - **Schur-Jacobi preconditioner** (Ceres-style, best PCG convergence)
+    /// - **Schur complement solver**, direct sparse Cholesky on the reduced
+    ///   system — the fastest variant measured on every BAL dataset
+    /// - **Schur-Jacobi preconditioner**, used if an iterative variant is
+    ///   selected through [`Self::with_schur_variant`]
     /// - **Moderate initial damping** (1e-3) - not too aggressive
-    /// - **200 max iterations** (BA often needs more iterations for full convergence)
+    /// - **20 max iterations** (early stop once RMSE is below a pixel)
     /// - **Very tight tolerances** matching Ceres Solver for accurate reconstruction
+    ///
+    /// For problems where the reduced system `S` is too large to materialize,
+    /// switch to [`SchurVariant::Iterative`] (matrix-free) or
+    /// [`SchurVariant::ChunkedSparse`] (never forms `JᵀJ`).
     ///
     /// This configuration matches Ceres Solver's recommended BA settings and
     /// should achieve similar convergence quality.
@@ -668,7 +674,12 @@ impl LevenbergMarquardtConfig {
     pub fn for_bundle_adjustment() -> Self {
         Self::default()
             .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-            .with_schur_variant(SchurVariant::Iterative)
+            // Direct Cholesky on the reduced system is the fastest variant on
+            // every BAL dataset measured, at identical RMSE and iteration
+            // count. The matrix-free variant costs 1.7-4.5x more time and
+            // earns its place only when `S` will not fit in memory, so it is
+            // opt-in through `with_schur_variant` rather than the default.
+            .with_schur_variant(SchurVariant::Sparse)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
             .with_damping(1e-3) // Moderate initial damping (Ceres default)
             .with_max_iterations(20) // Reduced for early stop when RMSE < 1px
