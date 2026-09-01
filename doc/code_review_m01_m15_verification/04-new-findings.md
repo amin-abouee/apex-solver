@@ -122,6 +122,62 @@ to share an `Arc`, or a single field plus an `is_damped` flag.
 
 ---
 
+<a id="nf6"></a>
+## NF-6 · HIGH — The entire matrix-free Schur solver is dead code
+
+**Location:** `src/linalg/sparse/explicit_schur.rs:219, 234, 1071`;
+`src/linalg/sparse/implicit_schur.rs` (whole file, ~1500 lines)
+
+`SparseSchurComplementSolver` holds a delegate:
+
+```rust
+iterative_solver: Option<IterativeSchurSolver>,   // :219
+```
+
+`initialize_structure` builds one for `SchurVariant::Iterative` (`:1071`) and stores it.
+**Nothing ever reads the field** — a workspace-wide grep for `iterative_solver` returns
+exactly three hits: the declaration, the `None` initializer, and that one write.
+
+The solve never delegates either. Step 6 of both `solve_normal_equation` and
+`solve_augmented_equation` is:
+
+```rust
+let delta_c = match self.variant {
+    SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+    _ => self.solve_with_cholesky(&s, &g_reduced)?,
+};
+```
+
+— `self.solve_with_pcg`, a local Jacobi-preconditioned CG on the **already formed** `s`.
+
+So both `SchurVariant`s form the full explicit Schur complement through
+`compute_schur_complement`, including its O(cam_size²) dense accumulator; the variant only
+chooses the inner linear solve. `IterativeSchurSolver`'s matrix-free operator, its block and
+Schur-Jacobi preconditioners, and its visibility index are never executed outside unit
+tests. Constructing the delegate is pure waste — `initialize_structure` on it allocates a
+second full block structure per solve.
+
+**How this was found:** measuring. Two fixes applied to `implicit_schur.rs`
+([C-7](01-confirmed.md), [C-10](01-confirmed.md)) produced *exactly* zero change on every
+BA probe, including one that removed a full `JᵀJ` copy per iteration. Code on a hot path
+does not behave like that.
+
+**This also corrects the original review.** Its M01-H5 / M10-P4 rated the
+`implicit_schur.rs` Hessian clones HIGH, "potentially hundreds of MB each iteration under
+`SchurVariant::Iterative`". Those clones cost nothing, because nothing runs them.
+
+**Not fixed here** — deliberately. There are two defensible resolutions and they point in
+opposite directions:
+
+- **Wire it up.** Matrix-free PCG never forms `S`, so it sidesteps the O(cam²) dense
+  buffer that dominates large-camera solves. Plausibly the better algorithm at Ladybug
+  scale and above. But it changes BA numerics and needs its own convergence validation.
+- **Delete it.** ~1500 lines, plus the delegate field and half of `SchurVariant`'s meaning.
+
+Either is an architecture decision, not a mechanical fix. Left for a dedicated round.
+
+---
+
 ## NF-4 · LOW — The one per-iteration allocation the workspace refactor missed
 
 **Location:** `src/linearizer/cpu/sparse.rs:119`
@@ -135,6 +191,25 @@ and residual buffer, but this O(nnz) scatter target is still allocated fresh on 
 `assemble_sparse` call. It is capacity-correct, so this is one large allocation rather than a
 growth cascade — but it belongs in the workspace next to `jac_arena` for consistency, and it
 is the last thing standing between the assembly path and being genuinely allocation-free.
+
+---
+
+<a id="nf7"></a>
+## NF-7 · resolved — The Schur drain loop was the dominant cost at scale
+
+**Location:** `src/linalg/sparse/explicit_schur.rs` (drain loop following the
+symmetrisation)
+
+`s_dense` is row-major (`[row * cam_size + col]`), but the loop converting it back to
+triplets iterated **columns outermost**, striding by `cam_size` on every one of the
+`cam_size²` elements.
+
+Fixed by swapping the nesting — `try_new_from_triplets` sorts, so emission order is free —
+plus `Vec::with_capacity`.
+
+**Measured: 15.86 s → 8.69 s on ladybug (8k points, explicit Schur), a 45% cut**, final
+cost bit-identical at `2.114155e4`. This was the single largest win of the round, and the
+original review had it filed as one clause inside a MEDIUM (M10-8).
 
 ---
 
