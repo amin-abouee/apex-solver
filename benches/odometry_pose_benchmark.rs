@@ -157,6 +157,41 @@ fn compute_se2_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
     }
 }
 
+/// Edge weight from a g2o information matrix, counting unusable Ω.
+///
+/// Clamping an indefinite Ω to PSD is the nearest-PSD projection: it keeps the
+/// trustworthy part of the measurement and zeroes the directions the data
+/// contradicts. That is the right repair, but it is silent, and on
+/// `cubicle.g2o` (5021/16869 edges) and `rim.g2o` (8815/29743) it applies to
+/// ~30% of the graph. Counting it here turns 5021 per-edge warnings into one
+/// line per dataset that says how much of the input is ill-formed.
+fn edge_noise(info: nalgebra::DMatrix<f64>, unusable: &mut usize) -> NoiseModel {
+    match NoiseModel::from_information_reporting(info) {
+        Ok((noise, repair)) => {
+            if repair.is_material() {
+                *unusable += 1;
+            }
+            noise
+        }
+        Err(e) => panic!("g2o information matrix must be well-formed: {e:?}"),
+    }
+}
+
+/// Warn once per dataset when edges had to fall back to unit weight.
+fn report_unusable_information(dataset: &str, unusable: usize, total: usize) {
+    if unusable > 0 {
+        warn!(
+            "{}: {}/{} edges ({:.1}%) have a materially indefinite information \
+             matrix; the clamped directions carry no constraint — the \
+             dataset's Ω is ill-formed",
+            dataset,
+            unusable,
+            total,
+            100.0 * unusable as f64 / total.max(1) as f64
+        );
+    }
+}
+
 /// Compute both SE3 cost metrics from G2O graph data
 /// - Chi-squared: sum of r^T * Omega * r (information-weighted)
 /// - Unweighted: 0.5 * sum ||r||^2
@@ -510,17 +545,16 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
+    let mut unusable_information = 0usize;
     for edge in &graph.edges_se2 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
             // Weight with the edge's information matrix so the optimized
             // objective equals the harness-reported Ω-weighted χ².
-            let noise = NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
-                3,
-                3,
-                edge.information.as_slice(),
-            ))
-            .unwrap_or_else(|e| panic!("g2o information matrix must be PD: {e:?}"));
+            let noise = edge_noise(
+                nalgebra::DMatrix::from_column_slice(3, 3, edge.information.as_slice()),
+                &mut unusable_information,
+            );
             problem.add_residual_block_with_noise(
                 &[k0, k1],
                 Box::new(between_factor),
@@ -529,6 +563,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             );
         }
     }
+    report_unusable_information(dataset.name, unusable_information, graph.edges_se2.len());
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(150)
@@ -596,17 +631,16 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
+    let mut unusable_information = 0usize;
     for edge in &graph.edges_se3 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
             // Weight with the edge's information matrix so the optimized
             // objective equals the harness-reported Ω-weighted χ².
-            let noise = NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
-                6,
-                6,
-                edge.information.as_slice(),
-            ))
-            .unwrap_or_else(|e| panic!("g2o information matrix must be PD: {e:?}"));
+            let noise = edge_noise(
+                nalgebra::DMatrix::from_column_slice(6, 6, edge.information.as_slice()),
+                &mut unusable_information,
+            );
             problem.add_residual_block_with_noise(
                 &[k0, k1],
                 Box::new(between_factor),
@@ -615,6 +649,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             );
         }
     }
+    report_unusable_information(dataset.name, unusable_information, graph.edges_se3.len());
 
     let config = LevenbergMarquardtConfig::new()
         .with_max_iterations(100)

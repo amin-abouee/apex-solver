@@ -33,6 +33,46 @@ pub enum NoiseModel {
     Dense(DMatrix<f64>),
 }
 
+/// What [`NoiseModel::from_information_reporting`] had to repair to make an
+/// information matrix PSD.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct InformationRepair {
+    /// Eigen-directions whose negative eigenvalue was clamped to zero. Each
+    /// one is a residual direction the measurement no longer constrains.
+    pub clamped_directions: usize,
+    /// Smallest eigenvalue of the symmetrized `Ω`, before clamping.
+    pub min_eigenvalue: f64,
+    /// Largest eigenvalue of the symmetrized `Ω`, the scale `min_eigenvalue`
+    /// is judged against.
+    pub max_eigenvalue: f64,
+}
+
+/// Relative size below which a negative eigenvalue is attributed to
+/// floating-point noise in the eigendecomposition rather than to bad data.
+const INDEFINITE_TOLERANCE: f64 = 1e-9;
+
+impl InformationRepair {
+    /// True when clamping discarded real information rather than
+    /// floating-point noise.
+    ///
+    /// Rank-deficient `Ω` (an exactly-zero eigenvalue, an unobserved DOF) is
+    /// legitimate and is *not* material — only a negative eigenvalue that is
+    /// large relative to the matrix scale is.
+    pub fn is_material(&self) -> bool {
+        let tol = self.max_eigenvalue.abs() * INDEFINITE_TOLERANCE + 1e-12;
+        self.min_eigenvalue < -tol
+    }
+
+    /// Most negative eigenvalue as a fraction of the largest, a scale-free
+    /// measure of how indefinite `Ω` was. Zero when `Ω` was PSD.
+    pub fn relative_indefiniteness(&self) -> f64 {
+        if self.max_eigenvalue <= 0.0 || self.min_eigenvalue >= 0.0 {
+            return 0.0;
+        }
+        -self.min_eigenvalue / self.max_eigenvalue
+    }
+}
+
 impl NoiseModel {
     /// Identity model.
     pub fn null() -> Self {
@@ -70,7 +110,36 @@ impl NoiseModel {
     /// so negative eigenvalues are clamped to zero — the corresponding
     /// residual directions carry no information and whiten to zero. The
     /// square root is the symmetric `S = V·√Λ⁺·Vᵀ`, satisfying `SᵀS = Ω`.
+    ///
+    /// Clamping is silent here. Callers that must distinguish floating-point
+    /// noise from a genuinely ill-formed Ω — where clamping discards real
+    /// constraints rather than empty directions — should use
+    /// [`Self::from_information_reporting`] and inspect the
+    /// [`InformationRepair`] it returns.
     pub fn from_information(info: DMatrix<f64>) -> CoreResult<Self> {
+        let (model, repair) = Self::from_information_reporting(info)?;
+        if repair.is_material() {
+            tracing::warn!(
+                "information matrix has a negative eigenvalue (min = {:.3e}, \
+                 max = {:.3e}); clamping to zero — the edge may be ill-formed",
+                repair.min_eigenvalue,
+                repair.max_eigenvalue
+            );
+        }
+        Ok(model)
+    }
+
+    /// Same repair as [`Self::from_information`], but reports what it did.
+    ///
+    /// Clamping an indefinite `Ω` to PSD is the nearest-PSD projection, and on
+    /// a genuinely ill-formed matrix it silently deletes constraints: the
+    /// clamped directions stop influencing the solution at all. Returning the
+    /// [`InformationRepair`] lets a caller decide — keep the repaired `Ω`,
+    /// substitute a unit weight, or reject the measurement — instead of
+    /// optimizing a quietly mutilated objective.
+    pub fn from_information_reporting(
+        info: DMatrix<f64>,
+    ) -> CoreResult<(Self, InformationRepair)> {
         let n = info.nrows();
         if !info.is_square() || n == 0 {
             return Err(CoreError::InvalidInput(
@@ -87,21 +156,17 @@ impl NoiseModel {
         // Negative eigenvalues are clamped to zero (matching g2o/GTSAM, whose
         // pivoting LDLᵀ tolerates indefinite Ω): fp-noise negatives arise on
         // rank-deficient directions, and some real datasets carry slightly
-        // indefinite Ω. A genuinely large negative is surfaced as a warning —
-        // it means ill-formed measurement information, not a crash.
+        // indefinite Ω.
         let lam_max = se.eigenvalues.iter().copied().fold(f64::MIN, f64::max);
-        let tol = lam_max.abs() * 1e-9 + 1e-12;
-        if se.eigenvalues.iter().any(|&lam| lam < -tol) {
-            tracing::warn!(
-                "information matrix has a negative eigenvalue (min = {:.3e}); \
-                 clamping to zero — the edge may be ill-formed",
-                se.eigenvalues.iter().copied().fold(f64::MAX, f64::min)
-            );
-        }
+        let lam_min = se.eigenvalues.iter().copied().fold(f64::MAX, f64::min);
         let mut s = DMatrix::zeros(n, n);
+        let mut clamped_directions = 0;
         for i in 0..n {
-            let lam = se.eigenvalues[i].max(0.0);
-            if lam == 0.0 {
+            let lam = se.eigenvalues[i];
+            if lam <= 0.0 {
+                if lam < 0.0 {
+                    clamped_directions += 1;
+                }
                 continue;
             }
             let root = lam.sqrt();
@@ -111,7 +176,12 @@ impl NoiseModel {
                 }
             }
         }
-        Ok(NoiseModel::Dense(s))
+        let repair = InformationRepair {
+            clamped_directions,
+            min_eigenvalue: lam_min,
+            max_eigenvalue: lam_max,
+        };
+        Ok((NoiseModel::Dense(s), repair))
     }
 
     /// Dense model from an explicit square-root information matrix `S`

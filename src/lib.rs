@@ -68,7 +68,7 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
-pub use core::noise::NoiseModel;
+pub use core::noise::{InformationRepair, NoiseModel};
 pub use factors::{BetweenFactor, EuclideanPriorFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
