@@ -50,7 +50,7 @@
 //! # }
 //! ```
 
-use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
+use super::explicit_schur::SchurPreconditioner;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
@@ -62,10 +62,42 @@ use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashMap;
 
+/// Fixed-shape block structure used by the matrix-free solver.
+///
+/// This is the pre-generalization layout: retained and eliminated variables
+/// each assumed contiguous, eliminated blocks assumed 3-DOF. The explicit
+/// solver moved to [`SchurPartition`](super::schur_partition::SchurPartition),
+/// which lifts both restrictions; this path still carries the old assumptions
+/// and is therefore bundle-adjustment specific.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LegacyBlockStructure {
+    pub camera_blocks: Vec<(VarKey, usize, usize)>,
+    pub landmark_blocks: Vec<(VarKey, usize, usize)>,
+    pub camera_dof: usize,
+    pub landmark_dof: usize,
+    pub num_landmarks: usize,
+}
+
+impl LegacyBlockStructure {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn camera_col_range(&self) -> (usize, usize) {
+        let start = self.camera_blocks.first().map(|b| b.1).unwrap_or(0);
+        (start, start + self.camera_dof)
+    }
+
+    pub fn landmark_col_range(&self) -> (usize, usize) {
+        let start = self.landmark_blocks.first().map(|b| b.1).unwrap_or(0);
+        (start, start + self.landmark_dof)
+    }
+}
+
 /// Iterative Schur complement solver using Preconditioned Conjugate Gradients
 #[derive(Debug, Clone)]
 pub struct IterativeSchurSolver {
-    block_structure: Option<SchurBlockStructure>,
+    block_structure: Option<LegacyBlockStructure>,
 
     // CG parameters
     max_cg_iterations: usize,
@@ -972,7 +1004,7 @@ impl StructureAware for IterativeSchurSolver {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
-        let mut structure = SchurBlockStructure::new();
+        let mut structure = LegacyBlockStructure::new();
 
         for (key, variable) in variables {
             let start_col = *variable_index_map.get(key).ok_or_else(|| {

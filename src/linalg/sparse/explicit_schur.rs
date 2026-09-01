@@ -45,7 +45,9 @@
 //! ```
 
 use super::implicit_schur::IterativeSchurSolver;
+use super::schur_partition::{BlockSpan, EliminatedBlocks, SchurPartition};
 use crate::core::VarKey;
+use crate::error::ErrorLogging;
 use crate::core::variable::ManifoldVariable;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
@@ -56,7 +58,6 @@ use faer::{
     linalg::solvers::Solve,
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
-use nalgebra::Matrix3;
 use slotmap::{SecondaryMap, SlotMap};
 use tracing::debug;
 
@@ -147,59 +148,30 @@ impl SchurOrdering {
         }
     }
 }
-
-/// Block structure for Schur complement solver
-#[derive(Debug, Clone)]
-pub struct SchurBlockStructure {
-    pub camera_blocks: Vec<(VarKey, usize, usize)>,
-    pub landmark_blocks: Vec<(VarKey, usize, usize)>,
-    pub camera_dof: usize,
-    pub landmark_dof: usize,
-    pub num_landmarks: usize,
-}
-
-impl SchurBlockStructure {
-    pub fn new() -> Self {
-        Self {
-            camera_blocks: Vec::new(),
-            landmark_blocks: Vec::new(),
-            camera_dof: 0,
-            landmark_dof: 0,
-            num_landmarks: 0,
-        }
-    }
-
-    pub fn camera_col_range(&self) -> (usize, usize) {
-        if self.camera_blocks.is_empty() {
-            (0, 0)
-        } else {
-            // Safe: we just checked is_empty() is false
-            let start = self.camera_blocks.first().map(|b| b.1).unwrap_or(0);
-            (start, start + self.camera_dof)
-        }
-    }
-
-    pub fn landmark_col_range(&self) -> (usize, usize) {
-        if self.landmark_blocks.is_empty() {
-            (0, 0)
-        } else {
-            // Safe: we just checked is_empty() is false
-            let start = self.landmark_blocks.first().map(|b| b.1).unwrap_or(0);
-            (start, start + self.landmark_dof)
-        }
-    }
-}
-
-impl Default for SchurBlockStructure {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Superseded by [`SchurPartition`], which supports eliminated blocks of any
+/// DOF, mixed sizes within one problem, and non-contiguous partitions.
+///
+/// This alias keeps existing imports resolving. The replacement exposes
+/// accessors (`kept_blocks()`, `eliminated_dof()`, …) rather than public
+/// fields, so code that read the old fields must be updated.
+#[deprecated(
+    since = "1.6.0",
+    note = "renamed and generalized to `SchurPartition`; eliminated blocks are no longer \
+            restricted to 3 DOF and the partition may be non-contiguous"
+)]
+pub type SchurBlockStructure = SchurPartition;
 
 /// Sparse Schur Complement Solver for Bundle Adjustment
 #[derive(Debug, Clone)]
 pub struct SparseSchurComplementSolver {
-    block_structure: Option<SchurBlockStructure>,
+    partition: Option<SchurPartition>,
+    /// Diagonal blocks of `H_ee`; allocated once per structure and reused.
+    eliminated: EliminatedBlocks,
+    /// `(nrows, ncols, nnz)` of the Hessian whose block-diagonality was checked.
+    ///
+    /// The check is structural, so it only has to run when the sparsity
+    /// changes — not on every solve.
+    verified_pattern: Option<(usize, usize, usize)>,
     ordering: SchurOrdering,
     variant: SchurVariant,
     preconditioner: SchurPreconditioner,
@@ -222,7 +194,9 @@ pub struct SparseSchurComplementSolver {
 impl SparseSchurComplementSolver {
     pub fn new() -> Self {
         Self {
-            block_structure: None,
+            partition: None,
+            eliminated: EliminatedBlocks::default(),
+            verified_pattern: None,
             ordering: SchurOrdering::default(),
             variant: SchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
@@ -255,10 +229,40 @@ impl SparseSchurComplementSolver {
         self.cg_tolerance = tol;
         self
     }
-
-    pub fn block_structure(&self) -> Option<&SchurBlockStructure> {
-        self.block_structure.as_ref()
+    /// The variable partition, once `initialize_structure` has run.
+    pub fn partition(&self) -> Option<&SchurPartition> {
+        self.partition.as_ref()
     }
+
+    /// Verify `H_ee` is block-diagonal, once per sparsity pattern.
+    ///
+    /// Eliminating mutually connected variables silently yields a wrong step,
+    /// so this is checked rather than assumed — but the check is structural,
+    /// so repeating it every iteration would be pure overhead.
+    fn ensure_block_diagonal(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
+        let fingerprint = (
+            hessian.nrows(),
+            hessian.ncols(),
+            hessian.as_ref().compute_nnz(),
+        );
+        if self.verified_pattern == Some(fingerprint) {
+            return Ok(());
+        }
+        self.require_partition()?.verify_block_diagonal(hessian)?;
+        self.verified_pattern = Some(fingerprint);
+        Ok(())
+    }
+
+    /// Borrow the partition, or report that `initialize_structure` was skipped.
+    fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
+        self.partition.as_ref().ok_or_else(|| {
+            LinAlgError::InvalidInput(
+                "Block structure not built. Call initialize_structure() first.".to_string(),
+            )
+            .log()
+        })
+    }
+
 
     /// Union of the manually marked landmark keys and — when
     /// [`SchurOrdering::auto_detect`] is enabled — the variables matching the
@@ -279,289 +283,132 @@ impl SparseSchurComplementSolver {
         }
         keys
     }
-
-    fn build_block_structure(
+    /// Partition the variables into eliminated and retained sets.
+    ///
+    /// Both sides accept arbitrary DOF and arbitrary column interleaving: the
+    /// eliminated set need not be 3-DOF points, and need not occupy a
+    /// contiguous column range. See [`SchurPartition`].
+    fn build_partition(
         &mut self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         variable_index_map: &SecondaryMap<VarKey, usize>,
-        schur_landmark_keys: &std::collections::HashSet<VarKey>,
+        eliminate_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
-        let mut structure = SchurBlockStructure::new();
-        for (key, variable) in variables {
-            let start_col = *variable_index_map.get(key).ok_or_else(|| {
-                LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key))
-            })?;
-            let size = variable.dof();
+        let mut kept = Vec::new();
+        let mut eliminated = Vec::new();
 
-            if schur_landmark_keys.contains(&key) {
-                structure.landmark_blocks.push((key, start_col, size));
-                structure.landmark_dof += size;
-                structure.num_landmarks += 1;
+        for (key, variable) in variables {
+            let col_start = *variable_index_map.get(key).ok_or_else(|| {
+                LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key)).log()
+            })?;
+            let span = BlockSpan {
+                key,
+                col_start,
+                dof: variable.dof(),
+            };
+            if eliminate_keys.contains(&key) {
+                eliminated.push(span);
             } else {
-                structure.camera_blocks.push((key, start_col, size));
-                structure.camera_dof += size;
+                kept.push(span);
             }
         }
 
-        structure.camera_blocks.sort_by_key(|(_, col, _)| *col);
-        structure.landmark_blocks.sort_by_key(|(_, col, _)| *col);
-
-        if structure.camera_blocks.is_empty() {
-            return Err(LinAlgError::InvalidInput(
-                "No camera variables found".to_string(),
-            ));
-        }
-        if structure.landmark_blocks.is_empty() {
-            return Err(LinAlgError::InvalidInput(
-                "No landmark variables found".to_string(),
-            ));
-        }
-
-        // Log block structure for diagnostics
-        debug!("Schur complement block structure:");
-        debug!(
-            "  Camera blocks: {} variables, {} total DOF",
-            structure.camera_blocks.len(),
-            structure.camera_dof
-        );
-        debug!(
-            "  Landmark blocks: {} variables, {} total DOF",
-            structure.landmark_blocks.len(),
-            structure.landmark_dof
-        );
-        debug!("  Camera column range: {:?}", structure.camera_col_range());
-        debug!(
-            "  Landmark column range: {:?}",
-            structure.landmark_col_range()
-        );
-        debug!(
-            "  Schur complement S size: {} × {}",
-            structure.camera_dof, structure.camera_dof
-        );
-
-        // Validate column ranges are contiguous
-        let (_cam_start, cam_end) = structure.camera_col_range();
-        let (land_start, _land_end) = structure.landmark_col_range();
-        if cam_end != land_start {
-            debug!(
-                "WARNING: Gap between camera and landmark blocks! cam_end={}, land_start={}",
-                cam_end, land_start
-            );
-        }
-
-        self.block_structure = Some(structure);
+        let partition = SchurPartition::new(kept, eliminated)?;
+        self.eliminated = EliminatedBlocks::new(&partition);
+        self.partition = Some(partition);
+        self.verified_pattern = None;
         Ok(())
     }
-
-    /// Extract 3×3 diagonal blocks from H_pp
-    fn extract_landmark_blocks(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Vec<Matrix3<f64>>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not built".to_string()))?;
-
-        let mut blocks = Vec::with_capacity(structure.num_landmarks);
-        let symbolic = hessian.symbolic();
-
-        for (_, start_col, _) in &structure.landmark_blocks {
-            let mut block = Matrix3::<f64>::zeros();
-
-            for local_col in 0..3 {
-                let global_col = start_col + local_col;
-                let row_indices = symbolic.row_idx_of_col_raw(global_col);
-                let col_values = hessian.val_of_col(global_col);
-
-                for (idx, &row) in row_indices.iter().enumerate() {
-                    if row >= *start_col && row < start_col + 3 {
-                        let local_row = row - start_col;
-                        block[(local_row, local_col)] = col_values[idx];
-                    }
-                }
-            }
-
-            blocks.push(block);
-        }
-
-        Ok(blocks)
-    }
-
-    /// Invert all 3×3 blocks with numerical robustness
+    /// Extract `H_kk`, the retained-retained block.
     ///
-    /// This function checks the condition number of each block and applies
-    /// additional regularization for ill-conditioned blocks to prevent
-    /// numerical instability in the Schur complement computation.
-    fn invert_landmark_blocks(blocks: &[Matrix3<f64>]) -> LinAlgResult<Vec<Matrix3<f64>>> {
-        Self::invert_landmark_blocks_with_lambda(blocks, 0.0)
-    }
-
-    /// Invert all 3×3 blocks with numerical robustness and optional damping
-    ///
-    /// # Arguments
-    /// * `blocks` - The 3×3 H_pp diagonal blocks to invert
-    /// * `lambda` - LM damping parameter (already added to blocks if > 0)
-    ///
-    /// For severely ill-conditioned blocks, additional regularization is applied
-    /// to ensure numerical stability.
-    fn invert_landmark_blocks_with_lambda(
-        blocks: &[Matrix3<f64>],
-        lambda: f64,
-    ) -> LinAlgResult<Vec<Matrix3<f64>>> {
-        // Thresholds for numerical robustness
-        const CONDITION_THRESHOLD: f64 = 1e10; // Max acceptable condition number
-        const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12; // Below this is considered singular
-        const REGULARIZATION_SCALE: f64 = 1e-6; // Scale for additional regularization
-
-        let mut ill_conditioned_count = 0;
-        let mut regularized_count = 0;
-
-        let result: LinAlgResult<Vec<Matrix3<f64>>> = blocks
-            .iter()
-            .enumerate()
-            .map(|(i, block)| {
-                // Compute symmetric eigenvalues for condition number check
-                // For a 3x3 SPD matrix, eigenvalues give us the condition number
-                let eigenvalues = block.symmetric_eigenvalues();
-                let min_ev = eigenvalues.min();
-                let max_ev = eigenvalues.max();
-
-                if min_ev < MIN_EIGENVALUE_THRESHOLD {
-                    // Severely ill-conditioned: add strong regularization
-                    regularized_count += 1;
-                    let reg = lambda.max(REGULARIZATION_SCALE) + max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        LinAlgError::SingularMatrix(format!(
-                            "Landmark block {} singular even with regularization (min_ev={:.2e})",
-                            i, min_ev
-                        ))
-                    })
-                } else if max_ev / min_ev > CONDITION_THRESHOLD {
-                    // Ill-conditioned but not singular: add moderate regularization
-                    ill_conditioned_count += 1;
-                    let extra_reg = max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * extra_reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        LinAlgError::SingularMatrix(format!(
-                            "Landmark block {} ill-conditioned (cond={:.2e})",
-                            i,
-                            max_ev / min_ev
-                        ))
-                    })
-                } else {
-                    // Well-conditioned: standard inversion
-                    block.try_inverse().ok_or_else(|| {
-                        LinAlgError::SingularMatrix(format!("Landmark block {} is singular", i))
-                    })
-                }
-            })
-            .collect();
-
-        // Log statistics about conditioning
-        if ill_conditioned_count > 0 || regularized_count > 0 {
-            debug!(
-                "Landmark block conditioning: {} ill-conditioned, {} regularized out of {}",
-                ill_conditioned_count,
-                regularized_count,
-                blocks.len()
-            );
-        }
-
-        result
-    }
-
-    /// Extract H_cc (camera-camera block)
-    fn extract_camera_block(
+    /// Indices go through the partition rather than a contiguous range, so the
+    /// retained variables need not be adjacent in column space.
+    fn extract_kept_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not built".to_string()))?;
-
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let cam_size = structure.camera_dof;
+        let partition = self.require_partition()?;
+        let kept_dof = partition.kept_dof();
         let symbolic = hessian.symbolic();
 
         let mut triplets = Vec::new();
-
-        for global_col in cam_start..cam_end {
-            let local_col = global_col - cam_start;
-            let row_indices = symbolic.row_idx_of_col_raw(global_col);
-            let col_values = hessian.val_of_col(global_col);
-
-            for (idx, &global_row) in row_indices.iter().enumerate() {
-                if global_row >= cam_start && global_row < cam_end {
-                    let local_row = global_row - cam_start;
-                    triplets.push(Triplet::new(local_row, local_col, col_values[idx]));
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let global_col = block.col_start + offset;
+                let Some(local_col) = partition.kept_local(global_col) else {
+                    continue;
+                };
+                let rows = symbolic.row_idx_of_col_raw(global_col);
+                let vals = hessian.val_of_col(global_col);
+                for (idx, &global_row) in rows.iter().enumerate() {
+                    if let Some(local_row) = partition.kept_local(global_row) {
+                        triplets.push(Triplet::new(local_row, local_col, vals[idx]));
+                    }
                 }
             }
         }
 
-        SparseColMat::try_new_from_triplets(cam_size, cam_size, &triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_cc: {:?}", e)))
+        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &triplets)
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_kk: {:?}", e)))
     }
-
-    /// Extract H_cp (camera-point coupling)
+    /// Extract `H_ke`, the coupling between retained and eliminated variables.
+    ///
+    /// Columns follow the eliminated-local ordering, so block `i` occupies
+    /// `partition.eliminated_offset(i) .. + dof`.
     fn extract_coupling_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not built".to_string()))?;
-
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let (land_start, land_end) = structure.landmark_col_range();
-        let cam_size = structure.camera_dof;
-        let land_size = structure.landmark_dof;
+        let partition = self.require_partition()?;
         let symbolic = hessian.symbolic();
 
         let mut triplets = Vec::new();
-
-        for global_col in land_start..land_end {
-            let local_col = global_col - land_start;
-            let row_indices = symbolic.row_idx_of_col_raw(global_col);
-            let col_values = hessian.val_of_col(global_col);
-
-            for (idx, &global_row) in row_indices.iter().enumerate() {
-                if global_row >= cam_start && global_row < cam_end {
-                    let local_row = global_row - cam_start;
-                    triplets.push(Triplet::new(local_row, local_col, col_values[idx]));
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let col_base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                let global_col = block.col_start + offset;
+                let rows = symbolic.row_idx_of_col_raw(global_col);
+                let vals = hessian.val_of_col(global_col);
+                for (idx, &global_row) in rows.iter().enumerate() {
+                    if let Some(local_row) = partition.kept_local(global_row) {
+                        triplets.push(Triplet::new(local_row, col_base + offset, vals[idx]));
+                    }
                 }
             }
         }
 
-        SparseColMat::try_new_from_triplets(cam_size, land_size, &triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_cp: {:?}", e)))
+        SparseColMat::try_new_from_triplets(
+            partition.kept_dof(),
+            partition.eliminated_dof(),
+            &triplets,
+        )
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("H_ke: {:?}", e)))
     }
-
-    /// Extract gradient blocks
+    /// Split the gradient into its retained and eliminated parts.
     fn extract_gradient_blocks(&self, gradient: &Mat<f64>) -> LinAlgResult<(Mat<f64>, Mat<f64>)> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not built".to_string()))?;
+        let partition = self.require_partition()?;
 
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let (land_start, land_end) = structure.landmark_col_range();
+        let mut g_k = Mat::zeros(partition.kept_dof(), 1);
+        let mut g_e = Mat::zeros(partition.eliminated_dof(), 1);
 
-        let mut g_c = Mat::zeros(structure.camera_dof, 1);
-        for i in 0..(cam_end - cam_start) {
-            g_c[(i, 0)] = gradient[(cam_start + i, 0)];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let global = block.col_start + offset;
+                if let Some(local) = partition.kept_local(global) {
+                    g_k[(local, 0)] = gradient[(global, 0)];
+                }
+            }
+        }
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                g_e[(base + offset, 0)] = gradient[(block.col_start + offset, 0)];
+            }
         }
 
-        let mut g_p = Mat::zeros(structure.landmark_dof, 1);
-        for i in 0..(land_end - land_start) {
-            g_p[(i, 0)] = gradient[(land_start + i, 0)];
-        }
-
-        Ok((g_c, g_p))
+        Ok((g_k, g_e))
     }
+
 
     /// Solve S * x = b using Cholesky factorization with automatic regularization
     ///
@@ -761,171 +608,171 @@ impl SparseSchurComplementSolver {
 
         Ok(x)
     }
-
-    /// Compute Schur complement: S = H_cc - H_cp * H_pp^{-1} * H_cp^T
+    /// Form the Schur complement `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ`.
     ///
-    /// This is an efficient implementation that exploits:
-    /// 1. Block-diagonal structure of H_pp (each landmark is independent)
-    /// 2. Sparsity of H_cp (each landmark connects to only a few cameras)
-    /// 3. Dense accumulation for the small camera-camera matrix S
+    /// Exploits the block-diagonal structure of `H_ee`: each eliminated block
+    /// contributes independently, touching only the retained rows it couples
+    /// to. Blocks may have any DOF and may differ from one another, so a 1-DOF
+    /// inverse depth and a 3-DOF point can be eliminated in the same solve.
     ///
-    /// Algorithm:
-    /// For each landmark block p:
-    ///   - Get the cameras that observe this landmark (non-zero rows in H_cp column block)
-    ///   - Compute contribution: H_cp[:, p] * H_pp[p,p]^{-1} * H_cp[:, p]^T
-    ///   - This is an outer product of sparse vectors, producing a small dense update
-    ///   - Accumulate into the dense result S
+    /// `S` is accumulated densely (`kept_dof²`) and then filtered back to
+    /// sparse; that buffer is the current scaling limit for very large
+    /// retained sets.
     fn compute_schur_complement(
         &self,
-        h_cc: &SparseColMat<usize, f64>,
-        h_cp: &SparseColMat<usize, f64>,
-        hpp_inv_blocks: &[Matrix3<f64>],
+        h_kk: &SparseColMat<usize, f64>,
+        h_ke: &SparseColMat<usize, f64>,
+        h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let cam_size = h_cc.nrows();
-        let h_cp_symbolic = h_cp.symbolic();
+        let partition = self.require_partition()?;
+        let kept_dof = h_kk.nrows();
+        let h_ke_symbolic = h_ke.symbolic();
 
-        // Use a dense matrix for S since the Schur complement is typically dense
-        // For 89 cameras, this is only 89*89*8 = 63KB - very cache-friendly
-        let mut s_dense = vec![0.0f64; cam_size * cam_size];
+        let mut s_dense = vec![0.0f64; kept_dof * kept_dof];
 
-        // First, add H_cc to S
-        let h_cc_symbolic = h_cc.symbolic();
-        for col in 0..h_cc.ncols() {
-            let row_indices = h_cc_symbolic.row_idx_of_col_raw(col);
-            let col_values = h_cc.val_of_col(col);
-            for (idx, &row) in row_indices.iter().enumerate() {
-                s_dense[row * cam_size + col] += col_values[idx];
+        // S starts as H_kk.
+        let h_kk_symbolic = h_kk.symbolic();
+        for col in 0..h_kk.ncols() {
+            let rows = h_kk_symbolic.row_idx_of_col_raw(col);
+            let vals = h_kk.val_of_col(col);
+            for (idx, &row) in rows.iter().enumerate() {
+                s_dense[row * kept_dof + col] += vals[idx];
             }
         }
 
-        // Pre-allocate vectors for camera data per landmark
-        // Max cameras per landmark is bounded by number of cameras
-        let mut cam_rows: Vec<usize> = Vec::with_capacity(32);
-        let mut h_cp_block: Vec<[f64; 3]> = Vec::with_capacity(32);
-        let mut contrib_block: Vec<[f64; 3]> = Vec::with_capacity(32);
+        let max_dof = partition
+            .eliminated_blocks()
+            .iter()
+            .map(|b| b.dof)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        // Scratch reused across blocks; `h_ke_rows` and `contrib` are row-major
+        // `n_rows × dof` strips.
+        let mut kept_rows: Vec<usize> = Vec::with_capacity(32);
+        let mut h_ke_rows: Vec<f64> = Vec::with_capacity(32 * max_dof);
+        let mut contrib: Vec<f64> = Vec::with_capacity(32 * max_dof);
+        let mut cursors: Vec<usize> = Vec::with_capacity(max_dof);
+        let mut col_rows: Vec<&[usize]> = Vec::with_capacity(max_dof);
+        let mut col_vals: Vec<&[f64]> = Vec::with_capacity(max_dof);
 
-        // Process each landmark block independently (sequential for efficiency)
-        for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
-            let col_start = block_idx * 3;
-
-            cam_rows.clear();
-            h_cp_block.clear();
-
-            if col_start + 2 >= h_cp.ncols() {
+        for block_idx in 0..h_ee_inv.len() {
+            let dof = h_ee_inv.dof(block_idx);
+            if dof == 0 {
                 continue;
             }
+            let col_base = partition.eliminated_offset(block_idx);
 
-            let row_indices_0 = h_cp_symbolic.row_idx_of_col_raw(col_start);
-            let col_values_0 = h_cp.val_of_col(col_start);
-            let row_indices_1 = h_cp_symbolic.row_idx_of_col_raw(col_start + 1);
-            let col_values_1 = h_cp.val_of_col(col_start + 1);
-            let row_indices_2 = h_cp_symbolic.row_idx_of_col_raw(col_start + 2);
-            let col_values_2 = h_cp.val_of_col(col_start + 2);
+            kept_rows.clear();
+            h_ke_rows.clear();
+            cursors.clear();
+            cursors.resize(dof, 0);
 
-            let mut i0 = 0;
-            let mut i1 = 0;
-            let mut i2 = 0;
+            // Hoist the column slices: looking them up per row per column costs
+            // more than the merge itself.
+            col_rows.clear();
+            col_vals.clear();
+            for local in 0..dof {
+                let col = col_base + local;
+                col_rows.push(h_ke_symbolic.row_idx_of_col_raw(col));
+                col_vals.push(h_ke.val_of_col(col));
+            }
 
-            while i0 < row_indices_0.len() || i1 < row_indices_1.len() || i2 < row_indices_2.len() {
-                let r0 = if i0 < row_indices_0.len() {
-                    row_indices_0[i0]
-                } else {
-                    usize::MAX
-                };
-                let r1 = if i1 < row_indices_1.len() {
-                    row_indices_1[i1]
-                } else {
-                    usize::MAX
-                };
-                let r2 = if i2 < row_indices_2.len() {
-                    row_indices_2[i2]
-                } else {
-                    usize::MAX
-                };
-
-                let min_row = r0.min(r1).min(r2);
+            // Merge the block's `dof` columns into dense rows: each retained
+            // variable appears once, carrying one value per eliminated column
+            // (zero where structurally absent).
+            loop {
+                let mut min_row = usize::MAX;
+                for local in 0..dof {
+                    if let Some(&row) = col_rows[local].get(cursors[local]) {
+                        min_row = min_row.min(row);
+                    }
+                }
                 if min_row == usize::MAX {
                     break;
                 }
 
-                let v0 = if r0 == min_row {
-                    i0 += 1;
-                    col_values_0[i0 - 1]
-                } else {
-                    0.0
-                };
-                let v1 = if r1 == min_row {
-                    i1 += 1;
-                    col_values_1[i1 - 1]
-                } else {
-                    0.0
-                };
-                let v2 = if r2 == min_row {
-                    i2 += 1;
-                    col_values_2[i2 - 1]
-                } else {
-                    0.0
-                };
-
-                cam_rows.push(min_row);
-                h_cp_block.push([v0, v1, v2]);
+                let strip = h_ke_rows.len();
+                h_ke_rows.resize(strip + dof, 0.0);
+                for local in 0..dof {
+                    if col_rows[local].get(cursors[local]) == Some(&min_row) {
+                        h_ke_rows[strip + local] = col_vals[local][cursors[local]];
+                        cursors[local] += 1;
+                    }
+                }
+                kept_rows.push(min_row);
             }
 
-            if cam_rows.is_empty() {
+            if kept_rows.is_empty() {
                 continue;
             }
 
-            contrib_block.clear();
-            for h_cp_row in &h_cp_block {
-                let c0 = h_cp_row[0] * hpp_inv_block[(0, 0)]
-                    + h_cp_row[1] * hpp_inv_block[(1, 0)]
-                    + h_cp_row[2] * hpp_inv_block[(2, 0)];
-                let c1 = h_cp_row[0] * hpp_inv_block[(0, 1)]
-                    + h_cp_row[1] * hpp_inv_block[(1, 1)]
-                    + h_cp_row[2] * hpp_inv_block[(2, 1)];
-                let c2 = h_cp_row[0] * hpp_inv_block[(0, 2)]
-                    + h_cp_row[1] * hpp_inv_block[(1, 2)]
-                    + h_cp_row[2] * hpp_inv_block[(2, 2)];
-                contrib_block.push([c0, c1, c2]);
+            // contrib = H_ke_rows · H_ee_inv, over the block's flat
+            // column-major values borrowed once.
+            let inv = h_ee_inv.block(block_idx);
+            contrib.clear();
+            contrib.resize(kept_rows.len() * dof, 0.0);
+            for r in 0..kept_rows.len() {
+                let row = &h_ke_rows[r * dof..(r + 1) * dof];
+                for c in 0..dof {
+                    let inv_col = &inv[c * dof..(c + 1) * dof];
+                    let mut acc = 0.0;
+                    for k in 0..dof {
+                        acc += row[k] * inv_col[k];
+                    }
+                    contrib[r * dof + c] = acc;
+                }
             }
 
-            let n_cams = cam_rows.len();
-            for i in 0..n_cams {
-                let cam_i = cam_rows[i];
-                let contrib_i = &contrib_block[i];
-                for j in 0..n_cams {
-                    let cam_j = cam_rows[j];
-                    let h_cp_j = &h_cp_block[j];
-                    let dot = contrib_i[0] * h_cp_j[0]
-                        + contrib_i[1] * h_cp_j[1]
-                        + contrib_i[2] * h_cp_j[2];
-                    s_dense[cam_i * cam_size + cam_j] -= dot;
+            // S[i,j] -= contrib[i,:] · H_ke_rows[j,:].
+            //
+            // The rank-`dof` update is the innermost work in the whole solve,
+            // so the 3-DOF case — points in classic BA — gets an unrolled path.
+            // The general loop below handles every other size, including mixed
+            // ones within the same problem.
+            if dof == 3 {
+                for (i, &row_i) in kept_rows.iter().enumerate() {
+                    let (c0, c1, c2) = (contrib[i * 3], contrib[i * 3 + 1], contrib[i * 3 + 2]);
+                    let base = row_i * kept_dof;
+                    for (j, &row_j) in kept_rows.iter().enumerate() {
+                        let dot = c0 * h_ke_rows[j * 3]
+                            + c1 * h_ke_rows[j * 3 + 1]
+                            + c2 * h_ke_rows[j * 3 + 2];
+                        s_dense[base + row_j] -= dot;
+                    }
+                }
+            } else {
+                for (i, &row_i) in kept_rows.iter().enumerate() {
+                    let contrib_i = &contrib[i * dof..(i + 1) * dof];
+                    let base = row_i * kept_dof;
+                    for (j, &row_j) in kept_rows.iter().enumerate() {
+                        let h_ke_j = &h_ke_rows[j * dof..(j + 1) * dof];
+                        let mut dot = 0.0;
+                        for k in 0..dof {
+                            dot += contrib_i[k] * h_ke_j[k];
+                        }
+                        s_dense[base + row_j] -= dot;
+                    }
                 }
             }
         }
 
-        // Symmetrize the Schur complement to ensure numerical symmetry
-        // Due to floating-point accumulation errors across 156K+ landmarks,
-        // S can become slightly asymmetric. Force symmetry: S = 0.5 * (S + S^T)
-        for i in 0..cam_size {
-            for j in (i + 1)..cam_size {
-                let avg = (s_dense[i * cam_size + j] + s_dense[j * cam_size + i]) * 0.5;
-                s_dense[i * cam_size + j] = avg;
-                s_dense[j * cam_size + i] = avg;
+        // Force exact symmetry: accumulation over many blocks drifts.
+        for i in 0..kept_dof {
+            for j in (i + 1)..kept_dof {
+                let avg = (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
+                s_dense[i * kept_dof + j] = avg;
+                s_dense[j * kept_dof + i] = avg;
             }
         }
 
-        // Convert dense matrix to sparse (filtering near-zeros).
-        //
-        // `s_dense` is row-major, so the row index must be the *outer* loop:
-        // iterating columns first strides by `cam_size` on every element and
-        // misses the cache on a buffer that is O(cam_size²).
-        // `try_new_from_triplets` sorts, so the emission order is free.
+        // Back to sparse, filtering numerical noise. Row-major outer loop keeps
+        // the read sequential over the row-major buffer.
         let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
-            Vec::with_capacity(cam_size.saturating_mul(8));
-        for row in 0..cam_size {
-            let row_base = row * cam_size;
-            for col in 0..cam_size {
+            Vec::with_capacity(kept_dof.saturating_mul(8));
+        for row in 0..kept_dof {
+            let row_base = row * kept_dof;
+            for col in 0..kept_dof {
                 let val = s_dense[row_base + col];
                 if val.abs() > 1e-12 {
                     s_triplets.push(Triplet::new(row, col, val));
@@ -933,113 +780,94 @@ impl SparseSchurComplementSolver {
             }
         }
 
-        SparseColMat::try_new_from_triplets(cam_size, cam_size, &s_triplets)
+        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
             .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))
     }
-
-    /// Compute reduced gradient: g_reduced = g_c - H_cp * H_pp^{-1} * g_p
+    /// Reduced right-hand side `g_k − H_ke·H_ee⁻¹·g_e`.
     fn compute_reduced_gradient(
         &self,
-        g_c: &Mat<f64>,
-        g_p: &Mat<f64>,
-        h_cp: &SparseColMat<usize, f64>,
-        hpp_inv_blocks: &[Matrix3<f64>],
+        g_k: &Mat<f64>,
+        g_e: &Mat<f64>,
+        h_ke: &SparseColMat<usize, f64>,
+        h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<Mat<f64>> {
-        // Infer sizes from matrices
-        let land_size = g_p.nrows();
-        let cam_size = g_c.nrows();
+        let partition = self.require_partition()?;
+        let kept_dof = g_k.nrows();
 
-        // Compute H_pp^{-1} * g_p block-wise
-        let mut hpp_inv_gp = Mat::zeros(land_size, 1);
-
-        for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
-            let row_start = block_idx * 3;
-
-            let gp_block = nalgebra::Vector3::new(
-                g_p[(row_start, 0)],
-                g_p[(row_start + 1, 0)],
-                g_p[(row_start + 2, 0)],
-            );
-
-            let result = hpp_inv_block * gp_block;
-            hpp_inv_gp[(row_start, 0)] = result[0];
-            hpp_inv_gp[(row_start + 1, 0)] = result[1];
-            hpp_inv_gp[(row_start + 2, 0)] = result[2];
-        }
-
-        // Compute H_cp * (H_pp^{-1} * g_p)
-        let mut h_cp_hpp_inv_gp = Mat::<f64>::zeros(cam_size, 1);
-        let symbolic = h_cp.symbolic();
-
-        for col in 0..h_cp.ncols() {
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = h_cp.val_of_col(col);
-
-            for (idx, &row) in row_indices.iter().enumerate() {
-                h_cp_hpp_inv_gp[(row, 0)] += col_values[idx] * hpp_inv_gp[(col, 0)];
+        // H_ee⁻¹·g_e, blockwise.
+        let mut hee_inv_ge = Mat::zeros(g_e.nrows(), 1);
+        for block_idx in 0..h_ee_inv.len() {
+            let dof = h_ee_inv.dof(block_idx);
+            let base = partition.eliminated_offset(block_idx);
+            let inv = h_ee_inv.block(block_idx);
+            for r in 0..dof {
+                let mut acc = 0.0;
+                for c in 0..dof {
+                    acc += inv[c * dof + r] * g_e[(base + c, 0)];
+                }
+                hee_inv_ge[(base + r, 0)] = acc;
             }
         }
 
-        // g_reduced = g_c - H_cp * H_pp^{-1} * g_p
-        let mut g_reduced = Mat::zeros(cam_size, 1);
-        for i in 0..cam_size {
-            g_reduced[(i, 0)] = g_c[(i, 0)] - h_cp_hpp_inv_gp[(i, 0)];
+        // H_ke·(H_ee⁻¹·g_e)
+        let mut correction = Mat::<f64>::zeros(kept_dof, 1);
+        let symbolic = h_ke.symbolic();
+        for col in 0..h_ke.ncols() {
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let vals = h_ke.val_of_col(col);
+            for (idx, &row) in rows.iter().enumerate() {
+                correction[(row, 0)] += vals[idx] * hee_inv_ge[(col, 0)];
+            }
         }
 
+        let mut g_reduced = Mat::zeros(kept_dof, 1);
+        for i in 0..kept_dof {
+            g_reduced[(i, 0)] = g_k[(i, 0)] - correction[(i, 0)];
+        }
         Ok(g_reduced)
     }
-
-    /// Back-substitute: δp = H_pp^{-1} * (g_p - H_cp^T * δc)
+    /// Back-substitute: `δ_e = H_ee⁻¹·(g_e − H_keᵀ·δ_k)`.
     fn back_substitute(
         &self,
-        delta_c: &Mat<f64>,
-        g_p: &Mat<f64>,
-        h_cp: &SparseColMat<usize, f64>,
-        hpp_inv_blocks: &[Matrix3<f64>],
+        delta_k: &Mat<f64>,
+        g_e: &Mat<f64>,
+        h_ke: &SparseColMat<usize, f64>,
+        h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<Mat<f64>> {
-        // Infer size from matrix
+        let partition = self.require_partition()?;
+        let eliminated_dof = g_e.nrows();
 
-        let land_size = g_p.nrows();
+        // H_keᵀ·δ_k
+        let mut hke_t_delta = Mat::<f64>::zeros(eliminated_dof, 1);
+        let symbolic = h_ke.symbolic();
+        for col in 0..h_ke.ncols() {
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let vals = h_ke.val_of_col(col);
+            let mut acc = 0.0;
+            for (idx, &row) in rows.iter().enumerate() {
+                acc += vals[idx] * delta_k[(row, 0)];
+            }
+            hke_t_delta[(col, 0)] = acc;
+        }
 
-        // Compute H_cp^T * δc
-        let mut h_cp_t_delta_c = Mat::<f64>::zeros(land_size, 1);
-        let symbolic = h_cp.symbolic();
-
-        for col in 0..h_cp.ncols() {
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = h_cp.val_of_col(col);
-
-            for (idx, &row) in row_indices.iter().enumerate() {
-                h_cp_t_delta_c[(col, 0)] += col_values[idx] * delta_c[(row, 0)];
+        let mut delta_e = Mat::zeros(eliminated_dof, 1);
+        for block_idx in 0..h_ee_inv.len() {
+            let dof = h_ee_inv.dof(block_idx);
+            let base = partition.eliminated_offset(block_idx);
+            let inv = h_ee_inv.block(block_idx);
+            for r in 0..dof {
+                let mut acc = 0.0;
+                for c in 0..dof {
+                    let rhs = g_e[(base + c, 0)] - hke_t_delta[(base + c, 0)];
+                    acc += inv[c * dof + r] * rhs;
+                }
+                delta_e[(base + r, 0)] = acc;
             }
         }
 
-        // Compute rhs = g_p - H_cp^T * δc
-        let mut rhs = Mat::zeros(land_size, 1);
-        for i in 0..land_size {
-            rhs[(i, 0)] = g_p[(i, 0)] - h_cp_t_delta_c[(i, 0)];
-        }
-
-        // Compute δp = H_pp^{-1} * rhs block-wise
-        let mut delta_p = Mat::zeros(land_size, 1);
-
-        for (block_idx, hpp_inv_block) in hpp_inv_blocks.iter().enumerate() {
-            let row_start = block_idx * 3;
-
-            let rhs_block = nalgebra::Vector3::new(
-                rhs[(row_start, 0)],
-                rhs[(row_start + 1, 0)],
-                rhs[(row_start + 2, 0)],
-            );
-
-            let result = hpp_inv_block * rhs_block;
-            delta_p[(row_start, 0)] = result[0];
-            delta_p[(row_start + 1, 0)] = result[1];
-            delta_p[(row_start + 2, 0)] = result[2];
-        }
-
-        Ok(delta_p)
+        Ok(delta_e)
     }
+
 }
 
 impl Default for SparseSchurComplementSolver {
@@ -1062,7 +890,7 @@ impl StructureAware for SparseSchurComplementSolver {
             Self::effective_landmark_keys(variables, schur_landmark_keys, &self.ordering);
 
         // Build block structure for all variants
-        self.build_block_structure(variables, variable_index_map, &effective_keys)?;
+        self.build_partition(variables, variable_index_map, &effective_keys)?;
 
         // Initialize delegate solver based on variant
         match self.variant {
@@ -1087,148 +915,105 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        let jacobians = jacobian;
-
-        if self.block_structure.is_none() {
-            return Err(LinAlgError::InvalidInput(
-                "Block structure not built. Call initialize_structure() first.".to_string(),
-            ));
-        }
-
-        // Sparse and Iterative variants use the same Schur complement formation
-        // They differ only in how S*δc = g_reduced is solved:
-        // - Sparse: Cholesky factorization
-        // - Iterative: PCG
+        self.require_partition()?;
 
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        // 2. Extract blocks
-        let h_cc = self.extract_camera_block(&hessian)?;
-        let h_cp = self.extract_coupling_block(&hessian)?;
-        let hpp_blocks = self.extract_landmark_blocks(&hessian)?;
-        let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
+        // 2. Split the system. `H_ee` must be block-diagonal for the
+        //    elimination to be exact; that is checked, not assumed.
+        self.ensure_block_diagonal(&hessian)?;
+        let (h_kk, h_ke, g_k, g_e) = {
+            let h_kk = self.extract_kept_block(&hessian)?;
+            let h_ke = self.extract_coupling_block(&hessian)?;
+            let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
+            (h_kk, h_ke, g_k, g_e)
+        };
 
-        // Publish H and g now that the block extraction has finished borrowing
-        // them, so neither has to be cloned.
-        //
-        // The stored gradient is the positive J^T*r used for predicted-reduction
-        // accounting; the solve below drives off `neg_gradient`.
+        // 3. Gather and invert the H_ee diagonal blocks (any DOF, mixed sizes).
+        let mut eliminated = std::mem::take(&mut self.eliminated);
+        let inversion = (|| -> LinAlgResult<()> {
+            let partition = self.require_partition()?;
+            eliminated.gather(&hessian, partition);
+            eliminated.invert_in_place(partition)
+        })();
+        if let Err(e) = inversion {
+            self.eliminated = eliminated;
+            return Err(e);
+        }
+
+        // Publish H and g now that extraction is done, so neither is cloned.
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
 
-        // 3. Invert H_pp blocks
-        let hpp_inv_blocks = Self::invert_landmark_blocks(&hpp_blocks)?;
-
-        // 4. Compute Schur complement S
-        let s = self.compute_schur_complement(&h_cc, &h_cp, &hpp_inv_blocks)?;
-
-        // 5. Compute reduced gradient
-        let g_reduced = self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
-
-        // 6. Solve S * δc = g_reduced (Cholesky for Sparse, PCG for Iterative)
-        let delta_c = match self.variant {
-            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
-            _ => self.solve_with_cholesky(&s, &g_reduced)?,
-        };
-
-        // 7. Back-substitute for δp
-        let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
-
-        // 8. Combine results
-        self.combine_updates(&delta_c, &delta_p)
+        let result = self.solve_reduced_system(&h_kk, &h_ke, &g_k, &g_e, &eliminated);
+        self.eliminated = eliminated;
+        result
     }
-
     fn solve_augmented_equation(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
-        let jacobians = jacobian;
+        self.require_partition()?;
 
-        if self.block_structure.is_none() {
-            return Err(LinAlgError::InvalidInput(
-                "Block structure not built. Call initialize_structure() first.".to_string(),
-            ));
-        }
-
-        // Sparse and Iterative variants use the same Schur complement formation with damping
         // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
-        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        // 2. Extract blocks
-        let h_cc = self.extract_camera_block(&hessian)?;
-        let h_cp = self.extract_coupling_block(&hessian)?;
-        let mut hpp_blocks = self.extract_landmark_blocks(&hessian)?;
-        let (g_c, g_p) = self.extract_gradient_blocks(&neg_gradient)?;
+        // 2. Split the system, verifying the elimination precondition.
+        self.ensure_block_diagonal(&hessian)?;
+        let partition = self.require_partition()?;
+        let kept_dof = partition.kept_dof();
+        let h_kk = self.extract_kept_block(&hessian)?;
+        let h_ke = self.extract_coupling_block(&hessian)?;
+        let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
-        // Log matrix dimensions for diagnostics
-        debug!("Iteration matrices:");
         debug!(
-            "  Hessian (J^T*J): {} × {}",
+            "Iteration matrices: H {}×{}, H_kk {}×{}, H_ke {}×{}, {} eliminated blocks",
             hessian.nrows(),
-            hessian.ncols()
+            hessian.ncols(),
+            h_kk.nrows(),
+            h_kk.ncols(),
+            h_ke.nrows(),
+            h_ke.ncols(),
+            partition.eliminated_blocks().len()
         );
-        debug!("  H_cc (camera): {} × {}", h_cc.nrows(), h_cc.ncols());
-        debug!("  H_cp (coupling): {} × {}", h_cp.nrows(), h_cp.ncols());
-        debug!("  H_pp blocks: {} (3×3 each)", hpp_blocks.len());
 
-        // Publish the *un-damped* H and g now that nothing borrows them any
-        // more, so neither has to be cloned. Damping below operates on the
-        // extracted blocks, not on `hessian`.
-        //
-        // The stored gradient is the positive J^T*r used for predicted-reduction
-        // accounting; the solve below drives off `neg_gradient`.
+        // 3. λ·D is applied to *both* sides before elimination — damping the
+        //    reduced system instead would not be the same problem.
+        let h_kk_damped = damp_camera_block(&h_kk, kept_dof, damping)?;
+
+        let mut eliminated = std::mem::take(&mut self.eliminated);
+        let prepared = (|| -> LinAlgResult<()> {
+            let partition = self.require_partition()?;
+            eliminated.gather(&hessian, partition);
+            eliminated.damp(damping);
+            eliminated.invert_in_place(partition)
+        })();
+        if let Err(e) = prepared {
+            self.eliminated = eliminated;
+            return Err(e);
+        }
+
+        // Publish the *un-damped* H and g: the optimizers build the true
+        // quadratic model from these.
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
 
-        // 3. Add damping to H_cc and H_pp
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-        let cam_size = structure.camera_dof;
-
-        // Add λ·D to H_cc, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
-        let h_cc_damped = damp_camera_block(&h_cc, cam_size, damping)?;
-
-        // Add λ·D to H_pp blocks (same clamped-diagonal rule as H_cc)
-        for block in &mut hpp_blocks {
-            for k in 0..3 {
-                block[(k, k)] += damping.diagonal_term(block[(k, k)]);
-            }
-        }
-
-        // 4. Invert damped H_pp blocks
-        let hpp_inv_blocks = Self::invert_landmark_blocks(&hpp_blocks)?;
-
-        // 5. Compute Schur complement with damped matrices
-        let s = self.compute_schur_complement(&h_cc_damped, &h_cp, &hpp_inv_blocks)?;
-
-        // 6. Compute reduced gradient
-        let g_reduced = self.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv_blocks)?;
-
-        // 7. Solve S * δc = g_reduced (Cholesky for Sparse, PCG for Iterative)
-        let delta_c = match self.variant {
-            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
-            _ => self.solve_with_cholesky(&s, &g_reduced)?,
-        };
-
-        // 8. Back-substitute for δp
-        let delta_p = self.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv_blocks)?;
-
-        // 9. Combine results
-        self.combine_updates(&delta_c, &delta_p)
+        let result = self.solve_reduced_system(&h_kk_damped, &h_ke, &g_k, &g_e, &eliminated);
+        self.eliminated = eliminated;
+        result
     }
+
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
         self.hessian.as_ref()
@@ -1241,39 +1026,63 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
 
 // Helper methods for SparseSchurComplementSolver
 impl SparseSchurComplementSolver {
-    /// Combine camera and landmark updates into full update vector
-    fn combine_updates(&self, delta_c: &Mat<f64>, delta_p: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
-        let structure = self
-            .block_structure
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Block structure not built".to_string()))?;
+    /// Eliminate, solve the reduced system, and back-substitute.
+    ///
+    /// Shared by the damped and undamped paths, which differ only in whether
+    /// `h_kk` and the `H_ee` blocks already carry `λ·D`.
+    fn solve_reduced_system(
+        &self,
+        h_kk: &SparseColMat<usize, f64>,
+        h_ke: &SparseColMat<usize, f64>,
+        g_k: &Mat<f64>,
+        g_e: &Mat<f64>,
+        h_ee_inv: &EliminatedBlocks,
+    ) -> LinAlgResult<Mat<f64>> {
+        let s = self.compute_schur_complement(h_kk, h_ke, h_ee_inv)?;
+        let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
-        let total_dof = structure.camera_dof + structure.landmark_dof;
-        let mut delta = Mat::zeros(total_dof, 1);
+        let delta_k = match self.variant {
+            SchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            _ => self.solve_with_cholesky(&s, &g_reduced)?,
+        };
 
-        let (cam_start, cam_end) = structure.camera_col_range();
-        let (land_start, land_end) = structure.landmark_col_range();
+        let delta_e = self.back_substitute(&delta_k, g_e, h_ke, h_ee_inv)?;
+        self.combine_updates(&delta_k, &delta_e)
+    }
 
-        // Copy camera updates
-        for i in 0..(cam_end - cam_start) {
-            delta[(cam_start + i, 0)] = delta_c[(i, 0)];
+    /// Scatter the two solution halves back into one full-length update.
+    ///
+    /// Goes through the partition, so it stays correct when the retained and
+    /// eliminated variables interleave in column space.
+    fn combine_updates(&self, delta_k: &Mat<f64>, delta_e: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
+        let partition = self.require_partition()?;
+        let mut delta = Mat::zeros(partition.total_dof(), 1);
+
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let global = block.col_start + offset;
+                if let Some(local) = partition.kept_local(global) {
+                    delta[(global, 0)] = delta_k[(local, 0)];
+                }
+            }
+        }
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                delta[(block.col_start + offset, 0)] = delta_e[(base + offset, 0)];
+            }
         }
 
-        // Copy landmark updates
-        for i in 0..(land_end - land_start) {
-            delta[(land_start + i, 0)] = delta_p[(i, 0)];
-        }
-
-        // Debug: Log update magnitude
         debug!(
-            "Update norms: delta_c={:.6e}, delta_p={:.6e}, combined={:.6e}",
-            delta_c.norm_l2(),
-            delta_p.norm_l2(),
+            "Update norms: delta_kept={:.6e}, delta_eliminated={:.6e}, combined={:.6e}",
+            delta_k.norm_l2(),
+            delta_e.norm_l2(),
             delta.norm_l2()
         );
 
         Ok(delta)
     }
+
 }
 
 /// `H_cc + λ·D` with `D_jj = clamp(H_jj, min_diagonal, max_diagonal)`.
@@ -1504,25 +1313,25 @@ mod tests {
         marks.insert(pt0);
         let mut solver = SparseSchurComplementSolver::new();
         solver.initialize_structure(&variables, &index_map, &marks)?;
-        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
-            structure.num_landmarks, 1,
+            structure.eliminated_blocks().len(), 1,
             "auto-detection must be off by default"
         );
-        assert_eq!(structure.camera_blocks.len(), 3);
-        assert!(structure.camera_blocks.iter().any(|(k, _, _)| *k == pt1));
+        assert_eq!(structure.kept_blocks().len(), 3);
+        assert!(structure.kept_blocks().iter().any(|b| b.key == pt1));
 
         // Opt-in: unmarked Rn(3) variables are eliminated as landmarks.
         let ordering = SchurOrdering::default().with_auto_detect(true);
         let mut solver = SparseSchurComplementSolver::new().with_ordering(ordering);
         solver.initialize_structure(&variables, &index_map, &empty_marks)?;
-        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
-            structure.num_landmarks, 2,
+            structure.eliminated_blocks().len(), 2,
             "Rn(3) variables must auto-eliminate"
         );
         assert_eq!(
-            structure.camera_blocks.len(),
+            structure.kept_blocks().len(),
             2,
             "SE3 variables must stay cameras"
         );
@@ -1532,32 +1341,25 @@ mod tests {
         marks.insert(cam1);
         let mut solver = SparseSchurComplementSolver::new();
         solver.initialize_structure(&variables, &index_map, &marks)?;
-        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
-        assert!(structure.landmark_blocks.iter().any(|(k, _, _)| *k == cam1));
+        let structure = solver.partition().ok_or("partition missing")?;
+        assert!(structure.eliminated_blocks().iter().any(|b| b.key == cam1));
 
         Ok(())
     }
-
+    /// A partition needs both sides populated; the shape itself is covered in
+    /// depth by `schur_partition`'s own tests.
     #[test]
-    fn test_block_structure_creation() {
-        let structure = SchurBlockStructure::new();
-        assert_eq!(structure.camera_dof, 0);
-        assert_eq!(structure.landmark_dof, 0);
+    fn test_partition_requires_both_sides() {
+        assert!(SchurPartition::new(Vec::new(), Vec::new()).is_err());
     }
+
 
     #[test]
     fn test_solver_creation() {
         let solver = SparseSchurComplementSolver::new();
-        assert!(solver.block_structure.is_none());
+        assert!(solver.partition().is_none());
     }
 
-    #[test]
-    fn test_3x3_block_inversion() -> Result<(), LinAlgError> {
-        let block = Matrix3::new(2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0);
-        let inv = SparseSchurComplementSolver::invert_landmark_blocks(&[block])?;
-        assert!((inv[0][(0, 0)] - 0.5).abs() < 1e-10);
-        Ok(())
-    }
 
     #[test]
     fn test_schur_variants() {
@@ -1569,75 +1371,92 @@ mod tests {
         assert_eq!(solver.cg_max_iterations, 100);
         assert!((solver.cg_tolerance - 1e-8).abs() < 1e-12);
     }
+    /// Solver with a partition of `kept_dof` retained columns followed by one
+    /// eliminated block of `dof`, plus that block's inverse preloaded.
+    fn solver_with_block(
+        kept_dof: usize,
+        dof: usize,
+        inverse: &[f64],
+    ) -> Result<(SparseSchurComplementSolver, EliminatedBlocks), LinAlgError> {
+        let kept = (0..kept_dof)
+            .map(|i| BlockSpan {
+                key: VarKey::default(),
+                col_start: i,
+                dof: 1,
+            })
+            .collect();
+        let eliminated = vec![BlockSpan {
+            key: VarKey::default(),
+            col_start: kept_dof,
+            dof,
+        }];
+        let partition = SchurPartition::new(kept, eliminated)?;
+        let mut blocks = EliminatedBlocks::new(&partition);
+        blocks.block_mut(0).copy_from_slice(inverse);
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.partition = Some(partition);
+        Ok((solver, blocks))
+    }
 
+    /// S = H_kk − H_ke·H_ee⁻¹·H_keᵀ against hand-computed values, unchanged
+    /// from before the generalization.
     #[test]
     fn test_compute_schur_complement_known_matrix() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
-        let solver = SparseSchurComplementSolver::new();
+        // H_ee⁻¹ = 0.5·I₃
+        let inv = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5];
+        let (solver, blocks) = solver_with_block(2, 3, &inv)?;
 
-        // Create simple 2x2 H_cc (camera block)
-        let h_cc_triplets = vec![Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 5.0)];
-        let h_cc = SparseColMat::try_new_from_triplets(2, 2, &h_cc_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        let h_kk = SparseColMat::try_new_from_triplets(
+            2,
+            2,
+            &[Triplet::new(0, 0, 4.0), Triplet::new(1, 1, 5.0)],
+        )
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
+        let h_ke = SparseColMat::try_new_from_triplets(
+            2,
+            3,
+            &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0)],
+        )
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
-        // Create 2x3 H_cp (coupling block - 1 landmark with 3 DOF)
-        let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 2.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
-
-        // Create H_pp^{-1} as identity scaled by 0.5
-        let hpp_inv = vec![Matrix3::new(0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5)];
-
-        // Compute S = H_cc - H_cp * H_pp^{-1} * H_cp^T
-        // H_cp has [1.0 at (0,0), 2.0 at (1,1), rest zeros]
-        // H_cp * H_pp^{-1} (with H_pp^{-1} = 0.5*I) gives:
-        //   Row 0: [0.5, 0, 0]
-        //   Row 1: [0, 1.0, 0]
-        // (H_cp * H_pp^{-1}) * H_cp^T:
-        //   (0,0): 0.5*1 = 0.5, but we sum over all k, so actually just first column contribution
-        //   The diagonal will be: row·row for each
-        // Let me recalculate: S(0,0) = 4 - 0.5*1 = 3.5, but actual is 3.75
-        // Actually the formula computes sum over all landmark DOF
-        let s = solver.compute_schur_complement(&h_cc, &h_cp, &hpp_inv)?;
+        let s = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
 
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
-        // Verify the actual computed values (diagonal elements of Schur complement)
-        // S = H_cc - H_cp * H_pp^{-1} * H_cp^T
-        // H_cp * H_pp^{-1} = [[0.5, 0, 0], [0, 1.0, 0]]
-        // (H_cp * H_pp^{-1}) * H_cp^T:
-        //   (0,0) = 0.5*1 = 0.5
-        //   (1,1) = 1.0*2 = 2.0
-        // S(0,0) = 4 - 0.5 = 3.5, S(1,1) = 5 - 2.0 = 3.0
-        assert!((s[(0, 0)] - 3.5).abs() < 1e-10, "S(0,0) = {}", s[(0, 0)]);
-        assert!((s[(1, 1)] - 3.0).abs() < 1e-10, "S(1,1) = {}", s[(1, 1)]);
+
+        // S(0,0) = 4 − 1·0.5·1 = 3.5 ; S(1,1) = 5 − 2·0.5·2 = 3.0
+        let dense = dense_of(&s);
+        assert!((dense[0][0] - 3.5).abs() < 1e-12, "got {}", dense[0][0]);
+        assert!((dense[1][1] - 3.0).abs() < 1e-12, "got {}", dense[1][1]);
         Ok(())
     }
+
 
     #[test]
     fn test_back_substitute() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
-        let solver = SparseSchurComplementSolver::new();
+        // H_ee⁻¹ = I₃
+        let inv = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let (solver, blocks) = solver_with_block(2, 3, &inv)?;
 
-        // Create test data
         let delta_c = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
         let g_p = Mat::from_fn(3, 1, |i, _| (i + 1) as f64); // [1; 2; 3]
 
-        // H_cp (2x3)
-        let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
-
-        // H_pp^{-1} (identity)
-        let hpp_inv = vec![Matrix3::identity()];
+        let h_cp = SparseColMat::try_new_from_triplets(
+            2,
+            3,
+            &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+        )
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // Compute δp = H_pp^{-1} * (g_p - H_cp^T * δc)
         // H_cp^T * δc = [1*1; 1*2; 0] = [1; 2; 0]
         // g_p - result = [1; 2; 3] - [1; 2; 0] = [0; 0; 3]
         // H_pp^{-1} * [0; 0; 3] = [0; 0; 3]
-        let delta_p = solver.back_substitute(&delta_c, &g_p, &h_cp, &hpp_inv)?;
+        let delta_p = solver.back_substitute(&delta_c, &g_p, &h_cp, &blocks)?;
 
         assert_eq!(delta_p.nrows(), 3);
         assert!((delta_p[(0, 0)]).abs() < 1e-10);
@@ -1650,25 +1469,25 @@ mod tests {
     fn test_compute_reduced_gradient() -> Result<(), LinAlgError> {
         use faer::sparse::Triplet;
 
-        let solver = SparseSchurComplementSolver::new();
+        // H_ee⁻¹ = 2·I₃
+        let inv = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0];
+        let (solver, blocks) = solver_with_block(2, 3, &inv)?;
 
-        // Create test data
         let g_c = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
         let g_p = Mat::from_fn(3, 1, |i, _| (i + 1) as f64); // [1; 2; 3]
 
-        // H_cp (2x3)
-        let h_cp_triplets = vec![Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)];
-        let h_cp = SparseColMat::try_new_from_triplets(2, 3, &h_cp_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
-
-        // H_pp^{-1} (2*identity)
-        let hpp_inv = vec![Matrix3::new(2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0)];
+        let h_cp = SparseColMat::try_new_from_triplets(
+            2,
+            3,
+            &[Triplet::new(0, 0, 1.0), Triplet::new(1, 1, 1.0)],
+        )
+        .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
         // Compute g_reduced = g_c - H_cp * H_pp^{-1} * g_p
         // H_pp^{-1} * g_p = 2*[1; 2; 3] = [2; 4; 6]
         // H_cp * [2; 4; 6] = [1*2; 1*4] = [2; 4]
         // g_reduced = [1; 2] - [2; 4] = [-1; -2]
-        let g_reduced = solver.compute_reduced_gradient(&g_c, &g_p, &h_cp, &hpp_inv)?;
+        let g_reduced = solver.compute_reduced_gradient(&g_c, &g_p, &h_cp, &blocks)?;
 
         assert_eq!(g_reduced.nrows(), 2);
         assert!((g_reduced[(0, 0)] + 1.0).abs() < 1e-10);
@@ -1684,51 +1503,21 @@ mod tests {
     #[test]
     fn test_solver_default() {
         let solver = SparseSchurComplementSolver::default();
-        assert!(solver.block_structure.is_none());
+        assert!(solver.partition().is_none());
         assert!(solver.hessian.is_none());
         assert!(solver.gradient.is_none());
     }
 
-    /// Test SchurBlockStructure::default() has empty blocks
+
+    /// Test partition() getter after initialize_structure
     #[test]
-    fn test_block_structure_default() {
-        let s = SchurBlockStructure::default();
-        assert!(s.camera_blocks.is_empty());
-        assert!(s.landmark_blocks.is_empty());
-        assert_eq!(s.camera_dof, 0);
-        assert_eq!(s.landmark_dof, 0);
-    }
-
-    /// Test camera_col_range() and landmark_col_range() with known fields
-    #[test]
-    fn test_block_structure_col_ranges() {
-        let mut s = SchurBlockStructure::new();
-        // Empty → (0, 0)
-        assert_eq!(s.camera_col_range(), (0, 0));
-        assert_eq!(s.landmark_col_range(), (0, 0));
-
-        // Populate with known values (use dummy VarKeys from a temp SlotMap)
-        let mut tmp: SlotMap<VarKey, ()> = SlotMap::with_key();
-        let cam_key = tmp.insert(());
-        let pt_key = tmp.insert(());
-        s.camera_blocks.push((cam_key, 0, 6));
-        s.camera_dof = 6;
-        s.landmark_blocks.push((pt_key, 6, 3));
-        s.landmark_dof = 3;
-
-        assert_eq!(s.camera_col_range(), (0, 6));
-        assert_eq!(s.landmark_col_range(), (6, 9));
-    }
-
-    /// Test block_structure() getter after initialize_structure
-    #[test]
-    fn test_block_structure_getter() -> TestResult {
+    fn test_partition_getter() -> TestResult {
         let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
 
-        assert!(solver.block_structure().is_none());
+        assert!(solver.partition().is_none());
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
-        assert!(solver.block_structure().is_some());
+        assert!(solver.partition().is_some());
         Ok(())
     }
 
@@ -1743,29 +1532,33 @@ mod tests {
         let solver = SparseSchurComplementSolver::new().with_ordering(ordering);
         assert_eq!(solver.ordering.eliminate_rn_size, Some(3));
     }
-
-    /// Test invert_landmark_blocks_with_lambda() inverts well-conditioned blocks
-    ///
-    /// Note: lambda is used only as a floor for regularization of ill-conditioned blocks;
-    /// for well-conditioned blocks the standard inverse is returned unchanged.
+    /// Diagonal 3-DOF block inversion, the classic-BA case, through the
+    /// generalized arena. Sizes 1/2/4/6/9 are covered in `schur_partition`.
     #[test]
-    fn test_invert_landmark_blocks_with_lambda() -> TestResult {
-        // Diagonal block: diag(2, 3, 4) → inverse is diag(0.5, 1/3, 0.25)
-        let block = Matrix3::new(2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0);
+    fn test_eliminated_block_inversion_3dof() -> TestResult {
+        // diag(2, 3, 4) → diag(0.5, 1/3, 0.25)
+        let inv_seed = [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0];
+        let kept = vec![BlockSpan {
+            key: VarKey::default(),
+            col_start: 0,
+            dof: 1,
+        }];
+        let eliminated = vec![BlockSpan {
+            key: VarKey::default(),
+            col_start: 1,
+            dof: 3,
+        }];
+        let partition = SchurPartition::new(kept, eliminated)?;
+        let mut blocks = EliminatedBlocks::new(&partition);
+        blocks.block_mut(0).copy_from_slice(&inv_seed);
+        blocks.invert_in_place(&partition)?;
 
-        // lambda=0 path (called by invert_landmark_blocks internally)
-        let inv = SparseSchurComplementSolver::invert_landmark_blocks_with_lambda(&[block], 0.0)?;
-        assert_eq!(inv.len(), 1);
-        assert!((inv[0][(0, 0)] - 0.5).abs() < 1e-10);
-        assert!((inv[0][(1, 1)] - 1.0 / 3.0).abs() < 1e-10);
-        assert!((inv[0][(2, 2)] - 0.25).abs() < 1e-10);
-
-        // lambda > 0: for a well-conditioned block the result is still the standard inverse
-        let inv_lam =
-            SparseSchurComplementSolver::invert_landmark_blocks_with_lambda(&[block], 1.0)?;
-        assert!((inv_lam[0][(0, 0)] - 0.5).abs() < 1e-10);
+        assert!((blocks.at(0, 0, 0) - 0.5).abs() < 1e-10);
+        assert!((blocks.at(0, 1, 1) - 1.0 / 3.0).abs() < 1e-10);
+        assert!((blocks.at(0, 2, 2) - 0.25).abs() < 1e-10);
         Ok(())
     }
+
 
     /// Test initialize_structure() correctly partitions 2 cameras + 3 landmarks
     #[test]
@@ -1774,11 +1567,11 @@ mod tests {
         let mut solver = SparseSchurComplementSolver::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
-        let bs = solver.block_structure().ok_or("block_structure is None")?;
-        assert_eq!(bs.camera_blocks.len(), 2);
-        assert_eq!(bs.landmark_blocks.len(), 3);
-        assert_eq!(bs.camera_dof, 12); // 2 × 6
-        assert_eq!(bs.landmark_dof, 9); // 3 × 3
+        let bs = solver.partition().ok_or("partition is None")?;
+        assert_eq!(bs.kept_blocks().len(), 2);
+        assert_eq!(bs.eliminated_blocks().len(), 3);
+        assert_eq!(bs.kept_dof(), 12); // 2 × 6
+        assert_eq!(bs.eliminated_dof(), 9); // 3 × 3
         Ok(())
     }
 
@@ -1973,7 +1766,7 @@ mod tests {
 
         let mut fresh = SparseSchurComplementSolver::new();
         fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
-        let h_cc = fresh.extract_camera_block(&hessian)?;
+        let h_cc = fresh.extract_kept_block(&hessian)?;
 
         // camera DOF = 12 (2 cameras × 6)
         assert_eq!(h_cc.nrows(), 12);
@@ -2002,9 +1795,9 @@ mod tests {
         Ok(())
     }
 
-    /// Test extract_landmark_blocks produces one 3×3 block per landmark.
+    /// Gathering H_ee yields one block per eliminated variable, sized by its DOF.
     #[test]
-    fn test_extract_landmark_blocks() -> TestResult {
+    fn test_gather_eliminated_blocks() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new();
@@ -2015,10 +1808,15 @@ mod tests {
 
         let mut fresh = SparseSchurComplementSolver::new();
         fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
-        let blocks = fresh.extract_landmark_blocks(&hessian)?;
+        let partition = fresh.partition().ok_or("partition is None")?;
+        let mut blocks = EliminatedBlocks::new(partition);
+        blocks.gather(&hessian, partition);
 
-        // 3 landmarks → 3 blocks
+        // 3 landmarks → 3 blocks, each 3 DOF
         assert_eq!(blocks.len(), 3);
+        for i in 0..blocks.len() {
+            assert_eq!(blocks.dof(i), 3);
+        }
         Ok(())
     }
 

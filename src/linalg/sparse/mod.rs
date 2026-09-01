@@ -6,6 +6,7 @@ pub mod schur_partition;
 pub mod qr;
 
 pub use cholesky::SparseCholeskySolver;
+#[allow(deprecated)] // re-export kept so existing imports of the old name resolve
 pub use explicit_schur::{
     SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
     SparseSchurComplementSolver,

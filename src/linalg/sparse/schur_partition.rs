@@ -38,6 +38,19 @@ use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linalg::{LinAlgError, LinAlgResult};
 
+/// Sentinel for a column that is not retained.
+const NOT_KEPT: u32 = u32::MAX;
+/// Sentinel for a column that is not eliminated.
+const NOT_ELIMINATED: u32 = u32::MAX;
+
+fn too_many_columns(total: usize) -> LinAlgError {
+    LinAlgError::InvalidInput(format!(
+        "system has {total} columns, more than the {} this partition can index",
+        u32::MAX
+    ))
+    .log()
+}
+
 /// One variable's span of tangent-space columns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockSpan {
@@ -70,8 +83,12 @@ pub struct SchurPartition {
     eliminated_blocks: Vec<BlockSpan>,
     kept_dof: usize,
     eliminated_dof: usize,
-    /// Global column → side and local position. Length `kept_dof + eliminated_dof`.
-    col_slot: Vec<ColSlot>,
+    /// Global column → local index in the reduced system, or [`NOT_KEPT`].
+    kept_local: Vec<u32>,
+    /// Global column → owning eliminated block, or [`NOT_ELIMINATED`].
+    elim_block: Vec<u32>,
+    /// Global column → local column within its eliminated block.
+    elim_offset: Vec<u32>,
     /// Start of each eliminated block within the eliminated-local column space.
     eliminated_offsets: Vec<usize>,
 }
@@ -106,7 +123,9 @@ impl SchurPartition {
         // Every column of the system must be claimed exactly once. A gap or an
         // overlap means the caller's index map disagrees with the partition,
         // which would silently mis-address the Hessian.
-        let mut col_slot = vec![ColSlot::Kept(usize::MAX); total];
+        let mut kept_local = vec![NOT_KEPT; total];
+        let mut elim_block = vec![NOT_ELIMINATED; total];
+        let mut elim_offset = vec![0u32; total];
         let mut claimed = vec![false; total];
 
         let mut local = 0usize;
@@ -114,7 +133,7 @@ impl SchurPartition {
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
                 Self::claim(&mut claimed, col, total, block.key)?;
-                col_slot[col] = ColSlot::Kept(local);
+                kept_local[col] = u32::try_from(local).map_err(|_| too_many_columns(total))?;
                 local += 1;
             }
         }
@@ -126,7 +145,9 @@ impl SchurPartition {
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
                 Self::claim(&mut claimed, col, total, block.key)?;
-                col_slot[col] = ColSlot::Eliminated(block_idx, offset);
+                elim_block[col] =
+                    u32::try_from(block_idx).map_err(|_| too_many_columns(total))?;
+                elim_offset[col] = u32::try_from(offset).map_err(|_| too_many_columns(total))?;
             }
             local += block.dof;
         }
@@ -144,7 +165,9 @@ impl SchurPartition {
             eliminated_blocks: eliminated,
             kept_dof,
             eliminated_dof,
-            col_slot,
+            kept_local,
+            elim_block,
+            elim_offset,
             eliminated_offsets,
         })
     }
@@ -193,16 +216,22 @@ impl SchurPartition {
     }
 
     /// Where a global column sits, or `None` if out of range.
-    #[inline]
     pub fn slot(&self, global_col: usize) -> Option<ColSlot> {
-        self.col_slot.get(global_col).copied()
+        if let Some(local) = self.kept_local(global_col) {
+            return Some(ColSlot::Kept(local));
+        }
+        self.eliminated_local(global_col)
+            .map(|(b, o)| ColSlot::Eliminated(b, o))
     }
 
     /// Local index of `global_col` in the reduced system, if it is retained.
+    ///
+    /// On the hot path for every Hessian nonzero, so it is a single indexed
+    /// load and a sentinel compare.
     #[inline]
     pub fn kept_local(&self, global_col: usize) -> Option<usize> {
-        match self.col_slot.get(global_col) {
-            Some(ColSlot::Kept(local)) => Some(*local),
+        match self.kept_local.get(global_col) {
+            Some(&local) if local != NOT_KEPT => Some(local as usize),
             _ => None,
         }
     }
@@ -210,8 +239,10 @@ impl SchurPartition {
     /// `(block index, local column)` of `global_col`, if it is eliminated.
     #[inline]
     pub fn eliminated_local(&self, global_col: usize) -> Option<(usize, usize)> {
-        match self.col_slot.get(global_col) {
-            Some(ColSlot::Eliminated(block, offset)) => Some((*block, *offset)),
+        match self.elim_block.get(global_col) {
+            Some(&block) if block != NOT_ELIMINATED => {
+                Some((block as usize, self.elim_offset[global_col] as usize))
+            }
             _ => None,
         }
     }

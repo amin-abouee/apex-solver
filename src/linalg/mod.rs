@@ -11,10 +11,12 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Display, Formatter};
 use thiserror::Error;
 
+#[allow(deprecated)] // re-export kept so existing imports of the old name resolve
 pub use sparse::{
     IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
     SparseCholeskySolver, SparseQRSolver, SparseSchurComplementSolver,
 };
+pub use sparse::{BlockSpan, ColSlot, EliminatedBlocks, SchurPartition};
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
 
