@@ -400,6 +400,41 @@ impl EliminatedBlocks {
         }
     }
 
+    /// Invert one block in place, leaving the rest untouched.
+    ///
+    /// Chunk-wise elimination inverts each block as it reaches it, rather than
+    /// in one sweep after gathering them all.
+    pub fn invert_one(&mut self, idx: usize, key: VarKey) -> LinAlgResult<()> {
+        let dof = self.spans[idx].1;
+        match dof {
+            0 => Ok(()),
+            1 => {
+                let block = self.block_mut(idx);
+                let v = block[0];
+                if v.abs() > f64::EPSILON {
+                    block[0] = 1.0 / v;
+                    Ok(())
+                } else {
+                    Err(singular(key, dof))
+                }
+            }
+            3 => {
+                let block = self.block_mut(idx);
+                let m = Matrix3::from_column_slice(block);
+                let inv = invert_with_retry_3(&m).ok_or_else(|| singular(key, dof))?;
+                block.copy_from_slice(inv.as_slice());
+                Ok(())
+            }
+            n => {
+                let block = self.block_mut(idx);
+                let m = DMatrix::from_column_slice(n, n, block);
+                let inv = invert_with_retry_dyn(&m).ok_or_else(|| singular(key, dof))?;
+                block.copy_from_slice(inv.as_slice());
+                Ok(())
+            }
+        }
+    }
+
     /// Invert every block in place.
     ///
     /// Dispatches on DOF so the common sizes stay on stack-allocated types —
