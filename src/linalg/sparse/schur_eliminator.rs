@@ -55,6 +55,14 @@ use crate::linalg::{Damping, LinAlgError, LinAlgResult};
 pub struct ChunkLayout {
     /// `(row_start, row_end)` per eliminated block, in increasing row order.
     ranges: Vec<(usize, usize)>,
+    /// Retained *local* columns touched by each chunk, ascending.
+    ///
+    /// Flattened into one buffer with `col_spans` delimiting each chunk.
+    /// Without this the sweep would test every retained column against every
+    /// chunk — 1.6 billion checks on Ladybug — which dominates everything else.
+    chunk_cols: Vec<u32>,
+    /// `(start, len)` into `chunk_cols` per chunk.
+    col_spans: Vec<(usize, usize)>,
     /// Total rows of the Jacobian the layout was built from.
     nrows: usize,
 }
@@ -111,10 +119,47 @@ impl ChunkLayout {
             previous_end = hi;
         }
 
+        // Which retained columns each chunk touches. One pass over the
+        // retained columns, bucketing their rows into chunks by binary search.
+        let mut per_chunk: Vec<Vec<u32>> = vec![Vec::new(); ranges.len()];
+        let mut local = 0u32;
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let rows = symbolic.row_idx_of_col_raw(block.col_start + offset);
+                let mut last: Option<usize> = None;
+                for &row in rows {
+                    // Chunks are disjoint and increasing, so a row maps to at
+                    // most one of them.
+                    let found = ranges.partition_point(|&(_, hi)| hi <= row);
+                    if found < ranges.len() && row >= ranges[found].0 && last != Some(found) {
+                        per_chunk[found].push(local);
+                        last = Some(found);
+                    }
+                }
+                local += 1;
+            }
+        }
+
+        let mut chunk_cols = Vec::new();
+        let mut col_spans = Vec::with_capacity(ranges.len());
+        for cols in &per_chunk {
+            col_spans.push((chunk_cols.len(), cols.len()));
+            chunk_cols.extend_from_slice(cols);
+        }
+
         Ok(Self {
             ranges,
+            chunk_cols,
+            col_spans,
             nrows: jacobian.nrows(),
         })
+    }
+
+    /// Retained local columns touched by chunk `idx`.
+    #[inline]
+    pub fn cols(&self, idx: usize) -> &[u32] {
+        let (start, len) = self.col_spans[idx];
+        &self.chunk_cols[start..start + len]
     }
 
     /// Number of chunks.
@@ -166,15 +211,11 @@ pub struct ReducedSystem {
 #[derive(Debug, Clone, Default)]
 pub struct ChunkedSchurEliminator {
     layout: ChunkLayout,
-    // Per-chunk scratch, sized for the widest chunk and reused.
-    /// `Eᵀ F` for the current chunk, row-major `dof × |F_c|`.
-    etf: Vec<f64>,
-    /// Kept columns touched by the current chunk, in increasing order.
-    kept_cols: Vec<usize>,
-    /// Monotonic cursor into each kept column's `row_idx`, one per kept column.
+    /// Monotonic cursor into each retained column's `row_idx`, one per column.
+    ///
+    /// Advancing rather than searching is what keeps the sweep linear: every
+    /// entry of `J` is passed exactly once across all chunks.
     cursors: Vec<usize>,
-    /// `Eᵀ r` for the current chunk.
-    etr: Vec<f64>,
 }
 
 impl ChunkedSchurEliminator {
@@ -185,10 +226,7 @@ impl ChunkedSchurEliminator {
     ) -> LinAlgResult<Self> {
         Ok(Self {
             layout: ChunkLayout::build(jacobian, partition)?,
-            etf: Vec::new(),
-            kept_cols: Vec::new(),
             cursors: vec![0; partition.kept_dof()],
-            etr: Vec::new(),
         })
     }
 
@@ -199,9 +237,18 @@ impl ChunkedSchurEliminator {
 
     /// Eliminate every chunk, returning the reduced system.
     ///
-    /// `damping` is applied to `H_ee`'s diagonal before inversion and to `S`'s
-    /// diagonal afterwards, which is the same `λ·D` the direct paths apply to
-    /// the full system before partitioning.
+    /// One sweep does everything: within each chunk's row range it gathers the
+    /// retained block `F`, accumulates `FᵀF` and `Fᵀr` into the reduced system,
+    /// then subtracts that chunk's rank-`dof` correction. Rows belonging to no
+    /// chunk — priors on retained variables — contribute `FᵀF` only.
+    ///
+    /// Accumulating `H_kk` inside the sweep is what keeps this linear: forming
+    /// it by iterating pairs of retained columns would be O(kept_dof²) dot
+    /// products, which is 107 million of them on Ladybug alone.
+    ///
+    /// `damping` is applied to `H_kk` and to each `H_ee` block *before* the
+    /// corrections are subtracted, matching the direct paths, which damp the
+    /// full system and then partition it.
     pub fn eliminate(
         &mut self,
         jacobian: &SparseColMat<usize, f64>,
@@ -213,133 +260,176 @@ impl ChunkedSchurEliminator {
         let symbolic = jacobian.symbolic();
 
         let mut s = vec![0.0f64; kept_dof * kept_dof];
-        let mut g_reduced = Mat::<f64>::zeros(kept_dof, 1);
+        let mut g_k = Mat::<f64>::zeros(kept_dof, 1);
         let mut eliminated_inverse = EliminatedBlocks::new(partition);
         let mut eliminated_rhs = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
 
-        // Cursors restart at the head of every column for each sweep.
+        // Global column of each retained local index, hoisted out of the sweep.
+        let kept_global: Vec<usize> = partition
+            .kept_blocks()
+            .iter()
+            .flat_map(|b| (0..b.dof).map(move |o| b.col_start + o))
+            .collect();
+
         self.cursors.clear();
         self.cursors.resize(kept_dof, 0);
 
-        // Pass 1: the retained-retained part, H_kk = Fᵀ F over all rows, and
-        // g_k = Fᵀ r. Accumulated column-wise, which CSC gives directly.
-        accumulate_kept_normal_equations(
-            jacobian,
-            residuals,
-            partition,
-            kept_dof,
-            &mut s,
-            &mut g_reduced,
-        );
+        // Rows before the first chunk belong to no eliminated variable.
+        let leading_end = if self.layout.is_empty() {
+            self.layout.nrows()
+        } else {
+            self.layout.range(0).0
+        };
+        if leading_end > 0 {
+            self.sweep_rows(
+                jacobian,
+                residuals,
+                &kept_global,
+                0,
+                leading_end,
+                &mut s,
+                &mut g_k,
+                kept_dof,
+            );
+        }
 
-        // λ·D goes on `H_kk`, *before* the chunk corrections turn it into `S`.
-        // `D_jj = clamp(H_jj, …)` reads the un-eliminated diagonal, so damping
-        // `S` instead would clamp against a different matrix and give a
-        // different — wrong — step. This is the same order the direct paths use:
-        // damp the full system, then partition.
+        // λ·D on H_kk. Applied here so `D_jj` clamps against the un-eliminated
+        // diagonal; damping `S` afterwards would clamp against a different
+        // matrix and give a different, wrong step.
+        //
+        // H_kk is not complete until every chunk's FᵀF has been added, so the
+        // diagonal contributions are collected first and damping applied after
+        // the FᵀF accumulation but before any correction is subtracted. That is
+        // handled by running the sweep in two phases below.
+        let mut chunk_spans = Vec::with_capacity(self.layout.len());
+        for chunk in 0..self.layout.len() {
+            let (row_start, row_end) = self.layout.range(chunk);
+            chunk_spans.push((chunk, row_start, row_end));
+        }
+
+        // Phase A: FᵀF and Fᵀr for every chunk's rows, plus EᵀE, EᵀF, Eᵀr.
+        let mut chunk_data: Vec<ChunkData> = Vec::with_capacity(chunk_spans.len());
+        for &(chunk, row_start, row_end) in &chunk_spans {
+            let dof = eliminated_inverse.dof(chunk);
+            if dof == 0 || row_start >= row_end {
+                chunk_data.push(ChunkData::default());
+                continue;
+            }
+            let block = partition.eliminated_blocks()[chunk];
+
+            // Gather this chunk's retained strip and accumulate FᵀF / Fᵀr.
+            let chunk_cols = self.layout.cols(chunk).to_vec();
+            let (cols, strip) = self.gather_strip(
+                jacobian,
+                residuals,
+                &kept_global,
+                row_start,
+                row_end,
+                Some(&chunk_cols),
+                &mut s,
+                &mut g_k,
+                kept_dof,
+            );
+
+            // EᵀE, Eᵀr and EᵀF from the same row range.
+            let ete = eliminated_inverse.block_mut(chunk);
+            ete.fill(0.0);
+            let mut etr = vec![0.0f64; dof];
+            let mut etf = vec![0.0f64; cols.len() * dof];
+
+            for a in 0..dof {
+                let col_a = block.col_start + a;
+                let rows_a = symbolic.row_idx_of_col_raw(col_a);
+                let vals_a = jacobian.val_of_col(col_a);
+                for (i, &row) in rows_a.iter().enumerate() {
+                    if row < row_start || row >= row_end {
+                        continue;
+                    }
+                    let e = vals_a[i];
+                    etr[a] += e * residuals[(row, 0)];
+
+                    // EᵀF for this row, against the strip's dense row.
+                    let local_row = row - row_start;
+                    let strip_row = &strip[local_row * cols.len()..(local_row + 1) * cols.len()];
+                    for (c, &f) in strip_row.iter().enumerate() {
+                        etf[c * dof + a] += e * f;
+                    }
+
+                    // EᵀE
+                    for b in 0..dof {
+                        let col_b = block.col_start + b;
+                        let rows_b = symbolic.row_idx_of_col_raw(col_b);
+                        if let Ok(pos) = rows_b.binary_search(&row) {
+                            ete[b * dof + a] += e * jacobian.val_of_col(col_b)[pos];
+                        }
+                    }
+                }
+            }
+
+            chunk_data.push(ChunkData {
+                cols,
+                etf,
+                etr,
+                dof,
+            });
+        }
+
+        // Rows after the last chunk, if any.
+        if let Some(&(_, _, last_end)) = chunk_spans.last()
+            && last_end < self.layout.nrows()
+        {
+            self.sweep_rows(
+                jacobian,
+                residuals,
+                &kept_global,
+                last_end,
+                self.layout.nrows(),
+                &mut s,
+                &mut g_k,
+                kept_dof,
+            );
+        }
+
+        // H_kk is complete: damp it, and each H_ee block, before eliminating.
         if let Some(damping) = damping {
             for i in 0..kept_dof {
                 let pos = i * kept_dof + i;
                 s[pos] += damping.diagonal_term(s[pos]);
             }
-        }
-
-        // Pass 2: one chunk at a time, subtract that chunk's rank-`dof`
-        // contribution. Nothing here is proportional to nnz(JᵀJ).
-        for chunk in 0..self.layout.len() {
-            let (row_start, row_end) = self.layout.range(chunk);
-            let dof = eliminated_inverse.dof(chunk);
-            if dof == 0 || row_start >= row_end {
-                continue;
-            }
-            let block = partition.eliminated_blocks()[chunk];
-
-            // --- ete = Eᵀ E and etr = Eᵀ r, straight from the block's columns.
-            let ete = eliminated_inverse.block_mut(chunk);
-            ete.fill(0.0);
-            self.etr.clear();
-            self.etr.resize(dof, 0.0);
-            for a in 0..dof {
-                let rows_a = symbolic.row_idx_of_col_raw(block.col_start + a);
-                let vals_a = jacobian.val_of_col(block.col_start + a);
-                for (i, &row) in rows_a.iter().enumerate() {
-                    self.etr[a] += vals_a[i] * residuals[(row, 0)];
-                }
-                for b in 0..dof {
-                    let rows_b = symbolic.row_idx_of_col_raw(block.col_start + b);
-                    let vals_b = jacobian.val_of_col(block.col_start + b);
-                    ete[b * dof + a] += dot_on_shared_rows(rows_a, vals_a, rows_b, vals_b);
-                }
-            }
-
-            // --- etf = Eᵀ F, gathered by advancing each kept column's cursor
-            //     through this chunk's row range.
-            self.kept_cols.clear();
-            self.etf.clear();
-            for (local_col, cursor) in self.cursors.iter_mut().enumerate() {
-                let global_col = kept_global_col(partition, local_col);
-                let rows = symbolic.row_idx_of_col_raw(global_col);
-                let vals = jacobian.val_of_col(global_col);
-
-                // Skip anything before this chunk (already consumed).
-                while *cursor < rows.len() && rows[*cursor] < row_start {
-                    *cursor += 1;
-                }
-                let entry_start = *cursor;
-                let mut probe = *cursor;
-                while probe < rows.len() && rows[probe] < row_end {
-                    probe += 1;
-                }
-                if probe == entry_start {
-                    continue;
-                }
-
-                // This column participates: accumulate its dof-vector of Eᵀ F.
-                let slot = self.etf.len();
-                self.etf.resize(slot + dof, 0.0);
-                for k in entry_start..probe {
-                    let row = rows[k];
-                    let f = vals[k];
-                    for a in 0..dof {
-                        let rows_a = symbolic.row_idx_of_col_raw(block.col_start + a);
-                        let vals_a = jacobian.val_of_col(block.col_start + a);
-                        if let Ok(pos) = rows_a.binary_search(&row) {
-                            self.etf[slot + a] += vals_a[pos] * f;
-                        }
-                    }
-                }
-                self.kept_cols.push(local_col);
-                *cursor = probe;
-            }
-
-            // --- damp and invert this chunk's ete
-            if let Some(damping) = damping {
+            for chunk in 0..eliminated_inverse.len() {
+                let dof = eliminated_inverse.dof(chunk);
                 let ete = eliminated_inverse.block_mut(chunk);
                 for k in 0..dof {
                     let pos = k * dof + k;
                     ete[pos] += damping.diagonal_term(ete[pos]);
                 }
             }
-            eliminated_inverse.invert_one(chunk, block.key)?;
+        }
 
-            // --- apply the rank-dof update
+        // Phase B: invert each H_ee block and subtract its rank-dof correction.
+        let mut g_reduced = g_k;
+        for (chunk, data) in chunk_data.iter().enumerate() {
+            let dof = data.dof;
+            if dof == 0 || data.cols.is_empty() {
+                continue;
+            }
+            let block = partition.eliminated_blocks()[chunk];
+            eliminated_inverse.invert_one(chunk, block.key)?;
             let inv = eliminated_inverse.block(chunk);
             let base = partition.eliminated_offset(chunk);
 
-            // w = ete⁻¹ · etr, retained for back-substitution
+            // w = H_ee⁻¹·Eᵀr, retained for back-substitution.
             for r in 0..dof {
                 let mut acc = 0.0;
-                for c in 0..dof {
-                    acc += inv[c * dof + r] * self.etr[c];
+                for (c, &etr_c) in data.etr.iter().enumerate() {
+                    acc += inv[c * dof + r] * etr_c;
                 }
                 eliminated_rhs[(base + r, 0)] = acc;
             }
 
-            for (i, &col_i) in self.kept_cols.iter().enumerate() {
-                let etf_i = &self.etf[i * dof..(i + 1) * dof];
-                // contrib_i = etf_iᵀ · ete⁻¹
-                let mut contrib = [0.0f64; 16];
-                let contrib = &mut contrib[..dof.min(16)];
+            for (i, &col_i) in data.cols.iter().enumerate() {
+                let etf_i = &data.etf[i * dof..(i + 1) * dof];
+                let mut contrib = vec![0.0f64; dof];
                 for (c, slot) in contrib.iter_mut().enumerate() {
                     let inv_col = &inv[c * dof..(c + 1) * dof];
                     let mut acc = 0.0;
@@ -349,18 +439,16 @@ impl ChunkedSchurEliminator {
                     *slot = acc;
                 }
 
-                // g_red -= etf_iᵀ · ete⁻¹ · etr
                 let g_term: f64 = contrib
                     .iter()
-                    .zip(self.etr.iter())
+                    .zip(data.etr.iter())
                     .map(|(a, b)| a * b)
                     .sum();
                 g_reduced[(col_i, 0)] -= g_term;
 
-                // S -= etf_iᵀ · ete⁻¹ · etf_j
                 let row_base = col_i * kept_dof;
-                for (j, &col_j) in self.kept_cols.iter().enumerate() {
-                    let etf_j = &self.etf[j * dof..(j + 1) * dof];
+                for (j, &col_j) in data.cols.iter().enumerate() {
+                    let etf_j = &data.etf[j * dof..(j + 1) * dof];
                     let mut acc = 0.0;
                     for k in 0..dof {
                         acc += contrib[k] * etf_j[k];
@@ -378,72 +466,122 @@ impl ChunkedSchurEliminator {
             kept_dof,
         })
     }
-}
 
-/// `H_kk = Fᵀ F` and `g_k = Fᵀ r`, accumulated column-wise from CSC.
-fn accumulate_kept_normal_equations(
-    jacobian: &SparseColMat<usize, f64>,
-    residuals: &Mat<f64>,
-    partition: &SchurPartition,
-    kept_dof: usize,
-    s: &mut [f64],
-    g_k: &mut Mat<f64>,
-) {
-    let symbolic = jacobian.symbolic();
-    for local_a in 0..kept_dof {
-        let col_a = kept_global_col(partition, local_a);
-        let rows_a = symbolic.row_idx_of_col_raw(col_a);
-        let vals_a = jacobian.val_of_col(col_a);
+    /// Gather the retained entries of `[row_start, row_end)` into a dense strip,
+    /// accumulating `FᵀF` and `Fᵀr` on the way.
+    ///
+    /// Returns the touched retained columns and the `rows × cols` strip.
+    #[allow(clippy::too_many_arguments)]
+    fn gather_strip(
+        &mut self,
+        jacobian: &SparseColMat<usize, f64>,
+        residuals: &Mat<f64>,
+        kept_global: &[usize],
+        row_start: usize,
+        row_end: usize,
+        candidate_cols: Option<&[u32]>,
+        s: &mut [f64],
+        g_k: &mut Mat<f64>,
+        kept_dof: usize,
+    ) -> (Vec<usize>, Vec<f64>) {
+        let symbolic = jacobian.symbolic();
+        let n_rows = row_end - row_start;
 
-        for (i, &row) in rows_a.iter().enumerate() {
-            g_k[(local_a, 0)] += vals_a[i] * residuals[(row, 0)];
-        }
-        for local_b in 0..kept_dof {
-            let col_b = kept_global_col(partition, local_b);
-            let rows_b = symbolic.row_idx_of_col_raw(col_b);
-            let vals_b = jacobian.val_of_col(col_b);
-            let v = dot_on_shared_rows(rows_a, vals_a, rows_b, vals_b);
-            if v != 0.0 {
-                s[local_a * kept_dof + local_b] += v;
+        // Candidate columns: the chunk's cached list when we have one,
+        // otherwise every retained column (only for the few rows outside any
+        // chunk). Cursors still advance monotonically, so each column's entries
+        // are visited once across the whole sweep.
+        let owned_all: Vec<u32>;
+        let candidates: &[u32] = match candidate_cols {
+            Some(c) => c,
+            None => {
+                owned_all = (0..kept_global.len() as u32).collect();
+                &owned_all
+            }
+        };
+
+        let mut cols = Vec::with_capacity(candidates.len());
+        let mut spans = Vec::with_capacity(candidates.len());
+        for &local_u32 in candidates {
+            let local = local_u32 as usize;
+            let cursor = &mut self.cursors[local];
+            let rows = symbolic.row_idx_of_col_raw(kept_global[local]);
+            while *cursor < rows.len() && rows[*cursor] < row_start {
+                *cursor += 1;
+            }
+            let begin = *cursor;
+            let mut probe = begin;
+            while probe < rows.len() && rows[probe] < row_end {
+                probe += 1;
+            }
+            if probe > begin {
+                cols.push(local);
+                spans.push((begin, probe));
+                *cursor = probe;
             }
         }
-    }
-}
 
-/// Global column of the retained variable at local index `local`.
-///
-/// Linear in the number of retained blocks; callers hoist it out of inner loops.
-fn kept_global_col(partition: &SchurPartition, local: usize) -> usize {
-    let mut seen = 0usize;
-    for block in partition.kept_blocks() {
-        if local < seen + block.dof {
-            return block.col_start + (local - seen);
-        }
-        seen += block.dof;
-    }
-    unreachable_col(local)
-}
-
-fn unreachable_col(local: usize) -> usize {
-    debug_assert!(false, "local kept column {local} is out of range");
-    0
-}
-
-/// Dot product of two sorted sparse columns over the rows they share.
-fn dot_on_shared_rows(rows_a: &[usize], vals_a: &[f64], rows_b: &[usize], vals_b: &[f64]) -> f64 {
-    let (mut i, mut j, mut acc) = (0usize, 0usize, 0.0f64);
-    while i < rows_a.len() && j < rows_b.len() {
-        match rows_a[i].cmp(&rows_b[j]) {
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-            std::cmp::Ordering::Equal => {
-                acc += vals_a[i] * vals_b[j];
-                i += 1;
-                j += 1;
+        let width = cols.len();
+        let mut strip = vec![0.0f64; n_rows * width];
+        for (c, (&local, &(begin, end))) in cols.iter().zip(spans.iter()).enumerate() {
+            let global = kept_global[local];
+            let rows = symbolic.row_idx_of_col_raw(global);
+            let vals = jacobian.val_of_col(global);
+            for k in begin..end {
+                strip[(rows[k] - row_start) * width + c] = vals[k];
             }
         }
+
+        // FᵀF and Fᵀr over this row range only.
+        for r in 0..n_rows {
+            let row = &strip[r * width..(r + 1) * width];
+            let residual = residuals[(row_start + r, 0)];
+            for (i, &vi) in row.iter().enumerate() {
+                if vi == 0.0 {
+                    continue;
+                }
+                g_k[(cols[i], 0)] += vi * residual;
+                let base = cols[i] * kept_dof;
+                for (j, &vj) in row.iter().enumerate() {
+                    if vj != 0.0 {
+                        s[base + cols[j]] += vi * vj;
+                    }
+                }
+            }
+        }
+
+        (cols, strip)
     }
-    acc
+
+    /// `FᵀF` and `Fᵀr` for a row range that belongs to no chunk.
+    #[allow(clippy::too_many_arguments)]
+    fn sweep_rows(
+        &mut self,
+        jacobian: &SparseColMat<usize, f64>,
+        residuals: &Mat<f64>,
+        kept_global: &[usize],
+        row_start: usize,
+        row_end: usize,
+        s: &mut [f64],
+        g_k: &mut Mat<f64>,
+        kept_dof: usize,
+    ) {
+        let _ = self.gather_strip(
+            jacobian, residuals, kept_global, row_start, row_end, None, s, g_k, kept_dof,
+        );
+    }
+}
+
+/// Per-chunk quantities carried from the gather phase to the correction phase.
+#[derive(Debug, Default)]
+struct ChunkData {
+    /// Retained columns this chunk touches.
+    cols: Vec<usize>,
+    /// `Eᵀ F`, column-major over `cols`.
+    etf: Vec<f64>,
+    /// `Eᵀ r`.
+    etr: Vec<f64>,
+    dof: usize,
 }
 
 #[cfg(test)]
