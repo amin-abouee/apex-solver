@@ -54,12 +54,33 @@ impl Problem {
         }
     }
 
-    /// Mark a variable as a Schur complement landmark (eliminated block).
+    /// Mark a variable to be eliminated by the Schur complement solver.
     ///
-    /// Call this for every landmark/point variable when using a Schur complement
-    /// solver. Variables not marked here are treated as camera-block variables.
-    pub fn mark_as_schur_landmark(&mut self, key: VarKey) {
+    /// Unmarked variables are retained and form the reduced system. The
+    /// eliminated set is not restricted to 3-DOF landmarks: any DOF works, sizes
+    /// may be mixed within one problem, and the eliminated variables need not be
+    /// adjacent in the variable ordering. That covers inverse-depth
+    /// parameterizations (1 DOF), LiDAR features, and sliding-window
+    /// marginalization of whole poses (6 DOF), as well as classic bundle
+    /// adjustment.
+    ///
+    /// # Precondition
+    ///
+    /// Eliminated variables must be **mutually unconnected** — no factor may
+    /// touch two of them. That is what makes `H_ee` block-diagonal and its
+    /// inverse cheap. Violating it is reported as an error on the first solve,
+    /// naming both variables, rather than silently producing a wrong step.
+    pub fn mark_for_elimination(&mut self, key: VarKey) {
         self.schur_landmark_keys.insert(key);
+    }
+
+    /// Bundle-adjustment-flavoured alias for [`Self::mark_for_elimination`].
+    #[deprecated(
+        since = "1.6.0",
+        note = "renamed to `mark_for_elimination`: elimination is not restricted to landmarks"
+    )]
+    pub fn mark_as_schur_landmark(&mut self, key: VarKey) {
+        self.mark_for_elimination(key);
     }
 
     /// Add a variable with a given manifold type and initial parameter vector.

@@ -97,7 +97,7 @@ pub struct SchurOrdering {
     /// Off by default: `Rn(3)` is also how self-calibration represents intrinsic
     /// parameters (`[focal, k1, k2]`), and eliminating those as landmarks
     /// silently corrupts the Schur complement. Manual marks via
-    /// `Problem::mark_as_schur_landmark` always apply, with or without this flag.
+    /// `Problem::mark_for_elimination` always apply, with or without this flag.
     pub auto_detect: bool,
 }
 
