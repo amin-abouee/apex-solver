@@ -57,6 +57,7 @@ pub mod imu;
 
 // GPS factors
 pub mod gps_factor;
+pub mod navigation;
 
 // Vision / landmark factors
 pub mod bearing_factor;

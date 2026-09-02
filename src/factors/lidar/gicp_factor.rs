@@ -77,7 +77,7 @@ impl GicpFactor {
 
     /// `C^{-1/2}` via symmetric eigendecomposition with eigenvalue clamping.
     fn whiten(c: &Matrix3<f64>) -> Matrix3<f64> {
-        let symm = nalgebra::SymmetricEigen::new(c.clone());
+        let symm = nalgebra::SymmetricEigen::new(*c);
         let mut sqrt_inv_diag = Vector3::zeros();
         for i in 0..3 {
             let lam = symm.eigenvalues[i].max(MIN_EIGENVALUE);

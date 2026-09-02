@@ -258,7 +258,7 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
         point: &Vector3<f64>,
         depth_deficit: f64,
         residual: &mut [f64],
-        mut jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let penalty = CHEIRALITY_BASE_PENALTY + CHEIRALITY_DEPTH_SCALE * depth_deficit;
         for i in 0..self.observations.len() {
