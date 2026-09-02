@@ -77,7 +77,7 @@ pub use imu::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, ImuPreintegra
 pub use lidar_factor::{
     LidarEdgeFactor, LidarPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
-pub use prior_factor::PriorFactor;
+pub use prior_factor::{EuclideanPriorFactor, PriorFactor};
 pub use projection_factor::ProjectionFactor;
 
 // Optimization configuration types

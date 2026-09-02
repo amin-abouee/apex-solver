@@ -28,8 +28,8 @@
 //! params[3]: imu bias j   — 6D
 //! ```
 //!
-//! [`CombinedImuFactor`]: super::combined_imu_factor::CombinedImuFactor
-//! [`ImuFactor`]: super::imu_factor::ImuFactor
+//! [`CombinedImuFactor`]: super::combined_imu_se23_factors::CombinedImuFactor
+//! [`ImuFactor`]: super::imu_se23_factors::ImuFactor
 
 use apex_manifolds::LieGroup;
 use apex_manifolds::se23::{SE23, SE23Tangent};
@@ -46,8 +46,8 @@ use crate::factors::Factor;
 /// parameter block per frame instead of being split across separate SE3 and
 /// R³ blocks.
 ///
-/// [`ImuFactor`]: super::imu_factor::ImuFactor
-/// [`CombinedImuFactor`]: super::combined_imu_factor::CombinedImuFactor
+/// [`ImuFactor`]: super::imu_se23_factors::ImuFactor
+/// [`CombinedImuFactor`]: super::combined_imu_se23_factors::CombinedImuFactor
 pub struct CombinedSe23ImuFactor {
     preintegration: ImuPreintegration,
 }
@@ -88,7 +88,7 @@ impl Factor for CombinedSe23ImuFactor {
     /// a constant 9×9 matrix (`j_gc_state` below) rather than two
     /// separately-derived pose/velocity blocks.
     ///
-    /// [`ImuFactor`]: super::imu_factor::ImuFactor
+    /// [`ImuFactor`]: super::imu_se23_factors::ImuFactor
     fn linearize(
         &self,
         params: &[&[f64]],

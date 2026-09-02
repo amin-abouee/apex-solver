@@ -11,6 +11,7 @@
 
 use apex_manifolds::Tangent;
 use apex_manifolds::se23::SE23;
+use apex_manifolds::sgal3::SGal3;
 use apex_manifolds::so3::SO3Tangent;
 use nalgebra::{Matrix3, SMatrix, UnitQuaternion, Vector3};
 
@@ -553,6 +554,20 @@ impl ImuPreintegration {
     /// Preintegrated delta as an SE_2(3) element: `SE23(Δp, Δv, ΔR)`.
     pub fn delta_se23(&self) -> SE23 {
         SE23::new(self.acc_doubleintegral, self.acc_integral, self.delta_q)
+    }
+
+    /// Preintegrated delta as an SGal(3) element: `SGal3(Δp, Δv, ΔR, Δt)`.
+    ///
+    /// With frame-i states carried at `s = 0` and frame-j states at
+    /// `s = Δt`, the composition `gc_state_i ∘ delta_sgal3()` reproduces the
+    /// propagated frame-j state exactly (see [`SGal3`](apex_manifolds::sgal3::SGal3)).
+    pub fn delta_sgal3(&self) -> SGal3 {
+        SGal3::new(
+            self.acc_doubleintegral,
+            self.acc_integral,
+            self.delta_q,
+            self.t1 - self.t0,
+        )
     }
 }
 

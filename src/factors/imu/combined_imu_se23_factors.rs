@@ -43,7 +43,7 @@ use crate::factors::Factor;
 /// Jacobians — but with 6 parameter blocks instead of 4, matching GTSAM's
 /// `CombinedImuFactor` convention.
 ///
-/// [`ImuFactor`]: super::imu_factor::ImuFactor
+/// [`ImuFactor`]: super::imu_se23_factors::ImuFactor
 pub struct CombinedImuFactor {
     preintegration: ImuPreintegration,
 }
@@ -79,7 +79,7 @@ impl Factor for CombinedImuFactor {
     /// 24..30 — bias_j   (R⁶,  6 DOF)
     /// ```
     ///
-    /// [`ImuFactor`]: super::imu_factor::ImuFactor
+    /// [`ImuFactor`]: super::imu_se23_factors::ImuFactor
     fn linearize(
         &self,
         params: &[&[f64]],
