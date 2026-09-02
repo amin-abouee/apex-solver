@@ -17,7 +17,7 @@ use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;
-use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+use apex_solver::optimizer::levenberg_marquardt::{DampingUpdate, LevenbergMarquardtConfig};
 use apex_solver::optimizer::{
     DogLeg, GaussNewton, LevenbergMarquardt, OptimizationStatus, initialize_optimization_state,
 };
@@ -83,6 +83,100 @@ struct Args {
     /// reported χ².
     #[arg(long)]
     no_noise: bool,
+
+    /// Initial LM damping λ (config default: 1e-4; GTSAM's odometry default is 1e-5)
+    #[arg(long)]
+    damping: Option<f64>,
+
+    /// Nielsen ν — the rejected-step multiplier (config default: 2.0)
+    #[arg(long)]
+    damping_nu: Option<f64>,
+
+    /// Use Marquardt's three-band rule instead of Nielsen's cubic rule, with
+    /// these (increase, decrease) factors — e.g. `--damping-marquardt 10,0.3`
+    #[arg(long, num_args = 2, value_delimiter = ',')]
+    damping_marquardt: Option<Vec<f64>>,
+
+    /// Bounds for the Marquardt diagonal D_jj. `(1,1)` gives scalar λ·I damping
+    /// (GTSAM's default); omit for the config default (λ·diag(H) with clamping)
+    #[arg(long, num_args = 2, value_delimiter = ',')]
+    diagonal_bounds: Option<Vec<f64>>,
+
+    /// Upper bound for λ before the solve is declared a damping failure
+    /// (config default: 1e12; GTSAM uses 1e5)
+    #[arg(long)]
+    damping_max: Option<f64>,
+
+    /// Repair strategy for indefinite per-edge information matrices:
+    /// "clamp" (PSD projection — default) or "unit-weight" (identity weighting
+    /// for affected edges; trades χ² for unweighted cost)
+    #[arg(long, default_value = "clamp")]
+    indefinite_repair: String,
+
+    /// Print per-iteration cost/damping/step-quality lines (debug-level solver log)
+    #[arg(long)]
+    verbose_iters: bool,
+}
+
+// ============================================================================
+// LM TUNING + NOISE REPAIR
+// ============================================================================
+
+/// Apply the CLI's LM damping/termination tuning to a base config.
+///
+/// Every knob maps onto an existing `LevenbergMarquardtConfig` field — this is
+/// parameter tuning only, no algorithm change.
+fn apply_lm_tuning(config: LevenbergMarquardtConfig, args: &Args) -> LevenbergMarquardtConfig {
+    let mut config = config;
+    if let Some(d) = args.damping {
+        config = config.with_damping(d);
+    }
+    if let Some(nu) = args.damping_nu {
+        config.damping_nu = nu;
+    }
+    if let Some(max) = args.damping_max {
+        let min = config.damping_min;
+        config = config.with_damping_bounds(min, max);
+    }
+    if let Some(bounds) = &args.diagonal_bounds {
+        config = config.with_diagonal_bounds(bounds[0], bounds[1]);
+    }
+    if let Some(factors) = &args.damping_marquardt {
+        config = config
+            .with_damping_update(DampingUpdate::Marquardt)
+            .with_damping_factors(factors[0], factors[1]);
+    }
+    config
+}
+
+/// Build the per-edge noise model honouring `--indefinite-repair`.
+///
+/// "clamp" (default) keeps the PSD-projection behaviour of `from_information`;
+/// "unit-weight" replaces any edge whose Ω needed material repairs with an
+/// identity weight, trading χ² for unweighted cost.
+fn edge_noise_model(
+    info: nalgebra::DMatrix<f64>,
+    args: &Args,
+) -> Result<NoiseModel, apex_solver::error::ApexSolverError> {
+    if args.indefinite_repair == "unit-weight" {
+        let (model, repair) =
+            NoiseModel::from_information_reporting(info).map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?;
+        if repair.is_material() {
+            Ok(NoiseModel::null())
+        } else {
+            Ok(model)
+        }
+    } else {
+        Ok(NoiseModel::from_information(info).map_err(|e| {
+            apex_solver::error::ApexSolverError::from(
+                apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+            )
+        })?)
+    }
 }
 
 // ============================================================================
@@ -100,12 +194,15 @@ struct Args {
 struct CostMetrics {
     /// Chi-squared cost: sum of r^T * Omega * r (information-weighted)
     chi2_cost: f64,
+    /// Unweighted cost: sum of ||r||^2 (no information matrix)
+    unweighted_cost: f64,
 }
 
 /// Compute SE2 cost metrics from G2O graph data
 /// - Chi-squared: sum of r^T * Omega * r (information-weighted)
 fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
+    let mut unweighted_cost = 0.0;
 
     for edge in &graph.edges_se2 {
         let from_idx = edge.from;
@@ -133,16 +230,21 @@ fn compute_se2_cost_metrics(graph: &Graph) -> CostMetrics {
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
+            unweighted_cost += residual_vec.norm_squared();
         }
     }
 
-    CostMetrics { chi2_cost }
+    CostMetrics {
+        chi2_cost,
+        unweighted_cost,
+    }
 }
 
 /// Compute SE3 cost metrics from G2O graph data
 /// Returns chi-squared: sum of r^T * Omega * r (information-weighted)
 fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
     let mut chi2_cost = 0.0;
+    let mut unweighted_cost = 0.0;
 
     for edge in &graph.edges_se3 {
         let from_idx = edge.from;
@@ -170,10 +272,14 @@ fn compute_se3_cost_metrics(graph: &Graph) -> CostMetrics {
             // Chi-squared: r^T * Omega * r (information-weighted)
             let weighted_sq = &residual_vec.transpose() * edge.information * &residual_vec;
             chi2_cost += weighted_sq[(0, 0)];
+            unweighted_cost += residual_vec.norm_squared();
         }
     }
 
-    CostMetrics { chi2_cost }
+    CostMetrics {
+        chi2_cost,
+        unweighted_cost,
+    }
 }
 
 #[derive(Clone)]
@@ -437,16 +543,10 @@ fn test_se2_dataset(
         let edge_noise = if args.no_noise {
             NoiseModel::null()
         } else {
-            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
-                3,
-                3,
-                edge.information.as_slice(),
-            ))
-            .map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            edge_noise_model(
+                nalgebra::DMatrix::from_column_slice(3, 3, edge.information.as_slice()),
+                args,
+            )?
         };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
@@ -548,11 +648,14 @@ fn test_se2_dataset(
             solver.optimize(&mut problem)?
         }
         _ => {
-            let config = LevenbergMarquardtConfig::new()
-                .with_max_iterations(max_iter)
-                .with_cost_tolerance(cost_tol)
-                .with_parameter_tolerance(param_tol)
-                .with_gradient_tolerance(1e-10);
+            let config = apply_lm_tuning(
+                LevenbergMarquardtConfig::new()
+                    .with_max_iterations(max_iter)
+                    .with_cost_tolerance(cost_tol)
+                    .with_parameter_tolerance(param_tol)
+                    .with_gradient_tolerance(1e-10),
+                args,
+            );
 
             let mut solver = LevenbergMarquardt::with_config(config);
             attach_visualizer!(solver, args);
@@ -613,6 +716,10 @@ fn test_se2_dataset(
         initial_metrics.chi2_cost,
         final_metrics.chi2_cost,
         chi2_improvement * 100.0
+    );
+    info!(
+        "  Unweighted: {:.6e} -> {:.6e}",
+        initial_metrics.unweighted_cost, final_metrics.unweighted_cost
     );
     info!(
         "  Initial cost: {:.6e}, Final cost: {:.6e}, Cost reduction: {:.2}%",
@@ -810,16 +917,10 @@ fn test_se3_dataset(
         let edge_noise = if args.no_noise {
             NoiseModel::null()
         } else {
-            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
-                6,
-                6,
-                edge.information.as_slice(),
-            ))
-            .map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?
+            edge_noise_model(
+                nalgebra::DMatrix::from_column_slice(6, 6, edge.information.as_slice()),
+                args,
+            )?
         };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
@@ -909,11 +1010,14 @@ fn test_se3_dataset(
             solver.optimize(&mut problem)?
         }
         _ => {
-            let config = LevenbergMarquardtConfig::new()
-                .with_max_iterations(max_iter)
-                .with_cost_tolerance(cost_tol)
-                .with_parameter_tolerance(param_tol)
-                .with_gradient_tolerance(1e-10);
+            let config = apply_lm_tuning(
+                LevenbergMarquardtConfig::new()
+                    .with_max_iterations(max_iter)
+                    .with_cost_tolerance(cost_tol)
+                    .with_parameter_tolerance(param_tol)
+                    .with_gradient_tolerance(1e-10),
+                args,
+            );
 
             let mut solver = LevenbergMarquardt::with_config(config);
             attach_visualizer!(solver, args);
@@ -954,6 +1058,10 @@ fn test_se3_dataset(
         initial_metrics.chi2_cost,
         final_metrics.chi2_cost,
         chi2_improvement * 100.0
+    );
+    info!(
+        "  Unweighted: {:.6e} -> {:.6e}",
+        initial_metrics.unweighted_cost, final_metrics.unweighted_cost
     );
     info!(
         "  Initial cost: {:.6e}, Final cost: {:.6e}, Cost reduction: {:.2}%",
@@ -1030,7 +1138,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg_attr(not(feature = "visualization"), allow(unused_mut))]
     let mut args = Args::parse();
 
-    init_logger();
+    if args.verbose_iters {
+        apex_solver::init_logger_with_directives(
+            tracing::Level::INFO,
+            "info,apex_solver::optimizer=debug",
+        );
+    } else {
+        init_logger();
+    }
 
     info!("APEX-SOLVER POSE GRAPH OPTIMIZATION (2D + 3D)");
     info!("");
