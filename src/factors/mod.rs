@@ -67,6 +67,7 @@ pub mod visual;
 // LiDAR / ICP factors
 pub mod icp_factor;
 pub mod lidar_factor;
+pub mod lidar;
 
 pub use bearing_factor::BearingFactor;
 pub use between_factor::BetweenFactor;
