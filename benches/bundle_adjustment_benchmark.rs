@@ -322,7 +322,20 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     }
 
     // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
+
+    // APEX_BENCH_SCHUR selects the Schur variant so one build can benchmark
+    // several of them. Unset keeps `for_bundle_adjustment`'s default.
+    if let Ok(v) = std::env::var("APEX_BENCH_SCHUR") {
+        config.schur_variant = match v.as_str() {
+            "sparse" => apex_solver::linalg::SchurVariant::Sparse,
+            "iterative" => apex_solver::linalg::SchurVariant::Iterative,
+            "explicit-iterative" => apex_solver::linalg::SchurVariant::ExplicitIterative,
+            "chunked" => apex_solver::linalg::SchurVariant::ChunkedSparse,
+            other => panic!("APEX_BENCH_SCHUR: unknown variant {other}"),
+        };
+        info!("APEX_BENCH_SCHUR={v} -> {:?}", config.schur_variant);
+    }
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
