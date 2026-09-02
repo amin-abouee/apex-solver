@@ -40,6 +40,9 @@
 //! - This matches the timing approach in optimize_*_graph.rs binaries
 //! - One sample per invocation; `benches/tools/run_repeated.sh` supplies the repetitions
 //!
+//! ### Rust-only mode:
+//! - Set `APEX_BENCH_RUST_ONLY=1` to skip the C++ solvers (g2o, GTSAM, Ceres)
+//!
 //! ### Gauge Freedom Handling:
 //! - apex-solver: Uses `fix_variable()` to anchor first pose (simple, effective for LM)
 //! - factrs/tiny-solver: Use their default gauge freedom handling
@@ -55,6 +58,7 @@ use tracing::{Level, info, warn};
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_manifolds::Tangent;
 use apex_solver::ManifoldType;
+use apex_solver::NoiseModel;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
@@ -509,7 +513,20 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     for edge in &graph.edges_se2 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), Some(Box::new(L2Loss)));
+            // Weight with the edge's information matrix so the optimized
+            // objective equals the harness-reported Ω-weighted χ².
+            let noise = NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                3,
+                3,
+                edge.information.as_slice(),
+            ))
+            .unwrap_or_else(|e| panic!("g2o information matrix must be PD: {e:?}"));
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                Some(Box::new(L2Loss)),
+                noise,
+            );
         }
     }
 
@@ -582,7 +599,20 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     for edge in &graph.edges_se3 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), Some(Box::new(L2Loss)));
+            // Weight with the edge's information matrix so the optimized
+            // objective equals the harness-reported Ω-weighted χ².
+            let noise = NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                6,
+                6,
+                edge.information.as_slice(),
+            ))
+            .unwrap_or_else(|e| panic!("g2o information matrix must be PD: {e:?}"));
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                Some(Box::new(L2Loss)),
+                noise,
+            );
         }
     }
 
@@ -981,6 +1011,12 @@ fn parse_cpp_results(csv_path: &Path) -> Result<Vec<BenchmarkResult>, String> {
 /// Run all available C++ benchmarks and return combined results
 fn run_cpp_benchmarks() -> Vec<BenchmarkResult> {
     let mut all_results = Vec::new();
+
+    // Skip C++ solvers when APEX_BENCH_RUST_ONLY is set (fast apex-only iteration runs).
+    if std::env::var_os("APEX_BENCH_RUST_ONLY").is_some() {
+        info!("APEX_BENCH_RUST_ONLY set: skipping C++ benchmarks");
+        return all_results;
+    }
 
     // Try to build C++ benchmarks
     let build_dir = match build_cpp_benchmarks() {

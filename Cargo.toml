@@ -12,7 +12,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/amin-abouee/apex-solver"
 homepage = "https://github.com/amin-abouee/apex-solver"
-rust-version = "1.85"
+rust-version = "1.93"
 
 [workspace.dependencies]
 apex-manifolds = { path = "crates/apex-manifolds", version = "0.3.0" }
@@ -23,6 +23,10 @@ apex-camera-models = { path = "crates/apex-camera-models", version = "0.3.0" }
 slotmap = "1.0"
 nalgebra = { version = "0.33" }
 faer = { version = "0.24", features = ["sparse"] }
+# faer's numeric sparse kernels take a `MemStack` scratch, but faer keeps
+# `MemStack` crate-private; dyn-stack is faer's own support crate (same version
+# already resolved in the lockfile), so we depend on it directly.
+dyn-stack = "0.13"
 rayon = "1.12"
 thiserror = "2.0.18"
 rand = "0.9.4"
@@ -63,6 +67,11 @@ tempfile = "3.27"
 factrs = "0.2.0"
 tiny-solver = "0.17"
 csv = "1.4"
+
+[workspace.lints.rust]
+# Neither this crate nor its workspace members contain any unsafe code today,
+# so forbidding it costs nothing and keeps it that way.
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"
@@ -128,6 +137,7 @@ apex-camera-models.workspace = true
 slotmap.workspace = true
 nalgebra.workspace = true
 faer.workspace = true
+dyn-stack.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
 rand.workspace = true
@@ -171,6 +181,10 @@ workspace = true
 split-debuginfo = "unpacked"
 debug = 1
 
+# Tests run under the release profile: debug builds are ~50x slower on the
+# large-graph integration tests. Trade-off: `debug_assert!` checks and integer
+# overflow detection are NOT exercised by `cargo test` — run a debug
+# `cargo run` / `cargo check` when debugging correctness patterns.
 [profile.test]
 inherits = "release"
 split-debuginfo = "unpacked"
@@ -183,3 +197,7 @@ debug = true
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[[bench]]
+name = "micro_kernels"
+harness = false

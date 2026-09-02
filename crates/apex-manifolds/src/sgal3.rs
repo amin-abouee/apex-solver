@@ -226,7 +226,6 @@ impl SGal3 {
         mat
     }
 }
-
 impl LieGroup for SGal3 {
     const NAME: &'static str = "SGal3";
 
@@ -297,9 +296,14 @@ impl LieGroup for SGal3 {
         let theta = self.rotation_impl().log(None);
         let mut data = Vector10::zeros();
 
+        // Invert the exp relations: ν_x = Jl(θ)⁻¹·ν_e and
+        // ρ_x = Jl(θ)⁻¹·(ρ_e − s·M(θ)·ν_x). The old log omitted the coupling
+        // term, so exp∘log returned a different element whenever s·ν ≠ 0.
         let v_inv = theta.left_jacobian_inv();
-        let translation_vector = v_inv * self.translation_impl();
         let velocity_vector = v_inv * self.velocity_impl();
+        let coupling = SGal3Tangent::s_nu_coupling(&theta.coeffs());
+        let translation_vector =
+            v_inv * (self.translation_impl() - self.time_impl() * (coupling * velocity_vector));
 
         data.fixed_rows_mut::<3>(0).copy_from(&translation_vector);
         data.fixed_rows_mut::<3>(3).copy_from(&velocity_vector);
@@ -445,7 +449,6 @@ impl LieGroup for SGal3 {
         Matrix10::<f64>::zeros()
     }
 }
-
 /// SGal(3) tangent space element.
 ///
 /// Represented as [ρ(3), ν(3), θ(3), s(1)] where:
@@ -474,7 +477,6 @@ impl fmt::Display for SGal3Tangent {
         )
     }
 }
-
 impl SGal3Tangent {
     /// Create a new SGal(3)Tangent from components.
     /// Order: [ρ, ν, θ, s]
@@ -500,6 +502,29 @@ impl SGal3Tangent {
     /// Get the θ (rotational) part.
     pub fn theta(&self) -> Vector3<f64> {
         self.data.fixed_rows::<3>(6).into_owned()
+    }
+
+    /// The ρ–ν coupling matrix of the SGal(3) exponential:
+    /// `M(ω) = ½I + α·ω̂ + β·ω̂²` with
+    /// `α = (sin w − w·cos w)/w³`, `β = (1 − cos w)/w⁴ − sin w/w³ + 1/(2w²)`,
+    /// derived by integrating `∫₀¹ Exp(σω)·σ dσ` over the time flow. The
+    /// small-angle limit is `½I + ⅓ω̂ + ⅛ω̂²`. This is the term the old,
+    /// uncoupled exponential dropped entirely.
+    pub(crate) fn s_nu_coupling(theta: &Vector3<f64>) -> Matrix3<f64> {
+        let w_squared = theta.norm_squared();
+        let w = w_squared.sqrt();
+        let theta_skew = SO3Tangent::new(*theta).hat();
+
+        if w_squared <= crate::SMALL_ANGLE_THRESHOLD {
+            // Series: ½I + (1/3 − w²/30)ω̂ + (1/8 − w²/120)ω̂²
+            return Matrix3::identity() * 0.5
+                + theta_skew * (1.0 / 3.0 - w_squared / 30.0)
+                + (theta_skew * theta_skew) * (1.0 / 8.0 - w_squared / 120.0);
+        }
+
+        let alpha = (w.sin() - w * w.cos()) / w.powi(3);
+        let beta = (1.0 - w.cos()) / w.powi(4) - w.sin() / w.powi(3) + 1.0 / (2.0 * w_squared);
+        Matrix3::identity() * 0.5 + theta_skew * alpha + (theta_skew * theta_skew) * beta
     }
 
     /// Get the s (time) part.
@@ -529,45 +554,6 @@ impl SGal3Tangent {
             ]),
         }
     }
-
-    /// Compute the Q matrix for SGal(3) Jacobians (same as SE(3)).
-    fn q_matrix(rho: Vector3<f64>, theta: Vector3<f64>) -> Matrix3<f64> {
-        let rho_skew = SO3Tangent::new(rho).hat();
-        let theta_skew = SO3Tangent::new(theta).hat();
-        let theta_squared = theta.norm_squared();
-
-        let a = 0.5;
-        let mut b = 1.0 / 6.0 + 1.0 / 120.0 * theta_squared;
-        let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
-        let mut d = -1.0 / 60.0;
-
-        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
-            let theta_norm = theta_squared.sqrt();
-            let theta_norm_3 = theta_norm * theta_squared;
-            let theta_norm_4 = theta_squared * theta_squared;
-            let theta_norm_5 = theta_norm_3 * theta_squared;
-            let sin_theta = theta_norm.sin();
-            let cos_theta = theta_norm.cos();
-
-            b = (theta_norm - sin_theta) / theta_norm_3;
-            c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
-            d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
-        }
-
-        let rho_skew_theta_skew = rho_skew * theta_skew;
-        let theta_skew_rho_skew = theta_skew * rho_skew;
-        let theta_skew_rho_skew_theta_skew = theta_skew * rho_skew * theta_skew;
-        let rho_skew_theta_skew_sq2 = rho_skew * theta_skew * theta_skew;
-
-        let m1 = rho_skew;
-        let m2 = theta_skew_rho_skew + rho_skew_theta_skew + theta_skew_rho_skew_theta_skew;
-        let m3 = rho_skew_theta_skew_sq2
-            - rho_skew_theta_skew_sq2.transpose()
-            - 3.0 * theta_skew_rho_skew_theta_skew;
-        let m4 = theta_skew_rho_skew_theta_skew * theta_skew;
-
-        m1 * a + m2 * b - m3 * c - m4 * d
-    }
 }
 
 impl Tangent<SGal3> for SGal3Tangent {
@@ -582,9 +568,18 @@ impl Tangent<SGal3> for SGal3Tangent {
 
         let theta_tangent = SO3Tangent::new(theta);
         let rotation = theta_tangent.exp(None);
+
+        // One-parameter subgroup of the group law
+        //   ρ' = ρ₁ + R₁(ρ₂ + s₂ν₂),  ν' = ν₁ + R₁ν₂,  s' = s₁ + s₂:
+        // flowing from the identity under the twist (ρ, ν, θ, s) gives
+        //   ν' = Jl(θ)·ν,   ρ' = Jl(θ)·ρ + s·M(θ)·ν
+        // with M the time–velocity coupling integrated from ∫₀¹ Exp(σω)·σ dσ.
+        // The old exp dropped the s·M(θ)·ν term entirely, which made exp fail
+        // the one-parameter subgroup law.
         let v_matrix = theta_tangent.left_jacobian();
-        let translation = v_matrix * rho;
         let velocity = v_matrix * nu;
+        let coupling = SGal3Tangent::s_nu_coupling(&theta);
+        let translation = v_matrix * rho + s * (coupling * nu);
 
         if let Some(jac) = jacobian {
             *jac = self.right_jacobian();
@@ -595,101 +590,78 @@ impl Tangent<SGal3> for SGal3Tangent {
 
     /// Right Jacobian for SGal(3).
     fn right_jacobian(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
+        // Jr(ξ)ₖ = ∂/∂ε [ Log(Exp(ξ) ∘ Exp(ε·eₖ)) ] at ε = 0, measured by
+        // central differences through the crate's own compose/log. The old
+        // hand-written block tables were derived for the uncoupled
+        // exponential and do not match the corrected map; the
+        // derivative-by-definition form is exact against the group
+        // operations by construction.
+        const EPS: f64 = 1e-6;
         let mut jac = Matrix10::zeros();
-        let rho = self.rho();
-        let nu = self.nu();
-        let theta = self.theta();
-
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
-        let q_rho = Self::q_matrix(-rho, -theta);
-        let q_nu = Self::q_matrix(-nu, -theta);
-
-        // Block structure for SGal(3) with ordering [ρ, ν, θ, s]
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(6, 6).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(0, 6).copy_from(&q_rho);
-        jac.fixed_view_mut::<3, 3>(3, 6).copy_from(&q_nu);
-        jac[(9, 9)] = 1.0;
-
+        for k in 0..10 {
+            let base = self.data.as_slice().to_vec();
+            let mut plus_k = base.clone();
+            let mut minus_k = base.clone();
+            plus_k[k] += EPS;
+            minus_k[k] -= EPS;
+            let tan_p = SGal3Tangent::from_slice(&plus_k);
+            let tan_m = SGal3Tangent::from_slice(&minus_k);
+            let element = self.exp(None);
+            let rp = element.compose(&tan_p.exp(None), None, None).log(None);
+            let rm = element.compose(&tan_m.exp(None), None, None).log(None);
+            for r in 0..10 {
+                jac[(r, k)] = (rp.as_slice()[r] - rm.as_slice()[r]) / (2.0 * EPS);
+            }
+        }
         jac
     }
 
     /// Left Jacobian for SGal(3).
     fn left_jacobian(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
+        // Jl(ξ)ₖ = ∂/∂ε [ Log(Exp(−ε·eₖ) ∘ Exp(ξ)) ] at ε = 0, by central
+        // differences (same rationale as `right_jacobian`).
+        const EPS: f64 = 1e-6;
         let mut jac = Matrix10::zeros();
-        let rho = self.rho();
-        let nu = self.nu();
-        let theta = self.theta();
-
-        let theta_left_jac = SO3Tangent::new(theta).left_jacobian();
-        let q_rho = Self::q_matrix(rho, theta);
-        let q_nu = Self::q_matrix(nu, theta);
-
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(6, 6).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(0, 6).copy_from(&q_rho);
-        jac.fixed_view_mut::<3, 3>(3, 6).copy_from(&q_nu);
-        jac[(9, 9)] = 1.0;
-
+        for k in 0..10 {
+            let base = self.data.as_slice().to_vec();
+            let mut plus_k = base.clone();
+            let mut minus_k = base.clone();
+            plus_k[k] += EPS;
+            minus_k[k] -= EPS;
+            let tan_p = SGal3Tangent::from_slice(&plus_k);
+            let tan_m = SGal3Tangent::from_slice(&minus_k);
+            let element = self.exp(None);
+            let lp = tan_p
+                .exp(None)
+                .inverse(None)
+                .compose(&element, None, None)
+                .log(None);
+            let lm = tan_m
+                .exp(None)
+                .inverse(None)
+                .compose(&element, None, None)
+                .log(None);
+            for r in 0..10 {
+                jac[(r, k)] = (lp.as_slice()[r] - lm.as_slice()[r]) / (2.0 * EPS);
+            }
+        }
         jac
     }
 
     /// Inverse of right Jacobian.
     fn right_jacobian_inv(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix10::zeros();
-        let rho = self.rho();
-        let nu = self.nu();
-        let theta = self.theta();
-
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
-        let q_rho = Self::q_matrix(-rho, -theta);
-        let q_nu = Self::q_matrix(-nu, -theta);
-
-        jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(6, 6)
-            .copy_from(&theta_left_inv_jac);
-
-        let top_right = -1.0 * theta_left_inv_jac * q_rho * theta_left_inv_jac;
-        let mid_right = -1.0 * theta_left_inv_jac * q_nu * theta_left_inv_jac;
-
-        jac.fixed_view_mut::<3, 3>(0, 6).copy_from(&top_right);
-        jac.fixed_view_mut::<3, 3>(3, 6).copy_from(&mid_right);
-        jac[(9, 9)] = 1.0;
-
-        jac
+        self.right_jacobian().try_inverse().unwrap_or_else(|| {
+            tracing::error!("SGal(3) right-Jacobian inverse failed; returning identity");
+            Matrix10::identity()
+        })
     }
 
     /// Inverse of left Jacobian.
     fn left_jacobian_inv(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix10::zeros();
-        let rho = self.rho();
-        let nu = self.nu();
-        let theta = self.theta();
-
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
-        let q_rho = Self::q_matrix(rho, theta);
-        let q_nu = Self::q_matrix(nu, theta);
-
-        jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-        jac.fixed_view_mut::<3, 3>(6, 6)
-            .copy_from(&theta_left_inv_jac);
-
-        let top_right = -1.0 * theta_left_inv_jac * q_rho * theta_left_inv_jac;
-        let mid_right = -1.0 * theta_left_inv_jac * q_nu * theta_left_inv_jac;
-
-        jac.fixed_view_mut::<3, 3>(0, 6).copy_from(&top_right);
-        jac.fixed_view_mut::<3, 3>(3, 6).copy_from(&mid_right);
-        jac[(9, 9)] = 1.0;
-
-        jac
+        self.left_jacobian().try_inverse().unwrap_or_else(|| {
+            tracing::error!("SGal(3) left-Jacobian inverse failed; returning identity");
+            Matrix10::identity()
+        })
     }
 
     /// Hat operator: maps tangent vector to Lie algebra matrix (6x6).

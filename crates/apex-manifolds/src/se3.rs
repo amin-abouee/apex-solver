@@ -393,6 +393,26 @@ impl LieGroup for SE3 {
         self.params.as_slice()
     }
 
+    /// Raw write access to the 7-parameter storage.
+    ///
+    /// # Safety of representation (not memory)
+    ///
+    /// Writing the quaternion components (`params[3..7]`) through this slice
+    /// does **not** renormalize: a non-unit quaternion silently degrades every
+    /// subsequent exp/retraction built on it. The solver path never needs
+    /// this — tangent steps go through the exponential map, which is
+    /// unit-preserving — but consumers seeding parameters from files or
+    /// sensors must call [`LieGroup::normalize`] once after batch writes:
+    ///
+    /// ```
+    /// # use apex_manifolds::se3::SE3;
+    /// # use apex_manifolds::LieGroup;
+    /// # use nalgebra::dvector;
+    /// let mut pose = SE3::identity();
+    /// pose.as_param_slice_mut()[3] += 0.5; // no longer unit
+    /// pose.normalize();
+    /// assert!(pose.is_valid(1e-9));
+    /// ```
     fn as_param_slice_mut(&mut self) -> &mut [f64] {
         self.params.as_mut_slice()
     }

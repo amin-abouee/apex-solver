@@ -68,12 +68,14 @@ pub use core::variable::Variable;
 pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
-pub use factors::{BetweenFactor, Factor, PriorFactor, ProjectionFactor};
+pub use core::noise::NoiseModel;
+pub use factors::{BetweenFactor, EuclideanPriorFactor, Factor, PriorFactor, ProjectionFactor};
 
 // Re-export linear algebra types
 pub use linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
-    LinearizationMode, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, IterativeSchurSolver, JacobianMode,
+    LinearSolver, LinearSolverType, LinearizationMode, SparseCholeskySolver, SparseMode,
+    SparseQRSolver, SparseSchurComplementSolver,
 };
 
 // Re-export logger
@@ -81,8 +83,8 @@ pub use logger::{init_logger, init_logger_with_directives, init_logger_with_leve
 
 // Re-export optimizer types
 pub use optimizer::{
-    LevenbergMarquardt, OptObserver, OptObserverVec, Optimizer, OptimizerType,
-    levenberg_marquardt::LevenbergMarquardtConfig,
+    DogLeg, GaussNewton, LevenbergMarquardt, OptObserver, OptObserverVec, Optimizer, OptimizerType,
+    levenberg_marquardt::{DampingUpdate, LevenbergMarquardtConfig},
 };
 
 #[cfg(feature = "visualization")]

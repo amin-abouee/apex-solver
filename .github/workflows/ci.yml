@@ -54,3 +54,32 @@ jobs:
 
       - name: Check visualization examples compile
         run: cargo check --examples --features visualization
+
+  msrv:
+    name: MSRV 1.93
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust MSRV toolchain
+        uses: dtolnay/rust-toolchain@1.93
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-msrv-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-msrv-
+
+      - name: Check compilation with MSRV
+        run: cargo check --workspace --all-targets --all-features
+
+      - name: Run tests with MSRV
+        run: cargo test --workspace --all-features --release

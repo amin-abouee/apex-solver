@@ -5,6 +5,145 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **`PriorFactor` is now a tangent-space anchor and generic over the manifold.**
+  `r = Log(T_prior⁻¹ ∘ X) ∈ ℝ^dof` with the full between-chain Jacobian — no quaternion
+  double-cover ambiguity, no dropped rotation–translation coupling, correct SE(2) angle wrap.
+  The old ambient parameter-space factor is renamed **`EuclideanPriorFactor`** and is
+  restricted to `Rn` variables at registration (anything else returns a
+  `DimensionMismatch` error). Struct-literal construction (`PriorFactor { data }`) becomes
+  `PriorFactor::new(prior)` / `EuclideanPriorFactor::new(data)`.
+  ```rust
+  // before — ambient, SE(3)-incorrect
+  problem.add_residual_block(&[k], Box::new(PriorFactor { data: pose7 }), loss);
+
+  // after — tangent anchor on SE(3)
+  problem.add_residual_block(&[k], Box::new(PriorFactor::<SE3>::new(prior_pose)), loss);
+  ```
+- **`KannalaBrandtCamera::unproject` now returns `NumericalError`** for pixels outside the
+  model's valid domain (`ru > π/2`) and for non-converged Newton iterations; the old code
+  silently clamped `ru` and returned an unconverged ray.
+- **`Rn::DIM` / `Rn::DOF` / `Rn::REP_SIZE` are deprecated** — they are `0` sentinels for a
+  dynamic manifold, not dimensions. Use `is_dynamic()` / `tangent_dim()`.
+
+### Added
+
+- **Noise model layer** — measurement uncertainty per residual block:
+  `NoiseModel` (`Null` identity default | `Diagonal` | `Dense`, sqrt-information domain),
+  registered via `add_residual_block_with_noise` / `try_add_residual_block_with_noise`.
+  Residuals and Jacobians are whitened (`r̃ = S·r`, `J̃ = S·J`) upstream of the robust-loss
+  corrector, so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted objective g2o
+  reports. `pose_graph_g2o` and the odometry benchmark weight edges with the parsed
+  information matrices **by default**; `--no-noise` restores the unweighted solve.
+  `NoiseModel::from_information` tolerates rank-deficient/slightly indefinite Ω (negative
+  eigenvalues clamped with a warning) — required by real g2o data such as sphere2500.
+- **One-parameter subgroup law tests for all eight manifolds**
+  (`exp(aξ)∘exp(bξ) = exp((a+b)ξ)`) plus an SGal(3) Jacobian composition check with strong
+  time–velocity coupling.
+
+### Fixed
+
+- **`IterativeSchurSolver` published `−Jᵀr` from `get_gradient`** while every other backend
+  published `+Jᵀr`, the documented contract. Levenberg-Marquardt and Dog Leg build their
+  predicted cost reduction from that vector, so on the implicit-Schur path the step-quality
+  ratio ρ came out sign-inverted. It also cached the *damped* `JᵀJ + λI` as `get_hessian`,
+  which Dog Leg uses for the Cauchy point and the true quadratic model. `tests/
+  linear_solver_contract.rs` now pins both conventions across all six backends.
+
+- **`compute_step_quality` accepted steps that increased the cost.** A negative predicted
+  reduction divided by a negative actual reduction yields ρ > 0, so a step the quadratic model
+  itself expected to make things worse was accepted. Ceres treats a non-positive
+  `model_cost_change` as an invalid step; it is now rejected. The near-zero case is unchanged,
+  since at the solution both reductions legitimately vanish.
+
+- **λ, ν, the trust-region radius and μ were stored in the config and mutated during a solve**,
+  so a second `optimize()` call on the same solver silently started from wherever the previous
+  run finished. They are now solver run state, re-seeded from the configuration on every solve.
+
+
+- **SGal(3) `exp` is now the group exponential.** The old map dropped the time–velocity
+  coupling entirely: `exp(aξ)∘exp(bξ)` differed from `exp((a+b)ξ)` by exactly `a·b·s·ν`,
+  and `exp∘log ≠ id` whenever `s·ν ≠ 0`. `exp` now integrates the subgroup flow
+  (`ρ' = Jl(θ)·ρ + s·M(θ)·ν` with `M(ω) = ½I + α·ω̂ + β·ω̂²`), `log` inverts it exactly, and
+  `right/left_jacobian(±inv)` are computed as the derivative-by-definition of the corrected
+  map (central differences through the crate's own compose/log) — validated by the subgroup
+  law and a coupling-region composition test.
+- **`SO3::log` returned the wrong sign near the negative-`w` identity.** For a rotation by
+  `−s` (`w < 0`, `|s| < 2e-5`) the small-angle branch returned `+s`. Now sign-correct with
+  regression tests.
+- **Sim(3) `right/left_jacobian_inv` and `V⁻¹` no longer silently fall back to identity**
+  on singular inputs; they use a Tikhonov-regularized inverse and emit a `warn!`.
+- **Kannala-Brandt `unproject` validates its Newton iterations** post-loop (finite,
+  converged) and rejects out-of-domain radii, matching `ftheta`.
+
+### Changed
+
+Eleven configuration fields were declared, documented, given builder setters — and never read.
+Each now drives behaviour or is deprecated:
+
+- `min_diagonal` / `max_diagonal` (LM) — the Marquardt damping diagonal, plus the
+  `with_diagonal_bounds` setter they never had.
+- `min_relative_decrease` (LM, Dog Leg) — the step-acceptance threshold.
+- `max_condition_number` (LM, GN, Dog Leg) — checks `κ₂(JᵀJ) ≥ max_j H_jj / min_j H_jj`, a
+  rigorous lower bound computed from the column norms already available, and terminates with
+  `OptimizationStatus::IllConditionedJacobian` — a variant nothing previously constructed.
+  Exceeding the threshold is proof of ill-conditioning; staying below it is not proof of the
+  converse, and the doc says so. Its most useful case is a variable no residual constrains,
+  which gives a zero column and an infinite bound; that previously surfaced as an opaque
+  "JᵀJ has structurally empty diagonal entries" from inside the linear solver.
+- `damping_increase_factor` / `damping_decrease_factor` / `min_step_quality` /
+  `good_step_quality` (LM) — read by the new `DampingUpdate::Marquardt` policy. The default
+  `DampingUpdate::Nielsen` derives both directions from ρ and ignores them, which is why they
+  were inert; each field's doc now names the policy that reads it.
+- `min_diagonal` (GN) — the uniform regularizer its doc-comment always promised, applied as
+  `(JᵀJ + min_diagonal·I)`. Set to `0.0` for the un-regularized normal equations.
+- `trust_region_increase_factor` (Dog Leg) — replaces the hardcoded `3.0` in the radius
+  growth rule (same default, so unchanged behaviour). The radius growth now measures the step
+  in the *scaled* space the radius bounds; previously it mixed the scaled radius with an
+  un-scaled step norm whenever Jacobi scaling was on, which is Dog Leg's default.
+- `min_step_quality` (Dog Leg) and `enable_visualization` (GN, Dog Leg) are `#[deprecated]`:
+  the first duplicates `min_relative_decrease`, the second is superseded by the observer
+  pattern (`solver.add_observer(RerunObserver::new(true)?)`).
+
+Also: Dog Leg's `update_trust_region` return value was discarded, so a rejected step with
+`0 < ρ < 1e-4` took the "moderate" branch and cleared the step-reuse cache as though it had
+been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-specific identity
+`½·δᵀ(λδ − g)` to the policy-independent `−δᵀg − ½·δᵀHδ`, shared with Dog Leg.
+
+
+- **Odometry benchmarks now solve the Ω-weighted objective end-to-end** — the optimized
+  number is the χ² the harness reports. Measured impact on eight pose graphs: every final
+  χ² improves (torus3D 1.8×, cubicle 240×, sphere2500 2.5×, mit 12×), five of eight are
+  also faster. Details in [`noise-round-results.md`](noise-round-results.md).
+
+- **`LinearSolver::solve_augmented_equation` takes `&Damping` instead of `lambda: f64`.**
+  Custom `LinearSolver` implementations must update the signature. The augmented system it
+  describes is now `(JᵀJ + λ·D)·dx = −Jᵀr` with `D_jj = clamp(JᵀJ_jj, min_diagonal,
+  max_diagonal)` — Ceres' `LevenbergMarquardtStrategy`. `Damping::identity(lambda)` reproduces
+  the previous uniform `λI` behaviour exactly:
+  ```rust
+  // before
+  solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
+
+  // after — same numerics
+  solver.solve_augmented_equation(&residuals, &jacobian, &Damping::identity(lambda))?;
+  ```
+
+- **Levenberg-Marquardt now damps with `λ·D` and starts from `λ = 1e-4`** (was `λI` and
+  `1e-3`). Iterates change on every problem. Measurements across ten pose graphs, two BAL
+  datasets and three camera-calibration problems are in
+  [`ceres-params-validation.md`](ceres-params-validation.md): order-of-magnitude wins wherever
+  parameter scales are heterogeneous (calibration, bundle adjustment), bounded constant-factor
+  costs on homogeneous pose graphs. To restore the old behaviour:
+  `LevenbergMarquardtConfig::new().with_diagonal_bounds(1.0, 1.0).with_damping(1e-3)`.
+
+- **Step acceptance is now gated on `min_relative_decrease`** in both Levenberg-Marquardt
+  (was a hardcoded `rho > 0.0`) and Dog Leg (was `rho > 1e-4`). The default of `1e-3` matches
+  Ceres, so marginal steps that used to be accepted are now rejected and the damping raised.
+
 ## [1.4.0] - 2026-07-30
 
 ### Breaking Changes

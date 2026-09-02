@@ -1,0 +1,23 @@
+[book]
+authors = ["Amin Abouee <amin.abouee@gmail.com>"]
+language = "en"
+src = "src"
+title = "Apex Solver Cookbook"
+description = "Practical guide to nonlinear least squares on manifolds with apex-solver: problem construction, optimizers, linear solvers, robust losses and visualization."
+
+[build]
+build-dir = "book"
+create-missing = true
+
+[preprocessor.katex]
+after = ["links"]
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+git-repository-url = "https://github.com/amin-abouee/apex-solver"
+edit-url-template = "https://github.com/amin-abouee/apex-solver/edit/main/doc/cookbook/{path}"
+
+[output.html.fold]
+enable = true
+level = 1

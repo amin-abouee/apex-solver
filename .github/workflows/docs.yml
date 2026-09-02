@@ -1,0 +1,82 @@
+name: Cookbook
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "doc/cookbook/**"
+      - "crates/*/doc/cookbook/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build mdBook site
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: latest
+
+      - name: Install mdbook-katex
+        uses: taiki-e/install-action@v2
+        with:
+          tool: mdbook-katex
+
+      - name: Build main cookbook
+        run: mdbook build doc/cookbook
+
+      - name: Build crate cookbooks
+        run: |
+          mdbook build crates/apex-manifolds/doc/cookbook
+          mdbook build crates/apex-camera-models/doc/cookbook
+          mdbook build crates/apex-io/doc/cookbook
+
+      - name: Aggregate site
+        run: |
+          # mdBook 0.5 writes HTML directly into build-dir; 0.4 used a html/
+          # subdirectory. Handle both so the workflow survives mdbook bumps.
+          copy_book() {
+            src="$1"
+            if [ -d "$src/html" ]; then src="$src/html"; fi
+            mkdir -p "$2"
+            cp -r "$src/." "$2/"
+          }
+          copy_book doc/cookbook/book site
+          copy_book crates/apex-manifolds/doc/cookbook/book site/manifolds
+          copy_book crates/apex-camera-models/doc/cookbook/book site/camera-models
+          copy_book crates/apex-io/doc/cookbook/book site/io
+          ls site | head
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-22.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

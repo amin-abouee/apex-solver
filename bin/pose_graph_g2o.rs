@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
+use apex_solver::NoiseModel;
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
 };
@@ -69,6 +70,19 @@ struct Args {
     /// Enable detailed profiling output with timing breakdown
     #[arg(long)]
     profile: bool,
+
+    /// Disable the built-in per-dataset tolerance/iteration overrides
+    /// (manhattanOlson3500, grid3D — which caps iterations at 30 —, rim,
+    /// torus3D) and use the CLI values verbatim for every dataset.
+    #[arg(long)]
+    no_dataset_overrides: bool,
+
+    /// Ignore the per-edge information matrices parsed from the G2O file and
+    /// optimize the unweighted objective (legacy behaviour). By default the
+    /// Ω matrices whiten every edge so the optimized objective equals the
+    /// reported χ².
+    #[arg(long)]
+    no_noise: bool,
 }
 
 // ============================================================================
@@ -322,15 +336,26 @@ fn test_se2_dataset(
         dataset_name
     );
 
-    // Apply dataset-specific optimizations
-    let (cost_tol, param_tol, max_iter) = match dataset_name {
-        "manhattanOlson3500" => (1e-3, 1e-3, args.max_iterations),
-        _ => (
+    // Apply dataset-specific optimizations (disable with --no-dataset-overrides)
+    let (cost_tol, param_tol, max_iter) = if args.no_dataset_overrides {
+        (
             args.cost_tolerance,
             args.parameter_tolerance,
             args.max_iterations,
-        ),
+        )
+    } else {
+        match dataset_name {
+            "manhattanOlson3500" => (1e-3, 1e-3, args.max_iterations),
+            _ => (
+                args.cost_tolerance,
+                args.parameter_tolerance,
+                args.max_iterations,
+            ),
+        }
     };
+    info!(
+        "Effective SE2 settings: cost_tol={cost_tol:e} param_tol={param_tol:e} max_iter={max_iter}"
+    );
 
     let load_start = Instant::now();
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, dataset_name);
@@ -391,13 +416,7 @@ fn test_se2_dataset(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
     {
-        let trans = first_vertex.pose.translation();
-        let angle = first_vertex.pose.rotation_angle();
-        let prior_value = dvector![trans.x, trans.y, angle];
-
-        let prior_factor = PriorFactor {
-            data: prior_value.clone(),
-        };
+        let prior_factor = PriorFactor::new(first_vertex.pose.clone());
         let huber_loss = HuberLoss::new(1.0)?;
         let first_key = var_key_map[&first_id];
         problem.add_residual_block(
@@ -431,9 +450,28 @@ fn test_se2_dataset(
         } else {
             None
         };
+        let edge_noise = if args.no_noise {
+            NoiseModel::null()
+        } else {
+            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                3,
+                3,
+                edge.information.as_slice(),
+            ))
+            .map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?
+        };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                edge_loss,
+                edge_noise,
+            );
         }
     }
 
@@ -673,19 +711,33 @@ fn test_se3_dataset(
         dataset_name
     );
 
-    let (cost_tol, param_tol, max_iter) = match dataset_name {
-        "grid3D" => {
-            info!("Note: grid3D requires very relaxed tolerances due to high complexity");
-            (1e-1, 1e-1, 30)
-        }
-        "rim" => (1e-3, 1e-3, args.max_iterations),
-        "torus3D" => (1e-5, 1e-5, args.max_iterations),
-        _ => (
+    let (cost_tol, param_tol, max_iter) = if args.no_dataset_overrides {
+        (
             args.cost_tolerance,
             args.parameter_tolerance,
             args.max_iterations,
-        ),
+        )
+    } else {
+        match dataset_name {
+            "grid3D" => {
+                info!(
+                    "Note: grid3D requires very relaxed tolerances due to high complexity \
+                     (hard 30-iteration cap; disable with --no-dataset-overrides)"
+                );
+                (1e-1, 1e-1, 30)
+            }
+            "rim" => (1e-3, 1e-3, args.max_iterations),
+            "torus3D" => (1e-5, 1e-5, args.max_iterations),
+            _ => (
+                args.cost_tolerance,
+                args.parameter_tolerance,
+                args.max_iterations,
+            ),
+        }
     };
+    info!(
+        "Effective SE3 settings: cost_tol={cost_tol:e} param_tol={param_tol:e} max_iter={max_iter}"
+    );
 
     let dataset_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, dataset_name);
     let mut graph = G2oLoader::load(&dataset_path)?;
@@ -737,13 +789,7 @@ fn test_se3_dataset(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
     {
-        let quat = first_vertex.pose.rotation_quaternion();
-        let trans = first_vertex.pose.translation();
-        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-
-        let prior_factor = PriorFactor {
-            data: prior_value.clone(),
-        };
+        let prior_factor = PriorFactor::new(first_vertex.pose.clone());
         let huber_loss = HuberLoss::new(1.0)?;
         let first_key = var_key_map[&first_id];
         problem.add_residual_block(
@@ -777,9 +823,28 @@ fn test_se3_dataset(
         } else {
             None
         };
+        let edge_noise = if args.no_noise {
+            NoiseModel::null()
+        } else {
+            NoiseModel::from_information(nalgebra::DMatrix::from_column_slice(
+                6,
+                6,
+                edge.information.as_slice(),
+            ))
+            .map_err(|e| {
+                apex_solver::error::ApexSolverError::from(
+                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+                )
+            })?
+        };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
-            problem.add_residual_block(&[k0, k1], Box::new(between_factor), edge_loss);
+            problem.add_residual_block_with_noise(
+                &[k0, k1],
+                Box::new(between_factor),
+                edge_loss,
+                edge_noise,
+            );
         }
     }
 
@@ -1001,9 +1066,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             se3_run.push(args.dataset.as_str());
         }
         if se2_run.is_empty() && se3_run.is_empty() {
-            warn!("Unknown dataset: {}", args.dataset);
-            warn!("Using default: running all datasets");
-            (se2_datasets, se3_datasets)
+            // Any dataset file on disk is runnable standalone (grid3D, rim, …).
+            let se2_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_2D, args.dataset);
+            let se3_path = format!("{}/{}.g2o", ODOMETRY_DATA_DIR_3D, args.dataset);
+            if std::path::Path::new(&se2_path).exists() {
+                se2_run.push(args.dataset.as_str());
+                (se2_run, se3_run)
+            } else if std::path::Path::new(&se3_path).exists() {
+                se3_run.push(args.dataset.as_str());
+                (se2_run, se3_run)
+            } else {
+                warn!("Unknown dataset: {}", args.dataset);
+                warn!("Using default: running all datasets");
+                (se2_datasets, se3_datasets)
+            }
         } else {
             (se2_run, se3_run)
         }

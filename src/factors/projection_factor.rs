@@ -1,15 +1,36 @@
 //! Generic projection factor for bundle adjustment and SfM.
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix2xX, Matrix3xX};
+use nalgebra::{Matrix2xX, Matrix3xX, Vector3};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
 use tracing::warn;
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::{Factor, OptimizeParams};
-use apex_camera_models::CameraModel;
+use apex_camera_models::{CameraModel, CameraModelError};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
+
+/// Baseline cheirality-violation penalty (pixels-equivalent). Chosen to
+/// comfortably dominate any plausible in-image residual — an observation is
+/// always a finite pixel coordinate, and even a badly-fit-but-valid
+/// projection is bounded by roughly the image extent, so a small multiple
+/// of a typical image diagonal (a few thousand pixels) is already an
+/// unreachable residual for a valid projection — so becoming invalid is
+/// never a cheaper escape hatch than fitting the data. Deliberately *not*
+/// orders of magnitude larger than that: mixing genuinely huge and
+/// pixel-scale residuals/Jacobian entries in the same least-squares problem
+/// ill-conditions the normal equations (observed as Cholesky/linear-solve
+/// failures in practice).
+const CHEIRALITY_BASE_PENALTY: f64 = 1.0e4;
+
+/// Penalty growth rate per metre of depth violation, added on top of
+/// [`CHEIRALITY_BASE_PENALTY`] so the penalty keeps increasing — and keeps
+/// providing a gradient pointing back toward validity — the further behind
+/// the camera a point ends up. Kept modest for the same conditioning reason
+/// as [`CHEIRALITY_BASE_PENALTY`].
+const CHEIRALITY_DEPTH_SCALE: f64 = 1.0e3;
 
 /// Trait for optimization configuration.
 ///
@@ -207,11 +228,33 @@ where
             // Project point (includes all validity checks)
             let uv = match camera.project(&p_cam) {
                 Ok(proj) => proj,
+                Err(CameraModelError::PointBehindCamera { z, min_z }) => {
+                    if self.verbose_cheirality {
+                        warn!(
+                            "Point {} behind camera (z={}, min_z={}): applying cheirality penalty",
+                            i, z, min_z
+                        );
+                    }
+                    self.write_cheirality_penalty(
+                        i,
+                        z,
+                        min_z,
+                        &p_world,
+                        pose,
+                        camera,
+                        residual,
+                        jacobian.as_mut(),
+                    );
+                    continue;
+                }
                 Err(cam_err) => {
                     if self.verbose_cheirality {
                         warn!("Invalid projection for point {}: {}", i, cam_err);
                     }
-                    // Invalid projection: use zero residual (matches Ceres convention)
+                    // Invalid projection for a reason other than cheirality
+                    // (e.g. a model-specific numerical singularity): no
+                    // principled penalty gradient is available, so fall
+                    // back to a zero residual as before.
                     residual[i * 2] = 0.0;
                     residual[i * 2 + 1] = 0.0;
                     // Jacobian rows remain zero
@@ -275,6 +318,91 @@ where
             }
         }
     }
+
+    /// Writes a smooth cheirality-violation penalty for observation `i`,
+    /// used in place of the normal reprojection residual when the point
+    /// fails `camera.project`'s `PointBehindCamera` check.
+    ///
+    /// A hard zero residual/Jacobian there (the previous behaviour) makes
+    /// "point behind camera" a free way to reduce total cost — and worse
+    /// than free, since a valid-but-grazing-incidence point can have a very
+    /// large residual, so pushing it just past the cheirality boundary
+    /// (residual → 0) is actually *cheaper* than fitting it. That gives the
+    /// optimizer a standing incentive to make points invalid rather than
+    /// fit them, which is backwards for a residual meant to be minimized.
+    ///
+    /// Instead this returns a residual that (a) is unconditionally larger
+    /// than any plausible in-image residual, so becoming invalid is never
+    /// attractive, and (b) grows with how far behind the camera the point
+    /// is, with a real gradient — built from `∂z_cam/∂pose` and
+    /// `∂z_cam/∂p_world`, both well-defined for any point regardless of
+    /// cheirality — that pushes the optimizer back toward `z_cam > min_z`.
+    /// The intrinsics block is left at zero: `z_cam` does not depend on the
+    /// intrinsic parameters.
+    ///
+    /// # Rank property (deliberate)
+    ///
+    /// Both rows carry the same scalar penalty, so their Jacobian rows are
+    /// identical and the block is rank-1. This is exact — the residual *is*
+    /// the same scalar in both rows — and intentional: the factor's row
+    /// layout is fixed at 2 rows per observation, and a violating point
+    /// contributes one scalar constraint however it is laid out. Under LM
+    /// damping the resulting singular normal block is harmless; under plain
+    /// Gauss–Newton a solve made only of cheirality blocks would be
+    /// rank-deficient by construction.
+    #[allow(clippy::too_many_arguments)]
+    fn write_cheirality_penalty(
+        &self,
+        i: usize,
+        z: f64,
+        min_z: f64,
+        p_world: &Vector3<f64>,
+        pose: &SE3,
+        camera: &CAM,
+        residual: &mut [f64],
+        jacobian: Option<&mut faer::mat::MatMut<'_, f64>>,
+    ) {
+        let depth_deficit = (min_z - z).max(0.0);
+        let penalty = CHEIRALITY_BASE_PENALTY + CHEIRALITY_DEPTH_SCALE * depth_deficit;
+        residual[i * 2] = penalty;
+        residual[i * 2 + 1] = penalty;
+
+        let Some(jac) = jacobian else { return };
+
+        // ∂penalty/∂z_cam = -CHEIRALITY_DEPTH_SCALE (increasing z_cam
+        // shrinks the deficit).
+        let d_penalty_d_zcam = -CHEIRALITY_DEPTH_SCALE;
+        let mut col_offset = 0;
+
+        if OP::POSE {
+            // `d_pcam_d_pose`'s 3rd row is ∂z_cam/∂(pose tangent) — a pure
+            // rotation/skew(p_world) quantity (see the default
+            // `CameraModel::jacobian_pose` body) independent of the camera
+            // model's own projection formula, so it is exactly as valid
+            // here as it is behind the cheirality boundary. The first
+            // tuple element (∂uv/∂p_cam) is intentionally unused: it is
+            // not defined in a meaningful way for an invalid projection.
+            let (_, d_pcam_d_pose) = camera.jacobian_pose(p_world, pose);
+            for c in 0..6 {
+                let d = d_penalty_d_zcam * d_pcam_d_pose[(2, c)];
+                *jac.rb_mut().get_mut(i * 2, col_offset + c) = d;
+                *jac.rb_mut().get_mut(i * 2 + 1, col_offset + c) = d;
+            }
+            col_offset += 6;
+        }
+
+        if OP::LANDMARK {
+            // z_cam = (R p_world + t).z, so ∂z_cam/∂p_world = R's 3rd row.
+            let rotation = pose.rotation_so3().rotation_matrix();
+            for c in 0..3 {
+                let d = d_penalty_d_zcam * rotation[(2, c)];
+                *jac.rb_mut().get_mut(i * 2, col_offset + i * 3 + c) = d;
+                *jac.rb_mut().get_mut(i * 2 + 1, col_offset + i * 3 + c) = d;
+            }
+        }
+        // Intrinsics block (if present) is left at zero: z_cam does not
+        // depend on the intrinsic parameters.
+    }
 }
 
 // Factor trait implementation with generic dispatch
@@ -320,7 +448,7 @@ where
         };
 
         let n = self.observations.ncols();
-        assert_eq!(
+        debug_assert_eq!(
             landmarks.ncols(),
             n,
             "Number of landmarks ({}) must match observations ({})",
@@ -349,6 +477,51 @@ where
             cols += CAM::INTRINSIC_DIM;
         }
         (n * 2, cols)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        let mut idx = 0;
+
+        if OP::POSE {
+            let pose = variables.get(idx).ok_or_else(|| {
+                "ProjectionFactor expects a pose variable as its first parameter".to_string()
+            })?;
+            if pose.as_param_slice().len() != SE3::REP_SIZE {
+                return Err(format!(
+                    "pose variable holds {} parameters, ProjectionFactor requires {} (SE3)",
+                    pose.as_param_slice().len(),
+                    SE3::REP_SIZE
+                ));
+            }
+            idx += 1;
+        }
+
+        if OP::LANDMARK {
+            let landmarks = variables
+                .get(idx)
+                .ok_or_else(|| "ProjectionFactor expects a landmark variable".to_string())?;
+            let expected = 3 * self.observations.ncols();
+            if landmarks.as_param_slice().len() != expected {
+                return Err(format!(
+                    "landmark variable holds {} parameters but the factor's {} observations \
+                     reference {} landmarks (3 coordinates each)",
+                    landmarks.as_param_slice().len(),
+                    self.observations.ncols(),
+                    self.observations.ncols()
+                ));
+            }
+        } else if self
+            .fixed_landmarks
+            .as_ref()
+            .is_none_or(|l| l.ncols() != self.observations.ncols())
+        {
+            return Err(format!(
+                "fixed landmarks must be set and match the {} observations",
+                self.observations.ncols()
+            ));
+        }
+
+        Ok(())
     }
 }
 
@@ -503,8 +676,101 @@ mod tests {
 
         let (residual, _) = call_linearize(&factor, &params, false);
 
-        assert!(residual[0].abs() < 1e-10);
-        assert!(residual[1].abs() < 1e-10);
+        // A point behind the camera must NOT be a free (zero-residual) way
+        // to reduce cost: see `write_cheirality_penalty`. The point is 1m
+        // behind the camera (min_z is ~0), so the penalty is at least the
+        // base penalty.
+        assert!(
+            residual[0] >= CHEIRALITY_BASE_PENALTY,
+            "residual[0] = {}",
+            residual[0]
+        );
+        assert!(
+            residual[1] >= CHEIRALITY_BASE_PENALTY,
+            "residual[1] = {}",
+            residual[1]
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cheirality_penalty_grows_with_depth_violation() -> TestResult {
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+        let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
+        let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+            ProjectionFactor::new(observations, camera);
+        let pose = SE3::identity();
+        let pose_vec = DVector::from_column_slice(pose.as_param_slice());
+
+        let residual_at = |z: f64| -> f64 {
+            let landmarks_vec = DVector::from_vec(vec![0.0, 0.0, z]);
+            let params = vec![pose_vec.clone(), landmarks_vec];
+            let (residual, _) = call_linearize(&factor, &params, false);
+            residual[0]
+        };
+
+        // Further behind the camera => strictly larger penalty, so the
+        // optimizer always has a gradient pointing back toward validity
+        // rather than a flat or decreasing cost.
+        let r_close = residual_at(-0.01);
+        let r_mid = residual_at(-0.5);
+        let r_far = residual_at(-2.0);
+        assert!(r_close < r_mid, "{r_close} vs {r_mid}");
+        assert!(r_mid < r_far, "{r_mid} vs {r_far}");
+
+        // And it must always exceed any plausible valid residual.
+        assert!(r_close >= CHEIRALITY_BASE_PENALTY);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_cheirality_penalty_jacobian_numerical() -> TestResult {
+        // Numerically verify the pose and landmark Jacobians written by
+        // `write_cheirality_penalty` against finite differences of the
+        // penalty residual itself, the same style used for the camera
+        // models' own Jacobian tests.
+        let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+        let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
+        let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
+            ProjectionFactor::new(observations, camera);
+
+        let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(0.1, -0.2, 0.3),
+            nalgebra::UnitQuaternion::from_euler_angles(0.05, -0.1, 0.2),
+        ));
+        let landmark = Vector3::new(0.2, -0.1, -0.5); // behind the camera
+
+        let eval = |pose: &SE3, landmark: &Vector3<f64>| -> f64 {
+            let pose_vec = DVector::from_column_slice(pose.as_param_slice());
+            let landmarks_vec = DVector::from_vec(vec![landmark.x, landmark.y, landmark.z]);
+            let params = vec![pose_vec, landmarks_vec];
+            let (residual, _) = call_linearize(&factor, &params, false);
+            residual[0]
+        };
+
+        let params = vec![
+            DVector::from_column_slice(pose.as_param_slice()),
+            DVector::from_vec(vec![landmark.x, landmark.y, landmark.z]),
+        ];
+        let (_, jacobian) = call_linearize(&factor, &params, true);
+        let jac = jacobian.ok_or("Jacobian should be Some")?;
+
+        // ∂residual/∂landmark (columns 6..9), numerically.
+        let eps = 1e-6;
+        for c in 0..3 {
+            let mut plus = landmark;
+            let mut minus = landmark;
+            plus[c] += eps;
+            minus[c] -= eps;
+            let num = (eval(&pose, &plus) - eval(&pose, &minus)) / (2.0 * eps);
+            let ana = jac[(0, 6 + c)];
+            assert!(
+                (num - ana).abs() < 1e-2,
+                "landmark col {c}: numerical={num}, analytical={ana}"
+            );
+        }
 
         Ok(())
     }

@@ -250,36 +250,23 @@ pub struct Duration {
     pub nanosec: u32,
 }
 
-/// Helper function to manually read f64 without automatic alignment
+/// Read an `f64` with CDR's alignment applied.
 ///
-/// This function provides optimized f64 reading with proper error handling
-/// and bounds checking for better performance and safety.
+/// This used to read eight raw bytes from the current position, documented as
+/// "without automatic alignment" — so every `geometry_msgs` type built on it
+/// (`Vector3`, `Quaternion`, `Point`, `Twist`, `Imu`, ...) skipped the padding
+/// CDR requires before an 8-byte field. After a variable-length field such as
+/// `header.frame_id` that reads from inside the padding gap, which is how
+/// coordinates decoded as ~1e200 while the 4-byte timestamps beside them
+/// survived.
+///
+/// It also was not faster: it went byte at a time through `read_u8`, where
+/// [`CdrDeserializer::read_f64`] copies the slice once.
+///
+/// Kept as a named function so the call sites stay readable and so this note
+/// has somewhere to live. See `tests/ros2_cdr_alignment_tests.rs`.
 fn read_f64_manual(deserializer: &mut CdrDeserializer) -> Result<f64> {
-    let position = deserializer.position();
-    let data_len = deserializer.data_len();
-
-    // Check bounds before reading to provide better error messages
-    if !deserializer.has_remaining(8) {
-        return Err(crate::rosbag::error::ReaderError::cdr_deserialization(
-            "Not enough data for f64",
-            position,
-            data_len,
-        ));
-    }
-
-    // Read 8 bytes for f64 with optimized error handling
-    let mut bytes = [0u8; 8];
-    for (i, byte) in bytes.iter_mut().enumerate().take(8) {
-        *byte = deserializer.read_u8().map_err(|e| {
-            crate::rosbag::error::ReaderError::cdr_deserialization(
-                format!("Failed to read byte {i} of f64: {e}"),
-                position + i,
-                data_len,
-            )
-        })?;
-    }
-
-    Ok(f64::from_le_bytes(bytes))
+    deserializer.read_f64()
 }
 
 /// Helper function to manually read f64 array without automatic alignment
@@ -963,19 +950,36 @@ mod tests {
         vec![0x00, 0x01, 0x00, 0x00]
     }
 
+    /// Pad to `n`-byte alignment measured from the **body**, i.e. after the
+    /// 4-byte encapsulation header — the rule CDR actually specifies.
+    ///
+    /// These helpers are a miniature spec-conformant encoder. They previously
+    /// wrote every primitive at the current offset with no padding at all,
+    /// which matched the decoder's own defect and so made these fixtures agree
+    /// with the implementation rather than with the standard.
+    fn pad_to(buf: &mut Vec<u8>, n: usize) {
+        while !(buf.len() - 4).is_multiple_of(n) {
+            buf.push(0x00);
+        }
+    }
+
     fn push_u32_le(buf: &mut Vec<u8>, v: u32) {
+        pad_to(buf, 4);
         buf.extend_from_slice(&v.to_le_bytes());
     }
 
     fn push_i32_le(buf: &mut Vec<u8>, v: i32) {
+        pad_to(buf, 4);
         buf.extend_from_slice(&v.to_le_bytes());
     }
 
     fn push_f64_le(buf: &mut Vec<u8>, v: f64) {
+        pad_to(buf, 8);
         buf.extend_from_slice(&v.to_le_bytes());
     }
 
     fn push_f32_le(buf: &mut Vec<u8>, v: f32) {
+        pad_to(buf, 4);
         buf.extend_from_slice(&v.to_le_bytes());
     }
 
@@ -989,9 +993,9 @@ mod tests {
         push_u32_le(buf, 0);
     }
 
-    // align buf to `align` bytes (padding from header start)
+    /// Align the buffer, measured from the body — see [`pad_to`].
     fn align_to(buf: &mut Vec<u8>, align: usize) {
-        while buf.len() % align != 0 {
+        while !(buf.len() - 4).is_multiple_of(align) {
             buf.push(0x00);
         }
     }

@@ -1,8 +1,10 @@
+pub mod covariance;
 pub mod dense;
 pub mod sparse;
 pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};
+use crate::error::ErrorLogging;
 use faer::Mat;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashSet;
@@ -15,6 +17,8 @@ pub use sparse::{
 };
 
 pub use dense::{DenseCholeskySolver, DenseQRSolver};
+
+pub use covariance::{Covariance, CovarianceAlgorithm, CovarianceError, CovarianceOptions};
 
 pub use crate::linearizer::cpu::{DenseMode, LinearizationMode, SparseMode};
 
@@ -64,6 +68,106 @@ impl Display for LinearSolverType {
             LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
             LinearSolverType::DenseQR => write!(f, "Dense QR"),
         }
+    }
+}
+
+// ============================================================================
+// Damping
+// ============================================================================
+
+/// Damping applied to the normal equations by a trust-region optimizer.
+///
+/// The augmented system solved by [`LinearSolver::solve_augmented_equation`] is
+///
+/// ```text
+/// (JᵀJ + λ·D) · dx = −Jᵀr,     D_jj = clamp(JᵀJ_jj, min_diagonal, max_diagonal)
+/// ```
+///
+/// This is Ceres' `LevenbergMarquardtStrategy`: damping each column in
+/// proportion to that column's own curvature makes the damped step invariant to
+/// a rescaling of the parameters, which uniform `λI` damping is not. `D` is
+/// formed from the Hessian the solver actually receives — so when Jacobi column
+/// scaling is enabled upstream, `D` is the diagonal of the *scaled* `J̃ᵀJ̃`,
+/// matching Ceres.
+///
+/// [`Damping::identity`] sets `min_diagonal == max_diagonal == 1.0`, giving
+/// `D = I` and recovering plain `λI` damping exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Damping {
+    /// The damping parameter λ. Must be finite and non-negative.
+    pub lambda: f64,
+    /// Lower clamp on the damping diagonal (Ceres' `min_lm_diagonal`, 1e-6).
+    ///
+    /// Bounds the damping away from zero for columns with little curvature —
+    /// without it, an unconstrained direction would receive no damping at all.
+    pub min_diagonal: f64,
+    /// Upper clamp on the damping diagonal (Ceres' `max_lm_diagonal`, 1e32).
+    ///
+    /// Keeps a single very stiff column from dominating the damped system.
+    pub max_diagonal: f64,
+}
+
+impl Damping {
+    /// Marquardt damping with an explicit clamp range.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LinAlgError::InvalidInput`] if `lambda` is negative or not
+    /// finite, if either bound is not finite or non-positive, or if
+    /// `min_diagonal > max_diagonal` — `f64::clamp` panics on an inverted range,
+    /// so the check has to happen at construction.
+    pub fn new(lambda: f64, min_diagonal: f64, max_diagonal: f64) -> LinAlgResult<Self> {
+        if !lambda.is_finite() || lambda < 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "damping lambda must be finite and non-negative, got {lambda}"
+            ))
+            .log());
+        }
+        if !min_diagonal.is_finite() || min_diagonal <= 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "min_diagonal must be finite and positive, got {min_diagonal}"
+            ))
+            .log());
+        }
+        if max_diagonal.is_nan() || max_diagonal <= 0.0 {
+            return Err(LinAlgError::InvalidInput(format!(
+                "max_diagonal must be positive, got {max_diagonal}"
+            ))
+            .log());
+        }
+        if min_diagonal > max_diagonal {
+            return Err(LinAlgError::InvalidInput(format!(
+                "min_diagonal ({min_diagonal}) must not exceed max_diagonal ({max_diagonal})"
+            ))
+            .log());
+        }
+        Ok(Self {
+            lambda,
+            min_diagonal,
+            max_diagonal,
+        })
+    }
+
+    /// Uniform `λI` damping — the classic Levenberg form.
+    ///
+    /// Used where λ is a numerical stabiliser rather than a trust region: Dog
+    /// Leg's μ regularisation of the Gauss-Newton step, and Gauss-Newton's own
+    /// `min_diagonal` guard against an exactly singular `JᵀJ`.
+    pub fn identity(lambda: f64) -> Self {
+        Self {
+            lambda,
+            min_diagonal: 1.0,
+            max_diagonal: 1.0,
+        }
+    }
+
+    /// The damping to add to diagonal entry `(j, j)`, given `JᵀJ_jj`.
+    ///
+    /// `JᵀJ_jj = ‖J e_j‖² ≥ 0`, so the clamp is well defined for every input a
+    /// Gauss-Newton Hessian can produce.
+    #[inline]
+    pub fn diagonal_term(&self, hessian_diagonal: f64) -> f64 {
+        self.lambda * hessian_diagonal.clamp(self.min_diagonal, self.max_diagonal)
     }
 }
 
@@ -148,76 +252,37 @@ pub trait LinearSolver<M: LinearizationMode> {
         jacobian: &M::Jacobian,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Solve the augmented equations: (J^T · J + λI) · dx = −J^T · r
+    /// Solve the augmented equations: `(JᵀJ + λ·D) · dx = −Jᵀr`.
+    ///
+    /// See [`Damping`] for the definition of `D`. Pass
+    /// [`Damping::identity`] for classic uniform `λI` damping.
     fn solve_augmented_equation(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &M::Jacobian,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>>;
 
-    /// Get the cached Hessian matrix (J^T · J) from the last solve
+    /// The **un-damped** Hessian `JᵀJ` from the last solve.
+    ///
+    /// Implementations must not return the augmented `JᵀJ + λ·D` here: the
+    /// optimizers use this to evaluate the true quadratic model — Dog Leg's
+    /// Cauchy point and every predicted cost reduction — and damping it would
+    /// corrupt the step-quality ratio ρ.
     fn get_hessian(&self) -> Option<&M::Hessian>;
 
-    /// Get the cached gradient vector (J^T · r) from the last solve
+    /// The gradient `+Jᵀr` from the last solve.
+    ///
+    /// Note the sign: this is `Jᵀr`, **not** the right-hand side `−Jᵀr`.
+    /// Predicted-reduction formulas depend on it, so a backend that publishes
+    /// the negated vector silently inverts every ρ computed from it.
     fn get_gradient(&self) -> Option<&Mat<f64>>;
-
-    /// Compute the covariance matrix (H^{-1}) by inverting the cached Hessian.
-    ///
-    /// Returns `None` for solvers that do not support covariance estimation
-    /// (e.g., QR solvers, Schur complement solvers). Only Cholesky-based
-    /// solvers provide a real implementation.
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        None
-    }
-
-    /// Get the cached covariance matrix (H^{-1}) computed from the Hessian.
-    ///
-    /// Returns `None` if covariance has not been computed or is not supported.
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        None
-    }
-}
-
-// ============================================================================
-// Utility functions
-// ============================================================================
-
-/// Extract per-variable covariance blocks from the full covariance matrix.
-///
-/// Given the full covariance matrix H^{-1} (inverse of information matrix),
-/// this function extracts the diagonal blocks corresponding to each individual variable.
-pub(crate) fn extract_variable_covariances(
-    full_covariance: &Mat<f64>,
-    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    variable_index_map: &SecondaryMap<VarKey, usize>,
-) -> SecondaryMap<VarKey, Mat<f64>> {
-    let mut result = SecondaryMap::new();
-
-    for (key, var) in variables {
-        if let Some(&start_idx) = variable_index_map.get(key) {
-            let dim = var.dof();
-            let mut var_cov = Mat::zeros(dim, dim);
-            for i in 0..dim {
-                for j in 0..dim {
-                    var_cov[(i, j)] = full_covariance[(start_idx + i, start_idx + j)];
-                }
-            }
-            result.insert(key, var_cov);
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::variable::{ManifoldVariable, Variable};
     use crate::error::ErrorLogging;
-    use apex_manifolds::rn::Rn;
-    use faer::Mat;
-    use nalgebra::dvector;
 
     // -------------------------------------------------------------------------
     // JacobianMode
@@ -338,74 +403,5 @@ mod tests {
     fn test_lin_alg_result_err() {
         let r: LinAlgResult<i32> = Err(LinAlgError::InvalidInput("oops".into()));
         assert!(r.is_err());
-    }
-
-    // -------------------------------------------------------------------------
-    // extract_variable_covariances
-    // -------------------------------------------------------------------------
-
-    fn make_rn_var(val: f64) -> Box<dyn ManifoldVariable> {
-        Box::new(Variable::new(Rn::new(dvector![val])))
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_single_variable() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let kx = variables.insert(make_rn_var(1.0));
-        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        index_map.insert(kx, 0);
-
-        let full_cov = Mat::from_fn(1, 1, |_, _| 2.5);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert_eq!(result.len(), 1);
-        assert!((result[kx][(0, 0)] - 2.5).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_two_variables() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let ka = variables.insert(make_rn_var(1.0));
-        let kb = variables.insert(make_rn_var(2.0));
-        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        index_map.insert(ka, 0);
-        index_map.insert(kb, 1);
-
-        let full_cov = Mat::from_fn(2, 2, |i, j| if i == j { [3.0, 7.0][i] } else { 0.0 });
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert_eq!(result.len(), 2);
-        assert!((result[ka][(0, 0)] - 3.0).abs() < 1e-12);
-        assert!((result[kb][(0, 0)] - 7.0).abs() < 1e-12);
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_empty_variables() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        let index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        let full_cov = Mat::zeros(0, 0);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_extract_variable_covariances_var_not_in_index_map() {
-        use crate::core::VarKey;
-        use slotmap::{SecondaryMap, SlotMap};
-
-        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
-        variables.insert(make_rn_var(1.0));
-        let index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new(); // empty
-
-        let full_cov = Mat::from_fn(1, 1, |_, _| 5.0);
-        let result = extract_variable_covariances(&full_cov, &variables, &index_map);
-        assert!(result.is_empty());
     }
 }

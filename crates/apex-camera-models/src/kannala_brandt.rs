@@ -336,9 +336,20 @@ impl CameraModel for KannalaBrandtCamera {
         let mx = (u - self.pinhole.cx) / self.pinhole.fx;
         let my = (v - self.pinhole.cy) / self.pinhole.fy;
 
-        let mut ru = (mx * mx + my * my).sqrt();
+        let ru = (mx * mx + my * my).sqrt();
 
-        ru = ru.min(std::f64::consts::PI / 2.0);
+        // Out-of-domain guard: pixels whose undistorted radius exceeds the
+        // model's valid field of view are REJECTED rather than silently
+        // clamped — clamping rewrote the input ray and returned a direction
+        // that never projected back to the pixel (ftheta behaves the same).
+        if !ru.is_finite() || ru > std::f64::consts::PI / 2.0 {
+            return Err(CameraModelError::NumericalError {
+                operation: "unprojection".to_string(),
+                details: format!(
+                    "undistorted radius ru = {ru} is outside the KB model's valid domain (0, pi/2]"
+                ),
+            });
+        }
 
         if ru < crate::GEOMETRIC_PRECISION {
             return Ok(Vector3::new(0.0, 0.0, 1.0));
@@ -376,6 +387,32 @@ impl CameraModel for KannalaBrandtCamera {
             if delta.abs() < CONVERGENCE_THRESHOLD {
                 break;
             }
+        }
+
+        // Post-Newton convergence gate (mirrors `ftheta::unproject`): a
+        // non-converged or diverged theta must not silently become a ray.
+        if !theta.is_finite() || theta < 0.0 {
+            return Err(CameraModelError::NumericalError {
+                operation: "unprojection".to_string(),
+                details: format!("Newton-Raphson diverged, theta={theta}"),
+            });
+        }
+        let theta2 = theta * theta;
+        let residual_f = theta
+            * (1.0
+                + k1 * theta2
+                + k2 * theta2 * theta2
+                + k3 * theta2 * theta2 * theta2
+                + k4 * theta2 * theta2 * theta2 * theta2)
+            - ru;
+        if residual_f.abs() > crate::CONVERGENCE_THRESHOLD {
+            return Err(CameraModelError::NumericalError {
+                operation: "unprojection".to_string(),
+                details: format!(
+                    "Newton-Raphson did not converge after {MAX_ITER} iterations: |f(theta)| = {}",
+                    residual_f.abs()
+                ),
+            });
         }
 
         let sin_theta = theta.sin();
@@ -954,6 +991,52 @@ mod tests {
         let jac_intr = camera.jacobian_intrinsics(&p_cam);
         assert_eq!(jac_intr.nrows(), 2);
         assert_eq!(jac_intr.ncols(), 8); // KannalaBrandtCamera::INTRINSIC_DIM = 8
+        Ok(())
+    }
+
+    /// Out-of-domain pixels must be REJECTED, not silently clamped: the old
+    /// `ru = min(ru, pi/2)` rewrote the input ray and returned a direction
+    /// that never projected back to the pixel.
+    #[test]
+    fn test_unproject_rejects_out_of_domain_radius() -> TestResult {
+        let camera = KannalaBrandtCamera::new(
+            PinholeParams::new(400.0, 400.0, 320.0, 240.0)?,
+            DistortionModel::KannalaBrandt {
+                k1: 0.1,
+                k2: 0.02,
+                k3: -0.01,
+                k4: 0.005,
+            },
+        )?;
+        // A pixel far outside any plausible focal geometry produces a large
+        // undistorted radius.
+        let far_pixel = Vector2::new(320.0 + 1.0e6, 240.0);
+        let result = camera.unproject(&far_pixel);
+        assert!(result.is_err(), "out-of-domain ru must return Err");
+        Ok(())
+    }
+
+    #[test]
+    fn test_unproject_rejects_non_converged_newton() -> TestResult {
+        // Extreme distortion coefficients make the Newton map diverge for
+        // some radii; the post-Newton gate must surface that, not return a
+        // silently unconverged ray.
+        let camera = KannalaBrandtCamera::new(
+            PinholeParams::new(1.0, 1.0, 0.0, 0.0)?,
+            DistortionModel::KannalaBrandt {
+                k1: -50.0,
+                k2: 1.0e3,
+                k3: -1.0e4,
+                k4: 1.0e5,
+            },
+        )?;
+        let mut rejected = 0;
+        for px in [5.0, 50.0, 500.0] {
+            if camera.unproject(&Vector2::new(px, 0.0)).is_err() {
+                rejected += 1;
+            }
+        }
+        assert!(rejected > 0, "divergent Newton iterations must return Err");
         Ok(())
     }
 }

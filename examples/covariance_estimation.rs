@@ -2,9 +2,10 @@ use apex_manifolds::se2::SE2;
 use apex_solver::{
     JacobianMode, ManifoldType,
     core::problem::Problem,
-    factors::BetweenFactor,
+    factors::{BetweenFactor, PriorFactor},
     init_logger,
     linalg::LinearSolverType,
+    linalg::covariance::{Covariance, CovarianceAlgorithm, CovarianceOptions},
     optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig},
 };
 use nalgebra::dvector;
@@ -45,7 +46,20 @@ fn main() {
         None,
     );
 
-    info!("Added 3 odometry constraints and 1 loop closure\n");
+    // Anchor the gauge. `BetweenFactor` constraints are all relative, so without a
+    // prior the whole graph can be rigidly translated and rotated at zero cost:
+    // H = JᵀJ is singular with a 3-dimensional null space, and the covariance is
+    // undefined. Previously this was masked by Levenberg-Marquardt damping leaking
+    // into the covariance (H + λI is invertible even when H is not) — the bug
+    // behind issue #38. Now it would be reported as a rank deficiency, so the
+    // example fixes the gauge properly.
+    problem.add_residual_block(
+        &[x0],
+        Box::new(PriorFactor::<SE2>::new(SE2::identity())),
+        None,
+    );
+
+    info!("Added 3 odometry constraints, 1 loop closure, and 1 prior on x0\n");
 
     info!("Configuring Levenberg-Marquardt optimizer with covariance estimation...");
     let config = LevenbergMarquardtConfig::new()
@@ -117,6 +131,51 @@ fn main() {
                             (2.0 * std_theta).to_degrees()
                         );
                     }
+                }
+
+                // The explicit API: same numbers, but computable at any point, with
+                // a choice of algorithm, cross-covariance blocks, and a typed error
+                // instead of a silent `None`.
+                info!("Explicit Covariance API");
+                match Covariance::compute(
+                    CovarianceOptions::default(),
+                    &problem,
+                    &result.parameters,
+                ) {
+                    Ok(cov) => {
+                        info!("Recomputed post-hoc via Covariance::compute");
+                        if let Some(block) = cov.block(x1) {
+                            info!(
+                                "  x1 variances: [{:.6e}, {:.6e}, {:.6e}]",
+                                block[(0, 0)],
+                                block[(1, 1)],
+                                block[(2, 2)]
+                            );
+                        }
+                        // Cross-covariance is only available through this API.
+                        if let Some(cross) = cov.block_pair(x1, x2) {
+                            info!(
+                                "  cov(x1, x2) leading entry: {:.6e} (correlation between neighbours)",
+                                cross[(0, 0)]
+                            );
+                        }
+                    }
+                    Err(e) => warn!("Covariance::compute failed: {e}"),
+                }
+
+                // Gauge-free problems can still be handled explicitly, via the
+                // pseudo-inverse, instead of failing.
+                match Covariance::compute(
+                    CovarianceOptions::new().with_algorithm(CovarianceAlgorithm::DenseSvd),
+                    &problem,
+                    &result.parameters,
+                ) {
+                    Ok(cov) => {
+                        if let Some(block) = cov.block(x0) {
+                            info!("  DenseSvd agrees on x0 variance: {:.6e}", block[(0, 0)]);
+                        }
+                    }
+                    Err(e) => warn!("DenseSvd covariance failed: {e}"),
                 }
 
                 info!("Interpretation");

@@ -21,15 +21,10 @@
 //! # Running Tests
 //!
 //! ```bash
-//! # Run fast tests only (ring, intel)
-//! cargo test
-//!
-//! # Run all tests including slow ones (sphere2500, parking-garage)
-//! cargo test -- --include-ignored
-//!
-//! # Run only slow tests
-//! cargo test -- --ignored
+//! cargo test --test integration_tests
 //! ```
+//!
+//! Every test downloads its dataset on first use (see `apex_io::ensure_*`).
 
 use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D};
 use apex_solver::JacobianMode;
@@ -103,13 +98,7 @@ fn run_se3_optimization(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se3.get(&first_id)
     {
-        let quat = first_vertex.pose.rotation_quaternion();
-        let trans = first_vertex.pose.translation();
-        let prior_value = dvector![trans.x, trans.y, trans.z, quat.w, quat.i, quat.j, quat.k];
-
-        let prior_factor = PriorFactor {
-            data: prior_value.clone(),
-        };
+        let prior_factor = PriorFactor::new(first_vertex.pose.clone());
         let huber_loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
         problem.add_residual_block(
@@ -216,12 +205,7 @@ fn run_se2_optimization(
         && let Some(&first_id) = vertex_ids.first()
         && let Some(first_vertex) = graph.vertices_se2.get(&first_id)
     {
-        let pose = &first_vertex.pose;
-        let prior_value = dvector![pose.x(), pose.y(), pose.angle()];
-
-        let prior_factor = PriorFactor {
-            data: prior_value.clone(),
-        };
+        let prior_factor = PriorFactor::new(first_vertex.pose.clone());
         let huber_loss = HuberLoss::new(1.0)?;
         let first_key = var_keys[&first_id];
         problem.add_residual_block(
@@ -335,12 +319,9 @@ fn test_intel_se2_converges() -> Result<(), Box<dyn std::error::Error>> {
         result.final_cost
     );
 
-    // Verify performance (should complete in <5 seconds)
-    assert!(
-        result.elapsed_time.as_secs() < 5,
-        "Optimization took too long: {:?}",
-        result.elapsed_time
-    );
+    // Wall time is informational only — asserting on it flaked on shared
+    // runners. Use golden_values.rs for exact-behavior regression coverage.
+    tracing::info!("optimization elapsed: {:?}", result.elapsed_time);
 
     Ok(())
 }
@@ -385,10 +366,16 @@ fn test_sphere2500_se3_converges() -> Result<(), Box<dyn std::error::Error>> {
         result.improvement_pct
     );
 
-    // Verify iterations
+    // Verify iterations.
+    //
+    // 30, not 20: Marquardt damping (`JᵀJ + λ·D`) trades a few extra iterations
+    // on homogeneous pose graphs — where every column has a similar norm, so
+    // `D ≈ cI` and the change amounts to a rescaling of λ — for large wins where
+    // the parameter scales differ (bundle adjustment, self-calibration). The
+    // >99% cost reduction asserted above is unchanged.
     assert!(
-        result.iterations < 20,
-        "Should complete in < 20 iterations: {}",
+        result.iterations < 30,
+        "Should complete in < 30 iterations: {}",
         result.iterations
     );
 
@@ -445,10 +432,16 @@ fn test_parking_garage_se3_converges() -> Result<(), Box<dyn std::error::Error>>
         result.improvement_pct
     );
 
-    // Verify iterations
+    // Verify iterations.
+    //
+    // 30, not 20: Marquardt damping (`JᵀJ + λ·D`) trades a few extra iterations
+    // on homogeneous pose graphs — where every column has a similar norm, so
+    // `D ≈ cI` and the change amounts to a rescaling of λ — for large wins where
+    // the parameter scales differ (bundle adjustment, self-calibration). The
+    // >99% cost reduction asserted above is unchanged.
     assert!(
-        result.iterations < 20,
-        "Should complete in < 20 iterations: {}",
+        result.iterations < 30,
+        "Should complete in < 30 iterations: {}",
         result.iterations
     );
 

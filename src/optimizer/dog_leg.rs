@@ -196,8 +196,8 @@ use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode, LinearSolver, LinearSolverType,
-    SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
+    LinearSolver, LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -276,7 +276,17 @@ pub struct DogLegConfig {
     pub trust_region_increase_factor: f64,
     /// Trust region decrease factor (for poor steps, rho < 0.25)
     pub trust_region_decrease_factor: f64,
-    /// Minimum step quality for acceptance (typically 0.0)
+    /// Deprecated: superseded by
+    /// [`min_relative_decrease`](Self::min_relative_decrease).
+    ///
+    /// Both named the same thing — the ρ below which a step is rejected — and
+    /// only one can be the gate. `min_relative_decrease` won because it carries
+    /// Ceres' name and semantics and exists on the Levenberg-Marquardt config
+    /// too, so the acceptance rule is the same across optimizers.
+    #[deprecated(
+        since = "1.6.0",
+        note = "never read; the acceptance threshold is `min_relative_decrease`"
+    )]
     pub min_step_quality: f64,
     /// Good step quality threshold (typically 0.75)
     pub good_step_quality: f64,
@@ -327,24 +337,44 @@ pub struct DogLegConfig {
 
     /// Compute per-variable covariance matrices (uncertainty estimation)
     ///
-    /// When enabled, computes covariance by inverting the Hessian matrix after
+    /// When enabled, computes covariance by re-linearizing the problem at the
+    /// solution and inverting the Gauss-Newton Hessian `H = JᵀJ` after
     /// convergence. The full covariance matrix is extracted into per-variable
     /// blocks stored in both Variable structs and optimizer::SolverResult.
+    ///
+    /// Scaled (σ̂²·H⁻¹) versus unscaled (H⁻¹) covariance, the factorization
+    /// algorithm, and the pseudo-inverse cutoff are configured through
+    /// [`covariance_options`](Self::covariance_options).
     ///
     /// Default: false (to avoid performance overhead)
     pub compute_covariances: bool,
 
-    /// Enable real-time visualization (graphical debugging).
+    /// Options for covariance estimation when `compute_covariances` is enabled.
     ///
-    /// When enabled, optimization progress is logged to a Rerun viewer.
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
+    /// Defaults to unscaled `H⁻¹` via sparse Cholesky — the correct choice when
+    /// residuals are whitened by their measurement information matrix. Set
+    /// `apply_variance_scaling` for unweighted least squares, where the noise
+    /// scale `σ̂² = 2·cost/(m−n)` must be estimated from the fit. See
+    /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
+    pub covariance_options: CovarianceOptions,
+
+    /// Deprecated: never read. Visualization goes through the observer pattern.
+    ///
+    /// Setting this has no effect. Attach an observer to the solver instead:
+    /// `solver.add_observer(RerunObserver::new(true)?)`, which is how
+    /// Levenberg-Marquardt has always done it and works for every optimizer.
     ///
     /// Default: false
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "never read; attach a `RerunObserver` with `add_observer` instead"
+    )]
     pub enable_visualization: bool,
 }
 
 impl Default for DogLegConfig {
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             linear_solver_type: linalg::LinearSolverType::default(),
@@ -387,7 +417,9 @@ impl Default for DogLegConfig {
             min_relative_decrease: 1e-3,
 
             compute_covariances: false,
+            covariance_options: CovarianceOptions::default(),
             #[cfg(feature = "visualization")]
+            #[allow(deprecated)]
             enable_visualization: false,
         }
     }
@@ -455,7 +487,13 @@ impl DogLegConfig {
         self
     }
 
-    /// Set the trust region quality thresholds
+    /// Set the trust region quality thresholds.
+    ///
+    /// `min_quality` is accepted for source compatibility but has no effect —
+    /// see [`DogLegConfig::min_step_quality`]. Use
+    /// [`with_min_relative_decrease`](Self::with_min_relative_decrease) to move
+    /// the acceptance threshold.
+    #[allow(deprecated)]
     pub fn with_step_quality_thresholds(
         mut self,
         min_quality: f64,
@@ -533,20 +571,31 @@ impl DogLegConfig {
         self
     }
 
-    /// Enable real-time visualization.
+    /// Set the options used for covariance estimation.
     ///
-    /// **Note:** Requires the `visualization` feature to be enabled in `Cargo.toml`.
-    ///
-    /// # Arguments
-    ///
-    /// * `enable` - Whether to enable visualization
+    /// Controls scaled (`σ̂²·H⁻¹`) versus unscaled (`H⁻¹`) covariance, the
+    /// factorization algorithm (sparse Cholesky or dense SVD pseudo-inverse),
+    /// and the singular-value cutoff. Only takes effect when
+    /// `compute_covariances` is enabled.
+    pub fn with_covariance_options(mut self, options: CovarianceOptions) -> Self {
+        self.covariance_options = options;
+        self
+    }
+
+    /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
     #[cfg(feature = "visualization")]
+    #[deprecated(
+        since = "1.6.0",
+        note = "no-op; attach a `RerunObserver` with `add_observer` instead"
+    )]
+    #[allow(deprecated)]
     pub fn with_visualization(mut self, enable: bool) -> Self {
         self.enable_visualization = enable;
         self
     }
 
     /// Print configuration parameters (info level logging)
+    #[allow(deprecated)]
     pub fn print_configuration(&self) {
         debug!(
             "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
@@ -590,6 +639,12 @@ struct StepResult {
     step: faer::Mat<f64>,
     gradient_norm: f64,
     predicted_reduction: f64,
+    /// ‖step‖ measured in the space the trust-region radius bounds.
+    ///
+    /// Equal to `‖step‖` when Jacobi scaling is off; when it is on, the radius
+    /// constrains the scaled step, so the radius update has to be fed this norm
+    /// and not the un-scaled one.
+    scaled_step_norm: f64,
 }
 
 /// Type of step taken
@@ -689,6 +744,14 @@ pub struct DogLeg {
     min_mu: f64,
     max_mu: f64,
     mu_increase_factor: f64,
+    /// Run state: the live trust-region radius, seeded from
+    /// `config.trust_region_radius` at the start of every solve.
+    ///
+    /// The radius is iteration state, not configuration. Keeping it here rather
+    /// than mutating `config` in place means a second `optimize()` call on the
+    /// same solver starts from the configured radius instead of inheriting
+    /// whatever the previous run collapsed to.
+    trust_region_radius: f64,
 
     // Step reuse mechanism (Ceres-style efficiency optimization)
     reuse_step_on_rejection: bool,
@@ -719,6 +782,7 @@ impl DogLeg {
             min_mu: config.min_mu,
             max_mu: config.max_mu,
             mu_increase_factor: config.mu_increase_factor,
+            trust_region_radius: config.trust_region_radius,
 
             // Initialize step reuse mechanism (disabled initially, enabled after first rejection)
             reuse_step_on_rejection: false,
@@ -892,12 +956,20 @@ impl DogLeg {
         (dog_leg, StepType::DogLeg)
     }
 
-    /// Update trust region radius based on step quality (Ceres-style)
-    fn update_trust_region(&mut self, rho: f64, step_norm: f64) -> bool {
+    /// Update the trust-region radius from the step quality (Ceres-style).
+    ///
+    /// `scaled_step_norm` must be measured in the same space the radius bounds —
+    /// the *scaled* space when Jacobi scaling is on, which is Dog Leg's default.
+    /// Feeding the un-scaled norm here would compare two different units and
+    /// grow the radius by an arbitrary factor.
+    fn update_trust_region(&mut self, rho: f64, scaled_step_norm: f64) -> bool {
         if rho > self.config.good_step_quality {
-            // Good step, increase trust region (Ceres-style: max(radius, 3*step_norm))
-            let new_radius = self.config.trust_region_radius.max(3.0 * step_norm);
-            self.config.trust_region_radius = new_radius.min(self.config.trust_region_max);
+            // Good step: grow the region to at least `increase_factor` times the
+            // step that just succeeded (Ceres' `max(radius, 3·‖step‖)`).
+            let new_radius = self
+                .trust_region_radius
+                .max(self.config.trust_region_increase_factor * scaled_step_norm);
+            self.trust_region_radius = new_radius.min(self.config.trust_region_max);
 
             // Decrease mu on successful step (Ceres-style adaptive regularization)
             self.mu = (self.mu / (0.5 * self.mu_increase_factor)).max(self.min_mu);
@@ -913,7 +985,7 @@ impl DogLeg {
             true
         } else if rho < self.config.poor_step_quality {
             // Poor step, decrease trust region
-            self.config.trust_region_radius = (self.config.trust_region_radius
+            self.trust_region_radius = (self.trust_region_radius
                 * self.config.trust_region_decrease_factor)
                 .max(self.config.trust_region_min);
 
@@ -933,21 +1005,6 @@ impl DogLeg {
 
             true
         }
-    }
-
-    /// Compute predicted cost reduction from linear model (generic over assembly mode).
-    fn compute_predicted_reduction_generic<M: AssemblyBackend>(
-        &self,
-        step: &faer::Mat<f64>,
-        gradient: &faer::Mat<f64>,
-        hessian: &M::Hessian,
-    ) -> f64 {
-        // Dog Leg predicted reduction: -step^T * gradient - 0.5 * step^T * H * step
-        let linear_term = step.transpose() * gradient;
-        let hessian_step = M::hessian_vec_product(hessian, step);
-        let quadratic_term = step.transpose() * &hessian_step;
-
-        -linear_term[(0, 0)] - 0.5 * quadratic_term[(0, 0)]
     }
 
     /// Compute dog leg optimization step (generic over assembly mode).
@@ -984,9 +1041,10 @@ impl DogLeg {
                 &steepest_descent,
                 cached_cauchy,
                 cached_gn,
-                self.config.trust_region_radius,
+                self.trust_region_radius,
             );
 
+            let scaled_step_norm = scaled_step.norm_l2();
             let step = if self.config.use_jacobi_scaling {
                 let scaling = self.jacobi_scaling.as_ref()?;
                 M::apply_inverse_scaling(&scaled_step, scaling)
@@ -998,12 +1056,13 @@ impl DogLeg {
             // Use hessian from linear solver if available.
             let hessian = linear_solver.get_hessian()?;
             let predicted_reduction =
-                self.compute_predicted_reduction_generic::<M>(&scaled_step, cached_grad, hessian);
+                optimizer::compute_predicted_reduction::<M>(&scaled_step, cached_grad, hessian);
 
             return Some(StepResult {
                 step,
                 gradient_norm,
                 predicted_reduction,
+                scaled_step_norm,
             });
         }
 
@@ -1015,10 +1074,14 @@ impl DogLeg {
 
         // Try to solve with current mu, increasing if necessary
         while mu_attempts < 10 && self.mu <= self.max_mu {
-            let damping = self.mu;
+            // μ is a numerical stabiliser for the Gauss-Newton solve, not a
+            // trust region — the region is enforced geometrically by the dog-leg
+            // construction — so it is applied as uniform λI rather than the
+            // Marquardt diagonal.
+            let damping = Damping::identity(self.mu);
 
             if let Ok(step) =
-                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, damping)
+                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
             {
                 scaled_gn_step = Some(step);
                 break;
@@ -1051,10 +1114,11 @@ impl DogLeg {
             &steepest_descent,
             &cauchy_point,
             &scaled_gn_step,
-            self.config.trust_region_radius,
+            self.trust_region_radius,
         );
 
         // 6. Apply inverse Jacobi scaling if enabled
+        let scaled_step_norm = scaled_step.norm_l2();
         let step = if self.config.use_jacobi_scaling {
             let scaling = self.jacobi_scaling.as_ref()?;
             M::apply_inverse_scaling(&scaled_step, scaling)
@@ -1064,7 +1128,7 @@ impl DogLeg {
 
         // 7. Compute predicted reduction
         let predicted_reduction =
-            self.compute_predicted_reduction_generic::<M>(&scaled_step, gradient, hessian);
+            optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
 
         // 8. Cache step components for potential reuse (Ceres-style)
         self.cached_gn_step = Some(scaled_gn_step.clone());
@@ -1076,6 +1140,7 @@ impl DogLeg {
             step,
             gradient_norm,
             predicted_reduction,
+            scaled_step_norm,
         })
     }
 
@@ -1087,15 +1152,15 @@ impl DogLeg {
         problem: &problem::Problem,
     ) -> error::ApexSolverResult<StepEvaluation> {
         // Apply parameter updates
-        let step_norm = optimizer::apply_parameter_step(
+        let _step_norm = optimizer::apply_parameter_step(
             &mut state.variables,
             step_result.step.as_ref(),
             &state.sorted_vars,
         );
 
         // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let new_residual = problem.compute_residual_sparse(&state.variables)?;
-        let new_cost = optimizer::compute_cost(&new_residual);
+        let (_new_residual, new_cost) =
+            problem.compute_residual_and_cost_sparse(&state.variables)?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
@@ -1104,10 +1169,12 @@ impl DogLeg {
             step_result.predicted_reduction,
         );
 
-        // Update trust region and decide acceptance
-        // Filter out numerical noise with small threshold
-        let accepted = rho > 1e-4;
-        let _trust_region_updated = self.update_trust_region(rho, step_norm);
+        // Accept on step quality, then resize the trust region. The two are
+        // separate decisions: `min_relative_decrease` says whether the step was
+        // worth keeping, `update_trust_region` says how far to trust the model
+        // next time.
+        let accepted = rho > self.config.min_relative_decrease;
+        self.update_trust_region(rho, step_result.scaled_step_norm);
 
         let cost_reduction = if accepted {
             let reduction = state.current_cost - new_cost;
@@ -1145,6 +1212,19 @@ impl DogLeg {
 
         let mut state = optimizer::initialize_optimization_state(problem)?;
 
+        // Seed the run state from the configuration. The radius, μ and the step
+        // cache all evolve during the solve; resetting them here keeps
+        // `optimize()` idempotent when the same solver instance is reused.
+        self.trust_region_radius = self.config.trust_region_radius;
+        self.mu = self.config.initial_mu;
+        self.reuse_step_on_rejection = false;
+        self.cached_gn_step = None;
+        self.cached_cauchy_point = None;
+        self.cached_gradient = None;
+        self.cached_alpha = None;
+        self.cache_reuse_count = 0;
+        self.jacobi_scaling = None;
+
         let mut max_gradient_norm: f64 = 0.0;
         let mut max_parameter_update_norm: f64 = 0.0;
         let mut total_cost_reduction = 0.0;
@@ -1164,25 +1244,35 @@ impl DogLeg {
         loop {
             let iter_start = time::Instant::now();
 
-            // Evaluate residuals and Jacobian using the assembly mode
-            let (residuals, jacobian) = M::assemble(
+            // Shared preamble: assemble, conditioning check, Jacobi scaling
+            let (residuals, scaled_jacobian) = match optimizer::iteration_preamble::<M>(
                 problem,
-                &state.variables,
-                &state.variable_index_map,
-                state.symbolic_structure.as_ref(),
-                state.total_dof,
-            )?;
-            jacobian_evaluations += 1;
-
-            // Process Jacobian (apply scaling if enabled)
-            let scaled_jacobian = if self.config.use_jacobi_scaling {
-                optimizer::process_jacobian_generic::<M>(
-                    &jacobian,
-                    &mut self.jacobi_scaling,
-                    iteration,
-                )?
-            } else {
-                jacobian
+                &mut state,
+                &mut self.jacobi_scaling,
+                self.config.use_jacobi_scaling,
+                iteration,
+                self.config.max_condition_number,
+                &mut jacobian_evaluations,
+            )? {
+                optimizer::IterationPreamble::Proceed {
+                    residuals,
+                    scaled_jacobian,
+                } => (residuals, scaled_jacobian),
+                optimizer::IterationPreamble::EarlyExit(status) => {
+                    let elapsed = start_time.elapsed();
+                    self.observers.notify_complete(&state.variables, iteration);
+                    return Ok(optimizer::build_solver_result(
+                        status,
+                        iteration,
+                        state,
+                        elapsed,
+                        0.0,
+                        0.0,
+                        cost_evaluations,
+                        jacobian_evaluations,
+                        None,
+                    ));
+                }
             };
 
             // Compute dog leg step
@@ -1230,7 +1320,7 @@ impl DogLeg {
                     gradient_norm: step_result.gradient_norm,
                     step_norm,
                     tr_ratio: step_eval.rho,
-                    tr_radius: self.config.trust_region_radius,
+                    tr_radius: self.trust_region_radius,
                     ls_iter: 0,
                     iter_time_ms: iter_elapsed_ms,
                     total_time_ms: total_elapsed_ms,
@@ -1250,7 +1340,7 @@ impl DogLeg {
                 iteration,
                 state.current_cost,
                 step_result.gradient_norm,
-                Some(self.config.trust_region_radius),
+                Some(self.trust_region_radius),
                 step_norm,
                 Some(step_eval.rho),
                 linear_solver,
@@ -1282,7 +1372,7 @@ impl DogLeg {
                 cost_tolerance: self.config.cost_tolerance,
                 min_cost_threshold: self.config.min_cost_threshold,
                 timeout: self.config.timeout,
-                trust_region_radius: Some(self.config.trust_region_radius),
+                trust_region_radius: Some(self.trust_region_radius),
                 min_trust_region_radius: Some(self.config.trust_region_min),
             }) {
                 // Print summary only if debug level is enabled
@@ -1303,7 +1393,7 @@ impl DogLeg {
                         iteration_stats.clone(),
                         status.clone(),
                         None,
-                        Some(self.config.trust_region_radius),
+                        Some(self.trust_region_radius),
                         None,
                     );
                     debug!("{}", summary);
@@ -1311,10 +1401,9 @@ impl DogLeg {
 
                 // Compute covariances if enabled
                 let covariances = if self.config.compute_covariances {
-                    problem.compute_and_set_covariances_generic::<M>(
-                        linear_solver,
+                    problem.compute_and_set_covariances(
                         &mut state.variables,
-                        &state.variable_index_map,
+                        self.config.covariance_options,
                     )
                 } else {
                     None
@@ -1338,6 +1427,9 @@ impl DogLeg {
     }
 
     /// Run optimization, automatically selecting sparse or dense path based on config.
+    ///
+    /// Only solver/mode combinations that match are dispatched; anything else
+    /// returns an error rather than silently substituting a different solver.
     pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
@@ -1345,22 +1437,30 @@ impl DogLeg {
                     let mut solver = DenseQRSolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
-                _ => {
+                LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver)
                 }
+                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
+                    "Dog Leg in dense Jacobian mode supports DenseCholesky and DenseQR only; \
+                     requested {other}"
+                ))
+                .into()),
             },
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
-                _ => {
-                    // SparseCholesky (default), SparseSchurComplement or DenseCholesky with
-                    // sparse mode → SparseCholeskySolver
+                linalg::LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver)
                 }
+                other => Err(optimizer::OptimizerError::InvalidParameters(format!(
+                    "Dog Leg in sparse Jacobian mode supports SparseCholesky and SparseQR only; \
+                     requested {other}. Use Levenberg-Marquardt for the Schur complement."
+                ))
+                .into()),
             },
         }
     }
@@ -1530,6 +1630,115 @@ mod tests {
         prob
     }
 
+    // -------------------------------------------------------------------------
+    // Ceres-compatibility config fields
+    // -------------------------------------------------------------------------
+
+    /// `min_relative_decrease` replaces the hardcoded `rho > 1e-4` gate.
+    #[test]
+    fn dogleg_min_relative_decrease_gates_acceptance() -> TestResult {
+        let mut permissive_problem = rosenbrock_problem();
+        let permissive = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(1e-3),
+        )
+        .optimize(&mut permissive_problem)?;
+
+        let mut strict_problem = rosenbrock_problem();
+        let strict = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(100)
+                .with_min_relative_decrease(0.999_999),
+        )
+        .optimize(&mut strict_problem)?;
+
+        assert!(
+            strict.final_cost > permissive.final_cost,
+            "a near-1.0 acceptance threshold should leave the cost higher: \
+             strict {:.3e} vs permissive {:.3e}",
+            strict.final_cost,
+            permissive.final_cost
+        );
+        Ok(())
+    }
+
+    /// `trust_region_increase_factor` drives the radius growth that used to be a
+    /// hardcoded `3.0`.
+    ///
+    /// The initial radius has to be small for this to be observable: the growth
+    /// rule is `radius ← max(radius, factor · ‖step‖)`, so while the radius
+    /// still dwarfs the step — as it does from the default 1e4 on this problem —
+    /// the factor is multiplied by a number that never wins the `max`.
+    #[test]
+    fn dogleg_trust_region_increase_factor_is_read() -> TestResult {
+        let run = |factor: f64| -> Result<usize, Box<dyn std::error::Error>> {
+            let mut problem = rosenbrock_problem();
+            let result = DogLeg::with_config(
+                DogLegConfig::new()
+                    .with_max_iterations(200)
+                    .with_trust_region_radius(1e-3)
+                    .with_trust_region_factors(factor, 0.5),
+            )
+            .optimize(&mut problem)?;
+            Ok(result.iterations)
+        };
+
+        let fast = run(50.0)?;
+        let slow = run(1.0)?;
+
+        assert!(
+            fast < slow,
+            "a 50x radius growth factor should reach the solution in fewer \
+             iterations than a 1x (never-grow) factor: {fast} vs {slow}"
+        );
+        Ok(())
+    }
+
+    /// The radius is run state, so a reused solver reproduces its first result.
+    #[test]
+    fn dogleg_repeated_optimize_calls_are_reproducible() -> TestResult {
+        let mut solver = DogLeg::with_config(DogLegConfig::new().with_max_iterations(100));
+
+        let mut first_problem = rosenbrock_problem();
+        let first = solver.optimize(&mut first_problem)?;
+        let mut second_problem = rosenbrock_problem();
+        let second = solver.optimize(&mut second_problem)?;
+
+        assert_eq!(
+            first.iterations, second.iterations,
+            "reusing a solver changed the iteration count: {} then {}",
+            first.iterations, second.iterations
+        );
+        assert!(
+            (first.final_cost - second.final_cost).abs() < 1e-15,
+            "reusing a solver changed the final cost: {:.17e} then {:.17e}",
+            first.final_cost,
+            second.final_cost
+        );
+        Ok(())
+    }
+
+    /// `max_condition_number` detects a variable no residual constrains.
+    #[test]
+    fn dogleg_max_condition_number_detects_an_unconstrained_variable() -> TestResult {
+        let mut problem = rosenbrock_problem();
+        let _orphan = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+
+        let result = DogLeg::with_config(
+            DogLegConfig::new()
+                .with_max_iterations(10)
+                .with_max_condition_number(1e12),
+        )
+        .optimize(&mut problem)?;
+
+        assert_eq!(
+            result.status,
+            optimizer::OptimizationStatus::IllConditionedJacobian
+        );
+        Ok(())
+    }
+
     fn linear_problem(start: f64) -> problem::Problem {
         let mut prob = problem::Problem::new(JacobianMode::Sparse);
         let x = prob.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![start]);
@@ -1552,6 +1761,9 @@ mod tests {
     }
 
     #[test]
+    // Asserts that the deprecated `min_step_quality` setter still stores its
+    // value; the field is no longer read by the algorithm.
+    #[allow(deprecated)]
     fn test_dl_config_builders() {
         use crate::linalg::LinearSolverType;
         let cfg = DogLegConfig::new()
@@ -1728,6 +1940,9 @@ mod tests {
     }
 
     #[test]
+    // Asserts that the deprecated `min_step_quality` setter still stores its
+    // value; the field is no longer read by the algorithm.
+    #[allow(deprecated)]
     fn test_dl_step_quality_thresholds() {
         let cfg = DogLegConfig::new().with_step_quality_thresholds(0.05, 0.25, 0.8);
         assert!((cfg.min_step_quality - 0.05).abs() < 1e-15);

@@ -1,5 +1,16 @@
-use nalgebra::{UnitQuaternion, Vector3};
 use std::path::PathBuf;
+
+use nalgebra::Vector3;
+
+use crate::trajectory::TrajectoryPose;
+
+/// One ground-truth pose from an ASL dataset.
+///
+/// The trajectory module's [`TrajectoryPose`] under a dataset-reader name:
+/// same fields, same meaning, so a ground-truth track converts to a
+/// [`Trajectory`](crate::trajectory::Trajectory) by copying rather than by
+/// converting.
+pub type GroundTruthPose = TrajectoryPose;
 
 #[derive(Debug, Clone)]
 pub struct ImuMeasurement {
@@ -12,13 +23,6 @@ pub struct ImuMeasurement {
 pub struct CameraFrame {
     pub timestamp_ns: u64,
     pub image_path: PathBuf,
-}
-
-#[derive(Debug, Clone)]
-pub struct GroundTruthPose {
-    pub timestamp_ns: u64,
-    pub position: Vector3<f64>,
-    pub orientation: UnitQuaternion<f64>,
 }
 
 #[derive(Debug)]

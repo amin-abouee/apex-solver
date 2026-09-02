@@ -47,11 +47,12 @@
 use super::implicit_schur::IterativeSchurSolver;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
-    Mat, Side,
+    Accum, Mat, Side,
     linalg::solvers::Solve,
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
@@ -89,6 +90,14 @@ pub struct SchurOrdering {
     /// Only eliminate RN variables with this exact size (default: 3 for 3D landmarks)
     /// This prevents intrinsic variables (6 DOF) from being eliminated
     pub eliminate_rn_size: Option<usize>,
+    /// Auto-classify *unmarked* variables as landmarks when their type and size
+    /// match [`Self::should_eliminate`].
+    ///
+    /// Off by default: `Rn(3)` is also how self-calibration represents intrinsic
+    /// parameters (`[focal, k1, k2]`), and eliminating those as landmarks
+    /// silently corrupts the Schur complement. Manual marks via
+    /// `Problem::mark_as_schur_landmark` always apply, with or without this flag.
+    pub auto_detect: bool,
 }
 
 impl Default for SchurOrdering {
@@ -96,6 +105,7 @@ impl Default for SchurOrdering {
         Self {
             eliminate_types: vec![ManifoldType::RN],
             eliminate_rn_size: Some(3), // Only eliminate 3D landmarks, not intrinsics
+            auto_detect: false,
         }
     }
 }
@@ -103,6 +113,12 @@ impl Default for SchurOrdering {
 impl SchurOrdering {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Enable auto-classification of unmarked variables (see [`Self::auto_detect`]).
+    pub fn with_auto_detect(mut self, enabled: bool) -> Self {
+        self.auto_detect = enabled;
+        self
     }
 
     /// Check if a variable should be eliminated (treated as landmark).
@@ -113,12 +129,22 @@ impl SchurOrdering {
         if !self.eliminate_types.contains(manifold_type) {
             return false;
         }
-        if let Some(required_size) = self.eliminate_rn_size {
-            if size != required_size {
-                return false;
-            }
+        if let Some(required_size) = self.eliminate_rn_size
+            && size != required_size
+        {
+            return false;
         }
         true
+    }
+
+    /// [`Self::should_eliminate`] for a variable identified by its manifold's
+    /// [`LieGroup::NAME`] string (`"Rn"`, `"SE3"`, …), as reported by
+    /// [`ManifoldVariable::manifold_type_name`]. Unknown names never eliminate.
+    pub fn should_eliminate_by_name(&self, name: &str, size: usize) -> bool {
+        match ManifoldType::from_name(name) {
+            Some(manifold_type) => self.should_eliminate(&manifold_type, size),
+            None => false,
+        }
     }
 }
 
@@ -182,6 +208,9 @@ pub struct SparseSchurComplementSolver {
     cg_max_iterations: usize,
     cg_tolerance: f64,
 
+    // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
+
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
@@ -199,6 +228,7 @@ impl SparseSchurComplementSolver {
             preconditioner: SchurPreconditioner::default(),
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
+            ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
             iterative_solver: None,
@@ -230,6 +260,26 @@ impl SparseSchurComplementSolver {
         self.block_structure.as_ref()
     }
 
+    /// Union of the manually marked landmark keys and — when
+    /// [`SchurOrdering::auto_detect`] is enabled — the variables matching the
+    /// configured ordering.
+    fn effective_landmark_keys(
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        schur_landmark_keys: &std::collections::HashSet<VarKey>,
+        ordering: &SchurOrdering,
+    ) -> std::collections::HashSet<VarKey> {
+        let mut keys = schur_landmark_keys.clone();
+        if ordering.auto_detect {
+            for (key, variable) in variables {
+                if ordering.should_eliminate_by_name(variable.manifold_type_name(), variable.dof())
+                {
+                    keys.insert(key);
+                }
+            }
+        }
+        keys
+    }
+
     fn build_block_structure(
         &mut self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
@@ -237,7 +287,6 @@ impl SparseSchurComplementSolver {
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
         let mut structure = SchurBlockStructure::new();
-
         for (key, variable) in variables {
             let start_col = *variable_index_map.get(key).ok_or_else(|| {
                 LinAlgError::InvalidInput(format!("VarKey {:?} not found in index map", key))
@@ -618,6 +667,8 @@ impl SparseSchurComplementSolver {
     /// Solve using Preconditioned Conjugate Gradients (PCG)
     ///
     /// Uses Jacobi (diagonal) preconditioning for simplicity and robustness.
+    /// Reductions and vector updates run through faer's SIMD kernels; the
+    /// SpMV uses faer's parallel sparse×dense kernel into a hoisted buffer.
     fn solve_with_pcg(&self, a: &SparseColMat<usize, f64>, b: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
         let n = b.nrows();
         let max_iterations = self.cg_max_iterations;
@@ -637,6 +688,7 @@ impl SparseSchurComplementSolver {
                 }
             }
         }
+        let precond_m = Mat::from_fn(n, 1, |i, _| precond[i]);
 
         // Initialize
         let mut x = Mat::<f64>::zeros(n, 1);
@@ -646,41 +698,31 @@ impl SparseSchurComplementSolver {
 
         // z = M^{-1} * r (Jacobi preconditioning)
         let mut z = Mat::<f64>::zeros(n, 1);
-        for i in 0..n {
-            z[(i, 0)] = precond[i] * r[(i, 0)];
-        }
+        faer::zip!(&mut z, &precond_m, &r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
 
         let mut p = z.clone();
 
-        let mut rz_old = 0.0;
-        for i in 0..n {
-            rz_old += r[(i, 0)] * z[(i, 0)];
-        }
+        let mut rz_old: f64 = (r.transpose() * &z)[(0, 0)];
 
         // Compute initial residual norm for relative tolerance
-        let mut r_norm_init = 0.0;
-        for i in 0..n {
-            r_norm_init += r[(i, 0)] * r[(i, 0)];
-        }
-        r_norm_init = r_norm_init.sqrt();
-        let abs_tol = tolerance * r_norm_init.max(1.0);
+        let abs_tol = tolerance * r.norm_l2().max(1.0);
+
+        // Ap buffer (reused each iteration)
+        let mut ap = Mat::<f64>::zeros(n, 1);
 
         for _iter in 0..max_iterations {
-            // Ap = A * p (sparse matrix-vector product)
-            let mut ap = Mat::<f64>::zeros(n, 1);
-            for col in 0..n {
-                let row_indices = symbolic.row_idx_of_col_raw(col);
-                let col_values = a.val_of_col(col);
-                for (idx, &row) in row_indices.iter().enumerate() {
-                    ap[(row, 0)] += col_values[idx] * p[(col, 0)];
-                }
-            }
+            // Ap = A * p (parallel sparse×dense faer kernel)
+            faer::sparse::linalg::matmul::sparse_dense_matmul(
+                ap.as_mut(),
+                Accum::Replace,
+                a.as_ref(),
+                p.as_ref(),
+                1.0,
+                faer::get_global_parallelism(),
+            );
 
             // alpha = (r^T z) / (p^T Ap)
-            let mut p_ap = 0.0;
-            for i in 0..n {
-                p_ap += p[(i, 0)] * ap[(i, 0)];
-            }
+            let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
 
             if p_ap.abs() < 1e-30 {
                 break;
@@ -689,36 +731,21 @@ impl SparseSchurComplementSolver {
             let alpha = rz_old / p_ap;
 
             // x = x + alpha * p
-            for i in 0..n {
-                x[(i, 0)] += alpha * p[(i, 0)];
-            }
+            faer::zip!(&mut x, &p).for_each(|faer::unzip!(x, p)| *x += alpha * p);
 
             // r = r - alpha * Ap
-            for i in 0..n {
-                r[(i, 0)] -= alpha * ap[(i, 0)];
-            }
+            faer::zip!(&mut r, &ap).for_each(|faer::unzip!(r, ap)| *r -= alpha * ap);
 
             // Check convergence
-            let mut r_norm = 0.0;
-            for i in 0..n {
-                r_norm += r[(i, 0)] * r[(i, 0)];
-            }
-            r_norm = r_norm.sqrt();
-
-            if r_norm < abs_tol {
+            if r.norm_l2() < abs_tol {
                 break;
             }
 
             // z = M^{-1} * r
-            for i in 0..n {
-                z[(i, 0)] = precond[i] * r[(i, 0)];
-            }
+            faer::zip!(&mut z, &precond_m, &r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
 
             // beta = (r_{k+1}^T z_{k+1}) / (r_k^T z_k)
-            let mut rz_new = 0.0;
-            for i in 0..n {
-                rz_new += r[(i, 0)] * z[(i, 0)];
-            }
+            let rz_new: f64 = (r.transpose() * &z)[(0, 0)];
 
             if rz_old.abs() < 1e-30 {
                 break;
@@ -727,9 +754,7 @@ impl SparseSchurComplementSolver {
             let beta = rz_new / rz_old;
 
             // p = z + beta * p
-            for i in 0..n {
-                p[(i, 0)] = z[(i, 0)] + beta * p[(i, 0)];
-            }
+            faer::zip!(&mut p, &z).for_each(|faer::unzip!(p, z)| *p = *z + beta * *p);
 
             rz_old = rz_new;
         }
@@ -1024,15 +1049,21 @@ impl StructureAware for SparseSchurComplementSolver {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
+        // Effective landmark set: manual marks plus the SchurOrdering
+        // auto-classification, so both the outer structure and the delegate
+        // solver partition identically.
+        let effective_keys =
+            Self::effective_landmark_keys(variables, schur_landmark_keys, &self.ordering);
+
         // Build block structure for all variants
-        self.build_block_structure(variables, variable_index_map, schur_landmark_keys)?;
+        self.build_block_structure(variables, variable_index_map, &effective_keys)?;
 
         // Initialize delegate solver based on variant
         match self.variant {
             SchurVariant::Iterative => {
                 let mut solver =
                     IterativeSchurSolver::with_cg_params(self.cg_max_iterations, self.cg_tolerance);
-                solver.initialize_structure(variables, variable_index_map, schur_landmark_keys)?;
+                solver.initialize_structure(variables, variable_index_map, &effective_keys)?;
                 self.iterative_solver = Some(solver);
             }
             SchurVariant::Sparse => {
@@ -1050,7 +1081,6 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        use std::ops::Mul;
         let jacobians = jacobian;
 
         if self.block_structure.is_none() {
@@ -1064,13 +1094,8 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         // - Sparse: Cholesky factorization
         // - Iterative: PCG
 
-        // 1. Build H = J^T * J and g = -J^T * r
-        let jt = jacobians
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let hessian = jt.mul(jacobians);
-        let gradient = jacobians.transpose().mul(residuals);
+        // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1113,9 +1138,8 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
-        use std::ops::Mul;
         let jacobians = jacobian;
 
         if self.block_structure.is_none() {
@@ -1125,13 +1149,8 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         }
 
         // Sparse and Iterative variants use the same Schur complement formation with damping
-        // 1. Build H = J^T * J and g = -J^T * r
-        let jt = jacobians
-            .transpose()
-            .to_col_major()
-            .map_err(|e| LinAlgError::MatrixConversion(format!("Transpose failed: {:?}", e)))?;
-        let hessian = jt.mul(jacobians);
-        let gradient = jacobians.transpose().mul(residuals);
+        // 1. Build H = JᵀJ and g = Jᵀr (parallel faer kernels, cached symbolic)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
         let mut neg_gradient = Mat::zeros(gradient.nrows(), 1);
         for i in 0..gradient.nrows() {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
@@ -1166,7 +1185,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
         let cam_size = structure.camera_dof;
 
-        // Add λI to H_cc
+        // Add λ·D to H_cc, D_jj = clamp(H_jj, min_diagonal, max_diagonal)
         let mut h_cc_triplets = Vec::new();
         let h_cc_symbolic = h_cc.symbolic();
         for col in 0..h_cc.ncols() {
@@ -1178,20 +1197,22 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         }
         for i in 0..cam_size {
             if let Some(entry) = h_cc_triplets.iter_mut().find(|t| t.row == i && t.col == i) {
-                *entry = Triplet::new(i, i, entry.val + lambda);
+                *entry = Triplet::new(i, i, entry.val + damping.diagonal_term(entry.val));
             } else {
-                h_cc_triplets.push(Triplet::new(i, i, lambda));
+                // Structurally absent diagonal — H_ii is zero, so the clamp floors
+                // the damping at λ·min_diagonal.
+                h_cc_triplets.push(Triplet::new(i, i, damping.diagonal_term(0.0)));
             }
         }
         let h_cc_damped =
             SparseColMat::try_new_from_triplets(cam_size, cam_size, &h_cc_triplets)
                 .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Damped H_cc: {:?}", e)))?;
 
-        // Add λI to H_pp blocks
+        // Add λ·D to H_pp blocks (same clamped-diagonal rule as H_cc)
         for block in &mut hpp_blocks {
-            block[(0, 0)] += lambda;
-            block[(1, 1)] += lambda;
-            block[(2, 2)] += lambda;
+            for k in 0..3 {
+                block[(k, k)] += damping.diagonal_term(block[(k, k)]);
+            }
         }
 
         // 4. Invert damped H_pp blocks
@@ -1374,6 +1395,83 @@ mod tests {
         // RN with size != 3 is not eliminated
         assert!(!ordering.should_eliminate(&ManifoldType::RN, 6));
         assert!(!ordering.should_eliminate(&ManifoldType::RN, 2));
+    }
+
+    #[test]
+    fn test_schur_ordering_by_name_matches_type() {
+        let ordering = SchurOrdering::default();
+        assert!(ordering.should_eliminate_by_name("Rn", 3));
+        assert!(!ordering.should_eliminate_by_name("SE3", 6));
+        assert!(!ordering.should_eliminate_by_name("NotAManifold", 3));
+    }
+
+    #[test]
+    fn test_auto_elimination_is_opt_in() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::core::variable::Variable;
+        use apex_manifolds::{rn, se3};
+        use nalgebra::DVector;
+        use slotmap::SlotMap;
+
+        // Two SE3 cameras and two Rn(3) landmarks, none marked manually.
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let se3_data = DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        let cam0 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_data.as_slice(),
+        ))));
+        let cam1 = variables.insert(Box::new(Variable::new(se3::SE3::from_param_slice(
+            se3_data.as_slice(),
+        ))));
+        let pt_data = DVector::from_vec(vec![0.0, 0.0, 0.0]);
+        let pt0 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_data.clone()))));
+        let pt1 = variables.insert(Box::new(Variable::new(rn::Rn::new(pt_data.clone()))));
+
+        let mut index_map = SecondaryMap::new();
+        index_map.insert(cam0, 0);
+        index_map.insert(cam1, 6);
+        index_map.insert(pt0, 12);
+        index_map.insert(pt1, 15);
+
+        let empty_marks = std::collections::HashSet::new();
+
+        // Default ordering: auto-classification stays off — Rn(3) is ambiguous
+        // (landmarks vs self-calibration intrinsics), so only pt0 is eliminated
+        // and the unmarked pt1 stays a camera.
+        let mut marks = std::collections::HashSet::new();
+        marks.insert(pt0);
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &index_map, &marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert_eq!(
+            structure.num_landmarks, 1,
+            "auto-detection must be off by default"
+        );
+        assert_eq!(structure.camera_blocks.len(), 3);
+        assert!(structure.camera_blocks.iter().any(|(k, _, _)| *k == pt1));
+
+        // Opt-in: unmarked Rn(3) variables are eliminated as landmarks.
+        let ordering = SchurOrdering::default().with_auto_detect(true);
+        let mut solver = SparseSchurComplementSolver::new().with_ordering(ordering);
+        solver.initialize_structure(&variables, &index_map, &empty_marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert_eq!(
+            structure.num_landmarks, 2,
+            "Rn(3) variables must auto-eliminate"
+        );
+        assert_eq!(
+            structure.camera_blocks.len(),
+            2,
+            "SE3 variables must stay cameras"
+        );
+
+        // Manual marks still eliminate regardless of type/size.
+        let mut marks = std::collections::HashSet::new();
+        marks.insert(cam1);
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &index_map, &marks)?;
+        let structure = solver.block_structure.as_ref().ok_or("structure missing")?;
+        assert!(structure.landmark_blocks.iter().any(|(k, _, _)| *k == cam1));
+
+        Ok(())
     }
 
     #[test]
@@ -1576,6 +1674,7 @@ mod tests {
         let ordering = SchurOrdering {
             eliminate_types: vec![ManifoldType::RN],
             eliminate_rn_size: Some(3),
+            auto_detect: false,
         };
         let solver = SparseSchurComplementSolver::new().with_ordering(ordering);
         assert_eq!(solver.ordering.eliminate_rn_size, Some(3));
@@ -1662,7 +1761,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            0.1,
+            &Damping::identity(0.1),
         )?;
         assert_eq!(delta.nrows(), 21);
         Ok(())
@@ -1720,7 +1819,7 @@ mod tests {
             &mut solver1,
             &residuals,
             &jacobian,
-            0.001,
+            &Damping::identity(0.001),
         )?;
 
         let mut solver2 = SparseSchurComplementSolver::new();
@@ -1729,7 +1828,7 @@ mod tests {
             &mut solver2,
             &residuals,
             &jacobian,
-            100.0,
+            &Damping::identity(100.0),
         )?;
 
         // Different λ values should produce different updates

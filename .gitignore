@@ -13,8 +13,8 @@ target
 # Contains mutation testing data
 **/mutants.out*/
 
-# Cargo lock file
-Cargo.lock
+# Cargo.lock is tracked on purpose: it pins dependency resolution for the
+# reproducibility-claiming benchmarks and gives CI a meaningful cache key.
 
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

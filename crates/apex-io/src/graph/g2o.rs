@@ -1,4 +1,4 @@
-use crate::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
+use super::{EdgeSE2, EdgeSE3, Graph, GraphLoader, IoError, VertexSE2, VertexSE3};
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::{fs::File, io::Write, path::Path};

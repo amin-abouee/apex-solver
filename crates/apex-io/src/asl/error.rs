@@ -53,6 +53,11 @@ pub enum AslError {
 
     #[error("image load error: {0}")]
     ImageLoad(#[from] image::ImageError),
+
+    /// Ground-truth CSV parsing is delegated to the trajectory reader, which
+    /// is the one implementation of the ASL pose formats.
+    #[error("ground truth: {0}")]
+    GroundTruth(#[from] crate::trajectory::TrajectoryError),
 }
 
 pub type Result<T> = std::result::Result<T, AslError>;

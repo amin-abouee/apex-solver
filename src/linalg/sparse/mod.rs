@@ -1,6 +1,7 @@
 pub mod cholesky;
 pub mod explicit_schur;
 pub mod implicit_schur;
+pub mod normal_eq;
 pub mod qr;
 
 pub use cholesky::SparseCholeskySolver;

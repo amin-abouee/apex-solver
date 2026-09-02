@@ -80,7 +80,7 @@ use nalgebra::{DMatrix, DVector};
 
 use crate::core::{
     CoreResult, FactorKey, VarKey, corrector::Corrector, loss_functions::LossFunction,
-    variable::Variable,
+    noise::NoiseModel, variable::Variable,
 };
 use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
@@ -129,6 +129,9 @@ pub struct ResidualBlock {
     /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
     /// is applied to downweight outliers.
     pub loss_func: Option<Box<dyn LossFunction + Send>>,
+
+    /// Measurement noise model; whitened before the robust-loss corrector.
+    pub noise: NoiseModel,
 }
 
 impl ResidualBlock {
@@ -185,12 +188,34 @@ impl ResidualBlock {
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> Self {
+        Self::with_noise(
+            residual_block_id,
+            residual_row_start_idx,
+            variable_keys,
+            factor,
+            loss_func,
+            NoiseModel::Null,
+        )
+    }
+
+    /// Like [`Self::new`], with a measurement noise model. The whitened
+    /// residual and Jacobian drive both the linear system and the reported
+    /// cost (`½·ρ(‖S·r‖²)`).
+    pub fn with_noise(
+        residual_block_id: FactorKey,
+        residual_row_start_idx: usize,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> Self {
         ResidualBlock {
             residual_block_id,
             residual_row_start_idx,
             variable_keys: variable_keys.to_vec(),
             factor,
             loss_func,
+            noise,
         }
     }
 
@@ -275,15 +300,27 @@ impl ResidualBlock {
         self.factor
             .linearize(&param_slices, &mut residual_buf, Some(jac_mut));
 
-        let mut residual = DVector::from_vec(residual_buf);
-        let mut jacobian = DMatrix::from_column_slice(jac_rows, jac_cols, &jacobian_buf);
+        // Whiten by the noise model before the robust corrector (same
+        // ordering as `compute_block_into`).
+        self.noise.whiten_residual(&mut residual_buf);
+        self.noise
+            .whiten_jacobian(&mut jacobian_buf, jac_rows, jac_cols);
 
         if let Some(loss_func) = self.loss_func.as_ref() {
-            let squared_norm = residual.norm_squared();
+            let squared_norm: f64 = residual_buf.iter().map(|x| x * x).sum();
             let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-            corrector.correct_jacobian(&residual, &mut jacobian);
-            corrector.correct_residuals(&mut residual);
+            // Jacobian correction must read the original (un-corrected) residual.
+            corrector.correct_jacobian_in_place(
+                &residual_buf,
+                &mut jacobian_buf,
+                jac_rows,
+                jac_cols,
+            );
+            corrector.correct_residual_in_place(&mut residual_buf);
         }
+
+        let residual = DVector::from_vec(residual_buf);
+        let jacobian = DMatrix::from_column_slice(jac_rows, jac_cols, &jacobian_buf);
 
         Ok((residual, jacobian))
     }
@@ -296,6 +333,7 @@ mod tests {
         loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
+    use crate::factors::EuclideanPriorFactor;
     use crate::factors::{BetweenFactor, PriorFactor};
     use apex_manifolds::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
@@ -330,9 +368,7 @@ mod tests {
     #[test]
     fn test_residual_block_without_loss() -> TestResult {
         let (fk, keys) = make_keys(1);
-        let factor = Box::new(PriorFactor {
-            data: dvector![0.0, 0.0, 0.0],
-        });
+        let factor = Box::new(EuclideanPriorFactor::new(dvector![0.0, 0.0, 0.0]));
 
         let block = ResidualBlock::new(fk, 3, &keys, factor, None);
 
@@ -399,7 +435,9 @@ mod tests {
     fn test_residual_block_se3_between_factor() -> TestResult {
         let (fk, keys) = make_keys(1);
         let se3_data = dvector![1.0, 0.5, 0.2, 1.0, 0.0, 0.0, 0.0];
-        let factor = Box::new(PriorFactor { data: se3_data });
+        let factor = Box::new(PriorFactor::<SE3>::new(SE3::from_param_slice(
+            se3_data.as_slice(),
+        )));
         let block = ResidualBlock::new(fk, 0, &keys, factor, None);
 
         let var0 = Variable::new(SE3::from_translation_quaternion(
@@ -410,9 +448,15 @@ mod tests {
 
         let (residual, jacobian) = block.residual_and_jacobian(&variables)?;
 
-        assert_eq!(residual.len(), 7);
-        assert_eq!(jacobian.nrows(), 7);
-        assert!(jacobian.ncols() == 6 || jacobian.ncols() == 7);
+        // Tangent-space prior: 6-dim residual and Jacobian on the SE(3)
+        // variable (the old ambient prior produced 7 of each).
+        assert_eq!(residual.len(), 6);
+        assert_eq!(jacobian.nrows(), 6);
+        assert_eq!(jacobian.ncols(), 6);
+
+        // Variable is identity-rotation pose at (1, 0.5, 0.2); prior is the
+        // same translation with identity rotation → zero residual.
+        assert!(residual.norm() < 1e-12);
 
         Ok(())
     }
@@ -433,9 +477,7 @@ mod tests {
         let factors: Vec<Box<dyn Factor + Send>> = vec![
             Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1))),
             Box::new(BetweenFactor::new(SE2::from_xy_angle(0.8, 0.2, -0.05))),
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(EuclideanPriorFactor::new(dvector![0.0, 0.0, 0.0])),
         ];
 
         let blocks: Vec<ResidualBlock> = configs

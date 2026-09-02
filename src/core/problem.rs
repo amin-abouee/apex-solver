@@ -13,14 +13,14 @@ use tracing::warn;
 use crate::{
     core::CoreResult,
     core::{
-        FactorKey, VarKey,
-        corrector::Corrector,
+        CoreError, FactorKey, VarKey,
         loss_functions::LossFunction,
+        noise::NoiseModel,
         residual_block::ResidualBlock,
         variable::{ManifoldVariable, Variable},
     },
     factors::Factor,
-    linalg::{JacobianMode, LinearSolver, SparseMode, extract_variable_covariances},
+    linalg::JacobianMode,
 };
 use apex_manifolds::{LieGroup, ManifoldType, rn, se2, se3, se23, sgal3, sim3, so2, so3};
 
@@ -80,13 +80,95 @@ impl Problem {
         factor: Box<dyn Factor + Send>,
         loss_func: Option<Box<dyn LossFunction + Send>>,
     ) -> FactorKey {
+        self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
+    }
+
+    /// Register a residual block with a measurement noise model, keeping the
+    /// validation behaviour of [`Self::try_add_residual_block`].
+    ///
+    /// The model carries the square-root information `S`; residuals and
+    /// Jacobians are whitened (`S·r`, `S·J`) before the robust-loss corrector,
+    /// so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted
+    /// objective g2o-style benchmarks report. Its dimension must equal the
+    /// factor's `residual_dim()`.
+    pub fn add_residual_block_with_noise(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> FactorKey {
+        self.try_add_residual_block_with_noise(variable_keys, factor, loss_func, noise)
+            .unwrap_or_else(|e| panic!("invalid residual block: {e}"))
+    }
+
+    /// [`Self::add_residual_block_with_noise`] returning a typed error.
+    pub fn try_add_residual_block_with_noise(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> CoreResult<FactorKey> {
+        if noise.dim() != 0 && noise.dim() != factor.residual_dim() {
+            return Err(CoreError::DimensionMismatch(format!(
+                "noise model covers {} residual rows but the factor produces {}",
+                noise.dim(),
+                factor.residual_dim()
+            )));
+        }
+        self.try_add_residual_block_impl(variable_keys, factor, loss_func, noise)
+    }
+
+    /// Register a residual block, validating it against the referenced
+    /// variables first.
+    ///
+    /// Runs the factor's [`Factor::validate_variables`] hook so shape
+    /// mismatches (e.g. a landmark variable whose parameter count disagrees
+    /// with the factor's observations) surface as a typed registration error
+    /// instead of a panic inside the parallel assembly. Unknown variable keys
+    /// are rejected as well — they would otherwise be silently skipped during
+    /// linearization.
+    pub fn try_add_residual_block(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+    ) -> CoreResult<FactorKey> {
+        self.try_add_residual_block_impl(variable_keys, factor, loss_func, NoiseModel::Null)
+    }
+
+    fn try_add_residual_block_impl(
+        &mut self,
+        variable_keys: &[VarKey],
+        factor: Box<dyn Factor + Send>,
+        loss_func: Option<Box<dyn LossFunction + Send>>,
+        noise: NoiseModel,
+    ) -> CoreResult<FactorKey> {
+        let mut variables: Vec<&dyn ManifoldVariable> = Vec::with_capacity(variable_keys.len());
+        for &key in variable_keys {
+            let variable = self
+                .variables
+                .get(key)
+                .ok_or_else(|| {
+                    CoreError::Variable(format!(
+                        "residual block references unknown variable key {key:?}"
+                    ))
+                })?
+                .as_ref();
+            variables.push(variable);
+        }
+        factor
+            .validate_variables(&variables)
+            .map_err(CoreError::DimensionMismatch)?;
+
         let new_residual_dimension = factor.residual_dim();
         let row_start = self.total_residual_dimension;
         let fk = self.residual_blocks.insert_with_key(|fk| {
-            ResidualBlock::new(fk, row_start, variable_keys, factor, loss_func)
+            ResidualBlock::with_noise(fk, row_start, variable_keys, factor, loss_func, noise)
         });
         self.total_residual_dimension += new_residual_dimension;
-        fk
+        Ok(fk)
     }
 
     pub fn remove_residual_block(&mut self, block_id: FactorKey) -> Option<ResidualBlock> {
@@ -184,6 +266,13 @@ impl Problem {
         self.residual_blocks.len()
     }
 
+    /// Total number of scalar residuals across all residual blocks.
+    ///
+    /// This is the row count `m` of the assembled Jacobian.
+    pub fn total_residual_dimension(&self) -> usize {
+        self.total_residual_dimension
+    }
+
     pub(crate) fn residual_blocks(&self) -> &SlotMap<FactorKey, ResidualBlock> {
         &self.residual_blocks
     }
@@ -193,28 +282,57 @@ impl Problem {
         &self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     ) -> CoreResult<Mat<f64>> {
+        Ok(self.compute_residual_and_cost_sparse(variables)?.0)
+    }
+
+    /// Compute the residual vector together with the objective value.
+    ///
+    /// The cost is **not** `0.5·‖r‖²` of the returned vector. For blocks carrying a
+    /// robust loss the returned residual is Triggs-corrected — it exists to drive
+    /// the linear system — while the cost is the true robust cost `0.5·ρ(‖r‖²)`.
+    /// Squaring the corrected residual gives a different function, which is what
+    /// made every reported cost and every trust-region ratio wrong for robust
+    /// problems.
+    ///
+    /// For blocks with no loss function the two coincide at `0.5·‖r‖²`.
+    pub fn compute_residual_and_cost_sparse(
+        &self,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    ) -> CoreResult<(Mat<f64>, f64)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
+        self.compute_residual_and_cost_sparse_with_workspace(variables, &mut workspace)
+    }
+
+    /// [`Problem::compute_residual_and_cost_sparse`] reusing a per-solve workspace.
+    ///
+    /// The block ordering and scratch buffers are static for the lifetime of a
+    /// solve, so hot paths (per-iteration step evaluation) pass a workspace built
+    /// once by [`crate::optimizer::initialize_optimization_state`].
+    pub(crate) fn compute_residual_and_cost_sparse_with_workspace(
+        &self,
+        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        workspace: &mut crate::linearizer::AssemblyWorkspace,
+    ) -> CoreResult<(Mat<f64>, f64)> {
         use crate::linearizer::split_by_row_offsets_mut;
 
-        let mut blocks: Vec<&crate::core::residual_block::ResidualBlock> =
-            self.residual_blocks.values().collect();
-        blocks.sort_by_key(|b| b.residual_row_start_idx);
+        workspace.residual_buf.fill(0.0);
+        let residual_slices =
+            split_by_row_offsets_mut(&mut workspace.residual_buf, &workspace.offsets_lens);
 
-        let mut residual_buf = vec![0.0f64; self.total_residual_dimension];
-        let offsets_lens: Vec<(usize, usize)> = blocks
-            .iter()
-            .map(|b| (b.residual_row_start_idx, b.factor.residual_dim()))
-            .collect();
-        let residual_slices = split_by_row_offsets_mut(&mut residual_buf, &offsets_lens);
-
-        let results: Vec<CoreResult<()>> = residual_slices
+        // Accumulate the per-block cost on the existing parallel pass rather than
+        // making a second traversal.
+        let results: Vec<CoreResult<f64>> = residual_slices
             .into_par_iter()
-            .zip(blocks.par_iter())
-            .map(|(slice, block)| self.compute_residual_block(block, variables, slice))
+            .zip(workspace.block_order.par_iter())
+            .map(|(slice, key)| {
+                let block = &self.residual_blocks[*key];
+                self.compute_residual_block(block, variables, slice)
+            })
             .collect();
-        results.into_iter().collect::<CoreResult<Vec<_>>>()?;
+        let cost: f64 = results.into_iter().sum::<CoreResult<f64>>()?;
 
         let n = self.total_residual_dimension;
-        Ok(Mat::from_fn(n, 1, |i, _| residual_buf[i]))
+        Ok((Mat::from_fn(n, 1, |i, _| workspace.residual_buf[i]), cost))
     }
 
     /// Compute residuals and sparse Jacobian.
@@ -224,11 +342,13 @@ impl Problem {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         symbolic_structure: &SymbolicStructure,
     ) -> CoreResult<(Mat<f64>, SparseColMat<usize, f64>)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
         Ok(crate::linearizer::cpu::sparse::assemble_sparse(
             self,
             variables,
             variable_index_map,
             symbolic_structure,
+            &mut workspace,
         )?)
     }
 
@@ -239,38 +359,32 @@ impl Problem {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         total_dof: usize,
     ) -> CoreResult<(Mat<f64>, Mat<f64>)> {
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(self);
         Ok(crate::linearizer::cpu::dense::assemble_dense(
             self,
             variables,
             variable_index_map,
             total_dof,
+            &mut workspace,
         )?)
     }
 
+    /// Evaluate one residual block into `residual_slice`, returning its cost.
+    ///
+    /// With a loss function the slice receives the Triggs-corrected residual while
+    /// the returned cost is `0.5·ρ(s)`; without one, the slice receives the raw
+    /// residual and the cost is `0.5·‖r‖²`.
     fn compute_residual_block(
         &self,
         residual_block: &ResidualBlock,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
         residual_slice: &mut [f64],
-    ) -> CoreResult<()> {
-        let mut param_slices: smallvec::SmallVec<[&[f64]; 8]> = smallvec::SmallVec::new();
-        for &k in &residual_block.variable_keys {
-            if let Some(v) = variables.get(k) {
-                param_slices.push(v.as_param_slice());
-            }
-        }
-
-        residual_block
-            .factor
-            .linearize(&param_slices, residual_slice, None);
-
-        if let Some(loss_func) = &residual_block.loss_func {
-            let squared_norm: f64 = residual_slice.iter().map(|x| x * x).sum();
-            let corrector = Corrector::new(loss_func.as_ref(), squared_norm);
-            corrector.correct_residual_in_place(residual_slice);
-        }
-
-        Ok(())
+    ) -> CoreResult<f64> {
+        // Single source of truth for block evaluation — the linearizer's
+        // shared `compute_block_into` (Jacobian-less here, cost only).
+        let (_, cost) =
+            crate::linearizer::compute_block_into(residual_block, variables, residual_slice, None)?;
+        Ok(cost)
     }
 
     pub fn log_residual_to_file(
@@ -324,32 +438,39 @@ impl Problem {
         Ok(())
     }
 
+    /// Compute per-variable covariances at `variables` and store them on the
+    /// variables themselves.
+    ///
+    /// This re-linearizes the problem at the given point and inverts a clean
+    /// `H = JᵀJ` — no Levenberg-Marquardt damping and no Jacobi scaling, both of
+    /// which are internal solver details and must not appear in the result. See
+    /// [`crate::linalg::covariance`].
+    ///
+    /// `options` selects the factorization algorithm and whether the result is
+    /// multiplied by the estimated noise variance `σ̂²` (scaled) or returned as
+    /// the raw `H⁻¹` (unscaled). Optimizers pass their `covariance_options`
+    /// here.
+    ///
+    /// Returns `None` if covariance estimation fails (most commonly a
+    /// rank-deficient `H` from unfixed gauge freedom), after logging the reason.
+    /// Callers that need to handle the failure should use
+    /// [`Covariance::compute`](crate::linalg::covariance::Covariance::compute)
+    /// directly, which returns a typed error.
     pub fn compute_and_set_covariances(
         &self,
-        linear_solver: &mut Box<dyn LinearSolver<SparseMode>>,
         variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-        variable_index_map: &SecondaryMap<VarKey, usize>,
+        options: crate::linalg::covariance::CovarianceOptions,
     ) -> Option<SecondaryMap<VarKey, Mat<f64>>> {
-        linear_solver.compute_covariance_matrix()?;
-        let full_cov = linear_solver.get_covariance_matrix()?.clone();
-        let per_var = extract_variable_covariances(&full_cov, variables, variable_index_map);
-        for (key, cov) in &per_var {
-            if let Some(var) = variables.get_mut(key) {
-                var.set_covariance(cov.clone());
-            }
-        }
-        Some(per_var)
-    }
+        let covariance =
+            match crate::linalg::covariance::Covariance::compute(options, self, variables) {
+                Ok(covariance) => covariance,
+                Err(e) => {
+                    tracing::error!("Covariance estimation failed: {e}");
+                    return None;
+                }
+            };
 
-    pub fn compute_and_set_covariances_generic<M: crate::linalg::LinearizationMode>(
-        &self,
-        linear_solver: &mut dyn crate::linalg::LinearSolver<M>,
-        variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-        variable_index_map: &SecondaryMap<VarKey, usize>,
-    ) -> Option<SecondaryMap<VarKey, Mat<f64>>> {
-        linear_solver.compute_covariance_matrix()?;
-        let full_cov = linear_solver.get_covariance_matrix()?.clone();
-        let per_var = extract_variable_covariances(&full_cov, variables, variable_index_map);
+        let per_var = covariance.per_variable();
         for (key, cov) in &per_var {
             if let Some(var) = variables.get_mut(key) {
                 var.set_covariance(cov.clone());
@@ -418,9 +539,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 
@@ -480,9 +599,7 @@ mod tests {
 
         problem.add_residual_block(
             &[keys[0]],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE3>::new(SE3::identity())),
             None,
         );
 
@@ -550,9 +667,7 @@ mod tests {
         );
         let fk2 = p.add_residual_block(
             &[k0],
-            Box::new(PriorFactor {
-                data: dvector![0.0, 0.0, 0.0],
-            }),
+            Box::new(PriorFactor::<SE2>::new(SE2::identity())),
             None,
         );
 
@@ -633,6 +748,107 @@ mod tests {
         Ok(())
     }
 
+    // -------------------------------------------------------------------------
+    // Robust cost
+    // -------------------------------------------------------------------------
+
+    /// `r = x`, a single scalar residual — lets a test dial ‖r‖ exactly.
+    struct IdentityFactor;
+
+    impl crate::factors::Factor for IdentityFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0];
+            if let Some(mut jac) = jacobian {
+                use faer::prelude::ReborrowMut;
+                *jac.rb_mut().get_mut(0, 0) = 1.0;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+    }
+
+    /// The cost of a robust block must be `0.5·ρ(s)`, not `0.5·‖r̃‖²` computed
+    /// from the Triggs-corrected residual.
+    ///
+    /// Huber with δ = 1 at ‖r‖ = 2 (s = 4): ρ(s) = 2δ√s − δ² = 3, so the cost is
+    /// 1.5. The old code reported 1.0 — 33% low.
+    #[test]
+    fn robust_cost_is_half_rho_not_half_corrected_residual_squared() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![2.0]);
+        problem.add_residual_block(
+            &[x],
+            Box::new(IdentityFactor),
+            Some(Box::new(HuberLoss::new(1.0)?)),
+        );
+
+        let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+
+        assert!(
+            (cost - 1.5).abs() < 1e-12,
+            "robust cost should be 0.5·ρ(4) = 1.5, got {cost}"
+        );
+
+        // And confirm the old formula really does differ, so this test cannot
+        // silently start passing for the wrong reason.
+        let from_corrected_residual = 0.5 * residual.squared_norm_l2();
+        assert!(
+            (from_corrected_residual - 1.0).abs() < 1e-12,
+            "corrected-residual cost should be 1.0, got {from_corrected_residual}"
+        );
+        Ok(())
+    }
+
+    /// Without a loss function the two definitions coincide, so non-robust
+    /// problems must be completely unaffected by the change.
+    #[test]
+    fn cost_without_loss_is_half_squared_norm() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![3.0]);
+        problem.add_residual_block(&[x], Box::new(IdentityFactor), None);
+
+        let (residual, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+        assert!(
+            (cost - 4.5).abs() < 1e-12,
+            "expected 0.5·3² = 4.5, got {cost}"
+        );
+        assert!((cost - 0.5 * residual.squared_norm_l2()).abs() < 1e-15);
+        Ok(())
+    }
+
+    /// The cost must equal `0.5·ρ(s)` read straight off the loss function, for
+    /// every loss, not just Huber.
+    #[test]
+    fn robust_cost_matches_loss_function_rho() -> TestResult {
+        use crate::core::loss_functions::{CauchyLoss, LossFunction};
+
+        let value = 2.5;
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x = problem.add_variable(ManifoldType::RN, dvector![value]);
+        problem.add_residual_block(
+            &[x],
+            Box::new(IdentityFactor),
+            Some(Box::new(CauchyLoss::new(1.0)?)),
+        );
+
+        let (_, cost) = problem.compute_residual_and_cost_sparse(&problem.variables)?;
+        let expected = 0.5 * CauchyLoss::new(1.0)?.evaluate(value * value)[0];
+        assert!(
+            (cost - expected).abs() < 1e-12,
+            "expected 0.5·ρ(s) = {expected}, got {cost}"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_variable_covariance_lifecycle() -> TestResult {
         use faer::Mat;
@@ -710,5 +926,94 @@ mod tests {
         assert!((vec[0] - 5.0).abs() < 1e-10);
         assert!((vec[1] - 6.0).abs() < 1e-10);
         Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // Registration-time factor validation
+    // -------------------------------------------------------------------------
+
+    mod validation {
+        use super::*;
+        use crate::factors::projection_factor::ProjectionFactor;
+        use crate::factors::{BundleAdjustment, Factor};
+        use apex_camera_models::PinholeCamera;
+        use nalgebra::Matrix2xX;
+        use rn::Rn;
+
+        fn ba_factor(n_landmarks: usize) -> Box<dyn Factor + Send> {
+            let observations = Matrix2xX::from_fn(n_landmarks, |r, c| (r + c) as f64);
+            Box::new(ProjectionFactor::<PinholeCamera, BundleAdjustment>::new(
+                observations,
+                PinholeCamera::from([500.0, 500.0, 320.0, 240.0]),
+            ))
+        }
+
+        fn pose_and_landmarks(problem: &mut Problem, n_landmark_params: usize) -> (VarKey, VarKey) {
+            let pose = problem.add_variable(
+                ManifoldType::SE3,
+                dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+            );
+            let landmarks = problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_element(n_landmark_params, 1.0),
+            );
+            (pose, landmarks)
+        }
+
+        #[test]
+        fn try_add_accepts_matching_landmark_variable() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 9);
+            let key = problem.try_add_residual_block(&[pose, landmarks], ba_factor(3), None)?;
+            assert_eq!(problem.residual_blocks().len(), 1);
+            assert_eq!(problem.total_residual_dimension(), 6);
+            let _ = key;
+            Ok(())
+        }
+
+        #[test]
+        fn try_add_rejects_mismatched_landmark_variable() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
+            let err = problem
+                .try_add_residual_block(&[pose, landmarks], ba_factor(3), None)
+                .err()
+                .ok_or("mismatched landmark count must be rejected")?;
+            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            Ok(())
+        }
+
+        #[test]
+        fn add_residual_block_panics_on_invalid_registration() {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, landmarks) = pose_and_landmarks(&mut problem, 12);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                problem.add_residual_block(&[pose, landmarks], ba_factor(3), None);
+            }));
+            assert!(result.is_err(), "registration panic expected");
+        }
+
+        #[test]
+        fn try_add_rejects_unknown_variable_key() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let (pose, _landmarks) = pose_and_landmarks(&mut problem, 9);
+
+            // A key from a different, larger slot map: its slot index is out of
+            // bounds for the problem's store, so it can never resolve.
+            let mut other_store: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+            let mut foreign_key = None;
+            for i in 0..5 {
+                foreign_key =
+                    Some(other_store.insert(Box::new(Variable::new(Rn::new(dvector![i as f64])))));
+            }
+            let foreign_key = foreign_key.ok_or("inserted five keys")?;
+
+            let err = problem
+                .try_add_residual_block(&[pose, foreign_key], ba_factor(3), None)
+                .err()
+                .ok_or("unknown variable key must be rejected")?;
+            assert!(matches!(err, CoreError::Variable(_)), "{err}");
+            Ok(())
+        }
     }
 }

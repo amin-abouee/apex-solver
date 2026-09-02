@@ -6,6 +6,11 @@
 use crate::rosbag::error::{ReaderError, Result};
 use std::convert::TryInto;
 
+/// Bytes of the CDR encapsulation header preceding the body.
+///
+/// Alignment inside the body is measured from the end of this header.
+const ENCAPSULATION_HEADER_LEN: usize = 4;
+
 /// CDR header information
 #[derive(Debug, Clone, Copy)]
 pub struct CdrHeader {
@@ -64,9 +69,20 @@ impl<'a> CdrDeserializer<'a> {
         self.data
     }
 
-    /// Align position to the specified boundary
+    /// Align the read cursor to `alignment`, measured from the **body**.
+    ///
+    /// CDR aligns each primitive relative to the start of the encapsulated
+    /// body — after the 4-byte encapsulation header — not the start of the
+    /// buffer. The two agree for 1, 2 and 4-byte types, because the header is
+    /// itself 4 bytes, and disagree for every 8-byte type, which is why
+    /// timestamps survived while coordinates came back as ~1e200.
+    ///
+    /// See `tests/ros2_cdr_alignment_tests.rs`, whose fixture is assembled
+    /// byte by byte from the specification.
     fn align(&mut self, alignment: usize) {
-        self.pos = (self.pos + alignment - 1) & !(alignment - 1);
+        let body = self.pos - ENCAPSULATION_HEADER_LEN;
+        let aligned = (body + alignment - 1) & !(alignment - 1);
+        self.pos = aligned + ENCAPSULATION_HEADER_LEN;
     }
 
     /// Read a primitive value with proper alignment and endianness
@@ -356,8 +372,14 @@ impl CdrSerializer {
         s
     }
 
+    /// Pad to `n`-byte alignment, measured from the **body**.
+    ///
+    /// Mirrors [`CdrDeserializer::align`]; the two must agree, and both must
+    /// agree with the specification rather than merely with each other. They
+    /// previously did the latter, so round-trips passed while real ROS 2 bags
+    /// failed to decode.
     fn align(&mut self, n: usize) {
-        while self.buf.len() % n != 0 {
+        while !(self.buf.len() - ENCAPSULATION_HEADER_LEN).is_multiple_of(n) {
             self.buf.push(0);
         }
     }
@@ -575,11 +597,13 @@ mod tests {
 
     #[test]
     fn read_f64_le() -> TestResult {
+        // No padding: alignment is measured from the body, and an f64 at body
+        // offset 0 is already 8-aligned. This fixture previously inserted four
+        // pad bytes to match the decoder's buffer-relative rule, which is the
+        // defect `tests/ros2_cdr_alignment_tests.rs` now pins.
         let mut data = le_header();
-        data.extend_from_slice(&[0u8; 4]); // 4 pad bytes to align f64 to 8
         data.extend_from_slice(&1.5f64.to_le_bytes());
         let mut d = CdrDeserializer::new(&data)?;
-        // pos starts at 4, align(8) moves to 8
         assert!((d.read_f64()? - 1.5).abs() < 1e-10);
         Ok(())
     }
@@ -643,9 +667,8 @@ mod tests {
 
     #[test]
     fn read_f64_array_3() -> TestResult {
-        // f64 uses align(8), starting from pos 4. align to 8 → pos 8 (4 pad bytes needed).
+        // Body offset 0 is already 8-aligned, so no padding — see `read_f64_le`.
         let mut data = le_header();
-        data.extend_from_slice(&[0u8; 4]); // padding to reach 8-byte alignment
         for &v in &[1.0f64, 2.0, 3.0] {
             data.extend_from_slice(&v.to_le_bytes());
         }

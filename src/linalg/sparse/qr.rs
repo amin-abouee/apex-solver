@@ -1,18 +1,16 @@
 use faer::{
     Mat,
     linalg::solvers::Solve,
+    sparse::SparseColMat,
     sparse::linalg::solvers::{Qr, SymbolicQr},
-    sparse::{SparseColMat, Triplet},
 };
-use std::ops::Mul;
 
 use crate::error::ErrorLogging;
-use crate::linalg::{LinAlgError, LinAlgResult, LinearSolver, SparseMode};
+use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode};
 
 #[derive(Debug, Clone)]
 pub struct SparseQRSolver {
-    factorizer: Option<Qr<usize, f64>>,
-
     /// Cached symbolic factorization for reuse across iterations.
     ///
     /// This is computed once and reused when the sparsity pattern doesn't change,
@@ -20,6 +18,9 @@ pub struct SparseQRSolver {
     /// For augmented systems where only lambda changes, the sparsity pattern
     /// remains the same (adding diagonal lambda*I doesn't change the pattern).
     symbolic_factorization: Option<SymbolicQr<usize>>,
+
+    /// Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
+    ne_cache: LazyNormalEquations,
 
     /// The Hessian matrix, computed as `(J^T * W * J)`.
     ///
@@ -30,28 +31,15 @@ pub struct SparseQRSolver {
     ///
     /// This is `None` if the gradient could not be computed.
     gradient: Option<Mat<f64>>,
-
-    /// The parameter covariance matrix, computed as `(J^T * W * J)^-1`.
-    ///
-    /// This is `None` if the Hessian is singular or ill-conditioned.
-    covariance_matrix: Option<Mat<f64>>,
-    /// Asymptotic standard errors of the parameters.
-    ///
-    /// This is `None` if the covariance matrix could not be computed.
-    /// Each error is the square root of the corresponding diagonal element
-    /// of the covariance matrix.
-    standard_errors: Option<Mat<f64>>,
 }
 
 impl SparseQRSolver {
     pub fn new() -> Self {
         SparseQRSolver {
-            factorizer: None,
             symbolic_factorization: None,
+            ne_cache: LazyNormalEquations::default(),
             hessian: None,
             gradient: None,
-            covariance_matrix: None,
-            standard_errors: None,
         }
     }
 
@@ -61,38 +49,6 @@ impl SparseQRSolver {
 
     pub fn gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
-    }
-
-    pub fn compute_standard_errors(&mut self) -> Option<&Mat<f64>> {
-        // Ensure covariance matrix is computed first
-        if self.covariance_matrix.is_none() {
-            LinearSolver::<SparseMode>::compute_covariance_matrix(self);
-        }
-
-        // Return None if hessian is not available (solver not initialized)
-        let hessian = self.hessian.as_ref()?;
-        let n = hessian.ncols();
-        // Compute standard errors as sqrt of diagonal elements
-        if let Some(cov) = &self.covariance_matrix {
-            let mut std_errors = Mat::zeros(n, 1);
-            for i in 0..n {
-                let diag_val = cov[(i, i)];
-                if diag_val >= 0.0 {
-                    std_errors[(i, 0)] = diag_val.sqrt();
-                } else {
-                    // Negative diagonal indicates numerical issues
-                    return None;
-                }
-            }
-            self.standard_errors = Some(std_errors);
-        }
-        self.standard_errors.as_ref()
-    }
-
-    /// Reset covariance computation state (useful for iterative optimization)
-    pub fn reset_covariance(&mut self) {
-        self.covariance_matrix = None;
-        self.standard_errors = None;
     }
 }
 
@@ -108,20 +64,9 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
-        // Form the normal equations explicitly: H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r (stored as positive, will negate when solving)
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
+        // Form the normal equations: H = JᵀJ, g = Jᵀr (parallel faer kernels,
+        // symbolic product cached across iterations).
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
         // Check if we can reuse the cached symbolic factorization
         // We can reuse it if the sparsity pattern (symbolic structure) hasn't changed
@@ -154,7 +99,6 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(qr);
 
         Ok(dx)
     }
@@ -163,37 +107,13 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         &mut self,
         residuals: &Mat<f64>,
         jacobians: &SparseColMat<usize, f64>,
-        lambda: f64,
+        damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
-        let n = jacobians.ncols();
+        // H = JᵀJ, g = Jᵀr (parallel faer kernels)
+        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobians)?;
 
-        // H = J^T * J
-        let jt = jacobians.as_ref().transpose();
-        let hessian = jt
-            .to_col_major()
-            .map_err(|e| {
-                LinAlgError::MatrixConversion(
-                    "Failed to convert transposed Jacobian to column-major format".to_string(),
-                )
-                .log_with_source(e)
-            })?
-            .mul(jacobians.as_ref());
-
-        // g = J^T * r
-        let gradient = jacobians.as_ref().transpose().mul(residuals);
-
-        // H_aug = H + lambda * I
-        let mut lambda_i_triplets = Vec::with_capacity(n);
-        for i in 0..n {
-            lambda_i_triplets.push(Triplet::new(i, i, lambda));
-        }
-        let lambda_i =
-            SparseColMat::try_new_from_triplets(n, n, &lambda_i_triplets).map_err(|e| {
-                LinAlgError::SparseMatrixCreation("Failed to create lambda*I matrix".to_string())
-                    .log_with_source(e)
-            })?;
-
-        let augmented_hessian = hessian.as_ref() + lambda_i;
+        // H_aug = H + λ·D — diagonal edit on the cached product pattern.
+        let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
 
         // Check if we can reuse the cached symbolic factorization
         // For augmented systems, the sparsity pattern remains the same
@@ -225,7 +145,6 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
         let dx = qr.solve(-&gradient);
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
-        self.factorizer = Some(qr);
 
         Ok(dx)
     }
@@ -237,33 +156,12 @@ impl LinearSolver<SparseMode> for SparseQRSolver {
     fn get_gradient(&self) -> Option<&Mat<f64>> {
         self.gradient.as_ref()
     }
-
-    fn compute_covariance_matrix(&mut self) -> Option<&Mat<f64>> {
-        // Only compute if we have a factorizer and hessian, but no covariance matrix yet
-        if self.factorizer.is_some()
-            && self.hessian.is_some()
-            && self.covariance_matrix.is_none()
-            && let (Some(factorizer), Some(hessian)) = (&self.factorizer, &self.hessian)
-        {
-            let n = hessian.ncols();
-            // Create identity matrix
-            let identity = Mat::identity(n, n);
-
-            // Solve H * X = I to get X = H^(-1) = covariance matrix
-            let cov_matrix = factorizer.solve(&identity);
-            self.covariance_matrix = Some(cov_matrix);
-        }
-        self.covariance_matrix.as_ref()
-    }
-
-    fn get_covariance_matrix(&self) -> Option<&Mat<f64>> {
-        self.covariance_matrix.as_ref()
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use faer::sparse::Triplet;
 
     const TOLERANCE: f64 = 1e-10;
 
@@ -298,10 +196,12 @@ mod tests {
     #[test]
     fn test_qr_solver_creation() {
         let solver = SparseQRSolver::new();
-        assert!(solver.factorizer.is_none());
+        assert!(solver.hessian.is_none());
+        assert!(solver.gradient.is_none());
 
         let default_solver = SparseQRSolver::default();
-        assert!(default_solver.factorizer.is_none());
+        assert!(default_solver.hessian.is_none());
+        assert!(default_solver.gradient.is_none());
     }
 
     /// Test normal equation solving with QR decomposition
@@ -316,7 +216,6 @@ mod tests {
         assert_eq!(solution.ncols(), 1);
 
         // Verify symbolic pattern was cached
-        assert!(solver.factorizer.is_some());
         Ok(())
     }
 
@@ -329,7 +228,6 @@ mod tests {
         // First solve
         let sol1 =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        assert!(solver.factorizer.is_some());
 
         // Second solve should reuse pattern
         let sol2 =
@@ -353,7 +251,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            lambda,
+            &Damping::identity(lambda),
         )?;
         assert_eq!(solution.nrows(), 3); // Number of variables
         assert_eq!(solution.ncols(), 1);
@@ -373,13 +271,13 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            lambda1,
+            &Damping::identity(lambda1),
         )?;
         let sol2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver,
             &residuals,
             &jacobian,
-            lambda2,
+            &Damping::identity(lambda2),
         )?;
 
         // Solutions should be different due to different regularization
@@ -444,7 +342,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            lambda,
+            &Damping::identity(lambda),
         )?;
         assert_eq!(solution.nrows(), 2); // Should return only the variable part
         assert_eq!(solution.ncols(), 1);
@@ -486,9 +384,8 @@ mod tests {
     fn test_qr_solver_clone() {
         let solver1 = SparseQRSolver::new();
         let solver2 = solver1.clone();
-
-        assert!(solver1.factorizer.is_none());
-        assert!(solver2.factorizer.is_none());
+        assert!(solver2.hessian.is_none());
+        assert!(solver2.gradient.is_none());
     }
 
     /// Test zero lambda in augmented system (should behave like normal equation)
@@ -503,7 +400,7 @@ mod tests {
             &mut solver,
             &residuals,
             &jacobian,
-            0.0,
+            &Damping::identity(0.0),
         )?;
 
         // Solutions should be very close (within numerical precision)
@@ -512,175 +409,6 @@ mod tests {
                 (normal_sol[(i, 0)] - augmented_sol[(i, 0)]).abs() < 1e-8,
                 "Zero lambda augmented should match normal equation"
             );
-        }
-        Ok(())
-    }
-
-    /// Test covariance matrix computation
-    #[test]
-    fn test_qr_covariance_computation() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve to set up factorizer and hessian
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // Now compute covariance matrix
-        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov_matrix.is_some());
-
-        if let Some(cov) = cov_matrix {
-            assert_eq!(cov.nrows(), 3); // Should be n x n where n is number of variables
-            assert_eq!(cov.ncols(), 3);
-
-            // Covariance matrix should be symmetric
-            for i in 0..3 {
-                for j in 0..3 {
-                    assert!(
-                        (cov[(i, j)] - cov[(j, i)]).abs() < TOLERANCE,
-                        "Covariance matrix should be symmetric"
-                    );
-                }
-            }
-
-            // Diagonal elements should be positive (variances)
-            for i in 0..3 {
-                assert!(
-                    cov[(i, i)] > 0.0,
-                    "Diagonal elements (variances) should be positive"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Test standard errors computation
-    #[test]
-    fn test_qr_standard_errors_computation() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve to set up factorizer and hessian
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // Compute covariance matrix first (this also computes standard errors)
-        solver.compute_standard_errors();
-
-        // Now check that both covariance matrix and standard errors are available
-        assert!(solver.covariance_matrix.is_some());
-        assert!(solver.standard_errors.is_some());
-
-        if let (Some(cov), Some(errors)) = (&solver.covariance_matrix, &solver.standard_errors) {
-            assert_eq!(errors.nrows(), 3); // Should be n x 1 where n is number of variables
-            assert_eq!(errors.ncols(), 1);
-
-            // All standard errors should be positive
-            for i in 0..3 {
-                assert!(errors[(i, 0)] > 0.0, "Standard errors should be positive");
-            }
-
-            // Verify relationship: std_error = sqrt(covariance_diagonal)
-            for i in 0..3 {
-                let expected_std_error = cov[(i, i)].sqrt();
-                assert!(
-                    (errors[(i, 0)] - expected_std_error).abs() < TOLERANCE,
-                    "Standard error should equal sqrt of covariance diagonal"
-                );
-            }
-        }
-        Ok(())
-    }
-
-    /// Test covariance computation with well-conditioned system
-    #[test]
-    fn test_qr_covariance_well_conditioned() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-
-        // Create a well-conditioned 2x2 system
-        let triplets = vec![
-            Triplet::new(0, 0, 2.0),
-            Triplet::new(0, 1, 0.0),
-            Triplet::new(1, 0, 0.0),
-            Triplet::new(1, 1, 3.0),
-        ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| (i + 1) as f64);
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(cov_matrix.is_some());
-
-        if let Some(cov) = cov_matrix {
-            // For this system, H = J^T * W * J = [[4, 0], [0, 9]]
-            // So covariance = H^(-1) = [[1/4, 0], [0, 1/9]]
-            assert!((cov[(0, 0)] - 0.25).abs() < TOLERANCE);
-            assert!((cov[(1, 1)] - 1.0 / 9.0).abs() < TOLERANCE);
-            assert!(cov[(0, 1)].abs() < TOLERANCE);
-            assert!(cov[(1, 0)].abs() < TOLERANCE);
-        }
-        Ok(())
-    }
-
-    /// Test covariance computation caching
-    #[test]
-    fn test_qr_covariance_caching() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        // First solve
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-
-        // First covariance computation
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(solver.covariance_matrix.is_some());
-
-        // Get pointer to first computation
-        if let Some(cov1) = &solver.covariance_matrix {
-            let cov1_ptr = cov1.as_ptr();
-
-            // Second covariance computation should return cached result
-            LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-            assert!(solver.covariance_matrix.is_some());
-
-            // Get pointer to second computation
-            if let Some(cov2) = &solver.covariance_matrix {
-                let cov2_ptr = cov2.as_ptr();
-
-                // Should be the same pointer (cached)
-                assert_eq!(cov1_ptr, cov2_ptr, "Covariance matrix should be cached");
-            }
-        }
-        Ok(())
-    }
-
-    /// Test that covariance computation fails gracefully for singular systems
-    #[test]
-    fn test_qr_covariance_singular_system() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-
-        // Create a singular system (rank deficient)
-        let triplets = vec![
-            Triplet::new(0, 0, 1.0),
-            Triplet::new(0, 1, 2.0),
-            Triplet::new(1, 0, 2.0),
-            Triplet::new(1, 1, 4.0), // Second row is 2x first row
-        ];
-        let jacobian = SparseColMat::try_new_from_triplets(2, 2, &triplets)?;
-        let residuals = Mat::from_fn(2, 1, |i, _| i as f64);
-
-        // QR can handle rank-deficient systems, but covariance may be problematic
-        let result =
-            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
-        if result.is_ok() {
-            // If solve succeeded, covariance computation might still fail due to singularity
-            let cov_matrix = LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-            // We don't assert failure here since QR might handle this case
-            if let Some(cov) = cov_matrix {
-                // If covariance is computed, check that it's reasonable
-                assert!(cov.nrows() == 2);
-                assert!(cov.ncols() == 2);
-            }
         }
         Ok(())
     }
@@ -711,22 +439,6 @@ mod tests {
         Ok(())
     }
 
-    /// Test reset_covariance() clears the cached covariance
-    #[test]
-    fn test_qr_reset_covariance() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-        assert!(solver.covariance_matrix.is_some());
-
-        solver.reset_covariance();
-        assert!(solver.covariance_matrix.is_none());
-        assert!(solver.standard_errors.is_none());
-        Ok(())
-    }
-
     /// Test get_hessian() trait method returns Some after solve
     #[test]
     fn test_qr_get_hessian_trait() -> TestResult {
@@ -750,25 +462,6 @@ mod tests {
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
         assert!(LinearSolver::<SparseMode>::get_gradient(&solver).is_some());
-        Ok(())
-    }
-
-    /// Test get_covariance_matrix() getter matches compute result
-    #[test]
-    fn test_qr_get_covariance_matrix_getter() -> TestResult {
-        let mut solver = SparseQRSolver::new();
-        let (jacobian, residuals) = create_test_data()?;
-
-        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        LinearSolver::<SparseMode>::compute_covariance_matrix(&mut solver);
-
-        let via_getter = LinearSolver::<SparseMode>::get_covariance_matrix(&solver);
-        assert!(via_getter.is_some());
-
-        if let Some(cov) = via_getter {
-            assert_eq!(cov.nrows(), 3);
-            assert_eq!(cov.ncols(), 3);
-        }
         Ok(())
     }
 }
