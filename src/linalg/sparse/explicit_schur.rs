@@ -57,6 +57,7 @@ use faer::{
     linalg::solvers::Solve,
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
+use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use tracing::debug;
 
@@ -1173,19 +1174,24 @@ impl SparseSchurComplementSolver {
     }
 
     /// `Jᵀr` over the whole system, for the optimizers' gradient.
+    ///
+    /// Parallel over columns; each column's dot product stays serial, so the
+    /// result is bit-identical to the sequential version.
     fn full_gradient(jacobian: &SparseColMat<usize, f64>, residuals: &Mat<f64>) -> Mat<f64> {
         let symbolic = jacobian.symbolic();
-        let mut g = Mat::<f64>::zeros(jacobian.ncols(), 1);
-        for col in 0..jacobian.ncols() {
-            let rows = symbolic.row_idx_of_col_raw(col);
-            let vals = jacobian.val_of_col(col);
-            let mut acc = 0.0;
-            for (i, &row) in rows.iter().enumerate() {
-                acc += vals[i] * residuals[(row, 0)];
-            }
-            g[(col, 0)] = acc;
-        }
-        g
+        let per_col: Vec<f64> = (0..jacobian.ncols())
+            .into_par_iter()
+            .map(|col| {
+                let rows = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let mut acc = 0.0;
+                for (i, &row) in rows.iter().enumerate() {
+                    acc += vals[i] * residuals[(row, 0)];
+                }
+                acc
+            })
+            .collect();
+        Mat::from_fn(jacobian.ncols(), 1, |r, _| per_col[r])
     }
 
     /// `δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k)`, evaluated from `J` rather than `H_ke`.
@@ -1218,15 +1224,23 @@ impl SparseSchurComplementSolver {
         }
 
         let mut delta_e = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
+        // Scratch for Eᵀ·(J·δ_k), sized for the largest eliminated block. The
+        // partition layer allows arbitrary DOF, so there is no cap: truncating
+        // here would silently drop coupling terms and corrupt the step.
+        let max_dof = partition
+            .eliminated_blocks()
+            .iter()
+            .map(|block| block.dof)
+            .max()
+            .unwrap_or(0);
+        let mut etjd = vec![0.0f64; max_dof];
         for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             let dof = block.dof;
             let base = partition.eliminated_offset(block_idx);
             let inv = reduced.eliminated_inverse.block(block_idx);
 
             // Eᵀ·(J·δ_k) for this chunk.
-            let mut etjd = [0.0f64; 16];
-            let etjd = &mut etjd[..dof.min(16)];
-            for (a, slot) in etjd.iter_mut().enumerate() {
+            for (a, slot) in etjd[..dof].iter_mut().enumerate() {
                 let col = block.col_start + a;
                 let rows = symbolic.row_idx_of_col_raw(col);
                 let vals = jacobian.val_of_col(col);
@@ -1240,7 +1254,7 @@ impl SparseSchurComplementSolver {
             // δ_e = −H_ee⁻¹·g_e − H_ee⁻¹·Eᵀ(J·δ_k)
             for r in 0..dof {
                 let mut acc = -reduced.eliminated_rhs[(base + r, 0)];
-                for (c, &term) in etjd.iter().enumerate() {
+                for (c, &term) in etjd[..dof].iter().enumerate() {
                     acc -= inv[c * dof + r] * term;
                 }
                 delta_e[(base + r, 0)] = acc;
@@ -1267,9 +1281,21 @@ impl SparseSchurComplementSolver {
 
         let delta_k = match self.variant {
             SchurVariant::ExplicitIterative => self.solve_with_pcg(&s, &g_reduced)?,
-            // `Iterative` never reaches here — it is dispatched to the
-            // matrix-free solver before `S` is ever formed.
-            _ => self.solve_with_cholesky(&s, &g_reduced)?,
+            // `Iterative` is the matrix-free solver, which the optimizer
+            // constructs directly; standing in with Cholesky here would make
+            // the variant a lie.
+            SchurVariant::Iterative => {
+                return Err(LinAlgError::InvalidInput(
+                    "SchurVariant::Iterative is the matrix-free solver, dispatched by the \
+                     optimizer to IterativeSchurSolver; SparseSchurComplementSolver handles \
+                     only Sparse, ChunkedSparse and ExplicitIterative"
+                        .to_string(),
+                )
+                .log());
+            }
+            SchurVariant::Sparse | SchurVariant::ChunkedSparse => {
+                self.solve_with_cholesky(&s, &g_reduced)?
+            }
         };
 
         let delta_e = self.back_substitute(&delta_k, g_e, h_ke, h_ee_inv)?;
@@ -1853,16 +1879,21 @@ mod tests {
     /// Test Schur solve with Iterative (PCG) variant exercises solve_with_pcg path
     #[test]
     fn test_explicit_schur_solve_iterative_variant() -> TestResult {
-        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+        let (variables, variable_index_map, _jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
         let mut solver = SparseSchurComplementSolver::new()
             .with_variant(SchurVariant::Iterative)
             .with_cg_params(200, 1e-6);
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
-        let delta =
-            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
-        assert_eq!(delta.nrows(), 21);
+        // `Iterative` is the matrix-free solver; handing it to this solver
+        // must be an error, not a silent Cholesky fallback.
+        let result =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &_jacobian);
+        let Err(err) = result else {
+            panic!("Iterative must not silently run Cholesky on the formed S");
+        };
+        assert!(err.to_string().contains("matrix-free"), "{err}");
         Ok(())
     }
 
