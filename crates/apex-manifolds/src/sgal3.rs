@@ -358,17 +358,19 @@ impl LieGroup for SGal3 {
         let t = self.time_impl();
         let mut adj = Matrix10::zeros();
 
-        // Tangent ordering [ρ, ν, θ, s] — per manif SGal3 source:
-        // Ad(g) = [ R   -t·R   [ρ-t·ν]×R   ν ]
-        //         [ 0    R     [ν]×R         0 ]
-        //         [ 0    0     R             0 ]
-        //         [ 0    0     0             1 ]
+        // Tangent ordering [ρ, ν, θ, s]. Derived from the corrected group law
+        // g₁∘g₂ = (R₁R₂, R₁(t₂+s₁ν₂)+ρ₁, R₁ν₂+ν₁, t₁+t₂): conjugating
+        // exp(ξ) ≈ (I+θ̂, ρ, ν, σ) by g gives
+        //   ρ' = Rρ + t·Rν + ρ̂Rθ − ν·σ
+        //   ν' = Rν + ν̂Rθ,  θ' = Rθ,  s' = σ.
+        // Verified against Log(g ∘ exp(ξ) ∘ g⁻¹) by
+        // `adjoint_matches_group_conjugation`.
 
         adj.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-        adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&(-t * r));
+        adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&(t * r));
         adj.fixed_view_mut::<3, 3>(0, 6)
-            .copy_from(&(SO3Tangent::new(rho - t * nu).hat() * r));
-        adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&nu);
+            .copy_from(&(SO3Tangent::new(rho).hat() * r));
+        adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&(-nu));
 
         adj.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
         adj.fixed_view_mut::<3, 3>(3, 6)
@@ -1646,5 +1648,27 @@ mod tests {
         let t = SGal3Tangent::random();
         let recovered = SGal3Tangent::from_slice(t.as_slice());
         assert!(t.is_approx(&recovered, 1e-14));
+    }
+}
+
+#[cfg(test)]
+mod adjoint_check {
+    use super::*;
+    use crate::Tangent;
+
+    // Ad(g) ξ must equal Log(g ∘ exp(ξ) ∘ g⁻¹).
+    #[test]
+    fn adjoint_matches_group_conjugation() {
+        for _ in 0..20 {
+            let g = SGal3::random();
+            let xi = SGal3Tangent::random();
+            let conj = g
+                .compose(&xi.exp(None), None, None)
+                .compose(&g.inverse(None), None, None);
+            let lhs = conj.log(None);
+            let rhs = g.adjoint() * xi.data;
+            let err = (lhs.data - rhs).norm();
+            assert!(err < 1e-8, "adjoint mismatch: err = {err:.3e}");
+        }
     }
 }
