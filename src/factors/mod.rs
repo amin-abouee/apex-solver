@@ -62,6 +62,7 @@ pub mod gps_factor;
 pub mod bearing_factor;
 pub mod depth_factor;
 pub mod homogeneous_point_factor;
+pub mod visual;
 
 // LiDAR / ICP factors
 pub mod icp_factor;

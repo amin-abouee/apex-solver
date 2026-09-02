@@ -23,14 +23,14 @@ use apex_manifolds::se3::SE3;
 /// pixel-scale residuals/Jacobian entries in the same least-squares problem
 /// ill-conditions the normal equations (observed as Cholesky/linear-solve
 /// failures in practice).
-const CHEIRALITY_BASE_PENALTY: f64 = 1.0e4;
+pub(crate) const CHEIRALITY_BASE_PENALTY: f64 = 1.0e4;
 
 /// Penalty growth rate per metre of depth violation, added on top of
 /// [`CHEIRALITY_BASE_PENALTY`] so the penalty keeps increasing — and keeps
 /// providing a gradient pointing back toward validity — the further behind
 /// the camera a point ends up. Kept modest for the same conditioning reason
 /// as [`CHEIRALITY_BASE_PENALTY`].
-const CHEIRALITY_DEPTH_SCALE: f64 = 1.0e3;
+pub(crate) const CHEIRALITY_DEPTH_SCALE: f64 = 1.0e3;
 
 /// Trait for optimization configuration.
 ///
