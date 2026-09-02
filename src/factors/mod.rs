@@ -52,6 +52,12 @@ pub mod between_factor;
 pub mod prior_factor;
 pub mod projection_factor;
 
+// Range / bearing-range factors (UWB, radar, landmarks)
+pub mod range_factor;
+
+// Marginalization support
+pub mod marginal;
+
 // IMU factors
 pub mod imu;
 
@@ -80,8 +86,10 @@ pub use imu::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, ImuPreintegra
 pub use lidar_factor::{
     LidarEdgeFactor, LidarPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
+pub use marginal::{MarginalPriorFactor, PoseRotationPrior, PoseTranslationPrior};
 pub use prior_factor::{EuclideanPriorFactor, PriorFactor};
 pub use projection_factor::ProjectionFactor;
+pub use range_factor::{BearingRangeFactor, PosePointRangeFactor, PosePoseRangeFactor};
 
 // Optimization configuration types
 
