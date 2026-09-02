@@ -470,6 +470,35 @@ fn chunked_schur_matches_cholesky() -> TestResult {
     Ok(())
 }
 
+/// An eliminated block larger than the 16-wide scratch the back-substitution
+/// used to cap itself at. Regression: `Eᵀ(J·δ_k)` was silently truncated to 16
+/// components, producing a wrong step for any DOF > 16 with no diagnostic.
+#[test]
+fn chunked_schur_matches_cholesky_for_large_eliminated_block() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_grouped_system(&[6, 6, 18], &[2], &[(0, 2), (1, 2)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2]].into_iter().collect();
+
+    let mut cholesky = SparseCholeskySolver::new();
+    let reference = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_steps_agree(&reference, &step, "chunked elimination, 18-DOF eliminated block");
+    Ok(())
+}
+
 /// The chunked path must serve the quadratic model without ever holding `JᵀJ`.
 #[test]
 fn chunked_schur_serves_hessian_action_without_the_matrix() -> TestResult {
@@ -514,6 +543,35 @@ fn chunked_schur_serves_hessian_action_without_the_matrix() -> TestResult {
             got[(i, 0)]
         );
     }
+    Ok(())
+}
+
+/// `Iterative` is the matrix-free solver, which the optimizer constructs
+/// directly. A `SparseSchurComplementSolver` handed that variant must refuse
+/// instead of silently falling back to Cholesky on the formed `S`.
+#[test]
+fn directly_constructed_iterative_variant_is_rejected() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_system(&[6, 3, 3], &[(0, 1), (0, 2)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[1], system.keys[2]].into_iter().collect();
+
+    let mut schur = SparseSchurComplementSolver::new().with_variant(SchurVariant::Iterative);
+    schur.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let result = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut schur,
+        &system.residuals,
+        &system.jacobian,
+    );
+
+    let Err(err) = result else {
+        panic!("a SparseSchurComplementSolver given SchurVariant::Iterative must not silently run Cholesky");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("matrix-free"),
+        "error should point at the matrix-free dispatch, got: {message}"
+    );
     Ok(())
 }
 
