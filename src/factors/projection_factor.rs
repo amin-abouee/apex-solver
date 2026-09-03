@@ -4,6 +4,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix2xX, Matrix3xX, Vector3};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
@@ -80,7 +81,8 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone)]
+//
+// NOTE: `Clone` is manual because of the atomic fallback counter below.
 pub struct ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
@@ -101,8 +103,33 @@ where
     /// Log warnings for cheirality exceptions (points behind camera)
     pub verbose_cheirality: bool,
 
+    /// How often intrinsics decoding failed and evaluation fell back to the
+    /// constructor-time camera. A nonzero count after a solve means the
+    /// intrinsics blocks are degenerate — inspect, don't ignore.
+    intrinsics_fallbacks: AtomicUsize,
+
     /// Phantom data for optimization type
     _phantom: PhantomData<OP>,
+}
+
+impl<CAM, OP> Clone for ProjectionFactor<CAM, OP>
+where
+    CAM: CameraModel + Clone,
+    OP: OptimizationConfig,
+{
+    fn clone(&self) -> Self {
+        Self {
+            observations: self.observations.clone(),
+            camera: self.camera.clone(),
+            fixed_pose: self.fixed_pose.clone(),
+            fixed_landmarks: self.fixed_landmarks.clone(),
+            verbose_cheirality: self.verbose_cheirality,
+            intrinsics_fallbacks: AtomicUsize::new(
+                self.intrinsics_fallbacks.load(Ordering::Relaxed),
+            ),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<CAM, OP> ProjectionFactor<CAM, OP>
@@ -139,6 +166,7 @@ where
             fixed_pose: None,
             fixed_landmarks: None,
             verbose_cheirality: false,
+            intrinsics_fallbacks: AtomicUsize::new(0),
             _phantom: PhantomData,
         }
     }
@@ -195,6 +223,13 @@ where
     pub fn with_verbose_cheirality(mut self) -> Self {
         self.verbose_cheirality = true;
         self
+    }
+
+    /// How often intrinsics decoding failed and evaluation silently fell back
+    /// to the constructor-time camera. Query after a solve: nonzero means the
+    /// intrinsics blocks went degenerate mid-optimization.
+    pub fn intrinsics_fallback_count(&self) -> usize {
+        self.intrinsics_fallbacks.load(Ordering::Relaxed)
     }
 
     /// Get number of observations.
@@ -449,21 +484,29 @@ where
 
         // Decode intrinsics only when they are being optimized; otherwise (and
         // on a decode failure) fall back to the constructor-time camera by
-        // reference instead of cloning it.
+        // reference instead of cloning it. Failures are counted: a nonzero
+        // `intrinsics_fallback_count` after a solve means degenerate
+        // intrinsics blocks, not a working self-calibration.
         let decoded_camera: Option<CAM> = if OP::INTRINSIC {
             CAM::try_from(params[param_idx]).ok()
         } else {
             None
         };
+        if OP::INTRINSIC && decoded_camera.is_none() {
+            self.intrinsics_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
         let camera: &CAM = decoded_camera.as_ref().unwrap_or(&self.camera);
 
         let n = self.observations.ncols();
-        debug_assert_eq!(
+        // Hard assert, not debug-only: a stride mismatch silently misprojects
+        // every landmark, and `profile.test` inherits release, so a
+        // `debug_assert` would never fire under `cargo test`.
+        assert_eq!(
             landmarks.len(),
             3 * n,
-            "Number of landmarks ({}) must match observations ({})",
-            landmarks.len() / 3,
-            n
+            "landmark buffer length {} is not 3×N observations ({n}); \
+             the buffer must be flat column-major [x0,y0,z0,…]",
+            landmarks.len()
         );
 
         // Write directly into caller-provided buffers — zero temporary allocation.

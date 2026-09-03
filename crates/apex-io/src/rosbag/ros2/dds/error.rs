@@ -87,4 +87,20 @@ mod tests {
         let err = DdsError::ThreadJoin("OS error".to_string());
         assert!(err.to_string().contains("OS error"));
     }
+
+    #[test]
+    fn thread_spawn_display() {
+        let err = DdsError::ThreadSpawn("resource exhaustion".to_string());
+        let s = err.to_string();
+        assert!(s.contains("spawn"));
+        assert!(s.contains("resource exhaustion"));
+    }
+
+    #[test]
+    fn runtime_creation_display() {
+        let err = DdsError::RuntimeCreation("no tokio driver".to_string());
+        let s = err.to_string();
+        assert!(s.contains("runtime"));
+        assert!(s.contains("no tokio driver"));
+    }
 }
