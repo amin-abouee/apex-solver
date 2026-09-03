@@ -24,6 +24,16 @@ pub struct SymbolicStructure {
 }
 
 /// Build the symbolic sparsity structure for the Jacobian matrix.
+///
+/// Blocks are visited in `residual_row_start_idx` order, matching
+/// [`AssemblyWorkspace`](crate::linearizer::AssemblyWorkspace) `block_order`
+/// and therefore the order [`assemble_sparse`] pushes Jacobian values in.
+/// That shared order is load-bearing: `new_from_argsort` pairs the pushed
+/// values with these pairs positionally, so any disagreement silently
+/// permutes `J`'s rows against `r`. Slotmap iteration order coincides with
+/// row order only until rows are regrouped
+/// ([`Problem::group_rows_for_elimination`](crate::core::problem::Problem::group_rows_for_elimination)),
+/// which is exactly when the Schur path needs assembly to be right.
 pub fn build_symbolic_structure(
     problem: &Problem,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
@@ -32,7 +42,9 @@ pub fn build_symbolic_structure(
 ) -> LinearizerResult<SymbolicStructure> {
     let mut indices = Vec::<Pair<usize, usize>>::new();
 
-    problem.residual_blocks().iter().for_each(|(_, block)| {
+    let mut blocks: Vec<_> = problem.residual_blocks().iter().collect();
+    blocks.sort_by_key(|(_, block)| block.residual_row_start_idx);
+    blocks.iter().for_each(|(_, block)| {
         let mut var_local_sizes = Vec::<(usize, usize)>::new();
         let mut local_offset = 0;
 
@@ -221,6 +233,33 @@ mod tests {
         (problem, k)
     }
 
+    /// Unary factor with a configurable Jacobian gain, so a row permutation
+    /// of `J` is observable (uniform gains would hide it).
+    struct ScaledLinearFactor {
+        target: f64,
+        gain: f64,
+    }
+
+    impl factors::Factor for ScaledLinearFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            residual[0] = params[0][0] - self.target;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = self.gain;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            1
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (1, 1)
+        }
+    }
+
     fn build_index_map(problem: &Problem) -> (SecondaryMap<VarKey, usize>, usize) {
         let mut map = SecondaryMap::new();
         let mut offset = 0;
@@ -259,6 +298,85 @@ mod tests {
         let (index_map, total_dof) = build_index_map(&problem);
         let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
         assert_eq!(sym.pattern.compute_nnz(), 2);
+        Ok(())
+    }
+
+    /// Regrouped rows must not desynchronize the sparse Jacobian from the
+    /// residual vector.
+    ///
+    /// Regression: the symbolic index pairs were pushed in slotmap order while
+    /// Jacobian values scatter in row-start order, so after
+    /// `group_rows_for_elimination` the two orders disagreed and `J`'s rows no
+    /// longer matched `r`'s — silently corrupting every Schur-backed solve
+    /// while Cholesky (which never regroups) stayed exact. The dense path
+    /// indexes absolutely and is immune, so it serves as the oracle here.
+    /// Insertion is deliberately C,B,A so slotmap order and grouped row order
+    /// differ.
+    #[test]
+    fn test_grouped_sparse_assembly_matches_dense() -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let c = problem.add_variable(ManifoldType::RN, dvector![3.0]);
+        let b = problem.add_variable(ManifoldType::RN, dvector![2.0]);
+        let a = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+        // Distinct gains per block so a row permutation of J is observable.
+        for (key, target, gain) in [(c, 30.0, 3.0), (b, 20.0, 2.0), (a, 10.0, 1.0)] {
+            problem.add_residual_block(&[key], Box::new(ScaledLinearFactor { target, gain }), None);
+        }
+        problem.mark_for_elimination(c);
+        assert!(
+            problem.group_rows_for_elimination(),
+            "insertion order must differ from grouped order for this test"
+        );
+
+        let (index_map, total_dof) = build_index_map(&problem);
+        let sym = build_symbolic_structure(&problem, &problem.variables, &index_map, total_dof)?;
+        let mut workspace = AssemblyWorkspace::build(&problem);
+        let (r_sparse, j_sparse) = assemble_sparse(
+            &problem,
+            &problem.variables,
+            &index_map,
+            &sym,
+            &mut workspace,
+        )?;
+        let (r_dense, j_dense) = crate::linearizer::cpu::dense::assemble_dense(
+            &problem,
+            &problem.variables,
+            &index_map,
+            total_dof,
+            &mut workspace,
+        )?;
+
+        assert_eq!(r_sparse.nrows(), 3);
+        for i in 0..3 {
+            assert!(
+                (r_sparse[(i, 0)] - r_dense[(i, 0)]).abs() < 1e-12,
+                "residual row {i} differs"
+            );
+        }
+        // Each block is unary: exactly one nonzero per row and column, and it
+        // must sit in the same (row, col) in both assemblies — with distinct
+        // gains per block, any row permutation shows up as a value mismatch.
+        assert_eq!(j_sparse.as_ref().compute_nnz(), 3);
+        for col in 0..total_dof {
+            let rows = j_sparse.symbolic().row_idx_of_col_raw(col);
+            let vals = j_sparse.val_of_col(col);
+            assert_eq!(rows.len(), 1, "col {col} must hold exactly one entry");
+            assert!(
+                (vals[0] - j_dense[(rows[0], col)]).abs() < 1e-12,
+                "sparse value {} disagrees with dense {} at ({}, {col})",
+                vals[0],
+                j_dense[(rows[0], col)],
+                rows[0]
+            );
+            for row in 0..3 {
+                if row != rows[0] {
+                    assert!(
+                        j_dense[(row, col)].abs() < 1e-12,
+                        "dense has an unexpected entry at ({row}, {col})"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

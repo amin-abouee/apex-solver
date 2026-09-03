@@ -15,38 +15,18 @@
 //! per instance and cannot be compared across caches.)
 
 use faer::sparse::SparseColMat;
-use std::hash::Hasher;
 
-/// Deterministic 64-bit FNV-1a hasher over raw bytes.
-#[derive(Debug, Clone, Copy)]
-struct Fnv1a64(u64);
-
-impl Fnv1a64 {
-    const OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+/// Fold one value into an FNV-1a hash.
+///
+/// Values are pre-mixed with a golden-ratio multiply because raw structural
+/// indices (0, 1, 2, …) carry entropy only in their low bits; without the mix
+/// consecutive columns would cancel each other out of the hash.
+#[inline]
+fn fold(mut hash: u64, value: usize) -> u64 {
     const PRIME: u64 = 0x100000001b3;
-
-    fn new() -> Self {
-        Self(Self::OFFSET_BASIS)
-    }
-}
-
-impl Default for Fnv1a64 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Hasher for Fnv1a64 {
-    fn write(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.0 ^= u64::from(byte);
-            self.0 = self.0.wrapping_mul(Self::PRIME);
-        }
-    }
-
-    fn finish(&self) -> u64 {
-        self.0
-    }
+    const MIX: u64 = 0x9E3779B97F4A7C15;
+    hash ^= (value as u64).wrapping_mul(MIX);
+    hash.wrapping_mul(PRIME)
 }
 
 /// Structural identity of a sparse matrix: dimensions, nonzero count, and a
@@ -69,18 +49,19 @@ pub struct PatternFingerprint {
 impl PatternFingerprint {
     /// Fingerprint the sparsity pattern of `matrix` (values ignored).
     pub fn of(matrix: &SparseColMat<usize, f64>) -> Self {
-        use std::hash::Hash;
-
         let symbolic = matrix.symbolic();
-        let mut hasher = Fnv1a64::new();
-        matrix.nrows().hash(&mut hasher);
-        matrix.ncols().hash(&mut hasher);
+        // One xor-multiply per structural integer — the same pass `compute_nnz`
+        // style checks already pay, against O(nnz) floating-point assembly
+        // plus factorization downstream.
+        let mut hash: u64 = 0xcbf29ce484222325;
+        hash = fold(hash, matrix.nrows());
+        hash = fold(hash, matrix.ncols());
         let mut nnz = 0usize;
         for col in 0..matrix.ncols() {
             let rows = symbolic.row_idx_of_col_raw(col);
-            rows.len().hash(&mut hasher);
+            hash = fold(hash, rows.len());
             for &row in rows {
-                row.hash(&mut hasher);
+                hash = fold(hash, row);
                 nnz += 1;
             }
         }
@@ -88,7 +69,7 @@ impl PatternFingerprint {
             nrows: matrix.nrows(),
             ncols: matrix.ncols(),
             nnz,
-            hash: hasher.finish(),
+            hash,
         }
     }
 

@@ -720,6 +720,47 @@ fn sparse_and_chunked_variants_agree() -> TestResult {
     Ok(())
 }
 
+/// Solving the same system twice with one solver instance must give the same
+/// step both times — caches (normal equations, diagonality verdict, arenas)
+/// are keyed on structure and must not accumulate values across solves.
+#[test]
+fn repeated_solve_with_same_instance_agrees() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    for variant in [SchurVariant::Sparse, SchurVariant::ChunkedSparse] {
+        let system = if variant == SchurVariant::Sparse {
+            build_system(
+                &[6, 6, 3, 3, 3],
+                &[(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)],
+            )?
+        } else {
+            build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?
+        };
+        let eliminate: HashSet<VarKey> = if variant == SchurVariant::Sparse {
+            [system.keys[2], system.keys[3], system.keys[4]]
+                .into_iter()
+                .collect()
+        } else {
+            [system.keys[2], system.keys[3]].into_iter().collect()
+        };
+
+        let mut solver = SparseSchurComplementSolver::new().with_variant(variant);
+        solver.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+        let first = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut solver,
+            &system.residuals,
+            &system.jacobian,
+        )?;
+        let second = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut solver,
+            &system.residuals,
+            &system.jacobian,
+        )?;
+        assert_steps_agree(&first, &second, "repeated solve, same instance");
+    }
+    Ok(())
+}
+
 /// `ExplicitIterative` trades exactness for iteration; with a tight PCG
 /// tolerance it must still land on the Cholesky step. PCG is iterative, so
 /// this uses the looser 1e-6 comparison like the matrix-free test.

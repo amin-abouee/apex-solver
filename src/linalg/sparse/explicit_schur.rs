@@ -2067,6 +2067,271 @@ mod tests {
     }
 
     /// Test solve_with_cholesky satisfies Ax ≈ b for a known SPD system.
+    ///
+    /// Regression probe (diagnostic, kept): assemble a real SE2 pose chain
+    /// through `Problem` — grouping, workspace, sparse assembly — and require
+    /// the Schur step to equal the Cholesky step on that assembled system,
+    /// twice in a row with one solver instance. Hand-built Jacobians cannot
+    /// catch assembly-ordering interactions; this one can.
+    #[test]
+    fn schur_matches_cholesky_on_assembled_pose_chain() -> TestResult {
+        use crate::core::problem::Problem;
+        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::linalg::JacobianMode;
+        use crate::linalg::sparse::cholesky::SparseCholeskySolver;
+        use apex_manifolds::{ManifoldType, se2::SE2};
+        use nalgebra::dvector;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut keys = Vec::new();
+        for i in 0..5 {
+            keys.push(
+                problem.add_variable(ManifoldType::SE2, dvector![i as f64 + 0.1, 0.05, 0.02]),
+            );
+        }
+        for w in keys.windows(2) {
+            problem.add_residual_block(
+                &[w[0], w[1]],
+                Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
+                None,
+            );
+        }
+        problem.add_residual_block(
+            &[keys[0]],
+            Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
+            None,
+        );
+        problem.mark_for_elimination(keys[1]);
+        problem.mark_for_elimination(keys[3]);
+        problem.group_rows_for_elimination();
+
+        let state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let symbolic = state.symbolic_structure.as_ref().ok_or("sparse symbolic")?;
+        let mut workspace = crate::linearizer::AssemblyWorkspace::build(&problem);
+        let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            symbolic,
+            &mut workspace,
+        )?;
+
+        let mut eliminate = std::collections::HashSet::new();
+        eliminate.insert(keys[1]);
+        eliminate.insert(keys[3]);
+
+        let mut cholesky = SparseCholeskySolver::new();
+        let reference =
+            crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                &mut cholesky,
+                &residuals,
+                &jacobian,
+            )?;
+
+        let mut schur = SparseSchurComplementSolver::new();
+        schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
+        let first =
+            crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                &mut schur, &residuals, &jacobian,
+            )?;
+        let second =
+            crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                &mut schur, &residuals, &jacobian,
+            )?;
+
+        let scale = reference.norm_l2().max(1.0);
+        for (label, step) in [("first", &first), ("second", &second)] {
+            assert_eq!(reference.nrows(), step.nrows(), "{label}: length");
+            for i in 0..reference.nrows() {
+                let diff = (reference[(i, 0)] - step[(i, 0)]).abs();
+                assert!(
+                    diff / scale < 1e-9,
+                    "{label}: component {i} differs — cholesky {}, schur {} (rel {:.3e})",
+                    reference[(i, 0)],
+                    step[(i, 0)],
+                    diff / scale
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Diagnostic multi-iteration probe (kept): replicate three Gauss-Newton
+    /// iterations — assemble, solve with both solvers, compare, apply the
+    /// Cholesky step — to locate the first iteration where the Schur step
+    /// stops matching on evolving (not fixed) linearizations.
+    #[test]
+    fn schur_tracks_cholesky_across_iterations() -> TestResult {
+        use crate::core::problem::Problem;
+        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::linalg::JacobianMode;
+        use crate::linalg::sparse::cholesky::SparseCholeskySolver;
+        use apex_manifolds::{ManifoldType, se2::SE2};
+        use nalgebra::dvector;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut keys = Vec::new();
+        for i in 0..5 {
+            keys.push(
+                problem.add_variable(ManifoldType::SE2, dvector![i as f64 + 0.1, 0.05, 0.02]),
+            );
+        }
+        for w in keys.windows(2) {
+            problem.add_residual_block(
+                &[w[0], w[1]],
+                Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
+                None,
+            );
+        }
+        problem.add_residual_block(
+            &[keys[0]],
+            Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
+            None,
+        );
+        problem.mark_for_elimination(keys[1]);
+        problem.mark_for_elimination(keys[3]);
+        problem.group_rows_for_elimination();
+
+        let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let mut eliminate = std::collections::HashSet::new();
+        eliminate.insert(keys[1]);
+        eliminate.insert(keys[3]);
+
+        let mut cholesky = SparseCholeskySolver::new();
+        let mut schur = SparseSchurComplementSolver::new();
+        schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
+
+        for iter in 0..3 {
+            let symbolic = state.symbolic_structure.as_ref().ok_or("sparse symbolic")?;
+            let mut workspace = crate::linearizer::AssemblyWorkspace::build(&problem);
+            let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
+                &problem,
+                &state.variables,
+                &state.variable_index_map,
+                symbolic,
+                &mut workspace,
+            )?;
+            let reference =
+                crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                    &mut cholesky,
+                    &residuals,
+                    &jacobian,
+                )?;
+            let step =
+                crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                    &mut schur, &residuals, &jacobian,
+                )?;
+            let scale = reference.norm_l2().max(1.0);
+            let mut max_rel: f64 = 0.0;
+            for i in 0..reference.nrows() {
+                max_rel = max_rel.max((reference[(i, 0)] - step[(i, 0)]).abs() / scale);
+            }
+            assert!(
+                max_rel < 1e-9,
+                "iteration {iter}: Schur step diverges from Cholesky (max rel {max_rel:.3e})"
+            );
+            crate::optimizer::apply_parameter_step(
+                &mut state.variables,
+                step.as_ref(),
+                &state.sorted_vars,
+            );
+        }
+        Ok(())
+    }
+
+    /// Diagnostic multi-iteration probe, exact-loop replica (kept): same as
+    /// above but reusing ONE workspace across iterations, exactly like
+    /// `iteration_preamble` does — instead of rebuilding it per iteration.
+    /// Diverges here but not above ⟹ workspace-reuse assembly bug.
+    #[test]
+    fn schur_tracks_cholesky_with_shared_workspace() -> TestResult {
+        use crate::core::problem::Problem;
+        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::linalg::JacobianMode;
+        use crate::linalg::sparse::cholesky::SparseCholeskySolver;
+        use apex_manifolds::{ManifoldType, se2::SE2};
+        use nalgebra::dvector;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let mut keys = Vec::new();
+        for i in 0..5 {
+            keys.push(
+                problem.add_variable(ManifoldType::SE2, dvector![i as f64 + 0.1, 0.05, 0.02]),
+            );
+        }
+        for w in keys.windows(2) {
+            problem.add_residual_block(
+                &[w[0], w[1]],
+                Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0))),
+                None,
+            );
+        }
+        problem.add_residual_block(
+            &[keys[0]],
+            Box::new(PriorFactor::new(SE2::from_xy_angle(0.0, 0.0, 0.0))),
+            None,
+        );
+        problem.mark_for_elimination(keys[1]);
+        problem.mark_for_elimination(keys[3]);
+        problem.group_rows_for_elimination();
+
+        let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let mut eliminate = std::collections::HashSet::new();
+        eliminate.insert(keys[1]);
+        eliminate.insert(keys[3]);
+
+        // Drive BOTH solvers from one shared assembly each iteration, so any
+        // divergence is the solvers', not the assembly's.
+        let costs = |variables: &slotmap::SlotMap<
+            crate::core::VarKey,
+            Box<dyn crate::core::variable::ManifoldVariable>,
+        >|
+         -> Result<f64, Box<dyn std::error::Error>> {
+            Ok(problem.compute_residual_and_cost_sparse(variables)?.1)
+        };
+
+        let mut cholesky = SparseCholeskySolver::new();
+        let mut schur = SparseSchurComplementSolver::new();
+        schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
+
+        for iter in 0..3 {
+            let symbolic = state.symbolic_structure.as_ref().ok_or("sparse symbolic")?;
+            let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
+                &problem,
+                &state.variables,
+                &state.variable_index_map,
+                symbolic,
+                &mut state.workspace,
+            )?;
+            let reference =
+                crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                    &mut cholesky,
+                    &residuals,
+                    &jacobian,
+                )?;
+            let step =
+                crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
+                    &mut schur, &residuals, &jacobian,
+                )?;
+            let scale = reference.norm_l2().max(1.0);
+            let mut max_rel: f64 = 0.0;
+            for i in 0..reference.nrows() {
+                max_rel = max_rel.max((reference[(i, 0)] - step[(i, 0)]).abs() / scale);
+            }
+            assert!(
+                max_rel < 1e-9,
+                "iteration {iter}: Schur step diverges from Cholesky (max rel {max_rel:.3e})"
+            );
+            crate::optimizer::apply_parameter_step(
+                &mut state.variables,
+                reference.as_ref(),
+                &state.sorted_vars,
+            );
+            let _ = costs(&state.variables)?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_solve_with_cholesky_small_spd() -> TestResult {
         let solver = SparseSchurComplementSolver::new();
