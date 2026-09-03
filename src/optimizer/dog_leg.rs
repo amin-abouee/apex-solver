@@ -1234,11 +1234,10 @@ impl DogLeg {
         // Compute new cost (residual only, no Jacobian needed for step evaluation).
         // Reuses the solve workspace instead of allocating one per iteration,
         // like Levenberg-Marquardt does.
-        let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse_with_workspace(
-                &state.variables,
-                &mut state.workspace,
-            )?;
+        let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
+            &state.variables,
+            &mut state.workspace,
+        )?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(

@@ -1558,8 +1558,7 @@ mod tests {
         };
         let h_kk2 = solver.extract_kept_block(&h_full)?;
         let h_ke2 = solver.extract_coupling_block(&h_full)?;
-        let mut blocks =
-            EliminatedBlocks::new(solver.partition().ok_or("partition missing")?);
+        let mut blocks = EliminatedBlocks::new(solver.partition().ok_or("partition missing")?);
         blocks.gather(&h_full, solver.partition().ok_or("partition missing")?);
         blocks.invert_in_place(solver.partition().ok_or("partition missing")?)?;
         let s = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;

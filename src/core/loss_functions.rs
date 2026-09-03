@@ -771,8 +771,7 @@ impl LossFunction for DcsLoss {
             [
                 scale * s * scale,
                 (4.0 * phi_sqr * (self.phi - s)) / (denom * denom * denom),
-                -(8.0 * phi_sqr * (2.0 * self.phi - s))
-                    / (denom * denom * denom * denom),
+                -(8.0 * phi_sqr * (2.0 * self.phi - s)) / (denom * denom * denom * denom),
             ]
         }
     }
@@ -1705,9 +1704,7 @@ pub fn loss_from_name(
         "barron1" => Box::new(BarronGeneralLoss::new(1.0, s(1.0))?),
         "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, s(1.0))?),
         "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(s(5.0))?),
-        "adaptive-barron" | "adaptivebarron" => {
-            Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?)
-        }
+        "adaptive-barron" | "adaptivebarron" => Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?),
         other => {
             return Err(CoreError::InvalidInput(format!(
                 "unknown loss function: {other}. Valid options: {}",

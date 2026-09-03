@@ -1,7 +1,7 @@
 pub mod covariance;
 pub mod dense;
-pub mod sparse;
 pub(crate) mod regularization;
+pub mod sparse;
 pub mod utils;
 
 use crate::core::{VarKey, variable::ManifoldVariable};

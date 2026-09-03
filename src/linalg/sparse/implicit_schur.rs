@@ -121,12 +121,9 @@ pub(crate) fn regularize_landmark_block(block: &Matrix3<f64>) -> Result<Matrix3<
         // Severely ill-conditioned: add strong regularization
         let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
         let regularized = block + Matrix3::identity() * reg;
-        regularized.try_inverse().ok_or_else(|| {
-            format!(
-                "singular even with regularization (min_ev={:.2e})",
-                min_ev
-            )
-        })
+        regularized
+            .try_inverse()
+            .ok_or_else(|| format!("singular even with regularization (min_ev={:.2e})", min_ev))
     } else if max_ev / min_ev > CONDITION_THRESHOLD {
         // Ill-conditioned: add moderate regularization
         let extra_reg = max_ev * REGULARIZATION_SCALE;
@@ -793,9 +790,7 @@ impl IterativeSchurSolver {
         // Thresholds for numerical robustness
         let results: Vec<Result<Matrix3<f64>, (usize, String)>> = blocks
             .par_iter()
-            .map(|(i, block)| {
-                regularize_landmark_block(block).map_err(|msg| (*i, msg))
-            })
+            .map(|(i, block)| regularize_landmark_block(block).map_err(|msg| (*i, msg)))
             .collect();
 
         // Step 3: Collect results and check for errors

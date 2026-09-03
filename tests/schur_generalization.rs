@@ -828,6 +828,56 @@ fn failed_chunked_solve_keeps_last_good_gradient() -> TestResult {
     Ok(())
 }
 
+/// The two PCG-backed Schur paths must agree with each other, not just with
+/// Cholesky: `Iterative` (matrix-free operator) and `ExplicitIterative`
+/// (formed `S` + PCG) are the two settings of Ceres'
+/// `use_explicit_schur_complement` toggle, so their steps must coincide up to
+/// PCG tolerance on a problem both accept (contiguous 3-DOF blocks).
+#[test]
+fn iterative_and_explicit_iterative_agree() -> TestResult {
+    use apex_solver::linalg::{IterativeSchurSolver, SchurVariant};
+
+    let system = build_system(
+        &[6, 6, 3, 3, 3],
+        &[(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)],
+    )?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3], system.keys[4]]
+        .into_iter()
+        .collect();
+
+    let mut implicit = IterativeSchurSolver::with_cg_params(1000, 1e-12);
+    implicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let matrix_free = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut implicit,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut explicit = SparseSchurComplementSolver::new()
+        .with_variant(SchurVariant::ExplicitIterative)
+        .with_cg_params(1000, 1e-12);
+    explicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let formed = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut explicit,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_eq!(matrix_free.nrows(), formed.nrows());
+    let scale = matrix_free.norm_l2().max(1.0);
+    for i in 0..matrix_free.nrows() {
+        let diff = (matrix_free[(i, 0)] - formed[(i, 0)]).abs();
+        assert!(
+            diff / scale < 1e-6,
+            "PCG-path component {i}: implicit {}, explicit {} (rel {:.3e})",
+            matrix_free[(i, 0)],
+            formed[(i, 0)],
+            diff / scale
+        );
+    }
+    Ok(())
+}
+
 /// `ExplicitIterative` trades exactness for iteration; with a tight PCG
 /// tolerance it must still land on the Cholesky step. PCG is iterative, so
 /// this uses the looser 1e-6 comparison like the matrix-free test.

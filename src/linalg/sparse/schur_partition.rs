@@ -37,7 +37,9 @@ use nalgebra::{DMatrix, Matrix3};
 
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
-use crate::linalg::regularization::{invert_with_retry_1, invert_with_retry_3, invert_with_retry_dyn};
+use crate::linalg::regularization::{
+    invert_with_retry_1, invert_with_retry_3, invert_with_retry_dyn,
+};
 use crate::linalg::{LinAlgError, LinAlgResult};
 
 /// Sentinel for a column that is not retained.
