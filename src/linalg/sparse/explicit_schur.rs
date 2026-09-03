@@ -209,11 +209,14 @@ pub struct SparseSchurComplementSolver {
     /// extra copy of the Jacobian; still far less than the `Jᵀ`, permutation and
     /// `JᵀJ` that forming the normal equations would require.
     chunked_jacobian: Option<SparseColMat<usize, f64>>,
-    /// `(nrows, ncols, nnz)` of the Hessian whose block-diagonality was checked.
+    /// Structural fingerprint of the Hessian whose block-diagonality was checked.
     ///
     /// The check is structural, so it only has to run when the sparsity
-    /// changes — not on every solve.
-    verified_pattern: Option<(usize, usize, usize)>,
+    /// changes — not on every solve. Keyed on the full
+    /// [`PatternFingerprint`](super::pattern::PatternFingerprint): the old
+    /// `(nrows, ncols, nnz)` triple aliased equal-`nnz` permutations and could
+    /// skip the check for a coupled pattern.
+    verified_pattern: Option<super::pattern::PatternFingerprint>,
     ordering: SchurOrdering,
     variant: SchurVariant,
     preconditioner: SchurPreconditioner,
@@ -281,11 +284,7 @@ impl SparseSchurComplementSolver {
     /// so this is checked rather than assumed — but the check is structural,
     /// so repeating it every iteration would be pure overhead.
     fn ensure_block_diagonal(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
-        let fingerprint = (
-            hessian.nrows(),
-            hessian.ncols(),
-            hessian.as_ref().compute_nnz(),
-        );
+        let fingerprint = super::pattern::PatternFingerprint::of(hessian);
         if self.verified_pattern == Some(fingerprint) {
             return Ok(());
         }

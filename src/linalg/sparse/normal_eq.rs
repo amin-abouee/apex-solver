@@ -63,9 +63,11 @@ pub struct NormalEquationsCache {
     /// there, and damping has to *create* it.
     augmented: Option<AugmentedDiagonal>,
     /// Fingerprint of the pattern the cache was built from.
-    nrows: usize,
-    ncols: usize,
-    nnz: usize,
+    ///
+    /// Keyed on the full [`PatternFingerprint`](super::pattern::PatternFingerprint),
+    /// not just dimensions: an equal-`nnz` permutation must rebuild the
+    /// symbolic product and permutation, never reuse them.
+    pattern: super::pattern::PatternFingerprint,
     /// Reusable `Jᵀ` value buffer.
     jt_values: Vec<f64>,
     /// Reusable `JᵀJ` value buffer.
@@ -190,17 +192,17 @@ impl NormalEquationsCache {
             product_info,
             diag_pos,
             augmented,
-            nrows: jacobian.nrows(),
-            ncols,
-            nnz: jacobian.as_ref().compute_nnz(),
+            pattern: super::pattern::PatternFingerprint::of(jacobian),
         })
     }
 
     /// Whether the cache still describes `jacobian`'s sparsity pattern.
+    ///
+    /// Full-pattern equality: dimensions and nonzero count reject fast, and
+    /// the embedded hash rejects equal-`nnz` permutations that would
+    /// otherwise reuse a stale symbolic product and value permutation.
     pub fn matches(&self, jacobian: &SparseColMat<usize, f64>) -> bool {
-        jacobian.nrows() == self.nrows
-            && jacobian.ncols() == self.ncols
-            && jacobian.as_ref().compute_nnz() == self.nnz
+        self.pattern == super::pattern::PatternFingerprint::of(jacobian)
     }
 
     /// Sparsity of `JᵀJ`, for building factorizations compatible with `compute`.
@@ -247,7 +249,7 @@ impl NormalEquationsCache {
         };
 
         // Parallel sparse×dense product for the gradient: g = Jᵀ·r.
-        let mut gradient = Mat::<f64>::zeros(self.ncols, 1);
+        let mut gradient = Mat::<f64>::zeros(self.pattern.ncols(), 1);
         {
             let jt = SparseColMatRef::new(self.jt_pattern.rb(), &self.jt_values);
             sparse_dense_matmul(
@@ -510,6 +512,40 @@ mod tests {
 
         let other = sample_jacobian(30, 21, 1)?;
         assert!(!cache.matches(&other));
+        Ok(())
+    }
+
+    #[test]
+    fn test_matches_rejects_equal_nnz_permutation() -> TestResult<()> {
+        // Same shape and same nnz, one entry relocated within its column: the
+        // old `(nrows, ncols, nnz)` triple reused the stale symbolic product
+        // and value permutation for this pattern.
+        let t = vec![
+            Triplet::new(0usize, 0usize, 1.0f64),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(1, 1, 3.0),
+            Triplet::new(2, 1, 4.0),
+        ];
+        let j = SparseColMat::try_new_from_triplets(3, 2, &t)?;
+        let cache = NormalEquationsCache::try_new(&j)?;
+        assert!(cache.matches(&j));
+
+        let moved = vec![
+            Triplet::new(0usize, 0usize, 1.0f64),
+            Triplet::new(1, 0, 2.0),
+            Triplet::new(0, 1, 3.0),
+            Triplet::new(2, 1, 4.0),
+        ];
+        let permuted = SparseColMat::try_new_from_triplets(3, 2, &moved)?;
+        assert_eq!(
+            permuted.as_ref().compute_nnz(),
+            j.as_ref().compute_nnz(),
+            "relocation must preserve nnz for the regression to be meaningful"
+        );
+        assert!(
+            !cache.matches(&permuted),
+            "an equal-nnz permutation must invalidate the cache"
+        );
         Ok(())
     }
 
