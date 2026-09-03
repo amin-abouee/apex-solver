@@ -63,15 +63,13 @@ pub struct ChunkLayout {
     chunk_cols: Vec<u32>,
     /// `(start, len)` into `chunk_cols` per chunk.
     col_spans: Vec<(usize, usize)>,
-    /// Total rows of the Jacobian the layout was built from.
-    nrows: usize,
-    /// Total columns of the Jacobian the layout was built from.
-    ncols: usize,
-    /// Nonzero count of the Jacobian the layout was built from.
+    /// Structural fingerprint of the Jacobian the layout was built from.
     ///
-    /// Together with `nrows` and `ncols` this fingerprints the sparsity
-    /// pattern, so `matches` can reject structural changes.
-    nnz: usize,
+    /// The triple `(nrows, ncols, nnz)` alone aliases patterns that permute
+    /// entries at equal nonzero count; the hash in
+    /// [`PatternFingerprint`](super::pattern::PatternFingerprint) closes that
+    /// hole, so `matches` rejects any structural change.
+    pattern: super::pattern::PatternFingerprint,
 }
 
 impl ChunkLayout {
@@ -86,7 +84,16 @@ impl ChunkLayout {
         let symbolic = jacobian.symbolic();
         let mut ranges = Vec::with_capacity(partition.eliminated_blocks().len());
 
-        for block in partition.eliminated_blocks() {
+        // Owner of each row: the index (into `eliminated_blocks`) of the
+        // eliminated variable whose columns touch it. A row touched by two
+        // eliminated variables means a factor couples them, so `H_ee` is not
+        // block-diagonal and chunk-wise elimination would give a wrong step.
+        // This is the chunked path's counterpart to
+        // `SchurPartition::verify_block_diagonal`, which needs the Hessian
+        // that this path deliberately never forms.
+        let mut row_owner: Vec<usize> = vec![usize::MAX; jacobian.nrows()];
+
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             // Union of rows over the block's columns. Each column's indices are
             // sorted, so min/max over them bounds the chunk.
             let mut lo = usize::MAX;
@@ -97,6 +104,23 @@ impl ChunkLayout {
                 if let (Some(&first), Some(&last)) = (rows.first(), rows.last()) {
                     lo = lo.min(first);
                     hi = hi.max(last + 1);
+                }
+                for &row in rows {
+                    match row_owner[row] {
+                        usize::MAX => row_owner[row] = block_idx,
+                        owned if owned != block_idx => {
+                            let other = partition.eliminated_blocks()[owned];
+                            return Err(LinAlgError::InvalidInput(format!(
+                                "variables {:?} and {:?} are both marked for elimination but \
+                                 share residual row {row}, so H_ee is not block-diagonal and \
+                                 chunk-wise elimination would give a wrong step; eliminate only \
+                                 mutually unconnected variables",
+                                block.key, other.key
+                            ))
+                            .log());
+                        }
+                        _ => {}
+                    }
                 }
                 count += rows.len();
             }
@@ -170,9 +194,7 @@ impl ChunkLayout {
             ranges,
             chunk_cols,
             col_spans,
-            nrows: jacobian.nrows(),
-            ncols: jacobian.ncols(),
-            nnz: jacobian.as_ref().compute_nnz(),
+            pattern: super::pattern::PatternFingerprint::of(jacobian),
         })
     }
 
@@ -201,28 +223,28 @@ impl ChunkLayout {
 
     /// Rows of the Jacobian this layout describes.
     pub fn nrows(&self) -> usize {
-        self.nrows
+        self.pattern.nrows()
     }
 
     /// Number of Jacobian columns.
     pub fn ncols(&self) -> usize {
-        self.ncols
+        self.pattern.ncols()
     }
 
     /// Number of Jacobian nonzeros.
     pub fn nnz(&self) -> usize {
-        self.nnz
+        self.pattern.nnz()
     }
 
     /// Whether this layout still describes `jacobian`.
     ///
-    /// A structural fingerprint — the same `(nrows, ncols, nnz)` idiom the
-    /// other caches use. The cached chunk columns follow the sparsity pattern,
-    /// so any pattern change at equal row count must invalidate the layout.
+    /// Compares the full [`PatternFingerprint`](super::pattern::PatternFingerprint):
+    /// dimensions and nonzero count reject fast, and the pattern hash rejects
+    /// equal-`nnz` permutations that the old triple check aliased. The cached
+    /// chunk columns follow the sparsity pattern, so any structural change at
+    /// equal row count must invalidate the layout.
     pub fn matches(&self, jacobian: &SparseColMat<usize, f64>) -> bool {
-        jacobian.nrows() == self.nrows
-            && jacobian.ncols() == self.ncols
-            && jacobian.as_ref().compute_nnz() == self.nnz
+        self.pattern == super::pattern::PatternFingerprint::of(jacobian)
     }
 }
 
@@ -860,6 +882,42 @@ mod tests {
         let t = vec![Triplet::new(0usize, 0usize, 1.0f64)];
         let other = SparseColMat::try_new_from_triplets(8, 6, &t)?;
         assert!(!layout.matches(&other), "a pattern change at equal row count must not match");
+
+        // Same shape and same nnz, one entry moved to a different row of its
+        // column: the old `(nrows, ncols, nnz)` triple aliased this permutation
+        // and reused a stale layout. The pattern hash must reject it.
+        // Same shape and same nnz, but the (3, 0) entry relocated to row 2
+        // of column 0: the old `(nrows, ncols, nnz)` triple aliased this
+        // permutation and reused a stale layout. The pattern hash must
+        // reject it.
+        let moved = vec![
+            Triplet::new(0usize, 0usize, 1.0f64),
+            Triplet::new(0, 1, 0.5),
+            Triplet::new(0, 4, 2.0),
+            Triplet::new(1, 0, 0.3),
+            Triplet::new(1, 2, 1.1),
+            Triplet::new(1, 4, 1.5),
+            Triplet::new(2, 0, 0.4),
+            Triplet::new(2, 2, 0.9),
+            Triplet::new(2, 3, 1.3),
+            Triplet::new(2, 5, 1.7),
+            Triplet::new(3, 3, 0.8),
+            Triplet::new(3, 5, 2.1),
+            Triplet::new(4, 0, 0.7),
+            Triplet::new(5, 1, 0.6),
+            Triplet::new(6, 2, 0.9),
+            Triplet::new(7, 3, 1.2),
+        ];
+        let permuted = SparseColMat::try_new_from_triplets(8, 6, &moved)?;
+        assert_eq!(
+            permuted.as_ref().compute_nnz(),
+            j.as_ref().compute_nnz(),
+            "relocation must preserve nnz for the regression to be meaningful"
+        );
+        assert!(
+            !layout.matches(&permuted),
+            "an equal-nnz permutation must invalidate the layout"
+        );
         Ok(())
     }
 
