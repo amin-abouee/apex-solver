@@ -218,7 +218,22 @@ impl Problem {
         // Order: unchunked blocks first, then blocks grouped by the eliminated
         // variable they touch. Ties broken by the existing offset so the result
         // is deterministic and idempotent.
-        let mut ordered: Vec<(Option<VarKey>, usize, FactorKey)> = self
+        //
+        // Groups are ordered by the eliminated variable's *column position*
+        // (slotmap iteration order — the same order
+        // `build_variable_index_map` lays columns out in), not by `VarKey`
+        // sort order. Key ordering is version-major, so after a
+        // remove-and-reinsert cycle it can disagree with column order, and
+        // `ChunkLayout::build` emits ranges in column order while demanding
+        // increasing rows — a disagreement it can only report as a layout
+        // failure despite the problem being regroupable.
+        let rank: std::collections::HashMap<VarKey, usize> = self
+            .variables
+            .keys()
+            .enumerate()
+            .map(|(rank, key)| (key, rank))
+            .collect();
+        let mut ordered: Vec<(Option<usize>, usize, FactorKey)> = self
             .residual_blocks
             .iter()
             .map(|(key, block)| {
@@ -226,7 +241,8 @@ impl Problem {
                     .variable_keys
                     .iter()
                     .find(|k| self.schur_landmark_keys.contains(k))
-                    .copied();
+                    .copied()
+                    .and_then(|k| rank.get(&k).copied());
                 (eliminated, block.residual_row_start_idx, key)
             })
             .collect();
@@ -899,6 +915,87 @@ mod tests {
 
         // Idempotent.
         assert!(!p.group_rows_for_elimination(), "a second call must be a no-op");
+        Ok(())
+    }
+
+    /// Mutating the problem after grouping must not corrupt the row layout.
+    ///
+    /// A block added post-grouping lands at the end, which can violate the
+    /// unchunked-first invariant the chunk sweep depends on. Regrouping must
+    /// restore a compact, contiguous layout with the total preserved — this is
+    /// what every LM entry relies on when a problem is solved, mutated, and
+    /// solved again.
+    #[test]
+    fn test_group_rows_after_mutation_restores_layout() -> TestResult {
+        use crate::linearizer::AssemblyWorkspace;
+
+        let mut p = Problem::new(JacobianMode::Sparse);
+        let a = p.add_variable(ManifoldType::SE2, dvector![0.1, 0.2, 0.05]);
+        let b = p.add_variable(ManifoldType::SE2, dvector![1.0, 0.1, 0.02]);
+        let p0 = p.add_variable(ManifoldType::RN, dvector![0.3, 0.4, 0.5]);
+
+        for (x, y) in [(a, p0), (b, p0)] {
+            p.add_residual_block(
+                &[x, y],
+                Box::new(crate::factors::BetweenFactor::new(
+                    apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
+                )),
+                None,
+            );
+        }
+        p.mark_for_elimination(p0);
+        assert!(p.group_rows_for_elimination());
+        assert!(!p.group_rows_for_elimination(), "grouped layout must be stable");
+
+        // Mutate after grouping: an unchunked block appended at the end.
+        p.add_residual_block(
+            &[a, b],
+            Box::new(crate::factors::BetweenFactor::new(
+                apex_manifolds::se2::SE2::from_xy_angle(0.2, 0.0, 0.0),
+            )),
+            None,
+        );
+        assert!(
+            p.group_rows_for_elimination(),
+            "the appended unchunked block must move ahead of the chunks"
+        );
+
+        // Layout is compact: every residual row is covered exactly once.
+        let total = p.total_residual_dimension;
+        let mut covered = vec![false; total];
+        for block in p.residual_blocks().values() {
+            for row in block.residual_row_start_idx..block.residual_row_start_idx + block.factor.residual_dim() {
+                assert!(row < total, "row {row} out of range (total {total})");
+                assert!(!covered[row], "row {row} covered twice");
+                covered[row] = true;
+            }
+        }
+        assert!(covered.iter().all(|&c| c), "layout has gaps: {covered:?}");
+
+        // Unchunked rows come first.
+        let first_chunk_row = p
+            .residual_blocks()
+            .values()
+            .filter(|b| b.variable_keys.contains(&p0))
+            .map(|b| b.residual_row_start_idx)
+            .min()
+            .ok_or_else(|| CoreError::Variable("eliminated block missing".to_string()))?;
+        for block in p.residual_blocks().values() {
+            if !block.variable_keys.contains(&p0) {
+                assert!(
+                    block.residual_row_start_idx < first_chunk_row,
+                    "unchunked block at {} is inside the chunked region (starts at {first_chunk_row})",
+                    block.residual_row_start_idx
+                );
+            }
+        }
+
+        // Cost invariant holds across the regroup.
+        let variables = p.variables.clone();
+        let mut ws = AssemblyWorkspace::build(&p);
+        let (_, cost) = p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
+        assert!(cost.is_finite(), "cost must stay finite, got {cost}");
+        assert!(!p.group_rows_for_elimination(), "layout must be stable now");
         Ok(())
     }
 
