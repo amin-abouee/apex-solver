@@ -370,7 +370,11 @@ impl Ros1Reader {
     fn read_message_payload(&mut self, chunk_pos: u64, offset: u32) -> Result<Vec<u8>> {
         // Move a hit to the back (most recent); on a miss, inflate and evict
         // the least recently used entry once at capacity.
-        if let Some(idx) = self.chunk_cache.iter().position(|(pos, _)| *pos == chunk_pos) {
+        if let Some(idx) = self
+            .chunk_cache
+            .iter()
+            .position(|(pos, _)| *pos == chunk_pos)
+        {
             let entry = self.chunk_cache.remove(idx);
             self.chunk_cache.push(entry);
         } else {
@@ -555,7 +559,10 @@ mod tests {
         );
 
         r.close()?;
-        assert!(r.chunk_cache.is_empty(), "close() should drop cached chunks");
+        assert!(
+            r.chunk_cache.is_empty(),
+            "close() should drop cached chunks"
+        );
         assert!(!r.is_open);
         Ok(())
     }

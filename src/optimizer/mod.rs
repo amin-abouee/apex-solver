@@ -925,10 +925,7 @@ pub fn notify_observers(
     if !observers.is_empty()
         && let Some(gradient) = linear_solver.get_gradient()
     {
-        observers.set_matrix_data(
-            linear_solver.get_hessian().cloned(),
-            Some(gradient.clone()),
-        );
+        observers.set_matrix_data(linear_solver.get_hessian().cloned(), Some(gradient.clone()));
     }
 
     observers.notify(variables, iteration);

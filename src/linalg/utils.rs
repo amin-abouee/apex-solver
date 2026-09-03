@@ -11,7 +11,10 @@ use crate::linalg::{LinAlgError, LinAlgResult};
 /// This is O(nnz) for reading entries and O(nrows × ncols) for the output.
 /// Used by dense solvers that accept sparse input from `Problem`.
 #[inline]
-#[deprecated(since = "1.6.0", note = "no callers outside this module's own tests; densifying a sparse Jacobian defeats the sparse pipeline")]
+#[deprecated(
+    since = "1.6.0",
+    note = "no callers outside this module's own tests; densifying a sparse Jacobian defeats the sparse pipeline"
+)]
 pub fn sparse_to_dense(sparse: &SparseColMat<usize, f64>) -> Mat<f64> {
     let nrows = sparse.nrows();
     let ncols = sparse.ncols();
@@ -39,7 +42,10 @@ pub fn sparse_to_dense(sparse: &SparseColMat<usize, f64>) -> Mat<f64> {
 /// # Arguments
 /// * `dense` — Dense matrix to convert
 /// * `threshold` — Values with absolute value below this are treated as zero (default: 1e-15
-#[deprecated(since = "1.6.0", note = "no callers outside this module's own tests; build sparse matrices from the symbolic structure instead")]
+#[deprecated(
+    since = "1.6.0",
+    note = "no callers outside this module's own tests; build sparse matrices from the symbolic structure instead"
+)]
 pub fn dense_to_sparse(dense: &Mat<f64>, threshold: f64) -> LinAlgResult<SparseColMat<usize, f64>> {
     let nrows = dense.nrows();
     let ncols = dense.ncols();

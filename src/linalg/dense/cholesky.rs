@@ -119,10 +119,12 @@ impl LinearSolver<DenseMode> for DenseCholeskySolver {
     }
 
     fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
-        Some(<DenseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
-            self.hessian.as_ref()?,
-            v,
-        ))
+        Some(
+            <DenseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
+                self.hessian.as_ref()?,
+                v,
+            ),
+        )
     }
 
     fn get_hessian(&self) -> Option<&Mat<f64>> {

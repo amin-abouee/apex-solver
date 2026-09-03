@@ -33,9 +33,9 @@ use smallvec::SmallVec;
 use thiserror::Error;
 
 use crate::core::problem::Problem;
-use crate::error::ErrorLogging;
 use crate::core::variable::ManifoldVariable;
 use crate::core::{FactorKey, VarKey};
+use crate::error::ErrorLogging;
 use crate::{
     core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},

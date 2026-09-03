@@ -887,12 +887,17 @@ mod tests {
 
         let variables = p.variables.clone();
         let mut ws = AssemblyWorkspace::build(&p);
-        let (_, cost_before) = p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
+        let (_, cost_before) =
+            p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
 
-        assert!(p.group_rows_for_elimination(), "camera-major rows must move");
+        assert!(
+            p.group_rows_for_elimination(),
+            "camera-major rows must move"
+        );
 
         let mut ws = AssemblyWorkspace::build(&p);
-        let (_, cost_after) = p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
+        let (_, cost_after) =
+            p.compute_residual_and_cost_sparse_with_workspace(&variables, &mut ws)?;
         assert!(
             (cost_before - cost_after).abs() < 1e-12,
             "cost changed: {cost_before} -> {cost_after}"
@@ -910,11 +915,17 @@ mod tests {
                 .collect();
             rows.sort_unstable();
             let contiguous = rows.windows(2).all(|w| w[1] == w[0] + 1);
-            assert!(contiguous, "rows for {landmark:?} are not contiguous: {rows:?}");
+            assert!(
+                contiguous,
+                "rows for {landmark:?} are not contiguous: {rows:?}"
+            );
         }
 
         // Idempotent.
-        assert!(!p.group_rows_for_elimination(), "a second call must be a no-op");
+        assert!(
+            !p.group_rows_for_elimination(),
+            "a second call must be a no-op"
+        );
         Ok(())
     }
 
@@ -947,8 +958,14 @@ mod tests {
         }
         p.mark_for_elimination(p0);
         p.mark_for_elimination(p1);
-        assert!(p.group_rows_for_elimination(), "camera-major rows must move");
-        assert!(!p.group_rows_for_elimination(), "grouped layout must be stable");
+        assert!(
+            p.group_rows_for_elimination(),
+            "camera-major rows must move"
+        );
+        assert!(
+            !p.group_rows_for_elimination(),
+            "grouped layout must be stable"
+        );
 
         // Mutate after grouping: an unchunked block appended at the end.
         p.add_residual_block(
@@ -967,10 +984,16 @@ mod tests {
         let total = p.total_residual_dimension;
         let mut covered = vec![false; total];
         for block in p.residual_blocks().values() {
-            for row in block.residual_row_start_idx..block.residual_row_start_idx + block.factor.residual_dim() {
+            let start = block.residual_row_start_idx;
+            for (row, slot) in covered
+                .iter_mut()
+                .enumerate()
+                .skip(start)
+                .take(block.factor.residual_dim())
+            {
                 assert!(row < total, "row {row} out of range (total {total})");
-                assert!(!covered[row], "row {row} covered twice");
-                covered[row] = true;
+                assert!(!*slot, "row {row} covered twice");
+                *slot = true;
             }
         }
         assert!(covered.iter().all(|&c| c), "layout has gaps: {covered:?}");

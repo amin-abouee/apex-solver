@@ -216,9 +216,7 @@ impl NoiseModel {
     /// [`InformationRepair`] lets a caller decide — keep the repaired `Ω`,
     /// substitute a unit weight, or reject the measurement — instead of
     /// optimizing a quietly mutilated objective.
-    pub fn from_information_reporting(
-        info: DMatrix<f64>,
-    ) -> CoreResult<(Self, InformationRepair)> {
+    pub fn from_information_reporting(info: DMatrix<f64>) -> CoreResult<(Self, InformationRepair)> {
         let n = info.nrows();
         if !info.is_square() || n == 0 {
             return Err(CoreError::InvalidInput(

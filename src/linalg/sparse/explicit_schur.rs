@@ -46,8 +46,8 @@
 
 use super::schur_partition::{BlockSpan, EliminatedBlocks, SchurPartition};
 use crate::core::VarKey;
-use crate::error::ErrorLogging;
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use apex_manifolds::ManifoldType;
@@ -231,7 +231,6 @@ pub struct SparseSchurComplementSolver {
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
-
 }
 
 impl SparseSchurComplementSolver {
@@ -302,7 +301,6 @@ impl SparseSchurComplementSolver {
             .log()
         })
     }
-
 
     /// Union of the manually marked landmark keys and — when
     /// [`SchurOrdering::auto_detect`] is enabled — the variables matching the
@@ -448,7 +446,6 @@ impl SparseSchurComplementSolver {
 
         Ok((g_k, g_e))
     }
-
 
     /// Solve S * x = b using Cholesky factorization with automatic regularization
     ///
@@ -907,7 +904,6 @@ impl SparseSchurComplementSolver {
 
         Ok(delta_e)
     }
-
 }
 
 impl Default for SparseSchurComplementSolver {
@@ -1049,7 +1045,6 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         result
     }
 
-
     fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
         if let Some(h) = self.hessian.as_ref() {
             return Some(
@@ -1163,8 +1158,7 @@ impl SparseSchurComplementSolver {
 
             // δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k); the eliminator already holds
             // H_ee⁻¹·g_e, so only the coupling term is left to apply.
-            let delta_e =
-                self.back_substitute_chunked(&delta_k, &reduced, jacobian, partition)?;
+            let delta_e = self.back_substitute_chunked(&delta_k, &reduced, jacobian, partition)?;
             self.combine_updates(&delta_k, &delta_e)
         })();
 
@@ -1333,7 +1327,6 @@ impl SparseSchurComplementSolver {
 
         Ok(delta)
     }
-
 }
 
 /// `H_cc + λ·D` with `D_jj = clamp(H_jj, min_diagonal, max_diagonal)`.
@@ -1566,7 +1559,8 @@ mod tests {
         solver.initialize_structure(&variables, &index_map, &marks)?;
         let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
-            structure.eliminated_blocks().len(), 1,
+            structure.eliminated_blocks().len(),
+            1,
             "auto-detection must be off by default"
         );
         assert_eq!(structure.kept_blocks().len(), 3);
@@ -1578,7 +1572,8 @@ mod tests {
         solver.initialize_structure(&variables, &index_map, &empty_marks)?;
         let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
-            structure.eliminated_blocks().len(), 2,
+            structure.eliminated_blocks().len(),
+            2,
             "Rn(3) variables must auto-eliminate"
         );
         assert_eq!(
@@ -1604,13 +1599,11 @@ mod tests {
         assert!(SchurPartition::new(Vec::new(), Vec::new()).is_err());
     }
 
-
     #[test]
     fn test_solver_creation() {
         let solver = SparseSchurComplementSolver::new();
         assert!(solver.partition().is_none());
     }
-
 
     #[test]
     fn test_schur_variants() {
@@ -1683,7 +1676,6 @@ mod tests {
         assert!((dense[1][1] - 3.0).abs() < 1e-12, "got {}", dense[1][1]);
         Ok(())
     }
-
 
     #[test]
     fn test_back_substitute() -> Result<(), LinAlgError> {
@@ -1759,7 +1751,6 @@ mod tests {
         assert!(solver.gradient.is_none());
     }
 
-
     /// Test partition() getter after initialize_structure
     #[test]
     fn test_partition_getter() -> TestResult {
@@ -1809,7 +1800,6 @@ mod tests {
         assert!((blocks.at(0, 2, 2) - 0.25).abs() < 1e-10);
         Ok(())
     }
-
 
     /// Test initialize_structure() correctly partitions 2 cameras + 3 landmarks
     #[test]

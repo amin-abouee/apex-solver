@@ -313,7 +313,8 @@ mod tests {
             let factor = BetweenFactor::new(relative);
 
             let pose_i = DVector::from_vec((0..dim).map(|k| 0.1 * k as f64).collect::<Vec<_>>());
-            let pose_j = DVector::from_vec((0..dim).map(|k| 1.0 - 0.2 * k as f64).collect::<Vec<_>>());
+            let pose_j =
+                DVector::from_vec((0..dim).map(|k| 1.0 - 0.2 * k as f64).collect::<Vec<_>>());
 
             let (_, analytic) = compute_with_jacobian(&factor, &pose_i, &pose_j);
 

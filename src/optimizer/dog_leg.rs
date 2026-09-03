@@ -1107,8 +1107,7 @@ impl DogLeg {
 
         // 4. Compute Cauchy point and optimal step length
         let h_g = linear_solver.hessian_vec_product(gradient)?;
-        let (alpha, cauchy_point) =
-            self.compute_cauchy_point_and_alpha_generic(gradient, &h_g);
+        let (alpha, cauchy_point) = self.compute_cauchy_point_and_alpha_generic(gradient, &h_g);
 
         // 5. Compute dog leg step based on trust region radius
         let (scaled_step, _step_type) = self.compute_dog_leg_step(

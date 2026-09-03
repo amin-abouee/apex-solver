@@ -628,7 +628,14 @@ impl ChunkedSchurEliminator {
         g_k: &mut Mat<f64>,
     ) {
         let _ = self.gather_strip(
-            jacobian, residuals, kept_global, row_start, row_end, candidates, s, g_k,
+            jacobian,
+            residuals,
+            kept_global,
+            row_start,
+            row_end,
+            candidates,
+            s,
+            g_k,
         );
     }
 }
@@ -705,12 +712,28 @@ mod tests {
 
         let partition = SchurPartition::new(
             vec![
-                BlockSpan { key: key(0), col_start: 0, dof: 2 },
-                BlockSpan { key: key(1), col_start: 2, dof: 2 },
+                BlockSpan {
+                    key: key(0),
+                    col_start: 0,
+                    dof: 2,
+                },
+                BlockSpan {
+                    key: key(1),
+                    col_start: 2,
+                    dof: 2,
+                },
             ],
             vec![
-                BlockSpan { key: key(2), col_start: 4, dof: 1 },
-                BlockSpan { key: key(3), col_start: 5, dof: 1 },
+                BlockSpan {
+                    key: key(2),
+                    col_start: 4,
+                    dof: 1,
+                },
+                BlockSpan {
+                    key: key(3),
+                    col_start: 5,
+                    dof: 1,
+                },
             ],
         )?;
         Ok((j, r, partition))
@@ -854,10 +877,22 @@ mod tests {
         ];
         let j = SparseColMat::try_new_from_triplets(3, 3, &t)?;
         let partition = SchurPartition::new(
-            vec![BlockSpan { key: key(0), col_start: 0, dof: 1 }],
+            vec![BlockSpan {
+                key: key(0),
+                col_start: 0,
+                dof: 1,
+            }],
             vec![
-                BlockSpan { key: key(1), col_start: 1, dof: 1 },
-                BlockSpan { key: key(2), col_start: 2, dof: 1 },
+                BlockSpan {
+                    key: key(1),
+                    col_start: 1,
+                    dof: 1,
+                },
+                BlockSpan {
+                    key: key(2),
+                    col_start: 2,
+                    dof: 1,
+                },
             ],
         )?;
 
@@ -881,7 +916,10 @@ mod tests {
         // the row count must invalidate the layout.
         let t = vec![Triplet::new(0usize, 0usize, 1.0f64)];
         let other = SparseColMat::try_new_from_triplets(8, 6, &t)?;
-        assert!(!layout.matches(&other), "a pattern change at equal row count must not match");
+        assert!(
+            !layout.matches(&other),
+            "a pattern change at equal row count must not match"
+        );
 
         // Same shape and same nnz, one entry moved to a different row of its
         // column: the old `(nrows, ncols, nnz)` triple aliased this permutation
@@ -944,12 +982,28 @@ mod tests {
         let j = SparseColMat::try_new_from_triplets(6, 4, &t)?;
         let partition = SchurPartition::new(
             vec![
-                BlockSpan { key: key(0), col_start: 0, dof: 1 },
-                BlockSpan { key: key(1), col_start: 1, dof: 1 },
+                BlockSpan {
+                    key: key(0),
+                    col_start: 0,
+                    dof: 1,
+                },
+                BlockSpan {
+                    key: key(1),
+                    col_start: 1,
+                    dof: 1,
+                },
             ],
             vec![
-                BlockSpan { key: key(2), col_start: 2, dof: 1 },
-                BlockSpan { key: key(3), col_start: 3, dof: 1 },
+                BlockSpan {
+                    key: key(2),
+                    col_start: 2,
+                    dof: 1,
+                },
+                BlockSpan {
+                    key: key(3),
+                    col_start: 3,
+                    dof: 1,
+                },
             ],
         )?;
 
@@ -970,8 +1024,16 @@ mod tests {
         ];
         let j = SparseColMat::try_new_from_triplets(2, 2, &t)?;
         let partition = SchurPartition::new(
-            vec![BlockSpan { key: key(0), col_start: 0, dof: 1 }],
-            vec![BlockSpan { key: key(1), col_start: 1, dof: 1 }],
+            vec![BlockSpan {
+                key: key(0),
+                col_start: 0,
+                dof: 1,
+            }],
+            vec![BlockSpan {
+                key: key(1),
+                col_start: 1,
+                dof: 1,
+            }],
         )?;
 
         let Err(err) = ChunkedSchurEliminator::new(&j, &partition) else {

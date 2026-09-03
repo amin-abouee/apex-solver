@@ -308,14 +308,20 @@ fn information_repair_separates_rank_deficiency_from_indefiniteness() -> TestRes
         &nalgebra::DVector::from_column_slice(&[4.0, 0.0]),
     ))?;
     assert_eq!(deficient.clamped_directions, 0, "zero is not negative");
-    assert!(!deficient.is_material(), "rank deficiency must not be material");
+    assert!(
+        !deficient.is_material(),
+        "rank deficiency must not be material"
+    );
 
     // Materially indefinite: real information is discarded.
     let (_, indefinite) = NoiseModel::from_information_reporting(DMatrix::from_diagonal(
         &nalgebra::DVector::from_column_slice(&[100.0, -25.0]),
     ))?;
     assert_eq!(indefinite.clamped_directions, 1);
-    assert!(indefinite.is_material(), "a -25 eigenvalue must be material");
+    assert!(
+        indefinite.is_material(),
+        "a -25 eigenvalue must be material"
+    );
     assert!((indefinite.relative_indefiniteness() - 0.25).abs() < 1e-12);
 
     // Floating-point noise on a rank-deficient direction must NOT be material,
@@ -331,12 +337,17 @@ fn information_repair_separates_rank_deficiency_from_indefiniteness() -> TestRes
 
     // The repaired model is still PSD in every case.
     let (model, _) = NoiseModel::from_information_reporting(DMatrix::from_column_slice(
-        2, 2, &[1.0, 0.0, 0.0, -4.0],
+        2,
+        2,
+        &[1.0, 0.0, 0.0, -4.0],
     ))?;
     match model {
         NoiseModel::Dense(m) => {
             let evals = (m.clone() * m).symmetric_eigenvalues();
-            assert!(evals.iter().all(|&l| l >= -1e-12), "SᵀS must be PSD: {evals}");
+            assert!(
+                evals.iter().all(|&l| l >= -1e-12),
+                "SᵀS must be PSD: {evals}"
+            );
         }
         _ => return Err("expected dense model".into()),
     }

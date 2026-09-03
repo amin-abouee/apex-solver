@@ -31,8 +31,8 @@
 //! block-diagonal, and hence cheap to invert. [`SchurPartition::verify_block_diagonal`]
 //! checks this against the actual Hessian pattern rather than trusting the caller.
 
-use faer::sparse::SparseColMat;
 use faer::mat::{MatMut, MatRef};
+use faer::sparse::SparseColMat;
 use nalgebra::{DMatrix, Matrix3};
 
 use crate::core::VarKey;
@@ -146,8 +146,7 @@ impl SchurPartition {
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
                 Self::claim(&mut claimed, col, total, block.key)?;
-                elim_block[col] =
-                    u32::try_from(block_idx).map_err(|_| too_many_columns(total))?;
+                elim_block[col] = u32::try_from(block_idx).map_err(|_| too_many_columns(total))?;
                 elim_offset[col] = u32::try_from(offset).map_err(|_| too_many_columns(total))?;
             }
             local += block.dof;
@@ -585,10 +584,7 @@ mod tests {
     #[test]
     fn partition_handles_non_contiguous_interleaving() -> TestResult {
         // columns: [kept 0..6) [eliminated 6..9) [kept 9..15)
-        let p = SchurPartition::new(
-            vec![span(0, 0, 6), span(2, 9, 6)],
-            vec![span(1, 6, 3)],
-        )?;
+        let p = SchurPartition::new(vec![span(0, 0, 6), span(2, 9, 6)], vec![span(1, 6, 3)])?;
         assert_eq!(p.kept_dof(), 12);
         assert_eq!(p.eliminated_dof(), 3);
 
@@ -650,14 +646,28 @@ mod tests {
     fn verify_block_diagonal_rejects_coupled_eliminated_variables() -> TestResult {
         let p = SchurPartition::new(vec![span(0, 0, 1)], vec![span(1, 1, 1), span(2, 2, 1)])?;
 
-        let ok =
-            hessian_from(3, &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0), (0, 1, 0.5), (1, 0, 0.5)])?;
+        let ok = hessian_from(
+            3,
+            &[
+                (0, 0, 1.0),
+                (1, 1, 1.0),
+                (2, 2, 1.0),
+                (0, 1, 0.5),
+                (1, 0, 0.5),
+            ],
+        )?;
         p.verify_block_diagonal(&ok)?;
 
         // A (1,2) entry couples the two eliminated variables.
         let bad = hessian_from(
             3,
-            &[(0, 0, 1.0), (1, 1, 1.0), (2, 2, 1.0), (1, 2, 0.5), (2, 1, 0.5)],
+            &[
+                (0, 0, 1.0),
+                (1, 1, 1.0),
+                (2, 2, 1.0),
+                (1, 2, 0.5),
+                (2, 1, 0.5),
+            ],
         )?;
         let Err(err) = p.verify_block_diagonal(&bad) else {
             panic!("coupled eliminated variables must be rejected");

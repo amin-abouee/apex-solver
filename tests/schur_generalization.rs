@@ -17,12 +17,12 @@
 //! - eliminating variables coupled to each other, which is *invalid* and must
 //!   be reported rather than silently producing a wrong step
 
+use apex_manifolds::rn::Rn;
 use apex_solver::core::VarKey;
 use apex_solver::core::variable::{ManifoldVariable, Variable};
 use apex_solver::linalg::{
     LinearSolver, SparseCholeskySolver, SparseMode, SparseSchurComplementSolver, StructureAware,
 };
-use apex_manifolds::rn::Rn;
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
 use nalgebra::DVector;
@@ -49,7 +49,10 @@ struct System {
 ///
 /// Values are deterministic and irrational-ish so that an indexing mistake
 /// cannot coincidentally cancel.
-fn build_system(dofs: &[usize], couplings: &[(usize, usize)]) -> Result<System, Box<dyn std::error::Error>> {
+fn build_system(
+    dofs: &[usize],
+    couplings: &[(usize, usize)],
+) -> Result<System, Box<dyn std::error::Error>> {
     let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
     let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
     let mut keys = Vec::new();
@@ -381,10 +384,10 @@ fn build_grouped_system(
     let mut row = 0usize;
 
     let emit_coupling = |row: &mut usize,
-                             triplets: &mut Vec<Triplet<usize, usize, f64>>,
-                             pair_idx: usize,
-                             a: usize,
-                             b: usize| {
+                         triplets: &mut Vec<Triplet<usize, usize, f64>>,
+                         pair_idx: usize,
+                         a: usize,
+                         b: usize| {
         let rows_here = dofs[a].max(dofs[b]);
         for r in 0..rows_here {
             for k in 0..dofs[a] {
@@ -405,7 +408,11 @@ fn build_grouped_system(
             continue;
         }
         for k in 0..dof {
-            triplets.push(Triplet::new(row, col_starts[v] + k, 0.9 + (k % 3) as f64 * 0.15));
+            triplets.push(Triplet::new(
+                row,
+                col_starts[v] + k,
+                0.9 + (k % 3) as f64 * 0.15,
+            ));
             row += 1;
         }
     }
@@ -418,7 +425,11 @@ fn build_grouped_system(
             }
         }
         for k in 0..dofs[e] {
-            triplets.push(Triplet::new(row, col_starts[e] + k, 0.9 + (k % 3) as f64 * 0.15));
+            triplets.push(Triplet::new(
+                row,
+                col_starts[e] + k,
+                0.9 + (k % 3) as f64 * 0.15,
+            ));
             row += 1;
         }
     }
@@ -495,7 +506,11 @@ fn chunked_schur_matches_cholesky_for_large_eliminated_block() -> TestResult {
         &system.jacobian,
     )?;
 
-    assert_steps_agree(&reference, &step, "chunked elimination, 18-DOF eliminated block");
+    assert_steps_agree(
+        &reference,
+        &step,
+        "chunked elimination, 18-DOF eliminated block",
+    );
     Ok(())
 }
 
@@ -565,7 +580,9 @@ fn directly_constructed_iterative_variant_is_rejected() -> TestResult {
     );
 
     let Err(err) = result else {
-        panic!("a SparseSchurComplementSolver given SchurVariant::Iterative must not silently run Cholesky");
+        panic!(
+            "a SparseSchurComplementSolver given SchurVariant::Iterative must not silently run Cholesky"
+        );
     };
     let message = err.to_string();
     assert!(
@@ -633,7 +650,9 @@ fn chunked_schur_rejects_coupled_eliminated_variables() -> TestResult {
     );
 
     let Err(err) = result else {
-        panic!("chunked elimination of two coupled variables must be rejected, not silently solved");
+        panic!(
+            "chunked elimination of two coupled variables must be rejected, not silently solved"
+        );
     };
     let message = err.to_string();
     assert!(
@@ -681,8 +700,7 @@ fn sparse_and_chunked_variants_agree() -> TestResult {
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
 
-    let mut sparse =
-        SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
+    let mut sparse = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
     sparse.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let sparse_step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut sparse,

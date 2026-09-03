@@ -52,8 +52,8 @@
 
 use super::explicit_schur::SchurPreconditioner;
 use crate::core::VarKey;
-use crate::error::ErrorLogging;
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
@@ -1126,10 +1126,12 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
     }
 
     fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
-        Some(<SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
-            self.hessian.as_ref()?,
-            v,
-        ))
+        Some(
+            <SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
+                self.hessian.as_ref()?,
+                v,
+            ),
+        )
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {

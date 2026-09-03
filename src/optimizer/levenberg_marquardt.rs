@@ -953,9 +953,11 @@ impl LevenbergMarquardt {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
         let gradient_norm = gradient.norm_l2();
-        let hessian_step = linear_solver.hessian_vec_product(&scaled_step).ok_or_else(|| {
-            OptimizerError::NumericalInstability("Hessian not available".into()).log()
-        })?;
+        let hessian_step = linear_solver
+            .hessian_vec_product(&scaled_step)
+            .ok_or_else(|| {
+                OptimizerError::NumericalInstability("Hessian not available".into()).log()
+            })?;
 
         // Compute the predicted reduction BEFORE un-scaling the step: the
         // solver's cached gradient and Hessian are the *scaled* ones, and all
@@ -2349,10 +2351,7 @@ mod tests {
         }
 
         // Sparse problem, dense solvers requested.
-        for solver_type in [
-            LinearSolverType::DenseCholesky,
-            LinearSolverType::DenseQR,
-        ] {
+        for solver_type in [LinearSolverType::DenseCholesky, LinearSolverType::DenseQR] {
             let mut problem = rosenbrock(JacobianMode::Sparse);
             let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
             let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {

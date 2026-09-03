@@ -59,8 +59,8 @@ use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D
 use apex_manifolds::Tangent;
 use apex_solver::ManifoldType;
 use apex_solver::NoiseModel;
-use apex_solver::core::noise::{RepairStrategy, RepairSummary};
 use apex_solver::core::loss_functions::L2Loss;
+use apex_solver::core::noise::{RepairStrategy, RepairSummary};
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
 use apex_solver::init_logger_with_directives;
@@ -230,7 +230,11 @@ fn odom_lm_config(max_iterations: usize, dataset: &str) -> LevenbergMarquardtCon
         "parking-garage" => (1e-5, (1e-6, 1e32)),
         _ => (1e-4, (1e-6, 1e32)),
     };
-    let default_tol = if dataset == "parking-garage" { 1e-3 } else { 1e-4 };
+    let default_tol = if dataset == "parking-garage" {
+        1e-3
+    } else {
+        1e-4
+    };
     config = config
         .with_max_iterations(max_iterations)
         .with_cost_tolerance(env_parse("APEX_ODOM_COST_TOL", default_tol))
@@ -661,7 +665,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
     }
     report_unusable_information(dataset.name, &repair_summary, graph.edges_se2.len());
 
-    let config = odom_lm_config(150, &dataset.name);
+    let config = odom_lm_config(150, dataset.name);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -744,7 +748,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
     }
     report_unusable_information(dataset.name, &repair_summary, graph.edges_se3.len());
 
-    let config = odom_lm_config(100, &dataset.name);
+    let config = odom_lm_config(100, dataset.name);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 

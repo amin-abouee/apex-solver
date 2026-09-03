@@ -4,7 +4,6 @@ use std::time::Instant;
 use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::NoiseModel;
-use apex_solver::core::noise::{InformationRepair, RepairStrategy, RepairSummary};
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
 };
@@ -13,6 +12,7 @@ use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::apex_manifolds::{LieGroup, ManifoldType, Tangent};
 use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::*;
+use apex_solver::core::noise::{InformationRepair, RepairStrategy, RepairSummary};
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
@@ -582,9 +582,7 @@ fn test_se2_dataset(
             "Information repair ({} edges, {} materially repaired, {} unit-weighted): \
              clamped directions carry no information; unit-weighted edges optimize \
              unweighted cost, not χ²",
-            repair_summary.edges,
-            repair_summary.materially_repaired,
-            repair_summary.unit_weighted
+            repair_summary.edges, repair_summary.materially_repaired, repair_summary.unit_weighted
         );
     }
 
@@ -962,9 +960,7 @@ fn test_se3_dataset(
             "Information repair ({} edges, {} materially repaired, {} unit-weighted): \
              clamped directions carry no information; unit-weighted edges optimize \
              unweighted cost, not χ²",
-            repair_summary.edges,
-            repair_summary.materially_repaired,
-            repair_summary.unit_weighted
+            repair_summary.edges, repair_summary.materially_repaired, repair_summary.unit_weighted
         );
     }
 
