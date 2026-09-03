@@ -980,12 +980,16 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             return Err(e);
         }
 
-        // Publish H and g now that extraction is done, so neither is cloned.
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
-
+        // Publish H and g only on success, so neither is cloned — and so a
+        // failed solve keeps the previous solve's published system instead of
+        // a half-published new one (see the freshness contract on
+        // `LinearSolver::get_hessian`).
         let result = self.solve_reduced_system(&h_kk, &h_ke, &g_k, &g_e, &eliminated);
         self.eliminated = eliminated;
+        if result.is_ok() {
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+        }
         result
     }
     fn solve_augmented_equation(
@@ -1041,13 +1045,16 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
             return Err(e);
         }
 
-        // Publish the *un-damped* H and g: the optimizers build the true
-        // quadratic model from these.
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
-
+        // Publish the *un-damped* H and g, but only on success: the optimizers
+        // build the true quadratic model from these, and a failed solve must
+        // keep the previous solve's published system (see the freshness
+        // contract on `LinearSolver::get_hessian`).
         let result = self.solve_reduced_system(&h_kk_damped, &h_ke, &g_k, &g_e, &eliminated);
         self.eliminated = eliminated;
+        if result.is_ok() {
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+        }
         result
     }
 
@@ -1130,10 +1137,9 @@ impl SparseSchurComplementSolver {
         };
 
         // The optimizers need +Jᵀr and the action of the un-damped Hessian.
-        self.gradient = Some(Self::full_gradient(jacobian, residuals));
-        self.hessian = None;
-        self.chunked_jacobian = Some(jacobian.clone());
-
+        // Both are published only on success, so a failed solve keeps the
+        // previous solve's published system (freshness contract on
+        // `LinearSolver::get_hessian`).
         let outcome = (|| -> LinAlgResult<Mat<f64>> {
             let partition = self.require_partition()?;
             let reduced = eliminator.eliminate(jacobian, residuals, partition, damping)?;
@@ -1169,6 +1175,11 @@ impl SparseSchurComplementSolver {
         })();
 
         self.chunked = Some(eliminator);
+        if outcome.is_ok() {
+            self.gradient = Some(Self::full_gradient(jacobian, residuals));
+            self.hessian = None;
+            self.chunked_jacobian = Some(jacobian.clone());
+        }
         outcome
     }
 
@@ -1489,6 +1500,98 @@ mod tests {
             residuals,
             landmark_keys,
         ))
+    }
+
+    /// The reduced camera matrix against naive dense algebra.
+    ///
+    /// Pins the `dof == 3` unrolled path, the general loop, the flat
+    /// column-major `EliminatedBlocks` indexing and the exact-symmetrization
+    /// step against one independent `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ` computed
+    /// with dense nalgebra — so a future edit breaking any single
+    /// representation fails here even if every other path still agrees.
+    #[test]
+    fn schur_complement_matches_naive_dense() -> TestResult {
+        let (variables, variable_index_map, jacobian, _residuals, landmark_keys) =
+            create_schur_test_setup()?;
+        let mut solver = SparseSchurComplementSolver::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+
+        // Dense J, then H = JᵀJ.
+        let nrows = jacobian.nrows();
+        let ncols = jacobian.ncols();
+        let mut dense_j = nalgebra::DMatrix::zeros(nrows, ncols);
+        for col in 0..ncols {
+            let rows = jacobian.symbolic().row_idx_of_col_raw(col);
+            let vals = jacobian.val_of_col(col);
+            for (i, &row) in rows.iter().enumerate() {
+                dense_j[(row, col)] = vals[i];
+            }
+        }
+        let h = dense_j.transpose() * &dense_j;
+
+        // Kept vs eliminated columns from the same index map the solver used.
+        let mut elim_cols = Vec::new();
+        for key in &landmark_keys {
+            let start = variable_index_map.get(*key).ok_or("elim key missing")?;
+            let dof = variables.get(*key).ok_or("elim var missing")?.dof();
+            elim_cols.extend(*start..*start + dof);
+        }
+        elim_cols.sort_unstable();
+        let kept_cols: Vec<usize> = (0..ncols).filter(|c| !elim_cols.contains(c)).collect();
+
+        let submatrix = |rows: &[usize], cols: &[usize]| -> nalgebra::DMatrix<f64> {
+            nalgebra::DMatrix::from_fn(rows.len(), cols.len(), |r, c| h[(rows[r], cols[c])])
+        };
+        let h_kk = submatrix(&kept_cols, &kept_cols);
+        let h_ke = submatrix(&kept_cols, &elim_cols);
+        let h_ee = submatrix(&elim_cols, &elim_cols);
+        let h_ee_inv = h_ee.try_inverse().ok_or("naive H_ee must invert")?;
+        let s_naive = h_kk - &h_ke * h_ee_inv * h_ke.transpose();
+
+        // Solver's S through its own extraction + arena + complement path,
+        // sharing one H so the comparison is legible.
+        let h_full = {
+            let mut cache =
+                crate::linalg::sparse::normal_eq::NormalEquationsCache::try_new(&jacobian)?;
+            let residuals = Mat::zeros(nrows, 1);
+            cache.compute(&residuals, &jacobian)?.hessian
+        };
+        let h_kk2 = solver.extract_kept_block(&h_full)?;
+        let h_ke2 = solver.extract_coupling_block(&h_full)?;
+        let mut blocks =
+            EliminatedBlocks::new(solver.partition().ok_or("partition missing")?);
+        blocks.gather(&h_full, solver.partition().ok_or("partition missing")?);
+        blocks.invert_in_place(solver.partition().ok_or("partition missing")?)?;
+        let s = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;
+
+        // Exact symmetry, then value agreement with naive dense math.
+        // Entries the solver filters (|v| <= 1e-12) read back as 0.0, which
+        // stays inside the 1e-9 comparison tolerance by construction.
+        let s_val = |i: usize, j: usize| -> f64 {
+            let rows = s.symbolic().row_idx_of_col_raw(j);
+            let vals = s.val_of_col(j);
+            rows.iter()
+                .position(|&r| r == i)
+                .map(|p| vals[p])
+                .unwrap_or(0.0)
+        };
+        let k = kept_cols.len();
+        assert_eq!((s.nrows(), s.ncols()), (k, k));
+        for i in 0..k {
+            for j in 0..k {
+                let (a, b) = (s_val(i, j), s_val(j, i));
+                assert!(
+                    (a - b).abs() < 1e-12,
+                    "S not symmetric at ({i},{j}): {a} vs {b}"
+                );
+                assert!(
+                    (a - s_naive[(i, j)]).abs() < 1e-9,
+                    "S[{i},{j}] = {a}, naive dense = {}",
+                    s_naive[(i, j)]
+                );
+            }
+        }
+        Ok(())
     }
 
     #[test]

@@ -286,6 +286,11 @@ pub trait LinearSolver<M: LinearizationMode> {
     /// Diagnostics and visualisation only. `None` is a valid answer — a backend
     /// that eliminates straight from `J` never materializes `JᵀJ` — so callers
     /// must degrade rather than fail.
+    ///
+    /// Freshness contract: these accessors always describe the last
+    /// *successful* solve. A failed solve must leave the previously published
+    /// values untouched, so an optimizer retrying after an error never reads a
+    /// half-published linearization mixed across two iterations.
     fn get_hessian(&self) -> Option<&M::Hessian> {
         None
     }

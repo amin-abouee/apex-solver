@@ -1091,11 +1091,14 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         }
 
         // Undamped solve: the operator and the published Hessian coincide, so
-        // the solve borrows the local and it is moved into place afterwards.
-        self.gradient = Some(gradient);
-
+        // the solve borrows the local. Publishing happens only on success, so
+        // a failed solve keeps the previous solve's system (freshness contract
+        // on `LinearSolver::get_hessian`).
         let delta = self.solve_with_system(&hessian, &neg_gradient);
-        self.hessian = Some(hessian);
+        if delta.is_ok() {
+            self.gradient = Some(gradient);
+            self.hessian = Some(hessian);
+        }
         delta
     }
 
@@ -1118,11 +1121,14 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
 
         // Publish the *un-damped* system, per the LinearSolver contract. The
         // damped matrix drives the Schur operator and the preconditioners and is
-        // handed down by reference, so it is never copied.
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
-
-        self.solve_with_system(&augmented_hessian, &neg_gradient)
+        // handed down by reference, so it is never copied. Publishing happens
+        // only on success (freshness contract on `get_hessian`).
+        let delta = self.solve_with_system(&augmented_hessian, &neg_gradient);
+        if delta.is_ok() {
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+        }
+        delta
     }
 
     fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {

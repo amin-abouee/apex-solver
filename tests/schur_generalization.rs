@@ -761,6 +761,73 @@ fn repeated_solve_with_same_instance_agrees() -> TestResult {
     Ok(())
 }
 
+/// A failed solve must keep the previous solve's published diagnostics.
+///
+/// Reversing the row order preserves every dimension but destroys chunk
+/// contiguity, so the second solve errors during layout build — while
+/// `get_gradient()` must still report the first (successful) linearization,
+/// never a half-published failed one (freshness contract on
+/// `LinearSolver::get_gradient`).
+#[test]
+fn failed_chunked_solve_keeps_last_good_gradient() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    solver.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let _ = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut solver,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+    let good_gradient = LinearSolver::<SparseMode>::get_gradient(&solver)
+        .ok_or("gradient must be published after a successful solve")?
+        .clone();
+
+    // Reverse all rows: same shape and nnz, but no eliminated variable keeps
+    // a contiguous range, so layout construction must fail.
+    let nrows = system.jacobian.nrows();
+    let ncols = system.jacobian.ncols();
+    let mut triplets = Vec::new();
+    for col in 0..ncols {
+        let rows = system.jacobian.symbolic().row_idx_of_col_raw(col);
+        let vals = system.jacobian.val_of_col(col);
+        for (i, &row) in rows.iter().enumerate() {
+            triplets.push(Triplet::new(nrows - 1 - row, col, vals[i]));
+        }
+    }
+    let reversed = SparseColMat::try_new_from_triplets(nrows, ncols, &triplets)?;
+    let reversed_residuals = {
+        let mut r = Mat::zeros(nrows, 1);
+        for i in 0..nrows {
+            r[(nrows - 1 - i, 0)] = system.residuals[(i, 0)];
+        }
+        r
+    };
+    let result = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut solver,
+        &reversed_residuals,
+        &reversed,
+    );
+    assert!(
+        result.is_err(),
+        "row-reversed layout must fail chunk construction, not mis-sweep"
+    );
+
+    let kept = LinearSolver::<SparseMode>::get_gradient(&solver)
+        .ok_or("gradient must survive a failed solve")?;
+    assert_eq!(kept.nrows(), good_gradient.nrows());
+    for i in 0..kept.nrows() {
+        assert!(
+            (kept[(i, 0)] - good_gradient[(i, 0)]).abs() < 1e-12,
+            "stale gradient at row {i} after failed solve"
+        );
+    }
+    Ok(())
+}
+
 /// `ExplicitIterative` trades exactness for iteration; with a tight PCG
 /// tolerance it must still land on the Cholesky step. PCG is iterative, so
 /// this uses the looser 1e-6 comparison like the matrix-free test.
