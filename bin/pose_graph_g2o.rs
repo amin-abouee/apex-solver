@@ -60,7 +60,11 @@ struct Args {
     #[cfg(feature = "visualization")]
     with_visualizer: bool,
 
-    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2", "t-distribution", "adaptive-barron"
+    /// Robust loss function to use: "l2", "l1", "huber", "cauchy", "fair", "welsch", "tukey", "geman", "dcs", "andrews", "ramsay", "trimmed", "lp", "barron0", "barron1", "barron-2", "t-distribution", "adaptive-barron"
+    ///
+    /// Keep this list in sync with `loss_canonical_names()` in
+    /// `core::loss_functions` (clap attributes cannot call it, so sync is by
+    /// convention — adding a kernel means updating both places).
     #[arg(long, default_value = "l2")]
     loss_function: String,
 
@@ -376,42 +380,16 @@ fn create_loss_function(
     loss_name: &str,
     scale: Option<f64>,
 ) -> Result<Option<Box<dyn LossFunction + Send + Sync>>, Box<dyn std::error::Error>> {
-    let loss_lower = loss_name.to_lowercase();
-
-    // One table: each arm picks its own default scale, so there is no second
-    // table to drift out of sync and no unreachable fallthrough between them.
-    // `scale` overrides the default where the loss takes one; L2 and L1 have no
-    // scale parameter.
-    let s = |default: f64| scale.unwrap_or(default);
-    let loss: Box<dyn LossFunction + Send + Sync> = match loss_lower.as_str() {
-        "l2" => Box::new(L2Loss),
-        "l1" => Box::new(L1Loss),
-        "huber" => Box::new(HuberLoss::new(s(1.345))?),
-        "cauchy" => Box::new(CauchyLoss::new(s(2.3849))?),
-        "fair" => Box::new(FairLoss::new(s(1.3999))?),
-        "welsch" => Box::new(WelschLoss::new(s(2.9846))?),
-        "tukey" => Box::new(TukeyBiweightLoss::new(s(4.6851))?),
-        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(s(1.0))?),
-        "andrews" => Box::new(AndrewsWaveLoss::new(s(1.339))?),
-        "ramsay" => Box::new(RamsayEaLoss::new(s(0.3))?),
-        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(s(2.0))?),
-        "lp" => Box::new(LpNormLoss::new(s(1.5))?),
-        "barron0" => Box::new(BarronGeneralLoss::new(0.0, s(1.0))?),
-        "barron1" => Box::new(BarronGeneralLoss::new(1.0, s(1.0))?),
-        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, s(1.0))?),
-        "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(s(5.0))?),
-        "adaptive-barron" | "adaptivebarron" => Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?),
-        other => {
-            return Err(format!(
-                "Unknown loss function: {other}. Valid options: l2, l1, huber, cauchy, fair, \
-                 welsch, tukey, geman, andrews, ramsay, trimmed, lp, barron0, barron1, \
-                 barron-2, t-distribution, adaptive-barron"
-            )
-            .into());
-        }
-    };
-
-    Ok(Some(loss))
+    // Single table lives in the library (`loss_from_name`); this wrapper only
+    // adapts the error type so help text and accepted names cannot drift.
+    Ok(Some(
+        apex_solver::core::loss_functions::loss_from_name(loss_name, scale).map_err(|e| {
+            Box::<dyn std::error::Error>::from(format!(
+                "{e}. Valid options: {}",
+                apex_solver::core::loss_functions::loss_canonical_names().join(", ")
+            ))
+        })?,
+    ))
 }
 
 fn test_se2_dataset(

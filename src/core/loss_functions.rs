@@ -33,6 +33,7 @@
 //!
 //! ## Strong Robustness
 //! - [`GemanMcClureLoss`]: Very strong outlier rejection
+//! - [`DcsLoss`]: Dynamic covariance scaling for loop closures (g2o-compatible)
 //! - [`WelschLoss`]: Exponential downweighting
 //! - [`TukeyBiweightLoss`]: Complete outlier suppression (redescending)
 //!
@@ -683,6 +684,97 @@ impl LossFunction for GemanMcClureLoss {
             inv2,                       // ρ'(s) = 1 / (1 + s/c²)²
             -2.0 * self.c * inv2 * inv, // ρ''(s) = -2 / (c²(1 + s/c²)³)
         ]
+    }
+}
+
+/// Dynamic Covariance Scaling (DCS) loss for switchable-constraint loop closures.
+///
+/// DCS (Agarwal et al., ICRA 2013) downweights loop-closure constraints with
+/// large errors by scaling their information matrix with `s²`, where the
+/// scaling factor has the closed form `s = min(1, 2Φ/(Φ+χ²))` and `Φ` is a
+/// free parameter (1.0 in the paper and in g2o).
+///
+/// # Mathematical Definition
+///
+/// With `s = ||r||²` and `scale = 2Φ/(Φ+s)`:
+///
+/// ```text
+/// s ≤ Φ:  ρ(s) = s,  ρ'(s) = 1,  ρ''(s) = 0                    (inlier: plain LS)
+/// s > Φ:  ρ(s) = scale²·s,  ρ'(s) = 4Φ²(Φ−s)/(Φ+s)³,
+///         ρ''(s) = −8Φ²(2Φ−s)/(Φ+s)⁴
+/// ```
+///
+/// This mirrors g2o's `RobustKernelDCS` (`_delta` used as Φ) term for term, so
+/// χ² values crossing this backend agree with a g2o backend on the same graph.
+///
+/// # Negative weights
+///
+/// Past `s = Φ` the effective weight `ρ'(s)` goes *negative* — DCS suppresses
+/// outliers harder than any saturating kernel. The [`Corrector`](crate::core::corrector::Corrector)
+/// clamps `√ρ'` at zero there, so such blocks contribute nothing to the step
+/// (like Tukey's flat region) while their cost `½ρ(s)` is still counted.
+/// DCS is the first kernel in this module with that property.
+///
+/// # Scale Parameter Selection
+///
+/// - **1.0**: Paper and g2o default; wide working range on standard datasets
+/// - **0.1–1.0**: Tighter gating; below 0.1 convergence degrades (notably Sphere)
+///
+/// # Example
+///
+/// ```
+/// use apex_solver::core::loss_functions::{LossFunction, DcsLoss};
+/// # use apex_solver::core::CoreResult;
+/// # fn example() -> CoreResult<()> {
+///
+/// let dcs = DcsLoss::new(1.0)?;
+///
+/// // Inlier region behaves like least squares
+/// let [rho, rho_prime, _] = dcs.evaluate(0.5);
+/// assert_eq!(rho, 0.5);
+/// assert_eq!(rho_prime, 1.0);
+/// # Ok(())
+/// # }
+/// # example().unwrap();
+/// ```
+#[derive(Debug, Clone)]
+pub struct DcsLoss {
+    phi: f64,
+}
+
+impl DcsLoss {
+    /// Create a new DCS loss function.
+    ///
+    /// # Arguments
+    ///
+    /// * `phi` - Free parameter Φ (must be positive; 1.0 is the paper default)
+    pub fn new(phi: f64) -> CoreResult<Self> {
+        if phi <= 0.0 || !phi.is_finite() {
+            return Err(CoreError::InvalidInput(
+                "DCS phi must be finite and positive".to_string(),
+            ));
+        }
+        Ok(DcsLoss { phi })
+    }
+}
+
+impl LossFunction for DcsLoss {
+    #[inline]
+    fn evaluate(&self, s: f64) -> [f64; 3] {
+        let scale = (2.0 * self.phi) / (self.phi + s);
+        if scale >= 1.0 {
+            // s ≤ Φ: unscaled least squares.
+            [s, 1.0, 0.0]
+        } else {
+            let phi_sqr = self.phi * self.phi;
+            let denom = self.phi + s;
+            [
+                scale * s * scale,
+                (4.0 * phi_sqr * (self.phi - s)) / (denom * denom * denom),
+                -(8.0 * phi_sqr * (2.0 * self.phi - s))
+                    / (denom * denom * denom * denom),
+            ]
+        }
     }
 }
 
@@ -1580,6 +1672,77 @@ impl Default for AdaptiveBarronLoss {
     }
 }
 
+/// Single source of truth mapping loss names to constructors.
+///
+/// CLI tools and examples must resolve names through
+/// [`loss_from_name`] instead of keeping their own match tables, so a new
+/// kernel becomes available everywhere (and documented in
+/// [`loss_canonical_names`]) the moment it is added here. Matching is
+/// case-insensitive; every entry lists all accepted aliases first.
+pub fn loss_from_name(
+    name: &str,
+    scale: Option<f64>,
+) -> CoreResult<Box<dyn LossFunction + Send + Sync>> {
+    // Each arm picks its own default scale, so there is no second table to
+    // drift out of sync. `scale` overrides the default where the loss takes
+    // one; L2 and L1 have no scale parameter.
+    let s = |default: f64| scale.unwrap_or(default);
+    let loss: Box<dyn LossFunction + Send + Sync> = match name.to_lowercase().as_str() {
+        "l2" => Box::new(L2Loss),
+        "l1" => Box::new(L1Loss),
+        "huber" => Box::new(HuberLoss::new(s(1.345))?),
+        "cauchy" => Box::new(CauchyLoss::new(s(2.3849))?),
+        "fair" => Box::new(FairLoss::new(s(1.3999))?),
+        "welsch" => Box::new(WelschLoss::new(s(2.9846))?),
+        "tukey" => Box::new(TukeyBiweightLoss::new(s(4.6851))?),
+        "geman" | "gemanmcclure" => Box::new(GemanMcClureLoss::new(s(1.0))?),
+        "dcs" => Box::new(DcsLoss::new(s(1.0))?),
+        "andrews" => Box::new(AndrewsWaveLoss::new(s(1.339))?),
+        "ramsay" => Box::new(RamsayEaLoss::new(s(0.3))?),
+        "trimmed" | "trimmedmean" => Box::new(TrimmedMeanLoss::new(s(2.0))?),
+        "lp" => Box::new(LpNormLoss::new(s(1.5))?),
+        "barron0" => Box::new(BarronGeneralLoss::new(0.0, s(1.0))?),
+        "barron1" => Box::new(BarronGeneralLoss::new(1.0, s(1.0))?),
+        "barron-2" => Box::new(BarronGeneralLoss::new(-2.0, s(1.0))?),
+        "t-distribution" | "tdistribution" => Box::new(TDistributionLoss::new(s(5.0))?),
+        "adaptive-barron" | "adaptivebarron" => {
+            Box::new(AdaptiveBarronLoss::new(0.0, s(1.0))?)
+        }
+        other => {
+            return Err(CoreError::InvalidInput(format!(
+                "unknown loss function: {other}. Valid options: {}",
+                loss_canonical_names().join(", ")
+            )));
+        }
+    };
+    Ok(loss)
+}
+
+/// Canonical (first-alias) name of every registered loss, for help text and
+/// parity tests. Keep in the same order as [`loss_from_name`].
+pub fn loss_canonical_names() -> Vec<&'static str> {
+    vec![
+        "l2",
+        "l1",
+        "huber",
+        "cauchy",
+        "fair",
+        "welsch",
+        "tukey",
+        "geman",
+        "dcs",
+        "andrews",
+        "ramsay",
+        "trimmed",
+        "lp",
+        "barron0",
+        "barron1",
+        "barron-2",
+        "t-distribution",
+        "adaptive-barron",
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2015,6 +2178,113 @@ mod tests {
         assert!(AdaptiveBarronLoss::new(1.0, -1.0).is_err());
         assert!(AdaptiveBarronLoss::new(0.0, 1.0).is_ok());
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_loss_registry_resolves_every_canonical_name() -> TestResult {
+        // The registry is the single source CLI tools resolve through: every
+        // canonical name (plus its documented aliases, case-insensitively)
+        // must construct, and unknowns must error listing the valid set.
+        for name in loss_canonical_names() {
+            let loss = loss_from_name(name, None)?;
+            // Sanity at the origin: zero cost and a sane (unit-or-less,
+            // non-negative) weight. Conventions differ per kernel (Welsch
+            // uses ρ'(0) = 1/2), so only the bounds are pinned here.
+            let [rho, rho_prime, _] = loss.evaluate(0.0);
+            assert_eq!(rho, 0.0, "{name}: ρ(0) must be 0");
+            assert!(
+                (0.0..=1.0).contains(&rho_prime),
+                "{name}: ρ'(0) must be a sane weight, got {rho_prime}"
+            );
+            assert_eq!(
+                name.to_lowercase(),
+                name,
+                "{name}: canonical names must already be lowercase"
+            );
+        }
+        // Documented aliases resolve too.
+        for alias in [
+            "gemanmcclure",
+            "trimmedmean",
+            "tdistribution",
+            "adaptivebarron",
+            "HUBER",
+        ] {
+            loss_from_name(alias, None)?;
+        }
+        let Err(err) = loss_from_name("not-a-loss", None) else {
+            panic!("unknown loss name must not resolve");
+        };
+        let message = err.to_string();
+        for name in loss_canonical_names() {
+            assert!(
+                message.contains(name),
+                "error must list valid names, missing {name}: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_dcs_matches_g2o_reference_values() -> TestResult {
+        // Hand-computed from g2o's RobustKernelDCS with Φ = 1 at s = 4:
+        // scale = 2/5 = 0.4; ρ = 0.4·4·0.4 = 0.64;
+        // ρ' = 4·(1−4)/125 = −0.096; ρ'' = −8·(2−4)/625 = 0.0256.
+        let dcs = DcsLoss::new(1.0)?;
+        let [rho, rho_prime, rho_double_prime] = dcs.evaluate(4.0);
+        assert!((rho - 0.64).abs() < 1e-12, "ρ(4) = {rho}");
+        assert!((rho_prime + 0.096).abs() < 1e-12, "ρ'(4) = {rho_prime}");
+        assert!(
+            (rho_double_prime - 0.0256).abs() < 1e-12,
+            "ρ''(4) = {rho_double_prime}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dcs_inlier_identity_and_saturation() -> TestResult {
+        let dcs = DcsLoss::new(1.0)?;
+        // At and below Φ the kernel is plain least squares.
+        for s in [0.0, 0.5, 1.0] {
+            let [rho, rho_prime, rho_double_prime] = dcs.evaluate(s);
+            assert_eq!(rho, s, "inlier ρ({s})");
+            assert_eq!(rho_prime, 1.0, "inlier ρ'({s})");
+            assert_eq!(rho_double_prime, 0.0, "inlier ρ''({s})");
+        }
+        // Far outliers saturate: ρ(s) → 0 as s → ∞, never negative, always
+        // finite — the cost stays bounded like Tukey/Geman-McClure.
+        let [rho, _, _] = dcs.evaluate(1e12);
+        assert!(rho.is_finite() && rho >= 0.0, "saturated ρ = {rho}");
+        assert!(rho < 1e-6, "saturated ρ must vanish, got {rho}");
+        // Rejects non-positive or non-finite Φ like the other scaled losses.
+        assert!(DcsLoss::new(0.0).is_err());
+        assert!(DcsLoss::new(-1.0).is_err());
+        assert!(DcsLoss::new(f64::INFINITY).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_dcs_negative_weight_suppresses_without_nan() -> TestResult {
+        use crate::core::corrector::Corrector;
+
+        // Past s = Φ the DCS weight goes negative; the corrector must clamp
+        // instead of propagating NaN through sqrt(ρ').
+        let dcs = DcsLoss::new(1.0)?;
+        for s in [1.5, 4.0, 100.0] {
+            let corrector = Corrector::new(&dcs, s);
+            let mut residual = vec![s.sqrt(), 0.0];
+            corrector.correct_residual_in_place(&mut residual);
+            assert!(
+                residual.iter().all(|v| v.is_finite()),
+                "NaN at s = {s}: {residual:?}"
+            );
+            assert!(
+                residual.iter().all(|&v| v == 0.0),
+                "fully suppressed at s = {s}: {residual:?}"
+            );
+            assert!(corrector.robust_cost().is_finite());
+        }
         Ok(())
     }
 }
