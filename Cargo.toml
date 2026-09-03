@@ -75,6 +75,11 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Library code must log through `tracing`, never print directly. CLI binaries
+# in crates/apex-io/bin/ and a few test diagnostics opt out file-by-file, since
+# user-facing console output (and --nocapture test notes) are their job.
+print_stdout = "deny"
+print_stderr = "deny"
 
 # apex-solver package (root crate)
 [package]

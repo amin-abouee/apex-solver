@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Console output is this CLI's user interface (piped topic lists, progress).
+
 //! Copy and filter ROS2 bag files
 //!
 //! Reads an existing ROS2 bag file and writes it to a new location with optional

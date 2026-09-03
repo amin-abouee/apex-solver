@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Console output is this CLI's user interface (progress report).
+
 //! Extract topic data from ROS2 bag files
 //!
 //! Reads a specific topic from a ROS2 bag file and exports the data:
