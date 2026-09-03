@@ -12,8 +12,8 @@ use std::fmt::{self, Debug, Display, Formatter};
 use thiserror::Error;
 
 pub use sparse::{
-    BlockSpan, ChunkLayout, ChunkedSchurEliminator, ColSlot, EliminatedBlocks, ReducedSystem,
-    SchurPartition,
+    BlockSpan, ChunkLayout, ChunkedSchurEliminator, ColSlot, EliminatedBlocks, PatternFingerprint,
+    ReducedSystem, SchurPartition,
 };
 #[allow(deprecated)] // re-export kept so existing imports of the old name resolve
 pub use sparse::{
