@@ -547,7 +547,7 @@ impl ChunkedSchurEliminator {
     /// would force a per-solve clone of the chunk-column cache.
     #[allow(clippy::too_many_arguments)]
     fn gather_strip(
-        cursors: &mut Vec<usize>,
+        cursors: &mut [usize],
         jacobian: &SparseColMat<usize, f64>,
         residuals: &Mat<f64>,
         kept_global: &[usize],
@@ -622,7 +622,7 @@ impl ChunkedSchurEliminator {
     /// `FᵀF` and `Fᵀr` for a row range that belongs to no chunk.
     #[allow(clippy::too_many_arguments)]
     fn sweep_rows(
-        cursors: &mut Vec<usize>,
+        cursors: &mut [usize],
         jacobian: &SparseColMat<usize, f64>,
         residuals: &Mat<f64>,
         kept_global: &[usize],
