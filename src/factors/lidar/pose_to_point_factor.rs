@@ -54,20 +54,14 @@ impl Factor for PoseToPointFactor {
 
         let rotation = pose.rotation_so3().rotation_matrix();
         let p_x = nalgebra::Matrix3::new(
-            0.0,
-            -p_body.z,
-            p_body.y,
-            p_body.z,
-            0.0,
-            -p_body.x,
-            -p_body.y,
-            p_body.x,
-            0.0,
+            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
         );
 
         // ∂(T p)/∂(δρ, δθ) = [R | −R·p̂_body]
         let mut d_pred_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_pred_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
+        d_pred_d_pose
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&rotation);
         d_pred_d_pose
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&(-rotation * p_x));

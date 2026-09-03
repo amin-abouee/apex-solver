@@ -21,8 +21,8 @@ use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
 use nalgebra::Vector3;
 
-use super::preintegration::ImuPreintegration;
 use super::imu_sgal3_factors::sgal3_kinematics;
+use super::preintegration::ImuPreintegration;
 use crate::factors::Factor;
 
 /// Combined SGal(3) IMU factor with separate velocity and bias parameter
@@ -211,9 +211,7 @@ mod tests {
         let vel_j = [vj.x, vj.y, vj.z];
         let bias = [0.0f64; 6];
 
-        let residual = compute_residual(
-            &factor, &pose_i, &vel_i, &bias, &pose_j, &vel_j, &bias,
-        );
+        let residual = compute_residual(&factor, &pose_i, &vel_i, &bias, &pose_j, &vel_j, &bias);
 
         for (i, ri) in residual.iter().enumerate().take(15).skip(9) {
             assert!(ri.abs() < 1e-14, "bias residual[{i}] nonzero");
@@ -287,12 +285,12 @@ mod tests {
 
         // (block id, block len, column offset, perturbation kind)
         let blocks: [(usize, usize, usize); 6] = [
-            (0, 6, 0),    // pose_i (SE3)
-            (1, 3, 6),    // vel_i
-            (2, 6, 9),    // bias_i
-            (3, 6, 15),   // pose_j (SE3)
-            (4, 3, 21),   // vel_j
-            (5, 6, 24),   // bias_j
+            (0, 6, 0),  // pose_i (SE3)
+            (1, 3, 6),  // vel_i
+            (2, 6, 9),  // bias_i
+            (3, 6, 15), // pose_j (SE3)
+            (4, 3, 21), // vel_j
+            (5, 6, 24), // bias_j
         ];
 
         for &(block, len, col0) in &blocks {
@@ -303,9 +301,7 @@ mod tests {
                     se3_tan[idx] = EPS;
                     let se3 = SE3::from_param_slice(pose);
                     let tan = SE3Tangent::from_slice(&se3_tan);
-                    se3.right_plus(&tan, None, None)
-                        .as_param_slice()
-                        .to_vec()
+                    se3.right_plus(&tan, None, None).as_param_slice().to_vec()
                 };
 
                 let (p_i, v_i, b_i, p_j, v_j, b_j) = match block {

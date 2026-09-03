@@ -266,9 +266,15 @@ fn assemble_jacobians(
 ) {
     // Row extractor P (9×10): [ρ, θ, ν] ← SGal(3) tangent [ρ, ν, θ, s].
     let mut p_extract = SMatrix::<f64, 9, 10>::zeros();
-    p_extract.fixed_view_mut::<3, 3>(0, 0).copy_from(&Matrix3::identity()); // ρ
-    p_extract.fixed_view_mut::<3, 3>(3, 6).copy_from(&Matrix3::identity()); // θ
-    p_extract.fixed_view_mut::<3, 3>(6, 3).copy_from(&Matrix3::identity()); // ν
+    p_extract
+        .fixed_view_mut::<3, 3>(0, 0)
+        .copy_from(&Matrix3::identity()); // ρ
+    p_extract
+        .fixed_view_mut::<3, 3>(3, 6)
+        .copy_from(&Matrix3::identity()); // θ
+    p_extract
+        .fixed_view_mut::<3, 3>(6, 3)
+        .copy_from(&Matrix3::identity()); // ν
 
     // d(r)/d(ξ_gc) = Jr⁻¹(θ) · (−Ad(predicted⁻¹)), 10×10.
     let d_pred_gc = jac_rm_pred * (-predicted.inverse(None).adjoint());
@@ -427,9 +433,7 @@ mod tests {
     fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> Vec<f64> {
         let se3 = SE3::from_param_slice(pose);
         let tan = SE3Tangent::from_slice(tangent);
-        se3.right_plus(&tan, None, None)
-            .as_param_slice()
-            .to_vec()
+        se3.right_plus(&tan, None, None).as_param_slice().to_vec()
     }
 
     fn compute_residual(
@@ -646,7 +650,11 @@ mod tests {
             tan[col] = EPS;
             let pose_i_p = perturb_se3(&pose_i_vec, &tan);
             let mut r_pert = vec![0.0f64; rows];
-            factor.linearize(&[&pose_i_p, &sb_i_vec, &pose_j_vec, &sb_j_vec], &mut r_pert, None);
+            factor.linearize(
+                &[&pose_i_p, &sb_i_vec, &pose_j_vec, &sb_j_vec],
+                &mut r_pert,
+                None,
+            );
             for row in 0..rows {
                 let fd = (r_pert[row] - residual[row]) / EPS;
                 let err = (fd - jac_buf[row * cols + col]).abs();
@@ -664,7 +672,11 @@ mod tests {
             let mut sb_p = sb_i_vec;
             sb_p[col] += EPS;
             let mut r_pert = vec![0.0f64; rows];
-            factor.linearize(&[&pose_i_vec, &sb_p, &pose_j_vec, &sb_j_vec], &mut r_pert, None);
+            factor.linearize(
+                &[&pose_i_vec, &sb_p, &pose_j_vec, &sb_j_vec],
+                &mut r_pert,
+                None,
+            );
             for row in 0..rows {
                 let fd = (r_pert[row] - residual[row]) / EPS;
                 let err = (fd - jac_buf[row * cols + 6 + col]).abs();
@@ -683,7 +695,11 @@ mod tests {
             tan[col] = EPS;
             let pose_j_p = perturb_se3(&pose_j_vec, &tan);
             let mut r_pert = vec![0.0f64; rows];
-            factor.linearize(&[&pose_i_vec, &sb_i_vec, &pose_j_p, &sb_j_vec], &mut r_pert, None);
+            factor.linearize(
+                &[&pose_i_vec, &sb_i_vec, &pose_j_p, &sb_j_vec],
+                &mut r_pert,
+                None,
+            );
             for row in 0..rows {
                 let fd = (r_pert[row] - residual[row]) / EPS;
                 let err = (fd - jac_buf[row * cols + 15 + col]).abs();
@@ -701,7 +717,11 @@ mod tests {
             let mut sb_p = sb_j_vec;
             sb_p[col] += EPS;
             let mut r_pert = vec![0.0f64; rows];
-            factor.linearize(&[&pose_i_vec, &sb_i_vec, &pose_j_vec, &sb_p], &mut r_pert, None);
+            factor.linearize(
+                &[&pose_i_vec, &sb_i_vec, &pose_j_vec, &sb_p],
+                &mut r_pert,
+                None,
+            );
             for row in 0..rows {
                 let fd = (r_pert[row] - residual[row]) / EPS;
                 let err = (fd - jac_buf[row * cols + 21 + col]).abs();

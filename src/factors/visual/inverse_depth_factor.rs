@@ -24,8 +24,8 @@ use nalgebra::{Matrix3, SMatrix, Vector2, Vector3};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 use crate::factors::Factor;
+use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Inverse-depth landmark reprojection factor over `[pose_i, anchor, pose_j]`.
 #[derive(Clone)]
@@ -63,10 +63,7 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
         if !(d.is_finite() && d > 0.0) {
             return None;
         }
-        let ray = self
-            .camera
-            .unproject(&Vector2::new(u, v))
-            .ok()?;
+        let ray = self.camera.unproject(&Vector2::new(u, v)).ok()?;
         Some(ray / d)
     }
 
@@ -74,7 +71,10 @@ impl<CAM: CameraModel> InverseDepthFactor<CAM> {
     /// does not expose an analytic pixel-space backprojection Jacobian.
     fn unproject_jacobian(&self, u: f64, v: f64) -> SMatrix<f64, 3, 2> {
         let mut jac = SMatrix::<f64, 3, 2>::zeros();
-        for (col, (du, dv)) in [(0usize, (NUMERICAL_DERIVATIVE_EPS, 0.0)), (1, (0.0, NUMERICAL_DERIVATIVE_EPS))] {
+        for (col, (du, dv)) in [
+            (0usize, (NUMERICAL_DERIVATIVE_EPS, 0.0)),
+            (1, (0.0, NUMERICAL_DERIVATIVE_EPS)),
+        ] {
             let plus = self
                 .camera
                 .unproject(&Vector2::new(u + du, v + dv))
@@ -125,9 +125,7 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
         };
 
         // p_w = T_i⁻¹ X_i ; p_cj = T_j p_w
-        let p_w = pose_i
-            .inverse(None)
-            .act(&x_i, None, None);
+        let p_w = pose_i.inverse(None).act(&x_i, None, None);
         let p_cj = pose_j.act(&p_w, None, None);
 
         let uv_j = match self.camera.project(&p_cj) {
@@ -154,9 +152,9 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
                     }
                     for c in 0..3 {
                         let pc = p_w;
-                        let col = -r_j * Matrix3::new(
-                            0.0, -pc.z, pc.y, pc.z, 0.0, -pc.x, -pc.y, pc.x, 0.0,
-                        ).column(c);
+                        let col = -r_j
+                            * Matrix3::new(0.0, -pc.z, pc.y, pc.z, 0.0, -pc.x, -pc.y, pc.x, 0.0)
+                                .column(c);
                         *jac.rb_mut().get_mut(0, 12 + c) = d_pen * col[2];
                         *jac.rb_mut().get_mut(1, 12 + c) = d_pen * col[2];
                     }
@@ -210,9 +208,7 @@ impl<CAM: CameraModel> Factor for InverseDepthFactor<CAM> {
         let r_j = pose_j.rotation_so3().rotation_matrix();
 
         // pose_j block: J_cam · [R_j | −R_j p̂_w]  (2×6)
-        let skew_w = Matrix3::new(
-            0.0, -p_w.z, p_w.y, p_w.z, 0.0, -p_w.x, -p_w.y, p_w.x, 0.0,
-        );
+        let skew_w = Matrix3::new(0.0, -p_w.z, p_w.y, p_w.z, 0.0, -p_w.x, -p_w.y, p_w.x, 0.0);
         let mut d_pcj_d_pose_j = SMatrix::<f64, 3, 6>::zeros();
         d_pcj_d_pose_j.fixed_view_mut::<3, 3>(0, 0).copy_from(&r_j);
         d_pcj_d_pose_j
@@ -321,11 +317,7 @@ mod tests {
         let (factor, pose_i, anchor, pose_j) = truth_setup()?;
         let mut residual = vec![0.0; 2];
         factor.linearize(
-            &[
-                pose_i.as_param_slice(),
-                &anchor,
-                pose_j.as_param_slice(),
-            ],
+            &[pose_i.as_param_slice(), &anchor, pose_j.as_param_slice()],
             &mut residual,
             None,
         );

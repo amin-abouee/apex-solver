@@ -46,8 +46,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 use crate::factors::Factor;
+use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Failure mode of the internal triangulation, exposed for graph-building
 /// code to decide on outlier rejection / keyframing.
@@ -101,9 +101,7 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
         if sigmas.len() != self.observations.len()
             || sigmas.iter().any(|s| !(s.is_finite() && *s > 0.0))
         {
-            return Err(
-                "sigmas must be positive, finite, and match the observation count".into(),
-            );
+            return Err("sigmas must be positive, finite, and match the observation count".into());
         }
         self.sigmas = sigmas;
         Ok(self)
@@ -150,9 +148,7 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
             let ray = self.camera.unproject(&self.observations[i]).ok()?;
             let r = pose.rotation_so3().rotation_matrix();
             let t = pose.translation();
-            let d_x = Matrix3::new(
-                0.0, -ray.z, ray.y, ray.z, 0.0, -ray.x, -ray.y, ray.x, 0.0,
-            );
+            let d_x = Matrix3::new(0.0, -ray.z, ray.y, ray.z, 0.0, -ray.x, -ray.y, ray.x, 0.0);
             let block = d_x * r;
             let rhs = d_x * t;
             for row in 0..3 {
@@ -340,7 +336,9 @@ impl<CAM: CameraModel> Factor for SmartProjectionFactor<CAM> {
 
         let Some(point) = self.triangulate(&poses) else {
             if self.verbose {
-                warn!("SmartProjectionFactor: rank-deficient triangulation (degenerate configuration)");
+                warn!(
+                    "SmartProjectionFactor: rank-deficient triangulation (degenerate configuration)"
+                );
             }
             self.set_status(TriangulationStatus::RankDeficient);
             self.write_constant_penalty(residual, jacobian);
@@ -378,11 +376,19 @@ impl<CAM: CameraModel> Factor for SmartProjectionFactor<CAM> {
                 }
                 Err(CameraModelError::PointBehindCamera { z, min_z }) => {
                     if self.verbose {
-                        warn!("SmartProjectionFactor: view {i} behind camera (z={z}, min_z={min_z})");
+                        warn!(
+                            "SmartProjectionFactor: view {i} behind camera (z={z}, min_z={min_z})"
+                        );
                     }
                     self.set_status(TriangulationStatus::CheiralityViolation);
                     let depth_deficit = (min_z - z).max(0.0);
-                    self.write_cheirality_penalty(&poses, &point, depth_deficit, residual, jacobian);
+                    self.write_cheirality_penalty(
+                        &poses,
+                        &point,
+                        depth_deficit,
+                        residual,
+                        jacobian,
+                    );
                     return;
                 }
                 Err(cam_err) => {
@@ -556,7 +562,9 @@ mod tests {
             );
             let mut d_pc_d_pose = SMatrix::<f64, 3, 6>::zeros();
             d_pc_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
-            d_pc_d_pose.fixed_view_mut::<3, 3>(0, 3).copy_from(&(-rot * p_x));
+            d_pc_d_pose
+                .fixed_view_mut::<3, 3>(0, 3)
+                .copy_from(&(-rot * p_x));
             let a = d_uv_d_pc * d_pc_d_pose;
             let b = d_uv_d_pc * rot;
             for r_i in 0..6 {
@@ -569,7 +577,7 @@ mod tests {
             }
         }
         let mut h_ll = SMatrix::<f64, 3, 3>::zeros();
-        for (i, pose) in poses.iter().enumerate() {
+        for pose in poses.iter() {
             let p_cam = pose.act(&point, None, None);
             let d_uv_d_pc = factor.camera.jacobian_point(&p_cam);
             let rot = pose.rotation_so3().rotation_matrix();
@@ -577,7 +585,8 @@ mod tests {
             h_ll += b.transpose() * b;
         }
         let h_ll_inv = h_ll.try_inverse().ok_or("Hll singular")?;
-        let schur = &h_pp - &h_pl * DMatrix::from_fn(3, 3, |r, c| h_ll_inv[(r, c)]) * h_pl.transpose();
+        let schur =
+            &h_pp - &h_pl * DMatrix::from_fn(3, 3, |r, c| h_ll_inv[(r, c)]) * h_pl.transpose();
 
         // Factor output.
         let (rows, cols) = factor.jacobian_shape();
@@ -632,7 +641,11 @@ mod tests {
         let mut residual = vec![0.0; factor.residual_dim()];
         factor.linearize(&[&a_vec, &b_vec], &mut residual, None);
         assert_eq!(factor.status(), TriangulationStatus::CheiralityViolation);
-        assert!(residual.iter().all(|r| r.is_finite() && *r >= CHEIRALITY_BASE_PENALTY));
+        assert!(
+            residual
+                .iter()
+                .all(|r| r.is_finite() && *r >= CHEIRALITY_BASE_PENALTY)
+        );
         Ok(())
     }
 
@@ -710,9 +723,11 @@ mod tests {
     #[test]
     fn rejects_empty_observations() {
         assert!(SmartProjectionFactor::new(Vec::new(), camera()).is_err());
-        assert!(SmartProjectionFactor::new(vec![Vector2::zeros()], camera())
-            .unwrap_or_else(|e| panic!("{e}"))
-            .with_sigmas(vec![1.0, 1.0])
-            .is_err());
+        assert!(
+            SmartProjectionFactor::new(vec![Vector2::zeros()], camera())
+                .unwrap_or_else(|e| panic!("{e}"))
+                .with_sigmas(vec![1.0, 1.0])
+                .is_err()
+        );
     }
 }

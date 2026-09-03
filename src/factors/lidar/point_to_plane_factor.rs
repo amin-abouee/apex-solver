@@ -84,15 +84,7 @@ impl Factor for PointToPlaneFactor {
 
         let rotation = pose.rotation_so3().rotation_matrix();
         let p_x = Matrix3::new(
-            0.0,
-            -p_body.z,
-            p_body.y,
-            p_body.z,
-            0.0,
-            -p_body.x,
-            -p_body.y,
-            p_body.x,
-            0.0,
+            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
         );
 
         // ∂r/∂(δρ, δθ) = [nᵀR | −nᵀR·p̂_body];  ∂r/∂p_body = Rᵀn

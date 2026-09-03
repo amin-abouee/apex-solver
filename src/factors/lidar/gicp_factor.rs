@@ -117,15 +117,7 @@ impl Factor for GicpFactor {
         // by C^{-1/2} (the rotation-dependence of C is dropped: standard
         // small-angle approximation, see module docs).
         let p_x = Matrix3::new(
-            0.0,
-            -p_body.z,
-            p_body.y,
-            p_body.z,
-            0.0,
-            -p_body.x,
-            -p_body.y,
-            p_body.x,
-            0.0,
+            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
         );
         let mut d_e_d_pose = SMatrix::<f64, 3, 6>::zeros();
         d_e_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
@@ -273,7 +265,6 @@ mod tests {
         // nothing, while a normal-direction error of the same size must
         // survive — this is what makes GICP plane-to-plane.
         let pose = SE3::identity();
-        let p_body = Vector3::<f64>::zeros();
         let factor = GicpFactor::new(
             Vector3::new(0.0, 0.0, 1.0), // 1 m normal error
             plane_cov_along_z(),
@@ -281,7 +272,11 @@ mod tests {
             Matrix3::identity(),
         )?;
         let mut residual = vec![0.0; 3];
-        factor.linearize(&[pose.as_param_slice(), &[0.0, 0.0, 0.0]], &mut residual, None);
+        factor.linearize(
+            &[pose.as_param_slice(), &[0.0f64, 0.0, 0.0]],
+            &mut residual,
+            None,
+        );
         let normal_component = residual[2];
         assert!(
             normal_component.abs() > 100.0,
@@ -307,7 +302,23 @@ mod tests {
     fn rejects_non_finite_covariances() {
         let mut bad = plane_cov_along_z();
         bad[(0, 0)] = f64::NAN;
-        assert!(GicpFactor::new(Vector3::zeros(), bad, plane_cov_along_z(), Matrix3::identity()).is_err());
-        assert!(GicpFactor::new(Vector3::zeros(), plane_cov_along_z(), bad, Matrix3::identity()).is_err());
+        assert!(
+            GicpFactor::new(
+                Vector3::zeros(),
+                bad,
+                plane_cov_along_z(),
+                Matrix3::identity()
+            )
+            .is_err()
+        );
+        assert!(
+            GicpFactor::new(
+                Vector3::zeros(),
+                plane_cov_along_z(),
+                bad,
+                Matrix3::identity()
+            )
+            .is_err()
+        );
     }
 }

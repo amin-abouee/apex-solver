@@ -72,7 +72,10 @@ impl MarginalPriorFactor {
             ));
         }
         if offset.len() != total {
-            return Err(format!("offset has length {}, expected {total}", offset.len()));
+            return Err(format!(
+                "offset has length {}, expected {total}",
+                offset.len()
+            ));
         }
         Ok(Self {
             sqrt_info,
@@ -105,12 +108,12 @@ impl Factor for MarginalPriorFactor {
         (self.local_log)(params, &mut delta);
 
         let rows = self.sqrt_info.nrows();
-        for i in 0..rows {
+        for (i, r) in residual.iter_mut().enumerate().take(rows) {
             let mut acc = 0.0;
-            for j in 0..total {
-                acc += self.sqrt_info[(i, j)] * (delta[j] - self.offset[j]);
+            for (j, d) in delta.iter().enumerate() {
+                acc += self.sqrt_info[(i, j)] * (d - self.offset[j]);
             }
-            residual[i] = acc;
+            *r = acc;
         }
 
         let Some(mut jac) = jacobian else { return };
@@ -148,16 +151,13 @@ mod tests {
     use super::*;
     use crate::factors::test_utils::assert_close;
     use apex_manifolds::LieGroup;
-use apex_manifolds::Tangent;
+    use apex_manifolds::Tangent;
     use apex_manifolds::se3::{SE3, SE3Tangent};
 
     type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
     /// Local log over two SE3 blocks: right-minus against the linearization.
-    fn se2_local_log(
-        x0_a: &SE3,
-        x0_b: &SE3,
-    ) -> LocalLogFn {
+    fn se2_local_log(x0_a: &SE3, x0_b: &SE3) -> LocalLogFn {
         let x0_a = x0_a.clone();
         let x0_b = x0_b.clone();
         Box::new(move |params: &[&[f64]], out: &mut [f64]| {
@@ -183,7 +183,8 @@ use apex_manifolds::Tangent;
         let b = sample_pose([1.0, -0.5, 0.2], [-0.02, 0.01, 0.0]);
         let sqrt_info = DMatrix::identity(12, 12);
         let offset = DVector::zeros(12);
-        let factor = MarginalPriorFactor::new(vec![6, 6], sqrt_info, offset, se2_local_log(&a, &b))?;
+        let factor =
+            MarginalPriorFactor::new(vec![6, 6], sqrt_info, offset, se2_local_log(&a, &b))?;
 
         let mut residual = vec![0.0; 12];
         factor.linearize(
@@ -205,7 +206,8 @@ use apex_manifolds::Tangent;
         // Offset: pose b pulled by 0.1 m in x.
         let mut offset = DVector::zeros(12);
         offset[6] = 0.1;
-        let factor = MarginalPriorFactor::new(vec![6, 6], sqrt_info, offset, se2_local_log(&a, &b))?;
+        let factor =
+            MarginalPriorFactor::new(vec![6, 6], sqrt_info, offset, se2_local_log(&a, &b))?;
 
         // Evaluating at x0 gives residual −offset (S = I).
         let mut residual = vec![0.0; 12];
@@ -236,7 +238,8 @@ use apex_manifolds::Tangent;
         sqrt_info[(0, 0)] = 2.0;
         sqrt_info[(6, 6)] = 3.0;
         let offset = DVector::zeros(12);
-        let factor = MarginalPriorFactor::new(vec![6, 6], sqrt_info.clone(), offset, se2_local_log(&a, &b))?;
+        let factor =
+            MarginalPriorFactor::new(vec![6, 6], sqrt_info.clone(), offset, se2_local_log(&a, &b))?;
 
         let a_v: Vec<f64> = a.as_param_slice().to_vec();
         let b_v: Vec<f64> = b.as_param_slice().to_vec();
@@ -249,7 +252,12 @@ use apex_manifolds::Tangent;
         // Jacobian must be exactly S (column-major layout).
         for row in 0..12 {
             for col in 0..12 {
-                assert_close(jac_buf[col * 12 + row], sqrt_info[(row, col)], 1e-12, "J vs S");
+                assert_close(
+                    jac_buf[col * 12 + row],
+                    sqrt_info[(row, col)],
+                    1e-12,
+                    "J vs S",
+                );
             }
         }
 
@@ -276,20 +284,24 @@ use apex_manifolds::Tangent;
     fn rejects_dimension_mismatch() -> TestResult<()> {
         let a = sample_pose([0.0; 3], [0.0; 3]);
         let b = sample_pose([0.0; 3], [0.0; 3]);
-        assert!(MarginalPriorFactor::new(
-            vec![6, 6],
-            DMatrix::identity(11, 12),
-            DVector::zeros(12),
-            se2_local_log(&a, &b),
-        )
-        .is_err());
-        assert!(MarginalPriorFactor::new(
-            vec![6, 6],
-            DMatrix::identity(12, 12),
-            DVector::zeros(11),
-            se2_local_log(&a, &b),
-        )
-        .is_err());
+        assert!(
+            MarginalPriorFactor::new(
+                vec![6, 6],
+                DMatrix::identity(11, 12),
+                DVector::zeros(12),
+                se2_local_log(&a, &b),
+            )
+            .is_err()
+        );
+        assert!(
+            MarginalPriorFactor::new(
+                vec![6, 6],
+                DMatrix::identity(12, 12),
+                DVector::zeros(11),
+                se2_local_log(&a, &b),
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

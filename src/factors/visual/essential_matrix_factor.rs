@@ -39,10 +39,7 @@ impl EssentialMatrixFactor {
     /// Create the factor from matched normalized point pairs.
     ///
     /// Returns an error when the pair lists disagree or are empty.
-    pub fn new(
-        points_1: Vec<Vector3<f64>>,
-        points_2: Vec<Vector3<f64>>,
-    ) -> Result<Self, String> {
+    pub fn new(points_1: Vec<Vector3<f64>>, points_2: Vec<Vector3<f64>>) -> Result<Self, String> {
         if points_1.is_empty() || points_1.len() != points_2.len() {
             return Err(format!(
                 "EssentialMatrixFactor needs non-empty, equal-length point lists \
@@ -67,7 +64,11 @@ impl Factor for EssentialMatrixFactor {
         residual: &mut [f64],
         mut jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 1, "EssentialMatrixFactor expects 1 pose block");
+        debug_assert_eq!(
+            params.len(),
+            1,
+            "EssentialMatrixFactor expects 1 pose block"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
 
         let pose = SE3::from_param_slice(params[0]);
@@ -84,14 +85,14 @@ impl Factor for EssentialMatrixFactor {
                 continue;
             }
             let u = translation / t_norm;
-            let u_x = Matrix3::new(
-                0.0, -u.z, u.y, u.z, 0.0, -u.x, -u.y, u.x, 0.0,
-            );
+            let u_x = Matrix3::new(0.0, -u.z, u.y, u.z, 0.0, -u.x, -u.y, u.x, 0.0);
             let m = rotation * p1;
             let e_row = p2.transpose() * u_x * rotation; // 1×3, = p2ᵀ[u]×R
             residual[i] = (e_row * p1)[(0, 0)];
 
-            let Some(jac) = jacobian.as_mut() else { continue };
+            let Some(jac) = jacobian.as_mut() else {
+                continue;
+            };
 
             // ∂r/∂δρ: ((I − uuᵀ)(m×p2))ᵀ R / ‖t‖
             let cross_mp2 = m.cross(p2);
@@ -99,9 +100,7 @@ impl Factor for EssentialMatrixFactor {
             let d_rho = (proj.transpose() * rotation) / t_norm;
 
             // ∂r/∂δθ: −(p2ᵀ[u]×R)·p̂₁
-            let p1_x = Matrix3::new(
-                0.0, -p1.z, p1.y, p1.z, 0.0, -p1.x, -p1.y, p1.x, 0.0,
-            );
+            let p1_x = Matrix3::new(0.0, -p1.z, p1.y, p1.z, 0.0, -p1.x, -p1.y, p1.x, 0.0);
             let d_theta = -(e_row * p1_x);
 
             for c in 0..3 {
@@ -146,7 +145,9 @@ impl EssentialMatrixConstraint {
     pub fn new(rotation_e: SO3, direction_e: Vector3<f64>) -> Result<Self, String> {
         let norm = direction_e.norm();
         if !(norm.is_finite() && norm > 1e-12) {
-            return Err("EssentialMatrixConstraint requires a non-zero translation direction".into());
+            return Err(
+                "EssentialMatrixConstraint requires a non-zero translation direction".into(),
+            );
         }
         Ok(Self {
             rotation_e,
@@ -162,7 +163,11 @@ impl Factor for EssentialMatrixConstraint {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 1, "EssentialMatrixConstraint expects 1 pose block");
+        debug_assert_eq!(
+            params.len(),
+            1,
+            "EssentialMatrixConstraint expects 1 pose block"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
 
         let pose = SE3::from_param_slice(params[0]);
@@ -285,7 +290,12 @@ mod tests {
         factor.linearize(&[pose.as_param_slice()], &mut r1, None);
         factor.linearize(&[scaled.as_param_slice()], &mut r2, None);
         for i in 0..r1.len() {
-            assert!((r1[i] - r2[i]).abs() < 1e-9, "row {i}: {} vs {}", r1[i], r2[i]);
+            assert!(
+                (r1[i] - r2[i]).abs() < 1e-9,
+                "row {i}: {} vs {}",
+                r1[i],
+                r2[i]
+            );
         }
         Ok(())
     }

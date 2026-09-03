@@ -33,7 +33,11 @@ impl Factor for PosePoseRangeFactor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "PosePoseRangeFactor expects two SE3 blocks");
+        debug_assert_eq!(
+            params.len(),
+            2,
+            "PosePoseRangeFactor expects two SE3 blocks"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 7, "params[1] must be SE3 (7D)");
 
@@ -105,7 +109,11 @@ impl Factor for PosePointRangeFactor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "PosePointRangeFactor expects [pose, point]");
+        debug_assert_eq!(
+            params.len(),
+            2,
+            "PosePointRangeFactor expects [pose, point]"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
         debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D point");
 
@@ -155,13 +163,13 @@ impl Factor for PosePointRangeFactor {
 
 /// Bearing + range constraint between a pose and a 3D landmark.
 ///
-/// Residual (3D, effectively rank-2): the unit bearing from the pose to the
-/// point, expressed in the body frame, compared against the measured unit
-/// direction:
+/// Residual (4D = 3 bearing rows + 1 range row): the unit bearing from the
+/// pose to the point, expressed in the body frame, compared against the
+/// measured unit direction, plus the scalar range error:
 ///
 /// ```text
 /// b_pred = R·(p_world − t)/‖p_world − t‖     (world-to-body pose convention)
-/// r      = b_pred − b_measured
+/// r      = [ b_pred − b_measured ; ‖p_world − t‖ − d_measured ]
 /// ```
 #[derive(Clone)]
 pub struct BearingRangeFactor {
@@ -215,25 +223,17 @@ impl Factor for BearingRangeFactor {
         }
 
         let b_pred = rotation * (delta_w / dist);
-        let r = b_pred - self.measured_bearing;
-        residual.copy_from_slice(r.as_slice());
+        residual[0..3].copy_from_slice((b_pred - self.measured_bearing).as_slice());
+        residual[3] = dist - self.measured_range;
 
         let Some(mut jac) = jacobian else { return };
 
-// δp_body = R(δθ × q) − R·R·δρ with q = p_world − t (the body-tangent
+        // δp_body = R(δθ × q) − R·R·δρ with q = p_world − t (the body-tangent
         // translation step moves the origin by R·δρ in the world frame);
         // b = p_body/d:
         // ∂b/∂(δρ, δθ) = (I − bbᵀ)/d · [−R² | −R·q̂]; ∂b/∂p_world = (I − bbᵀ)R/d.
         let q_x = Matrix3::new(
-            0.0,
-            -delta_w.z,
-            delta_w.y,
-            delta_w.z,
-            0.0,
-            -delta_w.x,
-            -delta_w.y,
-            delta_w.x,
-            0.0,
+            0.0, -delta_w.z, delta_w.y, delta_w.z, 0.0, -delta_w.x, -delta_w.y, delta_w.x, 0.0,
         );
         let proj = Matrix3::identity() - b_pred * b_pred.transpose();
         let scale = 1.0 / dist;
@@ -252,14 +252,24 @@ impl Factor for BearingRangeFactor {
                 *jac.rb_mut().get_mut(row, 6 + col) = d_b_d_point[(row, col)];
             }
         }
+        // Range row: d = ‖q‖ with q = p_world − t. The body-tangent
+        // translation step moves the origin by R·δρ in the world, so
+        // ∂d/∂δρ = −q̂ᵀR; rotation does not change the origin; point block
+        // is q̂ᵀ.
+        let q_hat = delta_w / dist;
+        for col in 0..3 {
+            *jac.rb_mut().get_mut(3, col) = -q_hat.dot(&rotation.column(col));
+            *jac.rb_mut().get_mut(3, 3 + col) = 0.0;
+            *jac.rb_mut().get_mut(3, 6 + col) = q_hat[col];
+        }
     }
 
     fn residual_dim(&self) -> usize {
-        3
+        4
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (3, 9)
+        (4, 9)
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
@@ -278,8 +288,6 @@ mod tests {
     use super::*;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
-
-    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
     fn fd_check_1d(
         factor: &dyn Factor,
@@ -406,16 +414,16 @@ mod tests {
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let point_v = vec![point.x, point.y, point.z];
 
-        let mut residual = vec![0.0; 3];
+        let mut residual = vec![0.0; 4];
         factor.linearize(&[&pose_v, &point_v], &mut residual, None);
         for r in &residual {
             assert!(r.abs() < 1e-12);
         }
 
         // FD on all 3 rows, pose block and point block.
-        let mut r0 = vec![0.0; 3];
-        let mut jac_buf = vec![0.0; 27];
-        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, 3, 9);
+        let mut r0 = vec![0.0; 4];
+        let mut jac_buf = vec![0.0; 36];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, 4, 9);
         factor.linearize(&[&pose_v, &point_v], &mut r0, Some(jac_mut));
         const EPS: f64 = 1e-6;
         const TOL: f64 = 1e-4;
@@ -426,11 +434,11 @@ mod tests {
                 .right_plus(&SE3Tangent::from_slice(&tan), None, None)
                 .as_param_slice()
                 .to_vec();
-            let mut r_pert = vec![0.0; 3];
+            let mut r_pert = vec![0.0; 4];
             factor.linearize(&[&perturbed, &point_v], &mut r_pert, None);
-            for row in 0..3 {
+            for row in 0..4 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                let ana = jac_buf[col * 3 + row];
+                let ana = jac_buf[col * 4 + row];
                 assert!(
                     (fd - ana).abs() < TOL,
                     "pose[{row},{col}]: analytical={ana:.6} fd={fd:.6}"
@@ -442,13 +450,13 @@ mod tests {
             let mut minus = point_v.clone();
             plus[col] += EPS;
             minus[col] -= EPS;
-            let mut r_plus = vec![0.0; 3];
-            let mut r_minus = vec![0.0; 3];
+            let mut r_plus = vec![0.0; 4];
+            let mut r_minus = vec![0.0; 4];
             factor.linearize(&[&pose_v, &plus], &mut r_plus, None);
             factor.linearize(&[&pose_v, &minus], &mut r_minus, None);
-            for row in 0..3 {
+            for row in 0..4 {
                 let fd = (r_plus[row] - r_minus[row]) / (2.0 * EPS);
-                let ana = jac_buf[(6 + col) * 3 + row];
+                let ana = jac_buf[(6 + col) * 4 + row];
                 assert!(
                     (fd - ana).abs() < TOL,
                     "point[{row},{col}]: analytical={ana:.6} fd={fd:.6}"
@@ -463,4 +471,3 @@ mod tests {
         assert!(BearingRangeFactor::new(Vector3::zeros(), 1.0).is_err());
     }
 }
-

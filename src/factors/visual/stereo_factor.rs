@@ -20,8 +20,8 @@ use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 use crate::factors::Factor;
+use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Rectified stereo calibration: focal lengths, principal point, baseline.
 #[derive(Clone, Debug)]
@@ -46,7 +46,10 @@ impl StereoCalibration {
             || !(cx.is_finite() && cy.is_finite())
             || !(baseline.is_finite() && baseline > 0.0)
         {
-            return Err("stereo calibration requires fx, fy > 0, finite principal point, baseline > 0".into());
+            return Err(
+                "stereo calibration requires fx, fy > 0, finite principal point, baseline > 0"
+                    .into(),
+            );
         }
         Ok(Self {
             fx,
@@ -113,12 +116,16 @@ impl StereoFactor {
     fn point_jacobians(pose: &SE3, p_world: &Vector3<f64>) -> (SMatrix<f64, 3, 6>, Matrix3<f64>) {
         let rotation = pose.rotation_so3().rotation_matrix();
         let mut d_pc_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_pc_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
         d_pc_d_pose
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-rotation * Matrix3::new(
-                0.0, -p_world.z, p_world.y, p_world.z, 0.0, -p_world.x, -p_world.y, p_world.x, 0.0,
-            )));
+            .fixed_view_mut::<3, 3>(0, 0)
+            .copy_from(&rotation);
+        d_pc_d_pose.fixed_view_mut::<3, 3>(0, 3).copy_from(
+            &(-rotation
+                * Matrix3::new(
+                    0.0, -p_world.z, p_world.y, p_world.z, 0.0, -p_world.x, -p_world.y, p_world.x,
+                    0.0,
+                )),
+        );
         (d_pc_d_pose, rotation)
     }
 }
@@ -234,7 +241,10 @@ impl Factor for StereoFactor {
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         if variables.len() != 2 {
-            return Err(format!("StereoFactor expects 2 variables, got {}", variables.len()));
+            return Err(format!(
+                "StereoFactor expects 2 variables, got {}",
+                variables.len()
+            ));
         }
         if variables[0].as_param_slice().len() != SE3::REP_SIZE {
             return Err("StereoFactor requires an SE3 pose (7 parameters)".into());
@@ -289,8 +299,16 @@ mod tests {
     }
 
     #[test]
-    fn finite_difference_jacobians() {
-        let (factor, pose, landmark) = truth_setup();
+    fn finite_difference_jacobians_at_nonzero_residual() {
+        // Evaluate the Jacobian at a state with a large non-zero residual:
+        // the measurement is offset from the truth projection.
+        let (factor0, pose, landmark) = truth_setup();
+        let offset_factor = StereoFactor {
+            measurement: factor0.measurement + Vector3::new(1.0, -0.5, 0.3),
+            calibration: factor0.calibration.clone(),
+            verbose_cheirality: false,
+        };
+        let factor = offset_factor;
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
         let lm_vec = [landmark.x, landmark.y, landmark.z];
 
@@ -308,10 +326,7 @@ mod tests {
             let mut tan = [0.0f64; 6];
             tan[col] = EPS;
             let tan6 = SE3Tangent::from_slice(&tan);
-            let perturbed: Vec<f64> = pose
-                .right_plus(&tan6, None, None)
-                .as_param_slice()
-                .to_vec();
+            let perturbed: Vec<f64> = pose.right_plus(&tan6, None, None).as_param_slice().to_vec();
             let mut r_pert = vec![0.0; rows];
             factor.linearize(&[&perturbed, &lm_vec], &mut r_pert, None);
             for row in 0..rows {
@@ -348,7 +363,8 @@ mod tests {
     #[test]
     fn cheirality_violation_gets_penalty() {
         let cal = stereo_cal();
-        let factor = StereoFactor::new(Vector3::new(320.0, 320.0, 240.0), cal).with_verbose_cheirality();
+        let factor =
+            StereoFactor::new(Vector3::new(320.0, 320.0, 240.0), cal).with_verbose_cheirality();
         let pose = SE3::identity();
         let pose_vec: Vec<f64> = pose.as_param_slice().to_vec();
 
@@ -361,7 +377,10 @@ mod tests {
         let behind = eval(-0.5);
         let behind_far = eval(-2.0);
         assert!(behind >= CHEIRALITY_BASE_PENALTY);
-        assert!(behind < behind_far, "penalty must grow with violation depth");
+        assert!(
+            behind < behind_far,
+            "penalty must grow with violation depth"
+        );
     }
 
     #[test]

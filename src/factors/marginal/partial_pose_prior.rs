@@ -4,9 +4,9 @@
 //! yaw anchoring.
 
 use apex_manifolds::LieGroup;
+use apex_manifolds::Tangent;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3Tangent;
-use apex_manifolds::Tangent;
 use faer::prelude::ReborrowMut;
 use nalgebra::Vector3;
 
@@ -102,7 +102,11 @@ impl Factor for PoseTranslationPrior {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 1, "PoseTranslationPrior expects one SE3 block");
+        debug_assert_eq!(
+            params.len(),
+            1,
+            "PoseTranslationPrior expects one SE3 block"
+        );
         debug_assert_eq!(params[0].len(), 7, "params[0] must be SE3 (7D)");
 
         let pose = SE3::from_param_slice(params[0]);
@@ -114,11 +118,7 @@ impl Factor for PoseTranslationPrior {
         let rotation = pose.rotation_so3().rotation_matrix();
         for row in 0..3 {
             for col in 0..6 {
-                *jac.rb_mut().get_mut(row, col) = if col < 3 {
-                    rotation[(row, col)]
-                } else {
-                    0.0
-                };
+                *jac.rb_mut().get_mut(row, col) = if col < 3 { rotation[(row, col)] } else { 0.0 };
             }
         }
     }

@@ -51,7 +51,11 @@ impl Factor for PseudorangeFactor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "PseudorangeFactor expects [position, clock bias]");
+        debug_assert_eq!(
+            params.len(),
+            2,
+            "PseudorangeFactor expects [position, clock bias]"
+        );
         debug_assert_eq!(params[0].len(), 3, "params[0] must be a 3D position");
         debug_assert_eq!(params[1].len(), 1, "params[1] must be a scalar clock bias");
 
@@ -135,7 +139,11 @@ impl Factor for DopplerFactor {
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        debug_assert_eq!(params.len(), 2, "DopplerFactor expects [position, velocity]");
+        debug_assert_eq!(
+            params.len(),
+            2,
+            "DopplerFactor expects [position, velocity]"
+        );
         debug_assert_eq!(params[0].len(), 3, "params[0] must be a 3D position");
         debug_assert_eq!(params[1].len(), 3, "params[1] must be a 3D velocity");
 
@@ -197,9 +205,13 @@ impl Factor for DopplerFactor {
 mod tests {
     use super::*;
 
-    type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
-
-    fn fd_check<F>(f: &F, params: &[Vec<f64>], rows: usize, cols: usize, tol: f64) -> Result<(), String>
+    fn fd_check<F>(
+        f: &F,
+        params: &[Vec<f64>],
+        rows: usize,
+        cols: usize,
+        tol: f64,
+    ) -> Result<(), String>
     where
         F: Fn(&[&[f64]], &mut [f64], Option<faer::mat::MatMut<'_, f64>>),
     {
@@ -291,7 +303,13 @@ mod tests {
         factor.linearize(&[&pos_v, &vel_v], &mut residual, None);
         assert!(residual[0].abs() < 1e-9, "residual = {}", residual[0]);
 
-        fd_check(&|p, r, j| factor.linearize(p, r, j), &[pos_v, vel_v], 1, 6, 1e-4)?;
+        fd_check(
+            &|p, r, j| factor.linearize(p, r, j),
+            &[pos_v, vel_v],
+            1,
+            6,
+            1e-4,
+        )?;
         Ok(())
     }
 }
