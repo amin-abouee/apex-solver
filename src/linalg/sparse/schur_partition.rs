@@ -37,6 +37,7 @@ use nalgebra::{DMatrix, Matrix3};
 
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
+use crate::linalg::regularization::{invert_with_retry_1, invert_with_retry_3, invert_with_retry_dyn};
 use crate::linalg::{LinAlgError, LinAlgResult};
 
 /// Sentinel for a column that is not retained.
@@ -498,48 +499,6 @@ fn singular(key: VarKey, dof: usize) -> LinAlgError {
          the variable is unobserved or its observations are degenerate"
     ))
     .log()
-}
-
-/// Invert a 1×1 block, retrying with Tikhonov regularization scaled to its
-/// magnitude — the scalar counterpart of [`invert_with_retry_3`].
-///
-/// A near-singular depth previously failed outright where a 3-DOF point would
-/// have been regularized; the policies now match. Sign is preserved for any
-/// usable value (a nonzero indefinite scalar is still invertible); the shift
-/// only rescues magnitudes at or below floating-point noise. `None` is
-/// returned solely when even the shifted value underflows — a defensive
-/// impossibility for finite input, kept so the error path stays total.
-fn invert_with_retry_1(v: f64) -> Option<f64> {
-    if v.abs() > f64::EPSILON {
-        return Some(1.0 / v);
-    }
-    let reg = (1e-6 * v.abs()).max(1e-8);
-    // Tikhonov shift toward +inf, mirroring the matrix retries.
-    let shifted = v + reg;
-    if shifted.abs() > f64::EPSILON {
-        Some(1.0 / shifted)
-    } else {
-        None
-    }
-}
-
-/// Invert a 3×3 block, retrying with Tikhonov regularization scaled to its trace.
-fn invert_with_retry_3(m: &Matrix3<f64>) -> Option<Matrix3<f64>> {
-    if let Some(inv) = m.try_inverse() {
-        return Some(inv);
-    }
-    let reg = (1e-6 * m.diagonal().iter().sum::<f64>().abs() / 3.0).max(1e-8);
-    (m + Matrix3::identity() * reg).try_inverse()
-}
-
-/// Dimension-generic counterpart of [`invert_with_retry_3`].
-fn invert_with_retry_dyn(m: &DMatrix<f64>) -> Option<DMatrix<f64>> {
-    if let Some(inv) = m.clone().try_inverse() {
-        return Some(inv);
-    }
-    let n = m.nrows();
-    let reg = (1e-6 * m.diagonal().iter().sum::<f64>().abs() / n as f64).max(1e-8);
-    (m + DMatrix::identity(n, n) * reg).try_inverse()
 }
 
 #[cfg(test)]

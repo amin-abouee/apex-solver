@@ -95,6 +95,51 @@ impl LegacyBlockStructure {
     }
 }
 
+/// Invert one 3x3 landmark block with eigen-gated regularization.
+///
+/// Thresholds for numerical robustness; kept next to the policy (rather than
+/// in the shared [`tikhonov_scale`](crate::linalg::regularization::tikhonov_scale)
+/// helper) because this path already pays for the eigendecomposition to feed
+/// the Schur-Jacobi preconditioner — reusing that information is cheaper than
+/// a blind retry here. The well-conditioned branch is a plain inverse, exactly
+/// like the shared retry helpers, so all policies agree where it matters.
+///
+/// `pub(crate)` for the cross-policy pinning tests in
+/// [`crate::linalg::regularization`].
+pub(crate) fn regularize_landmark_block(block: &Matrix3<f64>) -> Result<Matrix3<f64>, String> {
+    // Thresholds for numerical robustness
+    const CONDITION_THRESHOLD: f64 = 1e10;
+    const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12;
+    const REGULARIZATION_SCALE: f64 = 1e-6;
+
+    // Check conditioning and apply regularization if needed
+    let eigenvalues = block.symmetric_eigenvalues();
+    let min_ev = eigenvalues.min();
+    let max_ev = eigenvalues.max();
+
+    if min_ev < MIN_EIGENVALUE_THRESHOLD {
+        // Severely ill-conditioned: add strong regularization
+        let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
+        let regularized = block + Matrix3::identity() * reg;
+        regularized.try_inverse().ok_or_else(|| {
+            format!(
+                "singular even with regularization (min_ev={:.2e})",
+                min_ev
+            )
+        })
+    } else if max_ev / min_ev > CONDITION_THRESHOLD {
+        // Ill-conditioned: add moderate regularization
+        let extra_reg = max_ev * REGULARIZATION_SCALE;
+        let regularized = block + Matrix3::identity() * extra_reg;
+        regularized
+            .try_inverse()
+            .ok_or_else(|| format!("ill-conditioned (cond={:.2e})", max_ev / min_ev))
+    } else {
+        // Well-conditioned: standard inversion
+        block.try_inverse().ok_or_else(|| "singular".to_string())
+    }
+}
+
 /// Iterative Schur complement solver using Preconditioned Conjugate Gradients
 #[derive(Debug, Clone)]
 pub struct IterativeSchurSolver {
@@ -746,44 +791,10 @@ impl IterativeSchurSolver {
 
         // Step 2: Invert all blocks in parallel
         // Thresholds for numerical robustness
-        const CONDITION_THRESHOLD: f64 = 1e10;
-        const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12;
-        const REGULARIZATION_SCALE: f64 = 1e-6;
-
         let results: Vec<Result<Matrix3<f64>, (usize, String)>> = blocks
             .par_iter()
             .map(|(i, block)| {
-                // Check conditioning and apply regularization if needed
-                let eigenvalues = block.symmetric_eigenvalues();
-                let min_ev = eigenvalues.min();
-                let max_ev = eigenvalues.max();
-
-                if min_ev < MIN_EIGENVALUE_THRESHOLD {
-                    // Severely ill-conditioned: add strong regularization
-                    let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        (
-                            *i,
-                            format!("singular even with regularization (min_ev={:.2e})", min_ev),
-                        )
-                    })
-                } else if max_ev / min_ev > CONDITION_THRESHOLD {
-                    // Ill-conditioned: add moderate regularization
-                    let extra_reg = max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * extra_reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        (
-                            *i,
-                            format!("ill-conditioned (cond={:.2e})", max_ev / min_ev),
-                        )
-                    })
-                } else {
-                    // Well-conditioned: standard inversion
-                    block
-                        .try_inverse()
-                        .ok_or_else(|| (*i, "singular".to_string()))
-                }
+                regularize_landmark_block(block).map_err(|msg| (*i, msg))
             })
             .collect();
 
