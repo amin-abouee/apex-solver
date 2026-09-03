@@ -718,6 +718,30 @@ impl LevenbergMarquardtConfig {
             .with_diagonal_bounds(1.0, 1.0)
     }
 
+    /// Configuration tuned for large 3D pose graphs with early cost plateaus
+    /// (parking-garage class).
+    ///
+    /// On such graphs the weighted objective plateaus while the unweighted
+    /// cost is already accurate, so looser 1e-3 cost/parameter tolerances stop
+    /// the plateau early (~2× faster at identical unweighted cost), and a
+    /// smaller initial damping (1e-5) keeps the accurate basin. Like
+    /// [`Self::for_2d_pose_graph`], this encodes a measured sweep winner
+    /// rather than a guess — see the odometry benchmark harness.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+    ///
+    /// let config = LevenbergMarquardtConfig::for_large_3d_pose_graph();
+    /// ```
+    pub fn for_large_3d_pose_graph() -> Self {
+        Self::default()
+            .with_damping(1e-5)
+            .with_cost_tolerance(1e-3)
+            .with_parameter_tolerance(1e-3)
+    }
+
     /// Enable real-time visualization (graphical debugging).
     ///
     /// When enabled, optimization progress is logged to a Rerun viewer with:

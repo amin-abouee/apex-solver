@@ -216,10 +216,12 @@ fn repair_strategy() -> RepairStrategy {
 /// - `APEX_ODOM_DMAX`      λ upper bound (default 1e12)
 /// - `APEX_ODOM_COST_TOL` / `APEX_ODOM_PARAM_TOL` (per-dataset default)
 fn odom_lm_config(max_iterations: usize, dataset: &str) -> LevenbergMarquardtConfig {
-    // 2D + cubicle start from the sweep-winning scalar-damping preset so the
-    // bench and the library share one definition of the tuned defaults.
+    // Tuned arms start from the sweep-winning library presets so the bench
+    // and the library share one definition of the tuned defaults.
     let mut config = if matches!(dataset, "M3500" | "mit" | "city10000" | "ring" | "cubicle") {
         LevenbergMarquardtConfig::for_2d_pose_graph()
+    } else if dataset == "parking-garage" {
+        LevenbergMarquardtConfig::for_large_3d_pose_graph()
     } else {
         LevenbergMarquardtConfig::new()
     };
