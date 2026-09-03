@@ -933,8 +933,10 @@ mod tests {
         let a = p.add_variable(ManifoldType::SE2, dvector![0.1, 0.2, 0.05]);
         let b = p.add_variable(ManifoldType::SE2, dvector![1.0, 0.1, 0.02]);
         let p0 = p.add_variable(ManifoldType::RN, dvector![0.3, 0.4, 0.5]);
+        let p1 = p.add_variable(ManifoldType::RN, dvector![0.6, 0.7, 0.8]);
 
-        for (x, y) in [(a, p0), (b, p0)] {
+        // Camera-major insertion: each landmark's rows end up scattered.
+        for (x, y) in [(a, p0), (a, p1), (b, p0), (b, p1)] {
             p.add_residual_block(
                 &[x, y],
                 Box::new(crate::factors::BetweenFactor::new(
@@ -944,7 +946,8 @@ mod tests {
             );
         }
         p.mark_for_elimination(p0);
-        assert!(p.group_rows_for_elimination());
+        p.mark_for_elimination(p1);
+        assert!(p.group_rows_for_elimination(), "camera-major rows must move");
         assert!(!p.group_rows_for_elimination(), "grouped layout must be stable");
 
         // Mutate after grouping: an unchunked block appended at the end.
@@ -973,15 +976,16 @@ mod tests {
         assert!(covered.iter().all(|&c| c), "layout has gaps: {covered:?}");
 
         // Unchunked rows come first.
+        let touches_eliminated = |keys: &[VarKey]| keys.contains(&p0) || keys.contains(&p1);
         let first_chunk_row = p
             .residual_blocks()
             .values()
-            .filter(|b| b.variable_keys.contains(&p0))
+            .filter(|b| touches_eliminated(&b.variable_keys))
             .map(|b| b.residual_row_start_idx)
             .min()
             .ok_or_else(|| CoreError::Variable("eliminated block missing".to_string()))?;
         for block in p.residual_blocks().values() {
-            if !block.variable_keys.contains(&p0) {
+            if !touches_eliminated(&block.variable_keys) {
                 assert!(
                     block.residual_row_start_idx < first_chunk_row,
                     "unchunked block at {} is inside the chunked region (starts at {first_chunk_row})",
