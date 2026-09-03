@@ -609,3 +609,137 @@ fn chunked_schur_matches_cholesky_when_damped() -> TestResult {
     assert_steps_agree(&reference, &step, "chunked elimination, damped");
     Ok(())
 }
+
+/// The chunked path must reject coupled eliminated variables with the same
+/// block-diagonal error as the explicit path — not with a layout error and
+/// never with a silently wrong step.
+///
+/// The coupling check runs inside layout construction (no Hessian exists on
+/// this path), so it fires before the overlap/gap validation.
+#[test]
+fn chunked_schur_rejects_coupled_eliminated_variables() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    // keys[1] and keys[2] are coupled directly to each other.
+    let system = build_system(&[6, 3, 3], &[(0, 1), (0, 2), (1, 2)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[1], system.keys[2]].into_iter().collect();
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let result = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    );
+
+    let Err(err) = result else {
+        panic!("chunked elimination of two coupled variables must be rejected, not silently solved");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("block-diagonal"),
+        "error should explain the precondition, got: {message}"
+    );
+    Ok(())
+}
+
+/// Rows that are not grouped by eliminated variable must be rejected by the
+/// chunked path, never mis-swept: here keys[2]'s rows are split apart by
+/// keys[3]'s rows, so no valid chunk ranges exist.
+#[test]
+fn chunked_schur_rejects_non_grouped_rows() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_system(&[6, 6, 3, 3], &[(0, 2), (0, 3), (1, 2), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let result = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    );
+
+    let Err(err) = result else {
+        panic!("non-grouped rows must be rejected by chunk-wise elimination, not mis-swept");
+    };
+    let message = err.to_string();
+    assert!(
+        message.contains("chunk"),
+        "error should point at chunk layout requirements, got: {message}"
+    );
+    Ok(())
+}
+
+/// `Sparse` and `ChunkedSparse` form `S` by different routes (formed `H`
+/// vs J-direct); on the same problem they must agree to round-off.
+#[test]
+fn sparse_and_chunked_variants_agree() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut sparse =
+        SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
+    sparse.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let sparse_step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut sparse,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let chunked_step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut chunked,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_steps_agree(&sparse_step, &chunked_step, "sparse vs chunked Schur");
+    Ok(())
+}
+
+/// `ExplicitIterative` trades exactness for iteration; with a tight PCG
+/// tolerance it must still land on the Cholesky step. PCG is iterative, so
+/// this uses the looser 1e-6 comparison like the matrix-free test.
+#[test]
+fn explicit_iterative_matches_cholesky() -> TestResult {
+    use apex_solver::linalg::SchurVariant;
+
+    let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
+    let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
+
+    let mut cholesky = SparseCholeskySolver::new();
+    let reference = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut cholesky,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    let mut iterative = SparseSchurComplementSolver::new()
+        .with_variant(SchurVariant::ExplicitIterative)
+        .with_cg_params(1000, 1e-12);
+    iterative.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
+    let step = LinearSolver::<SparseMode>::solve_normal_equation(
+        &mut iterative,
+        &system.residuals,
+        &system.jacobian,
+    )?;
+
+    assert_eq!(reference.nrows(), step.nrows());
+    let scale = reference.norm_l2().max(1.0);
+    for i in 0..reference.nrows() {
+        let diff = (reference[(i, 0)] - step[(i, 0)]).abs();
+        assert!(
+            diff / scale < 1e-6,
+            "explicit-iterative component {i}: cholesky {}, iterative {} (rel {:.3e})",
+            reference[(i, 0)],
+            step[(i, 0)],
+            diff / scale
+        );
+    }
+    Ok(())
+}
