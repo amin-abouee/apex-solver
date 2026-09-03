@@ -333,11 +333,6 @@ impl ChunkedSchurEliminator {
         // Every retained local column, for the rows outside any chunk.
         let all_kept: Vec<u32> = (0..kept_dof as u32).collect();
 
-        // One flat copy of the per-chunk column cache, cloned per solve rather
-        // than per chunk: `gather_strip` needs `&mut self` while the layout is
-        // borrowed, and per-chunk clones were the old workaround.
-        let chunk_cols_flat = self.layout.chunk_cols.clone();
-
         self.cursors.clear();
         self.cursors.resize(kept_dof, 0);
 
@@ -348,7 +343,8 @@ impl ChunkedSchurEliminator {
             self.layout.range(0).0
         };
         if leading_end > 0 {
-            self.sweep_rows(
+            Self::sweep_rows(
+                &mut self.cursors,
                 jacobian,
                 residuals,
                 &kept_global,
@@ -381,9 +377,13 @@ impl ChunkedSchurEliminator {
             let block = partition.eliminated_blocks()[chunk];
 
             // Gather this chunk's retained strip and accumulate FᵀF / Fᵀr.
+            // The column slice borrows the layout directly — no per-solve copy:
+            // `gather_strip` takes cursors separately, so the shared layout
+            // borrow and the cursor borrow never alias through `self`.
             let (start, len) = self.layout.col_spans[chunk];
-            let chunk_cols = &chunk_cols_flat[start..start + len];
-            let (cols, strip) = self.gather_strip(
+            let chunk_cols = &self.layout.chunk_cols[start..start + len];
+            let (cols, strip) = Self::gather_strip(
+                &mut self.cursors,
                 jacobian,
                 residuals,
                 &kept_global,
@@ -450,7 +450,8 @@ impl ChunkedSchurEliminator {
         if !self.layout.is_empty() {
             let last_end = self.layout.range(self.layout.len() - 1).1;
             if last_end < self.layout.nrows() {
-                self.sweep_rows(
+                Self::sweep_rows(
+                    &mut self.cursors,
                     jacobian,
                     residuals,
                     &kept_global,
@@ -540,9 +541,13 @@ impl ChunkedSchurEliminator {
     /// accumulating `FᵀF` and `Fᵀr` on the way.
     ///
     /// Returns the touched retained columns and the `rows × cols` strip.
+    ///
+    /// Associated function (not a method) so callers can hold `&layout` slices
+    /// while advancing `cursors`: taking `&mut self` for the cursors alone
+    /// would force a per-solve clone of the chunk-column cache.
     #[allow(clippy::too_many_arguments)]
     fn gather_strip(
-        &mut self,
+        cursors: &mut Vec<usize>,
         jacobian: &SparseColMat<usize, f64>,
         residuals: &Mat<f64>,
         kept_global: &[usize],
@@ -565,7 +570,7 @@ impl ChunkedSchurEliminator {
         let mut spans = Vec::with_capacity(candidates.len());
         for &local_u32 in candidates {
             let local = local_u32 as usize;
-            let cursor = &mut self.cursors[local];
+            let cursor = &mut cursors[local];
             let rows = symbolic.row_idx_of_col_raw(kept_global[local]);
             while *cursor < rows.len() && rows[*cursor] < row_start {
                 *cursor += 1;
@@ -617,7 +622,7 @@ impl ChunkedSchurEliminator {
     /// `FᵀF` and `Fᵀr` for a row range that belongs to no chunk.
     #[allow(clippy::too_many_arguments)]
     fn sweep_rows(
-        &mut self,
+        cursors: &mut Vec<usize>,
         jacobian: &SparseColMat<usize, f64>,
         residuals: &Mat<f64>,
         kept_global: &[usize],
@@ -627,7 +632,8 @@ impl ChunkedSchurEliminator {
         s: &mut Mat<f64>,
         g_k: &mut Mat<f64>,
     ) {
-        let _ = self.gather_strip(
+        let _ = Self::gather_strip(
+            cursors,
             jacobian,
             residuals,
             kept_global,
