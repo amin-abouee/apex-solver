@@ -56,7 +56,11 @@ impl Problem {
 
     /// Mark a variable to be eliminated by the Schur complement solver.
     ///
-    /// Unmarked variables are retained and form the reduced system. The
+    /// Nothing is eliminated by default — not even `Rn(3)` landmarks. A
+    /// bundle-adjustment problem only uses the Schur path once every landmark
+    /// carries an explicit mark (or the solver is configured with
+    /// auto-detection); unmarked variables are retained and form the reduced
+    /// system. The
     /// eliminated set is not restricted to 3-DOF landmarks: any DOF works, sizes
     /// may be mixed within one problem, and the eliminated variables need not be
     /// adjacent in the variable ordering. That covers inverse-depth
@@ -98,7 +102,7 @@ impl Problem {
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
     ) -> FactorKey {
         self.add_residual_block_with_noise(variable_keys, factor, loss_func, NoiseModel::null())
     }
@@ -115,7 +119,7 @@ impl Problem {
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
         noise: NoiseModel,
     ) -> FactorKey {
         self.try_add_residual_block_with_noise(variable_keys, factor, loss_func, noise)
@@ -127,7 +131,7 @@ impl Problem {
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
         noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
         if noise.dim() != 0 && noise.dim() != factor.residual_dim() {
@@ -153,7 +157,7 @@ impl Problem {
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
     ) -> CoreResult<FactorKey> {
         self.try_add_residual_block_impl(variable_keys, factor, loss_func, NoiseModel::Null)
     }
@@ -162,7 +166,7 @@ impl Problem {
         &mut self,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
         noise: NoiseModel,
     ) -> CoreResult<FactorKey> {
         let mut variables: Vec<&dyn ManifoldVariable> = Vec::with_capacity(variable_keys.len());

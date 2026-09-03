@@ -7,6 +7,17 @@
 //! Rⁿ tangent elements are also represented as `DVector<f64>` since the tangent space
 //! is isomorphic to the manifold itself.
 //!
+//! # Dimension limits
+//!
+//! Most operations accept any `n`, but the two that leave Rⁿ do not:
+//!
+//! - [`Rn::act`] is the translation action on R³ and is only defined for
+//!   `Rn(3)`: dimensions other than 3 hit at best a `debug_assert` (debug
+//!   builds) and at worst an out-of-bounds panic or a silently truncated
+//!   translation (release builds). Do not call it on any other `n`.
+//! - The default [`LieGroup::between`] composes `inverse` + `compose` and
+//!   requires both operands to share one dimension (asserted).
+//!
 //! The implementation follows the [manif](https://github.com/artivis/manif) C++ library
 //! conventions and provides all operations required by the LieGroup and Tangent traits.
 

@@ -53,7 +53,7 @@
 //! let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
 //!
 //! // Add robust loss function for outlier rejection
-//! let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
+//! let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send + Sync>);
 //!
 //! // Create residual block
 //! let block = ResidualBlock::new(
@@ -128,7 +128,12 @@ pub struct ResidualBlock {
     ///
     /// If `None`, standard least squares is used. If `Some`, the corrector algorithm
     /// is applied to downweight outliers.
-    pub loss_func: Option<Box<dyn LossFunction + Send>>,
+    ///
+    /// The `Send + Sync` bound mirrors `factor`: residual blocks are evaluated
+    /// by rayon tasks that share `&ResidualBlock` references, so both the
+    /// factor and the loss must be safe to share across threads — not merely
+    /// safe to move between them.
+    pub loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
 
     /// Measurement noise model; whitened before the robust-loss corrector.
     pub noise: NoiseModel,
@@ -168,7 +173,7 @@ impl ResidualBlock {
     /// let fk = fac_sm.insert(());
     ///
     /// let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
-    /// let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
+    /// let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send + Sync>);
     ///
     /// let block = ResidualBlock::new(
     ///     fk,                 // Block handle
@@ -186,7 +191,7 @@ impl ResidualBlock {
         residual_row_start_idx: usize,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
     ) -> Self {
         Self::with_noise(
             residual_block_id,
@@ -206,7 +211,7 @@ impl ResidualBlock {
         residual_row_start_idx: usize,
         variable_keys: &[VarKey],
         factor: Box<dyn Factor + Send + Sync>,
-        loss_func: Option<Box<dyn LossFunction + Send>>,
+        loss_func: Option<Box<dyn LossFunction + Send + Sync>>,
         noise: NoiseModel,
     ) -> Self {
         ResidualBlock {
@@ -353,7 +358,7 @@ mod tests {
     fn test_residual_block_creation() -> TestResult {
         let (fk, keys) = make_keys(2);
         let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.1)));
-        let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send + Sync>);
 
         let block = ResidualBlock::new(fk, 0, &keys, factor, loss);
 
@@ -410,7 +415,7 @@ mod tests {
     fn test_residual_and_jacobian_with_huber_loss() -> TestResult {
         let (fk, keys) = make_keys(2);
         let factor = Box::new(BetweenFactor::new(SE2::from_xy_angle(1.0, 0.0, 0.0)));
-        let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send>);
+        let loss = Some(Box::new(HuberLoss::new(1.0)?) as Box<dyn LossFunction + Send + Sync>);
         let block = ResidualBlock::new(fk, 0, &keys, factor, loss);
 
         let var0 = Variable::new(SE2::from_xy_angle(0.0, 0.0, 0.0));

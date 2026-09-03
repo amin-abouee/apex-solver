@@ -449,10 +449,12 @@ impl GaussNewtonConfig {
     /// Print configuration parameters (info level logging)
     pub fn print_configuration(&self) {
         debug!(
-            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
             self.linear_solver_type,
             self.schur_variant,
             self.schur_preconditioner,
+            self.schur_cg_max_iterations,
+            self.schur_cg_tolerance,
             self.max_iterations,
             self.cost_tolerance,
             self.parameter_tolerance,
@@ -635,9 +637,14 @@ impl GaussNewton {
             &state.sorted_vars,
         );
 
-        // Compute new cost (residual only, no Jacobian needed for step evaluation)
+        // Compute new cost (residual only, no Jacobian needed for step evaluation).
+        // Reuses the solve workspace instead of allocating one per iteration,
+        // like Levenberg-Marquardt does.
         let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse(&state.variables)?;
+            problem.compute_residual_and_cost_sparse_with_workspace(
+                &state.variables,
+                &mut state.workspace,
+            )?;
 
         // Compute cost reduction
         let cost_reduction = state.current_cost - new_cost;

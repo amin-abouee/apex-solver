@@ -364,6 +364,8 @@ pub struct LevenbergMarquardtConfig {
     /// variant of the Schur complement method to use:
     /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
     ///   memory is O(kept_dof²).
+    /// - [`SchurVariant::ChunkedSparse`]: form S straight from `J`, never
+    ///   materializing `JᵀJ`. Same algebra, far less memory on large problems.
     /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
     ///   linear, which is what makes very large camera sets tractable.
     /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
@@ -664,6 +666,12 @@ impl LevenbergMarquardtConfig {
     /// This configuration matches Ceres Solver's recommended BA settings and
     /// should achieve similar convergence quality.
     ///
+    /// Note this preset selects the *solver*, not the *variables*: no landmark
+    /// is eliminated until it is marked with
+    /// [`Problem::mark_for_elimination`](crate::core::problem::Problem::mark_for_elimination).
+    /// A BA problem without marks solves correctly but without any Schur
+    /// reduction.
+    ///
     /// # Example
     ///
     /// ```
@@ -732,8 +740,12 @@ impl LevenbergMarquardtConfig {
     ///   Print configuration parameters (verbose mode only)
     pub fn print_configuration(&self) {
         debug!(
-            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Step Quality:\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            "Configuration:\n  Solver:        Levenberg-Marquardt\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Damping Parameters:\n  Initial damping:     {:.2e}\n  Damping range:       [{:.2e}, {:.2e}]\n  Increase factor:     {:.2}\n  Decrease factor:     {:.2}\n  Step Quality:\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
             self.linear_solver_type,
+            self.schur_variant,
+            self.schur_preconditioner,
+            self.schur_cg_max_iterations,
+            self.schur_cg_tolerance,
             self.max_iterations,
             self.cost_tolerance,
             self.parameter_tolerance,

@@ -375,7 +375,7 @@ fn format_summary_table(results: &[DatasetResult]) {
 fn create_loss_function(
     loss_name: &str,
     scale: Option<f64>,
-) -> Result<Option<Box<dyn LossFunction + Send>>, Box<dyn std::error::Error>> {
+) -> Result<Option<Box<dyn LossFunction + Send + Sync>>, Box<dyn std::error::Error>> {
     let loss_lower = loss_name.to_lowercase();
 
     // One table: each arm picks its own default scale, so there is no second
@@ -383,7 +383,7 @@ fn create_loss_function(
     // `scale` overrides the default where the loss takes one; L2 and L1 have no
     // scale parameter.
     let s = |default: f64| scale.unwrap_or(default);
-    let loss: Box<dyn LossFunction + Send> = match loss_lower.as_str() {
+    let loss: Box<dyn LossFunction + Send + Sync> = match loss_lower.as_str() {
         "l2" => Box::new(L2Loss),
         "l1" => Box::new(L1Loss),
         "huber" => Box::new(HuberLoss::new(s(1.345))?),

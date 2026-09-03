@@ -50,7 +50,7 @@ fn initial_cost(
 ) -> Result<f64, Box<dyn std::error::Error>> {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let x = problem.add_variable(ManifoldType::RN, dvector![1.0, 2.0, 3.0]);
-    let loss_boxed = loss.map(|l| Box::new(l) as Box<dyn LossFunction + Send>);
+    let loss_boxed = loss.map(|l| Box::new(l) as Box<dyn LossFunction + Send + Sync>);
     problem.add_residual_block_with_noise(
         &[x],
         Box::new(Linear3 {

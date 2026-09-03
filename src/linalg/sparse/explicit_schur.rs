@@ -118,6 +118,12 @@ pub enum SchurPreconditioner {
 }
 
 /// Configuration for Schur complement variable ordering
+///
+/// Note the default eliminates **nothing** until variables are marked with
+/// [`Problem::mark_for_elimination`](crate::core::problem::Problem::mark_for_elimination):
+/// `auto_detect` is off because `Rn(3)` is ambiguous (landmarks vs
+/// self-calibration intrinsics), so a default-constructed ordering only
+/// *classifies* — the marks still have to exist.
 #[derive(Debug, Clone)]
 pub struct SchurOrdering {
     pub eliminate_types: Vec<ManifoldType>,

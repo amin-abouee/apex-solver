@@ -666,10 +666,12 @@ impl DogLegConfig {
     #[allow(deprecated)]
     pub fn print_configuration(&self) {
         debug!(
-            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
+            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
             self.linear_solver_type,
             self.schur_variant,
             self.schur_preconditioner,
+            self.schur_cg_max_iterations,
+            self.schur_cg_tolerance,
             self.max_iterations,
             self.cost_tolerance,
             self.parameter_tolerance,
@@ -1229,9 +1231,14 @@ impl DogLeg {
             &state.sorted_vars,
         );
 
-        // Compute new cost (residual only, no Jacobian needed for step evaluation)
+        // Compute new cost (residual only, no Jacobian needed for step evaluation).
+        // Reuses the solve workspace instead of allocating one per iteration,
+        // like Levenberg-Marquardt does.
         let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse(&state.variables)?;
+            problem.compute_residual_and_cost_sparse_with_workspace(
+                &state.variables,
+                &mut state.workspace,
+            )?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
