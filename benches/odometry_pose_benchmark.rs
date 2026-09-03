@@ -59,6 +59,7 @@ use apex_io::{G2oLoader, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D
 use apex_manifolds::Tangent;
 use apex_solver::ManifoldType;
 use apex_solver::NoiseModel;
+use apex_solver::core::noise::{RepairStrategy, RepairSummary};
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BetweenFactor;
@@ -167,31 +168,31 @@ fn compute_se2_cost_metrics(graph: &apex_io::Graph) -> CostMetrics {
 /// `cubicle.g2o` (5021/16869 edges) and `rim.g2o` (8815/29743) it applies to
 /// ~30% of the graph. Counting it here turns 5021 per-edge warnings into one
 /// line per dataset that says how much of the input is ill-formed.
-fn edge_noise(info: nalgebra::DMatrix<f64>, unusable: &mut usize) -> NoiseModel {
-    match NoiseModel::from_information_reporting(info) {
+fn edge_noise(
+    info: nalgebra::DMatrix<f64>,
+    strategy: RepairStrategy,
+    summary: &mut RepairSummary,
+) -> NoiseModel {
+    match strategy.build(info) {
         Ok((noise, repair)) => {
-            if repair.is_material() {
-                *unusable += 1;
-                if unit_weight_repair() {
-                    return NoiseModel::null();
-                }
-            }
+            summary.record(strategy, &repair);
             noise
         }
         Err(e) => panic!("g2o information matrix must be well-formed: {e:?}"),
     }
 }
 
-/// Whether indefinite-Ω edges fall back to identity weighting. Default on:
-/// the benchmark's headline metric is the unweighted cost, and on the only
+/// Repair strategy from the environment. Default on unit-weight: the
+/// benchmark's headline metric is the unweighted cost, and on the only
 /// datasets with material indefiniteness (cubicle, rim — ~30% of edges) the
 /// clamped directions carry no constraint, so the PSD projection strands the
 /// optimizer at a poor unweighted optimum. `APEX_ODOM_REPAIR=clamp` restores
 /// the projection behaviour.
-fn unit_weight_repair() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| {
-        !std::env::var("APEX_ODOM_REPAIR").is_ok_and(|v| v == "clamp")
+fn repair_strategy() -> RepairStrategy {
+    static STRATEGY: std::sync::OnceLock<RepairStrategy> = std::sync::OnceLock::new();
+    *STRATEGY.get_or_init(|| {
+        let name = std::env::var("APEX_ODOM_REPAIR").unwrap_or_else(|_| "unit-weight".to_string());
+        RepairStrategy::from_name(&name).unwrap_or_else(|e| panic!("{e:?}"))
     })
 }
 
@@ -215,6 +216,13 @@ fn unit_weight_repair() -> bool {
 /// - `APEX_ODOM_DMAX`      λ upper bound (default 1e12)
 /// - `APEX_ODOM_COST_TOL` / `APEX_ODOM_PARAM_TOL` (per-dataset default)
 fn odom_lm_config(max_iterations: usize, dataset: &str) -> LevenbergMarquardtConfig {
+    // 2D + cubicle start from the sweep-winning scalar-damping preset so the
+    // bench and the library share one definition of the tuned defaults.
+    let mut config = if matches!(dataset, "M3500" | "mit" | "city10000" | "ring" | "cubicle") {
+        LevenbergMarquardtConfig::for_2d_pose_graph()
+    } else {
+        LevenbergMarquardtConfig::new()
+    };
     let (default_damping, default_diag) = match dataset {
         "M3500" | "mit" | "city10000" | "ring" | "cubicle" => (1e-4, (1.0, 1.0)),
         // parking-garage: λ0=1e-5 keeps the unweighted cost at the accurate
@@ -223,7 +231,7 @@ fn odom_lm_config(max_iterations: usize, dataset: &str) -> LevenbergMarquardtCon
         _ => (1e-4, (1e-6, 1e32)),
     };
     let default_tol = if dataset == "parking-garage" { 1e-3 } else { 1e-4 };
-    let mut config = LevenbergMarquardtConfig::new()
+    config = config
         .with_max_iterations(max_iterations)
         .with_cost_tolerance(env_parse("APEX_ODOM_COST_TOL", default_tol))
         .with_parameter_tolerance(env_parse("APEX_ODOM_PARAM_TOL", default_tol))
@@ -263,16 +271,17 @@ fn env_parse_pair(key: &str) -> Option<(f64, f64)> {
 }
 
 /// Warn once per dataset when edges had to fall back to unit weight.
-fn report_unusable_information(dataset: &str, unusable: usize, total: usize) {
-    if unusable > 0 {
+fn report_unusable_information(dataset: &str, summary: &RepairSummary, total: usize) {
+    if !summary.is_clean() {
         warn!(
             "{}: {}/{} edges ({:.1}%) have a materially indefinite information \
-             matrix; the clamped directions carry no constraint — the \
-             dataset's Ω is ill-formed",
+             matrix ({} unit-weighted); the clamped directions carry no \
+             constraint — the dataset's Ω is ill-formed",
             dataset,
-            unusable,
+            summary.materially_repaired,
             total,
-            100.0 * unusable as f64 / total.max(1) as f64
+            100.0 * summary.materially_repaired as f64 / total.max(1) as f64,
+            summary.unit_weighted
         );
     }
 }
@@ -630,7 +639,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
-    let mut unusable_information = 0usize;
+    let strategy = repair_strategy();
+    let mut repair_summary = RepairSummary::default();
     for edge in &graph.edges_se2 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
@@ -638,7 +648,8 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             // objective equals the harness-reported Ω-weighted χ².
             let noise = edge_noise(
                 nalgebra::DMatrix::from_column_slice(3, 3, edge.information.as_slice()),
-                &mut unusable_information,
+                strategy,
+                &mut repair_summary,
             );
             problem.add_residual_block_with_noise(
                 &[k0, k1],
@@ -648,7 +659,7 @@ fn apex_solver_se2(dataset: &Dataset) -> BenchmarkResult {
             );
         }
     }
-    report_unusable_information(dataset.name, unusable_information, graph.edges_se2.len());
+    report_unusable_information(dataset.name, &repair_summary, graph.edges_se2.len());
 
     let config = odom_lm_config(150, &dataset.name);
 
@@ -711,7 +722,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
         }
     }
 
-    let mut unusable_information = 0usize;
+    let strategy = repair_strategy();
+    let mut repair_summary = RepairSummary::default();
     for edge in &graph.edges_se3 {
         if let (Some(&k0), Some(&k1)) = (var_keys.get(&edge.from), var_keys.get(&edge.to)) {
             let between_factor = BetweenFactor::new(edge.measurement.clone());
@@ -719,7 +731,8 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             // objective equals the harness-reported Ω-weighted χ².
             let noise = edge_noise(
                 nalgebra::DMatrix::from_column_slice(6, 6, edge.information.as_slice()),
-                &mut unusable_information,
+                strategy,
+                &mut repair_summary,
             );
             problem.add_residual_block_with_noise(
                 &[k0, k1],
@@ -729,7 +742,7 @@ fn apex_solver_se3(dataset: &Dataset) -> BenchmarkResult {
             );
         }
     }
-    report_unusable_information(dataset.name, unusable_information, graph.edges_se3.len());
+    report_unusable_information(dataset.name, &repair_summary, graph.edges_se3.len());
 
     let config = odom_lm_config(100, &dataset.name);
 

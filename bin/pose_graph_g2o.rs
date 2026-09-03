@@ -4,6 +4,7 @@ use std::time::Instant;
 use apex_solver::ErrorLogging;
 use apex_solver::JacobianMode;
 use apex_solver::NoiseModel;
+use apex_solver::core::noise::{InformationRepair, RepairStrategy, RepairSummary};
 use apex_solver::apex_io::{
     G2oLoader, Graph, GraphLoader, ODOMETRY_DATA_DIR_2D, ODOMETRY_DATA_DIR_3D,
 };
@@ -151,32 +152,29 @@ fn apply_lm_tuning(config: LevenbergMarquardtConfig, args: &Args) -> LevenbergMa
 
 /// Build the per-edge noise model honouring `--indefinite-repair`.
 ///
-/// "clamp" (default) keeps the PSD-projection behaviour of `from_information`;
-/// "unit-weight" replaces any edge whose Ω needed material repairs with an
-/// identity weight, trading χ² for unweighted cost.
+/// Returns the model and what the repair did, so the caller can aggregate one
+/// summary line per dataset instead of one `warn!` per edge. "clamp" (default)
+/// keeps the PSD-projection behaviour of `from_information`; "unit-weight"
+/// replaces any edge whose Ω needed a material repair with identity weight,
+/// trading χ² for unweighted cost.
 fn edge_noise_model(
     info: nalgebra::DMatrix<f64>,
-    args: &Args,
-) -> Result<NoiseModel, apex_solver::error::ApexSolverError> {
-    if args.indefinite_repair == "unit-weight" {
-        let (model, repair) =
-            NoiseModel::from_information_reporting(info).map_err(|e| {
-                apex_solver::error::ApexSolverError::from(
-                    apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-                )
-            })?;
-        if repair.is_material() {
-            Ok(NoiseModel::null())
-        } else {
-            Ok(model)
-        }
-    } else {
-        Ok(NoiseModel::from_information(info).map_err(|e| {
-            apex_solver::error::ApexSolverError::from(
-                apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
-            )
-        })?)
-    }
+    strategy: RepairStrategy,
+) -> Result<(NoiseModel, InformationRepair), apex_solver::error::ApexSolverError> {
+    strategy.build(info).map_err(|e| {
+        apex_solver::error::ApexSolverError::from(
+            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+        )
+    })
+}
+
+/// Parse `--indefinite-repair` once, before the edge loop.
+fn repair_strategy(args: &Args) -> Result<RepairStrategy, apex_solver::error::ApexSolverError> {
+    RepairStrategy::from_name(&args.indefinite_repair).map_err(|e| {
+        apex_solver::error::ApexSolverError::from(
+            apex_solver::core::CoreError::InvalidInput(e.to_string()).log(),
+        )
+    })
 }
 
 // ============================================================================
@@ -527,6 +525,9 @@ fn test_se2_dataset(
         )
     })?;
 
+    let strategy = repair_strategy(args)?;
+    let mut repair_summary = RepairSummary::default();
+
     for edge in &graph.edges_se2 {
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactor::new(relative_pose);
@@ -543,10 +544,12 @@ fn test_se2_dataset(
         let edge_noise = if args.no_noise {
             NoiseModel::null()
         } else {
-            edge_noise_model(
+            let (model, repair) = edge_noise_model(
                 nalgebra::DMatrix::from_column_slice(3, 3, edge.information.as_slice()),
-                args,
-            )?
+                strategy,
+            )?;
+            repair_summary.record(strategy, &repair);
+            model
         };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
@@ -574,6 +577,16 @@ fn test_se2_dataset(
         if needs_prior { "1" } else { "0" },
         graph.edges_se2.len()
     );
+    if !args.no_noise && !repair_summary.is_clean() {
+        info!(
+            "Information repair ({} edges, {} materially repaired, {} unit-weighted): \
+             clamped directions carry no information; unit-weighted edges optimize \
+             unweighted cost, not χ²",
+            repair_summary.edges,
+            repair_summary.materially_repaired,
+            repair_summary.unit_weighted
+        );
+    }
 
     let init_cost_start = Instant::now();
     let init_state = initialize_optimization_state(&mut problem).map_err(|e| {
@@ -901,6 +914,9 @@ fn test_se3_dataset(
         )
     })?;
 
+    let strategy = repair_strategy(args)?;
+    let mut repair_summary = RepairSummary::default();
+
     for edge in &graph.edges_se3 {
         let relative_pose = edge.measurement.clone();
         let between_factor = BetweenFactor::new(relative_pose);
@@ -917,10 +933,12 @@ fn test_se3_dataset(
         let edge_noise = if args.no_noise {
             NoiseModel::null()
         } else {
-            edge_noise_model(
+            let (model, repair) = edge_noise_model(
                 nalgebra::DMatrix::from_column_slice(6, 6, edge.information.as_slice()),
-                args,
-            )?
+                strategy,
+            )?;
+            repair_summary.record(strategy, &repair);
+            model
         };
 
         if let (Some(&k0), Some(&k1)) = (var_key_map.get(&edge.from), var_key_map.get(&edge.to)) {
@@ -939,6 +957,16 @@ fn test_se3_dataset(
         if needs_prior { "1" } else { "0" },
         graph.edges_se3.len()
     );
+    if !args.no_noise && !repair_summary.is_clean() {
+        info!(
+            "Information repair ({} edges, {} materially repaired, {} unit-weighted): \
+             clamped directions carry no information; unit-weighted edges optimize \
+             unweighted cost, not χ²",
+            repair_summary.edges,
+            repair_summary.materially_repaired,
+            repair_summary.unit_weighted
+        );
+    }
 
     let init_cost_start = Instant::now();
     let init_state = initialize_optimization_state(&mut problem).map_err(|e| {

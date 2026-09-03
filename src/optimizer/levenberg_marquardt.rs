@@ -689,6 +689,27 @@ impl LevenbergMarquardtConfig {
             .with_gradient_tolerance(1e-10) // Relaxed (was 1e-16)
     }
 
+    /// Configuration tuned for 2D pose-graph odometry.
+    ///
+    /// Sweep winner on the 2D suite (M3500/mit/city10000/ring) and cubicle:
+    /// scalar λ·I damping (`min = max = 1` diagonal bounds, GTSAM's default)
+    /// is 2–7× faster than λ·diag(H) at unchanged cost there. On cubicle it
+    /// pairs with [`RepairStrategy::UnitWeight`](crate::core::noise::RepairStrategy)
+    /// for a 6.9× lower unweighted cost.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
+    ///
+    /// let config = LevenbergMarquardtConfig::for_2d_pose_graph();
+    /// ```
+    pub fn for_2d_pose_graph() -> Self {
+        Self::default()
+            .with_damping(1e-4)
+            .with_diagonal_bounds(1.0, 1.0)
+    }
+
     /// Enable real-time visualization (graphical debugging).
     ///
     /// When enabled, optimization progress is logged to a Rerun viewer with:

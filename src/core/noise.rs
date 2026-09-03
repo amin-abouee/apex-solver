@@ -73,6 +73,85 @@ impl InformationRepair {
     }
 }
 
+/// Strategy for handling an indefinite per-edge information matrix.
+///
+/// The repair itself lives in [`NoiseModel::from_information_reporting`]; this
+/// enum is the single shared vocabulary for choosing what to do with the
+/// report, so binaries, benches and libraries stop re-implementing the
+/// `clamp | unit-weight` branch with divergent defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RepairStrategy {
+    /// Keep the PSD projection (nearest-PSD clamp). The optimized objective
+    /// stays the Ω-weighted χ², minus the clamped directions.
+    #[default]
+    Clamp,
+    /// Substitute an identity weight for any edge whose `Ω` needed a
+    /// *material* repair. This trades χ² for unweighted cost on those edges —
+    /// callers must label the reported objective accordingly.
+    UnitWeight,
+}
+
+impl RepairStrategy {
+    /// Parse a CLI/env value (`"clamp"` or `"unit-weight"`, case-insensitive).
+    pub fn from_name(name: &str) -> CoreResult<Self> {
+        if name.eq_ignore_ascii_case("clamp") {
+            Ok(RepairStrategy::Clamp)
+        } else if name.eq_ignore_ascii_case("unit-weight") {
+            Ok(RepairStrategy::UnitWeight)
+        } else {
+            Err(CoreError::InvalidInput(format!(
+                "unknown repair strategy {name:?}: expected \"clamp\" or \"unit-weight\""
+            )))
+        }
+    }
+
+    /// Build a noise model from `Ω` under this strategy, reporting what
+    /// happened. Returns the model and its [`InformationRepair`]; under
+    /// [`RepairStrategy::UnitWeight`] a materially-repaired edge comes back
+    /// as [`NoiseModel::Null`] (identity weight).
+    pub fn build(&self, info: DMatrix<f64>) -> CoreResult<(NoiseModel, InformationRepair)> {
+        let (model, repair) = NoiseModel::from_information_reporting(info)?;
+        if *self == RepairStrategy::UnitWeight && repair.is_material() {
+            Ok((NoiseModel::null(), repair))
+        } else {
+            Ok((model, repair))
+        }
+    }
+}
+
+/// Running tally of information-matrix repairs over a loaded graph.
+///
+/// The library reports per edge ([`InformationRepair`]); aggregation belongs
+/// to the caller, and this is the shared counter so every harness reports the
+/// same line. Log one summary per dataset, not one `warn!` per edge.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RepairSummary {
+    /// Edges examined.
+    pub edges: usize,
+    /// Edges whose `Ω` needed a material repair (real information clamped).
+    pub materially_repaired: usize,
+    /// Of those, edges substituted with identity weight (`UnitWeight` only).
+    pub unit_weighted: usize,
+}
+
+impl RepairSummary {
+    /// Record one edge's outcome under `strategy`.
+    pub fn record(&mut self, strategy: RepairStrategy, repair: &InformationRepair) {
+        self.edges += 1;
+        if repair.is_material() {
+            self.materially_repaired += 1;
+            if strategy == RepairStrategy::UnitWeight {
+                self.unit_weighted += 1;
+            }
+        }
+    }
+
+    /// True when every edge was PSD as parsed.
+    pub fn is_clean(&self) -> bool {
+        self.materially_repaired == 0
+    }
+}
+
 impl NoiseModel {
     /// Identity model.
     pub fn null() -> Self {
@@ -256,5 +335,69 @@ impl NoiseModel {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    #[test]
+    fn repair_strategy_parses_known_names() -> TestResult {
+        assert_eq!(RepairStrategy::from_name("clamp")?, RepairStrategy::Clamp);
+        assert_eq!(
+            RepairStrategy::from_name("UNIT-WEIGHT")?,
+            RepairStrategy::UnitWeight
+        );
+        assert_eq!(RepairStrategy::default(), RepairStrategy::Clamp);
+        assert!(RepairStrategy::from_name("project").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn clamp_keeps_repaired_model_and_unit_weight_substitutes() -> TestResult {
+        // diag(1, -4): one materially indefinite direction.
+        let info = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, -4.0]);
+        let (clamped, repair) = RepairStrategy::Clamp.build(info.clone())?;
+        assert!(repair.is_material());
+        assert!(matches!(clamped, NoiseModel::Dense(_)));
+
+        let (unit, repair) = RepairStrategy::UnitWeight.build(info)?;
+        assert!(repair.is_material());
+        assert_eq!(unit, NoiseModel::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn clean_matrix_never_counts_as_repaired() -> TestResult {
+        let info = DMatrix::from_row_slice(2, 2, &[4.0, 0.0, 0.0, 1.0]);
+        let mut summary = RepairSummary::default();
+        for strategy in [RepairStrategy::Clamp, RepairStrategy::UnitWeight] {
+            let (model, repair) = strategy.build(info.clone())?;
+            summary.record(strategy, &repair);
+            assert!(!matches!(model, NoiseModel::Null));
+        }
+        assert!(summary.is_clean());
+        assert_eq!(summary.edges, 2);
+        assert_eq!(summary.materially_repaired, 0);
+        assert_eq!(summary.unit_weighted, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn summary_counts_material_and_unit_weighted_edges() -> TestResult {
+        let bad = DMatrix::from_row_slice(2, 2, &[1.0, 0.0, 0.0, -4.0]);
+        let mut summary = RepairSummary::default();
+        let (_, repair) = RepairStrategy::Clamp.build(bad.clone())?;
+        summary.record(RepairStrategy::Clamp, &repair);
+        let (_, repair) = RepairStrategy::UnitWeight.build(bad)?;
+        summary.record(RepairStrategy::UnitWeight, &repair);
+        assert_eq!(summary.edges, 2);
+        assert_eq!(summary.materially_repaired, 2);
+        assert_eq!(summary.unit_weighted, 1);
+        assert!(!summary.is_clean());
+        Ok(())
     }
 }
