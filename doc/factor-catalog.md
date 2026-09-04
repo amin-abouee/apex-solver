@@ -93,8 +93,8 @@ observability in every configuration.
 | `GpsVelocityFactor` | `GPSVelocityFactor` | R³ velocity |
 | `PseudorangeFactor` | `PseudorangeFactor` | receiver position + clock bias (meters); degenerate geometry penalized |
 | `DopplerFactor` | `DopplerFactor` | range-rate over position + velocity |
-| `BarometricFactor` | `BarometricFactor` | `[SE3 pose, R¹ bias]` |
-| `AttitudeFactor` | `AttitudeFactor` / `MagFactor` | gravity/magnetometer direction; add two (gravity + mag) for full AHRS |
+| `BarometricFactor` | `BarometricFactor` | `navigation/barometric.rs`; `[SE3 pose, R¹ bias]` |
+| `AttitudeFactor` | `AttitudeFactor` / `MagFactor` | `navigation/attitude.rs`; gravity/magnetometer direction; add two (gravity + mag) for full AHRS |
 
 ### Range / bearing (`src/factors/ranging/`)
 | Factor | GTSAM analogue | Notes |

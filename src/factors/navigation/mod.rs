@@ -2,12 +2,14 @@
 //! auxiliary inertial aids (barometric altitude, attitude from
 //! gravity/magnetometer).
 
-pub mod barometric_attitude_factor;
+pub mod attitude;
+pub mod barometric;
 pub mod gnss_raw;
 pub mod gps;
 pub mod gps_velocity;
 
-pub use barometric_attitude_factor::{AttitudeFactor, BarometricFactor};
+pub use attitude::AttitudeFactor;
+pub use barometric::BarometricFactor;
 pub use gnss_raw::{DopplerFactor, PseudorangeFactor};
 pub use gps::{GpsAsyncFactor, GpsFactor};
 pub use gps_velocity::GpsVelocityFactor;
