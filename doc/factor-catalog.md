@@ -7,7 +7,7 @@ manifold Jacobians and finite-difference unit tests.
 
 **Layout.** A factor lives in the folder named for its sensor modality, and is
 addressed by that path — `factors::visual::StereoFactor`,
-`factors::inertial::ImuFactor`. `apex_solver::prelude` re-exports only the
+`factors::inertial::se23::ImuFactor`. `apex_solver::prelude` re-exports only the
 common set. `factors::common/` holds what several families share; manifold
 derivatives are *not* among them, since every group in `apex-manifolds` already
 reports the Jacobians of its own operations.
@@ -31,35 +31,39 @@ internally or expects a `NoiseModel` — never both; the ones that do report
 
 ### Inertial (`src/factors/inertial/`) — shared `ImuPreintegration`
 
-Two independent axes, following GTSAM. **Combined or not** decides how bias
-evolution is modelled and therefore the residual dimension; **state
-parameterization** decides how pose and velocity are stored.
+Two factors per group and nothing else, so the choice is two questions.
 
-Non-combined factors share one bias variable per edge and need a companion
-bias random-walk edge — build one with `inertial::bias::{bias_random_walk,
-bias_random_walk_noise}`. Combined factors embed that walk in their trailing
-six rows and take a bias per frame, so adding the edge alongside one of them
-would count the same uncertainty twice. The weighting follows the same split:
-non-combined factors use a 9×9 information built from measurement noise alone,
-combined factors the full 15×15.
+**Which group?** `se23` models a keyframe as `(R, t, v)`. `sgal3` adds a time
+coordinate, `(R, t, v, s)`, making the inter-keyframe interval an estimated
+quantity — pick it for sensor time-offset or rolling-shutter calibration.
 
-| Factor | Residual | Blocks | GTSAM analogue |
-|---|---|---|---|
-| `ImuFactor` | 9D | `(SE3, vel, SE3, vel, bias)` | `ImuFactor` |
-| `Se23ImuFactor` | 9D | `(SE23, SE23, bias)` | `ImuFactor2` |
-| `CombinedImuFactor` | 15D | `(SE3, vel, bias) × 2` | `CombinedImuFactor` |
-| `CombinedSe23ImuFactor` | 15D | `(SE23, bias) × 2` | — |
-| `Sgal3ImuFactor` | 9D | `(SE3, vel, SE3, vel, bias)` | — |
-| `Sgal3StateImuFactor` | **10D** | `(SGal3, SGal3, bias)` | — |
-| `Sgal3CombinedImuFactor` | 15D | `(SE3, vel, bias) × 2` | — |
-| `Sgal3CombinedStateImuFactor` | **16D** | `(SGal3, bias) × 2` | — |
+**Combined or not?** `ImuFactor` shares one bias variable across the interval
+and leaves its evolution to a `bias::bias_random_walk` edge.
+`CombinedImuFactor` takes a bias per keyframe and embeds the random walk in its
+trailing six rows, so it needs no such edge. Using both counts that
+uncertainty twice. Weighting follows the same split: the shared-bias form uses
+a 9×9 information built from measurement noise alone, the combined form the
+full 15×15.
 
-SGal(3)'s tangent carries a **time** coordinate, giving a `(t_j − t_i) − Δt`
-residual row — but only where time is estimated. The native-`SGal3` factors
-take it as part of the state, so that row is a real constraint (sensor
-time-offset and rolling-shutter calibration; weight it with
-`with_time_sigma`). The split-block factors have no time variable, so the row
-would be identically zero on both residual and Jacobian, and they drop it.
+| | `ImuFactor` | `CombinedImuFactor` |
+|---|---|---|
+| `se23` | 9D, `(SE23, SE23, bias)` | 15D, `(SE23, bias, SE23, bias)` |
+| `sgal3` | 10D, `(SGal3, SGal3, bias)` | 16D, `(SGal3, bias, SGal3, bias)` |
+
+Both names exist in both modules, so they are addressed by their group:
+`inertial::se23::ImuFactor`, `inertial::sgal3::CombinedImuFactor`.
+
+A keyframe is a **single** state variable on the group, not separate pose and
+velocity blocks: the optimizer's update is then a group right-plus, and the
+pose/velocity coupling inertial integration produces is the group's job.
+The practical consequence is that aiding measurements attach to that state —
+an `SE3`-only factor (`PoseTranslationPrior`, `ProjectionFactor`, …) cannot
+attach to an `SE23` variable. `PriorFactor<SE23>` and `MarginalPriorFactor`
+are generic and do work; see `tests/factor_integration.rs` for a GNSS
+position+velocity fix written against a state.
+
+SGal(3)'s extra row is `(t_j − t_i) − Δt`, weighted by `1/σ_t`
+(`with_time_sigma`, default 100 µs).
 
 An initial bias prior (`EuclideanPriorFactor` on R⁶) is required for
 observability in every configuration.

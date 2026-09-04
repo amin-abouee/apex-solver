@@ -1,18 +1,15 @@
-//! Tests for the four SGal(3) IMU factors.
+//! Tests for the two SGal(3) IMU factors.
 //!
-//! The predecessors of these tests were `#[ignore]`d ("tangent Jacobian chain
-//! under investigation"). They are enabled here, and they linearize *away* from
-//! ground truth — the point at which the previous SE_2(3) tests were unable to
-//! see a Jacobian error at all.
+//! Like the SE_2(3) tests, Jacobians are checked away from ground truth. The
+//! predecessors of these tests were `#[ignore]`d for a Jacobian chain that has
+//! since been fixed.
 
-use apex_manifolds::se3::{SE3, SE3Tangent};
+use apex_manifolds::se3::SE3;
 use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
 use apex_manifolds::{LieGroup, Tangent, rn::Rn};
 use nalgebra::{DMatrix, DVector, Vector3};
 
-use super::factors::{
-    Sgal3CombinedImuFactor, Sgal3CombinedStateImuFactor, Sgal3ImuFactor, Sgal3StateImuFactor,
-};
+use super::factors::{CombinedImuFactor, ImuFactor};
 use crate::core::variable::{ManifoldVariable, Variable};
 use crate::factors::Factor;
 use crate::factors::inertial::preintegration::ImuPreintegration;
@@ -21,8 +18,7 @@ use crate::factors::inertial::types::{
 };
 
 const FD_EPS: f64 = 1e-5;
-/// See the SE_2(3) tests for why this is 1e-3: the floor is the `Q`-block
-/// coupling of the group's right Jacobians, not the factor code.
+/// See the SE_2(3) tests: the floor is the group's `Q`-block coupling.
 const FD_TOL: f64 = 1e-3;
 
 fn euroc_params() -> ImuParameters {
@@ -66,16 +62,8 @@ fn scenario() -> (ImuPreintegration, SE3, SpeedAndBias, f64) {
     (preint, pose_j, sb_j, t1)
 }
 
-fn pose_blocks(p: &SE3) -> DVector<f64> {
-    DVector::from_column_slice(p.as_param_slice())
-}
-
-fn vec3(v: Vector3<f64>) -> DVector<f64> {
-    DVector::from_vec(vec![v.x, v.y, v.z])
-}
-
-/// The `SGal3` state equivalent to a `(pose, velocity, time)` triple.
-fn sgal3_of(pose: &SE3, v: Vector3<f64>, t: f64) -> DVector<f64> {
+/// The `SGal3` state for a `(pose, velocity, time)` triple.
+fn state_of(pose: &SE3, v: Vector3<f64>, t: f64) -> DVector<f64> {
     let s = SGal3::new(pose.translation(), v, pose.rotation_quaternion(), t);
     DVector::from_column_slice(s.as_param_slice())
 }
@@ -86,54 +74,21 @@ fn residual_of<F: Factor>(f: &F, params: &[&[f64]]) -> Vec<f64> {
     r
 }
 
-#[derive(Clone, Copy)]
-enum Chart {
-    Se3,
-    Sgal3,
-    Euclidean,
-}
-
-impl Chart {
-    fn dof(self, block: &[f64]) -> usize {
-        match self {
-            Chart::Se3 => 6,
-            Chart::Sgal3 => 10,
-            Chart::Euclidean => block.len(),
-        }
-    }
-
-    fn perturb(self, block: &[f64], k: usize, eps: f64) -> DVector<f64> {
-        match self {
-            Chart::Se3 => {
-                let mut t = [0.0f64; 6];
-                t[k] = eps;
-                let m = SE3::from_param_slice(block).right_plus(
-                    &SE3Tangent::from_slice(&t),
-                    None,
-                    None,
-                );
-                DVector::from_column_slice(m.as_param_slice())
-            }
-            Chart::Sgal3 => {
-                let mut t = [0.0f64; 10];
-                t[k] = eps;
-                let m = SGal3::from_param_slice(block).right_plus(
-                    &SGal3Tangent::from_slice(&t),
-                    None,
-                    None,
-                );
-                DVector::from_column_slice(m.as_param_slice())
-            }
-            Chart::Euclidean => {
-                let mut out = DVector::from_column_slice(block);
-                out[k] += eps;
-                out
-            }
-        }
+fn perturb(block: &[f64], k: usize, eps: f64, is_state: bool) -> DVector<f64> {
+    if is_state {
+        let mut t = [0.0f64; 10];
+        t[k] = eps;
+        let moved =
+            SGal3::from_param_slice(block).right_plus(&SGal3Tangent::from_slice(&t), None, None);
+        DVector::from_column_slice(moved.as_param_slice())
+    } else {
+        let mut out = DVector::from_column_slice(block);
+        out[k] += eps;
+        out
     }
 }
 
-fn check_jacobian<F: Factor>(f: &F, blocks: &[DVector<f64>], charts: &[Chart], label: &str) {
+fn check_jacobian<F: Factor>(f: &F, blocks: &[DVector<f64>], state_blocks: &[bool], label: &str) {
     let params: Vec<&[f64]> = blocks.iter().map(|b| b.as_slice()).collect();
     let (rows, cols) = f.jacobian_shape();
     let mut r = vec![0.0; rows];
@@ -143,15 +98,16 @@ fn check_jacobian<F: Factor>(f: &F, blocks: &[DVector<f64>], charts: &[Chart], l
     let analytic = DMatrix::from_column_slice(rows, cols, &buf);
 
     let mut col = 0usize;
-    for (b, &chart) in charts.iter().enumerate() {
-        for k in 0..chart.dof(blocks[b].as_slice()) {
-            let mut p_plus = blocks.to_vec();
-            p_plus[b] = chart.perturb(blocks[b].as_slice(), k, FD_EPS);
-            let mut p_minus = blocks.to_vec();
-            p_minus[b] = chart.perturb(blocks[b].as_slice(), k, -FD_EPS);
+    for (b, &is_state) in state_blocks.iter().enumerate() {
+        let dof = if is_state { 10 } else { blocks[b].len() };
+        for k in 0..dof {
+            let mut plus = blocks.to_vec();
+            plus[b] = perturb(blocks[b].as_slice(), k, FD_EPS, is_state);
+            let mut minus = blocks.to_vec();
+            minus[b] = perturb(blocks[b].as_slice(), k, -FD_EPS, is_state);
 
-            let rp = residual_of(f, &p_plus.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
-            let rm = residual_of(f, &p_minus.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
+            let rp = residual_of(f, &plus.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
+            let rm = residual_of(f, &minus.iter().map(|v| v.as_slice()).collect::<Vec<_>>());
 
             for row in 0..rows {
                 let fd = (rp[row] - rm[row]) / (2.0 * FD_EPS);
@@ -169,143 +125,104 @@ fn check_jacobian<F: Factor>(f: &F, blocks: &[DVector<f64>], charts: &[Chart], l
     assert_eq!(col, cols, "{label}: column count");
 }
 
+fn perturbed(
+    pose_j: &SE3,
+    sb_j: &SpeedAndBias,
+    dt: f64,
+) -> (DVector<f64>, DVector<f64>, DVector<f64>) {
+    let pose_i = SE3::from_param_slice(&[0.05, -0.02, 0.01, 0.99875, 0.03, 0.02, 0.02]);
+    (
+        state_of(&pose_i, Vector3::new(0.03, -0.01, 0.02), 1e-3),
+        state_of(
+            pose_j,
+            sb_j.velocity() + Vector3::new(0.01, -0.02, 0.005),
+            dt + 2e-3,
+        ),
+        DVector::from_vec(vec![1e-3, -2e-3, 5e-4, 1e-2, -5e-3, 2e-3]),
+    )
+}
+
 // ── Shapes ───────────────────────────────────────────────────────────────────
 
 #[test]
-fn split_block_factors_drop_the_time_row() {
+fn factor_shapes_carry_the_time_row() {
     let (preint, _, _, _) = scenario();
-    let a = Sgal3ImuFactor::new(preint.clone());
-    let b = Sgal3CombinedImuFactor::new(preint);
-    assert_eq!(a.residual_dim(), 9);
-    assert_eq!(a.jacobian_shape(), (9, 24));
-    assert_eq!(b.residual_dim(), 15);
-    assert_eq!(b.jacobian_shape(), (15, 30));
+    let imu = ImuFactor::new(preint.clone());
+    assert_eq!(imu.residual_dim(), 10, "9 kinematic rows plus time");
+    assert_eq!(imu.jacobian_shape(), (10, 26));
+
+    let combined = CombinedImuFactor::new(preint);
+    assert_eq!(combined.residual_dim(), 16, "15 rows plus time");
+    assert_eq!(combined.jacobian_shape(), (16, 32));
 }
 
-#[test]
-fn native_state_factors_carry_the_time_row() {
-    let (preint, _, _, _) = scenario();
-    let a = Sgal3StateImuFactor::new(preint.clone());
-    let b = Sgal3CombinedStateImuFactor::new(preint);
-    assert_eq!(a.residual_dim(), 10);
-    assert_eq!(a.jacobian_shape(), (10, 26));
-    assert_eq!(b.residual_dim(), 16);
-    assert_eq!(b.jacobian_shape(), (16, 32));
-}
-
-// ── Zero residual at ground truth ────────────────────────────────────────────
+// ── Zero residual at propagated ground truth ─────────────────────────────────
 
 #[test]
-fn split_block_residuals_vanish_at_ground_truth() {
-    let (preint, pose_j, sb_j, _) = scenario();
-    let pi = pose_blocks(&SE3::identity());
-    let vi = DVector::zeros(3);
-    let pj = pose_blocks(&pose_j);
-    let vj = vec3(sb_j.velocity());
-    let b = DVector::zeros(6);
-
-    let f = Sgal3ImuFactor::new(preint.clone());
-    for (i, v) in residual_of(
-        &f,
-        &[
-            pi.as_slice(),
-            vi.as_slice(),
-            pj.as_slice(),
-            vj.as_slice(),
-            b.as_slice(),
-        ],
-    )
-    .iter()
-    .enumerate()
-    {
-        assert!(v.abs() < 1e-6, "Sgal3ImuFactor residual[{i}] = {v:.3e}");
-    }
-
-    let f = Sgal3CombinedImuFactor::new(preint);
-    for (i, v) in residual_of(
-        &f,
-        &[
-            pi.as_slice(),
-            vi.as_slice(),
-            b.as_slice(),
-            pj.as_slice(),
-            vj.as_slice(),
-            b.as_slice(),
-        ],
-    )
-    .iter()
-    .enumerate()
-    {
-        assert!(
-            v.abs() < 1e-6,
-            "Sgal3CombinedImuFactor residual[{i}] = {v:.3e}"
-        );
-    }
-}
-
-#[test]
-fn native_state_residuals_vanish_at_ground_truth() {
+fn residuals_vanish_at_ground_truth() {
     let (preint, pose_j, sb_j, dt) = scenario();
-    // Frame i at t = 0, frame j at t = Δt: the time row is satisfied exactly.
-    let si = sgal3_of(&SE3::identity(), Vector3::zeros(), 0.0);
-    let sj = sgal3_of(&pose_j, sb_j.velocity(), dt);
-    let b = DVector::zeros(6);
+    // Frame i at t = 0 and frame j at t = Δt satisfies the time row exactly.
+    let state_i = state_of(&SE3::identity(), Vector3::zeros(), 0.0);
+    let state_j = state_of(&pose_j, sb_j.velocity(), dt);
+    let bias = DVector::zeros(6);
 
-    let f = Sgal3StateImuFactor::new(preint.clone());
-    for (i, v) in residual_of(&f, &[si.as_slice(), sj.as_slice(), b.as_slice()])
-        .iter()
-        .enumerate()
-    {
-        assert!(
-            v.abs() < 1e-6,
-            "Sgal3StateImuFactor residual[{i}] = {v:.3e}"
-        );
-    }
-
-    let f = Sgal3CombinedStateImuFactor::new(preint);
+    let imu = ImuFactor::new(preint.clone());
     for (i, v) in residual_of(
-        &f,
-        &[si.as_slice(), b.as_slice(), sj.as_slice(), b.as_slice()],
+        &imu,
+        &[state_i.as_slice(), state_j.as_slice(), bias.as_slice()],
     )
     .iter()
     .enumerate()
     {
-        assert!(
-            v.abs() < 1e-6,
-            "Sgal3CombinedStateImuFactor residual[{i}] = {v:.3e}"
-        );
+        assert!(v.abs() < 1e-6, "ImuFactor residual[{i}] = {v:.3e}");
+    }
+
+    let combined = CombinedImuFactor::new(preint);
+    for (i, v) in residual_of(
+        &combined,
+        &[
+            state_i.as_slice(),
+            bias.as_slice(),
+            state_j.as_slice(),
+            bias.as_slice(),
+        ],
+    )
+    .iter()
+    .enumerate()
+    {
+        assert!(v.abs() < 1e-6, "CombinedImuFactor residual[{i}] = {v:.3e}");
     }
 }
 
-/// The whole point of the native-state factors: the time row must respond to a
-/// wrong inter-keyframe interval, where the split-block factors cannot.
+/// The reason to choose SGal(3): the time row responds to a wrong interval,
+/// which an SE_2(3) factor structurally cannot see.
 #[test]
 fn time_row_penalizes_a_wrong_interval() {
     let (preint, pose_j, sb_j, dt) = scenario();
-    let f = Sgal3StateImuFactor::new(preint).with_time_sigma(1e-3);
-    let b = DVector::zeros(6);
-    let si = sgal3_of(&SE3::identity(), Vector3::zeros(), 0.0);
+    let factor = ImuFactor::new(preint).with_time_sigma(1e-3);
+    let bias = DVector::zeros(6);
+    let state_i = state_of(&SE3::identity(), Vector3::zeros(), 0.0);
 
     let exact = residual_of(
-        &f,
+        &factor,
         &[
-            si.as_slice(),
-            sgal3_of(&pose_j, sb_j.velocity(), dt).as_slice(),
-            b.as_slice(),
+            state_i.as_slice(),
+            state_of(&pose_j, sb_j.velocity(), dt).as_slice(),
+            bias.as_slice(),
         ],
     );
     assert!(exact[9].abs() < 1e-9, "time row at truth: {:.3e}", exact[9]);
 
     let skew = 5e-3;
     let skewed = residual_of(
-        &f,
+        &factor,
         &[
-            si.as_slice(),
-            sgal3_of(&pose_j, sb_j.velocity(), dt + skew).as_slice(),
-            b.as_slice(),
+            state_i.as_slice(),
+            state_of(&pose_j, sb_j.velocity(), dt + skew).as_slice(),
+            bias.as_slice(),
         ],
     );
-    // Weighted by 1/σ_t = 1e3, so a 5 ms error is a residual of ~5.
+    // Weighted by 1/σ_t = 1e3, so a 5 ms error becomes a residual of ~5.
     assert!(
         (skewed[9] - skew * 1e3).abs() < 1e-6,
         "time row should scale as Δ/σ_t, got {:.6}",
@@ -314,16 +231,22 @@ fn time_row_penalizes_a_wrong_interval() {
 }
 
 #[test]
-fn time_sigma_scales_the_time_row_only() {
+fn time_sigma_scales_only_the_time_row() {
     let (preint, pose_j, sb_j, dt) = scenario();
-    let b = DVector::zeros(6);
-    let si = sgal3_of(&SE3::identity(), Vector3::zeros(), 0.0);
-    let sj = sgal3_of(&pose_j, sb_j.velocity(), dt + 2e-3);
+    let bias = DVector::zeros(6);
+    let state_i = state_of(&SE3::identity(), Vector3::zeros(), 0.0);
+    let state_j = state_of(&pose_j, sb_j.velocity(), dt + 2e-3);
 
-    let loose = Sgal3StateImuFactor::new(preint.clone()).with_time_sigma(1e-2);
-    let tight = Sgal3StateImuFactor::new(preint).with_time_sigma(1e-4);
-    let rl = residual_of(&loose, &[si.as_slice(), sj.as_slice(), b.as_slice()]);
-    let rt = residual_of(&tight, &[si.as_slice(), sj.as_slice(), b.as_slice()]);
+    let loose = ImuFactor::new(preint.clone()).with_time_sigma(1e-2);
+    let tight = ImuFactor::new(preint).with_time_sigma(1e-4);
+    let rl = residual_of(
+        &loose,
+        &[state_i.as_slice(), state_j.as_slice(), bias.as_slice()],
+    );
+    let rt = residual_of(
+        &tight,
+        &[state_i.as_slice(), state_j.as_slice(), bias.as_slice()],
+    );
 
     for row in 0..9 {
         assert!(
@@ -337,120 +260,32 @@ fn time_sigma_scales_the_time_row_only() {
     );
 }
 
-// ── Finite-difference Jacobians (previously #[ignore]d) ──────────────────────
-
-fn perturbed_split_blocks(pose_j: &SE3, sb_j: &SpeedAndBias) -> Vec<DVector<f64>> {
-    let pose_i = SE3::from_param_slice(&[0.05, -0.02, 0.01, 0.99875, 0.03, 0.02, 0.02]);
-    vec![
-        pose_blocks(&pose_i),
-        DVector::from_vec(vec![0.03, -0.01, 0.02]),
-        pose_blocks(pose_j),
-        vec3(sb_j.velocity() + Vector3::new(0.01, -0.02, 0.005)),
-        DVector::from_vec(vec![1e-3, -2e-3, 5e-4, 1e-2, -5e-3, 2e-3]),
-    ]
-}
+// ── Finite-difference Jacobians ──────────────────────────────────────────────
 
 #[test]
-fn sgal3_imu_factor_jacobians_match_finite_differences() {
-    let (preint, pose_j, sb_j, _) = scenario();
-    let f = Sgal3ImuFactor::new(preint);
-    check_jacobian(
-        &f,
-        &perturbed_split_blocks(&pose_j, &sb_j),
-        &[
-            Chart::Se3,
-            Chart::Euclidean,
-            Chart::Se3,
-            Chart::Euclidean,
-            Chart::Euclidean,
-        ],
-        "Sgal3ImuFactor",
-    );
-}
-
-#[test]
-fn sgal3_combined_imu_factor_jacobians_match_finite_differences() {
-    let (preint, pose_j, sb_j, _) = scenario();
-    let f = Sgal3CombinedImuFactor::new(preint);
-    let p = perturbed_split_blocks(&pose_j, &sb_j);
-    let blocks = vec![
-        p[0].clone(),
-        p[1].clone(),
-        p[4].clone(),
-        p[2].clone(),
-        p[3].clone(),
-        DVector::from_vec(vec![-5e-4, 1e-3, 2e-3, -8e-3, 4e-3, 1e-3]),
-    ];
-    check_jacobian(
-        &f,
-        &blocks,
-        &[
-            Chart::Se3,
-            Chart::Euclidean,
-            Chart::Euclidean,
-            Chart::Se3,
-            Chart::Euclidean,
-            Chart::Euclidean,
-        ],
-        "Sgal3CombinedImuFactor",
-    );
-}
-
-fn perturbed_state_blocks(
-    pose_j: &SE3,
-    sb_j: &SpeedAndBias,
-    dt: f64,
-) -> (DVector<f64>, DVector<f64>) {
-    let pose_i = SE3::from_param_slice(&[0.05, -0.02, 0.01, 0.99875, 0.03, 0.02, 0.02]);
-    (
-        sgal3_of(&pose_i, Vector3::new(0.03, -0.01, 0.02), 1e-3),
-        sgal3_of(
-            pose_j,
-            sb_j.velocity() + Vector3::new(0.01, -0.02, 0.005),
-            dt + 2e-3,
-        ),
-    )
-}
-
-#[test]
-fn sgal3_state_imu_factor_jacobians_match_finite_differences() {
+fn imu_factor_jacobians_match_finite_differences() {
     let (preint, pose_j, sb_j, dt) = scenario();
-    let f = Sgal3StateImuFactor::new(preint);
-    let (si, sj) = perturbed_state_blocks(&pose_j, &sb_j, dt);
-    let blocks = vec![
-        si,
-        sj,
-        DVector::from_vec(vec![1e-3, -2e-3, 5e-4, 1e-2, -5e-3, 2e-3]),
-    ];
+    let factor = ImuFactor::new(preint);
+    let (si, sj, bias) = perturbed(&pose_j, &sb_j, dt);
     check_jacobian(
-        &f,
-        &blocks,
-        &[Chart::Sgal3, Chart::Sgal3, Chart::Euclidean],
-        "Sgal3StateImuFactor",
+        &factor,
+        &[si, sj, bias],
+        &[true, true, false],
+        "sgal3::ImuFactor",
     );
 }
 
 #[test]
-fn sgal3_combined_state_imu_factor_jacobians_match_finite_differences() {
+fn combined_imu_factor_jacobians_match_finite_differences() {
     let (preint, pose_j, sb_j, dt) = scenario();
-    let f = Sgal3CombinedStateImuFactor::new(preint);
-    let (si, sj) = perturbed_state_blocks(&pose_j, &sb_j, dt);
-    let blocks = vec![
-        si,
-        DVector::from_vec(vec![1e-3, -2e-3, 5e-4, 1e-2, -5e-3, 2e-3]),
-        sj,
-        DVector::from_vec(vec![-5e-4, 1e-3, 2e-3, -8e-3, 4e-3, 1e-3]),
-    ];
+    let factor = CombinedImuFactor::new(preint);
+    let (si, sj, bias_i) = perturbed(&pose_j, &sb_j, dt);
+    let bias_j = DVector::from_vec(vec![-5e-4, 1e-3, 2e-3, -8e-3, 4e-3, 1e-3]);
     check_jacobian(
-        &f,
-        &blocks,
-        &[
-            Chart::Sgal3,
-            Chart::Euclidean,
-            Chart::Sgal3,
-            Chart::Euclidean,
-        ],
-        "Sgal3CombinedStateImuFactor",
+        &factor,
+        &[si, bias_i, sj, bias_j],
+        &[true, false, true, false],
+        "sgal3::CombinedImuFactor",
     );
 }
 
@@ -459,25 +294,20 @@ fn sgal3_combined_state_imu_factor_jacobians_match_finite_differences() {
 #[test]
 fn factors_validate_their_layouts() {
     let (preint, _, _, _) = scenario();
-    let pose = Variable::new(SE3::identity());
-    let vel = Variable::new(Rn::new(DVector::zeros(3)));
-    let bias = Variable::new(Rn::new(DVector::zeros(6)));
     let state = Variable::new(SGal3::identity());
+    let bias = Variable::new(Rn::new(DVector::zeros(6)));
+    let pose = Variable::new(SE3::identity());
 
-    let split = Sgal3ImuFactor::new(preint.clone());
-    let good: Vec<&dyn ManifoldVariable> = vec![&pose, &vel, &pose, &vel, &bias];
-    assert!(split.validate_variables(&good).is_ok());
-    let wrong: Vec<&dyn ManifoldVariable> = vec![&state, &state, &bias];
-    assert!(split.validate_variables(&wrong).is_err());
-
-    let native = Sgal3StateImuFactor::new(preint.clone());
+    let imu = ImuFactor::new(preint.clone());
     let good: Vec<&dyn ManifoldVariable> = vec![&state, &state, &bias];
-    assert!(native.validate_variables(&good).is_ok());
-    // An SE3 pose is not an SGal3 state, even though both are "a pose".
+    assert!(imu.validate_variables(&good).is_ok());
+    // An SE3 pose carries no time coordinate, so it is not an SGal3 state.
     let wrong: Vec<&dyn ManifoldVariable> = vec![&pose, &state, &bias];
-    assert!(native.validate_variables(&wrong).is_err());
+    assert!(imu.validate_variables(&wrong).is_err());
 
-    let native_combined = Sgal3CombinedStateImuFactor::new(preint);
+    let combined = CombinedImuFactor::new(preint);
     let good: Vec<&dyn ManifoldVariable> = vec![&state, &bias, &state, &bias];
-    assert!(native_combined.validate_variables(&good).is_ok());
+    assert!(combined.validate_variables(&good).is_ok());
+    let wrong: Vec<&dyn ManifoldVariable> = vec![&state, &state, &bias];
+    assert!(combined.validate_variables(&wrong).is_err());
 }

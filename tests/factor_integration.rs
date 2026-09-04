@@ -23,14 +23,14 @@
 use apex_camera_models::CameraModel;
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::se3::SE3;
+use apex_solver::apex_manifolds::se23::{SE23, SE23Tangent};
 use apex_solver::apex_manifolds::{LieGroup, ManifoldType, Tangent};
 use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::noise::NoiseModel;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::inertial::{
-    CombinedImuFactor, ImuMeasurement, ImuParameters, ImuPreintegration, ImuSensorReadings,
-    SpeedAndBias,
+    ImuMeasurement, ImuParameters, ImuPreintegration, ImuSensorReadings, SpeedAndBias, se23,
 };
 use apex_solver::factors::lidar::{GicpFactor, Plane, PointToPlaneFactor, PoseToPointFactor};
 use apex_solver::factors::marginal::MarginalPriorFactor;
@@ -207,6 +207,50 @@ fn anchor_se3(problem: &mut Problem, key: VarKey, pose: &SE3) {
     );
 }
 
+/// GNSS position + Doppler velocity fix on a single `SE23` navigation state.
+///
+/// With the inertial factors defined on `SE23`, a keyframe is one variable, so
+/// aiding measurements attach to that state rather than to separate pose and
+/// velocity blocks. Under the group's right perturbation
+/// `(δρ, δθ, δν) ↦ (t + R·δρ, R·Exp(δθ), v + R·δν)`, so both blocks are `R`.
+struct Se23PositionVelocityFix {
+    position: Vector3<f64>,
+    velocity: Vector3<f64>,
+}
+
+impl apex_solver::factors::Factor for Se23PositionVelocityFix {
+    fn linearize(
+        &self,
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        use faer::prelude::ReborrowMut;
+        let state = SE23::from_param_slice(params[0]);
+        let dp = state.translation() - self.position;
+        let dv = state.velocity() - self.velocity;
+        residual[0..3].copy_from_slice(dp.as_slice());
+        residual[3..6].copy_from_slice(dv.as_slice());
+
+        let Some(mut jac) = jacobian else { return };
+        let r = state.rotation_matrix();
+        for row in 0..3 {
+            for col in 0..3 {
+                *jac.rb_mut().get_mut(row, col) = r[(row, col)];
+                *jac.rb_mut().get_mut(3 + row, 6 + col) = r[(row, col)];
+            }
+        }
+    }
+
+    fn residual_dim(&self) -> usize {
+        6
+    }
+
+    fn jacobian_shape(&self) -> (usize, usize) {
+        (6, 9)
+    }
+}
+
 // ── 1. VIO-style pipeline: IMU + GNSS position fixes ─────────────────────────
 
 #[test]
@@ -216,32 +260,36 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
     let n = key_times.len();
 
     let mut problem = Problem::new(JacobianMode::Sparse);
-    let mut pose_keys = Vec::new();
-    let mut vel_keys = Vec::new();
+    let mut state_keys = Vec::new();
     let mut bias_keys = Vec::new();
 
-    for (k, (pose, sb)) in truth.iter().enumerate() {
-        // Perturbed initialization (except pose 0, anchored by a prior).
-        let pert = if k == 0 {
-            pose.clone()
-        } else {
-            let mut tan = [0.0f64; 6];
-            tan[0] = 0.05;
-            tan[4] = 0.03;
-            pose.right_plus(
-                &apex_manifolds::se3::SE3Tangent::from_slice(&tan),
-                None,
-                None,
+    // Ground-truth navigation state per keyframe, as an SE23 element.
+    let truth_states: Vec<SE23> = truth
+        .iter()
+        .map(|(pose, sb)| {
+            SE23::new(
+                pose.translation(),
+                Vector3::new(sb[0], sb[1], sb[2]),
+                pose.rotation_quaternion(),
             )
-        };
-        let pv = pose_to_dvector(&pert);
-        pose_keys.push(problem.add_variable(ManifoldType::SE3, pv));
+        })
+        .collect();
 
-        let mut v = DVector::zeros(3);
-        v[0] = sb[0] + 0.1;
-        v[1] = sb[1] - 0.1;
-        v[2] = sb[2];
-        vel_keys.push(problem.add_variable(ManifoldType::RN, v));
+    for (k, state) in truth_states.iter().enumerate() {
+        // Perturbed initialization (except state 0, anchored by a prior).
+        let pert = if k == 0 {
+            state.clone()
+        } else {
+            let mut tan = [0.0f64; 9];
+            tan[0] = 0.05; // ρ
+            tan[4] = 0.03; // θ
+            tan[6] = 0.1; // ν
+            state.right_plus(&SE23Tangent::from_slice(&tan), None, None)
+        };
+        state_keys.push(problem.add_variable(
+            ManifoldType::SE23,
+            DVector::from_column_slice(pert.as_param_slice()),
+        ));
 
         let b = DVector::zeros(6);
         bias_keys.push(problem.add_variable(ManifoldType::RN, b));
@@ -249,10 +297,10 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
 
     // Anchor: strong prior on pose 0 (identity tangent) and initial biases.
     problem.add_residual_block_with_noise(
-        &[pose_keys[0]],
-        Box::new(PriorFactor::new(truth[0].0.clone())),
+        &[state_keys[0]],
+        Box::new(PriorFactor::new(truth_states[0].clone())),
         None,
-        NoiseModel::from_sigmas(&[1e-3; 6]).unwrap_or_else(|e| panic!("{e}")),
+        NoiseModel::from_sigmas(&[1e-3; 9]).unwrap_or_else(|e| panic!("{e}")),
     );
     for bias_key in bias_keys.iter() {
         problem.add_residual_block_with_noise(
@@ -267,7 +315,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
         );
     }
 
-    // IMU factors between consecutive keyframes (4-block layout).
+    // IMU factors between consecutive keyframes (SE23 state, bias) x 2.
     for k in 0..n - 1 {
         let samples = imu_segments[k].clone();
         let sb_ref = {
@@ -287,42 +335,30 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
             key_times[k + 1],
             &sb_ref,
         );
-        let sqrt_info = *preint.square_root_information();
-        let factor = CombinedImuFactor::new(preint);
+        let factor = se23::CombinedImuFactor::new(preint);
         problem.add_residual_block(
             &[
-                pose_keys[k],
-                vel_keys[k],
+                state_keys[k],
                 bias_keys[k],
-                pose_keys[k + 1],
-                vel_keys[k + 1],
+                state_keys[k + 1],
                 bias_keys[k + 1],
             ],
             Box::new(factor),
             None,
         );
-        let _ = sqrt_info;
     }
 
-    // GNSS position fixes (translation-only) at each keyframe.
+    // GNSS position + Doppler velocity fixes at each keyframe.
     for k in 0..n {
         problem.add_residual_block_with_noise(
-            &[pose_keys[k]],
-            Box::new(apex_solver::factors::pose::PoseTranslationPrior::new(
-                truth[k].0.translation(),
-            )),
+            &[state_keys[k]],
+            Box::new(Se23PositionVelocityFix {
+                position: truth_states[k].translation(),
+                velocity: truth_states[k].velocity(),
+            }),
             None,
-            NoiseModel::from_sigmas(&[0.05; 3]).unwrap_or_else(|e| panic!("{e}")),
-        );
-        // GNSS Doppler-derived velocity fixes.
-        problem.add_residual_block_with_noise(
-            &[vel_keys[k]],
-            Box::new(GpsVelocityFactor::new({
-                let sb = &truth[k].1;
-                Vector3::new(sb[0], sb[1], sb[2])
-            })),
-            None,
-            NoiseModel::from_sigmas(&[0.15; 3]).unwrap_or_else(|e| panic!("{e}")),
+            NoiseModel::from_sigmas(&[0.05, 0.05, 0.05, 0.15, 0.15, 0.15])
+                .unwrap_or_else(|e| panic!("{e}")),
         );
     }
 
@@ -338,21 +374,13 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
 
     // Recovered states must match truth within the GNSS noise floor.
     for k in 0..n {
-        let pose_hat = SE3::from_param_slice(result.parameters[pose_keys[k]].as_param_slice());
-        let pos_err = (pose_hat.translation() - truth[k].0.translation()).norm();
+        let state_hat = SE23::from_param_slice(result.parameters[state_keys[k]].as_param_slice());
+        let pos_err = (state_hat.translation() - truth_states[k].translation()).norm();
         assert!(
             pos_err < 0.15,
             "keyframe {k} position error {pos_err:.4} exceeds noise floor"
         );
-        let v_hat = result.parameters[vel_keys[k]].as_param_slice();
-        let v_true = {
-            let sb = &truth[k].1;
-            Vector3::new(sb[0], sb[1], sb[2])
-        };
-        let v_err = ((v_hat[0] - v_true.x).powi(2)
-            + (v_hat[1] - v_true.y).powi(2)
-            + (v_hat[2] - v_true.z).powi(2))
-        .sqrt();
+        let v_err = (state_hat.velocity() - truth_states[k].velocity()).norm();
         assert!(v_err < 0.2, "keyframe {k} velocity error {v_err:.4}");
 
         let b_hat = result.parameters[bias_keys[k]].as_param_slice();

@@ -1,41 +1,33 @@
 //! Inertial factors for visual-inertial and inertial odometry.
 //!
-//! All factors implement Forster et al. (2017) on-manifold preintegration and
-//! share one [`ImuPreintegration`] accumulator. They split along two axes.
+//! Each group gets two factors and nothing more, so a choice here is two
+//! questions rather than a catalogue:
 //!
-//! # Combined or not — how bias evolution is modelled
+//! **Which group?** [`se23`] models a keyframe as `(R, t, v)`; [`sgal3`] adds a
+//! time coordinate, `(R, t, v, s)`, making the inter-keyframe interval an
+//! estimated quantity — pick it for sensor time-offset or rolling-shutter
+//! calibration, and `se23` otherwise.
 //!
-//! This is the same split GTSAM draws between `ImuFactor` and
-//! `CombinedImuFactor`, and it decides the residual dimension:
+//! **Combined or not?** `ImuFactor` shares one bias variable across the
+//! interval and leaves its evolution to a
+//! [`bias_random_walk`](bias::bias_random_walk) edge. `CombinedImuFactor` takes
+//! a bias per keyframe and embeds the random walk in its trailing six residual
+//! rows, needing no such edge. Doing both counts that uncertainty twice.
 //!
-//! * **Non-combined** factors emit only the kinematic residual and share a
-//!   single bias variable across the interval. Bias evolution is a separate
-//!   edge — build one with [`bias_random_walk`] + [`bias_random_walk_noise`].
-//!   Weighting uses measurement noise alone.
-//! * **Combined** factors append the Gauss–Markov bias random walk to the
-//!   residual (six extra rows) and take a bias variable per frame, so they need
-//!   no companion edge. Weighting includes the random-walk covariance.
-//!
-//! Adding a bias edge next to a *combined* factor counts that uncertainty
-//! twice; pair the edge with the non-combined factors only.
-//!
-//! # State parameterization — how pose and velocity are stored
-//!
-//! Either as separate `(SE3 pose, R³ velocity)` blocks, or fused into a single
-//! native state variable on the group the preintegration lives on.
-//!
-//! | Group | Non-combined | Combined |
+//! | | `ImuFactor` | `CombinedImuFactor` |
 //! |---|---|---|
-//! | SE_2(3), split blocks | [`ImuFactor`] (9D) | [`CombinedImuFactor`] (15D) |
-//! | SE_2(3), native state | [`Se23ImuFactor`] (9D) | [`CombinedSe23ImuFactor`] (15D) |
-//! | SGal(3), split blocks | [`Sgal3ImuFactor`] (9D) | [`Sgal3CombinedImuFactor`] (15D) |
-//! | SGal(3), native state | [`Sgal3StateImuFactor`] (10D) | [`Sgal3CombinedStateImuFactor`] (16D) |
+//! | [`se23`] | 9D, `(SE23, SE23, bias)` | 15D, `(SE23, bias, SE23, bias)` |
+//! | [`sgal3`] | 10D, `(SGal3, SGal3, bias)` | 16D, `(SGal3, bias, SGal3, bias)` |
 //!
-//! SGal(3) additionally carries a **time** coordinate. It only becomes a
-//! residual row where it is estimated: the native-`SGal3` factors gain a
-//! `(t_j − t_i) − Δt` row (hence 10D/16D), while the split-block factors have
-//! no time variable and would carry an identically-zero row, so they drop it.
-//! See [`sgal3`] for the details.
+//! Both names exist in both modules, so they are addressed by their group:
+//! `inertial::se23::ImuFactor`, `inertial::sgal3::CombinedImuFactor`.
+//!
+//! A keyframe is a **single** state variable on the group, not separate pose
+//! and velocity blocks — the optimizer's update is then a group right-plus, and
+//! the pose/velocity coupling inertial integration produces is the group's job
+//! rather than bookkeeping across blocks. All four share one
+//! [`ImuPreintegration`] accumulator, and every derivative comes from the
+//! group's own operation Jacobians.
 //!
 //! An initial bias prior (an `EuclideanPriorFactor` on R⁶) is required for
 //! observability in every configuration.
@@ -44,9 +36,11 @@
 //!
 //! ```ignore
 //! use apex_solver::factors::inertial::{
-//!     ImuFactor, ImuPreintegration, ImuParameters, ImuMeasurement,
-//!     bias_random_walk, bias_random_walk_noise,
+//!     ImuPreintegration, ImuParameters, ImuMeasurement,
+//!     bias_random_walk, bias_random_walk_noise, se23,
 //! };
+//!
+//! let factor = se23::ImuFactor::new(preintegration);
 //! ```
 
 pub mod bias;
@@ -57,8 +51,4 @@ pub mod types;
 
 pub use bias::{bias_random_walk, bias_random_walk_noise};
 pub use preintegration::ImuPreintegration;
-pub use se23::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, Se23ImuFactor};
-pub use sgal3::{
-    Sgal3CombinedImuFactor, Sgal3CombinedStateImuFactor, Sgal3ImuFactor, Sgal3StateImuFactor,
-};
 pub use types::{ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt};
