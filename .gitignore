@@ -43,10 +43,8 @@ __cmake*
 data/
 
 
-# Generated Agent files
-CLAUDE.md
-AGENTS.md
-GEMINI.md
+# Agent tool state (caches, local settings) — the guideline files themselves
+# (AGENTS.md, CLAUDE.md, GEMINI.md) are tracked on purpose.
 .claude/
 .opencode/
 .rust_rules.mdc
