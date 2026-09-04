@@ -34,7 +34,7 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
-use crate::factors::imu::helpers::cross_matrix;
+use crate::factors::common::math::skew;
 
 /// Trait for querying a distance/occupancy field.
 ///
@@ -174,9 +174,7 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
         dpa_dtwa
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&(-Matrix3::identity()));
-        dpa_dtwa
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&cross_matrix(&p_a));
+        dpa_dtwa.fixed_view_mut::<3, 3>(0, 3).copy_from(&skew(&p_a));
 
         // dp_A/dT_WB (3×6): [C_WA^T·C_WB | -C_WA^T·C_WB·[p_B]×]
         let mut dpa_dtwb = SMatrix::<f64, 3, 6>::zeros();
@@ -185,7 +183,7 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
             .copy_from(&c_wa_t_c_wb);
         dpa_dtwb
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_wa_t_c_wb * cross_matrix(&self.point_b)));
+            .copy_from(&(-c_wa_t_c_wb * skew(&self.point_b)));
 
         // Chain rule
         let j_twa: SMatrix<f64, 1, 6> = de_dp_a * dpa_dtwa;
@@ -363,7 +361,7 @@ mod tests {
             let t_wa_p = perturb_se3(t_wa.as_slice(), &tan);
             let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
             let fd = (r_pert[0] - r0[0]) / EPS;
-            crate::factors::test_utils::assert_close(
+            crate::factors::common::test_utils::assert_close(
                 jac[(0, col)],
                 fd,
                 TOL,
@@ -378,7 +376,7 @@ mod tests {
             let t_wb_p = perturb_se3(t_wb.as_slice(), &tan);
             let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
             let fd = (r_pert[0] - r0[0]) / EPS;
-            crate::factors::test_utils::assert_close(
+            crate::factors::common::test_utils::assert_close(
                 jac[(0, 6 + col)],
                 fd,
                 TOL,

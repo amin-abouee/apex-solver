@@ -16,6 +16,10 @@
 //! triangulation, non-positive inverse depth, degenerate GNSS geometry,
 //! marginalization consistency) are exercised at the graph level.
 
+// Test diagnostics print convergence traces to stderr; the workspace-wide
+// `print_stderr` deny targets library code, not test output.
+#![allow(clippy::print_stderr)]
+
 use apex_camera_models::CameraModel;
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::se3::SE3;
@@ -24,22 +28,23 @@ use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::noise::NoiseModel;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::imu::{
+use apex_solver::factors::inertial::{
     CombinedImuFactor, ImuMeasurement, ImuParameters, ImuPreintegration, ImuSensorReadings,
     SpeedAndBias,
 };
 use apex_solver::factors::lidar::{GicpFactor, Plane, PointToPlaneFactor, PoseToPointFactor};
 use apex_solver::factors::marginal::MarginalPriorFactor;
-use apex_solver::factors::marginal::PoseRotationPrior;
 use apex_solver::factors::navigation::{
     AttitudeFactor, BarometricFactor, DopplerFactor, GpsVelocityFactor, PseudorangeFactor,
 };
-use apex_solver::factors::projection_factor::ProjectionFactor;
-use apex_solver::factors::range_factor::{BearingRangeFactor, PosePointRangeFactor};
+use apex_solver::factors::pose::PoseRotationPrior;
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
+use apex_solver::factors::ranging::range::{BearingRangeFactor, PosePointRangeFactor};
+use apex_solver::factors::visual::projection::ProjectionFactor;
 use apex_solver::factors::visual::{
     InverseDepthFactor, SmartProjectionFactor, StereoCalibration, StereoFactor,
 };
-use apex_solver::factors::{BetweenFactor, BundleAdjustment, Factor, PriorFactor};
+use apex_solver::factors::{BundleAdjustment, Factor};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DMatrix, DVector, Matrix2xX, UnitQuaternion, Vector2, Vector3};
 
@@ -184,7 +189,7 @@ fn velocity_dvector(v: &Vector3<f64>) -> DVector<f64> {
 fn anchor_rn(problem: &mut Problem, key: VarKey, params: &[f64]) {
     problem.add_residual_block_with_noise(
         &[key],
-        Box::new(apex_solver::factors::EuclideanPriorFactor::new(
+        Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
             DVector::from_vec(params.to_vec()),
         )),
         None,
@@ -249,10 +254,10 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
         None,
         NoiseModel::from_sigmas(&[1e-3; 6]).unwrap_or_else(|e| panic!("{e}")),
     );
-    for (k, bias_key) in bias_keys.iter().enumerate() {
+    for bias_key in bias_keys.iter() {
         problem.add_residual_block_with_noise(
             &[*bias_key],
-            Box::new(apex_solver::factors::EuclideanPriorFactor::new(
+            Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
                 DVector::from_vec(vec![
                     BG_TRUE[0], BG_TRUE[1], BG_TRUE[2], BA_TRUE[0], BA_TRUE[1], BA_TRUE[2],
                 ]),
@@ -303,7 +308,7 @@ fn vio_imu_gnss_recovers_trajectory_with_biases() {
     for k in 0..n {
         problem.add_residual_block_with_noise(
             &[pose_keys[k]],
-            Box::new(apex_solver::factors::PoseTranslationPrior::new(
+            Box::new(apex_solver::factors::pose::PoseTranslationPrior::new(
                 truth[k].0.translation(),
             )),
             None,
@@ -430,7 +435,7 @@ fn mono_ba_recovers_poses_with_behind_camera_landmark() {
         }
         let observations = Matrix2xX::from_columns(&obs);
         let factor: ProjectionFactor<apex_camera_models::PinholeCamera, BundleAdjustment> =
-            ProjectionFactor::new(observations, cam.clone());
+            ProjectionFactor::new(observations, cam);
         problem.add_residual_block_with_noise(
             &[pose_keys[k], lm_keys[k]],
             Box::new(factor),
@@ -498,7 +503,7 @@ fn stereo_vo_recovers_pose_and_points() {
         // fully-fixed variables produce.
         problem.add_residual_block_with_noise(
             &[key],
-            Box::new(apex_solver::factors::EuclideanPriorFactor::new(
+            Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
                 DVector::from_vec(vec![p.x, p.y, p.z]),
             )),
             None,
@@ -610,7 +615,7 @@ fn lidar_scan_matching_recovers_transform() {
         let p_key = problem.add_variable(ManifoldType::RN, DVector::from_vec(vec![p.x, p.y, p.z]));
         problem.add_residual_block_with_noise(
             &[p_key],
-            Box::new(apex_solver::factors::EuclideanPriorFactor::new(
+            Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
                 DVector::from_vec(vec![p.x, p.y, p.z]),
             )),
             None,
@@ -650,7 +655,7 @@ fn lidar_scan_matching_recovers_transform() {
         );
         problem.add_residual_block_with_noise(
             &[p_key],
-            Box::new(apex_solver::factors::EuclideanPriorFactor::new(
+            Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
                 DVector::from_vec(vec![scan_body[i].x, scan_body[i].y, scan_body[i].z]),
             )),
             None,
@@ -918,7 +923,7 @@ fn loop_closure_with_rotation_prior_closes_the_loop() {
     );
     problem.add_residual_block_with_noise(
         &[keys[3]],
-        Box::new(apex_solver::factors::PoseTranslationPrior::new(
+        Box::new(apex_solver::factors::pose::PoseTranslationPrior::new(
             Vector3::zeros(),
         )),
         None,
@@ -1094,7 +1099,7 @@ fn barometer_and_attitude_factors_constrain_a_hover() {
     // GNSS velocity (zero for a hover).
     problem.add_residual_block_with_noise(
         &[pose_key],
-        Box::new(apex_solver::factors::PoseTranslationPrior::new(
+        Box::new(apex_solver::factors::pose::PoseTranslationPrior::new(
             Vector3::new(0.0, 0.0, 50.0),
         )),
         None,

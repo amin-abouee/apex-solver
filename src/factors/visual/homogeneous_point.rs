@@ -223,7 +223,7 @@ mod tests {
             let r_pert = compute_residual(&factor, &hp_pert);
             for row in 0..3 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                crate::factors::test_utils::assert_close(
+                crate::factors::common::test_utils::assert_close(
                     jac[(row, col)],
                     fd,
                     TOL,

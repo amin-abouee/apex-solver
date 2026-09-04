@@ -10,7 +10,7 @@
 //! Parameter blocks: `[pose (7), landmark (3)]` — 9 minimal DOF, 3D residual
 //! `[uL, uR, v]`. Calibration is fixed at construction. Cheirality violations
 //! (`z ≤ 0`) are handled with the same smooth penalty as the monocular
-//! [`ProjectionFactor`](crate::factors::projection_factor::ProjectionFactor).
+//! [`ProjectionFactor`](crate::factors::visual::projection::ProjectionFactor).
 
 use apex_camera_models::CameraModelError;
 use apex_manifolds::LieGroup;
@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
+use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Rectified stereo calibration: focal lengths, principal point, baseline.
 #[derive(Clone, Debug)]

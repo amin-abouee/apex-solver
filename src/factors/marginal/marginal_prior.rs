@@ -149,7 +149,7 @@ impl Factor for MarginalPriorFactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::test_utils::assert_close;
+    use crate::factors::common::test_utils::assert_close;
     use apex_manifolds::LieGroup;
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::{SE3, SE3Tangent};

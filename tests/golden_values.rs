@@ -18,7 +18,7 @@ use apex_io::{G2oLoader, GraphLoader};
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use std::collections::HashMap;

@@ -13,25 +13,7 @@ use apex_camera_models::{CameraModel, CameraModelError};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
-/// Baseline cheirality-violation penalty (pixels-equivalent). Chosen to
-/// comfortably dominate any plausible in-image residual — an observation is
-/// always a finite pixel coordinate, and even a badly-fit-but-valid
-/// projection is bounded by roughly the image extent, so a small multiple
-/// of a typical image diagonal (a few thousand pixels) is already an
-/// unreachable residual for a valid projection — so becoming invalid is
-/// never a cheaper escape hatch than fitting the data. Deliberately *not*
-/// orders of magnitude larger than that: mixing genuinely huge and
-/// pixel-scale residuals/Jacobian entries in the same least-squares problem
-/// ill-conditions the normal equations (observed as Cholesky/linear-solve
-/// failures in practice).
-pub(crate) const CHEIRALITY_BASE_PENALTY: f64 = 1.0e4;
-
-/// Penalty growth rate per metre of depth violation, added on top of
-/// [`CHEIRALITY_BASE_PENALTY`] so the penalty keeps increasing — and keeps
-/// providing a gradient pointing back toward validity — the further behind
-/// the camera a point ends up. Kept modest for the same conditioning reason
-/// as [`CHEIRALITY_BASE_PENALTY`].
-pub(crate) const CHEIRALITY_DEPTH_SCALE: f64 = 1.0e3;
+use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Trait for optimization configuration.
 ///
@@ -64,7 +46,7 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 ///
 /// ```
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// use apex_solver::factors::projection_factor::ProjectionFactor;
+/// use apex_solver::factors::visual::projection::ProjectionFactor;
 /// use apex_solver::factors::BundleAdjustment;
 /// use apex_camera_models::PinholeCamera;
 /// use nalgebra::{Matrix2xX, Vector2};
@@ -148,7 +130,7 @@ where
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::visual::projection::ProjectionFactor;
     /// # use apex_solver::factors::BundleAdjustment;
     /// # use apex_camera_models::PinholeCamera;
     /// # use nalgebra::{Matrix2xX, Vector2};
@@ -177,7 +159,7 @@ where
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::visual::projection::ProjectionFactor;
     /// # use apex_solver::factors::BundleAdjustment;
     /// # use apex_camera_models::PinholeCamera;
     /// # use apex_solver::manifold::se3::SE3;
@@ -200,7 +182,7 @@ where
     ///
     /// ```
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// # use apex_solver::factors::projection_factor::ProjectionFactor;
+    /// # use apex_solver::factors::visual::projection::ProjectionFactor;
     /// # use apex_solver::factors::BundleAdjustment;
     /// # use apex_camera_models::PinholeCamera;
     /// # use nalgebra::{Matrix2xX, Matrix3xX, Vector2, Vector3};

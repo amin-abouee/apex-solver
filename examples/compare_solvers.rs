@@ -7,7 +7,7 @@ use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use apex_solver::optimizer::{LevenbergMarquardt, OptimizationStatus};

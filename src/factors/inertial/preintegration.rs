@@ -15,8 +15,8 @@ use apex_manifolds::sgal3::SGal3;
 use apex_manifolds::so3::SO3Tangent;
 use nalgebra::{Matrix3, SMatrix, UnitQuaternion, Vector3};
 
-use super::helpers::{cross_matrix, sinc, symm_sqrt_inverse};
 use super::types::{ImuMeasurement, ImuParameters, SpeedAndBias, SpeedAndBiasExt};
+use crate::factors::common::math::{sinc, skew, symm_sqrt_inverse};
 
 /// Accumulated preintegration state between two keyframes.
 #[derive(Clone)]
@@ -178,18 +178,17 @@ impl ImuPreintegration {
             // Interpolate at end boundary
             let next_time = t1_meas;
             let end = self.t1;
-            let dt;
-            if next_time > end {
+            let dt = if next_time > end {
                 let interval = next_time - t0_meas;
                 if interval > 1e-12 {
                     let r = (end - t0_meas) / interval;
                     omega_s_1 = (1.0 - r) * omega_s_0 + r * omega_s_1;
                     acc_s_1 = (1.0 - r) * acc_s_0 + r * acc_s_1;
                 }
-                dt = end - time;
+                end - time
             } else {
-                dt = next_time - time;
-            }
+                next_time - time
+            };
 
             if dt < 1e-12 {
                 time = next_time;
@@ -257,7 +256,7 @@ impl ImuPreintegration {
 
             self.dalpha_db_g += c_after * jr * dt;
 
-            let acc_skew = cross_matrix(&acc_true);
+            let acc_skew = skew(&acc_true);
             let dv_db_g_step =
                 0.5 * dt * (c_before * acc_skew * cross_old + c_after * acc_skew * cross_new);
             let dv_db_g_1 = dv_db_g_old + dv_db_g_step;
@@ -274,7 +273,7 @@ impl ImuPreintegration {
             let mut f_delta = SMatrix::<f64, 15, 15>::identity();
             f_delta
                 .fixed_view_mut::<3, 3>(0, 3)
-                .copy_from(&(-cross_matrix(&acc_doubleintegral_step)));
+                .copy_from(&(-skew(&acc_doubleintegral_step)));
             f_delta
                 .fixed_view_mut::<3, 3>(0, 6)
                 .copy_from(&(dt * Matrix3::identity()));
@@ -289,7 +288,7 @@ impl ImuPreintegration {
                 .copy_from(&(-dt * c_after));
             f_delta
                 .fixed_view_mut::<3, 3>(6, 3)
-                .copy_from(&(-cross_matrix(&acc_integral_step)));
+                .copy_from(&(-skew(&acc_integral_step)));
             f_delta
                 .fixed_view_mut::<3, 3>(6, 9)
                 .copy_from(&dv_db_g_step);
@@ -406,18 +405,17 @@ impl ImuPreintegration {
             }
 
             let next_time = t1_meas;
-            let dt;
-            if next_time > t_end {
+            let dt = if next_time > t_end {
                 let interval = next_time - t0_meas;
                 if interval > 1e-12 {
                     let r = (t_end - t0_meas) / interval;
                     omega_s_1 = (1.0 - r) * omega_s_0 + r * omega_s_1;
                     acc_s_1 = (1.0 - r) * acc_s_0 + r * acc_s_1;
                 }
-                dt = t_end - time;
+                t_end - time
             } else {
-                dt = next_time - time;
-            }
+                next_time - time
+            };
 
             if dt < 1e-12 {
                 time = next_time;

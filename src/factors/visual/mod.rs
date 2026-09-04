@@ -1,12 +1,19 @@
-//! Visual (camera-based) factors: stereo, inverse-depth landmarks, epipolar
-//! geometry, and structure-less smart projection.
+//! Camera factors: monocular and stereo reprojection, inverse-depth and
+//! homogeneous landmark parameterizations, epipolar geometry, and
+//! structure-less smart projection.
 
-pub mod essential_matrix_factor;
-pub mod inverse_depth_factor;
-pub mod smart_projection_factor;
-pub mod stereo_factor;
+pub mod depth;
+pub mod essential_matrix;
+pub mod homogeneous_point;
+pub mod inverse_depth;
+pub mod projection;
+pub mod smart_projection;
+pub mod stereo;
 
-pub use essential_matrix_factor::{EssentialMatrixConstraint, EssentialMatrixFactor};
-pub use inverse_depth_factor::InverseDepthFactor;
-pub use smart_projection_factor::{SmartProjectionFactor, TriangulationStatus};
-pub use stereo_factor::{StereoCalibration, StereoFactor, StereoPoint2};
+pub use depth::{DepthFactor, OneSidedDepthFactor, RegularDepthFactor};
+pub use essential_matrix::{EssentialMatrixConstraint, EssentialMatrixFactor};
+pub use homogeneous_point::HomogeneousPointFactor;
+pub use inverse_depth::InverseDepthFactor;
+pub use projection::{OptimizationConfig, ProjectionFactor};
+pub use smart_projection::{SmartProjectionFactor, TriangulationStatus};
+pub use stereo::{StereoCalibration, StereoFactor, StereoPoint2};

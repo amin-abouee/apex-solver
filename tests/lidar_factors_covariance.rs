@@ -34,7 +34,7 @@ use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergM
 use apex_solver::{
     JacobianMode, ManifoldType,
     core::problem::Problem,
-    factors::{LidarEdgeFactor, lidar_plane_factor_isotropic},
+    factors::lidar::{LidarEdgeFactor, lidar_plane_factor_isotropic},
 };
 use nalgebra::{DMatrix, DVector, Matrix3, UnitQuaternion, Vector3};
 use rand::Rng;

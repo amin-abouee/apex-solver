@@ -1,13 +1,10 @@
-//! LOAM-style LiDAR factors: point-to-edge and point-to-plane registration.
+//! LOAM-style point-to-edge LiDAR factor.
 //!
-//! Implements the two feature-alignment residuals from Zhang & Singh (2014,
-//! "LOAM: Lidar Odometry and Mapping in Real-time"), following the same
-//! precomputed-correspondence pattern as [`IcpFactor`](super::icp_factor::IcpFactor):
-//! the caller supplies an already-matched edge (point + direction) or plane
-//! (point + normal) alongside the query point — no nearest-neighbor search is
-//! performed inside the factor.
-//!
-//! # Point-to-edge (`LidarEdgeFactor`)
+//! Implements the edge-feature residual from Zhang & Singh (2014, "LOAM: Lidar
+//! Odometry and Mapping in Real-time"), following the same
+//! precomputed-correspondence pattern as [`IcpFactor`](super::distance_field::IcpFactor):
+//! the caller supplies an already-matched edge (point + direction) alongside
+//! the query point — no nearest-neighbor search happens inside the factor.
 //!
 //! ```text
 //! T_AB = T_WA⁻¹ · T_WB
@@ -20,17 +17,9 @@
 //! magnitude `‖(p_A − q) × d‖`) to match this crate's vector-residual convention
 //! and to avoid the Jacobian singularity the magnitude form has at its own zero.
 //!
-//! # Point-to-plane (`LidarPlaneFactor`)
+//! The companion point-to-plane residual lives in [`plane`](super::plane).
 //!
-//! ```text
-//! e = sqrt_info · n · (p_A − q)   ∈ R   (signed distance to the matched plane)
-//! ```
-//!
-//! This is mathematically identical to [`IcpFactor`](super::icp_factor::IcpFactor)
-//! evaluated against a precomputed plane, so it is implemented as
-//! `IcpFactor<PrecomputedPlane>` rather than a bespoke residual/Jacobian.
-//!
-//! # Parameter Layout (2 blocks, 12 DOF total, both factors)
+//! # Parameter Layout (2 blocks, 12 DOF total)
 //!
 //! ```text
 //! params[0]: T_WA — reference/map pose (7D, 6 DOF)
@@ -44,8 +33,7 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
-use crate::factors::icp_factor::{DistanceField, IcpFactor};
-use crate::factors::imu::helpers::cross_matrix;
+use crate::factors::common::math::skew;
 
 /// Point-to-edge (point-to-line) LOAM factor.
 ///
@@ -158,9 +146,7 @@ impl Factor for LidarEdgeFactor {
         dpa_dtwa
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&(-Matrix3::identity()));
-        dpa_dtwa
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&cross_matrix(&p_a));
+        dpa_dtwa.fixed_view_mut::<3, 3>(0, 3).copy_from(&skew(&p_a));
 
         // dp_A/dT_WB (3×6): [C_WA^T·C_WB | -C_WA^T·C_WB·[p_B]×]
         let mut dpa_dtwb = SMatrix::<f64, 3, 6>::zeros();
@@ -169,7 +155,7 @@ impl Factor for LidarEdgeFactor {
             .copy_from(&c_wa_t_c_wb);
         dpa_dtwb
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-c_wa_t_c_wb * cross_matrix(&self.point_b)));
+            .copy_from(&(-c_wa_t_c_wb * skew(&self.point_b)));
 
         // Chain rule
         let j_twa: SMatrix<f64, 3, 6> = de_dp_a * dpa_dtwa;
@@ -196,108 +182,15 @@ impl Factor for LidarEdgeFactor {
     }
 }
 
-/// A precomputed plane correspondence (point + unit normal), usable as a
-/// [`DistanceField`] so point-to-plane LOAM alignment can reuse
-/// [`IcpFactor`] directly instead of duplicating its Jacobian derivation.
-pub struct PrecomputedPlane {
-    /// A point on the matched plane, in frame A.
-    point: Vector3<f64>,
-    /// Unit normal of the matched plane, in frame A.
-    normal: Vector3<f64>,
-}
-
-impl PrecomputedPlane {
-    /// Create a plane correspondence.
-    ///
-    /// `normal` is normalized internally; need not be unit length on input.
-    pub fn new(point: Vector3<f64>, normal: Vector3<f64>) -> Self {
-        Self {
-            point,
-            normal: normal.normalize(),
-        }
-    }
-}
-
-impl DistanceField for PrecomputedPlane {
-    fn query(&self, point: &Vector3<f64>) -> Option<(f64, Vector3<f64>)> {
-        let val = self.normal.dot(&(point - self.point));
-        Some((val, self.normal))
-    }
-}
-
-/// Point-to-plane LOAM factor: aligns a query point from frame B against a
-/// precomputed plane correspondence (point + normal) in frame A.
-///
-/// Implemented as [`IcpFactor<PrecomputedPlane>`] — the residual
-/// `sqrt_info · n·(p_A − q)` and its Jacobian are exactly `IcpFactor`'s
-/// generic field-alignment math evaluated against a plane whose gradient is
-/// its (constant) normal everywhere.
-pub type LidarPlaneFactor = IcpFactor<PrecomputedPlane>;
-
-/// Construct a point-to-plane LOAM factor with isotropic noise.
-///
-/// # Arguments
-/// * `point_b` — query point in frame B
-/// * `plane_point` — a point on the matched plane, in frame A
-/// * `plane_normal` — normal of the matched plane, in frame A (normalized internally)
-/// * `sigma` — measurement noise standard deviation
-pub fn lidar_plane_factor_isotropic(
-    point_b: Vector3<f64>,
-    plane_point: Vector3<f64>,
-    plane_normal: Vector3<f64>,
-    sigma: f64,
-) -> LidarPlaneFactor {
-    IcpFactor::new(
-        PrecomputedPlane::new(plane_point, plane_normal),
-        point_b,
-        sigma,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use apex_manifolds::Tangent;
-    use apex_manifolds::se3::SE3Tangent;
-    use nalgebra::{DMatrix, DVector, UnitQuaternion};
-
-    fn make_pose(tx: f64, ty: f64, tz: f64, q: UnitQuaternion<f64>) -> DVector<f64> {
-        let q = q.quaternion();
-        DVector::from_vec(vec![tx, ty, tz, q.w, q.i, q.j, q.k])
-    }
-
-    fn identity_pose() -> DVector<f64> {
-        DVector::from_vec(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0])
-    }
-
-    fn perturb_se3(pose: &[f64], tangent: &[f64; 6]) -> DVector<f64> {
-        let se3 = SE3::from_param_slice(pose);
-        let tan = SE3Tangent::from_slice(tangent);
-        DVector::from_column_slice(se3.right_plus(&tan, None, None).as_param_slice())
-    }
-
-    fn compute_residual<F: Factor>(factor: &F, t_wa: &[f64], t_wb: &[f64]) -> Vec<f64> {
-        let mut residual = vec![0.0f64; factor.residual_dim()];
-        factor.linearize(&[t_wa, t_wb], &mut residual, None);
-        residual
-    }
-
-    fn compute_with_jacobian<F: Factor>(
-        factor: &F,
-        t_wa: &[f64],
-        t_wb: &[f64],
-    ) -> (Vec<f64>, DMatrix<f64>) {
-        let (rows, cols) = factor.jacobian_shape();
-        let mut residual = vec![0.0f64; rows];
-        let mut jac_buf = vec![0.0f64; rows * cols];
-        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut jac_buf, rows, cols);
-        factor.linearize(&[t_wa, t_wb], &mut residual, Some(jac_mut));
-        let jacobian = DMatrix::from_column_slice(rows, cols, &jac_buf);
-        (residual, jacobian)
-    }
+    use crate::factors::common::test_utils::{
+        compute_residual, compute_with_jacobian, identity_pose, make_pose, perturb_se3,
+    };
+    use nalgebra::UnitQuaternion;
 
     // ── LidarEdgeFactor ──────────────────────────────────────────────────────
-
     #[test]
     fn edge_zero_residual_when_point_on_line() {
         // Edge along z-axis through origin; point exactly on it.
@@ -376,7 +269,7 @@ mod tests {
             let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
             for row in 0..3 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                crate::factors::test_utils::assert_close(
+                crate::factors::common::test_utils::assert_close(
                     jac[(row, col)],
                     fd,
                     TOL,
@@ -392,7 +285,7 @@ mod tests {
             let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
             for row in 0..3 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                crate::factors::test_utils::assert_close(
+                crate::factors::common::test_utils::assert_close(
                     jac[(row, 6 + col)],
                     fd,
                     TOL,
@@ -433,7 +326,7 @@ mod tests {
             let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
             for row in 0..3 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                crate::factors::test_utils::assert_close(
+                crate::factors::common::test_utils::assert_close(
                     jac[(row, col)],
                     fd,
                     TOL,
@@ -449,7 +342,7 @@ mod tests {
             let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
             for row in 0..3 {
                 let fd = (r_pert[row] - r0[row]) / EPS;
-                crate::factors::test_utils::assert_close(
+                crate::factors::common::test_utils::assert_close(
                     jac[(row, 6 + col)],
                     fd,
                     TOL,
@@ -465,92 +358,5 @@ mod tests {
             LidarEdgeFactor::new_isotropic(Vector3::zeros(), Vector3::zeros(), Vector3::z(), 1.0);
         assert_eq!(factor.residual_dim(), 3);
         assert_eq!(factor.jacobian_shape(), (3, 12));
-    }
-
-    // ── LidarPlaneFactor / PrecomputedPlane ─────────────────────────────────
-
-    #[test]
-    fn plane_zero_residual_on_plane() {
-        let t_wa = identity_pose();
-        let t_wb = identity_pose();
-        let point_b = Vector3::new(1.0, 2.0, 5.0); // on the z=5 plane
-
-        let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
-        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
-        assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
-    }
-
-    #[test]
-    fn plane_residual_matches_closed_form() {
-        let t_wa = identity_pose();
-        let t_wb = identity_pose();
-        let point_b = Vector3::new(1.0, 2.0, 7.0); // 2m above the z=5 plane
-
-        let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
-        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
-        // n·(p - q) = (0,0,1)·(1,2,2) = 2, sqrt_info = 1
-        assert!((r[0] - 2.0).abs() < 1e-10, "residual = {}", r[0]);
-    }
-
-    #[test]
-    fn plane_finite_difference_jacobians() {
-        let q_a = UnitQuaternion::from_axis_angle(
-            &nalgebra::Unit::new_normalize(Vector3::new(0.0, 1.0, 0.0)),
-            0.2,
-        );
-        let q_b = UnitQuaternion::from_axis_angle(
-            &nalgebra::Unit::new_normalize(Vector3::new(0.0, 0.0, 1.0)),
-            -0.15,
-        );
-        let t_wa = make_pose(1.0, -0.5, 0.3, q_a);
-        let t_wb = make_pose(2.0, 1.0, -0.2, q_b);
-        let point_b = Vector3::new(0.5, -0.3, 4.0);
-
-        let normal = Vector3::new(0.0, 0.3, 0.9).normalize();
-        let factor =
-            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 3.0), normal, 0.5);
-
-        let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
-
-        const EPS: f64 = 1e-7;
-        const TOL: f64 = 1e-4;
-
-        for col in 0..6 {
-            let mut tan = [0.0f64; 6];
-            tan[col] = EPS;
-            let t_wa_p = perturb_se3(t_wa.as_slice(), &tan);
-            let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
-            let fd = (r_pert[0] - r0[0]) / EPS;
-            crate::factors::test_utils::assert_close(
-                jac[(0, col)],
-                fd,
-                TOL,
-                &format!("J_T_WA[0,{col}]"),
-            );
-        }
-
-        for col in 0..6 {
-            let mut tan = [0.0f64; 6];
-            tan[col] = EPS;
-            let t_wb_p = perturb_se3(t_wb.as_slice(), &tan);
-            let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
-            let fd = (r_pert[0] - r0[0]) / EPS;
-            crate::factors::test_utils::assert_close(
-                jac[(0, 6 + col)],
-                fd,
-                TOL,
-                &format!("J_T_WB[0,{col}]"),
-            );
-        }
-    }
-
-    #[test]
-    fn plane_dimension_is_one() {
-        let factor =
-            lidar_plane_factor_isotropic(Vector3::zeros(), Vector3::zeros(), Vector3::z(), 1.0);
-        assert_eq!(factor.residual_dim(), 1);
-        assert_eq!(factor.jacobian_shape(), (1, 12));
     }
 }

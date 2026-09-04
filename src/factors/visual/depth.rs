@@ -34,7 +34,7 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
-use crate::factors::imu::helpers::cross_matrix;
+use crate::factors::common::math::skew;
 
 /// Depth constraint factor with compile-time one-sided toggle.
 ///
@@ -183,7 +183,7 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         // ∂hp_S[0:3]/∂δθ = [hp_S[0:3]]×
         j_pose
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&cross_matrix(&hp_s_vec));
+            .copy_from(&skew(&hp_s_vec));
 
         let j_t_ws: SMatrix<f64, 1, 6> = -jh * t_cs * j_pose;
 
@@ -213,7 +213,7 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
         // ∂hp_C[0:3]/∂δθ_SC = [hp_C[0:3]]×
         j_extr
             .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&cross_matrix(&hp_c_vec));
+            .copy_from(&skew(&hp_c_vec));
 
         let j_t_sc: SMatrix<f64, 1, 6> = -jh * j_extr;
 

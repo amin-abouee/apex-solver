@@ -36,7 +36,7 @@ use apex_solver::apex_manifolds::{LieGroup, ManifoldType};
 use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::init_logger;
 use apex_solver::linalg::{SchurPreconditioner, SchurVariant};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
@@ -529,7 +529,7 @@ fn add_factors<OP>(
     include_intrinsics: bool,
 ) -> Result<(), Box<dyn Error>>
 where
-    OP: apex_solver::factors::projection_factor::OptimizationConfig + 'static,
+    OP: apex_solver::factors::visual::projection::OptimizationConfig + 'static,
 {
     for obs in valid_obs {
         let cam = &dataset.cameras[obs.camera_index];

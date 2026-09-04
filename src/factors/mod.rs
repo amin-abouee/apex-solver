@@ -47,49 +47,14 @@
 use crate::core::variable::ManifoldVariable;
 use thiserror::Error;
 
-// Pose factors
-pub mod between_factor;
-pub mod prior_factor;
-pub mod projection_factor;
-
-// Range / bearing-range factors (UWB, radar, landmarks)
-pub mod range_factor;
-
-// Marginalization support
-pub mod marginal;
-
-// IMU factors
-pub mod imu;
-
-// GPS factors
-pub mod gps_factor;
-pub mod navigation;
-
-// Vision / landmark factors
-pub mod bearing_factor;
-pub mod depth_factor;
-pub mod homogeneous_point_factor;
-pub mod visual;
-
-// LiDAR / ICP factors
-pub mod icp_factor;
+pub mod common;
+pub mod inertial;
 pub mod lidar;
-pub mod lidar_factor;
-
-pub use bearing_factor::BearingFactor;
-pub use between_factor::BetweenFactor;
-pub use depth_factor::{DepthFactor, OneSidedDepthFactor};
-pub use gps_factor::{GpsAsyncFactor, GpsFactor};
-pub use homogeneous_point_factor::HomogeneousPointFactor;
-pub use icp_factor::{DistanceField, IcpFactor};
-pub use imu::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, ImuPreintegration};
-pub use lidar_factor::{
-    LidarEdgeFactor, LidarPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
-};
-pub use marginal::{MarginalPriorFactor, PoseRotationPrior, PoseTranslationPrior};
-pub use prior_factor::{EuclideanPriorFactor, PriorFactor};
-pub use projection_factor::ProjectionFactor;
-pub use range_factor::{BearingRangeFactor, PosePointRangeFactor, PosePoseRangeFactor};
+pub mod marginal;
+pub mod navigation;
+pub mod pose;
+pub mod ranging;
+pub mod visual;
 
 // Optimization configuration types
 
@@ -238,24 +203,6 @@ pub trait Factor: Send + Sync {
     /// passed to registration.
     fn validate_variables(&self, _variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         Ok(())
-    }
-}
-
-/// Shared helpers for finite-difference Jacobian tests across factor modules.
-///
-/// Per-block perturbation construction (manifold `right_plus` vs. plain-vector
-/// `+= eps`) differs by factor and stays inline in each test; this only factors
-/// out the repeated compare-and-report boilerplate.
-#[cfg(test)]
-pub(crate) mod test_utils {
-    /// Assert a single analytical Jacobian entry matches its finite-difference
-    /// estimate within `tol`, panicking with both values and the error on failure.
-    pub(crate) fn assert_close(analytical: f64, fd: f64, tol: f64, label: &str) {
-        let err = (analytical - fd).abs();
-        assert!(
-            err < tol,
-            "{label}: analytical={analytical:.8} fd={fd:.8} err={err:.2e}"
-        );
     }
 }
 

@@ -1,11 +1,13 @@
-//! Navigation factors: GNSS (velocity, pseudorange, Doppler range-rate) and
+//! Navigation factors: GNSS (position, velocity, raw pseudorange/Doppler) and
 //! auxiliary inertial aids (barometric altitude, attitude from
 //! gravity/magnetometer).
 
 pub mod barometric_attitude_factor;
-pub mod gps_velocity_factor;
-pub mod pseudorange_doppler_factor;
+pub mod gnss_raw;
+pub mod gps;
+pub mod gps_velocity;
 
 pub use barometric_attitude_factor::{AttitudeFactor, BarometricFactor};
-pub use gps_velocity_factor::GpsVelocityFactor;
-pub use pseudorange_doppler_factor::{DopplerFactor, PseudorangeFactor};
+pub use gnss_raw::{DopplerFactor, PseudorangeFactor};
+pub use gps::{GpsAsyncFactor, GpsFactor};
+pub use gps_velocity::GpsVelocityFactor;

@@ -4,7 +4,7 @@
 
 ```rust
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::{G2oLoader, JacobianMode, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
@@ -124,7 +124,7 @@ model documentation.
 
 ```rust
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use apex_solver::{JacobianMode, ManifoldType};

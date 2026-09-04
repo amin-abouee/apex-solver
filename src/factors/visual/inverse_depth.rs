@@ -25,7 +25,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
+use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Inverse-depth landmark reprojection factor over `[pose_i, anchor, pose_j]`.
 #[derive(Clone)]

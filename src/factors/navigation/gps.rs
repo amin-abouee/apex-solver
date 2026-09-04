@@ -40,9 +40,9 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 
 use crate::factors::Factor;
-use crate::factors::imu::helpers::cross_matrix;
-use crate::factors::imu::preintegration::ImuPreintegration;
-use crate::factors::imu::types::{SpeedAndBias, SpeedAndBiasExt};
+use crate::factors::common::math::skew;
+use crate::factors::inertial::preintegration::ImuPreintegration;
+use crate::factors::inertial::types::{SpeedAndBias, SpeedAndBiasExt};
 
 /// GPS synchronous factor: connects `T_WS` (robot pose) and `T_GW`
 /// (GPS-to-world) to a 3D GPS position measurement.
@@ -149,8 +149,8 @@ impl Factor for GpsFactor {
         // Each block is 3×3; full unweighted Jacobian is 3×12.
         // After weighting: J_weighted = sqrt_info · J_raw.
 
-        let r_sa_hat = cross_matrix(&self.antenna_offset);
-        let t_ant_hat = cross_matrix(&t_antenna_w);
+        let r_sa_hat = skew(&self.antenna_offset);
+        let t_ant_hat = skew(&t_antenna_w);
 
         let de_drho_ws = -(c_gw * c_ws);
         let de_dtheta_ws = c_gw * c_ws * r_sa_hat;
@@ -356,8 +356,8 @@ impl Factor for GpsAsyncFactor {
         //   ∂e/∂δθ_GW =  C_GW · [t_antenna_W]×
 
         let delta_r_r_sa = delta_r * self.antenna_offset;
-        let theta_arm = cross_matrix(&(delta_p_body + delta_r_r_sa));
-        let t_ant_hat = cross_matrix(&t_antenna_w);
+        let theta_arm = skew(&(delta_p_body + delta_r_r_sa));
+        let t_ant_hat = skew(&t_antenna_w);
 
         // Block 0: T_WS (cols 0–5)
         let de_drho_ws = -(c_gw * c_ws_k);
@@ -411,8 +411,8 @@ mod tests {
     use apex_manifolds::se3::{SE3, SE3Tangent};
     use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
-    use crate::factors::imu::preintegration::ImuPreintegration;
-    use crate::factors::imu::types::{
+    use crate::factors::inertial::preintegration::ImuPreintegration;
+    use crate::factors::inertial::types::{
         ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias,
     };
 

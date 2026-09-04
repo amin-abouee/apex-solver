@@ -1,4 +1,4 @@
-use super::Factor;
+use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
 use faer::prelude::ReborrowMut;
 
@@ -60,7 +60,8 @@ use faer::prelude::ReborrowMut;
 /// ## SE(3) - 3D Pose Graph
 ///
 /// ```
-/// use apex_solver::factors::{Factor, BetweenFactor};
+/// use apex_solver::factors::Factor;
+/// use apex_solver::factors::pose::BetweenFactor;
 /// use apex_solver::manifold::se3::SE3;
 /// use nalgebra::{Vector3, Quaternion, DVector};
 ///
@@ -83,7 +84,8 @@ use faer::prelude::ReborrowMut;
 /// ## SE(2) - 2D Pose Graph
 ///
 /// ```
-/// use apex_solver::factors::{Factor, BetweenFactor};
+/// use apex_solver::factors::Factor;
+/// use apex_solver::factors::pose::BetweenFactor;
 /// use apex_solver::manifold::se2::SE2;
 /// use nalgebra::DVector;
 ///
@@ -135,7 +137,7 @@ where
     /// ## SE(3) Between Factor
     ///
     /// ```
-    /// use apex_solver::factors::BetweenFactor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::manifold::se3::SE3;
     ///
     /// // Create relative pose: move 2m in x, rotate 90° around z-axis
@@ -151,7 +153,7 @@ where
     /// ## SE(2) Between Factor
     ///
     /// ```
-    /// use apex_solver::factors::BetweenFactor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::manifold::se2::SE2;
     ///
     /// // Create relative 2D pose

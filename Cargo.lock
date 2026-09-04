@@ -344,6 +344,7 @@ dependencies = [
  "factrs",
  "faer 0.24.4",
  "nalgebra",
+ "rand 0.9.5",
  "rayon",
  "rerun",
  "serde",

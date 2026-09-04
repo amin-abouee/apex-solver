@@ -35,7 +35,7 @@
 //!   as the monocular [`ProjectionFactor`], with a real gradient pushing the
 //!   poses back toward validity.
 //!
-//! [`ProjectionFactor`]: crate::factors::projection_factor::ProjectionFactor
+//! [`ProjectionFactor`]: crate::factors::visual::projection::ProjectionFactor
 
 use apex_camera_models::{CameraModel, CameraModelError};
 use apex_manifolds::LieGroup;
@@ -47,7 +47,7 @@ use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::projection_factor::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
+use crate::factors::common::cheirality::{CHEIRALITY_BASE_PENALTY, CHEIRALITY_DEPTH_SCALE};
 
 /// Failure mode of the internal triangulation, exposed for graph-building
 /// code to decide on outlier rejection / keyframing.

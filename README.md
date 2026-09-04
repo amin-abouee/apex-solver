@@ -116,7 +116,7 @@ apex-solver = "1.4.0"
 
 ```rust
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::{G2oLoader, JacobianMode, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;

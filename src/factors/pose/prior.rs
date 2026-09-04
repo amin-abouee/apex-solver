@@ -10,8 +10,9 @@
 //!   for [`Rn`](apex_manifolds::rn::Rn) variables **only**; registration
 //!   rejects any other manifold.
 
-use super::{BetweenFactor, Factor};
+use super::BetweenFactor;
 use crate::core::variable::ManifoldVariable;
+use crate::factors::Factor;
 use apex_manifolds::{LieGroup, Tangent};
 use faer::prelude::ReborrowMut;
 use nalgebra::DVector;
@@ -51,7 +52,7 @@ use nalgebra::DVector;
 /// # Examples
 ///
 /// ```
-/// # use apex_solver::factors::PriorFactor;
+/// # use apex_solver::factors::pose::PriorFactor;
 /// # use apex_solver::manifold::se3::SE3;
 /// # use nalgebra::Vector3;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -222,7 +223,7 @@ impl Factor for EuclideanPriorFactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::BetweenFactor;
+    use crate::factors::pose::BetweenFactor;
     use apex_manifolds::se2::{SE2, SE2Tangent};
     use apex_manifolds::se3::{SE3, SE3Tangent};
     use nalgebra::{Quaternion, Vector3};

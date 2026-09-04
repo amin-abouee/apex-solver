@@ -2,7 +2,7 @@ use apex_manifolds::se2::SE2;
 use apex_solver::{
     JacobianMode, ManifoldType,
     core::problem::Problem,
-    factors::{BetweenFactor, PriorFactor},
+    factors::pose::{BetweenFactor, PriorFactor},
     init_logger,
     linalg::LinearSolverType,
     linalg::covariance::{Covariance, CovarianceAlgorithm, CovarianceOptions},

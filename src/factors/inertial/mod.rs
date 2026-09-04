@@ -22,7 +22,7 @@
 //! # Quick start
 //!
 //! ```ignore
-//! use apex_solver::factors::imu::{
+//! use apex_solver::factors::inertial::{
 //!     ImuFactor, CombinedImuFactor, CombinedSe23ImuFactor, Sgal3ImuFactor,
 //!     Sgal3CombinedImuFactor, ImuPreintegration, ImuParameters, ImuMeasurement,
 //!     ImuSensorReadings, SpeedAndBias,
@@ -32,7 +32,6 @@
 pub mod combined_imu_se23_factors;
 pub mod combined_imu_sgal3_factors;
 pub mod combined_se23_imu_factor;
-pub mod helpers;
 pub mod imu_se23_factors;
 pub mod imu_sgal3_factors;
 pub mod preintegration;

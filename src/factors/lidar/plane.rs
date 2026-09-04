@@ -1,4 +1,11 @@
-//! Point-to-plane correspondence factor (LIO-SAM `PoseToPlane` analogue).
+//! Point-to-plane LiDAR factors — two graph topologies over the same geometry.
+//!
+//! [`PointToPlaneFactor`] treats the body-frame point as a **variable** and the
+//! target plane as the measurement (LIO-SAM `PoseToPlane` analogue), while
+//! [`LidarPlaneFactor`] registers two **poses** with the query point baked into
+//! the factor. Pick the one matching how your front end parameterizes the scan.
+//!
+//! # `PointToPlaneFactor`
 //!
 //! Constrains a body-to-world pose `T_wr` against a matched plane in the
 //! target frame:
@@ -10,7 +17,7 @@
 //! with the target plane `nᵀ·x + d = 0` measured upstream from the target
 //! cloud (plane fitting is data association, not optimization). This is the
 //! standard lidar-odometry residual that needs no distance field — unlike
-//! [`IcpFactor`](crate::factors::icp_factor::IcpFactor) it evaluates a single
+//! [`IcpFactor`](crate::factors::lidar::distance_field::IcpFactor) it evaluates a single
 //! matched correspondence.
 
 use apex_manifolds::LieGroup;
@@ -20,6 +27,7 @@ use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::lidar::distance_field::{DistanceField, IcpFactor};
 
 /// A plane `nᵀ·x + d = 0` with a unit normal.
 #[derive(Clone, Debug)]
@@ -114,6 +122,64 @@ impl Factor for PointToPlaneFactor {
         }
         Ok(())
     }
+}
+
+/// A precomputed plane correspondence (point + unit normal), usable as a
+/// [`DistanceField`] so point-to-plane LOAM alignment can reuse
+/// [`IcpFactor`] directly instead of duplicating its Jacobian derivation.
+pub struct PrecomputedPlane {
+    /// A point on the matched plane, in frame A.
+    point: Vector3<f64>,
+    /// Unit normal of the matched plane, in frame A.
+    normal: Vector3<f64>,
+}
+
+impl PrecomputedPlane {
+    /// Create a plane correspondence.
+    ///
+    /// `normal` is normalized internally; need not be unit length on input.
+    pub fn new(point: Vector3<f64>, normal: Vector3<f64>) -> Self {
+        Self {
+            point,
+            normal: normal.normalize(),
+        }
+    }
+}
+
+impl DistanceField for PrecomputedPlane {
+    fn query(&self, point: &Vector3<f64>) -> Option<(f64, Vector3<f64>)> {
+        let val = self.normal.dot(&(point - self.point));
+        Some((val, self.normal))
+    }
+}
+
+/// Point-to-plane LOAM factor: aligns a query point from frame B against a
+/// precomputed plane correspondence (point + normal) in frame A.
+///
+/// Implemented as [`IcpFactor<PrecomputedPlane>`] — the residual
+/// `sqrt_info · n·(p_A − q)` and its Jacobian are exactly `IcpFactor`'s
+/// generic field-alignment math evaluated against a plane whose gradient is
+/// its (constant) normal everywhere.
+pub type LidarPlaneFactor = IcpFactor<PrecomputedPlane>;
+
+/// Construct a point-to-plane LOAM factor with isotropic noise.
+///
+/// # Arguments
+/// * `point_b` — query point in frame B
+/// * `plane_point` — a point on the matched plane, in frame A
+/// * `plane_normal` — normal of the matched plane, in frame A (normalized internally)
+/// * `sigma` — measurement noise standard deviation
+pub fn lidar_plane_factor_isotropic(
+    point_b: Vector3<f64>,
+    plane_point: Vector3<f64>,
+    plane_normal: Vector3<f64>,
+    sigma: f64,
+) -> LidarPlaneFactor {
+    IcpFactor::new(
+        PrecomputedPlane::new(plane_point, plane_normal),
+        point_b,
+        sigma,
+    )
 }
 
 #[cfg(test)]
@@ -217,5 +283,97 @@ mod tests {
         assert!((plane.normal.norm() - 1.0).abs() < 1e-12);
         assert!((plane.offset - (-2.0)).abs() < 1e-12);
         Ok(())
+    }
+
+    // ── LidarPlaneFactor / PrecomputedPlane (two-pose LOAM form) ────────────
+
+    use crate::factors::common::test_utils::{
+        compute_residual, compute_with_jacobian, identity_pose, make_pose, perturb_se3,
+    };
+    use nalgebra::UnitQuaternion;
+
+    #[test]
+    fn plane_zero_residual_on_plane() {
+        let t_wa = identity_pose();
+        let t_wb = identity_pose();
+        let point_b = Vector3::new(1.0, 2.0, 5.0); // on the z=5 plane
+
+        let factor =
+            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
+        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
+        assert!(r[0].abs() < 1e-10, "residual = {} should be zero", r[0]);
+    }
+
+    #[test]
+    fn plane_residual_matches_closed_form() {
+        let t_wa = identity_pose();
+        let t_wb = identity_pose();
+        let point_b = Vector3::new(1.0, 2.0, 7.0); // 2m above the z=5 plane
+
+        let factor =
+            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 5.0), Vector3::z(), 1.0);
+        let r = compute_residual(&factor, t_wa.as_slice(), t_wb.as_slice());
+        // n·(p - q) = (0,0,1)·(1,2,2) = 2, sqrt_info = 1
+        assert!((r[0] - 2.0).abs() < 1e-10, "residual = {}", r[0]);
+    }
+
+    #[test]
+    fn plane_finite_difference_jacobians() {
+        let q_a = UnitQuaternion::from_axis_angle(
+            &nalgebra::Unit::new_normalize(Vector3::new(0.0, 1.0, 0.0)),
+            0.2,
+        );
+        let q_b = UnitQuaternion::from_axis_angle(
+            &nalgebra::Unit::new_normalize(Vector3::new(0.0, 0.0, 1.0)),
+            -0.15,
+        );
+        let t_wa = make_pose(1.0, -0.5, 0.3, q_a);
+        let t_wb = make_pose(2.0, 1.0, -0.2, q_b);
+        let point_b = Vector3::new(0.5, -0.3, 4.0);
+
+        let normal = Vector3::new(0.0, 0.3, 0.9).normalize();
+        let factor =
+            lidar_plane_factor_isotropic(point_b, Vector3::new(0.0, 0.0, 3.0), normal, 0.5);
+
+        let (r0, jac) = compute_with_jacobian(&factor, t_wa.as_slice(), t_wb.as_slice());
+
+        const EPS: f64 = 1e-7;
+        const TOL: f64 = 1e-4;
+
+        for col in 0..6 {
+            let mut tan = [0.0f64; 6];
+            tan[col] = EPS;
+            let t_wa_p = perturb_se3(t_wa.as_slice(), &tan);
+            let r_pert = compute_residual(&factor, t_wa_p.as_slice(), t_wb.as_slice());
+            let fd = (r_pert[0] - r0[0]) / EPS;
+            crate::factors::common::test_utils::assert_close(
+                jac[(0, col)],
+                fd,
+                TOL,
+                &format!("J_T_WA[0,{col}]"),
+            );
+        }
+
+        for col in 0..6 {
+            let mut tan = [0.0f64; 6];
+            tan[col] = EPS;
+            let t_wb_p = perturb_se3(t_wb.as_slice(), &tan);
+            let r_pert = compute_residual(&factor, t_wa.as_slice(), t_wb_p.as_slice());
+            let fd = (r_pert[0] - r0[0]) / EPS;
+            crate::factors::common::test_utils::assert_close(
+                jac[(0, 6 + col)],
+                fd,
+                TOL,
+                &format!("J_T_WB[0,{col}]"),
+            );
+        }
+    }
+
+    #[test]
+    fn plane_dimension_is_one() {
+        let factor =
+            lidar_plane_factor_isotropic(Vector3::zeros(), Vector3::zeros(), Vector3::z(), 1.0);
+        assert_eq!(factor.residual_dim(), 1);
+        assert_eq!(factor.jacobian_shape(), (1, 12));
     }
 }

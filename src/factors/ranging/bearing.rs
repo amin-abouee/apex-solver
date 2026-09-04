@@ -32,7 +32,7 @@ use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
 use crate::factors::Factor;
-use crate::factors::imu::helpers::cross_matrix;
+use crate::factors::common::math::skew;
 
 /// Compute an orthonormal basis (3×2) for the tangent plane at unit vector `n`.
 ///
@@ -174,7 +174,7 @@ impl Factor for BearingFactor {
         //
         //   ∂p_body/∂δρ = −I₃
         //   ∂p_body/∂δθ = +[p_body]×   (note: positive!)
-        let p_body_hat = cross_matrix(&p_body);
+        let p_body_hat = skew(&p_body);
         let j_rho = -prefix; // 2×3
         let j_theta = prefix * p_body_hat; // 2×3  (positive sign)
 

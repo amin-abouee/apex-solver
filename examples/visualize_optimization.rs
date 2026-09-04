@@ -35,7 +35,7 @@ use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::variable::{ManifoldVariable, Variable};
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::optimizer::LevenbergMarquardt;
 use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 use clap::Parser;
@@ -299,7 +299,7 @@ fn optimize_se3_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::err
 
 /// Optimize SE2 pose graph with visualization
 fn optimize_se2_graph(graph: &Graph, args: &Args) -> Result<(), Box<dyn std::error::Error>> {
-    use apex_solver::factors::BetweenFactor;
+    use apex_solver::factors::pose::BetweenFactor;
 
     // Create optimization problem
     let mut problem = Problem::new(JacobianMode::Sparse);
