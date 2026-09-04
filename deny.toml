@@ -43,9 +43,25 @@ yanked = "deny"
 # "workspace" only on direct workspace dependencies, "none" ignores.
 unmaintained = "all"
 unsound = "workspace"
-# Version numbers, not advisories, are ignored here; keep the list empty and
-# handle RustSec ignores in .cargo/audit.toml instead.
-ignore = []
+# Each entry needs a justification; remove it once upstream resolves the issue.
+# RustSec ignores already covered by cargo-audit live here too, since
+# cargo-deny keeps its own list (.cargo/audit.toml is not read).
+ignore = [
+    # RUSTSEC-2026-0195 / RUSTSEC-2026-0194 — quick-xml DoS in NsReader.
+    # Pinned by rerun 0.26; the vulnerable namespace parsing is not exercised
+    # by our Rerun usage. Re-evaluate when rerun ships quick-xml >= 0.41.
+    # (Mirrors .cargo/audit.toml.)
+    { id = "RUSTSEC-2026-0195", reason = "rerun-pinned quick-xml, vulnerable NsReader path not exercised" },
+    { id = "RUSTSEC-2026-0194", reason = "rerun-pinned quick-xml, duplicate-attr check path not exercised" },
+    # RUSTSEC-2025-0119 — number_prefix unmaintained. Tiny stable formatting
+    # lib, reachable only via rerun -> indicatif (visualization feature).
+    # Upstream's call; re-evaluate on rerun upgrade.
+    { id = "RUSTSEC-2025-0119", reason = "transitive via rerun/indicatif, stable single-purpose crate" },
+    # RUSTSEC-2024-0436 — paste unmaintained (archived by author, no
+    # alternative). Reachable only via the factrs dev-dependency (test
+    # harness), never in shipped artifacts.
+    { id = "RUSTSEC-2024-0436", reason = "dev-only via factrs, never shipped" },
+]
 
 [sources]
 unknown-registry = "deny"
