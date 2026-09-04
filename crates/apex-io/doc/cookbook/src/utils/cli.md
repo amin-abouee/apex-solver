@@ -7,13 +7,17 @@ authoring, and live DDS listening. Run any of them with `cargo run -p apex-io
 
 | Binary | Purpose | Feature |
 |---|---|---|
-| [`download_datasets`](#download_datasets) | Download pose-graph & BAL datasets | — |
-| [`bag_info`](#bag_info) | Summarize a ROS2 bag (fast) | — |
-| [`bag_filter`](#bag_filter) | Copy/filter a ROS2 bag | — |
-| [`extract_topic_data`](#extract_topic_data) | Export one topic's data | — |
-| [`bag_convert`](#bag_convert) | Convert ROS1 ↔ ROS2 | — |
-| [`write_dummy_bag`](#write_dummy_bag) | Author a ROS2 bag from scratch | — |
+| [`download_datasets`](#download_datasets) | Download pose-graph & BAL datasets | `download` (default) |
+| [`bag_info`](#bag_info) | Summarize a ROS2 bag (fast) | `rosbag` |
+| [`bag_filter`](#bag_filter) | Copy/filter a ROS2 bag | `rosbag` |
+| [`extract_topic_data`](#extract_topic_data) | Export one topic's data | `rosbag` |
+| [`bag_convert`](#bag_convert) | Convert ROS1 ↔ ROS2 | `rosbag` |
+| [`write_dummy_bag`](#write_dummy_bag) | Author a ROS2 bag from scratch | `rosbag` |
 | [`dds_multi_listener`](#dds_multi_listener) | Listen to live DDS topics | `dds` |
+
+> Feature-gated binaries are skipped when their feature is off. Examples:
+> `cargo run -p apex-io --features rosbag --bin bag_info -- …`
+> (default features already include `download`).
 
 <a id="download_datasets"></a>
 ## `download_datasets`
