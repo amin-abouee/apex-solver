@@ -8,16 +8,16 @@
 //! - All other message types → CSV files with timestamped rows
 //!
 //! Usage:
-//!   `cargo run -p apex-io --features rosbag-sqlite --bin extract_topic_data -- \`
+//!   `cargo run -p apex-io --features rosbag --bin extract_topic_data -- \`
 //!       <bag_path> <topic_name> <output_folder>
 //!
 //! Examples:
 //!   # Extract camera images
-//!   `cargo run -p apex-io --features rosbag-sqlite --bin extract_topic_data -- \`
+//!   `cargo run -p apex-io --features rosbag --bin extract_topic_data -- \`
 //!       ./my_bag /camera/image_raw ./extracted_images/
 //!
 //!   # Extract IMU data to CSV
-//!   `cargo run -p apex-io --features rosbag-sqlite --bin extract_topic_data -- \`
+//!   `cargo run -p apex-io --features rosbag --bin extract_topic_data -- \`
 //!       ./my_bag /imu/data ./extracted_imu/
 
 use apex_io::rosbag::cdr::CdrDeserializer;

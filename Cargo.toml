@@ -104,7 +104,7 @@ exclude = [
     "data/*",
     "profiles/*",
     "output/*",
-    "doc/*.pdf",
+    "doc/**/*.pdf",
 ]
 
 # Build docs.rs with every feature so the `visualization` API is documented.
@@ -114,29 +114,45 @@ all-features = true
 [[bin]]
 name = "pose_graph_g2o"
 path = "bin/pose_graph_g2o.rs"
+required-features = ["cli"]
 
 [[bin]]
 name = "bundle_adjustment"
 path = "bin/bundle_adjustment.rs"
+required-features = ["cli", "apex-io/download"]
 
 [[example]]
 name = "compare_solvers"
+required-features = ["cli"]
+
+[[example]]
+name = "compare_optimizers"
+required-features = ["cli"]
+
+[[example]]
+name = "loss_function_comparison"
+required-features = ["cli"]
 
 [[example]]
 name = "visualize_graph_file"
-required-features = ["visualization"]
+required-features = ["visualization", "cli"]
 
 [[example]]
 name = "visualize_optimization"
-required-features = ["visualization"]
+required-features = ["visualization", "cli"]
 
 [features]
-default = []
+default = ["cli", "download"]
 visualization = ["dep:rerun", "apex-io/visualization"]
+# CLI argument parsing for bins/examples. Opt-out with `--no-default-features`.
+cli = ["dep:clap"]
+# ROS1/ROS2 bag I/O pass-through (opt-in; pulls bundled SQLite + codecs).
+rosbag = ["apex-io/rosbag"]
+# Dataset download helpers pass-through (on by default).
+download = ["apex-io/download"]
 
 [dependencies]
 apex-manifolds.workspace = true
-apex-io.workspace = true
 apex-camera-models.workspace = true
 
 # External dependencies
@@ -148,11 +164,23 @@ rayon.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-clap.workspace = true
 chrono.workspace = true
 smallvec.workspace = true
 
+# Path + version duplicated from [workspace.dependencies] on purpose: inheriting
+# via `workspace = true` forbids `default-features = false`, which is what makes
+# `--no-default-features` truly lean (no ureq/clap unless asked). Keep the two
+# version strings in sync on release.
+[dependencies.apex-io]
+path = "crates/apex-io"
+version = "0.3.0"
+default-features = false
+
 [dependencies.rerun]
+workspace = true
+optional = true
+
+[dependencies.clap]
 workspace = true
 optional = true
 

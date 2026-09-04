@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **`apex-io`: `rosbag` is now an opt-in feature (was built unconditionally).**
+  Depending on `apex-io` no longer compiles `rusqlite` (bundled SQLite),
+  `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`. Bag I/O users
+  must opt in:
+  ```toml
+  apex-io = { version = "0.3", features = ["rosbag"] }
+  # via the solver crate:
+  apex-solver = { version = "1.4", features = ["rosbag"] }
+  ```
+  (Use the newest 0.x / 1.x release; the `rosbag` feature name is stable.)
+  `download` (dataset fetching via `ureq`/`bzip2`/`flate2`/`tar`) stays on by
+  default; `--no-default-features` disables it, in which case the
+  `ensure_*_dataset` helpers only serve already-downloaded files.
+  `clap` is now behind the default-on `cli` feature in both crates
+  (bins requiring it declare `required-features`).
+  The `bag_*` binaries now require `--features rosbag`, `download_datasets`
+  requires `--features download`.
+- **`apex-solver` bins/examples moved behind the default-on `cli` feature.**
+  `--no-default-features` builds the library without `clap`; the
+  `pose_graph_g2o` / `bundle_adjustment` binaries and the `clap`-based
+  examples are skipped in that configuration.
+
+### Changed
+
+- **Changelog moved from `doc/CHANGELOG.md` to the repository root**
+  (`CHANGELOG.md`), following Keep-a-Changelog conventions. Each sub-crate's
+  changelog moved likewise from `crates/*/doc/CHANGELOG.md` to its crate root
+  (`crates/*/CHANGELOG.md`).
+- **Reference PDFs relocated** from `doc/*.pdf` to `doc/references/`.
+
 ### Added
 
 - **Factor library expansion** (GTSAM-audited; see `doc/factor-catalog.md` for the full
@@ -496,7 +528,7 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
   - Consistent performance across problem scales: 434 poses (ring) to 5,000 poses (torus3D)
   - 2-10x faster than Ceres on most datasets while achieving equivalent or better final cost
 
-## [0.1.6] - 2024-11-29
+## [0.1.6] - 2025-11-29
 
 ### Added
 - **Comprehensive benchmark infrastructure** comparing 6 optimization libraries across 8 standard datasets
@@ -586,4 +618,4 @@ All public APIs, types, imports, and behavior are identical to v1.1.0.
 
 ---
 
-*For detailed usage examples and API documentation, see [README.md](../README.md)*
+*For detailed usage examples and API documentation, see [README.md](README.md)*

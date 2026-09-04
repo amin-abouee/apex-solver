@@ -1,0 +1,23 @@
+name: Feature request
+description: Propose a factor, solver, manifold, or tooling improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What SLAM/vision task needs this?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: API sketch, math reference, and (for factors) the residual + Jacobian shape
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Breaking change?
+      options: ["No", "Yes — public API", "Yes — feature flags / defaults"]
+    validations:
+      required: true

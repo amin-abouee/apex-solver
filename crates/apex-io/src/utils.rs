@@ -24,11 +24,17 @@
 //! ```
 
 use std::collections::HashMap;
+#[cfg(feature = "download")]
 use std::fs;
-use std::io::{self, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+#[cfg(feature = "download")]
+use std::io::{Read, Write};
+#[cfg(feature = "download")]
+use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
+#[cfg(feature = "download")]
 use tracing::info;
 
 use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR, SENSOR_DATA_DIR};
@@ -209,11 +215,20 @@ pub fn ensure_odometry_dataset(name: &str) -> io::Result<PathBuf> {
         return Ok(path);
     }
 
-    info!("Downloading {name} ({}) ...", entry.filename);
-    download_file(&entry.url, &path)
-        .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
-    info!("Saved to {}", path.display());
-    Ok(path)
+    #[cfg(feature = "download")]
+    {
+        info!("Downloading {name} ({}) ...", entry.filename);
+        download_file(&entry.url, &path)
+            .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
+        info!("Saved to {}", path.display());
+        Ok(path)
+    }
+    #[cfg(not(feature = "download"))]
+    {
+        Err(io::Error::other(format!(
+            "Dataset '{name}' not found locally; rebuild apex-io with the `download` feature to fetch it"
+        )))
+    }
 }
 
 /// Ensure a BAL bundle-adjustment file is present at
@@ -253,16 +268,26 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
     let url = entry.problem_url(cameras, points);
     let bz2_path = txt_path.with_extension("txt.bz2");
 
-    info!("Downloading {name}/problem-{cameras}-{points} ...");
-    download_file(&url, &bz2_path)
-        .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
+    #[cfg(feature = "download")]
+    {
+        info!("Downloading {name}/problem-{cameras}-{points} ...");
+        download_file(&url, &bz2_path)
+            .map_err(|e| io::Error::other(format!("Failed to download {name}: {e}")))?;
 
-    decompress_bzip2(&bz2_path, &txt_path)
-        .map_err(|e| io::Error::other(format!("Failed to decompress: {e}")))?;
+        decompress_bzip2(&bz2_path, &txt_path)
+            .map_err(|e| io::Error::other(format!("Failed to decompress: {e}")))?;
 
-    let _ = fs::remove_file(&bz2_path); // clean up; ignore errors
-    info!("Saved to {}", txt_path.display());
-    Ok(txt_path)
+        let _ = fs::remove_file(&bz2_path); // clean up; ignore errors
+        info!("Saved to {}", txt_path.display());
+        Ok(txt_path)
+    }
+    #[cfg(not(feature = "download"))]
+    {
+        let _ = (url, bz2_path);
+        Err(io::Error::other(format!(
+            "Dataset '{name}/problem-{cameras}-{points}' not found locally; rebuild apex-io with the `download` feature to fetch it"
+        )))
+    }
 }
 
 /// Ensure a multi-sensor dataset is present under `data/sensor/{name}/`.
@@ -296,31 +321,42 @@ pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
     if marker.exists() {
         return Ok(dir);
     }
-    fs::create_dir_all(&dir)?;
 
-    for (url, filename) in &entry.files {
-        let dest = dir.join(filename);
-        if dest.exists() {
-            continue;
+    #[cfg(feature = "download")]
+    {
+        fs::create_dir_all(&dir)?;
+
+        for (url, filename) in &entry.files {
+            let dest = dir.join(filename);
+            if dest.exists() {
+                continue;
+            }
+            info!("Downloading {name}/{filename} ...");
+            download_file(url, &dest)
+                .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
         }
-        info!("Downloading {name}/{filename} ...");
-        download_file(url, &dest)
-            .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
-    }
 
-    for (url, filename) in &entry.archives {
-        let archive = dir.join(filename);
-        info!("Downloading {name}/{filename} ...");
-        download_file(url, &archive)
-            .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
-        extract_tar_gz(&archive, &dir)
-            .map_err(|e| io::Error::other(format!("Failed to extract {filename}: {e}")))?;
-        let _ = fs::remove_file(&archive); // clean up; ignore errors
-    }
+        for (url, filename) in &entry.archives {
+            let archive = dir.join(filename);
+            info!("Downloading {name}/{filename} ...");
+            download_file(url, &archive)
+                .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
+            extract_tar_gz(&archive, &dir)
+                .map_err(|e| io::Error::other(format!("Failed to extract {filename}: {e}")))?;
+            let _ = fs::remove_file(&archive); // clean up; ignore errors
+        }
 
-    fs::write(&marker, b"")?;
-    info!("Sensor dataset ready at {}", dir.display());
-    Ok(dir)
+        fs::write(&marker, b"")?;
+        info!("Sensor dataset ready at {}", dir.display());
+        Ok(dir)
+    }
+    #[cfg(not(feature = "download"))]
+    {
+        let _ = entry;
+        Err(io::Error::other(format!(
+            "Sensor dataset '{name}' not found locally; rebuild apex-io with the `download` feature to fetch it"
+        )))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -329,8 +365,11 @@ pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
 
 /// Download a URL to a local file, creating parent directories as needed.
 ///
+/// Requires the `download` feature.
+///
 /// # Errors
 /// Returns an error if the HTTP request fails or the file cannot be written.
+#[cfg(feature = "download")]
 pub fn download_file(url: &str, dest: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
@@ -353,19 +392,25 @@ pub fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 
 /// Decompress a `.bz2` file to `dest`.
 ///
+/// Requires the `download` feature.
+///
 /// # Errors
 /// Returns an error if the file cannot be read or the decompressed data
 /// cannot be written.
 /// Unpack a `.tar.gz` archive into `dest_dir`.
 ///
+/// Requires the `download` feature.
+///
 /// # Errors
 /// Returns an error if the archive cannot be read or an entry cannot be written.
+#[cfg(feature = "download")]
 pub fn extract_tar_gz(src: &Path, dest_dir: &Path) -> io::Result<()> {
     let file = fs::File::open(src)?;
     let decoder = flate2::read::GzDecoder::new(file);
     tar::Archive::new(decoder).unpack(dest_dir)
 }
 
+#[cfg(feature = "download")]
 pub fn decompress_bzip2(src: &Path, dest: &Path) -> io::Result<()> {
     use bzip2::read::BzDecoder;
 
@@ -656,6 +701,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "download")]
     fn decompress_bzip2_roundtrip() -> io::Result<()> {
         use bzip2::Compression;
         use bzip2::write::BzEncoder;

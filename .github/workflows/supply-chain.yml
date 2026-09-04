@@ -1,0 +1,41 @@
+# Supply-chain checks: license/source audit (cargo-deny). Complements the
+# RustSec-only `cargo audit` job in audit.yml.
+# Run locally: `cargo deny check`.
+# (cargo-semver-checks is intentionally not gated here; run it locally with
+# `cargo semver-checks check-release --only-explicit-features` when cutting
+# a release.)
+
+name: Supply Chain
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/supply-chain.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/supply-chain.yml"
+  schedule:
+    # Weekly scan for newly published advisories, Monday 06:30 UTC.
+    - cron: "30 6 * * 1"
+  workflow_dispatch:
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check licenses, advisories, sources
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: warn
+          command: check

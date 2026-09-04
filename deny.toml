@@ -1,0 +1,70 @@
+# cargo-deny configuration: license / advisory / source auditing.
+# Complements `cargo audit` (see .github/workflows/audit.yml), which only
+# covers RustSec advisories. Run locally with `cargo deny check`.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+all-features = true
+
+[licenses]
+version = 2
+# Deny-by-default: every license below is explicitly allowed, everything
+# else (including GPL/AGPL/LGPL copyleft) fails the check.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "MPL-2.0",
+    "Zlib",
+    "CC0-1.0",
+    "Unlicense",
+    # OSI-approved permissive data license covering Mozilla's CA certificate
+    # bundle shipped by webpki-roots (TLS roots for ureq dataset downloads
+    # and rerun's HTTP client). No copyleft obligations.
+    "CDLA-Permissive-2.0",
+]
+# Workspace crates are Apache-2.0; confidence threshold for license detection.
+confidence-threshold = 0.8
+
+[advisories]
+yanked = "deny"
+# Scope values (not severities): "all" fails on any crate in the graph,
+# "workspace" only on direct workspace dependencies, "none" ignores.
+unmaintained = "all"
+unsound = "workspace"
+# Each entry needs a justification; remove it once upstream resolves the issue.
+# RustSec ignores already covered by cargo-audit live here too, since
+# cargo-deny keeps its own list (.cargo/audit.toml is not read).
+ignore = [
+    # RUSTSEC-2026-0195 / RUSTSEC-2026-0194 — quick-xml DoS in NsReader.
+    # Pinned by rerun 0.26; the vulnerable namespace parsing is not exercised
+    # by our Rerun usage. Re-evaluate when rerun ships quick-xml >= 0.41.
+    # (Mirrors .cargo/audit.toml.)
+    { id = "RUSTSEC-2026-0195", reason = "rerun-pinned quick-xml, vulnerable NsReader path not exercised" },
+    { id = "RUSTSEC-2026-0194", reason = "rerun-pinned quick-xml, duplicate-attr check path not exercised" },
+    # RUSTSEC-2025-0119 — number_prefix unmaintained. Tiny stable formatting
+    # lib, reachable only via rerun -> indicatif (visualization feature).
+    # Upstream's call; re-evaluate on rerun upgrade.
+    { id = "RUSTSEC-2025-0119", reason = "transitive via rerun/indicatif, stable single-purpose crate" },
+    # RUSTSEC-2024-0436 — paste unmaintained (archived by author, no
+    # alternative). Reachable only via the factrs dev-dependency (test
+    # harness), never in shipped artifacts.
+    { id = "RUSTSEC-2024-0436", reason = "dev-only via factrs, never shipped" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

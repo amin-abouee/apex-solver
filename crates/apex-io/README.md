@@ -55,9 +55,15 @@ the `ros2 bag` CLI.
 ## Installation
 
 ```toml
-# Core: pose graphs + ROS2 bag reader/writer
+# Core: pose graphs + dataset registry (no bag I/O, no network)
 [dependencies]
 apex-io = "0.3.0"
+
+# With ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message types)
+apex-io = { version = "0.3.0", features = ["rosbag"] }
+
+# Without dataset auto-download (offline builds)
+apex-io = { version = "0.3.0", default-features = false }
 
 # With Rerun visualization helpers
 apex-io = { version = "0.3.0", features = ["visualization"] }
@@ -65,6 +71,14 @@ apex-io = { version = "0.3.0", features = ["visualization"] }
 # With live DDS topic subscription (requires a DDS runtime)
 apex-io = { version = "0.3.0", features = ["dds"] }
 ```
+
+| Feature | Default | Enables | Extra dependencies |
+|---|:---:|---|---|
+| `download` | ✓ | Dataset auto-download (`download_file`, `decompress_bzip2`, `extract_tar_gz`, `ensure_*_dataset` network fallback, `download_datasets` binary) | `ureq`, `bzip2`, `flate2`, `tar` |
+| `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
+| `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2` |
+| `visualization` | ✗ | `to_rerun_*` conversions | `rerun` |
+| `dds` | ✗ | Live DDS subscription, `dds_multi_listener` binary | `rustdds`, `tokio`, `futures` |
 
 > **Note:** `apex-io` depends on `apex-manifolds` (for SE2/SE3 types). Both crates must be
 > available on crates.io. If you are using the workspace they are handled automatically.

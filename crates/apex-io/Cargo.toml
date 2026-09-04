@@ -12,7 +12,7 @@ description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS1/ROS2 bags with
 readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
-exclude = ["tests/", "benches/"]
+exclude = ["tests/", "benches/", "doc/", "data/", "bin/", "examples/", "datasets.toml"]
 
 # Build docs.rs with every feature so the rosbag, DDS and visualization APIs are visible.
 [package.metadata.docs.rs]
@@ -21,26 +21,32 @@ all-features = true
 [[bin]]
 name = "download_datasets"
 path = "bin/download_datasets.rs"
+required-features = ["download", "cli"]
 
 [[bin]]
 name = "bag_info"
 path = "bin/bag_info.rs"
+required-features = ["rosbag"]
 
 [[bin]]
 name = "bag_filter"
 path = "bin/bag_filter.rs"
+required-features = ["rosbag", "cli"]
 
 [[bin]]
 name = "extract_topic_data"
 path = "bin/extract_topic_data.rs"
+required-features = ["rosbag"]
 
 [[bin]]
 name = "write_dummy_bag"
 path = "bin/write_dummy_bag.rs"
+required-features = ["rosbag"]
 
 [[bin]]
 name = "bag_convert"
 path = "bin/bag_convert.rs"
+required-features = ["rosbag", "cli"]
 
 [[bin]]
 name = "dds_multi_listener"
@@ -50,10 +56,12 @@ required-features = ["dds"]
 [[test]]
 name = "rosbag_ros2_integration_tests"
 path = "tests/rosbag_ros2_integration_tests.rs"
+required-features = ["rosbag"]
 
 [[test]]
 name = "rosbag_ros1_integration_tests"
 path = "tests/rosbag_ros1_integration_tests.rs"
+required-features = ["rosbag"]
 
 [[test]]
 name = "asl_integration_tests"
@@ -66,6 +74,7 @@ path = "tests/trajectory_integration_tests.rs"
 [[test]]
 name = "ros2_cdr_alignment_tests"
 path = "tests/ros2_cdr_alignment_tests.rs"
+required-features = ["rosbag"]
 
 [dependencies]
 apex-manifolds.workspace = true
@@ -77,23 +86,64 @@ tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
-clap.workspace = true
-ureq.workspace = true
-bzip2.workspace = true
-flate2.workspace = true
-tar.workspace = true
 toml.workspace = true
 
-# ROS2 bag dependencies
-serde_yaml.workspace = true
-byteorder.workspace = true
-bytes.workspace = true
-hex.workspace = true
-image.workspace = true
-rusqlite.workspace = true
-zstd.workspace = true
-mcap.workspace = true
-lz4_flex.workspace = true
+[dependencies.clap]
+workspace = true
+optional = true
+
+# Download helpers (ureq/bzip2/flate2/tar) — `download` feature, on by default.
+# bzip2 is shared with `rosbag` (ROS1 compression); either feature enables it.
+[dependencies.ureq]
+workspace = true
+optional = true
+
+[dependencies.bzip2]
+workspace = true
+optional = true
+
+[dependencies.flate2]
+workspace = true
+optional = true
+
+[dependencies.tar]
+workspace = true
+optional = true
+
+# ROS1/ROS2 bag I/O — `rosbag` feature, opt-in.
+[dependencies.serde_yaml]
+workspace = true
+optional = true
+
+[dependencies.byteorder]
+workspace = true
+optional = true
+
+[dependencies.bytes]
+workspace = true
+
+[dependencies.hex]
+workspace = true
+optional = true
+
+[dependencies.image]
+workspace = true
+
+[dependencies.rusqlite]
+workspace = true
+optional = true
+
+[dependencies.zstd]
+workspace = true
+optional = true
+
+[dependencies.mcap]
+workspace = true
+optional = true
+
+[dependencies.lz4_flex]
+workspace = true
+optional = true
 
 [dependencies.rerun]
 workspace = true
@@ -112,10 +162,28 @@ workspace = true
 optional = true
 
 [features]
-default = []
+default = ["download", "cli"]
+# CLI parsing for the clap-based bins. Opt-out with `--no-default-features`.
+cli = ["dep:clap"]
 visualization = ["dep:rerun"]
 dds = ["dep:rustdds", "dep:tokio", "dep:futures"]
 asl-async = ["dep:tokio"]
+# ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message catalog).
+# Opt-in: pulls rusqlite (bundled SQLite, compiles C), mcap, zstd, lz4_flex.
+rosbag = [
+    "dep:rusqlite",
+    "dep:mcap",
+    "dep:zstd",
+    "dep:lz4_flex",
+    "dep:serde_yaml",
+    "dep:byteorder",
+    "dep:hex",
+    "dep:bzip2",
+]
+# Dataset download helpers (`download_file`, `decompress_bzip2`, `extract_tar_gz`
+# and the `ensure_*_dataset` network fallback). On by default; `image` stays
+# mandatory regardless (ASL streaming API returns `image::DynamicImage`).
+download = ["dep:ureq", "dep:bzip2", "dep:flate2", "dep:tar"]
 
 [dev-dependencies]
 tempfile.workspace = true

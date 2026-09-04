@@ -43,10 +43,9 @@ __cmake*
 data/
 
 
-# Generated Agent files
+# Generated Agent files (local-only guidelines, not versioned)
 CLAUDE.md
 AGENTS.md
 GEMINI.md
 .claude/
 .opencode/
-.rust_rules.mdc
