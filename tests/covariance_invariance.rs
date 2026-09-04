@@ -13,7 +13,7 @@ use apex_solver::apex_manifolds::ManifoldType;
 use apex_solver::apex_manifolds::se2::SE2;
 use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
 use apex_solver::linalg::LinearSolverType;
 use apex_solver::linalg::covariance::{Covariance, CovarianceAlgorithm, CovarianceOptions};
 use apex_solver::optimizer::dog_leg::{DogLeg, DogLegConfig};

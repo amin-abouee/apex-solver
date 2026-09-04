@@ -35,7 +35,8 @@
 //! ```
 //! use apex_solver::core::residual_block::ResidualBlock;
 //! use apex_solver::core::{FactorKey, VarKey};
-//! use apex_solver::factors::{Factor, BetweenFactor};
+//! use apex_solver::factors::Factor;
+//! use apex_solver::factors::pose::BetweenFactor;
 //! use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
 //! use apex_solver::core::variable::Variable;
 //! use apex_solver::manifold::se2::SE2;
@@ -159,7 +160,8 @@ impl ResidualBlock {
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
     /// use apex_solver::core::{FactorKey, VarKey};
-    /// use apex_solver::factors::{Factor, BetweenFactor};
+    /// use apex_solver::factors::Factor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::core::loss_functions::{LossFunction, HuberLoss};
     /// use apex_solver::manifold::se2::SE2;
     /// use slotmap::SlotMap;
@@ -251,7 +253,8 @@ impl ResidualBlock {
     /// ```
     /// use apex_solver::core::residual_block::ResidualBlock;
     /// use apex_solver::core::{FactorKey, VarKey};
-    /// use apex_solver::factors::{Factor, BetweenFactor};
+    /// use apex_solver::factors::Factor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::core::variable::Variable;
     /// use apex_solver::manifold::se2::SE2;
     /// use slotmap::SlotMap;
@@ -338,8 +341,8 @@ mod tests {
         loss_functions::{HuberLoss, LossFunction},
         variable::Variable,
     };
-    use crate::factors::EuclideanPriorFactor;
-    use crate::factors::{BetweenFactor, PriorFactor};
+    use crate::factors::pose::EuclideanPriorFactor;
+    use crate::factors::pose::{BetweenFactor, PriorFactor};
     use apex_manifolds::{se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, dvector, vector};
     use slotmap::SlotMap;

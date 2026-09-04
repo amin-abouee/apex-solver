@@ -156,3 +156,31 @@ problems = [
     [93, 61203], [394, 100368], [871, 527480], [961, 187103],
     [1936, 649673], [3068, 310854], [4585, 1324582], [13682, 4456117],
 ]
+
+# ---------------------------------------------------------------------------
+# Multi-sensor datasets (IMU / GNSS / odometry with ground truth)
+# Source: NCLT, University of Michigan North Campus Long-Term dataset
+#         https://robots.engin.umich.edu/nclt/
+#
+# NCLT publishes each stream separately, so the ~40 MB of CSVs below can be
+# fetched without the images (~100 GB) or Velodyne scans (~50 GB).
+#
+# Sensor sections: [sensor.<name>]
+#   files    - array of [url, filename] pairs saved under
+#              data/sensor/<name>/<filename>
+#   archives - array of [url, filename] tar.gz archives extracted in place
+# ---------------------------------------------------------------------------
+
+[sensor.nclt-2013-01-10]
+files = [
+  [
+    "https://s3.us-east-2.amazonaws.com/nclt.perl.engin.umich.edu/ground_truth/groundtruth_2013-01-10.csv",
+    "groundtruth.csv",
+  ],
+]
+archives = [
+  [
+    "https://s3.us-east-2.amazonaws.com/nclt.perl.engin.umich.edu/sensor_data/2013-01-10_sen.tar.gz",
+    "sensor_data.tar.gz",
+  ],
+]

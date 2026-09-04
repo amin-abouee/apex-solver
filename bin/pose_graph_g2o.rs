@@ -14,7 +14,7 @@ use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::*;
 use apex_solver::core::noise::{InformationRepair, RepairStrategy, RepairSummary};
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
 use apex_solver::init_logger;
 use apex_solver::optimizer::dog_leg::DogLegConfig;
 use apex_solver::optimizer::gauss_newton::GaussNewtonConfig;

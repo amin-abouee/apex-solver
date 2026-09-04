@@ -32,7 +32,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;

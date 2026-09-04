@@ -62,6 +62,7 @@ pub mod linearizer;
 pub mod logger;
 pub mod observers;
 pub mod optimizer;
+pub mod prelude;
 
 // Re-export core types
 pub use core::variable::Variable;
@@ -69,7 +70,9 @@ pub use error::{ApexSolverError, ApexSolverResult, ErrorLogging};
 
 // Re-export factor types
 pub use core::noise::{InformationRepair, NoiseModel, RepairStrategy, RepairSummary};
-pub use factors::{BetweenFactor, EuclideanPriorFactor, Factor, PriorFactor, ProjectionFactor};
+pub use factors::Factor;
+pub use factors::pose::{BetweenFactor, EuclideanPriorFactor, PriorFactor};
+pub use factors::visual::ProjectionFactor;
 
 // Re-export linear algebra types
 pub use linalg::{

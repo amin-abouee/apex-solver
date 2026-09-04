@@ -141,6 +141,14 @@ impl Problem {
                 factor.residual_dim()
             )));
         }
+        if factor.whitens_internally() && !matches!(noise, NoiseModel::Null) {
+            return Err(CoreError::InvalidInput(
+                "this factor applies its own square-root information; register it with \
+                 NoiseModel::null(). Supplying a noise model as well would whiten the \
+                 residual twice."
+                    .into(),
+            ));
+        }
         self.try_add_residual_block_impl(variable_keys, factor, loss_func, noise)
     }
 
@@ -644,7 +652,7 @@ impl Problem {
 mod tests {
     use super::*;
     use crate::core::loss_functions::HuberLoss;
-    use crate::factors::{BetweenFactor, PriorFactor};
+    use crate::factors::pose::{BetweenFactor, PriorFactor};
     use apex_manifolds::{ManifoldType, se2::SE2, se3::SE3};
     use nalgebra::{Quaternion, Vector3, dvector};
 
@@ -880,7 +888,7 @@ mod tests {
         for (x, y) in [(a, p0), (a, p1), (b, p0), (b, p1)] {
             p.add_residual_block(
                 &[x, y],
-                Box::new(crate::factors::BetweenFactor::new(
+                Box::new(crate::factors::pose::BetweenFactor::new(
                     apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
                 )),
                 None,
@@ -954,7 +962,7 @@ mod tests {
         for (x, y) in [(a, p0), (a, p1), (b, p0), (b, p1)] {
             p.add_residual_block(
                 &[x, y],
-                Box::new(crate::factors::BetweenFactor::new(
+                Box::new(crate::factors::pose::BetweenFactor::new(
                     apex_manifolds::se2::SE2::from_xy_angle(0.5, 0.1, 0.01),
                 )),
                 None,
@@ -974,7 +982,7 @@ mod tests {
         // Mutate after grouping: an unchunked block appended at the end.
         p.add_residual_block(
             &[a, b],
-            Box::new(crate::factors::BetweenFactor::new(
+            Box::new(crate::factors::pose::BetweenFactor::new(
                 apex_manifolds::se2::SE2::from_xy_angle(0.2, 0.0, 0.0),
             )),
             None,
@@ -1289,7 +1297,7 @@ mod tests {
 
     mod validation {
         use super::*;
-        use crate::factors::projection_factor::ProjectionFactor;
+        use crate::factors::visual::projection::ProjectionFactor;
         use crate::factors::{BundleAdjustment, Factor};
         use apex_camera_models::PinholeCamera;
         use nalgebra::Matrix2xX;

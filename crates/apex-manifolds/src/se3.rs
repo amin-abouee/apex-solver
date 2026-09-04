@@ -588,7 +588,7 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
+        let theta_right_jac = SO3Tangent::new(theta).right_jacobian();
         jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
         jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
         jac.fixed_view_mut::<3, 3>(0, 3)
@@ -646,13 +646,13 @@ impl Tangent<SE3> for SE3Tangent {
         let mut jac = Matrix6::zeros();
         let rho = self.rho();
         let theta = self.theta();
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
+        let theta_right_inv_jac = SO3Tangent::new(theta).right_jacobian_inv();
         let q_block_jac = SE3Tangent::q_block_jacobian_matrix(-rho, -theta);
         jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
+            .copy_from(&theta_right_inv_jac);
         jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
-        let top_right = -1.0 * theta_left_inv_jac * q_block_jac * theta_left_inv_jac;
+            .copy_from(&theta_right_inv_jac);
+        let top_right = -1.0 * theta_right_inv_jac * q_block_jac * theta_right_inv_jac;
         jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
         jac
     }

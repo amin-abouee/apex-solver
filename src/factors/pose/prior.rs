@@ -10,9 +10,11 @@
 //!   for [`Rn`](apex_manifolds::rn::Rn) variables **only**; registration
 //!   rejects any other manifold.
 
-use super::{BetweenFactor, Factor};
+use super::BetweenFactor;
 use crate::core::variable::ManifoldVariable;
-use apex_manifolds::{LieGroup, Tangent};
+use crate::factors::Factor;
+use crate::factors::common::validate::expect_block_sizes;
+use apex_manifolds::LieGroup;
 use faer::prelude::ReborrowMut;
 use nalgebra::DVector;
 
@@ -51,7 +53,7 @@ use nalgebra::DVector;
 /// # Examples
 ///
 /// ```
-/// # use apex_solver::factors::PriorFactor;
+/// # use apex_solver::factors::pose::PriorFactor;
 /// # use apex_solver::manifold::se3::SE3;
 /// # use nalgebra::Vector3;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -70,6 +72,9 @@ where
 {
     /// The anchored value: the residual is zero when the variable equals it.
     prior: T,
+    /// The identity-measurement between constraint this factor delegates to,
+    /// built once so `linearize` allocates nothing.
+    between: BetweenFactor<T>,
 }
 
 impl<T> PriorFactor<T>
@@ -78,7 +83,14 @@ where
 {
     /// Anchor a variable to `prior`.
     pub fn new(prior: T) -> Self {
-        Self { prior }
+        // `x.between(&x)` is `x⁻¹ ∘ x` — the group identity, and for
+        // dimension-carrying groups such as `Rn` it is the identity of the
+        // *right* dimension, which an associated `identity()` could not be.
+        let identity = prior.between(&prior, None, None);
+        Self {
+            prior,
+            between: BetweenFactor::new(identity),
+        }
     }
 }
 
@@ -101,32 +113,16 @@ where
         // Note the residual sign follows the between convention (the overall
         // sign of a least-squares residual is immaterial: the zero and the
         // optimum are the same).
-        // Identity element = exp(0); Tangent provides construction from a slice.
-        let zero = <T::TangentVector as Tangent<T>>::from_slice(&vec![
-            0.0;
-            <T::TangentVector as Tangent<T>>::DIM
-        ]);
-        let between = BetweenFactor::<T>::new(zero.exp(None));
-        let dof = self.prior.tangent_dim();
-        let mut between_buf = vec![0.0; dof * 2 * dof];
-        between.linearize(
-            &[self.prior.as_param_slice(), params[0]],
+        //
+        // `linearize_wrt_second` writes only the block this factor needs, so
+        // nothing is allocated here — `linearize` runs once per factor per
+        // iteration and the trait documents it as allocation-free.
+        self.between.linearize_wrt_second(
+            self.prior.as_param_slice(),
+            params[0],
             residual,
-            Some(faer::mat::MatMut::from_column_major_slice_mut(
-                &mut between_buf,
-                dof,
-                2 * dof,
-            )),
+            jacobian,
         );
-        if let Some(mut jac) = jacobian {
-            // The between Jacobian is (dof × 2dof); the block wrt the second
-            // argument (the anchored variable) is our (dof × dof) Jacobian.
-            for k in 0..dof {
-                for i in 0..dof {
-                    *jac.rb_mut().get_mut(i, k) = between_buf[(dof + k) * dof + i];
-                }
-            }
-        }
     }
 
     fn residual_dim(&self) -> usize {
@@ -136,6 +132,14 @@ where
     fn jacobian_shape(&self) -> (usize, usize) {
         let dof = self.prior.tangent_dim();
         (dof, dof)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[self.prior.as_param_slice().len()],
+            "PriorFactor expects one variable of the prior's own group",
+        )
     }
 }
 
@@ -222,7 +226,7 @@ impl Factor for EuclideanPriorFactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::BetweenFactor;
+    use crate::factors::pose::BetweenFactor;
     use apex_manifolds::se2::{SE2, SE2Tangent};
     use apex_manifolds::se3::{SE3, SE3Tangent};
     use nalgebra::{Quaternion, Vector3};
@@ -284,14 +288,19 @@ mod tests {
     /// FD-vs-analytic check for the SE(3) prior Jacobian. Currently IGNORED:
     /// the delegation target (`BetweenFactor<SE3>`'s analytic chain) does not
     /// reproduce the central-difference derivative through the crate's own
-    /// `compose`/`log` — its wrt-X block behaves as identity and the
-    /// rotation-coupling block of `SE3Tangent::right_jacobian_inv` disagrees
-    /// with FD (which is computed purely from values). The SE(2) variant
-    /// below passes and pins the same code path for 3-DOF groups. Fixing the
-    /// SE(3) between/log Jacobian is a tracked correctness item; un-ignore
-    /// this test when it lands.
+    /// `compose`/`log` — its wrt-X block behaves as identity, and the
+    /// rotation-to-translation coupling block (`Q`) of
+    /// `SE3Tangent::right_jacobian_inv` still disagrees with FD by ~8e-3.
+    ///
+    /// Narrowed since this was first written: the *diagonal* blocks were the
+    /// larger error and are now correct (they were using the left SO(3)
+    /// Jacobian; see the `right_jacobian` fix), which took the overall
+    /// `right_minus` Jacobian error from 4.8e-1 to 7.6e-3. What remains is the
+    /// `Q` block alone. The SE(2) variant below passes and pins the same code
+    /// path for 3-DOF groups. Un-ignore this test when `Q` is fixed.
     #[test]
-    #[ignore = "SE3 between/log Jacobian chain is FD-inconsistent (tracked); SE2 variant pins the path"]
+    #[ignore = "SE3 right-Jacobian Q-block (rotation->translation coupling) is FD-inconsistent; \
+                the diagonal blocks are fixed, SE2 variant pins the path"]
     fn prior_factor_se3_jacobian_matches_central_difference() -> TestResult {
         let prior = SE3::from_translation_quaternion(
             Vector3::new(0.2, -0.4, 0.7),

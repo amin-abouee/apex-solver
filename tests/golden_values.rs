@@ -18,7 +18,7 @@ use apex_io::{G2oLoader, GraphLoader};
 use apex_solver::ManifoldType;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use std::collections::HashMap;
@@ -29,8 +29,13 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 const GOLDENS: &[(&str, bool, f64, f64)] = &[
     ("ring", false, 2.217_900_322_072e-2, 1e-6),
     ("M3500", false, 1.510_940_460_434e0, 1e-6),
-    ("parking-garage", true, 6.245_107_165_929e-1, 1e-6),
-    ("sphere2500", true, 2.131_994_494_757e1, 1e-6),
+    // The two SE3 goldens were re-pinned when SE3/SE23's right Jacobians were
+    // corrected to the right (rather than left) convention. Both moved *down* —
+    // the more accurate Jacobian converges to a better optimum: parking-garage
+    // by 1.3e-6 relative, sphere2500 by 1.4e-3. The SE2 datasets are unaffected,
+    // as SE2's Jacobians were already correct.
+    ("parking-garage", true, 6.245_093_871_665e-1, 1e-6),
+    ("sphere2500", true, 2.129_064_817_909e1, 1e-6),
 ];
 
 fn solve(dataset: &str, is_3d: bool) -> Result<f64, Box<dyn std::error::Error>> {

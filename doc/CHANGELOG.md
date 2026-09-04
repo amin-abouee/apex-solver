@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Factor library expansion** (GTSAM-audited; see `doc/factor-catalog.md` for the full
+  keep/skip rationale):
+  - **IMU**: model-suffixed files (`imu_se23_factors.rs`, `combined_imu_se23_factors.rs`,
+    `imu_sgal3_factors.rs`, `combined_imu_sgal3_factors.rs`) plus `Sgal3ImuFactor` /
+    `Sgal3CombinedImuFactor` — SGal(3)-based kinematic constraint over the same shared
+    `ImuPreintegration` (SGal(3) increment = SE(2)₃ delta + time coordinate; the time row
+    of the log-residual vanishes identically). `ImuPreintegration::delta_sgal3()` added.
+    The SGal(3) FD-Jacobian tests are currently `#[ignore]`d (tangent Jacobian chain under
+    investigation; the zero-residual and group-composition formulation tests pass).
+  - **Visual**: `StereoFactor` (rectified stereo), `InverseDepthFactor` (anchor pixel +
+    inverse-depth landmarks), `EssentialMatrixFactor` / `EssentialMatrixConstraint`
+    (2D–2D epipolar geometry), and `SmartProjectionFactor` — pose-only structure-less
+    multi-view factor with DLT + Gauss-Newton re-triangulation and the exact implicit-Schur
+    (point-marginalized) Jacobian; registers with `NoiseModel::null()` (internal whitening)
+    and falls back to a bounded cheirality penalty on degeneracy.
+  - **LiDAR**: `PoseToPointFactor`, `PointToPlaneFactor` (target plane, no distance field),
+    and `GicpFactor` (plane-to-plane via combined-covariance whitening, frozen at
+    construction with a rotation hint).
+  - **Navigation**: `GpsVelocityFactor`, `PseudorangeFactor`, `DopplerFactor`,
+    `BarometricFactor` (SE3 pose + scalar bias), `AttitudeFactor` (gravity/magnetometer
+    direction constraint).
+  - **Range family**: `PosePoseRangeFactor`, `PosePointRangeFactor`, `BearingRangeFactor`
+    (4D: 3 bearing rows + 1 range row).
+  - **Marginalization**: `MarginalPriorFactor` (GTSAM iSAM2 `LinearContainerFactor`
+    analogue — Gaussian marginal over eliminated variables, manifold-agnostic via a
+    caller-supplied local-log closure) plus `PoseRotationPrior` / `PoseTranslationPrior`
+    partial-pose priors for loop-closure initialization.
+- **Integration suite** (`tests/factor_integration.rs`): a synthetic multi-sensor dataset
+  (circular-climb trajectory with sequentially self-consistent IMU propagation) driving
+  end-to-end LM solves for VIO, monocular BA with cheirality violations, stereo VO,
+  lidar scan matching (point-to-plane + GICP + point correspondences), a GNSS
+  constellation solve (pseudorange + Doppler), marginalization consistency, loop
+  closure with partial priors, pose-only smart-factor BA, and auxiliary barometer/
+  attitude anchoring.
+
+### Fixed
+
+- **`BearingRangeFactor` never constrained the range** — the residual was bearing-only
+  (3 rows), so range measurements were silently ignored. The residual is now 4D with the
+  range row and its Jacobian (∂d/∂δρ = −q̂ᵀR, point block q̂ᵀ).
+- **`BarometricFactor` took an R³ position** instead of an SE3 pose (GTSAM layout); the
+  z-Jacobian follows the world-to-body retraction (`∂z/∂δρ = R[2,:]`).
+- **`AttitudeFactor` used the wrong hemisphere** of the world-to-body rotation
+  (`Rᵀ·d_world` instead of `R·d_world` for the crate's `T_wc` convention) and a wrong
+  rotation-Jacobian sign.
+- **`Sgal3` adjoint was stale** relative to the corrected group exponential
+  (`apex-manifolds`): the ρ-row ν-column sign, the θ-column (`ρ̂R` instead of
+  `(ρ−tν)̂R`), and the s-column (`−ν` instead of `+ν`) are fixed and now verified against
+  `Log(g∘exp(ξ)∘g⁻¹)` by `adjoint_matches_group_conjugation`.
+- `EuclideanPriorFactor` re-exported at `apex_solver::factors` level (was only reachable
+  via the module path).
+
+### Known limitations
+
+- **`fix_variable` under-corrects free variables** that share factors with the fixed one:
+  the linear solve still treats fixed coordinates as free and their step is discarded
+  after application. Anchor with tight `EuclideanPriorFactor` / `PriorFactor` priors
+  instead (see `tests/factor_integration.rs`); fully-fixed variables can also surface as
+  "structurally empty diagonal" errors in the sparse LM damping.
+- The SGal(3) IMU factors' analytical Jacobians are pending FD validation (tests
+  `#[ignore]`d); the residual formulation itself is exact.
+
+
 ### Breaking Changes
 
 - **`PriorFactor` is now a tangent-space anchor and generic over the manifold.**

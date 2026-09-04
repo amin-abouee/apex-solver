@@ -2184,7 +2184,7 @@ mod tests {
     #[test]
     fn schur_matches_cholesky_on_assembled_pose_chain() -> TestResult {
         use crate::core::problem::Problem;
-        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::factors::pose::{BetweenFactor, PriorFactor};
         use crate::linalg::JacobianMode;
         use crate::linalg::sparse::cholesky::SparseCholeskySolver;
         use apex_manifolds::{ManifoldType, se2::SE2};
@@ -2271,7 +2271,7 @@ mod tests {
     #[test]
     fn schur_tracks_cholesky_across_iterations() -> TestResult {
         use crate::core::problem::Problem;
-        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::factors::pose::{BetweenFactor, PriorFactor};
         use crate::linalg::JacobianMode;
         use crate::linalg::sparse::cholesky::SparseCholeskySolver;
         use apex_manifolds::{ManifoldType, se2::SE2};
@@ -2354,7 +2354,7 @@ mod tests {
     #[test]
     fn schur_tracks_cholesky_with_shared_workspace() -> TestResult {
         use crate::core::problem::Problem;
-        use crate::factors::{BetweenFactor, PriorFactor};
+        use crate::factors::pose::{BetweenFactor, PriorFactor};
         use crate::linalg::JacobianMode;
         use crate::linalg::sparse::cholesky::SparseCholeskySolver;
         use apex_manifolds::{ManifoldType, se2::SE2};

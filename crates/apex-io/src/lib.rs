@@ -13,7 +13,9 @@ pub mod rosbag;
 pub use rosbag::ros2::dds;
 
 pub use logger::init_logger;
-pub use utils::{DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset};
+pub use utils::{
+    DatasetRegistry, ensure_ba_dataset, ensure_odometry_dataset, ensure_sensor_dataset,
+};
 
 /// Default base directory for odometry (pose graph) datasets relative to the workspace root.
 pub const ODOMETRY_DATA_DIR: &str = "data/odometry";
@@ -26,6 +28,9 @@ pub const ODOMETRY_DATA_DIR_3D: &str = "data/odometry/3d";
 
 /// Default directory for bundle adjustment datasets relative to the workspace root.
 pub const BUNDLE_ADJUSTMENT_DATA_DIR: &str = "data/bundle_adjustment";
+
+/// Default directory for multi-sensor (IMU / GNSS / odometry) datasets.
+pub const SENSOR_DATA_DIR: &str = "data/sensor";
 
 // Re-exports
 pub use asl::error::AslError;

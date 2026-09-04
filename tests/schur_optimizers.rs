@@ -12,7 +12,7 @@ use apex_manifolds::se2::SE2;
 use apex_solver::ManifoldType;
 use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::{BetweenFactor, PriorFactor};
+use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
 use apex_solver::linalg::{JacobianMode, LinearSolverType, SchurVariant};
 use apex_solver::optimizer::dog_leg::{DogLeg, DogLegConfig};
 use apex_solver::optimizer::gauss_newton::{GaussNewton, GaussNewtonConfig};

@@ -328,7 +328,7 @@ For multi-camera systems where each camera may have different intrinsics:
 ```rust
 use apex_camera_models::{RadTanCamera, CameraModel, SelfCalibration};
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::ProjectionFactor;
+use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::{JacobianMode, ManifoldType};
 use nalgebra::DVector;
 

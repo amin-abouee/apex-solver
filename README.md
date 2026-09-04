@@ -116,7 +116,7 @@ apex-solver = "1.4.0"
 
 ```rust
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::{G2oLoader, JacobianMode, ManifoldType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::dvector;
@@ -186,7 +186,8 @@ The workspace root is the `apex-solver` crate. Sub-crates for manifolds, I/O, an
 apex-solver/                # workspace root = apex-solver crate
 ├── src/
 │   ├── core/               # Problem formulation, factors, residuals
-│   ├── factors/            # Factor implementations (projection, between, prior)
+│   ├── factors/            # Factors by sensor modality: pose/, visual/, lidar/,
+│   │                       #   imu/, navigation/, ranging/, marginal/, common/
 │   ├── optimizer/          # LM, GN, Dog Leg algorithms
 │   ├── linalg/             # Cholesky, QR, Explicit/Implicit Schur
 │   └── observers/          # Optimization observers and callbacks

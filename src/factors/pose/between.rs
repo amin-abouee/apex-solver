@@ -1,6 +1,14 @@
-use super::Factor;
+use crate::core::variable::ManifoldVariable;
+use crate::factors::Factor;
+use crate::factors::common::validate::expect_uniform_blocks;
 use apex_manifolds::{LieGroup, Tangent};
 use faer::prelude::ReborrowMut;
+
+/// The two Jacobian blocks of a between residual: `(∂r/∂k0, ∂r/∂k1)`.
+type BetweenBlocks<T> = (
+    <T as LieGroup>::JacobianMatrix,
+    <T as LieGroup>::JacobianMatrix,
+);
 
 /// Generic between factor for Lie group pose constraints.
 ///
@@ -60,7 +68,8 @@ use faer::prelude::ReborrowMut;
 /// ## SE(3) - 3D Pose Graph
 ///
 /// ```
-/// use apex_solver::factors::{Factor, BetweenFactor};
+/// use apex_solver::factors::Factor;
+/// use apex_solver::factors::pose::BetweenFactor;
 /// use apex_solver::manifold::se3::SE3;
 /// use nalgebra::{Vector3, Quaternion, DVector};
 ///
@@ -83,7 +92,8 @@ use faer::prelude::ReborrowMut;
 /// ## SE(2) - 2D Pose Graph
 ///
 /// ```
-/// use apex_solver::factors::{Factor, BetweenFactor};
+/// use apex_solver::factors::Factor;
+/// use apex_solver::factors::pose::BetweenFactor;
 /// use apex_solver::manifold::se2::SE2;
 /// use nalgebra::DVector;
 ///
@@ -104,7 +114,7 @@ use faer::prelude::ReborrowMut;
 /// - Compiler optimizes each instantiation (`BetweenFactor<SE3>`, `BetweenFactor<SE2>`, etc.)
 /// - All type checking happens at compile time
 /// - No dynamic dispatch or virtual function calls
-#[derive(Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct BetweenFactor<T>
 where
     T: LieGroup + Clone + Send + Sync,
@@ -135,7 +145,7 @@ where
     /// ## SE(3) Between Factor
     ///
     /// ```
-    /// use apex_solver::factors::BetweenFactor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::manifold::se3::SE3;
     ///
     /// // Create relative pose: move 2m in x, rotate 90° around z-axis
@@ -151,7 +161,7 @@ where
     /// ## SE(2) Between Factor
     ///
     /// ```
-    /// use apex_solver::factors::BetweenFactor;
+    /// use apex_solver::factors::pose::BetweenFactor;
     /// use apex_solver::manifold::se2::SE2;
     ///
     /// // Create relative 2D pose
@@ -163,20 +173,21 @@ where
     pub fn new(relative_pose: T) -> Self {
         Self { relative_pose }
     }
-}
 
-impl<T> Factor for BetweenFactor<T>
-where
-    T: LieGroup + Clone + Send + Sync,
-{
-    fn linearize(
+    /// Shared residual/Jacobian chain: writes the residual and, when
+    /// `want_jacobian`, returns the `(∂r/∂k0, ∂r/∂k1)` blocks.
+    ///
+    /// Both entry points go through here so the prior and the between
+    /// constraint stay bit-for-bit consistent — same chain, same conventions.
+    fn evaluate(
         &self,
-        params: &[&[f64]],
+        k0: &[f64],
+        k1: &[f64],
         residual: &mut [f64],
-        jacobian: Option<faer::mat::MatMut<'_, f64>>,
-    ) {
-        let se3_origin_k0 = T::from_param_slice(params[0]);
-        let se3_origin_k1 = T::from_param_slice(params[1]);
+        want_jacobian: bool,
+    ) -> (usize, Option<BetweenBlocks<T>>) {
+        let se3_origin_k0 = T::from_param_slice(k0);
+        let se3_origin_k1 = T::from_param_slice(k1);
         let se3_k0_k1_measured = &self.relative_pose;
 
         // Step 1: se3_origin_k1.between(se3_origin_k0) = k1⁻¹ * k0
@@ -200,12 +211,60 @@ where
 
         residual[..dof].copy_from_slice(tangent_slice);
 
-        if let Some(mut jac) = jacobian {
-            let j_diff_wrt_k0 = j_diff_wrt_k1_k0.clone() * j_k1_k0_wrt_k0;
-            let j_diff_wrt_k1 = j_diff_wrt_k1_k0 * j_k1_k0_wrt_k1;
-            let jacobian_wrt_k0 = j_log_wrt_diff.clone() * j_diff_wrt_k0;
-            let jacobian_wrt_k1 = j_log_wrt_diff * j_diff_wrt_k1;
+        if !want_jacobian {
+            return (dof, None);
+        }
 
+        let j_diff_wrt_k0 = j_diff_wrt_k1_k0.clone() * j_k1_k0_wrt_k0;
+        let j_diff_wrt_k1 = j_diff_wrt_k1_k0 * j_k1_k0_wrt_k1;
+        (
+            dof,
+            Some((
+                j_log_wrt_diff.clone() * j_diff_wrt_k0,
+                j_log_wrt_diff * j_diff_wrt_k1,
+            )),
+        )
+    }
+
+    /// Residual, plus only the Jacobian block with respect to the **second**
+    /// variable, written straight into a `dof × dof` output.
+    ///
+    /// A prior anchors one variable against a fixed value, which is a between
+    /// constraint whose first argument is constant. Sharing the chain keeps the
+    /// conventions identical while letting the prior skip the `dof × 2·dof`
+    /// scratch buffer whose first half it would discard — `linearize` is on the
+    /// hot path of every solve and is documented as allocation-free.
+    pub(crate) fn linearize_wrt_second(
+        &self,
+        first: &[f64],
+        second: &[f64],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        let (dof, blocks) = self.evaluate(first, second, residual, jacobian.is_some());
+        if let (Some(mut jac), Some((_, jacobian_wrt_k1))) = (jacobian, blocks) {
+            for i in 0..dof {
+                for j in 0..dof {
+                    *jac.rb_mut().get_mut(i, j) = jacobian_wrt_k1[(i, j)];
+                }
+            }
+        }
+    }
+}
+
+impl<T> Factor for BetweenFactor<T>
+where
+    T: LieGroup + Clone + Send + Sync,
+{
+    fn linearize(
+        &self,
+        params: &[&[f64]],
+        residual: &mut [f64],
+        jacobian: Option<faer::mat::MatMut<'_, f64>>,
+    ) {
+        let (dof, blocks) = self.evaluate(params[0], params[1], residual, jacobian.is_some());
+
+        if let (Some(mut jac), Some((jacobian_wrt_k0, jacobian_wrt_k1))) = (jacobian, blocks) {
             for i in 0..dof {
                 for j in 0..dof {
                     *jac.rb_mut().get_mut(i, j) = jacobian_wrt_k0[(i, j)];
@@ -222,6 +281,18 @@ where
     fn jacobian_shape(&self) -> (usize, usize) {
         let dof = self.relative_pose.tangent_dim();
         (dof, 2 * dof)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        // Both variables must be the same group as the measurement — the
+        // parameter length is what distinguishes e.g. SE3 (7) from SE23 (10).
+        let size = self.relative_pose.as_param_slice().len();
+        expect_uniform_blocks(
+            variables,
+            2,
+            size,
+            "BetweenFactor expects two variables of the measurement's own group",
+        )
     }
 }
 

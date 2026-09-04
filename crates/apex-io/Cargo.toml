@@ -80,6 +80,8 @@ chrono.workspace = true
 clap.workspace = true
 ureq.workspace = true
 bzip2.workspace = true
+flate2.workspace = true
+tar.workspace = true
 toml.workspace = true
 
 # ROS2 bag dependencies

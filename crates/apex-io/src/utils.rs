@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 use tracing::info;
 
-use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR};
+use crate::{BUNDLE_ADJUSTMENT_DATA_DIR, ODOMETRY_DATA_DIR, SENSOR_DATA_DIR};
 
 // Compile-time embed of the dataset registry.
 const DATASETS_TOML: &str = include_str!("../datasets.toml");
@@ -75,6 +75,21 @@ impl BaEntry {
     }
 }
 
+/// Metadata for a multi-sensor dataset (IMU / GNSS / odometry with ground truth).
+///
+/// Plain files are downloaded as-is; archives are downloaded and unpacked in
+/// place. Both are `(url, filename)` pairs saved under
+/// `data/sensor/<name>/`.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SensorEntry {
+    /// `(url, filename)` pairs downloaded verbatim.
+    #[serde(default)]
+    pub files: Vec<(String, String)>,
+    /// `(url, filename)` `.tar.gz` archives, unpacked into the dataset directory.
+    #[serde(default)]
+    pub archives: Vec<(String, String)>,
+}
+
 /// The complete dataset registry, parsed from `datasets.toml`.
 #[derive(Debug, Deserialize)]
 pub struct DatasetRegistry {
@@ -82,6 +97,9 @@ pub struct DatasetRegistry {
     pub odometry: HashMap<String, OdometryEntry>,
     /// Bundle adjustment datasets keyed by collection name (e.g. `"ladybug"`).
     pub bundle_adjustment: HashMap<String, BaEntry>,
+    /// Multi-sensor datasets keyed by short name (e.g. `"nclt-2013-01-10"`).
+    #[serde(default)]
+    pub sensor: HashMap<String, SensorEntry>,
 }
 
 impl DatasetRegistry {
@@ -247,6 +265,64 @@ pub fn ensure_ba_dataset(name: &str, cameras: u32, points: u32) -> io::Result<Pa
     Ok(txt_path)
 }
 
+/// Ensure a multi-sensor dataset is present under `data/sensor/{name}/`.
+///
+/// Each declared file is downloaded once; each declared `.tar.gz` archive is
+/// downloaded, unpacked in place, and the archive removed. A dataset whose
+/// marker file already exists is returned immediately, with no network access.
+///
+/// Unlike the image and LIDAR streams these datasets also publish, the CSV
+/// streams fetched here are a few tens of megabytes.
+///
+/// # Errors
+/// Returns an error if the name is not in the registry, or if a download or
+/// extraction fails.
+pub fn ensure_sensor_dataset(name: &str) -> io::Result<PathBuf> {
+    let registry = DatasetRegistry::load()?;
+    let entry = registry.sensor.get(name).ok_or_else(|| {
+        io::Error::other(format!(
+            "Sensor dataset '{name}' not found in registry. Available: {}",
+            {
+                let mut names: Vec<_> = registry.sensor.keys().map(String::as_str).collect();
+                names.sort();
+                names.join(", ")
+            }
+        ))
+    })?;
+
+    let dir = PathBuf::from(SENSOR_DATA_DIR).join(name);
+    // The extraction marker: present only after every archive has been unpacked.
+    let marker = dir.join(".complete");
+    if marker.exists() {
+        return Ok(dir);
+    }
+    fs::create_dir_all(&dir)?;
+
+    for (url, filename) in &entry.files {
+        let dest = dir.join(filename);
+        if dest.exists() {
+            continue;
+        }
+        info!("Downloading {name}/{filename} ...");
+        download_file(url, &dest)
+            .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
+    }
+
+    for (url, filename) in &entry.archives {
+        let archive = dir.join(filename);
+        info!("Downloading {name}/{filename} ...");
+        download_file(url, &archive)
+            .map_err(|e| io::Error::other(format!("Failed to download {url}: {e}")))?;
+        extract_tar_gz(&archive, &dir)
+            .map_err(|e| io::Error::other(format!("Failed to extract {filename}: {e}")))?;
+        let _ = fs::remove_file(&archive); // clean up; ignore errors
+    }
+
+    fs::write(&marker, b"")?;
+    info!("Sensor dataset ready at {}", dir.display());
+    Ok(dir)
+}
+
 // ---------------------------------------------------------------------------
 // Low-level download helpers (pub so the download_datasets binary can use them)
 // ---------------------------------------------------------------------------
@@ -280,6 +356,16 @@ pub fn download_file(url: &str, dest: &Path) -> io::Result<()> {
 /// # Errors
 /// Returns an error if the file cannot be read or the decompressed data
 /// cannot be written.
+/// Unpack a `.tar.gz` archive into `dest_dir`.
+///
+/// # Errors
+/// Returns an error if the archive cannot be read or an entry cannot be written.
+pub fn extract_tar_gz(src: &Path, dest_dir: &Path) -> io::Result<()> {
+    let file = fs::File::open(src)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    tar::Archive::new(decoder).unpack(dest_dir)
+}
+
 pub fn decompress_bzip2(src: &Path, dest: &Path) -> io::Result<()> {
     use bzip2::read::BzDecoder;
 

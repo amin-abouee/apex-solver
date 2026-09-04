@@ -62,7 +62,7 @@ use apex_solver::NoiseModel;
 use apex_solver::core::loss_functions::L2Loss;
 use apex_solver::core::noise::{RepairStrategy, RepairSummary};
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::BetweenFactor;
+use apex_solver::factors::pose::BetweenFactor;
 use apex_solver::init_logger_with_directives;
 use apex_solver::linalg::JacobianMode;
 use apex_solver::optimizer::OptimizationStatus;

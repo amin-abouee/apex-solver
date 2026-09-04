@@ -560,7 +560,7 @@ impl Tangent<SE23> for SE23Tangent {
         let theta = self.theta();
         let nu = self.nu();
 
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
+        let theta_right_jac = SO3Tangent::new(theta).right_jacobian();
         let q_rho = Self::q_matrix(-rho, -theta);
         let q_nu = Self::q_matrix(-nu, -theta);
 
@@ -601,19 +601,19 @@ impl Tangent<SE23> for SE23Tangent {
         let theta = self.theta();
         let nu = self.nu();
 
-        let theta_left_inv_jac = SO3Tangent::new(theta).left_jacobian_inv();
+        let theta_right_inv_jac = SO3Tangent::new(theta).right_jacobian_inv();
         let q_rho = Self::q_matrix(-rho, -theta);
         let q_nu = Self::q_matrix(-nu, -theta);
 
         jac.fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&theta_left_inv_jac);
+            .copy_from(&theta_right_inv_jac);
         jac.fixed_view_mut::<3, 3>(3, 3)
-            .copy_from(&theta_left_inv_jac);
+            .copy_from(&theta_right_inv_jac);
         jac.fixed_view_mut::<3, 3>(6, 6)
-            .copy_from(&theta_left_inv_jac);
+            .copy_from(&theta_right_inv_jac);
 
-        let top_right = -1.0 * theta_left_inv_jac * q_rho * theta_left_inv_jac;
-        let bottom_right = -1.0 * theta_left_inv_jac * q_nu * theta_left_inv_jac;
+        let top_right = -1.0 * theta_right_inv_jac * q_rho * theta_right_inv_jac;
+        let bottom_right = -1.0 * theta_right_inv_jac * q_nu * theta_right_inv_jac;
 
         jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&top_right);
         jac.fixed_view_mut::<3, 3>(6, 3).copy_from(&bottom_right);
