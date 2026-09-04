@@ -1,8 +1,9 @@
-# Supply-chain checks: license/source audit (cargo-deny) and semver
-# conformance (cargo-semver-checks). Complements the RustSec-only
-# `cargo audit` job in audit.yml.
-# Run locally: `cargo deny check` and
-# `cargo semver-checks check-release --only-explicit-features`.
+# Supply-chain checks: license/source audit (cargo-deny). Complements the
+# RustSec-only `cargo audit` job in audit.yml.
+# Run locally: `cargo deny check`.
+# (cargo-semver-checks is intentionally not gated here; run it locally with
+# `cargo semver-checks check-release --only-explicit-features` when cutting
+# a release.)
 
 name: Supply Chain
 
@@ -38,29 +39,3 @@ jobs:
         with:
           log-level: warn
           command: check
-
-  semver:
-    name: cargo-semver-checks
-    runs-on: ubuntu-22.04
-    # Advisory only: main intentionally carries breaking changes under
-    # [Unreleased] (see CHANGELOG.md), so a crates.io baseline comparison
-    # cannot pass until the next major/minor release. The log output remains
-    # the release-time checklist; release-plz owns the actual version bump.
-    continue-on-error: true
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-semver-checks
-
-      # Compares the workspace crates against their latest crates.io
-      # releases. New breaking items (e.g. gating `rosbag` behind a
-      # feature) must be announced in CHANGELOG.md before this passes.
-      - name: Check semver conformance
-        run: cargo semver-checks check-release --only-explicit-features
