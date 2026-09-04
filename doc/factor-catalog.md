@@ -5,6 +5,11 @@ implemented, what was deliberately skipped, and why. Each factor implements
 the buffer-writing [`Factor`](../src/factors/mod.rs) trait with analytical
 manifold Jacobians and finite-difference unit tests.
 
+**This document** is the audit: what exists, what was skipped, and why. For the
+mathematics of each factor — construction, error, and Jacobian written out —
+see the [Factor Reference](cookbook/src/factors/index.md) chapters of the
+cookbook.
+
 **Layout.** A factor lives in the folder named for its sensor modality, and is
 addressed by that path — `factors::visual::StereoFactor`,
 `factors::imu::se23::ImuFactor`. `apex_solver::prelude` re-exports only the

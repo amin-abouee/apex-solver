@@ -16,6 +16,9 @@ It bridges the gap between theoretical robotics and practical implementation:
 - **Four sparse linear solvers** — sparse Cholesky and QR, plus explicit and
   iterative (matrix-free PCG) Schur complement solvers for large-scale bundle
   adjustment.
+- **~40 factors** — pose, visual, IMU preintegration, LiDAR, GNSS, range and
+  bearing, motion models and marginalization, each documented with its error
+  and Jacobian in the [Factor Reference](./factors/index.md).
 - **15 robust loss functions** — Huber, Cauchy, Tukey, Welsch, Barron and more,
   with correct Triggs correction of residuals *and* Jacobians.
 - **Zero-copy sparse linear algebra** — parameters live in contiguous `nalgebra`
@@ -28,5 +31,6 @@ It bridges the gap between theoretical robotics and practical implementation:
 
 - [Installation & Quick Start](./quick_start.md) — solve your first pose graph.
 - [Problem Construction](./problem.md) — variables, factors, keys and gauge freedom.
+- [Factor Reference](./factors/index.md) — every factor's error and Jacobian.
 - [Optimizers](./optimizers.md) — choosing and tuning LM, GN and Dog Leg.
 - [Linear Solvers](./solvers.md) — Cholesky, QR and the Schur family.
