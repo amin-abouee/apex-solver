@@ -1,0 +1,34 @@
+name: Bug report
+description: Report wrong results, crashes, or build failures
+labels: [bug]
+body:
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal code or steps (dataset + solver config)
+      placeholder: |
+        Dataset: sphere2500 (or minimal snippet)
+        Config: LevenbergMarquardtConfig::new().with_max_iterations(100)…
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed vs expected
+      description: Initial/final cost, iterations, status — and where the expected value comes from
+      placeholder: final cost 2.1e3, expected 2.13e1 (Ceres / paper / GTSAM)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: apex-solver version and features
+      placeholder: 1.4.0, default features
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      placeholder: rustc --version, OS, `cargo tree` excerpt if dependency-related
