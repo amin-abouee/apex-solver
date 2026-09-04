@@ -2,7 +2,7 @@
 
 `1.4.0` changes the public API. Code written against `1.3.0` will not compile
 until you make the edits below. Full detail in the
-[changelog](https://github.com/amin-abouee/apex-solver/blob/main/doc/CHANGELOG.md).
+[changelog](https://github.com/amin-abouee/apex-solver/blob/main/CHANGELOG.md).
 
 ## 1. `Problem` uses handles instead of string names
 
