@@ -208,7 +208,7 @@ impl Factor for GpsFactor {
 ///
 /// ```text
 /// Δt           = t_g − t_k
-/// p_propagated = p_k + v_k · Δt + C_WS_k · Δp_body
+/// p_propagated = p_k + v_k · Δt − ½·g·Δt² + C_WS_k · Δp_body
 /// C_WS_g       = C_WS_k · ΔR                          (preintegrated rotation)
 /// t_antenna_W  = p_propagated + C_WS_g · r_SA
 /// predicted    = C_GW · t_antenna_W + t_GW
@@ -217,7 +217,10 @@ impl Factor for GpsFactor {
 /// ```
 ///
 /// Velocity `v_k` is in **world frame** (SpeedAndBias layout [0..2]).
-/// `Δp_body` = `preintegration.acc_doubleintegral()` (body-frame position increment).
+/// `Δp_body` = `preintegration.acc_doubleintegral()` (body-frame position
+/// increment). It is **gravity-free**, like every preintegrated quantity, so
+/// the `−½·g·Δt²` term above reinstates gravity — exactly as the IMU factors do
+/// when forming their gravity-corrected state.
 ///
 /// # Parameter Layout (3 blocks, 21 DOF)
 ///
@@ -321,8 +324,16 @@ impl Factor for GpsAsyncFactor {
             + preint.dp_db_g() * db_g
             + preint.c_doubleintegral() * db_a;
 
-        // Propagate position to GPS time
-        let p_propagated = p_k + v_k * delta_t + c_ws_k * delta_p_body;
+        // Propagate position to GPS time.
+        //
+        // The preintegrated `acc_doubleintegral` is gravity-free — the IMU
+        // factors add gravity when they build their gravity-corrected state —
+        // so it has to be reinstated here too. Leaving it out biases the
+        // predicted antenna position by ½·g·Δt², which is 0.44 m after only
+        // 0.3 s and grows quadratically.
+        let gravity = Vector3::new(0.0, 0.0, preint.imu_params().g);
+        let p_propagated =
+            p_k + v_k * delta_t - 0.5 * gravity * delta_t * delta_t + c_ws_k * delta_p_body;
 
         // Rotation at GPS time (first-order)
         let c_ws_g = c_ws_k * delta_r;
@@ -639,13 +650,12 @@ mod tests {
 
     /// Build a trivial preintegration with near-identity IMU (gravity-only accel,
     /// zero gyro) so the bias Jacobians are non-trivial but the result is known.
-    fn make_preint(dt: f64, v_world: Vector3<f64>) -> ImuPreintegration {
-        let params = ImuParameters::default();
-        let g = params.g;
+    /// The gravity-compensated, non-rotating IMU stream these tests integrate.
+    fn make_measurements(dt: f64) -> Vec<ImuMeasurement> {
+        let g = ImuParameters::default().g;
         let n = 21usize;
         let dt_step = dt / (n - 1) as f64;
-
-        let measurements: Vec<ImuMeasurement> = (0..n)
+        (0..n)
             .map(|i| ImuMeasurement {
                 timestamp: i as f64 * dt_step,
                 measurement: ImuSensorReadings {
@@ -653,7 +663,12 @@ mod tests {
                     accelerometers: Vector3::new(0.0, 0.0, g), // gravity compensation
                 },
             })
-            .collect();
+            .collect()
+    }
+
+    fn make_preint(dt: f64, v_world: Vector3<f64>) -> ImuPreintegration {
+        let params = ImuParameters::default();
+        let measurements = make_measurements(dt);
 
         // Use sb = [v_world, 0, 0] as linearization point
         let mut sb = SpeedAndBias::zeros();
@@ -682,13 +697,30 @@ mod tests {
         let q_ws = UnitQuaternion::identity();
         let r_sa = Vector3::zeros(); // no antenna offset for simplicity
 
-        // Propagated position (gravity-only IMU ⟹ Δp_body ≈ 0, delta_R = I)
-        let delta_p_body = *preint.acc_doubleintegral();
-        let delta_r: nalgebra::Matrix3<f64> = preint.delta_q().to_rotation_matrix().into_inner();
-        let c_ws_k: nalgebra::Matrix3<f64> = q_ws.to_rotation_matrix().into_inner();
-        let p_propagated = t_ws_pos + v_k * dt + c_ws_k * delta_p_body;
-        let c_ws_g = c_ws_k * delta_r;
-        let t_antenna_w = p_propagated + c_ws_g * r_sa;
+        // Where the antenna actually is at the GPS timestamp, obtained by
+        // *forward integrating* the same samples rather than by restating the
+        // factor's own expression. Deriving the expectation independently is
+        // the point: an earlier version of this test copied the prediction
+        // formula, so it could not see that the formula was missing gravity.
+        let params = ImuParameters::default();
+        let mut pose_at_gps = SE3::new(t_ws_pos, q_ws);
+        let mut sb_at_gps = {
+            let mut sb = SpeedAndBias::zeros();
+            sb[0] = v_k.x;
+            sb[1] = v_k.y;
+            sb[2] = v_k.z;
+            sb
+        };
+        ImuPreintegration::propagation(
+            &make_measurements(dt),
+            &params,
+            &mut pose_at_gps,
+            &mut sb_at_gps,
+            0.0,
+            dt,
+        );
+        let t_antenna_w =
+            pose_at_gps.translation() + pose_at_gps.rotation_so3().rotation_matrix() * r_sa;
 
         // GPS frame = world frame (identity T_GW)
         let measurement = t_antenna_w; // perfect measurement

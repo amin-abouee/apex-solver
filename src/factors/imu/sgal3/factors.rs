@@ -19,6 +19,22 @@
 //! Bias handling matches SE_2(3): [`ImuFactor`] shares one bias and needs a
 //! companion [`bias_random_walk`](crate::factors::imu::bias::bias_random_walk)
 //! edge, [`CombinedImuFactor`] embeds the walk and needs none.
+//!
+//! # Known limitation: timestamps must be interval-relative
+//!
+//! SGal(3)'s group law is `t = R₁·(t₂ + s₁·v₂) + t₁` — the **left** operand's
+//! time coordinate couples the right operand's velocity into translation. The
+//! residual composes `gc_i⁻¹ ∘ state_j`, so it depends on the absolute `s_i`
+//! and not only on `s_j − s_i`, while the preintegrated delta it is compared
+//! against corresponds to `s_i = 0`.
+//!
+//! In practice: a **single interval** with `s_i = 0` and `s_j = Δt` is correct
+//! (that is what the tests cover), but chaining these factors across keyframes
+//! carrying a common absolute clock is **not** — the residual picks up a
+//! spurious `s_i`-dependent translation term that grows with the timestamp.
+//! Making the residual origin-invariant requires re-deriving it in terms of
+//! `Δs = s_j − s_i`; until then prefer the [`se23`](super::super::se23) factors
+//! for multi-keyframe chains.
 
 use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
 use apex_manifolds::{LieGroup, Tangent};
