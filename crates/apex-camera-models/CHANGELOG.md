@@ -177,4 +177,4 @@ models without pulling in the full solver.
 
 ---
 
-*For the top-level apex-solver workspace changelog see [../../doc/CHANGELOG.md](../../doc/CHANGELOG.md)*
+*For the top-level apex-solver workspace changelog see [../../CHANGELOG.md](../../CHANGELOG.md)*

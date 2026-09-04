@@ -71,7 +71,7 @@ and DDS feature set that was developed since v0.1.0.
 ## [0.1.0] - 2026-01-30
 
 Initial creation of the `apex-io` crate as part of the `apex-solver` workspace restructuring
-([apex-solver v1.1.0](../../doc/CHANGELOG.md#110---2026-02-21)). Extracted from the monolithic
+([apex-solver v1.1.0](../../CHANGELOG.md#110---2026-02-21)). Extracted from the monolithic
 `apex-solver` crate to be independently publishable and usable.
 
 ### Added
@@ -98,4 +98,4 @@ Initial creation of the `apex-io` crate as part of the `apex-solver` workspace r
 
 ---
 
-*For the top-level apex-solver workspace changelog see [../../doc/CHANGELOG.md](../../doc/CHANGELOG.md)*
+*For the top-level apex-solver workspace changelog see [../../CHANGELOG.md](../../CHANGELOG.md)*
