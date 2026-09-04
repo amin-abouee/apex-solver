@@ -41,21 +41,20 @@ deny = [
 ]
 copyleft = "deny"
 allow-osi-fsf-free = "neither"
-uncertain-allow-osi-fsf-free = "deny"
 # Workspace crates are Apache-2.0; confidence threshold for license detection.
 confidence-threshold = 0.8
 
 [advisories]
-version = 2
 yanked = "deny"
-unmaintained = "warn"
-unsound = "warn"
+# Scope values (not severities): "all" fails on any crate in the graph,
+# "workspace" only on direct workspace dependencies, "none" ignores.
+unmaintained = "all"
+unsound = "workspace"
 # Version numbers, not advisories, are ignored here; keep the list empty and
 # handle RustSec ignores in .cargo/audit.toml instead.
 ignore = []
 
 [sources]
-version = 2
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
