@@ -836,6 +836,340 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
     assert!(err < 0.02, "scan pose translation error {err:.4}");
 }
 
+// ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
+
+/// A vehicle that is stationary and on the ground. ZUPT should zero the
+/// velocity, ZARU should hand the gyro bias its measured value, and the planar
+/// constraint should flatten and drop the pose onto the plane — starting from a
+/// state that is wrong in all three respects.
+#[test]
+fn motion_constraints_pin_a_stopped_ground_vehicle() {
+    use apex_solver::factors::motion::{
+        NonholonomicFactor, PlanarMotionFactor, ZeroAngularRateFactor, ZeroVelocityFactor,
+    };
+
+    let measured_rate = Vector3::new(0.012, -0.004, 0.002);
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    // Off the plane, tilted, drifting sideways, with an unknown gyro bias.
+    let wrong = SE23::new(
+        Vector3::new(2.0, -1.0, 0.4),
+        Vector3::new(0.3, 0.25, -0.1),
+        UnitQuaternion::from_euler_angles(0.08, -0.06, 0.5),
+    );
+    let state_key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(wrong.as_param_slice()),
+    );
+    let bias_key = problem.add_variable(ManifoldType::RN, DVector::zeros(6));
+
+    // The planar constraint acts on an SE3 pose, so the pose half of the state
+    // is mirrored into its own variable and tied to the state's translation.
+    let pose_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(
+            SE3::new(wrong.translation(), wrong.rotation_quaternion()).as_param_slice(),
+        ),
+    );
+
+    problem.add_residual_block_with_noise(
+        &[state_key],
+        Box::new(ZeroVelocityFactor::new()),
+        None,
+        NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
+    );
+    problem.add_residual_block_with_noise(
+        &[state_key],
+        Box::new(NonholonomicFactor::new()),
+        None,
+        NoiseModel::from_sigmas(&[0.05; 2]).unwrap_or_else(|e| panic!("{e}")),
+    );
+    problem.add_residual_block_with_noise(
+        &[bias_key],
+        Box::new(ZeroAngularRateFactor::new(measured_rate)),
+        None,
+        NoiseModel::from_sigmas(&[1e-3; 3]).unwrap_or_else(|e| panic!("{e}")),
+    );
+    problem.add_residual_block_with_noise(
+        &[pose_key],
+        Box::new(PlanarMotionFactor::new(0.1)),
+        None,
+        NoiseModel::from_sigmas(&[0.01; 3]).unwrap_or_else(|e| panic!("{e}")),
+    );
+    // The accelerometer half needs anchoring, the gyro half must stay free for
+    // ZARU to determine it — so this prior is deliberately anisotropic rather
+    // than a uniform `anchor_rn`, which would out-weight ZARU 1000:1.
+    problem.add_residual_block_with_noise(
+        &[bias_key],
+        Box::new(apex_solver::factors::pose::EuclideanPriorFactor::new(
+            DVector::zeros(6),
+        )),
+        None,
+        NoiseModel::from_sigmas(&[1e3, 1e3, 1e3, 1e-4, 1e-4, 1e-4])
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+
+    let mut solver = lm_solver(150);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("motion-constraint graph failed: {e}"));
+
+    let state = SE23::from_param_slice(result.parameters[state_key].as_param_slice());
+    assert!(
+        state.velocity().norm() < 1e-3,
+        "ZUPT should stop the vehicle, got |v| = {:.4}",
+        state.velocity().norm()
+    );
+
+    let bias = result.parameters[bias_key].as_param_slice();
+    for k in 0..3 {
+        assert!(
+            (bias[k] - measured_rate[k]).abs() < 5e-3,
+            "ZARU should drive the gyro bias to the measured rate: \
+             bias[{k}]={:.5} vs {:.5}",
+            bias[k],
+            measured_rate[k]
+        );
+    }
+    // The accelerometer half is anchored at zero and must not be dragged along.
+    for (k, value) in bias.iter().enumerate().take(6).skip(3) {
+        assert!(value.abs() < 1e-3, "accel bias {k} moved: {value:.5}");
+    }
+
+    let pose = SE3::from_param_slice(result.parameters[pose_key].as_param_slice());
+    assert!(
+        (pose.translation().z - 0.1).abs() < 1e-2,
+        "planar constraint should hold the height, got z = {:.4}",
+        pose.translation().z
+    );
+    let rotation = pose.rotation_so3().rotation_matrix();
+    assert!(
+        rotation[(2, 0)].abs() < 1e-2 && rotation[(2, 1)].abs() < 1e-2,
+        "planar constraint should level the pose, got tilt ({:.4}, {:.4})",
+        rotation[(2, 0)],
+        rotation[(2, 1)]
+    );
+}
+
+// ── 10. Extrinsic calibration from reprojections ─────────────────────────────
+
+/// A miscalibrated camera-to-body transform, recovered from observations of
+/// known landmarks at known body poses — the offline calibration problem.
+#[test]
+fn extrinsic_projection_recovers_the_camera_to_body_transform() {
+    use apex_camera_models::{CameraModel, PinholeCamera};
+    use apex_solver::factors::visual::ExtrinsicProjectionFactor;
+
+    let camera = PinholeCamera::from([480.0, 480.0, 320.0, 240.0]);
+    let truth = SE3::new(
+        Vector3::new(0.14, -0.05, 0.09),
+        UnitQuaternion::from_euler_angles(0.03, -0.02, 0.05),
+    );
+
+    // Views around a small target board.
+    let poses: Vec<SE3> = (0..8)
+        .map(|k| {
+            let a = k as f64 * 0.5;
+            SE3::new(
+                Vector3::new(0.6 * a.cos(), 0.6 * a.sin(), 0.1 * a),
+                UnitQuaternion::from_euler_angles(0.05 * a.sin(), 0.04 * a.cos(), 0.15 * a),
+            )
+        })
+        .collect();
+    // The pinhole model projects along +z, so the board sits in front of the
+    // camera in depth, not off to the side.
+    let board: Vec<Vector3<f64>> = (0..4)
+        .flat_map(|i| {
+            (0..4).map(move |j| {
+                Vector3::new(
+                    -0.45 + 0.3 * j as f64,
+                    -0.45 + 0.3 * i as f64,
+                    3.0 + 0.25 * i as f64,
+                )
+            })
+        })
+        .collect();
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let pose_keys: Vec<_> = poses
+        .iter()
+        .map(|p| {
+            problem.add_variable(
+                ManifoldType::SE3,
+                DVector::from_column_slice(p.as_param_slice()),
+            )
+        })
+        .collect();
+    // Start from a plausibly wrong calibration: ~3° and ~2 cm out.
+    let extrinsics_key = problem.add_variable(
+        ManifoldType::SE3,
+        nudge_se3(&truth, [0.02, -0.015, 0.02, 0.05, -0.04, 0.03]),
+    );
+
+    // Poses and landmarks are surveyed in a calibration rig; only the
+    // extrinsics are unknown.
+    for (k, key) in pose_keys.iter().enumerate() {
+        anchor_se3(&mut problem, *key, &poses[k]);
+    }
+
+    let mut observations = 0usize;
+    for (k, pose) in poses.iter().enumerate() {
+        let t_wc = pose.compose(&truth, None, None);
+        for point in &board {
+            let p_cam = t_wc.inverse(None).act(point, None, None);
+            let Ok(uv) = camera.project(&p_cam) else {
+                continue; // outside the model's valid region
+            };
+            let landmark_key = problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_vec(vec![point.x, point.y, point.z]),
+            );
+            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z]);
+            problem.add_residual_block_with_noise(
+                &[pose_keys[k], extrinsics_key, landmark_key],
+                Box::new(ExtrinsicProjectionFactor::new(camera, uv)),
+                None,
+                NoiseModel::from_sigmas(&[1.0; 2]).unwrap_or_else(|e| panic!("{e}")),
+            );
+            observations += 1;
+        }
+    }
+    assert!(observations > 60, "only {observations} usable observations");
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("extrinsic calibration failed: {e}"));
+
+    let hat = SE3::from_param_slice(result.parameters[extrinsics_key].as_param_slice());
+    let translation_error = (hat.translation() - truth.translation()).norm();
+    let rotation_error = hat
+        .rotation_so3()
+        .between(&truth.rotation_so3(), None, None)
+        .log(None)
+        .axis_angle()
+        .norm();
+    assert!(
+        translation_error < 5e-3,
+        "extrinsic translation error {translation_error:.5} m"
+    );
+    assert!(
+        rotation_error < 5e-3,
+        "extrinsic rotation error {rotation_error:.5} rad"
+    );
+}
+
+// ── 11. Camera-to-IMU time offset ────────────────────────────────────────────
+
+/// An unknown constant lag between the camera and IMU clocks, recovered from
+/// reprojections while the platform moves. The offset is only observable
+/// through motion, so the scenario keeps the platform translating and rotating.
+#[test]
+fn time_offset_projection_recovers_the_clock_offset() {
+    use apex_camera_models::{CameraModel, PinholeCamera};
+    use apex_solver::apex_manifolds::so3::SO3Tangent;
+    use apex_solver::factors::visual::TimeOffsetProjectionFactor;
+
+    let camera = PinholeCamera::from([480.0, 480.0, 320.0, 240.0]);
+    let extrinsics = SE3::new(
+        Vector3::new(0.12, -0.04, 0.08),
+        UnitQuaternion::from_euler_angles(0.02, 0.03, -0.01),
+    );
+    let truth_offset = 0.018_f64; // 18 ms
+    let body_rate = Vector3::new(0.15, -0.08, 0.35);
+
+    // A moving, rotating platform observed at several instants.
+    let states: Vec<SE23> = (0..6)
+        .map(|k| {
+            let a = k as f64 * 0.4;
+            SE23::new(
+                Vector3::new(a, 0.3 * a.sin(), 0.1 * a),
+                Vector3::new(1.2, 0.4 * a.cos(), -0.15),
+                UnitQuaternion::from_euler_angles(0.04 * a, -0.03 * a, 0.2 * a),
+            )
+        })
+        .collect();
+    let landmarks: Vec<Vector3<f64>> = (0..12)
+        .map(|i| {
+            let a = i as f64 * 0.52;
+            Vector3::new(4.0 + 0.5 * a.cos(), 0.8 * a.sin(), 1.0 + 0.3 * a.cos())
+        })
+        .collect();
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    let extrinsics_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(extrinsics.as_param_slice()),
+    );
+    // Start the offset at zero: the usual assumption when nobody has calibrated.
+    let offset_key = problem.add_variable(ManifoldType::RN, DVector::from_vec(vec![0.0]));
+
+    anchor_se3(&mut problem, extrinsics_key, &extrinsics);
+    for (k, key) in state_keys.iter().enumerate() {
+        problem.add_residual_block_with_noise(
+            &[*key],
+            Box::new(apex_solver::factors::pose::PriorFactor::new(
+                states[k].clone(),
+            )),
+            None,
+            NoiseModel::from_sigmas(&[1e-4; 9]).unwrap_or_else(|e| panic!("{e}")),
+        );
+    }
+
+    let mut observations = 0usize;
+    for (k, state) in states.iter().enumerate() {
+        // The body pose at true exposure time, built independently.
+        let delta_rot = SO3Tangent::new(body_rate * truth_offset).exp(None);
+        let t_wb = SE3::new(
+            state.translation() + state.velocity() * truth_offset,
+            state
+                .rotation_so3()
+                .compose(&delta_rot, None, None)
+                .quaternion(),
+        );
+        let t_wc = t_wb.compose(&extrinsics, None, None);
+
+        for point in &landmarks {
+            let Ok(uv) = camera.project(&t_wc.inverse(None).act(point, None, None)) else {
+                continue;
+            };
+            let landmark_key = problem.add_variable(
+                ManifoldType::RN,
+                DVector::from_vec(vec![point.x, point.y, point.z]),
+            );
+            anchor_rn(&mut problem, landmark_key, &[point.x, point.y, point.z]);
+            problem.add_residual_block_with_noise(
+                &[state_keys[k], extrinsics_key, landmark_key, offset_key],
+                Box::new(TimeOffsetProjectionFactor::new(camera, uv, body_rate)),
+                None,
+                NoiseModel::from_sigmas(&[1.0; 2]).unwrap_or_else(|e| panic!("{e}")),
+            );
+            observations += 1;
+        }
+    }
+    assert!(observations > 40, "only {observations} usable observations");
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("time-offset calibration failed: {e}"));
+
+    let recovered = result.parameters[offset_key].as_param_slice()[0];
+    assert!(
+        (recovered - truth_offset).abs() < 1e-3,
+        "time offset {recovered:.5} s should recover {truth_offset:.5} s"
+    );
+}
+
 // ── 8. The coverage guard ────────────────────────────────────────────────────
 
 /// Every factor a domain module exports must appear in one of the integration
@@ -853,6 +1187,7 @@ fn every_exported_factor_is_exercised_by_an_integration_test() {
         include_str!("../src/factors/navigation/mod.rs"),
         include_str!("../src/factors/ranging/mod.rs"),
         include_str!("../src/factors/marginal/mod.rs"),
+        include_str!("../src/factors/motion/mod.rs"),
         include_str!("../src/factors/imu/se23/mod.rs"),
         include_str!("../src/factors/imu/sgal3/mod.rs"),
     ];

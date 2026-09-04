@@ -78,6 +78,8 @@ observability in every configuration.
 | `ProjectionFactor<CAM, OP>` | `GenericProjectionFactor` | 9 camera models, pose/point/intrinsics flags, smooth cheirality penalty |
 | `DepthFactor` / `OneSidedDepthFactor` | OKVIS `DepthErrorT` | 1D depth on a homogeneous landmark; one-sided variant penalizes only too-near points |
 | `HomogeneousPointFactor` | `HomogeneousPointFactor` | unary prior on an R⁴ homogeneous landmark |
+| `ExtrinsicProjectionFactor<CAM>` | — | `[T_WB, T_BC, landmark]`; the camera-to-body transform is a **variable**, so many observations calibrate it |
+| `TimeOffsetProjectionFactor<CAM>` | — | `[SE23 state, T_BC, landmark, t_d]`; estimates the camera-to-IMU clock offset, observable only while moving |
 | `SmartProjectionFactor<CAM>` | `SmartProjectionPose3Factor` | pose-only, DLT + Gauss-Newton re-triangulation, exact implicit-Schur Jacobian; registers with `NoiseModel::null()` (internal whitening); degeneracy → bounded penalty |
 
 ### LiDAR (`src/factors/lidar/`)
@@ -99,6 +101,24 @@ observability in every configuration.
 | `DopplerFactor` | `DopplerFactor` | range-rate over position + velocity |
 | `BarometricFactor` | `BarometricFactor` | `navigation/barometric.rs`; `[SE3 pose, R¹ bias]` |
 | `AttitudeFactor` | `AttitudeFactor` / `MagFactor` | `navigation/attitude.rs`; gravity/magnetometer direction; add two (gravity + mag) for full AHRS |
+
+### Motion models (`src/factors/motion/`)
+
+No sensor involved — these are what the platform's own dynamics assert, which
+makes them very cheap and very easy to misapply. Each is valid only while its
+condition holds, so it is added by whatever detects that condition.
+
+| Factor | Residual | Blocks | Asserts |
+|---|---|---|---|
+| `ZeroVelocityFactor` (ZUPT) | 3D | `SE23` | the platform is at rest |
+| `ZeroAngularRateFactor` (ZARU) | 3D | bias | a stationary gyro reads its own bias |
+| `NonholonomicFactor` | 2D | `SE23` | no lateral or vertical body velocity |
+| `PlanarMotionFactor` | 3D | `SE3` | fixed height, no roll or pitch |
+
+ZUPT bounds inertial drift through a stop; ZARU makes the stop *observe* the
+gyro bias, so the two complement rather than duplicate each other. The planar
+constraint uses the world-z components of the body axes rather than roll/pitch
+angles — same zero set, no gimbal singularity.
 
 ### Range / bearing (`src/factors/ranging/`)
 | Factor | GTSAM analogue | Notes |
@@ -130,6 +150,10 @@ for loop-closure initialization rather than summarizing eliminated variables.
   the robust-loss layer (`LossFunction` + Triggs corrector), which apex-solver
   already has.
 - Carrier-phase GNSS: raw-ranging only for now.
+- Plane and line **landmarks**: every landmark here is a 3D point.
+  `PointToPlaneFactor` takes its plane as a measurement, not a variable, so
+  there is no plane or line SLAM. Adding it is a manifold-layer decision first
+  (a plane on S²×R, Plücker lines), not a factor-layer one.
 
 ## Test coverage
 

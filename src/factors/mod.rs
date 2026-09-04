@@ -51,6 +51,7 @@ pub mod common;
 pub mod imu;
 pub mod lidar;
 pub mod marginal;
+pub mod motion;
 pub mod navigation;
 pub mod pose;
 pub mod ranging;
