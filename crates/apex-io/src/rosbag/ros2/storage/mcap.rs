@@ -58,7 +58,7 @@ impl McapStorageReader {
                         entry.1 += 1;
                     }
                     Err(e) => {
-                        eprintln!("Warning: Failed to read MCAP message: {e}");
+                        tracing::warn!("Failed to read MCAP message: {e}");
                     }
                 }
             }

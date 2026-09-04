@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Console output is this CLI's user interface (bag summary tables).
+
 //! Display comprehensive ROS2 bag file information
 //!
 //! Provides detailed information about a ROS2 bag file including:

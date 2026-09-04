@@ -90,8 +90,14 @@ def aggregate(df: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
     return grouped
 
 
-def _bar_traces(agg, datasets, ycol, ecol, showlegend):
-    """One bar trace per solver across the given datasets."""
+def _bar_traces(agg, datasets, ycol, ecol, showlegend, labels=None):
+    """One bar trace per solver across the given datasets.
+
+    ``labels`` optionally maps the raw solver name to a legend entry that names
+    the algorithm actually configured for that figure (e.g. which linear solver
+    the C++ benchmark binary was built with).
+    """
+    labels = labels or {}
     traces = []
     for solver in SOLVER_ORDER:
         sub = agg[(agg["solver"] == solver) & (agg["dataset"].isin(datasets))]
@@ -100,7 +106,7 @@ def _bar_traces(agg, datasets, ycol, ecol, showlegend):
         sub = sub.set_index("dataset").reindex(datasets)
         traces.append(
             go.Bar(
-                name=solver,
+                name=labels.get(solver, solver),
                 x=datasets,
                 y=sub[ycol],
                 error_y={"type": "data", "array": sub[ecol], "visible": True},
@@ -110,6 +116,17 @@ def _bar_traces(agg, datasets, ycol, ecol, showlegend):
             )
         )
     return traces
+
+
+def runs_note(agg):
+    """Per-solver run counts for the title, e.g. 'apex-solver ×6 · Ceres ×1'."""
+    counts = agg.groupby("solver")["n"].agg(["min", "max"])
+    parts = []
+    for solver in SOLVER_ORDER:
+        if solver in counts.index:
+            lo, hi = int(counts.loc[solver, "min"]), int(counts.loc[solver, "max"])
+            parts.append(f"{solver} ×{lo}" if lo == hi else f"{solver} ×{lo}–{hi}")
+    return " · ".join(parts)
 
 
 def save(fig: go.Figure, stem: str) -> None:
@@ -143,32 +160,43 @@ def build_odometry() -> None:
     print(f"  wrote output/odometry_aggregated.csv ({len(agg)} rows)")
 
     datasets = [d for d in DATASETS_2D + DATASETS_3D if d in set(agg["dataset"])]
+    labels = {
+        "apex-solver": "apex-solver (LM + sparse Cholesky)",
+        "factrs": "factrs",
+        "tiny-solver": "tiny-solver",
+        "Ceres": "Ceres (LM + SPARSE_NORMAL_CHOLESKY)",
+        "GTSAM": "GTSAM (LM, multifrontal)",
+        "g2o": "g2o (LM + BlockSolver, LinearSolverEigen)",
+    }
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.10,
         subplot_titles=(
-            "Solution cost — final objective per degree of freedom (lower is better)",
-            "Runtime (lower is better)",
+            "Solution cost per degree of freedom — ½·Σ‖r‖² / (m−n), lower is better",
+            "Runtime per solve, lower is better",
         ),
     )
-    for tr in _bar_traces(agg, datasets, "norm_cost_mean", "norm_cost_std", True):
+    for tr in _bar_traces(agg, datasets, "norm_cost_mean", "norm_cost_std", True, labels):
         fig.add_trace(tr, row=1, col=1)
-    for tr in _bar_traces(agg, datasets, "elapsed_ms_mean", "elapsed_ms_std", False):
+    for tr in _bar_traces(agg, datasets, "elapsed_ms_mean", "elapsed_ms_std", False, labels):
         fig.add_trace(tr, row=2, col=1)
 
-    fig.update_yaxes(title_text="cost / (m − n)", type="log", row=1, col=1)
-    fig.update_yaxes(title_text="time (ms)", type="log", row=2, col=1)
-    fig.update_xaxes(title_text="dataset  (2D: M3500…ring   |   3D: sphere2500…cubicle)",
+    fig.update_yaxes(title_text="normalized cost  cost/(m−n)  (dimensionless, log scale)",
+                     type="log", row=1, col=1)
+    fig.update_yaxes(title_text="runtime (ms, log scale)", type="log", row=2, col=1)
+    fig.update_xaxes(title_text="dataset — 2D SE2: M3500, mit, city10000, ring   ·   "
+                                "3D SE3: sphere2500, parking-garage, torus3D, cubicle",
                      row=2, col=1)
     fig.update_layout(
-        title="Pose Graph Optimization — cost and runtime (mean ± std over 5 runs)"
-        "<br><sup>missing bars = solver failed on that dataset</sup>",
+        title=f"Pose Graph Optimization — cost and runtime (mean ± std; {runs_note(agg)})"
+        "<br><sup>missing bars = solver failed on that dataset · all solvers minimize the "
+        "unweighted objective with unit information, so costs are comparable</sup>",
         barmode="group",
         height=900,
         width=1400,
-        legend_title_text="solver",
+        legend_title_text="solver (algorithm configured in each benchmark binary)",
         template="plotly_white",
     )
     save(fig, "odometry_benchmark")
@@ -185,33 +213,42 @@ def build_ba() -> None:
     print(f"  wrote output/ba_aggregated.csv ({len(agg)} rows)")
 
     datasets = [d for d in DATASETS_BA if d in set(agg["dataset"])]
+    labels = {
+        "apex-solver": "apex-solver (LM + sparse Schur, direct)",
+        "Ceres": "Ceres (LM + ITERATIVE_SCHUR)",
+        "GTSAM": "GTSAM (LM, multifrontal)",
+        "g2o": "g2o (LM + BlockSolver_6_3, Schur)",
+    }
     fig = make_subplots(
         rows=2,
         cols=1,
         shared_xaxes=True,
         vertical_spacing=0.10,
         subplot_titles=(
-            "Final reprojection RMSE (lower is better)",
-            "Runtime (lower is better)",
+            "Final reprojection RMSE, lower is better — cameras, landmarks and "
+            "intrinsics optimized jointly (Huber loss, δ = 1 px)",
+            "Runtime per solve, lower is better",
         ),
     )
-    for tr in _bar_traces(agg, datasets, "final_rmse_mean", "final_rmse_std", True):
+    for tr in _bar_traces(agg, datasets, "final_rmse_mean", "final_rmse_std", True, labels):
         fig.add_trace(tr, row=1, col=1)
-    for tr in _bar_traces(agg, datasets, "time_seconds_mean", "time_seconds_std", False):
+    for tr in _bar_traces(agg, datasets, "time_seconds_mean", "time_seconds_std", False, labels):
         fig.add_trace(tr, row=2, col=1)
 
     # Log scale: g2o lands at 8-13 px while the others are sub-pixel, so a linear axis
     # flattens the differences that actually matter.
-    fig.update_yaxes(title_text="RMSE (pixels)", type="log", row=1, col=1)
-    fig.update_yaxes(title_text="time (s)", type="log", row=2, col=1)
+    fig.update_yaxes(title_text="reprojection RMSE (px, log scale)", type="log", row=1, col=1)
+    fig.update_yaxes(title_text="runtime (s, log scale)", type="log", row=2, col=1)
     fig.update_xaxes(title_text="BAL dataset", row=2, col=1)
     fig.update_layout(
-        title="Bundle Adjustment — reprojection RMSE and runtime (mean ± std over 5 runs)"
-        "<br><sup>missing bars = solver exceeded the 10-minute timeout</sup>",
+        title=f"Bundle Adjustment — reprojection RMSE and runtime (mean ± std; {runs_note(agg)})"
+        "<br><sup>missing bars = solver exceeded the 10-minute timeout · apex initializes "
+        "the focal length by self-calibration, so its starting RMSE is closer than the "
+        "C++ rows'</sup>",
         barmode="group",
         height=900,
         width=1400,
-        legend_title_text="solver",
+        legend_title_text="solver (algorithm configured in each benchmark binary)",
         template="plotly_white",
     )
     save(fig, "ba_benchmark")

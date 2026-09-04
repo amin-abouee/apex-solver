@@ -191,13 +191,16 @@
 //! - Conn, A. R., Gould, N. I. M., & Toint, P. L. (2000). *Trust-Region Methods*. SIAM.
 //! - Ceres Solver: <http://ceres-solver.org/> - Google's C++ nonlinear least squares library
 
+use crate::error::ErrorLogging;
 use crate::{core::problem, error, linalg, optimizer};
 use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
-    LinearSolver, LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver,
+    IterativeSchurSolver, JacobianMode, LinearSolver, LinearSolverType, SchurPreconditioner,
+    SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver, SparseSchurComplementSolver,
+    StructureAware,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -358,6 +361,45 @@ pub struct DogLegConfig {
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
 
+    /// Schur complement solver variant (for bundle adjustment problems)
+    ///
+    /// When using LinearSolverType::SparseSchurComplement, this determines which
+    /// variant of the Schur complement method backs the Gauss-Newton step:
+    /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
+    ///   memory is O(kept_dof²).
+    /// - [`SchurVariant::ChunkedSparse`]: form S straight from `J`, never
+    ///   materializing `JᵀJ`. Same algebra, far less memory on large problems.
+    /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
+    ///   linear, which is what makes very large camera sets tractable.
+    /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
+    ///
+    /// The Cauchy point and predicted reduction use the solver's
+    /// `hessian_vec_product`, which every variant serves (the chunked path
+    /// evaluates `Jᵀ(J·v)` from the retained Jacobian).
+    ///
+    /// Default: `Sparse`
+    pub schur_variant: SchurVariant,
+    /// Preconditioner for the PCG used by the iterative Schur variants.
+    ///
+    /// - [`SchurPreconditioner::None`]: unconditioned CG.
+    /// - [`SchurPreconditioner::BlockDiagonal`]: block diagonal of `H_kk`.
+    /// - [`SchurPreconditioner::SchurJacobi`]: block diagonal of `S` itself —
+    ///   Ceres's `SCHUR_JACOBI`, and usually the best convergence.
+    ///
+    /// Ignored by the direct variants, which factorize instead of iterating.
+    ///
+    /// Default: `SchurJacobi`
+    pub schur_preconditioner: SchurPreconditioner,
+    /// Maximum PCG iterations per linear solve, for the iterative variants.
+    ///
+    /// Default: 200 (Ceres's default)
+    pub schur_cg_max_iterations: usize,
+    /// Relative residual tolerance ending a PCG solve, for the iterative
+    /// variants.
+    ///
+    /// Default: 1e-6
+    pub schur_cg_tolerance: f64,
+
     /// Deprecated: never read. Visualization goes through the observer pattern.
     ///
     /// Setting this has no effect. Attach an observer to the solver instead:
@@ -418,6 +460,10 @@ impl Default for DogLegConfig {
 
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
+            schur_variant: SchurVariant::default(),
+            schur_preconditioner: SchurPreconditioner::default(),
+            schur_cg_max_iterations: 200,
+            schur_cg_tolerance: 1e-6,
             #[cfg(feature = "visualization")]
             #[allow(deprecated)]
             enable_visualization: false,
@@ -582,6 +628,28 @@ impl DogLegConfig {
         self
     }
 
+    /// Set Schur complement solver variant
+    ///
+    /// Takes effect when `linear_solver_type` is
+    /// [`LinearSolverType::SparseSchurComplement`].
+    pub fn with_schur_variant(mut self, variant: SchurVariant) -> Self {
+        self.schur_variant = variant;
+        self
+    }
+
+    /// Set Schur complement preconditioner for the iterative variants
+    pub fn with_schur_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
+        self.schur_preconditioner = preconditioner;
+        self
+    }
+
+    /// PCG budget for the iterative Schur variants.
+    pub fn with_schur_cg_params(mut self, max_iterations: usize, tolerance: f64) -> Self {
+        self.schur_cg_max_iterations = max_iterations;
+        self.schur_cg_tolerance = tolerance;
+        self
+    }
+
     /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
     #[cfg(feature = "visualization")]
     #[deprecated(
@@ -598,8 +666,12 @@ impl DogLegConfig {
     #[allow(deprecated)]
     pub fn print_configuration(&self) {
         debug!(
-            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
+            "Configuration:\n  Solver:        Dog-Leg\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Loss function: N/A\n\nConvergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n\nTrust Region:\n  Initial radius:      {:.2e}\n  Radius range:        [{:.2e}, {:.2e}]\n  Min step quality:    {:.2}\n  Good step quality:   {:.2}\n  Poor step quality:   {:.2}\n\nRegularization:\n  Initial mu:          {:.2e}\n  Mu range:            [{:.2e}, {:.2e}]\n  Mu increase factor:  {:.2}\n\nNumerical Settings:\n  Jacobi scaling:      {}\n  Step reuse:          {}\n  Compute covariances: {}",
             self.linear_solver_type,
+            self.schur_variant,
+            self.schur_preconditioner,
+            self.schur_cg_max_iterations,
+            self.schur_cg_tolerance,
             self.max_iterations,
             self.cost_tolerance,
             self.parameter_tolerance,
@@ -828,17 +900,19 @@ impl DogLeg {
     /// Returns (alpha, cauchy_point) where:
     /// - alpha: optimal step length α = ||g||² / (g^T H g)
     /// - cauchy_point: p_c = -α * g (the Cauchy point)
-    fn compute_cauchy_point_and_alpha_generic<M: AssemblyBackend>(
+    ///
+    /// `h_g` is `H·g`; only the Hessian's action is needed here, never the
+    /// matrix itself.
+    fn compute_cauchy_point_and_alpha_generic(
         &self,
         gradient: &faer::Mat<f64>,
-        hessian: &M::Hessian,
+        h_g: &faer::Mat<f64>,
     ) -> (f64, faer::Mat<f64>) {
         // Optimal step size along steepest descent: α = (g^T*g) / (g^T*H*g)
         let g_norm_sq_mat = gradient.transpose() * gradient;
         let g_norm_sq = g_norm_sq_mat[(0, 0)];
 
-        let h_g = M::hessian_vec_product(hessian, gradient);
-        let g_h_g_mat = gradient.transpose() * &h_g;
+        let g_h_g_mat = gradient.transpose() * h_g;
         let g_h_g = g_h_g_mat[(0, 0)];
 
         // Avoid division by zero
@@ -1054,9 +1128,9 @@ impl DogLeg {
 
             // For cached reuse, we need the hessian for predicted reduction.
             // Use hessian from linear solver if available.
-            let hessian = linear_solver.get_hessian()?;
+            let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
             let predicted_reduction =
-                optimizer::compute_predicted_reduction::<M>(&scaled_step, cached_grad, hessian);
+                optimizer::compute_predicted_reduction(&scaled_step, cached_grad, &hessian_step);
 
             return Some(StepResult {
                 step,
@@ -1068,7 +1142,6 @@ impl DogLeg {
 
         // Not reusing, compute fresh step
         // 1. Solve for Gauss-Newton step with adaptive mu regularization (Ceres-style)
-        let residuals_owned = residuals.as_ref().to_owned();
         let mut scaled_gn_step = None;
         let mut mu_attempts = 0;
 
@@ -1081,7 +1154,7 @@ impl DogLeg {
             let damping = Damping::identity(self.mu);
 
             if let Ok(step) =
-                linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+                linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
             {
                 scaled_gn_step = Some(step);
                 break;
@@ -1096,7 +1169,6 @@ impl DogLeg {
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
         let gradient = linear_solver.get_gradient()?;
-        let hessian = linear_solver.get_hessian()?;
         let gradient_norm = gradient.norm_l2();
 
         // 3. Compute steepest descent direction: δ_sd = -gradient
@@ -1106,8 +1178,8 @@ impl DogLeg {
         }
 
         // 4. Compute Cauchy point and optimal step length
-        let (alpha, cauchy_point) =
-            self.compute_cauchy_point_and_alpha_generic::<M>(gradient, hessian);
+        let h_g = linear_solver.hessian_vec_product(gradient)?;
+        let (alpha, cauchy_point) = self.compute_cauchy_point_and_alpha_generic(gradient, &h_g);
 
         // 5. Compute dog leg step based on trust region radius
         let (scaled_step, _step_type) = self.compute_dog_leg_step(
@@ -1127,8 +1199,9 @@ impl DogLeg {
         };
 
         // 7. Compute predicted reduction
+        let hessian_step = linear_solver.hessian_vec_product(&scaled_step)?;
         let predicted_reduction =
-            optimizer::compute_predicted_reduction::<M>(&scaled_step, gradient, hessian);
+            optimizer::compute_predicted_reduction(&scaled_step, gradient, &hessian_step);
 
         // 8. Cache step components for potential reuse (Ceres-style)
         self.cached_gn_step = Some(scaled_gn_step.clone());
@@ -1158,9 +1231,13 @@ impl DogLeg {
             &state.sorted_vars,
         );
 
-        // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse(&state.variables)?;
+        // Compute new cost (residual only, no Jacobian needed for step evaluation).
+        // Reuses the solve workspace instead of allocating one per iteration,
+        // like Levenberg-Marquardt does.
+        let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
+            &state.variables,
+            &mut state.workspace,
+        )?;
 
         // Compute step quality
         let rho = optimizer::compute_step_quality(
@@ -1198,10 +1275,16 @@ impl DogLeg {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
+    ///
+    /// `state` is built once by [`Self::optimize`] and handed over here —
+    /// see `LevenbergMarquardt::optimize_with_mode` for why: the Schur path
+    /// needs the variable index map to size its block structure, and rebuilding
+    /// it here would repeat the symbolic construction and cost evaluation.
     fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &mut problem::Problem,
         linear_solver: &mut dyn LinearSolver<M>,
+        mut state: optimizer::InitializedState,
     ) -> optimizer::OptimizeResult {
         let start_time = time::Instant::now();
         let mut iteration = 0;
@@ -1209,8 +1292,6 @@ impl DogLeg {
         let mut jacobian_evaluations = 0;
         let mut successful_steps = 0;
         let mut unsuccessful_steps = 0;
-
-        let mut state = optimizer::initialize_optimization_state(problem)?;
 
         // Seed the run state from the configuration. The radius, μ and the step
         // cache all evolve during the solve; resetting them here keeps
@@ -1430,16 +1511,37 @@ impl DogLeg {
     ///
     /// Only solver/mode combinations that match are dispatched; anything else
     /// returns an error rather than silently substituting a different solver.
+    /// `SparseSchurComplement` groups residual rows by eliminated variable and
+    /// initializes the Schur block structure from the shared initial state,
+    /// exactly like Levenberg-Marquardt. The dog-leg construction itself is
+    /// solver-agnostic: the Gauss-Newton step, gradient and Hessian-vector
+    /// products all come through the [`LinearSolver`] trait, which every Schur
+    /// variant serves.
     pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
+        // Chunk-wise elimination sweeps rows in chunk order, so each eliminated
+        // variable's rows must be adjacent. Regroup before any structure is
+        // built from the current layout — row order is a labelling, so this
+        // leaves the problem and its cost unchanged.
+        if matches!(
+            self.config.linear_solver_type,
+            LinearSolverType::SparseSchurComplement
+        ) {
+            problem.group_rows_for_elimination();
+        }
+
+        // Built once here and moved into the chosen arm (see
+        // `optimize_with_mode`).
+        let state = optimizer::initialize_optimization_state(problem)?;
+
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
                 LinearSolverType::DenseQR => {
                     let mut solver = DenseQRSolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
                     "Dog Leg in dense Jacobian mode supports DenseCholesky and DenseQR only; \
@@ -1450,15 +1552,62 @@ impl DogLeg {
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 linalg::LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                }
+                LinearSolverType::SparseSchurComplement => {
+                    // `Iterative` is the matrix-free path: it never forms S, so
+                    // it is a different solver type rather than a mode of the
+                    // explicit one — dispatched here, mirroring
+                    // Levenberg-Marquardt, which keeps the O(kept_dof²) buffer
+                    // out of the picture entirely.
+                    let init = |e: linalg::LinAlgError| {
+                        optimizer::OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    match self.config.schur_variant {
+                        SchurVariant::Iterative => {
+                            let mut solver = IterativeSchurSolver::with_config(
+                                self.config.schur_cg_max_iterations,
+                                self.config.schur_cg_tolerance,
+                                self.config.schur_preconditioner,
+                            );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                        variant => {
+                            let mut solver = SparseSchurComplementSolver::new()
+                                .with_variant(variant)
+                                .with_preconditioner(self.config.schur_preconditioner)
+                                .with_cg_params(
+                                    self.config.schur_cg_max_iterations,
+                                    self.config.schur_cg_tolerance,
+                                );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                    }
                 }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Dog Leg in sparse Jacobian mode supports SparseCholesky and SparseQR only; \
-                     requested {other}. Use Levenberg-Marquardt for the Schur complement."
+                    "Dog Leg in sparse Jacobian mode supports SparseCholesky, SparseQR and \
+                     SparseSchurComplement only; requested {other}"
                 ))
                 .into()),
             },

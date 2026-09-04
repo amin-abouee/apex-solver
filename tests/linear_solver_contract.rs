@@ -350,12 +350,20 @@ mod dispatch {
     }
 
     #[test]
-    fn gn_rejects_schur_under_sparse_mode() -> TestResult {
-        assert_rejected(
-            gn(LinearSolverType::SparseSchurComplement),
-            JacobianMode::Sparse,
-            "GN + Schur (sparse)",
-        )
+    fn gn_accepts_schur_under_sparse_mode() -> TestResult {
+        // Schur is dispatched like any other sparse solver now; the factor has
+        // a zero Jacobian so the solve fails numerically — any error other
+        // than the dispatch rejection is fine here.
+        let mut optimizer = gn(LinearSolverType::SparseSchurComplement);
+        let mut problem = small_problem(JacobianMode::Sparse);
+        let result = optimizer.optimize(&mut problem);
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("supports"),
+                "GN + Schur (sparse): dispatch must accept, got {e}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
@@ -382,12 +390,18 @@ mod dispatch {
     }
 
     #[test]
-    fn dog_leg_rejects_schur_under_sparse_mode() -> TestResult {
-        assert_rejected(
-            dl(LinearSolverType::SparseSchurComplement),
-            JacobianMode::Sparse,
-            "DogLeg + Schur (sparse)",
-        )
+    fn dog_leg_accepts_schur_under_sparse_mode() -> TestResult {
+        // See `gn_accepts_schur_under_sparse_mode`: dispatched, not rejected.
+        let mut optimizer = dl(LinearSolverType::SparseSchurComplement);
+        let mut problem = small_problem(JacobianMode::Sparse);
+        let result = optimizer.optimize(&mut problem);
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("supports"),
+                "DogLeg + Schur (sparse): dispatch must accept, got {e}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

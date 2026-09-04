@@ -38,7 +38,7 @@ use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::ProjectionFactor;
 use apex_solver::init_logger;
-use apex_solver::linalg::SchurVariant;
+use apex_solver::linalg::{SchurPreconditioner, SchurVariant};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -50,11 +50,18 @@ use tracing::info;
 /// Solver variant for Schur complement
 #[derive(Debug, Clone, Copy, ValueEnum, Default)]
 enum SolverArg {
-    /// Explicit Schur: direct sparse Cholesky factorization
+    /// Form S explicitly, factorize with sparse Cholesky. Fastest per
+    /// iteration; memory is O(kept_dof^2)
     Explicit,
-    /// Implicit Schur: iterative PCG solver (default, most efficient)
+    /// Matrix-free PCG: never forms S, memory linear in problem size. Required
+    /// for very large camera sets
     #[default]
     Implicit,
+    /// Form S explicitly, then solve it with PCG. Mainly for comparison
+    ExplicitIterative,
+    /// Form S chunk-wise straight from J, then Cholesky. Same answer as
+    /// `explicit` without ever building JtJ
+    Chunked,
 }
 
 impl From<SolverArg> for SchurVariant {
@@ -62,6 +69,30 @@ impl From<SolverArg> for SchurVariant {
         match arg {
             SolverArg::Explicit => SchurVariant::Sparse,
             SolverArg::Implicit => SchurVariant::Iterative,
+            SolverArg::ExplicitIterative => SchurVariant::ExplicitIterative,
+            SolverArg::Chunked => SchurVariant::ChunkedSparse,
+        }
+    }
+}
+
+/// PCG preconditioner, for the iterative variants
+#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+enum PreconditionerArg {
+    /// Unpreconditioned CG
+    None,
+    /// Block diagonal of H_kk
+    BlockDiagonal,
+    /// Block diagonal of S itself (Ceres SCHUR_JACOBI); best convergence
+    #[default]
+    SchurJacobi,
+}
+
+impl From<PreconditionerArg> for SchurPreconditioner {
+    fn from(arg: PreconditionerArg) -> Self {
+        match arg {
+            PreconditionerArg::None => SchurPreconditioner::None,
+            PreconditionerArg::BlockDiagonal => SchurPreconditioner::BlockDiagonal,
+            PreconditionerArg::SchurJacobi => SchurPreconditioner::SchurJacobi,
         }
     }
 }
@@ -108,6 +139,18 @@ struct Args {
     /// Solver variant for Schur complement
     #[arg(short = 's', long, value_enum, default_value = "implicit")]
     solver: SolverArg,
+
+    /// PCG preconditioner (iterative variants only)
+    #[arg(short = 'p', long, value_enum, default_value = "schur-jacobi")]
+    preconditioner: PreconditionerArg,
+
+    /// Maximum PCG iterations per linear solve (iterative variants only)
+    #[arg(long, default_value = "200")]
+    cg_max_iterations: usize,
+
+    /// PCG relative residual tolerance (iterative variants only)
+    #[arg(long, default_value = "1e-6")]
+    cg_tolerance: f64,
 
     /// Optimization type
     #[arg(short = 't', long, value_enum, default_value = "self-calibration")]
@@ -189,7 +232,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     run_bundle_adjustment(
         &dataset,
         num_points_to_use,
-        args.solver.into(),
+        SchurSettings {
+            variant: args.solver.into(),
+            preconditioner: args.preconditioner.into(),
+            cg_max_iterations: args.cg_max_iterations,
+            cg_tolerance: args.cg_tolerance,
+        },
         args.optimization_type,
         args.verbose,
         with_visualizer,
@@ -207,12 +255,21 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
     }
 }
 
+/// Schur solver settings gathered from the CLI.
+#[derive(Debug, Clone, Copy)]
+struct SchurSettings {
+    variant: SchurVariant,
+    preconditioner: SchurPreconditioner,
+    cg_max_iterations: usize,
+    cg_tolerance: f64,
+}
+
 /// Run bundle adjustment with specified solver and optimization type
 #[cfg_attr(not(feature = "visualization"), allow(unused_variables))]
 fn run_bundle_adjustment(
     dataset: &BalDataset,
     num_points: usize,
-    solver_variant: SchurVariant,
+    schur: SchurSettings,
     opt_type: OptimizationType,
     verbose: bool,
     with_visualizer: bool,
@@ -260,7 +317,7 @@ fn run_bundle_adjustment(
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
         let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
-        problem.mark_as_schur_landmark(pt_key);
+        problem.mark_for_elimination(pt_key);
         pt_keys.push(pt_key);
     }
 
@@ -344,11 +401,24 @@ fn run_bundle_adjustment(
 
     // Configure solver
     let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
-    config.schur_variant = solver_variant;
+    config.schur_variant = schur.variant;
+    config.schur_preconditioner = schur.preconditioner;
+    config.schur_cg_max_iterations = schur.cg_max_iterations;
+    config.schur_cg_tolerance = schur.cg_tolerance;
 
     info!("");
     info!("Solver configuration:");
-    info!("  Solver variant: {:?}", solver_variant);
+    info!("  Solver variant: {:?}", schur.variant);
+    if matches!(
+        schur.variant,
+        SchurVariant::Iterative | SchurVariant::ExplicitIterative
+    ) {
+        info!("  Preconditioner: {:?}", schur.preconditioner);
+        info!(
+            "  PCG budget: {} iterations, tol {:.1e}",
+            schur.cg_max_iterations, schur.cg_tolerance
+        );
+    }
     info!("  Optimization type: {:?}", opt_type);
     info!("  Linear solver: {:?}", config.linear_solver_type);
     info!("  Preconditioner: {:?}", config.schur_preconditioner);
@@ -406,27 +476,42 @@ fn run_bundle_adjustment(
     info!("Iterations: {}", result.iterations);
     info!("Time: {:.2} seconds", elapsed.as_secs_f64());
 
+    // A problem with no valid observations, or a zero initial cost, would turn
+    // these into NaN/inf in user-facing output; report "n/a" instead.
     let num_obs = valid_obs.len() as f64;
-    let initial_rmse = (result.initial_cost / num_obs).sqrt();
-    let final_rmse = (result.final_cost / num_obs).sqrt();
+    let rmse = |cost: f64| {
+        if num_obs > 0.0 {
+            format!("{:.3} pixels", (cost / num_obs).sqrt())
+        } else {
+            "n/a (no valid observations)".to_string()
+        }
+    };
+    let initial_rmse = rmse(result.initial_cost);
+    let final_rmse = rmse(result.final_cost);
 
     info!("");
     info!("Metrics:");
     info!("  Initial cost: {:.6e}", result.initial_cost);
     info!("  Final cost: {:.6e}", result.final_cost);
-    info!("  Initial RMSE: {:.3} pixels", initial_rmse);
-    info!("  Final RMSE: {:.3} pixels", final_rmse);
-    info!(
-        "  Improvement: {:.2}%",
-        (result.initial_cost - result.final_cost) / result.initial_cost * 100.0
-    );
+    info!("  Initial RMSE: {}", initial_rmse);
+    info!("  Final RMSE: {}", final_rmse);
+    if result.initial_cost > 0.0 {
+        info!(
+            "  Improvement: {:.2}%",
+            (result.initial_cost - result.final_cost) / result.initial_cost * 100.0
+        );
+    } else {
+        info!("  Improvement: n/a (initial cost is zero)");
+    }
 
     if verbose {
         info!("");
-        info!(
-            "  Per-iteration: {:.2}s",
-            elapsed.as_secs_f64() / result.iterations as f64
-        );
+        if result.iterations > 0 {
+            info!(
+                "  Per-iteration: {:.2}s",
+                elapsed.as_secs_f64() / result.iterations as f64
+            );
+        }
     }
 
     Ok(())

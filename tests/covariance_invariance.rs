@@ -31,7 +31,15 @@ type TestResult = Result<(), Box<dyn std::error::Error>>;
 /// a 3-dimensional gauge freedom and the covariance is genuinely undefined — the
 /// old code only appeared to work there because damping made `H + λI` invertible.
 fn pose_graph() -> (Problem, Vec<VarKey>) {
-    let mut problem = Problem::new(JacobianMode::Sparse);
+    pose_graph_in(JacobianMode::Sparse)
+}
+
+/// The same graph, built for a chosen assembly mode.
+///
+/// A solver must be paired with the matching `JacobianMode`; the optimizer
+/// rejects a mismatch instead of substituting a solver of its own.
+fn pose_graph_in(mode: JacobianMode) -> (Problem, Vec<VarKey>) {
+    let mut problem = Problem::new(mode);
 
     let x0 = problem.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
     let x1 = problem.add_variable(ManifoldType::SE2, dvector![0.95, 0.05, 0.02]);
@@ -385,13 +393,13 @@ fn covariance_available_for_every_linear_solver() -> TestResult {
     let (_, keys) = pose_graph();
     let reference = covariances_from_lm(false, 1e-3)?;
 
-    for solver_type in [
-        LinearSolverType::SparseCholesky,
-        LinearSolverType::SparseQR,
-        LinearSolverType::DenseCholesky,
-        LinearSolverType::DenseQR,
+    for (solver_type, mode) in [
+        (LinearSolverType::SparseCholesky, JacobianMode::Sparse),
+        (LinearSolverType::SparseQR, JacobianMode::Sparse),
+        (LinearSolverType::DenseCholesky, JacobianMode::Dense),
+        (LinearSolverType::DenseQR, JacobianMode::Dense),
     ] {
-        let (mut problem, _) = pose_graph();
+        let (mut problem, _) = pose_graph_in(mode);
         let result = LevenbergMarquardt::with_config(
             LevenbergMarquardtConfig::new()
                 .with_linear_solver_type(solver_type)

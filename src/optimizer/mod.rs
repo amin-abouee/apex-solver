@@ -143,21 +143,6 @@ pub enum OptimizerError {
 /// Result type for optimizer operations
 pub type OptimizerResult<T> = Result<T, OptimizerError>;
 
-// State information during iterative optimization.
-// #[derive(Debug, Clone)]
-// pub struct IterativeState {
-//     /// Current iteration number
-//     pub iteration: usize,
-//     /// Current cost value
-//     pub cost: f64,
-//     /// Current gradient norm
-//     pub gradient_norm: f64,
-//     /// Current parameter update norm
-//     pub parameter_update_norm: f64,
-//     /// Time elapsed since start
-//     pub elapsed_time: Duration,
-// }
-
 /// Detailed convergence information.
 #[derive(Debug, Clone)]
 pub struct ConvergenceInfo {
@@ -320,6 +305,19 @@ pub fn apply_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
 ) -> f64 {
+    apply_signed_parameter_step(variables, step, variable_order, 1.0)
+}
+
+/// Apply `sign · step`, the shared body of the forward and rollback paths.
+///
+/// The sign is folded into the per-variable copy that has to happen anyway, so
+/// a rollback does not allocate and fill a negated copy of the full step vector.
+fn apply_signed_parameter_step(
+    variables: &mut SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+    step: MatRef<f64>,
+    variable_order: &[VarKey],
+    sign: f64,
+) -> f64 {
     let mut step_offset = 0;
 
     // SmallVec-backed buffer: inline for the common case (DOF ≤ 16, covering
@@ -334,7 +332,7 @@ pub fn apply_parameter_step(
             step_buf.clear();
             step_buf.resize(var_size, 0.0);
             for i in 0..var_size {
-                step_buf[i] = var_step[(i, 0)];
+                step_buf[i] = sign * var_step[(i, 0)];
             }
             var.apply_tangent_step(&step_buf);
             step_offset += var_size;
@@ -359,11 +357,7 @@ pub fn apply_negative_parameter_step(
     step: MatRef<f64>,
     variable_order: &[VarKey],
 ) {
-    let mut negative_step = Mat::zeros(step.nrows(), 1);
-    for i in 0..step.nrows() {
-        negative_step[(i, 0)] = -step[(i, 0)];
-    }
-    apply_parameter_step(variables, negative_step.as_ref(), variable_order);
+    apply_signed_parameter_step(variables, step, variable_order, -1.0);
 }
 
 pub fn compute_cost(residual: &Mat<f64>) -> f64 {
@@ -481,6 +475,12 @@ pub fn compute_parameter_norm(variables: &SlotMap<VarKey, Box<dyn ManifoldVariab
 ///
 /// The scaling factor for each column is `1 / (1 + ||col||)`, which normalizes
 /// the columns to improve conditioning of the linear system.
+#[deprecated(
+    since = "1.6.0",
+    note = "quadratic in the number of columns; the optimizers use \
+            `AssemblyBackend::compute_column_norms` + `apply_column_scaling`, which are \
+            linear in nnz and parallel"
+)]
 pub fn create_jacobi_scaling(
     jacobian: &SparseColMat<usize, f64>,
 ) -> Result<SparseColMat<usize, f64>, OptimizerError> {
@@ -506,6 +506,12 @@ pub fn create_jacobi_scaling(
 ///
 /// On `iteration == 0`, creates the scaling matrix and stores it. On subsequent
 /// iterations, reuses the cached scaling.
+#[deprecated(
+    since = "1.6.0",
+    note = "builds a diagonal scaling matrix and multiplies; the optimizers scale the \
+            CSC values in place via `AssemblyBackend::apply_column_scaling`"
+)]
+#[allow(deprecated)]
 pub fn process_jacobian(
     jacobian: &SparseColMat<usize, f64>,
     jacobi_scaling: &mut Option<SparseColMat<usize, f64>>,
@@ -830,14 +836,13 @@ pub(crate) fn iteration_preamble<M: AssemblyBackend>(
 /// gradient and Hessian are the scaled ones. The predicted reduction is a value
 /// of the quadratic model and is invariant under that change of variables, so
 /// the result is equally the predicted reduction of the un-scaled step.
-pub fn compute_predicted_reduction<M: AssemblyBackend>(
+pub fn compute_predicted_reduction(
     step: &Mat<f64>,
     gradient: &Mat<f64>,
-    hessian: &M::Hessian,
+    hessian_step: &Mat<f64>,
 ) -> f64 {
-    let hessian_step = M::hessian_vec_product(hessian, step);
     let linear_term = (step.transpose() * gradient)[(0, 0)];
-    let quadratic_term = (step.transpose() * &hessian_step)[(0, 0)];
+    let quadratic_term = (step.transpose() * hessian_step)[(0, 0)];
     -linear_term - 0.5 * quadratic_term
 }
 
@@ -915,11 +920,12 @@ pub fn notify_observers(
 ) {
     observers.set_iteration_metrics(cost, gradient_norm, damping, step_norm, step_quality);
 
+    // Backends that eliminate straight from J never materialize JᵀJ, so the
+    // matrix view is best-effort; the gradient is always available.
     if !observers.is_empty()
-        && let (Some(hessian), Some(gradient)) =
-            (linear_solver.get_hessian(), linear_solver.get_gradient())
+        && let Some(gradient) = linear_solver.get_gradient()
     {
-        observers.set_matrix_data(Some(hessian.clone()), Some(gradient.clone()));
+        observers.set_matrix_data(linear_solver.get_hessian().cloned(), Some(gradient.clone()));
     }
 
     observers.notify(variables, iteration);
@@ -1173,6 +1179,7 @@ pub fn create_optimizer_summary(
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // these tests exist to cover the deprecated helpers until removal
 mod tests {
     use super::*;
     use crate::core::VarKey;

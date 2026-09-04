@@ -50,9 +50,10 @@
 //! # }
 //! ```
 
-use super::explicit_schur::{SchurBlockStructure, SchurPreconditioner};
+use super::explicit_schur::SchurPreconditioner;
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
+use crate::error::ErrorLogging;
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
@@ -62,10 +63,84 @@ use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use std::collections::HashMap;
 
+/// Fixed-shape block structure used by the matrix-free solver.
+///
+/// This is the pre-generalization layout: retained and eliminated variables
+/// each assumed contiguous, eliminated blocks assumed 3-DOF. The explicit
+/// solver moved to [`SchurPartition`](super::schur_partition::SchurPartition),
+/// which lifts both restrictions; this path still carries the old assumptions
+/// and is therefore bundle-adjustment specific.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LegacyBlockStructure {
+    pub camera_blocks: Vec<(VarKey, usize, usize)>,
+    pub landmark_blocks: Vec<(VarKey, usize, usize)>,
+    pub camera_dof: usize,
+    pub landmark_dof: usize,
+    pub num_landmarks: usize,
+}
+
+impl LegacyBlockStructure {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn camera_col_range(&self) -> (usize, usize) {
+        let start = self.camera_blocks.first().map(|b| b.1).unwrap_or(0);
+        (start, start + self.camera_dof)
+    }
+
+    pub fn landmark_col_range(&self) -> (usize, usize) {
+        let start = self.landmark_blocks.first().map(|b| b.1).unwrap_or(0);
+        (start, start + self.landmark_dof)
+    }
+}
+
+/// Invert one 3x3 landmark block with eigen-gated regularization.
+///
+/// Thresholds for numerical robustness; kept next to the policy (rather than
+/// in the shared [`tikhonov_scale`](crate::linalg::regularization::tikhonov_scale)
+/// helper) because this path already pays for the eigendecomposition to feed
+/// the Schur-Jacobi preconditioner — reusing that information is cheaper than
+/// a blind retry here. The well-conditioned branch is a plain inverse, exactly
+/// like the shared retry helpers, so all policies agree where it matters.
+///
+/// `pub(crate)` for the cross-policy pinning tests in
+/// [`crate::linalg::regularization`].
+pub(crate) fn regularize_landmark_block(block: &Matrix3<f64>) -> Result<Matrix3<f64>, String> {
+    // Thresholds for numerical robustness
+    const CONDITION_THRESHOLD: f64 = 1e10;
+    const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12;
+    const REGULARIZATION_SCALE: f64 = 1e-6;
+
+    // Check conditioning and apply regularization if needed
+    let eigenvalues = block.symmetric_eigenvalues();
+    let min_ev = eigenvalues.min();
+    let max_ev = eigenvalues.max();
+
+    if min_ev < MIN_EIGENVALUE_THRESHOLD {
+        // Severely ill-conditioned: add strong regularization
+        let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
+        let regularized = block + Matrix3::identity() * reg;
+        regularized
+            .try_inverse()
+            .ok_or_else(|| format!("singular even with regularization (min_ev={:.2e})", min_ev))
+    } else if max_ev / min_ev > CONDITION_THRESHOLD {
+        // Ill-conditioned: add moderate regularization
+        let extra_reg = max_ev * REGULARIZATION_SCALE;
+        let regularized = block + Matrix3::identity() * extra_reg;
+        regularized
+            .try_inverse()
+            .ok_or_else(|| format!("ill-conditioned (cond={:.2e})", max_ev / min_ev))
+    } else {
+        // Well-conditioned: standard inversion
+        block.try_inverse().ok_or_else(|| "singular".to_string())
+    }
+}
+
 /// Iterative Schur complement solver using Preconditioned Conjugate Gradients
 #[derive(Debug, Clone)]
 pub struct IterativeSchurSolver {
-    block_structure: Option<SchurBlockStructure>,
+    block_structure: Option<LegacyBlockStructure>,
 
     // CG parameters
     max_cg_iterations: usize,
@@ -82,12 +157,12 @@ pub struct IterativeSchurSolver {
     /// The un-damped `JᵀJ`, published through [`LinearSolver::get_hessian`].
     ///
     /// The optimizers build the true quadratic model from this, so it must never
-    /// carry the damping term — see `system_hessian` for the matrix the solve
-    /// itself operates on.
+    /// carry the damping term. The damped matrix the solve itself operates on is
+    /// passed down the call chain rather than stored, which keeps it out of this
+    /// struct and avoids copying a full `JᵀJ` every iteration.
     hessian: Option<SparseColMat<usize, f64>>,
     /// The matrix the Schur operator and preconditioners are applied to:
     /// `JᵀJ + λ·D` for a damped solve, plain `JᵀJ` otherwise.
-    system_hessian: Option<SparseColMat<usize, f64>>,
     /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
 
@@ -98,6 +173,10 @@ pub struct IterativeSchurSolver {
     // Visibility index: camera_block_idx -> Vec<landmark_block_idx>
     // This avoids O(cameras * landmarks) iteration in preconditioner computation
     camera_to_landmark_visibility: Vec<Vec<usize>>,
+    /// Structural fingerprint of the Hessian `camera_to_landmark_visibility`
+    /// was built from, so it is rebuilt whenever the sparsity changes — even
+    /// under an equal-`nnz` permutation, which the old dimension triple aliased.
+    visibility_fingerprint: Option<super::pattern::PatternFingerprint>,
 }
 
 impl IterativeSchurSolver {
@@ -114,11 +193,11 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -133,11 +212,11 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -156,11 +235,11 @@ impl IterativeSchurSolver {
             ne_cache: LazyNormalEquations::default(),
             landmark_block_inverses: Vec::new(),
             hessian: None,
-            system_hessian: None,
             gradient: None,
             workspace_lm: Vec::new(),
             workspace_cam: Vec::new(),
             camera_to_landmark_visibility: Vec::new(),
+            visibility_fingerprint: None,
         }
     }
 
@@ -185,6 +264,7 @@ impl IterativeSchurSolver {
     /// Uses workspace buffers to avoid allocations during PCG iterations.
     fn apply_schur_operator_fast(
         &self,
+        hessian: &SparseColMat<usize, f64>,
         x: &Mat<f64>,
         result: &mut Mat<f64>,
         temp_lm: &mut [f64],
@@ -194,11 +274,6 @@ impl IterativeSchurSolver {
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
         let (cam_start, cam_end) = structure.camera_col_range();
@@ -372,16 +447,14 @@ impl IterativeSchurSolver {
     /// NOTE: This is NOT the true Schur-Jacobi preconditioner. It only uses
     /// diagonal blocks of H_cc, not the Schur complement S. For better convergence,
     /// use `compute_schur_jacobi_preconditioner()` instead.
-    fn compute_block_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
+    fn compute_block_preconditioner(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
         let structure = self
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
 
@@ -476,16 +549,14 @@ impl IterativeSchurSolver {
     ///
     /// This preconditioner captures the effect of point elimination on each camera block,
     /// leading to much faster PCG convergence (typically 20-40 iterations vs 100+).
-    fn compute_schur_jacobi_preconditioner(&self) -> LinAlgResult<Vec<DMatrix<f64>>> {
+    fn compute_schur_jacobi_preconditioner(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
         let structure = self
             .block_structure
             .as_ref()
             .ok_or_else(|| LinAlgError::InvalidInput("Block structure not initialized".into()))?;
-
-        let hessian = self
-            .system_hessian
-            .as_ref()
-            .ok_or_else(|| LinAlgError::InvalidInput("Hessian not computed".into()))?;
 
         let symbolic = hessian.symbolic();
 
@@ -600,6 +671,7 @@ impl IterativeSchurSolver {
     /// Reductions and vector updates run through faer's SIMD kernels.
     fn solve_pcg_block(
         &self,
+        hessian: &SparseColMat<usize, f64>,
         b: &Mat<f64>,
         precond_blocks: &[DMatrix<f64>],
         workspace_lm: &mut [f64],
@@ -628,7 +700,7 @@ impl IterativeSchurSolver {
             // Ap = S * p (using fast operator with workspace buffers; the
             // operator accumulates, so reset ap first)
             ap.fill(0.0);
-            self.apply_schur_operator_fast(&p, &mut ap, workspace_lm, workspace_cam)?;
+            self.apply_schur_operator_fast(hessian, &p, &mut ap, workspace_lm, workspace_cam)?;
 
             // alpha = (r^T z) / (p^T Ap)
             let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
@@ -716,45 +788,9 @@ impl IterativeSchurSolver {
 
         // Step 2: Invert all blocks in parallel
         // Thresholds for numerical robustness
-        const CONDITION_THRESHOLD: f64 = 1e10;
-        const MIN_EIGENVALUE_THRESHOLD: f64 = 1e-12;
-        const REGULARIZATION_SCALE: f64 = 1e-6;
-
         let results: Vec<Result<Matrix3<f64>, (usize, String)>> = blocks
             .par_iter()
-            .map(|(i, block)| {
-                // Check conditioning and apply regularization if needed
-                let eigenvalues = block.symmetric_eigenvalues();
-                let min_ev = eigenvalues.min();
-                let max_ev = eigenvalues.max();
-
-                if min_ev < MIN_EIGENVALUE_THRESHOLD {
-                    // Severely ill-conditioned: add strong regularization
-                    let reg = REGULARIZATION_SCALE + max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        (
-                            *i,
-                            format!("singular even with regularization (min_ev={:.2e})", min_ev),
-                        )
-                    })
-                } else if max_ev / min_ev > CONDITION_THRESHOLD {
-                    // Ill-conditioned: add moderate regularization
-                    let extra_reg = max_ev * REGULARIZATION_SCALE;
-                    let regularized = block + Matrix3::identity() * extra_reg;
-                    regularized.try_inverse().ok_or_else(|| {
-                        (
-                            *i,
-                            format!("ill-conditioned (cond={:.2e})", max_ev / min_ev),
-                        )
-                    })
-                } else {
-                    // Well-conditioned: standard inversion
-                    block
-                        .try_inverse()
-                        .ok_or_else(|| (*i, "singular".to_string()))
-                }
-            })
+            .map(|(i, block)| regularize_landmark_block(block).map_err(|msg| (*i, msg)))
             .collect();
 
         // Step 3: Collect results and check for errors
@@ -780,7 +816,19 @@ impl IterativeSchurSolver {
     ///
     /// This scans the Hessian to find which landmarks each camera observes,
     /// enabling O(observations) preconditioner computation instead of O(cameras * landmarks).
+    ///
+    /// The index depends only on the Hessian's sparsity pattern and the block
+    /// structure, both of which are fixed for the duration of a solve, so it is
+    /// built once and reused. The fingerprint guards against a caller reusing a
+    /// solver across problems with different patterns.
     fn build_visibility_index(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
+        let fingerprint = super::pattern::PatternFingerprint::of(hessian);
+        if self.visibility_fingerprint == Some(fingerprint)
+            && !self.camera_to_landmark_visibility.is_empty()
+        {
+            return Ok(());
+        }
+
         let structure = self
             .block_structure
             .as_ref()
@@ -826,6 +874,7 @@ impl IterativeSchurSolver {
         }
 
         self.camera_to_landmark_visibility = visibility;
+        self.visibility_fingerprint = Some(fingerprint);
         Ok(())
     }
 
@@ -885,11 +934,11 @@ impl IterativeSchurSolver {
         let precond_blocks = match self.preconditioner_type {
             SchurPreconditioner::SchurJacobi => {
                 // True Schur-Jacobi: diagonal blocks of S (Ceres-style, best convergence)
-                self.compute_schur_jacobi_preconditioner()?
+                self.compute_schur_jacobi_preconditioner(hessian)?
             }
             SchurPreconditioner::BlockDiagonal => {
                 // Block diagonal of H_cc only (faster to compute, worse convergence)
-                self.compute_block_preconditioner()?
+                self.compute_block_preconditioner(hessian)?
             }
             SchurPreconditioner::None => {
                 // Identity preconditioner (for debugging)
@@ -909,6 +958,7 @@ impl IterativeSchurSolver {
         let mut workspace_cam = std::mem::take(&mut self.workspace_cam);
 
         let delta_cam = self.solve_pcg_block(
+            hessian,
             &g_reduced,
             &precond_blocks,
             &mut workspace_lm,
@@ -958,7 +1008,7 @@ impl StructureAware for IterativeSchurSolver {
         variable_index_map: &SecondaryMap<VarKey, usize>,
         schur_landmark_keys: &std::collections::HashSet<VarKey>,
     ) -> LinAlgResult<()> {
-        let mut structure = SchurBlockStructure::new();
+        let mut structure = LegacyBlockStructure::new();
 
         for (key, variable) in variables {
             let start_col = *variable_index_map.get(key).ok_or_else(|| {
@@ -997,7 +1047,38 @@ impl StructureAware for IterativeSchurSolver {
             ));
         }
 
+        // `camera_col_range`/`landmark_col_range` treat each side as one
+        // contiguous span, so a partition that interleaves them would address
+        // the wrong columns. The explicit solver lifted this restriction via
+        // `SchurPartition`; this path has not, so it must refuse rather than
+        // silently mis-index.
+        Self::require_contiguous(&structure.camera_blocks, "retained")?;
+        Self::require_contiguous(&structure.landmark_blocks, "eliminated")?;
+
         self.block_structure = Some(structure);
+        Ok(())
+    }
+}
+
+impl IterativeSchurSolver {
+    /// Error unless `blocks` covers one gap-free span of columns.
+    fn require_contiguous(blocks: &[(VarKey, usize, usize)], side: &str) -> LinAlgResult<()> {
+        let mut expected = match blocks.first() {
+            Some((_, col, _)) => *col,
+            None => return Ok(()),
+        };
+        for (key, col, size) in blocks {
+            if *col != expected {
+                return Err(LinAlgError::InvalidInput(format!(
+                    "the matrix-free Schur solver requires the {side} variables to occupy a \
+                     contiguous column range; {key:?} starts at column {col} but {expected} was \
+                     expected. Use SchurVariant::Sparse or ExplicitIterative for interleaved \
+                     partitions."
+                ))
+                .log());
+            }
+            expected += size;
+        }
         Ok(())
     }
 }
@@ -1015,12 +1096,16 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
             neg_gradient[(i, 0)] = -gradient[(i, 0)];
         }
 
-        // Undamped solve: the operator matrix and the published Hessian coincide.
-        self.system_hessian = Some(hessian.clone());
-        self.hessian = Some(hessian.clone());
-        self.gradient = Some(gradient);
-
-        self.solve_with_system(&hessian, &neg_gradient)
+        // Undamped solve: the operator and the published Hessian coincide, so
+        // the solve borrows the local. Publishing happens only on success, so
+        // a failed solve keeps the previous solve's system (freshness contract
+        // on `LinearSolver::get_hessian`).
+        let delta = self.solve_with_system(&hessian, &neg_gradient);
+        if delta.is_ok() {
+            self.gradient = Some(gradient);
+            self.hessian = Some(hessian);
+        }
+        delta
     }
 
     fn solve_augmented_equation(
@@ -1040,13 +1125,25 @@ impl LinearSolver<SparseMode> for IterativeSchurSolver {
         // (no per-call triplet rebuild + sparse sum).
         let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
 
-        // Publish the *un-damped* system, per the LinearSolver contract; the
-        // damped copy drives the Schur operator and the preconditioners.
-        self.system_hessian = Some(augmented_hessian.clone());
-        self.hessian = Some(hessian);
-        self.gradient = Some(gradient);
+        // Publish the *un-damped* system, per the LinearSolver contract. The
+        // damped matrix drives the Schur operator and the preconditioners and is
+        // handed down by reference, so it is never copied. Publishing happens
+        // only on success (freshness contract on `get_hessian`).
+        let delta = self.solve_with_system(&augmented_hessian, &neg_gradient);
+        if delta.is_ok() {
+            self.hessian = Some(hessian);
+            self.gradient = Some(gradient);
+        }
+        delta
+    }
 
-        self.solve_with_system(&augmented_hessian, &neg_gradient)
+    fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
+        Some(
+            <SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
+                self.hessian.as_ref()?,
+                v,
+            ),
+        )
     }
 
     fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
@@ -1471,8 +1568,12 @@ mod tests {
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        // Compute the block preconditioner blocks
-        let precond_blocks = solver.compute_block_preconditioner()?;
+        // Compute the block preconditioner blocks. The undamped solve publishes
+        // the same matrix the operator ran against, so it doubles as the input.
+        let hessian = LinearSolver::<SparseMode>::get_hessian(&solver)
+            .ok_or("solve_normal_equation must publish the Hessian")?
+            .clone();
+        let precond_blocks = solver.compute_block_preconditioner(&hessian)?;
         // Should have one block per camera (2 cameras)
         assert_eq!(precond_blocks.len(), 2);
 

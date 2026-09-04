@@ -116,6 +116,15 @@ impl LinearSolver<DenseMode> for DenseQRSolver {
         self.solve_dense_augmented(residuals, jacobian, damping)
     }
 
+    fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
+        Some(
+            <DenseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
+                self.hessian.as_ref()?,
+                v,
+            ),
+        )
+    }
+
     fn get_hessian(&self) -> Option<&Mat<f64>> {
         self.hessian.as_ref()
     }

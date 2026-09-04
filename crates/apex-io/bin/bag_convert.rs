@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Console output is this CLI's user interface (progress, warnings).
+
 //! Convert between ROS1 (.bag) and ROS2 (SQLite3 / MCAP) bag files.
 //!
 //! Direction is auto-detected from the input path:

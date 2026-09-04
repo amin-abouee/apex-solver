@@ -2,12 +2,19 @@ pub mod cholesky;
 pub mod explicit_schur;
 pub mod implicit_schur;
 pub mod normal_eq;
+pub mod pattern;
 pub mod qr;
+pub mod schur_eliminator;
+pub mod schur_partition;
 
 pub use cholesky::SparseCholeskySolver;
+#[allow(deprecated)] // re-export kept so existing imports of the old name resolve
 pub use explicit_schur::{
     SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
     SparseSchurComplementSolver,
 };
 pub use implicit_schur::IterativeSchurSolver;
+pub use pattern::PatternFingerprint;
 pub use qr::SparseQRSolver;
+pub use schur_eliminator::{ChunkLayout, ChunkedSchurEliminator, ReducedSystem};
+pub use schur_partition::{BlockSpan, ColSlot, EliminatedBlocks, SchurPartition};

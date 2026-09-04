@@ -4,6 +4,8 @@
 //! data extracted from the Python rosbags library.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Test diagnostics below print under `--nocapture` only.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use apex_io::rosbag::types::{CompressionFormat, CompressionMode, StoragePlugin};
 use apex_io::rosbag::{Reader, Writer};

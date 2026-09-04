@@ -1,3 +1,6 @@
+#![allow(clippy::print_stdout, clippy::print_stderr)]
+//! Console output is this CLI's user interface (progress report).
+
 //! Write a dummy ROS2 bag file with all supported message types
 //!
 //! Demonstrates how to create a ROS2 bag file from scratch using the apex-io writer.

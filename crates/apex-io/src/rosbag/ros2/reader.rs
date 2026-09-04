@@ -107,7 +107,7 @@ impl Reader {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to read topics from database: {e}");
+                    tracing::warn!("Failed to read topics from database: {e}");
                 }
             }
         }
@@ -137,7 +137,7 @@ impl Reader {
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: Failed to read topics from MCAP: {e}");
+                    tracing::warn!("Failed to read topics from MCAP: {e}");
                 }
             }
         }

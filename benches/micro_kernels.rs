@@ -4,6 +4,7 @@
 //! - [`cholesky`]/[`qr`]: damped sparse solve `(JᵀJ + λD)·dx = −Jᵀr`
 //! - [`pcg`]: iterative Schur (matrix-free PCG with Schur–Jacobi preconditioner)
 //! - [`assemble`]: residual/Jacobian assembly for a synthetic factor graph
+//! - [`fingerprint`]: structural pattern hashing guarding the sparse caches
 //!
 //! ```bash
 //! cargo bench --bench micro_kernels
@@ -15,6 +16,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::variable::Variable;
 use apex_solver::linalg::sparse::normal_eq::NormalEquationsCache;
+use apex_solver::linalg::sparse::pattern::PatternFingerprint;
 use apex_solver::linalg::sparse::qr::SparseQRSolver;
 use apex_solver::linalg::sparse::{IterativeSchurSolver, SparseCholeskySolver};
 use apex_solver::linalg::{Damping, LinearSolver, StructureAware};
@@ -273,12 +275,58 @@ fn bench_assemble(c: &mut Criterion) {
     group.finish();
 }
 
+/// Pattern fingerprinting: the O(nnz) integer hash behind every sparse-cache
+/// `matches()` check (normal equations, chunk layout, diagonality verdict,
+/// visibility index). It runs once per check against O(nnz) floating-point
+/// assembly plus factorization, so it must stay in the noise — this bench
+/// pins that.
+fn bench_fingerprint(c: &mut Criterion) {
+    let mut group = c.benchmark_group("fingerprint");
+
+    // BA-like Jacobian: 40 groups × (2 cams × 3 landmarks × 6 rows).
+    let (jacobian, _, _, _, _) = ba_like_system(40);
+    let nnz = jacobian.compute_nnz();
+    group.bench_function(format!("ba_40_groups_{nnz}_nnz"), |b| {
+        b.iter(|| black_box(PatternFingerprint::of(black_box(&jacobian))))
+    });
+
+    // Chain Jacobian from the assemble bench (5 001 variables).
+    let mut problem = Problem::new(apex_solver::linalg::JacobianMode::Sparse);
+    let mut keys: Vec<apex_solver::core::VarKey> = Vec::new();
+    for i in 0..5_001 {
+        keys.push(problem.add_variable(ManifoldType::RN, nalgebra::dvector![i as f64, 0.5, -0.25]));
+    }
+    for i in 0..5_000 {
+        problem.add_residual_block(&[keys[i], keys[i + 1]], Box::new(PairFactor), None);
+    }
+    let mut state = apex_solver::optimizer::initialize_optimization_state(&mut problem)
+        .unwrap_or_else(|e| panic!("optimization state: {e:?}"));
+    let symbolic = match state.symbolic_structure.as_ref() {
+        Some(symbolic) => symbolic,
+        None => panic!("sparse mode must produce a symbolic structure"),
+    };
+    let (_, chain_jacobian) = assemble_sparse(
+        &problem,
+        &state.variables,
+        &state.variable_index_map,
+        symbolic,
+        &mut state.workspace,
+    )
+    .unwrap_or_else(|e| panic!("assemble failed: {e:?}"));
+    let chain_nnz = chain_jacobian.compute_nnz();
+    group.bench_function(format!("chain_5k_{chain_nnz}_nnz"), |b| {
+        b.iter(|| black_box(PatternFingerprint::of(black_box(&chain_jacobian))))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_normal_equations,
     bench_cholesky,
     bench_qr,
     bench_pcg_iterative_schur,
-    bench_assemble
+    bench_assemble,
+    bench_fingerprint
 );
 criterion_main!(benches);

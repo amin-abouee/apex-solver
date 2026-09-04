@@ -143,8 +143,8 @@ fn write_csv(
 fn make_loss(
     name: &str,
     scale: f64,
-) -> Result<Option<Box<dyn LossFunction + Send>>, Box<dyn std::error::Error>> {
-    let loss: Box<dyn LossFunction + Send> = match name {
+) -> Result<Option<Box<dyn LossFunction + Send + Sync>>, Box<dyn std::error::Error>> {
+    let loss: Box<dyn LossFunction + Send + Sync> = match name {
         "L2" => Box::new(L2Loss),
         "L1" => Box::new(L1Loss),
         "Huber" => Box::new(HuberLoss::new(scale)?),
@@ -459,13 +459,9 @@ fn print_analysis(results: &[BenchmarkResult]) {
     info!("=== ANALYSIS AND RECOMMENDATIONS ===");
     info!("{}", "=".repeat(80));
 
-    let mut datasets_vec: Vec<String> = results
-        .iter()
-        .map(|r| r.dataset.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    let mut datasets_vec: Vec<String> = results.iter().map(|r| r.dataset.clone()).collect();
     datasets_vec.sort();
+    datasets_vec.dedup();
 
     for dataset in &datasets_vec {
         info!("Dataset: {}", dataset);
