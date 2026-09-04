@@ -142,6 +142,19 @@ fn list_datasets(registry: &DatasetRegistry) {
         total_odometry,
         total_ba
     );
+
+    if !registry.sensor.is_empty() {
+        let mut names: Vec<_> = registry.sensor.keys().map(String::as_str).collect();
+        names.sort();
+        info!("");
+        info!("Multi-sensor (IMU / GNSS / odometry with ground truth):");
+        info!(
+            "  {}. Sensor datasets    - {} sets ({})",
+            ba_len + 7,
+            names.len(),
+            names.join(", ")
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -328,7 +341,7 @@ fn get_user_selection(registry: &DatasetRegistry) -> Result<usize, Box<dyn std::
     info!("");
 
     let ba_count = registry.bundle_adjustment.len();
-    let max = ba_count + 6;
+    let max = ba_count + 7;
     info!("Enter your selection (0-{max}): ");
     std::io::stdout().flush()?;
 
@@ -369,7 +382,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let selection = match args.select {
         Some(s) => {
-            let max = ba_count + 6;
+            let max = ba_count + 7;
             if s > max {
                 info!("Invalid selection: {s}. Please enter a number between 0 and {max}.");
                 return Ok(());
@@ -463,6 +476,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             total_success += s;
             total_fail += f;
             total_bytes += b;
+        }
+        n if n == ba_count + 7 => {
+            info!("--- Downloading multi-sensor (IMU / GNSS) datasets ---");
+            for name in {
+                let mut names: Vec<_> = registry.sensor.keys().cloned().collect();
+                names.sort();
+                names
+            } {
+                info!("  {name}");
+                match apex_io::ensure_sensor_dataset(&name) {
+                    Ok(dir) => {
+                        info!("  Ready at {}", dir.display());
+                        total_success += 1;
+                    }
+                    Err(e) => {
+                        warn!("  Failed: {e}");
+                        total_fail += 1;
+                    }
+                }
+            }
         }
         _ => {
             info!("Invalid selection: {selection}. Run with --list to see available options.");

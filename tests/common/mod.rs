@@ -7,6 +7,8 @@
 
 #![allow(dead_code)]
 
+pub mod nclt;
+
 use apex_solver::apex_manifolds::LieGroup;
 use apex_solver::apex_manifolds::se3::SE3;
 use apex_solver::core::VarKey;

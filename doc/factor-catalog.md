@@ -131,6 +131,20 @@ for loop-closure initialization rather than summarizing eliminated variables.
   already has.
 - Carrier-phase GNSS: raw-ranging only for now.
 
+## Test coverage
+
+Every exported factor appears in at least one solved graph, enforced by
+`every_exported_factor_is_exercised_by_an_integration_test` in
+`tests/factor_coverage.rs`, which reads these modules' own `pub use` lines.
+
+* `tests/factor_integration.rs` — VIO/SLAM scenarios on a synthetic trajectory.
+* `tests/factor_coverage.rs` — the remaining factors, one scenario each.
+* `tests/nclt_gnss_fusion.rs` — odometry + GNSS on the real
+  [NCLT](https://robots.engin.umich.edu/nclt/) dataset (~40 MB of CSV, fetched
+  on first run). Real recorded noise rather than measurements generated from
+  the models under test: dead-reckoned odometry drifts to 44 m over 17 minutes,
+  fusing GNSS holds it at the ~6 m receiver noise floor.
+
 ## Solver notes learned during integration
 
 - **`fix_variable` caveat**: fixed indices are honored when applying steps,
