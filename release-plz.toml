@@ -1,0 +1,35 @@
+# release-plz configuration: automated version bumps, changelog entries,
+# and crates.io publishing from conventional commits.
+# Docs: https://release-plz.ieni.dev/docs/config
+# Run locally: `release-plz update` (dry-run PR contents).
+
+[workspace]
+# Only open a release PR when commits follow conventional-commit syntax;
+# otherwise just report what would change.
+release_always = false
+git_release_enable = true
+git_release_type = "prod"
+git_release_draft = false
+publish = true
+semver_check = true
+
+# The workspace root changelog lives at ./CHANGELOG.md; each sub-crate keeps
+# its own CHANGELOG.md at its crate root.
+[changelog]
+protect_breaking_commits = true
+
+[[package]]
+name = "apex-solver"
+changelog_path = "./CHANGELOG.md"
+
+[[package]]
+name = "apex-io"
+changelog_path = "crates/apex-io/CHANGELOG.md"
+
+[[package]]
+name = "apex-manifolds"
+changelog_path = "crates/apex-manifolds/CHANGELOG.md"
+
+[[package]]
+name = "apex-camera-models"
+changelog_path = "crates/apex-camera-models/CHANGELOG.md"
