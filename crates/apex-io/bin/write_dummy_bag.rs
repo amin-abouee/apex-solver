@@ -8,11 +8,11 @@
 //! robotics applications.
 //!
 //! Usage:
-//!   cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- \
+//!   cargo run -p apex-io --features rosbag --bin write_dummy_bag -- \
 //!       `[output_path] [--compression]`
 //!
 //! Example:
-//!   cargo run -p apex-io --features rosbag-sqlite --bin write_dummy_bag -- \
+//!   cargo run -p apex-io --features rosbag --bin write_dummy_bag -- \
 //!       ./my_test_bag --compression
 
 use apex_io::rosbag::types::{

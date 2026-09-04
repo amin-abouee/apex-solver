@@ -7,6 +7,7 @@ pub mod logger;
 pub mod trajectory;
 pub mod utils;
 
+#[cfg(feature = "rosbag")]
 pub mod rosbag;
 
 #[cfg(feature = "dds")]
