@@ -29,7 +29,7 @@ use apex_solver::core::VarKey;
 use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::noise::NoiseModel;
 use apex_solver::core::problem::Problem;
-use apex_solver::factors::inertial::{
+use apex_solver::factors::imu::{
     ImuMeasurement, ImuParameters, ImuPreintegration, ImuSensorReadings, SpeedAndBias, se23,
 };
 use apex_solver::factors::lidar::{GicpFactor, Plane, PointToPlaneFactor, PoseToPointFactor};

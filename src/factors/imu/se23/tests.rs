@@ -13,8 +13,8 @@ use nalgebra::{DMatrix, DVector, Vector3};
 use super::factors::{CombinedImuFactor, ImuFactor};
 use crate::core::variable::{ManifoldVariable, Variable};
 use crate::factors::Factor;
-use crate::factors::inertial::preintegration::ImuPreintegration;
-use crate::factors::inertial::types::{
+use crate::factors::imu::preintegration::ImuPreintegration;
+use crate::factors::imu::types::{
     ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt,
 };
 

@@ -48,7 +48,7 @@ use crate::core::variable::ManifoldVariable;
 use thiserror::Error;
 
 pub mod common;
-pub mod inertial;
+pub mod imu;
 pub mod lidar;
 pub mod marginal;
 pub mod navigation;

@@ -1,4 +1,4 @@
-//! Inertial factors for visual-inertial and inertial odometry.
+//! IMU factors for visual-inertial and inertial odometry.
 //!
 //! Each group gets two factors and nothing more, so a choice here is two
 //! questions rather than a catalogue:
@@ -20,7 +20,7 @@
 //! | [`sgal3`] | 10D, `(SGal3, SGal3, bias)` | 16D, `(SGal3, bias, SGal3, bias)` |
 //!
 //! Both names exist in both modules, so they are addressed by their group:
-//! `inertial::se23::ImuFactor`, `inertial::sgal3::CombinedImuFactor`.
+//! `imu::se23::ImuFactor`, `imu::sgal3::CombinedImuFactor`.
 //!
 //! A keyframe is a **single** state variable on the group, not separate pose
 //! and velocity blocks — the optimizer's update is then a group right-plus, and
@@ -35,7 +35,7 @@
 //! # Quick start
 //!
 //! ```ignore
-//! use apex_solver::factors::inertial::{
+//! use apex_solver::factors::imu::{
 //!     ImuPreintegration, ImuParameters, ImuMeasurement,
 //!     bias_random_walk, bias_random_walk_noise, se23,
 //! };

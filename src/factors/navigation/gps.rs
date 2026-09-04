@@ -43,8 +43,8 @@ use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
-use crate::factors::inertial::preintegration::ImuPreintegration;
-use crate::factors::inertial::types::{SpeedAndBias, SpeedAndBiasExt};
+use crate::factors::imu::preintegration::ImuPreintegration;
+use crate::factors::imu::types::{SpeedAndBias, SpeedAndBiasExt};
 
 /// GPS synchronous factor: connects `T_WS` (robot pose) and `T_GW`
 /// (GPS-to-world) to a 3D GPS position measurement.
@@ -441,8 +441,8 @@ mod tests {
     use apex_manifolds::se3::{SE3, SE3Tangent};
     use nalgebra::{DMatrix, DVector, UnitQuaternion, Vector3};
 
-    use crate::factors::inertial::preintegration::ImuPreintegration;
-    use crate::factors::inertial::types::{
+    use crate::factors::imu::preintegration::ImuPreintegration;
+    use crate::factors::imu::types::{
         ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias,
     };
 

@@ -7,7 +7,7 @@ manifold Jacobians and finite-difference unit tests.
 
 **Layout.** A factor lives in the folder named for its sensor modality, and is
 addressed by that path — `factors::visual::StereoFactor`,
-`factors::inertial::se23::ImuFactor`. `apex_solver::prelude` re-exports only the
+`factors::imu::se23::ImuFactor`. `apex_solver::prelude` re-exports only the
 common set. `factors::common/` holds what several families share; manifold
 derivatives are *not* among them, since every group in `apex-manifolds` already
 reports the Jacobians of its own operations.
@@ -29,7 +29,7 @@ internally or expects a `NoiseModel` — never both; the ones that do report
 | `PoseRotationPrior` | `PoseRotationPrior` | rotation-only anchor (moved here from `marginal/`) |
 | `PoseTranslationPrior` | `PoseTranslationPrior` | world-frame translation anchor |
 
-### Inertial (`src/factors/inertial/`) — shared `ImuPreintegration`
+### IMU (`src/factors/imu/`) — shared `ImuPreintegration`
 
 Two factors per group and nothing else, so the choice is two questions.
 
@@ -51,7 +51,7 @@ full 15×15.
 | `sgal3` | 10D, `(SGal3, SGal3, bias)` | 16D, `(SGal3, bias, SGal3, bias)` |
 
 Both names exist in both modules, so they are addressed by their group:
-`inertial::se23::ImuFactor`, `inertial::sgal3::CombinedImuFactor`.
+`imu::se23::ImuFactor`, `imu::sgal3::CombinedImuFactor`.
 
 A keyframe is a **single** state variable on the group, not separate pose and
 velocity blocks: the optimizer's update is then a group right-plus, and the

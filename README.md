@@ -187,7 +187,7 @@ apex-solver/                # workspace root = apex-solver crate
 ├── src/
 │   ├── core/               # Problem formulation, factors, residuals
 │   ├── factors/            # Factors by sensor modality: pose/, visual/, lidar/,
-│   │                       #   inertial/, navigation/, ranging/, marginal/, common/
+│   │                       #   imu/, navigation/, ranging/, marginal/, common/
 │   ├── optimizer/          # LM, GN, Dog Leg algorithms
 │   ├── linalg/             # Cholesky, QR, Explicit/Implicit Schur
 │   └── observers/          # Optimization observers and callbacks

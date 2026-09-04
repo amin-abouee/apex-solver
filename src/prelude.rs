@@ -1,7 +1,7 @@
 //! The common set, for `use apex_solver::prelude::*;`.
 //!
 //! Factors live under a module named for their sensor modality
-//! (`factors::visual::StereoFactor`, `factors::inertial::ImuFactor`, …) so the
+//! (`factors::visual::StereoFactor`, `factors::imu::ImuFactor`, …) so the
 //! import says which domain a measurement comes from. This prelude carries only
 //! the pieces almost every program needs — the problem, the optimizers, the
 //! manifolds, and the three factors that appear in nearly any graph. Reach into

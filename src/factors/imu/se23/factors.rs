@@ -13,7 +13,7 @@
 //!
 //! They differ in how bias evolution is modelled. [`ImuFactor`] shares one bias
 //! variable across the interval and leaves the random walk to a separate edge
-//! ([`bias_random_walk`](crate::factors::inertial::bias::bias_random_walk));
+//! ([`bias_random_walk`](crate::factors::imu::bias::bias_random_walk));
 //! [`CombinedImuFactor`] takes a bias per keyframe and puts the walk in its
 //! trailing six rows, so it needs no companion edge. Using both at once would
 //! count that uncertainty twice.
@@ -30,8 +30,8 @@ use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::validate::expect_block_sizes;
-use crate::factors::inertial::preintegration::ImuPreintegration;
-use crate::factors::inertial::types::SpeedAndBiasExt;
+use crate::factors::imu::preintegration::ImuPreintegration;
+use crate::factors::imu::types::SpeedAndBiasExt;
 
 /// One evaluation of the interval, in `SE23` tangent space.
 ///
@@ -166,7 +166,7 @@ fn write_jacobian<const R: usize, const C: usize>(
 /// Bias enters only through the first-order correction of the preintegrated
 /// delta, so one bias variable covers the interval; its evolution between
 /// keyframes belongs to a
-/// [`bias_random_walk`](crate::factors::inertial::bias::bias_random_walk) edge.
+/// [`bias_random_walk`](crate::factors::imu::bias::bias_random_walk) edge.
 /// Weighting therefore uses the measurement-noise-only 9×9 information — the
 /// random-walk terms live in that edge instead.
 ///

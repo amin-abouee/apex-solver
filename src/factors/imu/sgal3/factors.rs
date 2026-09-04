@@ -1,6 +1,6 @@
 //! The two SGal(3) IMU factors.
 //!
-//! The same two factors as [`se23`](crate::factors::inertial::se23), expressed
+//! The same two factors as [`se23`](crate::factors::imu::se23), expressed
 //! on the Special Galilean group. An [`SGal3`] element is `(R, t, v, s)` — a
 //! navigation state *plus a time coordinate* — so a keyframe carries its own
 //! timestamp as an estimated quantity and the residual gains a tenth row,
@@ -17,7 +17,7 @@
 //! [`ImuFactor::with_time_sigma`]; the default assumes trusted timestamps.
 //!
 //! Bias handling matches SE_2(3): [`ImuFactor`] shares one bias and needs a
-//! companion [`bias_random_walk`](crate::factors::inertial::bias::bias_random_walk)
+//! companion [`bias_random_walk`](crate::factors::imu::bias::bias_random_walk)
 //! edge, [`CombinedImuFactor`] embeds the walk and needs none.
 
 use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
@@ -31,8 +31,8 @@ type Matrix10 = SMatrix<f64, 10, 10>;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::validate::expect_block_sizes;
-use crate::factors::inertial::preintegration::ImuPreintegration;
-use crate::factors::inertial::types::SpeedAndBiasExt;
+use crate::factors::imu::preintegration::ImuPreintegration;
+use crate::factors::imu::types::SpeedAndBiasExt;
 
 /// Default standard deviation on the inter-keyframe time constraint [s].
 ///
