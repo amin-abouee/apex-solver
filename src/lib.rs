@@ -62,6 +62,7 @@ pub mod linearizer;
 pub mod logger;
 pub mod observers;
 pub mod optimizer;
+pub mod prelude;
 
 // Re-export core types
 pub use core::variable::Variable;

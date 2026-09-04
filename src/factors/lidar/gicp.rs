@@ -148,6 +148,12 @@ impl Factor for GicpFactor {
         }
         Ok(())
     }
+
+    /// This factor whitens with the combined point covariance, frozen at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

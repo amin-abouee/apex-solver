@@ -186,7 +186,8 @@ The workspace root is the `apex-solver` crate. Sub-crates for manifolds, I/O, an
 apex-solver/                # workspace root = apex-solver crate
 ├── src/
 │   ├── core/               # Problem formulation, factors, residuals
-│   ├── factors/            # Factor implementations (projection, between, prior)
+│   ├── factors/            # Factors by sensor modality: pose/, visual/, lidar/,
+│   │                       #   inertial/, navigation/, ranging/, marginal/, common/
 │   ├── optimizer/          # LM, GN, Dog Leg algorithms
 │   ├── linalg/             # Cholesky, QR, Explicit/Implicit Schur
 │   └── observers/          # Optimization observers and callbacks

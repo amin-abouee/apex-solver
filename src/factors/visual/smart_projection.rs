@@ -471,6 +471,12 @@ impl<CAM: CameraModel> Factor for SmartProjectionFactor<CAM> {
         }
         Ok(())
     }
+
+    /// This factor whitens with per-observation sigmas and its internal Schur elimination,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

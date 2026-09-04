@@ -216,6 +216,12 @@ impl<F: DistanceField> Factor for IcpFactor<F> {
             "IcpFactor expects [SE3 T_WA, SE3 T_WB]",
         )
     }
+
+    /// This factor whitens with the measurement sigma supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

@@ -188,6 +188,12 @@ impl Factor for GpsFactor {
             "GpsFactor expects [SE3 T_WS, SE3 T_GW]",
         )
     }
+
+    /// This factor whitens with the 3×3 sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 // ── GpsAsyncFactor ────────────────────────────────────────────────────────────
@@ -416,6 +422,12 @@ impl Factor for GpsAsyncFactor {
             &[SE3::REP_SIZE, 9, SE3::REP_SIZE],
             "GpsAsyncFactor expects [SE3 T_WS, speed-and-bias (9D), SE3 T_GW]",
         )
+    }
+
+    /// This factor whitens with the 3×3 sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
     }
 }
 

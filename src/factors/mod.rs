@@ -194,6 +194,26 @@ pub trait Factor: Send + Sync {
     /// `(rows, cols)` of the Jacobian — `rows == residual_dim()`, `cols == sum of variable DOFs`.
     fn jacobian_shape(&self) -> (usize, usize);
 
+    /// Whether this factor already applies its own square-root information to
+    /// the residual and Jacobian it writes.
+    ///
+    /// Most factors return the raw residual and let the
+    /// [`NoiseModel`](crate::core::noise::NoiseModel) supplied at registration
+    /// whiten it. A few cannot: their weighting is bound up with the
+    /// measurement itself — GICP's combined point covariance, a smart factor's
+    /// internal Schur elimination, a preintegration's information matrix — so
+    /// they whiten as they go and **must** be registered with
+    /// `NoiseModel::null()`.
+    ///
+    /// Pairing an internally-whitened factor with a non-null noise model
+    /// whitens twice and silently over-weights the block; the two conventions
+    /// are indistinguishable by inspecting a residual. Overriding this lets
+    /// [`Problem::try_add_residual_block_with_noise`](crate::core::problem::Problem::try_add_residual_block_with_noise)
+    /// reject the mistake at registration instead.
+    fn whitens_internally(&self) -> bool {
+        false
+    }
+
     /// Validate this factor against the variables it is being registered with.
     ///
     /// Called once by [`Problem::try_add_residual_block`](crate::core::problem::Problem::try_add_residual_block)

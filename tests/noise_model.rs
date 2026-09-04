@@ -354,3 +354,52 @@ fn information_repair_separates_rank_deficiency_from_indefiniteness() -> TestRes
     }
     Ok(())
 }
+
+/// An internally-whitened factor paired with a noise model would whiten twice.
+/// The two conventions are indistinguishable from a residual alone, so the
+/// mistake has to be caught at registration.
+#[test]
+fn internally_whitened_factor_rejects_a_noise_model() {
+    use apex_solver::factors::lidar::GicpFactor;
+
+    let mut problem = Problem::new(JacobianMode::Dense);
+    let pose = problem.add_variable(
+        ManifoldType::SE3,
+        nalgebra::dvector![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+    );
+    let point = problem.add_variable(ManifoldType::RN, nalgebra::dvector![1.0, 0.0, 0.0]);
+
+    let make = || {
+        GicpFactor::new(
+            nalgebra::Vector3::new(1.0, 0.0, 0.0),
+            nalgebra::Matrix3::identity(),
+            nalgebra::Matrix3::identity(),
+            nalgebra::Matrix3::identity(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"))
+    };
+
+    let rejected = problem.try_add_residual_block_with_noise(
+        &[pose, point],
+        Box::new(make()),
+        None,
+        NoiseModel::from_sigmas(&[1.0; 3]).unwrap_or_else(|e| panic!("{e}")),
+    );
+    match rejected {
+        Ok(_) => panic!("a noise model on an internally-whitened factor must be rejected"),
+        Err(err) => assert!(
+            err.to_string().contains("null"),
+            "error should point at NoiseModel::null(), got: {err}"
+        ),
+    }
+
+    // The same factor registers fine with the null model.
+    if let Err(e) = problem.try_add_residual_block_with_noise(
+        &[pose, point],
+        Box::new(make()),
+        None,
+        NoiseModel::null(),
+    ) {
+        panic!("null noise model must be accepted: {e}");
+    }
+}

@@ -211,6 +211,12 @@ impl Factor for BearingFactor {
             "BearingFactor expects [SE3 pose, 3D point]",
         )
     }
+
+    /// This factor whitens with the 2×2 sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

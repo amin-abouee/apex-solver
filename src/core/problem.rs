@@ -141,6 +141,14 @@ impl Problem {
                 factor.residual_dim()
             )));
         }
+        if factor.whitens_internally() && !matches!(noise, NoiseModel::Null) {
+            return Err(CoreError::InvalidInput(
+                "this factor applies its own square-root information; register it with \
+                 NoiseModel::null(). Supplying a noise model as well would whiten the \
+                 residual twice."
+                    .into(),
+            ));
+        }
         self.try_add_residual_block_impl(variable_keys, factor, loss_func, noise)
     }
 

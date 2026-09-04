@@ -245,6 +245,12 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
             "DepthFactor expects [SE3 T_WS, homogeneous point (4D), SE3 T_SC]",
         )
     }
+
+    /// This factor whitens with the sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

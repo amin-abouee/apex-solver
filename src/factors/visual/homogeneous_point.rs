@@ -141,6 +141,12 @@ impl Factor for HomogeneousPointFactor {
             "HomogeneousPointFactor expects [homogeneous point (4D)]",
         )
     }
+
+    /// This factor whitens with the 3×3 sqrt-information supplied at construction,
+    /// so it must be registered with `NoiseModel::null()`.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]
