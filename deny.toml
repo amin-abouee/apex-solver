@@ -29,6 +29,10 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "Unlicense",
+    # OSI-approved permissive data license covering Mozilla's CA certificate
+    # bundle shipped by webpki-roots (TLS roots for ureq dataset downloads
+    # and rerun's HTTP client). No copyleft obligations.
+    "CDLA-Permissive-2.0",
 ]
 # Workspace crates are Apache-2.0; confidence threshold for license detection.
 confidence-threshold = 0.8
