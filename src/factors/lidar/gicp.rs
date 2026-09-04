@@ -26,7 +26,7 @@
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, Vector3};
+use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
@@ -101,8 +101,9 @@ impl Factor for GicpFactor {
         let pose = SE3::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        let rotation = pose.rotation_so3().rotation_matrix();
-        let predicted = pose.act(&p_body, None, None);
+        let mut j_pose_act = SE3::zero_jacobian();
+        let mut j_point_act = Matrix3::zeros();
+        let predicted = pose.act(&p_body, Some(&mut j_pose_act), Some(&mut j_point_act));
         let e = predicted - self.target_point;
 
         // Whitening is applied internally (this factor *is* the noise model);
@@ -113,19 +114,12 @@ impl Factor for GicpFactor {
 
         let Some(mut jac) = jacobian else { return };
 
-        // ∂e/∂(δρ, δθ) = [R | −R·p̂_body], ∂e/∂p_body = R, then left-multiply
-        // by C^{-1/2} (the rotation-dependence of C is dropped: standard
-        // small-angle approximation, see module docs).
-        let p_x = Matrix3::new(
-            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
-        );
-        let mut d_e_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_e_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rotation);
-        d_e_d_pose
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-rotation * p_x));
-        let j_pose = c_inv_sqrt * d_e_d_pose;
-        let j_point = c_inv_sqrt * rotation;
+        // `act` supplies ∂e/∂(δρ, δθ) and ∂e/∂p_body in SE(3)'s right
+        // convention; whitening left-multiplies by C^{-1/2} (the
+        // rotation-dependence of C is dropped: standard small-angle
+        // approximation, see module docs).
+        let j_pose = c_inv_sqrt * j_pose_act.fixed_view::<3, 6>(0, 0);
+        let j_point = c_inv_sqrt * j_point_act;
 
         for row in 0..3 {
             for col in 0..6 {

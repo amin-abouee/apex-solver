@@ -13,7 +13,8 @@
 use super::BetweenFactor;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use apex_manifolds::{LieGroup, Tangent};
+use crate::factors::common::validate::expect_block_sizes;
+use apex_manifolds::LieGroup;
 use faer::prelude::ReborrowMut;
 use nalgebra::DVector;
 
@@ -71,6 +72,9 @@ where
 {
     /// The anchored value: the residual is zero when the variable equals it.
     prior: T,
+    /// The identity-measurement between constraint this factor delegates to,
+    /// built once so `linearize` allocates nothing.
+    between: BetweenFactor<T>,
 }
 
 impl<T> PriorFactor<T>
@@ -79,7 +83,14 @@ where
 {
     /// Anchor a variable to `prior`.
     pub fn new(prior: T) -> Self {
-        Self { prior }
+        // `x.between(&x)` is `x⁻¹ ∘ x` — the group identity, and for
+        // dimension-carrying groups such as `Rn` it is the identity of the
+        // *right* dimension, which an associated `identity()` could not be.
+        let identity = prior.between(&prior, None, None);
+        Self {
+            prior,
+            between: BetweenFactor::new(identity),
+        }
     }
 }
 
@@ -102,32 +113,16 @@ where
         // Note the residual sign follows the between convention (the overall
         // sign of a least-squares residual is immaterial: the zero and the
         // optimum are the same).
-        // Identity element = exp(0); Tangent provides construction from a slice.
-        let zero = <T::TangentVector as Tangent<T>>::from_slice(&vec![
-            0.0;
-            <T::TangentVector as Tangent<T>>::DIM
-        ]);
-        let between = BetweenFactor::<T>::new(zero.exp(None));
-        let dof = self.prior.tangent_dim();
-        let mut between_buf = vec![0.0; dof * 2 * dof];
-        between.linearize(
-            &[self.prior.as_param_slice(), params[0]],
+        //
+        // `linearize_wrt_second` writes only the block this factor needs, so
+        // nothing is allocated here — `linearize` runs once per factor per
+        // iteration and the trait documents it as allocation-free.
+        self.between.linearize_wrt_second(
+            self.prior.as_param_slice(),
+            params[0],
             residual,
-            Some(faer::mat::MatMut::from_column_major_slice_mut(
-                &mut between_buf,
-                dof,
-                2 * dof,
-            )),
+            jacobian,
         );
-        if let Some(mut jac) = jacobian {
-            // The between Jacobian is (dof × 2dof); the block wrt the second
-            // argument (the anchored variable) is our (dof × dof) Jacobian.
-            for k in 0..dof {
-                for i in 0..dof {
-                    *jac.rb_mut().get_mut(i, k) = between_buf[(dof + k) * dof + i];
-                }
-            }
-        }
     }
 
     fn residual_dim(&self) -> usize {
@@ -137,6 +132,14 @@ where
     fn jacobian_shape(&self) -> (usize, usize) {
         let dof = self.prior.tangent_dim();
         (dof, dof)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[self.prior.as_param_slice().len()],
+            "PriorFactor expects one variable of the prior's own group",
+        )
     }
 }
 

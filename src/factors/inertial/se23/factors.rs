@@ -32,6 +32,7 @@ use super::kinematics::{
 };
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::inertial::preintegration::ImuPreintegration;
 
 /// Copy a fixed-size weighted residual into the output buffer.
@@ -494,21 +495,4 @@ fn write_bias_walk_rows(j_full: &mut SMatrix<f64, 15, 30>, col_i: usize, col_j: 
     j_full
         .fixed_view_mut::<3, 3>(12, col_j + 3)
         .copy_from(&(-id));
-}
-
-/// Shared `validate_variables` body: check block count and per-block sizes.
-fn expect_block_sizes(
-    variables: &[&dyn ManifoldVariable],
-    expected: &[usize],
-    message: &str,
-) -> Result<(), String> {
-    if variables.len() != expected.len()
-        || variables
-            .iter()
-            .zip(expected)
-            .any(|(v, &n)| v.as_param_slice().len() != n)
-    {
-        return Err(message.into());
-    }
-    Ok(())
 }

@@ -39,8 +39,10 @@ use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
+use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::inertial::preintegration::ImuPreintegration;
 use crate::factors::inertial::types::{SpeedAndBias, SpeedAndBiasExt};
 
@@ -177,6 +179,14 @@ impl Factor for GpsFactor {
 
     fn jacobian_shape(&self) -> (usize, usize) {
         (3, 12)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, SE3::REP_SIZE],
+            "GpsFactor expects [SE3 T_WS, SE3 T_GW]",
+        )
     }
 }
 
@@ -398,6 +408,14 @@ impl Factor for GpsAsyncFactor {
 
     fn jacobian_shape(&self) -> (usize, usize) {
         (3, 21)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, 9, SE3::REP_SIZE],
+            "GpsAsyncFactor expects [SE3 T_WS, speed-and-bias (9D), SE3 T_GW]",
+        )
     }
 }
 

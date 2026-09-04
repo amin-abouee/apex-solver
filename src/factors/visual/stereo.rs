@@ -113,20 +113,14 @@ impl StereoFactor {
     /// Returns `(∂p_cam/∂pose_tangent (3×6), ∂p_cam/∂p_world = R (3×3))` for
     /// the world-to-camera pose convention `p_cam = R·p_world + t` with
     /// right-plus retractions.
+    /// `(∂p_cam/∂(δρ, δθ), ∂p_cam/∂p_world)`, taken straight from SE(3)'s own
+    /// `act` so this factor uses the group's right-perturbation convention
+    /// rather than a second, hand-derived copy of it.
     fn point_jacobians(pose: &SE3, p_world: &Vector3<f64>) -> (SMatrix<f64, 3, 6>, Matrix3<f64>) {
-        let rotation = pose.rotation_so3().rotation_matrix();
-        let mut d_pc_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_pc_d_pose
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&rotation);
-        d_pc_d_pose.fixed_view_mut::<3, 3>(0, 3).copy_from(
-            &(-rotation
-                * Matrix3::new(
-                    0.0, -p_world.z, p_world.y, p_world.z, 0.0, -p_world.x, -p_world.y, p_world.x,
-                    0.0,
-                )),
-        );
-        (d_pc_d_pose, rotation)
+        let mut j_pose = SE3::zero_jacobian();
+        let mut j_point = Matrix3::zeros();
+        let _ = pose.act(p_world, Some(&mut j_pose), Some(&mut j_point));
+        (j_pose.fixed_view::<3, 6>(0, 0).into_owned(), j_point)
     }
 }
 

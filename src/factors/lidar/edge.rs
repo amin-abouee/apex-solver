@@ -32,8 +32,10 @@ use nalgebra::{Matrix3, SMatrix, Vector3};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
+use crate::factors::common::validate::expect_block_sizes;
 
 /// Point-to-edge (point-to-line) LOAM factor.
 ///
@@ -179,6 +181,14 @@ impl Factor for LidarEdgeFactor {
 
     fn jacobian_shape(&self) -> (usize, usize) {
         (3, 12)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, SE3::REP_SIZE],
+            "LidarEdgeFactor expects [SE3 T_WA, SE3 T_WB]",
+        )
     }
 }
 

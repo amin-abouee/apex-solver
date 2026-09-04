@@ -27,7 +27,9 @@
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::validate::expect_block_sizes;
 
 /// Unary factor constraining a homogeneous 4D point to a measured 3D position.
 pub struct HomogeneousPointFactor {
@@ -130,6 +132,14 @@ impl Factor for HomogeneousPointFactor {
 
     fn jacobian_shape(&self) -> (usize, usize) {
         (3, 4)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[4],
+            "HomogeneousPointFactor expects [homogeneous point (4D)]",
+        )
     }
 }
 

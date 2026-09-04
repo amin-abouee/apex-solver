@@ -85,23 +85,24 @@ impl Factor for PointToPlaneFactor {
         let pose = SE3::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        let predicted = pose.act(&p_body, None, None);
+        // `act` reports `∂(T·p)/∂(δρ, δθ)` (top 3×6 of `j_pose`) and
+        // `∂(T·p)/∂p` (`j_point`) in SE(3)'s own right convention; the plane
+        // residual is then just `nᵀ` applied to those.
+        let mut j_pose = SE3::zero_jacobian();
+        let mut j_point = Matrix3::zeros();
+        let predicted = pose.act(&p_body, Some(&mut j_pose), Some(&mut j_point));
         residual[0] = self.plane.normal.dot(&predicted) + self.plane.offset;
 
         let Some(mut jac) = jacobian else { return };
 
-        let rotation = pose.rotation_so3().rotation_matrix();
-        let p_x = Matrix3::new(
-            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
-        );
-
-        // ∂r/∂(δρ, δθ) = [nᵀR | −nᵀR·p̂_body];  ∂r/∂p_body = Rᵀn
-        let n_r = self.plane.normal.transpose() * rotation; // 1×3
-        let r_t_n = rotation.transpose() * self.plane.normal; // 3×1
+        let n_t = self.plane.normal.transpose();
+        let d_pose = n_t * j_pose.fixed_view::<3, 6>(0, 0); // 1×6
+        let d_point = n_t * j_point; // 1×3
+        for col in 0..6 {
+            *jac.rb_mut().get_mut(0, col) = d_pose[(0, col)];
+        }
         for col in 0..3 {
-            *jac.rb_mut().get_mut(0, col) = n_r[col];
-            *jac.rb_mut().get_mut(0, 3 + col) = -(n_r * p_x)[(0, col)];
-            *jac.rb_mut().get_mut(0, 6 + col) = r_t_n[col];
+            *jac.rb_mut().get_mut(0, 6 + col) = d_point[(0, col)];
         }
     }
 

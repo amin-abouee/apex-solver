@@ -80,6 +80,18 @@ pub struct SmartProjectionFactor<CAM: CameraModel> {
     status: AtomicU8,
 }
 
+/// `(∂(T·p)/∂(δρ, δθ), ∂(T·p)/∂p)` from SE(3)'s own `act`.
+///
+/// The group already reports the derivatives of its action in its right
+/// convention; re-deriving `[R | −R·[p]ₓ]` by hand would be a second copy of
+/// that convention, free to drift from it.
+fn act_jacobians(pose: &SE3, point: &Vector3<f64>) -> (SMatrix<f64, 3, 6>, Matrix3<f64>) {
+    let mut j_pose = SE3::zero_jacobian();
+    let mut j_point = Matrix3::zeros();
+    let _ = pose.act(point, Some(&mut j_pose), Some(&mut j_point));
+    (j_pose.fixed_view::<3, 6>(0, 0).into_owned(), j_point)
+}
+
 impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
     /// Create the factor from pixel observations and a shared camera model.
     pub fn new(observations: Vec<Vector2<f64>>, camera: CAM) -> Result<Self, String> {
@@ -232,17 +244,10 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
             .unwrap_or_else(|_| Vector2::zeros());
         let r = (uv - self.observations[i]) * inv_sigma;
         let d_uv_d_pc = self.camera.jacobian_point(p_cam);
-        let rot = pose.rotation_so3().rotation_matrix();
-        let p_x = Matrix3::new(
-            0.0, -point.z, point.y, point.z, 0.0, -point.x, -point.y, point.x, 0.0,
-        );
-        let mut d_pc_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_pc_d_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
-        d_pc_d_pose
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-rot * p_x));
+        // ∂p_cam/∂pose and ∂p_cam/∂point come from SE(3)'s own `act`.
+        let (d_pc_d_pose, d_pc_d_point) = act_jacobians(pose, point);
         let a = (d_uv_d_pc.clone() * d_pc_d_pose) * inv_sigma;
-        let b = (d_uv_d_pc * rot) * inv_sigma;
+        let b = (d_uv_d_pc * d_pc_d_point) * inv_sigma;
         (r, a, b)
     }
 
@@ -264,13 +269,12 @@ impl<CAM: CameraModel> SmartProjectionFactor<CAM> {
         let Some(mut jac) = jacobian else { return };
         let d_pen_d_z = -CHEIRALITY_DEPTH_SCALE;
         for (i, pose) in poses.iter().enumerate() {
-            let rot = pose.rotation_so3().rotation_matrix();
-            let p_x = Matrix3::new(
-                0.0, -point.z, point.y, point.z, 0.0, -point.x, -point.y, point.x, 0.0,
-            );
+            // The penalty depends on the camera-frame depth z = (T·p)_2, so its
+            // gradient is row 2 of ∂(T·p)/∂pose.
+            let (d_pc_d_pose, _) = act_jacobians(pose, point);
             for c in 0..3 {
-                let d_t = d_pen_d_z * rot[(2, c)];
-                let d_r = d_pen_d_z * (-rot * p_x).row(2)[c];
+                let d_t = d_pen_d_z * d_pc_d_pose[(2, c)];
+                let d_r = d_pen_d_z * d_pc_d_pose[(2, 3 + c)];
                 *jac.rb_mut().get_mut(2 * i, 6 * i + c) = d_t;
                 *jac.rb_mut().get_mut(2 * i + 1, 6 * i + c) = d_t;
                 *jac.rb_mut().get_mut(2 * i, 6 * i + 3 + c) = d_r;

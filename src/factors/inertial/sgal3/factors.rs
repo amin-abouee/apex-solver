@@ -29,6 +29,7 @@ use super::kinematics::{
 };
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::inertial::preintegration::ImuPreintegration;
 
 /// Default standard deviation on the inter-keyframe time constraint [s].
@@ -59,22 +60,6 @@ fn write_jacobian<const R: usize, const C: usize>(
             *jac.rb_mut().get_mut(row, col) = weighted[(row, col)];
         }
     }
-}
-
-fn expect_block_sizes(
-    variables: &[&dyn ManifoldVariable],
-    expected: &[usize],
-    message: &str,
-) -> Result<(), String> {
-    if variables.len() != expected.len()
-        || variables
-            .iter()
-            .zip(expected)
-            .any(|(v, &n)| v.as_param_slice().len() != n)
-    {
-        return Err(message.into());
-    }
-    Ok(())
 }
 
 /// Stack the bias-correction blocks into `∂r/∂[b_g, b_a]` (10×6).

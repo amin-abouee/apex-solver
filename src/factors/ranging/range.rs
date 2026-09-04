@@ -222,24 +222,28 @@ impl Factor for BearingRangeFactor {
             return;
         }
 
-        let b_pred = rotation * (delta_w / dist);
+        // Body-frame direction to the landmark. The pose is body-in-world
+        // (`T_wb`), the same convention `PosePointRangeFactor` above uses, so
+        // the world-frame offset is rotated *into* the body by Rᵀ.
+        let p_body = rotation.transpose() * delta_w;
+        let b_pred = p_body / dist;
         residual[0..3].copy_from_slice((b_pred - self.measured_bearing).as_slice());
         residual[3] = dist - self.measured_range;
 
         let Some(mut jac) = jacobian else { return };
 
-        // δp_body = R(δθ × q) − R·R·δρ with q = p_world − t (the body-tangent
-        // translation step moves the origin by R·δρ in the world frame);
-        // b = p_body/d:
-        // ∂b/∂(δρ, δθ) = (I − bbᵀ)/d · [−R² | −R·q̂]; ∂b/∂p_world = (I − bbᵀ)R/d.
-        let q_x = Matrix3::new(
-            0.0, -delta_w.z, delta_w.y, delta_w.z, 0.0, -delta_w.x, -delta_w.y, delta_w.x, 0.0,
+        // With u = Rᵀ(p_world − t) and b = u/‖u‖, under the right SE(3)
+        // perturbation (t ← t + R·δρ, R ← R·Exp(δθ)):
+        //     ∂u/∂δρ = −I,  ∂u/∂δθ = [u]ₓ,  ∂u/∂p_world = Rᵀ
+        // and ∂b/∂u = (I − bbᵀ)/d.
+        let u_x = Matrix3::new(
+            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
         );
         let proj = Matrix3::identity() - b_pred * b_pred.transpose();
         let scale = 1.0 / dist;
-        let d_b_d_rho = (proj * (-rotation * rotation)) * scale; // 3×3
-        let d_b_d_theta = (proj * (-rotation * q_x)) * scale; // 3×3
-        let d_b_d_point = (proj * rotation) * scale; // 3×3
+        let d_b_d_rho = -proj * scale; // 3×3
+        let d_b_d_theta = (proj * u_x) * scale; // 3×3
+        let d_b_d_point = (proj * rotation.transpose()) * scale; // 3×3
 
         let mut j_pose = SMatrix::<f64, 3, 6>::zeros();
         j_pose.fixed_view_mut::<3, 3>(0, 0).copy_from(&d_b_d_rho);
@@ -409,7 +413,7 @@ mod tests {
         ));
         let point = Vector3::new(1.5, -0.5, 2.5);
         let delta = point - pose.translation();
-        let bearing = pose.rotation_so3().rotation_matrix() * (delta / delta.norm());
+        let bearing = pose.rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
         let factor = BearingRangeFactor::new(bearing, delta.norm())?;
         let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
         let point_v = vec![point.x, point.y, point.z];
@@ -462,6 +466,72 @@ mod tests {
                     "point[{row},{col}]: analytical={ana:.6} fd={fd:.6}"
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// A hand-computed bearing, which is what actually pins the SE(3)
+    /// convention. Finite differences cannot: they only check the Jacobian
+    /// against this factor's own residual, so a residual that rotates the wrong
+    /// way stays self-consistent and passes. That is exactly how
+    /// `BearingRangeFactor` shipped using `R` where it needed `Rᵀ`.
+    #[test]
+    fn bearing_range_golden_value_pins_the_convention() -> Result<(), String> {
+        // Body yawed +90° about z at the origin. A landmark 2 m along world +x
+        // therefore sits along the body's −y axis.
+        let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(0.0, 0.0, 0.0),
+            nalgebra::UnitQuaternion::from_euler_angles(0.0, 0.0, std::f64::consts::FRAC_PI_2),
+        ));
+        let point = Vector3::new(2.0, 0.0, 0.0);
+        let expected = Vector3::new(0.0, -1.0, 0.0);
+
+        let factor = BearingRangeFactor::new(expected, 2.0)?;
+        let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
+        let point_v = vec![point.x, point.y, point.z];
+        let mut residual = vec![0.0; 4];
+        factor.linearize(&[&pose_v, &point_v], &mut residual, None);
+
+        for (i, r) in residual.iter().enumerate() {
+            assert!(
+                r.abs() < 1e-12,
+                "expected zero residual for the hand-computed bearing, row {i} = {r:.3e}"
+            );
+        }
+        Ok(())
+    }
+
+    /// `BearingFactor` and `BearingRangeFactor` must agree on which way the
+    /// bearing points; they disagreed before this convention was fixed.
+    #[test]
+    fn bearing_range_agrees_with_bearing_factor() -> Result<(), String> {
+        use crate::factors::ranging::bearing::BearingFactor;
+
+        let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(0.1, 0.3, -0.2),
+            nalgebra::UnitQuaternion::from_euler_angles(0.3, -0.2, 0.5),
+        ));
+        let point = Vector3::new(1.5, -0.5, 2.5);
+        let pose_v: Vec<f64> = pose.as_param_slice().to_vec();
+        let point_v = vec![point.x, point.y, point.z];
+
+        // A bearing that BearingFactor reports as exact must also be exact for
+        // BearingRangeFactor's first three rows.
+        let delta = point - pose.translation();
+        let truth = pose.rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
+
+        let bearing_only = BearingFactor::new_isotropic(truth, 1.0);
+        let mut r_bearing = vec![0.0; 2];
+        bearing_only.linearize(&[&pose_v, &point_v], &mut r_bearing, None);
+        for (i, r) in r_bearing.iter().enumerate() {
+            assert!(r.abs() < 1e-12, "BearingFactor row {i} = {r:.3e}");
+        }
+
+        let combined = BearingRangeFactor::new(truth, delta.norm())?;
+        let mut r_combined = vec![0.0; 4];
+        combined.linearize(&[&pose_v, &point_v], &mut r_combined, None);
+        for (i, r) in r_combined.iter().enumerate() {
+            assert!(r.abs() < 1e-12, "BearingRangeFactor row {i} = {r:.3e}");
         }
         Ok(())
     }

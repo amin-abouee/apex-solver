@@ -13,7 +13,7 @@
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use faer::prelude::ReborrowMut;
-use nalgebra::{SMatrix, Vector3};
+use nalgebra::{Matrix3, Vector3};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
@@ -46,32 +46,24 @@ impl Factor for PoseToPointFactor {
         let pose = SE3::from_param_slice(params[0]);
         let p_body = Vector3::new(params[1][0], params[1][1], params[1][2]);
 
-        let predicted = pose.act(&p_body, None, None);
+        // `act` reports its own derivatives in SE(3)'s right convention:
+        // `∂(T·p)/∂(δρ, δθ)` in the top 3×6 of `j_pose`, and `∂(T·p)/∂p` in
+        // `j_point`. Asking the manifold keeps this factor on the group's
+        // conventions instead of a second, hand-derived copy of them.
+        let mut j_pose = SE3::zero_jacobian();
+        let mut j_point = Matrix3::zeros();
+        let predicted = pose.act(&p_body, Some(&mut j_pose), Some(&mut j_point));
         let r = predicted - self.measurement;
         residual.copy_from_slice(r.as_slice());
 
         let Some(mut jac) = jacobian else { return };
 
-        let rotation = pose.rotation_so3().rotation_matrix();
-        let p_x = nalgebra::Matrix3::new(
-            0.0, -p_body.z, p_body.y, p_body.z, 0.0, -p_body.x, -p_body.y, p_body.x, 0.0,
-        );
-
-        // ∂(T p)/∂(δρ, δθ) = [R | −R·p̂_body]
-        let mut d_pred_d_pose = SMatrix::<f64, 3, 6>::zeros();
-        d_pred_d_pose
-            .fixed_view_mut::<3, 3>(0, 0)
-            .copy_from(&rotation);
-        d_pred_d_pose
-            .fixed_view_mut::<3, 3>(0, 3)
-            .copy_from(&(-rotation * p_x));
-
         for row in 0..3 {
             for col in 0..6 {
-                *jac.rb_mut().get_mut(row, col) = d_pred_d_pose[(row, col)];
+                *jac.rb_mut().get_mut(row, col) = j_pose[(row, col)];
             }
             for col in 0..3 {
-                *jac.rb_mut().get_mut(row, 6 + col) = rotation[(row, col)];
+                *jac.rb_mut().get_mut(row, 6 + col) = j_point[(row, col)];
             }
         }
     }

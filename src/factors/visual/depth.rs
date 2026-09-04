@@ -33,8 +33,10 @@ use nalgebra::{Matrix3, Matrix4, SMatrix, Vector3, Vector4};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 
+use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 use crate::factors::common::math::skew;
+use crate::factors::common::validate::expect_block_sizes;
 
 /// Depth constraint factor with compile-time one-sided toggle.
 ///
@@ -234,6 +236,14 @@ impl<const ONESIDED: bool> Factor for DepthFactor<ONESIDED> {
 
     fn jacobian_shape(&self) -> (usize, usize) {
         (1, 16)
+    }
+
+    fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
+        expect_block_sizes(
+            variables,
+            &[SE3::REP_SIZE, 4, SE3::REP_SIZE],
+            "DepthFactor expects [SE3 T_WS, homogeneous point (4D), SE3 T_SC]",
+        )
     }
 }
 

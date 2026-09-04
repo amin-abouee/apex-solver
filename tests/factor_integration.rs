@@ -1132,7 +1132,9 @@ fn bearing_range_and_gps_velocity_graph() {
     let pose_true = Trajectory::pose(0.2);
     let landmark = Vector3::new(3.0, 1.0, 2.0);
     let delta = landmark - pose_true.translation();
-    let bearing = pose_true.rotation_so3().rotation_matrix() * (delta / delta.norm());
+    // Body-frame bearing: the pose is body-in-world, so rotate the world
+    // offset *into* the body with Rᵀ.
+    let bearing = pose_true.rotation_so3().rotation_matrix().transpose() * (delta / delta.norm());
 
     let mut problem = Problem::new(JacobianMode::Sparse);
     // Pose held at truth — bearing+range from a fixed pose determine the
