@@ -592,12 +592,13 @@ impl Tangent<SGal3> for SGal3Tangent {
 
     /// Right Jacobian for SGal(3).
     fn right_jacobian(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
-        // Jr(ξ)ₖ = ∂/∂ε [ Log(Exp(ξ) ∘ Exp(ε·eₖ)) ] at ε = 0, measured by
-        // central differences through the crate's own compose/log. The old
-        // hand-written block tables were derived for the uncoupled
-        // exponential and do not match the corrected map; the
-        // derivative-by-definition form is exact against the group
-        // operations by construction.
+        // Jr(ξ) is defined by  Exp(ξ + δ) ≈ Exp(ξ) ∘ Exp(Jr(ξ)·δ), i.e.
+        //
+        //     Jr(ξ)·δ = Log( Exp(ξ)⁻¹ ∘ Exp(ξ + δ) )
+        //
+        // evaluated here by central differences through the crate's own
+        // compose/log, so it tracks the group law by construction rather than
+        // a hand-written block table derived for the uncoupled exponential.
         const EPS: f64 = 1e-6;
         let mut jac = Matrix10::zeros();
         for k in 0..10 {
@@ -608,9 +609,9 @@ impl Tangent<SGal3> for SGal3Tangent {
             minus_k[k] -= EPS;
             let tan_p = SGal3Tangent::from_slice(&plus_k);
             let tan_m = SGal3Tangent::from_slice(&minus_k);
-            let element = self.exp(None);
-            let rp = element.compose(&tan_p.exp(None), None, None).log(None);
-            let rm = element.compose(&tan_m.exp(None), None, None).log(None);
+            let element_inv = self.exp(None).inverse(None);
+            let rp = element_inv.compose(&tan_p.exp(None), None, None).log(None);
+            let rm = element_inv.compose(&tan_m.exp(None), None, None).log(None);
             for r in 0..10 {
                 jac[(r, k)] = (rp.as_slice()[r] - rm.as_slice()[r]) / (2.0 * EPS);
             }
@@ -620,8 +621,11 @@ impl Tangent<SGal3> for SGal3Tangent {
 
     /// Left Jacobian for SGal(3).
     fn left_jacobian(&self) -> <SGal3 as LieGroup>::JacobianMatrix {
-        // Jl(ξ)ₖ = ∂/∂ε [ Log(Exp(−ε·eₖ) ∘ Exp(ξ)) ] at ε = 0, by central
-        // differences (same rationale as `right_jacobian`).
+        // Jl(ξ) is defined by  Exp(ξ + δ) ≈ Exp(Jl(ξ)·δ) ∘ Exp(ξ), i.e.
+        //
+        //     Jl(ξ)·δ = Log( Exp(ξ + δ) ∘ Exp(ξ)⁻¹ )
+        //
+        // by central differences (same rationale as `right_jacobian`).
         const EPS: f64 = 1e-6;
         let mut jac = Matrix10::zeros();
         for k in 0..10 {
@@ -632,17 +636,9 @@ impl Tangent<SGal3> for SGal3Tangent {
             minus_k[k] -= EPS;
             let tan_p = SGal3Tangent::from_slice(&plus_k);
             let tan_m = SGal3Tangent::from_slice(&minus_k);
-            let element = self.exp(None);
-            let lp = tan_p
-                .exp(None)
-                .inverse(None)
-                .compose(&element, None, None)
-                .log(None);
-            let lm = tan_m
-                .exp(None)
-                .inverse(None)
-                .compose(&element, None, None)
-                .log(None);
+            let element_inv = self.exp(None).inverse(None);
+            let lp = tan_p.exp(None).compose(&element_inv, None, None).log(None);
+            let lm = tan_m.exp(None).compose(&element_inv, None, None).log(None);
             for r in 0..10 {
                 jac[(r, k)] = (lp.as_slice()[r] - lm.as_slice()[r]) / (2.0 * EPS);
             }

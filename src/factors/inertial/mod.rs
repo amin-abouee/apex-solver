@@ -28,11 +28,14 @@
 //! |---|---|---|
 //! | SE_2(3), split blocks | [`ImuFactor`] (9D) | [`CombinedImuFactor`] (15D) |
 //! | SE_2(3), native state | [`Se23ImuFactor`] (9D) | [`CombinedSe23ImuFactor`] (15D) |
-//! | SGal(3), split blocks | [`Sgal3ImuFactor`] (10D) | [`Sgal3CombinedImuFactor`] (16D) |
+//! | SGal(3), split blocks | [`Sgal3ImuFactor`] (9D) | [`Sgal3CombinedImuFactor`] (15D) |
+//! | SGal(3), native state | [`Sgal3StateImuFactor`] (10D) | [`Sgal3CombinedStateImuFactor`] (16D) |
 //!
-//! SGal(3) carries a time coordinate, so its kinematic residual is 10D rather
-//! than 9D — see [`imu_sgal3_factors`] for what that extra row means and how it
-//! is weighted.
+//! SGal(3) additionally carries a **time** coordinate. It only becomes a
+//! residual row where it is estimated: the native-`SGal3` factors gain a
+//! `(t_j − t_i) − Δt` row (hence 10D/16D), while the split-block factors have
+//! no time variable and would carry an identically-zero row, so they drop it.
+//! See [`sgal3`] for the details.
 //!
 //! An initial bias prior (an `EuclideanPriorFactor` on R⁶) is required for
 //! observability in every configuration.
@@ -47,15 +50,15 @@
 //! ```
 
 pub mod bias;
-pub mod combined_imu_sgal3_factors;
-pub mod imu_sgal3_factors;
 pub mod preintegration;
 pub mod se23;
+pub mod sgal3;
 pub mod types;
 
 pub use bias::{bias_random_walk, bias_random_walk_noise};
-pub use combined_imu_sgal3_factors::Sgal3CombinedImuFactor;
-pub use imu_sgal3_factors::Sgal3ImuFactor;
 pub use preintegration::ImuPreintegration;
 pub use se23::{CombinedImuFactor, CombinedSe23ImuFactor, ImuFactor, Se23ImuFactor};
+pub use sgal3::{
+    Sgal3CombinedImuFactor, Sgal3CombinedStateImuFactor, Sgal3ImuFactor, Sgal3StateImuFactor,
+};
 pub use types::{ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt};

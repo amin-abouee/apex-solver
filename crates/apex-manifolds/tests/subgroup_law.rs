@@ -170,9 +170,11 @@ fn sgal3_exp_jacobian_matches_fd_with_coupling() {
         xi[9],
     );
 
-    // Analytic Jacobian: for the identity Exp(ξ+δ) ≈ Exp(ξ)∘Exp(Jr⁻¹(ξ)·δ),
-    // the composition check below must use the INVERSE right Jacobian.
-    let jac = tangent.right_jacobian_inv();
+    // The right Jacobian is *defined* by Exp(ξ+δ) ≈ Exp(ξ)∘Exp(Jr(ξ)·δ), so the
+    // composition check below uses Jr itself. (This previously used Jr⁻¹, which
+    // only held because `right_jacobian` was computing the wrong quantity —
+    // inverting one error cancelled the other.)
+    let jac = tangent.right_jacobian();
 
     let base = tangent.exp(None);
     for k in 0..10 {
@@ -189,7 +191,7 @@ fn sgal3_exp_jacobian_matches_fd_with_coupling() {
         );
         let _ = step_m;
         let ep = tan_p.exp(None);
-        // First-order identity: Exp(ξ+δξ) ≈ Exp(ξ) ∘ Exp(Jr⁻¹(ξ)·δξ).
+        // First-order identity: Exp(ξ+δξ) ≈ Exp(ξ) ∘ Exp(Jr(ξ)·δξ).
         let col = jac.column(k);
         let expected_ep = base.compose(
             &SGal3Tangent::new(
