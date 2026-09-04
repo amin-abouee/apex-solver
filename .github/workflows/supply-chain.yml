@@ -42,6 +42,11 @@ jobs:
   semver:
     name: cargo-semver-checks
     runs-on: ubuntu-22.04
+    # Advisory only: main intentionally carries breaking changes under
+    # [Unreleased] (see CHANGELOG.md), so a crates.io baseline comparison
+    # cannot pass until the next major/minor release. The log output remains
+    # the release-time checklist; release-plz owns the actual version bump.
+    continue-on-error: true
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
