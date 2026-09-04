@@ -53,6 +53,7 @@ pub struct ImuPreintegration {
     // Derived
     p_delta: SMatrix<f64, 15, 15>,
     square_root_information: SMatrix<f64, 15, 15>,
+    kinematic_square_root_information: SMatrix<f64, 9, 9>,
 
     // Linearization point
     speed_and_biases_ref: SpeedAndBias,
@@ -84,6 +85,7 @@ impl ImuPreintegration {
             dp_dsigma: [SMatrix::zeros(); 4],
             p_delta: SMatrix::zeros(),
             square_root_information: SMatrix::zeros(),
+            kinematic_square_root_information: SMatrix::zeros(),
             speed_and_biases_ref: *speed_and_biases,
         };
         preint.redo_preintegration(speed_and_biases);
@@ -346,6 +348,13 @@ impl ImuPreintegration {
         self.p_delta = 0.5 * (self.p_delta + self.p_delta.transpose());
         self.square_root_information = symm_sqrt_inverse(&self.p_delta);
 
+        // Kinematic-only weighting for the non-combined factors: measurement
+        // noise alone, with the two random-walk terms deliberately excluded.
+        let p_measurement = sg2 * self.dp_dsigma[0] + sa2 * self.dp_dsigma[1];
+        let kinematic = p_measurement.fixed_view::<9, 9>(0, 0).into_owned();
+        let kinematic = 0.5 * (kinematic + kinematic.transpose());
+        self.kinematic_square_root_information = symm_sqrt_inverse(&kinematic);
+
         num_steps
     }
 
@@ -524,7 +533,25 @@ impl ImuPreintegration {
         &self.dp_db_g
     }
 
+    /// 9×9 square-root information for the **kinematic** residual `[p, q, v]`,
+    /// used by the non-combined factors.
+    ///
+    /// Built from measurement noise only. The gyro/accel random-walk terms that
+    /// [`square_root_information`](Self::square_root_information) includes are
+    /// deliberately left out: the non-combined factors model bias evolution
+    /// with an explicit bias edge
+    /// ([`bias_random_walk`](super::bias::bias_random_walk)), so folding that
+    /// uncertainty into the kinematic weighting too would count it twice. This
+    /// mirrors GTSAM's split between `PreintegratedImuMeasurements` (9×9) and
+    /// `PreintegratedCombinedMeasurements` (15×15).
+    pub fn kinematic_square_root_information(&self) -> &SMatrix<f64, 9, 9> {
+        &self.kinematic_square_root_information
+    }
+
     /// 15×15 square-root information matrix (Cholesky of P_delta⁻¹).
+    ///
+    /// Includes the bias random walk, matching the combined factors' 15D
+    /// residual.
     pub fn square_root_information(&self) -> &SMatrix<f64, 15, 15> {
         &self.square_root_information
     }
