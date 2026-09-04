@@ -1,9 +1,9 @@
 //! ROS1 bag v2.0 reader.
 //!
-//! The reader memory-maps the index-data records at the tail of the bag so
-//! that messages can be iterated in timestamp order with optional
-//! topic/time-range filtering, without re-parsing every chunk.  Chunks are
-//! decompressed lazily on demand.
+//! The reader parses the index-data records at the tail of the bag so that
+//! messages can be iterated in timestamp order with optional topic/time-range
+//! filtering, without re-parsing every chunk.  Chunks are decompressed lazily
+//! on demand and only the few most recently used payloads are retained.
 
 use crate::rosbag::error::{BagError, Result};
 use crate::rosbag::types::{
@@ -28,6 +28,13 @@ struct IndexEntry {
     offset: u32,
 }
 
+/// Decompressed chunk payloads retained by [`Ros1Reader`].
+///
+/// Two is enough to absorb the alternation that interleaved topics can produce
+/// while iterating in timestamp order, and bounds the reader's memory at a
+/// couple of chunks rather than the whole inflated bag.
+const CHUNK_CACHE_CAPACITY: usize = 2;
+
 /// Reader for ROS1 bag v2.0 files.
 pub struct Ros1Reader {
     path: PathBuf,
@@ -37,8 +44,13 @@ pub struct Ros1Reader {
     connections: Vec<Connection>,
     topics: HashMap<String, TopicInfo>,
     index: Vec<IndexEntry>,
-    /// Cached decompressed chunk payload, keyed by `chunk_pos`.
-    chunk_cache: HashMap<u64, Vec<u8>>,
+    /// Most-recently-used decompressed chunk payloads, as `(chunk_pos, data)`.
+    ///
+    /// Bounded to [`CHUNK_CACHE_CAPACITY`]: index iteration is timestamp
+    /// ordered, so consecutive reads land in the same chunk and a tiny cache
+    /// captures all of the available locality. An unbounded map would hold the
+    /// entire *decompressed* bag — gigabytes — for the reader's lifetime.
+    chunk_cache: Vec<(u64, Vec<u8>)>,
 
     start_time_ns: u64,
     end_time_ns: u64,
@@ -58,7 +70,7 @@ impl Ros1Reader {
             connections: Vec::new(),
             topics: HashMap::new(),
             index: Vec::new(),
-            chunk_cache: HashMap::new(),
+            chunk_cache: Vec::new(),
             start_time_ns: u64::MAX,
             end_time_ns: 0,
         })
@@ -356,11 +368,24 @@ impl Ros1Reader {
     /// Decompress the chunk at `chunk_pos` (cached) and return the payload of
     /// the message-data record starting at `offset`.
     fn read_message_payload(&mut self, chunk_pos: u64, offset: u32) -> Result<Vec<u8>> {
-        if !self.chunk_cache.contains_key(&chunk_pos) {
+        // Move a hit to the back (most recent); on a miss, inflate and evict
+        // the least recently used entry once at capacity.
+        if let Some(idx) = self
+            .chunk_cache
+            .iter()
+            .position(|(pos, _)| *pos == chunk_pos)
+        {
+            let entry = self.chunk_cache.remove(idx);
+            self.chunk_cache.push(entry);
+        } else {
             let inflated = self.inflate_chunk(chunk_pos)?;
-            self.chunk_cache.insert(chunk_pos, inflated);
+            if self.chunk_cache.len() >= CHUNK_CACHE_CAPACITY {
+                self.chunk_cache.remove(0);
+            }
+            self.chunk_cache.push((chunk_pos, inflated));
         }
-        let buf = &self.chunk_cache[&chunk_pos];
+        // The requested chunk is now the most recent entry.
+        let buf = &self.chunk_cache[self.chunk_cache.len() - 1].1;
         if offset as usize >= buf.len() {
             return Err(BagError::Ros1IndexCorrupt {
                 reason: format!("message offset {offset} out of bounds in chunk at {chunk_pos}"),
@@ -418,6 +443,29 @@ impl Ros1Reader {
         }
         Ok(inflated)
     }
+
+    /// Release the file handle and cached chunk payloads.
+    ///
+    /// Idempotent, and mirrored by [`Drop`], matching `Ros1Writer` and the
+    /// ros2 `Reader`/`Writer`. The OS would reclaim the descriptor on drop
+    /// anyway; this also drops the decompressed chunks and leaves `is_open`
+    /// reporting the truth.
+    pub fn close(&mut self) -> Result<()> {
+        if !self.is_open {
+            return Ok(());
+        }
+        self.file = None;
+        self.chunk_cache.clear();
+        self.chunk_cache.shrink_to_fit();
+        self.is_open = false;
+        Ok(())
+    }
+}
+
+impl Drop for Ros1Reader {
+    fn drop(&mut self) {
+        let _ = self.close();
+    }
 }
 
 impl IndexEntry {
@@ -461,6 +509,63 @@ fn parse_connection_record(header: &RecordHeader, data: &[u8]) -> Result<Connect
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// The chunk cache must stay bounded while iterating a multi-chunk bag.
+    ///
+    /// Regression for the unbounded `HashMap<u64, Vec<u8>>` that retained every
+    /// decompressed chunk for the reader's lifetime — the whole inflated bag.
+    #[test]
+    fn chunk_cache_stays_bounded_across_many_chunks() -> Result<()> {
+        use crate::rosbag::ros1::format::Ros1Compression;
+        use crate::rosbag::ros1::writer::Ros1Writer;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many_chunks.bag");
+
+        // A tiny chunk threshold forces many chunks for a small payload.
+        let mut w = Ros1Writer::new(&path)?;
+        w.set_compression(Ros1Compression::Lz4)?;
+        w.set_chunk_threshold(1024)?;
+        w.open()?;
+        let conn = w.add_connection("/t", "std_msgs/String", "hash", "", false)?;
+        let payload = vec![7u8; 512];
+        for i in 0..200u64 {
+            w.write(&conn, 1_000 + i, &payload)?;
+        }
+        w.close()?;
+
+        let mut r = Ros1Reader::new(&path)?;
+        r.open()?;
+        let msgs = r.raw_messages()?;
+        assert_eq!(msgs.len(), 200, "all messages should be read back");
+
+        // Guard against the test going vacuous: it only proves anything if the
+        // read actually spanned more chunks than the cache can hold.
+        let distinct_chunks = r
+            .index
+            .iter()
+            .map(|e| e.chunk_pos)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        assert!(
+            distinct_chunks > CHUNK_CACHE_CAPACITY,
+            "bag has only {distinct_chunks} chunks; test cannot detect an unbounded cache"
+        );
+
+        assert!(
+            r.chunk_cache.len() <= CHUNK_CACHE_CAPACITY,
+            "chunk cache grew to {} entries, cap is {CHUNK_CACHE_CAPACITY}",
+            r.chunk_cache.len()
+        );
+
+        r.close()?;
+        assert!(
+            r.chunk_cache.is_empty(),
+            "close() should drop cached chunks"
+        );
+        assert!(!r.is_open);
+        Ok(())
+    }
 
     #[test]
     fn open_missing_file_errors() {

@@ -35,6 +35,7 @@ use thiserror::Error;
 use crate::core::problem::Problem;
 use crate::core::variable::ManifoldVariable;
 use crate::core::{FactorKey, VarKey};
+use crate::error::ErrorLogging;
 use crate::{
     core::{corrector::Corrector, residual_block::ResidualBlock},
     linearizer::cpu::{DenseMode, LinearizationMode, SparseMode},
@@ -143,6 +144,8 @@ pub struct AssemblyWorkspace {
     pub(crate) jac_offsets: Vec<(usize, usize)>,
     /// Reusable global residual buffer.
     pub(crate) residual_buf: Vec<f64>,
+    /// Reusable CSC value array the Jacobian blocks scatter into.
+    pub(crate) jacobian_values: Vec<f64>,
 }
 
 impl AssemblyWorkspace {
@@ -168,6 +171,9 @@ impl AssemblyWorkspace {
             jac_arena: vec![0.0; total_jac_len],
             jac_offsets,
             residual_buf: vec![0.0; problem.total_residual_dimension],
+            // Sized on first use: nnz comes from the symbolic structure, which
+            // the workspace does not carry.
+            jacobian_values: Vec::new(),
         }
     }
 
@@ -180,6 +186,7 @@ impl AssemblyWorkspace {
             jac_arena: Vec::new(),
             jac_offsets: Vec::new(),
             residual_buf: Vec::new(),
+            jacobian_values: Vec::new(),
         }
     }
 }
@@ -203,12 +210,21 @@ pub(crate) fn compute_block_into(
     let mut count_variable_local_idx: usize = 0;
 
     for &var_key in &residual_block.variable_keys {
-        if let Some(variable) = variables.get(var_key) {
-            param_slices.push(variable.as_param_slice());
-            let var_size = variable.dof();
-            variable_local_idx_size_list.push((count_variable_local_idx, var_size));
-            count_variable_local_idx += var_size;
-        }
+        // Skipping an unresolved key would silently shorten `param_slices`, and
+        // the factor then indexes past its end deep inside `linearize`. The
+        // scatter phase already reports this condition as an error; report it
+        // here too rather than turning it into a panic downstream.
+        let variable = variables.get(var_key).ok_or_else(|| {
+            LinearizerError::Variable(format!(
+                "residual block references variable key {var_key:?}, which is not in the \
+                 variable map"
+            ))
+            .log()
+        })?;
+        param_slices.push(variable.as_param_slice());
+        let var_size = variable.dof();
+        variable_local_idx_size_list.push((count_variable_local_idx, var_size));
+        count_variable_local_idx += var_size;
     }
 
     let (rows, cols) = residual_block.factor.jacobian_shape();
@@ -506,6 +522,39 @@ mod tests {
     // -------------------------------------------------------------------------
     // compute_block_into
     // -------------------------------------------------------------------------
+
+    /// An unresolved variable key must surface as a typed error.
+    ///
+    /// Skipping it silently shortens `param_slices`, and the factor then indexes
+    /// past its end inside `linearize` — a panic deep in parallel assembly
+    /// instead of an error at the boundary. `Problem` rejects unknown keys at
+    /// registration today, so this is defence for the paths that will remove
+    /// variables (sliding-window marginalization).
+    #[test]
+    fn test_compute_block_into_rejects_missing_variable() -> TestResult {
+        let (problem, _k) = one_var_problem();
+        let block = problem
+            .residual_blocks()
+            .values()
+            .next()
+            .ok_or("no blocks")?;
+
+        // An empty variable map cannot resolve the block's key.
+        let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let mut residual_slice = vec![0.0f64; 1];
+        let mut jac_buf = vec![0.0f64; 1];
+
+        let Err(err) =
+            compute_block_into(block, &variables, &mut residual_slice, Some(&mut jac_buf))
+        else {
+            panic!("missing variable key must be an error, not a silent skip");
+        };
+        assert!(
+            matches!(err, LinearizerError::Variable(_)),
+            "expected a Variable error, got {err:?}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_compute_block_into_residual_value() -> TestResult {

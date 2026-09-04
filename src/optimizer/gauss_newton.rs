@@ -118,8 +118,10 @@ use std::time;
 use tracing::debug;
 
 use crate::linalg::{
-    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, JacobianMode,
-    LinearSolver, LinearSolverType, SparseCholeskySolver, SparseMode, SparseQRSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver,
+    IterativeSchurSolver, JacobianMode, LinearSolver, LinearSolverType, SchurPreconditioner,
+    SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver, SparseSchurComplementSolver,
+    StructureAware,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
 
@@ -229,6 +231,41 @@ pub struct GaussNewtonConfig {
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
 
+    /// Schur complement solver variant (for bundle adjustment problems)
+    ///
+    /// When using LinearSolverType::SparseSchurComplement, this determines which
+    /// variant of the Schur complement method to use:
+    /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
+    ///   memory is O(kept_dof²).
+    /// - [`SchurVariant::ChunkedSparse`]: form S straight from `J`, never
+    ///   materializing `JᵀJ`. Same algebra, far less memory on large problems.
+    /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
+    ///   linear, which is what makes very large camera sets tractable.
+    /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
+    ///
+    /// Default: `Sparse`
+    pub schur_variant: SchurVariant,
+    /// Preconditioner for the PCG used by the iterative Schur variants.
+    ///
+    /// - [`SchurPreconditioner::None`]: unconditioned CG.
+    /// - [`SchurPreconditioner::BlockDiagonal`]: block diagonal of `H_kk`.
+    /// - [`SchurPreconditioner::SchurJacobi`]: block diagonal of `S` itself —
+    ///   Ceres's `SCHUR_JACOBI`, and usually the best convergence.
+    ///
+    /// Ignored by the direct variants, which factorize instead of iterating.
+    ///
+    /// Default: `SchurJacobi`
+    pub schur_preconditioner: SchurPreconditioner,
+    /// Maximum PCG iterations per linear solve, for the iterative variants.
+    ///
+    /// Default: 200 (Ceres's default)
+    pub schur_cg_max_iterations: usize,
+    /// Relative residual tolerance ending a PCG solve, for the iterative
+    /// variants.
+    ///
+    /// Default: 1e-6
+    pub schur_cg_tolerance: f64,
+
     /// Deprecated: never read. Visualization goes through the observer pattern.
     ///
     /// Setting this has no effect. Attach an observer to the solver instead:
@@ -264,6 +301,10 @@ impl Default for GaussNewtonConfig {
             max_condition_number: None,
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
+            schur_variant: SchurVariant::default(),
+            schur_preconditioner: SchurPreconditioner::default(),
+            schur_cg_max_iterations: 200,
+            schur_cg_tolerance: 1e-6,
             #[cfg(feature = "visualization")]
             #[allow(deprecated)]
             enable_visualization: false,
@@ -371,6 +412,28 @@ impl GaussNewtonConfig {
         self
     }
 
+    /// Set Schur complement solver variant
+    ///
+    /// Takes effect when `linear_solver_type` is
+    /// [`LinearSolverType::SparseSchurComplement`].
+    pub fn with_schur_variant(mut self, variant: SchurVariant) -> Self {
+        self.schur_variant = variant;
+        self
+    }
+
+    /// Set Schur complement preconditioner for the iterative variants
+    pub fn with_schur_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
+        self.schur_preconditioner = preconditioner;
+        self
+    }
+
+    /// PCG budget for the iterative Schur variants.
+    pub fn with_schur_cg_params(mut self, max_iterations: usize, tolerance: f64) -> Self {
+        self.schur_cg_max_iterations = max_iterations;
+        self.schur_cg_tolerance = tolerance;
+        self
+    }
+
     /// Deprecated: no-op. See [`enable_visualization`](Self::enable_visualization).
     #[cfg(feature = "visualization")]
     #[deprecated(
@@ -386,8 +449,12 @@ impl GaussNewtonConfig {
     /// Print configuration parameters (info level logging)
     pub fn print_configuration(&self) {
         debug!(
-            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
+            "\nConfiguration:\n  Solver:        Gauss-Newton\n  Linear solver: {:?}\n  Schur variant: {:?}\n  Schur preconditioner: {:?}\n  Schur CG budget:     {} iters @ {:.2e}\n  Convergence Criteria:\n  Max iterations:      {}\n  Cost tolerance:      {:.2e}\n  Parameter tolerance: {:.2e}\n  Gradient tolerance:  {:.2e}\n  Timeout:             {:?}\n  Numerical Settings:\n  Jacobi scaling:      {}\n  Compute covariances: {}",
             self.linear_solver_type,
+            self.schur_variant,
+            self.schur_preconditioner,
+            self.schur_cg_max_iterations,
+            self.schur_cg_tolerance,
             self.max_iterations,
             self.cost_tolerance,
             self.parameter_tolerance,
@@ -523,12 +590,11 @@ impl GaussNewton {
         // default of 1e-10 it is numerically invisible next to any real
         // curvature. `min_diagonal = 0` selects the un-regularized normal
         // equations, i.e. textbook Gauss-Newton.
-        let residuals_owned = residuals.as_ref().to_owned();
         let scaled_step = if self.config.min_diagonal > 0.0 {
             let damping = Damping::identity(self.config.min_diagonal);
-            linear_solver.solve_augmented_equation(&residuals_owned, scaled_jacobian, &damping)
+            linear_solver.solve_augmented_equation(residuals, scaled_jacobian, &damping)
         } else {
-            linear_solver.solve_normal_equation(&residuals_owned, scaled_jacobian)
+            linear_solver.solve_normal_equation(residuals, scaled_jacobian)
         }
         .map_err(|e| {
             optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
@@ -571,9 +637,13 @@ impl GaussNewton {
             &state.sorted_vars,
         );
 
-        // Compute new cost (residual only, no Jacobian needed for step evaluation)
-        let (_new_residual, new_cost) =
-            problem.compute_residual_and_cost_sparse(&state.variables)?;
+        // Compute new cost (residual only, no Jacobian needed for step evaluation).
+        // Reuses the solve workspace instead of allocating one per iteration,
+        // like Levenberg-Marquardt does.
+        let (_new_residual, new_cost) = problem.compute_residual_and_cost_sparse_with_workspace(
+            &state.variables,
+            &mut state.workspace,
+        )?;
 
         // Compute cost reduction
         let cost_reduction = state.current_cost - new_cost;
@@ -588,18 +658,21 @@ impl GaussNewton {
     }
 
     /// Run optimization using the specified assembly mode and linear solver.
+    ///
+    /// `state` is built once by [`Self::optimize`] and handed over here —
+    /// see `LevenbergMarquardt::optimize_with_mode` for why: the Schur path
+    /// needs the variable index map to size its block structure, and rebuilding
+    /// it here would repeat the symbolic construction and cost evaluation.
     fn optimize_with_mode<M: AssemblyBackend>(
         &mut self,
         problem: &mut problem::Problem,
         linear_solver: &mut dyn LinearSolver<M>,
+        mut state: optimizer::InitializedState,
     ) -> optimizer::OptimizeResult {
         let start_time = time::Instant::now();
         let mut iteration = 0;
         let mut cost_evaluations = 1; // Initial cost evaluation
         let mut jacobian_evaluations = 0;
-
-        // Initialize optimization state
-        let mut state = optimizer::initialize_optimization_state(problem)?;
 
         // Initialize summary tracking variables
         let mut max_gradient_norm: f64 = 0.0;
@@ -787,18 +860,35 @@ impl GaussNewton {
     /// Run optimization, automatically selecting sparse or dense path based on config.
     ///
     /// Only solver/mode combinations that match are dispatched; anything else
-    /// returns an error rather than silently substituting a different solver
-    /// (requesting Schur under Gauss-Newton previously ran plain Cholesky).
+    /// returns an error rather than silently substituting a different solver.
+    /// `SparseSchurComplement` groups residual rows by eliminated variable and
+    /// initializes the Schur block structure from the shared initial state,
+    /// exactly like Levenberg-Marquardt.
     pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
+        // Chunk-wise elimination sweeps rows in chunk order, so each eliminated
+        // variable's rows must be adjacent. Regroup before any structure is
+        // built from the current layout — row order is a labelling, so this
+        // leaves the problem and its cost unchanged.
+        if matches!(
+            self.config.linear_solver_type,
+            LinearSolverType::SparseSchurComplement
+        ) {
+            problem.group_rows_for_elimination();
+        }
+
+        // Built once here and moved into the chosen arm (see
+        // `optimize_with_mode`).
+        let state = optimizer::initialize_optimization_state(problem)?;
+
         match problem.jacobian_mode {
             JacobianMode::Dense => match self.config.linear_solver_type {
                 LinearSolverType::DenseQR => {
                     let mut solver = DenseQRSolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::DenseCholesky => {
                     let mut solver = DenseCholeskySolver::new();
-                    self.optimize_with_mode::<DenseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
                     "Gauss-Newton in dense Jacobian mode supports DenseCholesky and DenseQR only; \
@@ -809,15 +899,62 @@ impl GaussNewton {
             JacobianMode::Sparse => match self.config.linear_solver_type {
                 linalg::LinearSolverType::SparseQR => {
                     let mut solver = SparseQRSolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 linalg::LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
-                    self.optimize_with_mode::<SparseMode>(problem, &mut solver)
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                }
+                LinearSolverType::SparseSchurComplement => {
+                    // `Iterative` is the matrix-free path: it never forms S, so
+                    // it is a different solver type rather than a mode of the
+                    // explicit one — dispatched here, mirroring
+                    // Levenberg-Marquardt, which keeps the O(kept_dof²) buffer
+                    // out of the picture entirely.
+                    let init = |e: linalg::LinAlgError| {
+                        optimizer::OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    match self.config.schur_variant {
+                        SchurVariant::Iterative => {
+                            let mut solver = IterativeSchurSolver::with_config(
+                                self.config.schur_cg_max_iterations,
+                                self.config.schur_cg_tolerance,
+                                self.config.schur_preconditioner,
+                            );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                        variant => {
+                            let mut solver = SparseSchurComplementSolver::new()
+                                .with_variant(variant)
+                                .with_preconditioner(self.config.schur_preconditioner)
+                                .with_cg_params(
+                                    self.config.schur_cg_max_iterations,
+                                    self.config.schur_cg_tolerance,
+                                );
+                            solver
+                                .initialize_structure(
+                                    &state.variables,
+                                    &state.variable_index_map,
+                                    &problem.schur_landmark_keys,
+                                )
+                                .map_err(init)?;
+                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                        }
+                    }
                 }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Gauss-Newton in sparse Jacobian mode supports SparseCholesky and SparseQR \
-                     only; requested {other}. Use Levenberg-Marquardt for the Schur complement."
+                    "Gauss-Newton in sparse Jacobian mode supports SparseCholesky, SparseQR and \
+                     SparseSchurComplement only; requested {other}"
                 ))
                 .into()),
             },

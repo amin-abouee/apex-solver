@@ -21,6 +21,8 @@
 //! every offset stated. It encodes the standard rather than an implementation.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Test diagnostics below print under `--nocapture` only.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::path::Path;
 

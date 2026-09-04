@@ -1850,7 +1850,10 @@ impl OptObserver for RerunObserver {
 
         // Clear transient data for next iteration
         drop(metrics);
-        // Note: We don't clear the RefCell here to allow access from multiple threads
+        // Kept populated so later notifications can read it back. Note this is a
+        // `RefCell`, which is single-threaded by construction: notifications
+        // arrive sequentially from the optimizer thread. Concurrent `on_step`
+        // calls would panic on the runtime borrow check, not share safely.
     }
 
     /// Called when optimization completes.

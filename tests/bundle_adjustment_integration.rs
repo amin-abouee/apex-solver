@@ -71,7 +71,7 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
         let point_vec =
             DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
         let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
-        problem.mark_as_schur_landmark(pt_key);
+        problem.mark_for_elimination(pt_key);
         pt_keys.push(pt_key);
     }
 

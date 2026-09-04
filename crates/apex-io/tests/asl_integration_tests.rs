@@ -1,6 +1,8 @@
 //! Integration tests against real EuRoC/ASL data from the apex-calibration project.
 //! Tests are skipped when the dataset is not present on the current machine.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Test diagnostics below print under `--nocapture` only.
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use apex_io::AslError;
 use apex_io::asl::{AslDataset, AslReader};

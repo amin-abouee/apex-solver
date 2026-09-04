@@ -50,7 +50,7 @@ fn initial_cost(
 ) -> Result<f64, Box<dyn std::error::Error>> {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let x = problem.add_variable(ManifoldType::RN, dvector![1.0, 2.0, 3.0]);
-    let loss_boxed = loss.map(|l| Box::new(l) as Box<dyn LossFunction + Send>);
+    let loss_boxed = loss.map(|l| Box::new(l) as Box<dyn LossFunction + Send + Sync>);
     problem.add_residual_block_with_noise(
         &[x],
         Box::new(Linear3 {
@@ -120,7 +120,7 @@ fn null_noise_is_bit_identical_to_unweighted_path() -> TestResult {
     let build = |use_with_noise: bool| {
         let mut problem = Problem::new(JacobianMode::Sparse);
         let x = problem.add_variable(ManifoldType::RN, dvector![1.0, 2.0, 3.0]);
-        let factor: Box<dyn Factor + Send> = Box::new(Linear3 {
+        let factor: Box<dyn Factor + Send + Sync> = Box::new(Linear3 {
             target: DVector::from_vec(vec![0.5, -1.0, 2.5]),
         });
         if use_with_noise {
@@ -282,6 +282,71 @@ fn non_positive_information_is_rejected() -> TestResult {
             assert!(
                 evals.iter().all(|&l| l >= -1e-12),
                 "clamped SᵀS must be PSD: {evals}"
+            );
+        }
+        _ => return Err("expected dense model".into()),
+    }
+    Ok(())
+}
+
+/// `from_information_reporting` must distinguish a rank-deficient Ω (an
+/// unobserved DOF, legitimate) from a materially indefinite one (bad data),
+/// because clamping the second silently deletes constraints. `cubicle.g2o`
+/// carries the second on ~30% of its edges.
+#[test]
+fn information_repair_separates_rank_deficiency_from_indefiniteness() -> TestResult {
+    // Exactly PSD: nothing repaired, nothing material.
+    let (_, pd) = NoiseModel::from_information_reporting(DMatrix::from_diagonal(
+        &nalgebra::DVector::from_column_slice(&[4.0, 9.0]),
+    ))?;
+    assert_eq!(pd.clamped_directions, 0);
+    assert!(!pd.is_material(), "a PD Ω is not a material repair");
+    assert_eq!(pd.relative_indefiniteness(), 0.0);
+
+    // Rank-deficient: a zero eigenvalue is legitimate, not material.
+    let (_, deficient) = NoiseModel::from_information_reporting(DMatrix::from_diagonal(
+        &nalgebra::DVector::from_column_slice(&[4.0, 0.0]),
+    ))?;
+    assert_eq!(deficient.clamped_directions, 0, "zero is not negative");
+    assert!(
+        !deficient.is_material(),
+        "rank deficiency must not be material"
+    );
+
+    // Materially indefinite: real information is discarded.
+    let (_, indefinite) = NoiseModel::from_information_reporting(DMatrix::from_diagonal(
+        &nalgebra::DVector::from_column_slice(&[100.0, -25.0]),
+    ))?;
+    assert_eq!(indefinite.clamped_directions, 1);
+    assert!(
+        indefinite.is_material(),
+        "a -25 eigenvalue must be material"
+    );
+    assert!((indefinite.relative_indefiniteness() - 0.25).abs() < 1e-12);
+
+    // Floating-point noise on a rank-deficient direction must NOT be material,
+    // otherwise every real g2o graph would be flagged.
+    let (_, fp_noise) = NoiseModel::from_information_reporting(DMatrix::from_diagonal(
+        &nalgebra::DVector::from_column_slice(&[1.0e6, -1.0e-6]),
+    ))?;
+    assert!(
+        !fp_noise.is_material(),
+        "fp-noise negative must not be flagged: rel = {}",
+        fp_noise.relative_indefiniteness()
+    );
+
+    // The repaired model is still PSD in every case.
+    let (model, _) = NoiseModel::from_information_reporting(DMatrix::from_column_slice(
+        2,
+        2,
+        &[1.0, 0.0, 0.0, -4.0],
+    ))?;
+    match model {
+        NoiseModel::Dense(m) => {
+            let evals = (m.clone() * m).symmetric_eigenvalues();
+            assert!(
+                evals.iter().all(|&l| l >= -1e-12),
+                "SᵀS must be PSD: {evals}"
             );
         }
         _ => return Err("expected dense model".into()),

@@ -150,8 +150,11 @@ impl Corrector {
         let rho_1 = rho[1]; // ρ'(s)
         let rho_2 = rho[2]; // ρ''(s)
 
-        // Compute scaling factors
-        let sqrt_rho1 = rho_1.sqrt(); // √(ρ'(s))
+        // Compute scaling factors. The square root is clamped at zero: kernels
+        // whose effective weight goes negative past their threshold (DCS past
+        // s = Φ) fully suppress the block instead of producing NaN — the same
+        // outcome as Tukey's flat region, which yields sqrt(0) = 0.
+        let sqrt_rho1 = rho_1.max(0.0).sqrt(); // √(max(ρ'(s), 0))
 
         // Handle special cases (common case: rho[2] <= 0)
         // This occurs when the loss function has no curvature correction needed
@@ -162,7 +165,7 @@ impl Corrector {
         // `*cost = 0.5 * rho[0]` in `ResidualBlock::Evaluate`.
         let robust_cost = 0.5 * rho[0];
 
-        if sq_norm == 0.0 || rho_2 <= 0.0 {
+        if sq_norm == 0.0 || rho_2 <= 0.0 || rho_1 <= 0.0 {
             return Self {
                 sqrt_rho1,
                 residual_scaling: sqrt_rho1,
@@ -372,23 +375,25 @@ mod tests {
 
     #[test]
     fn test_corrector_no_nan_on_negative_d() {
-        // When rho_2 <= 0, the early return at line 156 handles it.
-        // But when rho_1 < 0 (degenerate loss), d can be negative.
-        // The .max(0.0) guard prevents NaN from sqrt.
+        // rho_1 < 0 with rho_2 > 0 (the DCS regime past its threshold): d can
+        // go negative AND sqrt(rho_1) would be NaN. Both are guarded — d is
+        // clamped to 0 and the weight is clamped at zero — so a negative
+        // effective weight fully suppresses the block instead of poisoning it.
         let loss = EdgeCaseLoss;
         let sq_norm = 100.0; // Large enough to make d very negative
 
-        // This should NOT panic or produce NaN
+        // This should NOT panic or produce NaN anywhere.
         let corrector = Corrector::new(&loss, sq_norm);
 
-        assert!(corrector.sqrt_rho1.is_nan()); // sqrt of negative rho_1
-        // The key assertion: alpha_sq_norm must not be NaN
-        // Actually sqrt_rho1 will be NaN because rho_1 is negative.
-        // The real protection is that d.sqrt() doesn't produce NaN.
-        // With the fix, d is clamped to 0, so d.sqrt() = 0, alpha = 1.
-        // But sqrt_rho1 = sqrt(-0.1) = NaN. This is expected for invalid loss functions.
-        // The corrector assumes rho_1 >= 0 (valid loss functions have non-negative first derivative).
-        // The fix protects against the specific case where d goes negative despite rho_1 > 0.
+        assert!(!corrector.sqrt_rho1.is_nan());
+        assert_eq!(corrector.sqrt_rho1, 0.0);
+        assert_eq!(corrector.alpha_sq_norm, 0.0);
+        let mut residual = vec![3.0, 4.0];
+        corrector.correct_residual_in_place(&mut residual);
+        assert_eq!(residual, vec![0.0, 0.0]);
+        assert!(corrector.robust_cost().is_finite());
+        // The key assertion: alpha computation must not produce NaN —
+        // d is clamped to 0, so d.sqrt() = 0.
     }
 
     #[test]

@@ -88,7 +88,7 @@ impl DdsSubscriber {
                     tracing::error!("DDS reader loop exited with error: {e}");
                 }
             })
-            .map_err(|e| DdsError::ThreadJoin(e.to_string()))?;
+            .map_err(|e| DdsError::ThreadSpawn(e.to_string()))?;
 
         Ok(rx)
     }
@@ -158,7 +158,7 @@ fn run_reader_loop(
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|e| DdsError::ThreadJoin(e.to_string()))?;
+        .map_err(|e| DdsError::RuntimeCreation(e.to_string()))?;
 
     rt.block_on(async move {
         use tokio::sync::mpsc::error::TrySendError;

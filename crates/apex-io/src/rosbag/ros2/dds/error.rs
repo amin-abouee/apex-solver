@@ -25,6 +25,14 @@ pub enum DdsError {
 
     #[error("Thread join failed: {0}")]
     ThreadJoin(String),
+
+    /// Failed to spawn the OS thread that drives the DDS reader loop.
+    #[error("Failed to spawn DDS reader thread: {0}")]
+    ThreadSpawn(String),
+
+    /// Failed to construct the tokio runtime the reader loop runs on.
+    #[error("Failed to create tokio runtime for DDS reader: {0}")]
+    RuntimeCreation(String),
 }
 
 pub type Result<T> = std::result::Result<T, DdsError>;
@@ -78,5 +86,21 @@ mod tests {
     fn thread_join_display() {
         let err = DdsError::ThreadJoin("OS error".to_string());
         assert!(err.to_string().contains("OS error"));
+    }
+
+    #[test]
+    fn thread_spawn_display() {
+        let err = DdsError::ThreadSpawn("resource exhaustion".to_string());
+        let s = err.to_string();
+        assert!(s.contains("spawn"));
+        assert!(s.contains("resource exhaustion"));
+    }
+
+    #[test]
+    fn runtime_creation_display() {
+        let err = DdsError::RuntimeCreation("no tokio driver".to_string());
+        let s = err.to_string();
+        assert!(s.contains("runtime"));
+        assert!(s.contains("no tokio driver"));
     }
 }

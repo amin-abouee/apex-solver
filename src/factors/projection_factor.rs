@@ -4,6 +4,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix2xX, Matrix3xX, Vector3};
 use std::convert::TryFrom;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tracing::warn;
 
 use crate::core::variable::ManifoldVariable;
@@ -80,7 +81,8 @@ impl<const P: bool, const L: bool, const I: bool> OptimizationConfig for Optimiz
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Clone)]
+//
+// NOTE: `Clone` is manual because of the atomic fallback counter below.
 pub struct ProjectionFactor<CAM, OP>
 where
     CAM: CameraModel,
@@ -101,8 +103,33 @@ where
     /// Log warnings for cheirality exceptions (points behind camera)
     pub verbose_cheirality: bool,
 
+    /// How often intrinsics decoding failed and evaluation fell back to the
+    /// constructor-time camera. A nonzero count after a solve means the
+    /// intrinsics blocks are degenerate — inspect, don't ignore.
+    intrinsics_fallbacks: AtomicUsize,
+
     /// Phantom data for optimization type
     _phantom: PhantomData<OP>,
+}
+
+impl<CAM, OP> Clone for ProjectionFactor<CAM, OP>
+where
+    CAM: CameraModel + Clone,
+    OP: OptimizationConfig,
+{
+    fn clone(&self) -> Self {
+        Self {
+            observations: self.observations.clone(),
+            camera: self.camera.clone(),
+            fixed_pose: self.fixed_pose.clone(),
+            fixed_landmarks: self.fixed_landmarks.clone(),
+            verbose_cheirality: self.verbose_cheirality,
+            intrinsics_fallbacks: AtomicUsize::new(
+                self.intrinsics_fallbacks.load(Ordering::Relaxed),
+            ),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<CAM, OP> ProjectionFactor<CAM, OP>
@@ -139,6 +166,7 @@ where
             fixed_pose: None,
             fixed_landmarks: None,
             verbose_cheirality: false,
+            intrinsics_fallbacks: AtomicUsize::new(0),
             _phantom: PhantomData,
         }
     }
@@ -197,6 +225,13 @@ where
         self
     }
 
+    /// How often intrinsics decoding failed and evaluation silently fell back
+    /// to the constructor-time camera. Query after a solve: nonzero means the
+    /// intrinsics blocks went degenerate mid-optimization.
+    pub fn intrinsics_fallback_count(&self) -> usize {
+        self.intrinsics_fallbacks.load(Ordering::Relaxed)
+    }
+
     /// Get number of observations.
     pub fn num_observations(&self) -> usize {
         self.observations.ncols()
@@ -204,10 +239,15 @@ where
 
     /// Internal evaluation function that writes residuals and Jacobians directly
     /// into the provided buffers — no temporary allocations.
+    /// `landmarks` is a flat column-major `[x0, y0, z0, x1, y1, z1, …]` buffer.
+    ///
+    /// That is the layout of both sources — the optimizer's parameter slice and
+    /// `Matrix3xX::as_slice` — so neither caller has to build an owned matrix
+    /// on the hot path.
     fn evaluate_internal(
         &self,
         pose: &SE3,
-        landmarks: &Matrix3xX<f64>,
+        landmarks: &[f64],
         camera: &CAM,
         residual: &mut [f64],
         mut jacobian: Option<faer::mat::MatMut<'_, f64>>,
@@ -217,7 +257,8 @@ where
         // Process each observation
         for i in 0..n {
             let observation = self.observations.column(i);
-            let p_world = landmarks.column(i).into_owned();
+            let p_world =
+                Vector3::new(landmarks[3 * i], landmarks[3 * i + 1], landmarks[3 * i + 2]);
 
             // Transform point to camera frame
             // World-to-camera convention: pose is T_wc where p_cam = R * p_world + t
@@ -428,36 +469,48 @@ where
             self.fixed_pose.clone().unwrap_or_else(SE3::identity)
         };
 
-        let landmarks: Matrix3xX<f64> = if OP::LANDMARK {
+        // Both landmark sources are already column-major triples, so this
+        // borrows rather than materializing a `Matrix3xX` per call — this
+        // factor is evaluated once per observation per iteration.
+        let landmarks: &[f64] = if OP::LANDMARK {
             let flat = params[param_idx];
-            let n = flat.len() / 3;
             param_idx += 1;
-            Matrix3xX::from_fn(n, |r, c| flat[c * 3 + r])
+            flat
         } else {
             self.fixed_landmarks
-                .clone()
-                .unwrap_or_else(|| Matrix3xX::zeros(0))
+                .as_ref()
+                .map_or(&[][..], |fixed| fixed.as_slice())
         };
 
-        let camera: CAM = if OP::INTRINSIC {
-            CAM::try_from(params[param_idx])
-                .ok()
-                .unwrap_or_else(|| self.camera.clone())
+        // Decode intrinsics only when they are being optimized; otherwise (and
+        // on a decode failure) fall back to the constructor-time camera by
+        // reference instead of cloning it. Failures are counted: a nonzero
+        // `intrinsics_fallback_count` after a solve means degenerate
+        // intrinsics blocks, not a working self-calibration.
+        let decoded_camera: Option<CAM> = if OP::INTRINSIC {
+            CAM::try_from(params[param_idx]).ok()
         } else {
-            self.camera.clone()
+            None
         };
+        if OP::INTRINSIC && decoded_camera.is_none() {
+            self.intrinsics_fallbacks.fetch_add(1, Ordering::Relaxed);
+        }
+        let camera: &CAM = decoded_camera.as_ref().unwrap_or(&self.camera);
 
         let n = self.observations.ncols();
-        debug_assert_eq!(
-            landmarks.ncols(),
-            n,
-            "Number of landmarks ({}) must match observations ({})",
-            landmarks.ncols(),
-            n
+        // Hard assert, not debug-only: a stride mismatch silently misprojects
+        // every landmark, and `profile.test` inherits release, so a
+        // `debug_assert` would never fire under `cargo test`.
+        assert_eq!(
+            landmarks.len(),
+            3 * n,
+            "landmark buffer length {} is not 3×N observations ({n}); \
+             the buffer must be flat column-major [x0,y0,z0,…]",
+            landmarks.len()
         );
 
         // Write directly into caller-provided buffers — zero temporary allocation.
-        self.evaluate_internal(&pose, &landmarks, &camera, residual, jacobian);
+        self.evaluate_internal(&pose, landmarks, camera, residual, jacobian);
     }
 
     fn residual_dim(&self) -> usize {
