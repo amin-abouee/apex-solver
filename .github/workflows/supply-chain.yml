@@ -36,7 +36,7 @@ jobs:
       - name: Check licenses, advisories, sources
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          log-level: warning
+          log-level: warn
           command: check
 
   semver:
