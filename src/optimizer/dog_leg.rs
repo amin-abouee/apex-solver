@@ -197,9 +197,9 @@ use std::{fmt, time};
 use tracing::debug;
 
 use crate::linalg::{
-    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver,
-    IterativeSchurSolver, JacobianMode, LinearSolver, LinearSolverType, SchurPreconditioner,
-    SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver, SparseSchurComplementSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, ExplicitDenseSchur,
+    ExplicitSchurVariant, ExplicitSparseSchur, ImplicitSparseSchur, JacobianMode, LinearSolver,
+    LinearSolverType, SchurPreconditioner, SparseCholeskySolver, SparseMode, SparseQRSolver,
     StructureAware,
 };
 use crate::optimizer::{AssemblyBackend, IterationStats};
@@ -361,24 +361,26 @@ pub struct DogLegConfig {
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
 
-    /// Schur complement solver variant (for bundle adjustment problems)
+    /// [`ExplicitSparseSchur`] sub-variant (for
+    /// [`LinearSolverType::ExplicitSparseSchur`]).
     ///
-    /// When using LinearSolverType::SparseSchurComplement, this determines which
-    /// variant of the Schur complement method backs the Gauss-Newton step:
-    /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
-    ///   memory is O(kept_dof²).
-    /// - [`SchurVariant::ChunkedSparse`]: form S straight from `J`, never
+    /// - [`ExplicitSchurVariant::Sparse`]: form S, sparse Cholesky. Most
+    ///   accurate; memory is O(kept_dof²).
+    /// - [`ExplicitSchurVariant::Chunked`]: form S straight from `J`, never
     ///   materializing `JᵀJ`. Same algebra, far less memory on large problems.
-    /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
-    ///   linear, which is what makes very large camera sets tractable.
-    /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
+    /// - [`ExplicitSchurVariant::Iterative`]: form S, then PCG instead of
+    ///   Cholesky.
+    ///
+    /// To never form `S` at all, use
+    /// [`LinearSolverType::ImplicitSparseSchur`] instead — a different
+    /// solver, not a variant of this one.
     ///
     /// The Cauchy point and predicted reduction use the solver's
     /// `hessian_vec_product`, which every variant serves (the chunked path
     /// evaluates `Jᵀ(J·v)` from the retained Jacobian).
     ///
     /// Default: `Sparse`
-    pub schur_variant: SchurVariant,
+    pub schur_variant: ExplicitSchurVariant,
     /// Preconditioner for the PCG used by the iterative Schur variants.
     ///
     /// - [`SchurPreconditioner::None`]: unconditioned CG.
@@ -460,7 +462,7 @@ impl Default for DogLegConfig {
 
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
-            schur_variant: SchurVariant::default(),
+            schur_variant: ExplicitSchurVariant::default(),
             schur_preconditioner: SchurPreconditioner::default(),
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
@@ -628,11 +630,11 @@ impl DogLegConfig {
         self
     }
 
-    /// Set Schur complement solver variant
+    /// Set the [`ExplicitSparseSchur`] sub-variant.
     ///
     /// Takes effect when `linear_solver_type` is
-    /// [`LinearSolverType::SparseSchurComplement`].
-    pub fn with_schur_variant(mut self, variant: SchurVariant) -> Self {
+    /// [`LinearSolverType::ExplicitSparseSchur`].
+    pub fn with_schur_variant(mut self, variant: ExplicitSchurVariant) -> Self {
         self.schur_variant = variant;
         self
     }
@@ -1511,10 +1513,11 @@ impl DogLeg {
     ///
     /// Only solver/mode combinations that match are dispatched; anything else
     /// returns an error rather than silently substituting a different solver.
-    /// `SparseSchurComplement` groups residual rows by eliminated variable and
-    /// initializes the Schur block structure from the shared initial state,
-    /// exactly like Levenberg-Marquardt. The dog-leg construction itself is
-    /// solver-agnostic: the Gauss-Newton step, gradient and Hessian-vector
+    /// `ExplicitSparseSchur`/`ImplicitSparseSchur` group residual rows by
+    /// eliminated variable and initialize the Schur block structure from the
+    /// shared initial state, exactly like Levenberg-Marquardt. The dog-leg
+    /// construction itself is solver-agnostic: the Gauss-Newton step,
+    /// gradient and Hessian-vector
     /// products all come through the [`LinearSolver`] trait, which every Schur
     /// variant serves.
     pub fn optimize(&mut self, problem: &mut problem::Problem) -> optimizer::OptimizeResult {
@@ -1524,7 +1527,7 @@ impl DogLeg {
         // leaves the problem and its cost unchanged.
         if matches!(
             self.config.linear_solver_type,
-            LinearSolverType::SparseSchurComplement
+            LinearSolverType::ExplicitSparseSchur | LinearSolverType::ImplicitSparseSchur
         ) {
             problem.group_rows_for_elimination();
         }
@@ -1543,9 +1546,26 @@ impl DogLeg {
                     let mut solver = DenseCholeskySolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
+                LinearSolverType::ExplicitDenseSchur => {
+                    let init = |e: linalg::LinAlgError| {
+                        optimizer::OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    let mut solver = ExplicitDenseSchur::new();
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
+                }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Dog Leg in dense Jacobian mode supports DenseCholesky and DenseQR only; \
-                     requested {other}"
+                    "Dog Leg in dense Jacobian mode supports DenseCholesky, DenseQR and \
+                     ExplicitDenseSchur only; requested {other}"
                 ))
                 .into()),
             },
@@ -1558,56 +1578,56 @@ impl DogLeg {
                     let mut solver = SparseCholeskySolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                LinearSolverType::SparseSchurComplement => {
-                    // `Iterative` is the matrix-free path: it never forms S, so
-                    // it is a different solver type rather than a mode of the
-                    // explicit one — dispatched here, mirroring
-                    // Levenberg-Marquardt, which keeps the O(kept_dof²) buffer
-                    // out of the picture entirely.
+                LinearSolverType::ExplicitSparseSchur => {
                     let init = |e: linalg::LinAlgError| {
                         optimizer::OptimizerError::LinearSolveFailed(format!(
                             "Failed to initialize Schur solver: {e}"
                         ))
                         .log()
                     };
-                    match self.config.schur_variant {
-                        SchurVariant::Iterative => {
-                            let mut solver = IterativeSchurSolver::with_config(
-                                self.config.schur_cg_max_iterations,
-                                self.config.schur_cg_tolerance,
-                                self.config.schur_preconditioner,
-                            );
-                            solver
-                                .initialize_structure(
-                                    &state.variables,
-                                    &state.variable_index_map,
-                                    &problem.schur_landmark_keys,
-                                )
-                                .map_err(init)?;
-                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
-                        }
-                        variant => {
-                            let mut solver = SparseSchurComplementSolver::new()
-                                .with_variant(variant)
-                                .with_preconditioner(self.config.schur_preconditioner)
-                                .with_cg_params(
-                                    self.config.schur_cg_max_iterations,
-                                    self.config.schur_cg_tolerance,
-                                );
-                            solver
-                                .initialize_structure(
-                                    &state.variables,
-                                    &state.variable_index_map,
-                                    &problem.schur_landmark_keys,
-                                )
-                                .map_err(init)?;
-                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
-                        }
-                    }
+                    let mut solver = ExplicitSparseSchur::new()
+                        .with_variant(self.config.schur_variant)
+                        .with_preconditioner(self.config.schur_preconditioner)
+                        .with_cg_params(
+                            self.config.schur_cg_max_iterations,
+                            self.config.schur_cg_tolerance,
+                        );
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                }
+                LinearSolverType::ImplicitSparseSchur => {
+                    // Never forms S, so it is a different solver type rather
+                    // than a mode of the explicit one — this is what keeps
+                    // the O(kept_dof²) buffer out of the picture entirely.
+                    let init = |e: linalg::LinAlgError| {
+                        optimizer::OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    let mut solver = ImplicitSparseSchur::with_config(
+                        self.config.schur_cg_max_iterations,
+                        self.config.schur_cg_tolerance,
+                        self.config.schur_preconditioner,
+                    );
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 other => Err(optimizer::OptimizerError::InvalidParameters(format!(
-                    "Dog Leg in sparse Jacobian mode supports SparseCholesky, SparseQR and \
-                     SparseSchurComplement only; requested {other}"
+                    "Dog Leg in sparse Jacobian mode supports SparseCholesky, SparseQR, \
+                     ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
                 ))
                 .into()),
             },

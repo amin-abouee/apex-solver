@@ -76,9 +76,9 @@ pub use factors::visual::ProjectionFactor;
 
 // Re-export linear algebra types
 pub use linalg::{
-    Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, IterativeSchurSolver, JacobianMode,
-    LinearSolver, LinearSolverType, LinearizationMode, SparseCholeskySolver, SparseMode,
-    SparseQRSolver, SparseSchurComplementSolver,
+    Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, ExplicitDenseSchur,
+    ExplicitSparseSchur, ImplicitSparseSchur, JacobianMode, LinearSolver, LinearSolverType,
+    LinearizationMode, SparseCholeskySolver, SparseMode, SparseQRSolver,
 };
 
 // Re-export logger
