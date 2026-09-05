@@ -130,25 +130,25 @@ sequence η = 1e-2) with a Huber loss (δ = 1 px).
 | Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
 |---------|--------|---------|-----------|--------------|-----------------|----------|-------|
 | **Ladybug** |
-| | apex-solver | 1,723 | 156,502 | 678,718 | **0.8765 ± 0.0000** | **18.8 ± 0.0** | 21 |
-| | Ceres * | 1,723 | 156,502 | 678,718 | 1.1657 | 19.1 | 101 |
-| | GTSAM * | 1,723 | 156,502 | 678,718 | 0.9812 | 87.2 | 2 |
-| | g2o * | 1,723 | 156,502 | 678,718 | 13.5074 | 157.2 | 20 |
+| | apex-solver | 1,723 | 156,502 | 678,718 | **0.8765 ± 0.0000** | **18.8 ± 0.1** | 21 |
+| | Ceres * | 1,723 | 156,502 | 678,718 | 1.1677 | 22.7 | 101 |
+| | GTSAM * | 1,723 | 156,502 | 678,718 | 0.9812 | 83.6 | 2 |
+| | g2o * | 1,723 | 156,502 | 678,718 | 13.5074 | 153.2 | 20 |
 | **Trafalgar** |
-| | apex-solver | 257 | 65,132 | 225,911 | 0.7981 ± 0.0000 | 6.3 ± 0.0 | 9 |
-| | Ceres * | 257 | 65,132 | 225,911 | 1.3061 | 53.0 | 101 |
-| | GTSAM * | 257 | 65,132 | 225,911 | **0.6259** | 61.7 | 100 |
+| | apex-solver | 257 | 65,132 | 225,911 | 0.7981 ± 0.0000 | **6.3 ± 0.0** | 9 |
+| | Ceres * | 257 | 65,132 | 225,911 | 1.3241 | 37.3 | 101 |
+| | GTSAM * | 257 | 65,132 | 225,911 | **0.6259** | 59.4 | 100 |
 | | g2o * | 257 | 65,132 | 225,911 | 8.1506 | 17.0 | 20 |
 | **Dubrovnik** |
-| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7686 ± 0.0000 | **31.3 ± 0.1** | 17 |
-| | Ceres * | 356 | 226,730 | 1,255,268 | 1.0035 | 87.2 | 101 |
-| | GTSAM * | 356 | 226,730 | 1,255,268 | **0.5622** | 126.8 | 31 |
-| | g2o * | 356 | 226,730 | 1,255,268 | 12.1678 | 35.8 | 20 |
+| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7686 ± 0.0000 | **31.5 ± 0.2** | 17 |
+| | Ceres * | 356 | 226,730 | 1,255,268 | 1.0036 | 80.7 | 101 |
+| | GTSAM * | 356 | 226,730 | 1,255,268 | **0.5622** | 120.3 | 31 |
+| | g2o * | 356 | 226,730 | 1,255,268 | 12.1678 | 35.4 | 20 |
 | **Venice** (largest) |
-| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7521 ± 0.0000** | **20.2 ± 0.1** | 2 |
+| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7521 ± 0.0000** | **20.3 ± 0.1** | 2 |
 | | Ceres * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
 | | GTSAM * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
-| | g2o * | 1,778 | 993,923 | 5,001,946 | 10.1261 | 259.4 | 20 |
+| | g2o * | 1,778 | 993,923 | 5,001,946 | 10.1261 | 253.5 | 20 |
 
 ### Schur solver comparison
 
@@ -182,8 +182,8 @@ cameras, 1,685 landmarks, 3,256 observations) it reaches **0.405324** in 36.6 s,
 bit-identical to `ExplicitSparseSchur` on the same subset (0.07 s) — the dense
 path is for problems of a few thousand DOF, not for BAL.
 
-\* C++ rows are a **single context run** (2026-09-01); apex rows are mean ± std
-of 5 runs. apex also initializes the focal length by self-calibration, so its
+\* C++ rows are a **single context run** (2026-09-05, same session as the apex
+rows); apex rows are mean ± std of 3 runs. apex also initializes the focal length by self-calibration, so its
 starting RMSE is closer than the C++ rows'.
 
 **Observations**:
@@ -198,10 +198,18 @@ starting RMSE is closer than the C++ rows'.
   before/after, so the delta is an objective change, not solver math.
   A robust optimum also has higher raw RMSE by construction (outliers are
   downweighted).
-- **Speed**: apex is now fastest on all four (Ladybug 18.8 s, Trafalgar 6.3 s,
-  Dubrovnik 31.3 s, Venice 20.2 s). Ladybug used to be Ceres's win (19.1 s vs
-  76.9 s) precisely because Ceres's `ITERATIVE_SCHUR` is matrix-free and
-  forcing-sequence-terminated; apex now does both, and the gap closed.
+- **Speed — apex is fastest on all four**: 18.8 s vs Ceres 22.7 s on Ladybug,
+  6.3 s vs g2o 17.0 s on Trafalgar, 31.5 s vs g2o 35.4 s on Dubrovnik, and
+  20.3 s on Venice where only g2o finishes at all (253.5 s). Ladybug used to be
+  Ceres's win (22.7 s vs our 76.3 s) precisely because Ceres's `ITERATIVE_SCHUR`
+  is matrix-free and forcing-sequence-terminated; apex now does both.
+- **Accuracy — apex is lowest on two of four**, not all: it wins Ladybug
+  (0.8765 vs GTSAM 0.9812) and Venice (0.7521, the only finisher besides g2o's
+  10.1261), but **GTSAM reaches a clearly better optimum on Trafalgar (0.6259 vs
+  0.7981) and Dubrovnik (0.5622 vs 0.7686)** — 22% and 27% margins, far larger
+  than the ~1% the forcing sequence accounts for, so this is a genuine gap in
+  the solution reached rather than a tolerance artefact. It is the open item on
+  this benchmark.
 - **The default changed**: `LevenbergMarquardtConfig::for_bundle_adjustment`
   selects `ImplicitSparseSchur`, not the direct solver. It is 2.2× faster in
   total across the suite, better RMSE on Trafalgar and Dubrovnik, at most 0.6%

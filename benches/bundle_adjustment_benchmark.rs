@@ -223,15 +223,20 @@ struct ApexRun {
 }
 
 impl ApexRun {
-    /// The `for_bundle_adjustment` default: `ExplicitSparseSchur` / `Sparse`
-    /// over the full dataset, which is what `doc/performance.md` measured.
-    fn default_sparse() -> Self {
+    /// Whatever `for_bundle_adjustment` currently selects, over the full
+    /// dataset.
+    ///
+    /// Read from the config rather than restated here: hardcoding the solver
+    /// meant that changing the library default left this benchmark silently
+    /// measuring the old one, which is exactly what happened once.
+    fn library_default() -> Self {
+        let config = LevenbergMarquardtConfig::for_bundle_adjustment();
         Self {
             solver: "Apex-Solver",
             jacobian_mode: JacobianMode::Sparse,
             max_cameras: None,
-            linear_solver_type: LinearSolverType::ExplicitSparseSchur,
-            schur_variant: ExplicitSchurVariant::Sparse,
+            linear_solver_type: config.linear_solver_type,
+            schur_variant: config.schur_variant,
         }
     }
 }
@@ -260,22 +265,22 @@ fn is_dense_schur_bench() -> bool {
 /// counterpart in the full-dataset table to be compared against.
 fn apex_runs() -> Vec<ApexRun> {
     let Ok(v) = std::env::var("APEX_BENCH_SCHUR") else {
-        return vec![ApexRun::default_sparse()];
+        return vec![ApexRun::library_default()];
     };
 
     let runs = match v.as_str() {
-        "sparse" => vec![ApexRun::default_sparse()],
+        "sparse" => vec![ApexRun::library_default()],
         "iterative" => vec![ApexRun {
             linear_solver_type: LinearSolverType::ImplicitSparseSchur,
-            ..ApexRun::default_sparse()
+            ..ApexRun::library_default()
         }],
         "explicit-iterative" => vec![ApexRun {
             schur_variant: ExplicitSchurVariant::Iterative,
-            ..ApexRun::default_sparse()
+            ..ApexRun::library_default()
         }],
         "chunked" => vec![ApexRun {
             schur_variant: ExplicitSchurVariant::Chunked,
-            ..ApexRun::default_sparse()
+            ..ApexRun::library_default()
         }],
         "explicit-dense" => {
             let max_cameras = Some(dense_bench_cameras());
@@ -285,12 +290,12 @@ fn apex_runs() -> Vec<ApexRun> {
                     jacobian_mode: JacobianMode::Dense,
                     max_cameras,
                     linear_solver_type: LinearSolverType::ExplicitDenseSchur,
-                    ..ApexRun::default_sparse()
+                    ..ApexRun::library_default()
                 },
                 ApexRun {
                     solver: "Apex-ExplicitSparseSchur",
                     max_cameras,
-                    ..ApexRun::default_sparse()
+                    ..ApexRun::library_default()
                 },
             ]
         }

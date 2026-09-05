@@ -214,7 +214,7 @@ def build_ba() -> None:
 
     datasets = [d for d in DATASETS_BA if d in set(agg["dataset"])]
     labels = {
-        "apex-solver": "apex-solver (LM + sparse Schur, direct)",
+        "apex-solver": "apex-solver (LM + implicit Schur, matrix-free PCG)",
         "Ceres": "Ceres (LM + ITERATIVE_SCHUR)",
         "GTSAM": "GTSAM (LM, multifrontal)",
         "g2o": "g2o (LM + BlockSolver_6_3, Schur)",
