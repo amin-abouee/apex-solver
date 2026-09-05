@@ -49,6 +49,7 @@
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::error::ErrorLogging;
+use crate::linalg::regularization::invert_with_retry_dyn;
 use crate::linalg::schur::{BlockSpan, EliminatedBlocks, SchurOrdering, SchurPartition};
 use crate::linalg::schur::{PcgParams, SchurPreconditioner, solve_pcg};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
@@ -60,6 +61,7 @@ use faer::{
     linalg::solvers::Solve,
     sparse::linalg::solvers::{Llt, SymbolicLlt},
 };
+use nalgebra::DMatrix;
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use tracing::debug;
@@ -78,11 +80,15 @@ pub enum ExplicitSchurVariant {
     /// Form `S` explicitly, then solve it with PCG instead of Cholesky.
     ///
     /// Carries the same `kept_dof²` memory cost as [`Self::Sparse`] while
-    /// solving less exactly, so it is rarely the right choice, but it
-    /// supports arbitrary partitions the way
-    /// [`ImplicitSparseSchur`](super::implicit::ImplicitSparseSchur) does
-    /// not. Equivalent to Ceres's `ITERATIVE_SCHUR` with
-    /// `use_explicit_schur_complement = true`.
+    /// solving less exactly, so it buys nothing on memory — but it is
+    /// competitive on time, measuring 0.84x-1.47x [`Self::Sparse`] across the
+    /// four BAL datasets.
+    ///
+    /// Equivalent to Ceres's `ITERATIVE_SCHUR` with
+    /// `use_explicit_schur_complement = true`, which Ceres permits only
+    /// alongside `SCHUR_JACOBI`. [`SchurPreconditioner::SchurJacobi`] is
+    /// likewise the default here, reading `S`'s diagonal blocks straight off
+    /// the `S` this variant has already formed.
     Iterative,
     /// Form `S` chunk by chunk **directly from `J`**, then factorize with
     /// sparse Cholesky.
@@ -95,6 +101,17 @@ pub enum ExplicitSchurVariant {
     /// Requires each eliminated variable's rows to be contiguous;
     /// `Problem::group_rows_for_elimination` arranges that when a Schur solver
     /// is selected.
+    ///
+    /// **This trades time for memory, and is slower in wall-clock than
+    /// [`Self::Sparse`]** — 1.13x-2.01x across the BAL datasets. The chunk
+    /// sweep is inherently serial: reading rows out of a column-major `J`
+    /// without building a CSR copy relies on one forward-only cursor per kept
+    /// column, which forces chunks to be visited in increasing row order. The
+    /// `JᵀJ` path it replaces is fully parallel (rayon gather plus faer's
+    /// threaded sparse kernels), so on a many-core machine the lost
+    /// parallelism outweighs the saved work. Ceres parallelizes its
+    /// `SchurEliminator` over chunks because it consumes a row-block matrix;
+    /// that option is not open to a CSC-only sweep.
     Chunked,
 }
 
@@ -434,29 +451,19 @@ impl ExplicitSparseSchur {
         )))
     }
 
-    /// Solve using Preconditioned Conjugate Gradients (PCG)
+    /// Solve using Preconditioned Conjugate Gradients (PCG).
     ///
-    /// Uses Jacobi (diagonal) preconditioning for simplicity and robustness.
-    /// Reductions and vector updates run through faer's SIMD kernels; the
-    /// SpMV uses faer's parallel sparse×dense kernel into a hoisted buffer.
-    fn solve_with_pcg(&self, a: &SparseColMat<usize, f64>, b: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
-        let n = b.nrows();
-
-        // Extract diagonal for Jacobi preconditioner
-        let symbolic = a.symbolic();
-        let mut precond = vec![1.0; n];
-        for (col, precond_val) in precond.iter_mut().enumerate().take(n) {
-            let row_indices = symbolic.row_idx_of_col_raw(col);
-            let col_values = a.val_of_col(col);
-            for (idx, &row) in row_indices.iter().enumerate() {
-                if row == col {
-                    let diag = col_values[idx];
-                    *precond_val = if diag.abs() > 1e-12 { 1.0 / diag } else { 1.0 };
-                    break;
-                }
-            }
-        }
-        let precond_m = Mat::from_fn(n, 1, |i, _| precond[i]);
+    /// The preconditioner is the one [`Self::with_preconditioner`] selected —
+    /// see [`Self::build_preconditioner`]. Reductions and vector updates run
+    /// through faer's SIMD kernels; the SpMV uses faer's parallel sparse×dense
+    /// kernel into a hoisted buffer.
+    fn solve_with_pcg(
+        &self,
+        a: &SparseColMat<usize, f64>,
+        b: &Mat<f64>,
+        h_kk: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        let precond = self.build_preconditioner(a, h_kk)?;
 
         let result = solve_pcg(
             b,
@@ -472,11 +479,51 @@ impl ExplicitSparseSchur {
                     faer::get_global_parallelism(),
                 );
             },
-            |r, z| {
-                faer::zip!(z, &precond_m, r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
-            },
+            |r, z| apply_block_preconditioner(precond.as_deref(), r, z),
         );
         Ok(result.x)
+    }
+
+    /// Build the PCG preconditioner blocks for the retained system.
+    ///
+    /// All three options act on the reduced system in kept-local coordinates,
+    /// one dense `dof × dof` inverse per retained variable:
+    ///
+    /// - [`SchurPreconditioner::None`] — `None`, so PCG runs unpreconditioned.
+    /// - [`SchurPreconditioner::BlockDiagonal`] — diagonal blocks of `H_kk`.
+    ///   Cheaper, but ignores the `H_ke·H_ee⁻¹·H_keᵀ` correction, so it is a
+    ///   preconditioner for the *unreduced* camera block, not for `S`.
+    /// - [`SchurPreconditioner::SchurJacobi`] — diagonal blocks of `S` itself.
+    ///   Since this variant has already formed `S`, they are simply read off
+    ///   it. This is Ceres's `SCHUR_JACOBI`, and the only preconditioner Ceres
+    ///   permits alongside `use_explicit_schur_complement`.
+    ///
+    /// A block that will not invert falls back to identity: a preconditioner is
+    /// a convergence aid, so a singular block must not fail the solve.
+    fn build_preconditioner(
+        &self,
+        s: &SparseColMat<usize, f64>,
+        h_kk: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Option<Vec<DMatrix<f64>>>> {
+        let source = match self.preconditioner {
+            SchurPreconditioner::None => return Ok(None),
+            SchurPreconditioner::SchurJacobi => s,
+            SchurPreconditioner::BlockDiagonal => h_kk,
+        };
+        let partition = self.require_partition()?;
+
+        let blocks = partition
+            .kept_blocks()
+            .par_iter()
+            .enumerate()
+            .map(|(idx, block)| {
+                let offset = partition.kept_offset(idx);
+                let dense = diagonal_block(source, offset, block.dof);
+                invert_with_retry_dyn(&dense)
+                    .unwrap_or_else(|| DMatrix::identity(block.dof, block.dof))
+            })
+            .collect();
+        Ok(Some(blocks))
     }
     /// Form the Schur complement `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ`.
     ///
@@ -1119,7 +1166,7 @@ impl ExplicitSparseSchur {
         let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
         let delta_k = match self.variant {
-            ExplicitSchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            ExplicitSchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced, h_kk)?,
             ExplicitSchurVariant::Sparse | ExplicitSchurVariant::Chunked => {
                 self.solve_with_cholesky(&s, &g_reduced)?
             }
@@ -1160,6 +1207,48 @@ impl ExplicitSparseSchur {
         );
 
         Ok(delta)
+    }
+}
+
+/// Extract the dense `dof × dof` diagonal block at `offset` from a matrix in
+/// kept-local coordinates.
+fn diagonal_block(m: &SparseColMat<usize, f64>, offset: usize, dof: usize) -> DMatrix<f64> {
+    let symbolic = m.symbolic();
+    let mut block = DMatrix::zeros(dof, dof);
+    for local_col in 0..dof {
+        let col = offset + local_col;
+        let rows = symbolic.row_idx_of_col_raw(col);
+        let vals = m.val_of_col(col);
+        for (idx, &row) in rows.iter().enumerate() {
+            if row >= offset && row < offset + dof {
+                block[(row - offset, local_col)] = vals[idx];
+            }
+        }
+    }
+    block
+}
+
+/// Apply `z = M⁻¹·r` for a block-diagonal `M⁻¹`, or `z = r` when there is none.
+///
+/// Blocks are in kept-local order and contiguous, so the flat offset advances
+/// block by block without consulting the partition.
+fn apply_block_preconditioner(blocks: Option<&[DMatrix<f64>]>, r: &Mat<f64>, z: &mut Mat<f64>) {
+    let Some(blocks) = blocks else {
+        faer::zip!(z, r).for_each(|faer::unzip!(z, r)| *z = *r);
+        return;
+    };
+
+    let mut offset = 0usize;
+    for inv in blocks {
+        let dof = inv.nrows();
+        for row in 0..dof {
+            let mut acc = 0.0;
+            for col in 0..dof {
+                acc += inv[(row, col)] * r[(offset + col, 0)];
+            }
+            z[(offset + row, 0)] = acc;
+        }
+        offset += dof;
     }
 }
 
@@ -1539,6 +1628,87 @@ mod tests {
 
         assert_eq!(solver.cg_max_iterations, 100);
         assert!((solver.cg_tolerance - 1e-8).abs() < 1e-12);
+        assert_eq!(solver.variant, ExplicitSchurVariant::Iterative);
+        assert_eq!(solver.preconditioner, SchurPreconditioner::BlockDiagonal);
+    }
+
+    /// Each [`SchurPreconditioner`] must actually reach the PCG loop.
+    ///
+    /// The regression this pins: `preconditioner` used to be stored and never
+    /// read, so `solve_with_pcg` always ran scalar Jacobi and every setting
+    /// was silently equivalent. `SchurJacobi` reads `S`'s diagonal blocks and
+    /// `BlockDiagonal` reads `H_kk`'s, so on a system where the
+    /// `H_ke·H_ee⁻¹·H_keᵀ` correction is non-zero the two must differ.
+    #[test]
+    fn preconditioner_selection_reaches_pcg() -> Result<(), LinAlgError> {
+        use faer::sparse::Triplet;
+
+        // One 2-DOF retained block so the preconditioner is a real 2x2 inverse
+        // rather than a scalar.
+        let kept = vec![BlockSpan {
+            key: VarKey::default(),
+            col_start: 0,
+            dof: 2,
+        }];
+        let eliminated = vec![BlockSpan {
+            key: VarKey::default(),
+            col_start: 2,
+            dof: 1,
+        }];
+        let partition = SchurPartition::new(kept, eliminated)?;
+        let mut solver = ExplicitSparseSchur::new();
+        solver.partition = Some(partition);
+
+        let mk = |vals: [f64; 4]| -> Result<SparseColMat<usize, f64>, LinAlgError> {
+            SparseColMat::try_new_from_triplets(
+                2,
+                2,
+                &[
+                    Triplet::new(0, 0, vals[0]),
+                    Triplet::new(1, 0, vals[1]),
+                    Triplet::new(0, 1, vals[2]),
+                    Triplet::new(1, 1, vals[3]),
+                ],
+            )
+            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))
+        };
+        let h_kk = mk([4.0, 1.0, 1.0, 5.0])?;
+        // S differs from H_kk by the elimination correction.
+        let s = mk([2.0, 0.5, 0.5, 3.0])?;
+
+        solver.preconditioner = SchurPreconditioner::None;
+        assert!(
+            solver.build_preconditioner(&s, &h_kk)?.is_none(),
+            "None must leave PCG unpreconditioned"
+        );
+
+        solver.preconditioner = SchurPreconditioner::SchurJacobi;
+        let blocks_missing = || LinAlgError::InvalidInput("expected blocks".into());
+        let schur = solver
+            .build_preconditioner(&s, &h_kk)?
+            .ok_or_else(blocks_missing)?;
+        solver.preconditioner = SchurPreconditioner::BlockDiagonal;
+        let plain = solver
+            .build_preconditioner(&s, &h_kk)?
+            .ok_or_else(blocks_missing)?;
+
+        // SchurJacobi inverts S's block; BlockDiagonal inverts H_kk's.
+        let expect_schur = DMatrix::from_row_slice(2, 2, &[2.0, 0.5, 0.5, 3.0])
+            .try_inverse()
+            .ok_or_else(|| LinAlgError::InvalidInput("S block must invert".into()))?;
+        for r in 0..2 {
+            for c in 0..2 {
+                assert!(
+                    (schur[0][(r, c)] - expect_schur[(r, c)]).abs() < 1e-12,
+                    "SchurJacobi must invert S's diagonal block"
+                );
+                assert!(
+                    (schur[0][(r, c)] - plain[0][(r, c)]).abs() > 1e-9,
+                    "SchurJacobi and BlockDiagonal must not coincide at ({r},{c})"
+                );
+            }
+        }
+        Ok(())
     }
     /// Solver with a partition of `kept_dof` retained columns followed by one
     /// eliminated block of `dof`, plus that block's inverse preloaded.
@@ -2302,7 +2472,10 @@ mod tests {
     /// Test solve_with_pcg converges on a small diagonal (trivial) system.
     #[test]
     fn test_solve_with_pcg_diagonal_system() -> TestResult {
-        let solver = ExplicitSparseSchur::new();
+        // A partition is required: the preconditioner is built per retained
+        // block. Two 1-DOF kept blocks match this 2x2 system.
+        let inv = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let (solver, _) = solver_with_block(2, 3, &inv)?;
 
         // Diagonal SPD: [[2,0],[0,3]]
         let triplets = vec![
@@ -2313,7 +2486,7 @@ mod tests {
             SparseColMat::try_new_from_triplets(2, 2, &triplets).map_err(|e| format!("{e:?}"))?;
         let b = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
 
-        let x = solver.solve_with_pcg(&a, &b)?;
+        let x = solver.solve_with_pcg(&a, &b, &a)?;
         // Expected: x = [1/2; 2/3]
         assert!((x[(0, 0)] - 0.5).abs() < 1e-6, "x[0] = {}", x[(0, 0)]);
         assert!((x[(1, 0)] - 2.0 / 3.0).abs() < 1e-6, "x[1] = {}", x[(1, 0)]);
