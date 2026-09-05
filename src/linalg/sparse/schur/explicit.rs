@@ -144,6 +144,8 @@ pub struct ExplicitSparseSchur {
     preconditioner: SchurPreconditioner,
 
     // CG parameters
+    /// Forcing-sequence parameter η; `0.0` disables the quadratic-model rule.
+    cg_q_tolerance: f64,
     cg_max_iterations: usize,
     cg_tolerance: f64,
 
@@ -166,6 +168,7 @@ impl ExplicitSparseSchur {
             ordering: SchurOrdering::default(),
             variant: ExplicitSchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
+            cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             ne_cache: LazyNormalEquations::default(),
@@ -186,6 +189,13 @@ impl ExplicitSparseSchur {
 
     pub fn with_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
         self.preconditioner = preconditioner;
+        self
+    }
+
+    /// Set the PCG forcing-sequence parameter η (`0.0` disables the
+    /// quadratic-model stopping rule). Only the `Iterative` variant uses it.
+    pub fn with_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
+        self.cg_q_tolerance = q_tolerance;
         self
     }
 
@@ -467,7 +477,8 @@ impl ExplicitSparseSchur {
 
         let result = solve_pcg(
             b,
-            &PcgParams::new(self.cg_max_iterations, self.cg_tolerance),
+            &PcgParams::new(self.cg_max_iterations, self.cg_tolerance)
+                .with_q_tolerance(self.cg_q_tolerance),
             |p, ap| {
                 // Ap = A * p (parallel sparse×dense faer kernel)
                 faer::sparse::linalg::matmul::sparse_dense_matmul(
