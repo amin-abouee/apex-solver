@@ -1,7 +1,8 @@
-//! # Explicit Schur Complement Solver
+//! # Explicit Sparse Schur Complement Solver
 //!
-//! This module implements the **Explicit Schur Complement** method for bundle adjustment
-//! and structured optimization problems.
+//! This module implements the **explicit** Schur complement method for
+//! bundle adjustment and structured optimization problems, over a sparse
+//! Hessian. Equivalent to Ceres's `SPARSE_SCHUR`.
 //!
 //! ## Explicit vs Implicit Schur Complement
 //!
@@ -9,9 +10,10 @@
 //! (S = B - E C⁻¹ Eᵀ) in memory and solves it using direct sparse Cholesky factorization.
 //! It provides the most accurate results with moderate memory usage.
 //!
-//! **Implicit Schur:** The alternative formulation (see [`implicit_schur`](super::implicit_schur))
-//! never constructs S explicitly, instead solving the system using matrix-free PCG.
-//! It's more memory-efficient for very large problems.
+//! **Implicit Schur:** The alternative formulation (see
+//! [`implicit`](super::implicit)) never constructs S explicitly, instead
+//! solving the system using matrix-free PCG. It's more memory-efficient for
+//! very large problems.
 //!
 //! ## When to Use Explicit Schur
 //!
@@ -23,7 +25,7 @@
 //! ## Usage Example
 //!
 //! ```no_run
-//! # use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! # use apex_solver::linalg::{ExplicitSparseSchur, ExplicitSchurVariant, SchurPreconditioner};
 //! # use apex_solver::linalg::StructureAware;
 //! # use apex_solver::core::VarKey;
 //! # use apex_solver::core::variable::ManifoldVariable;
@@ -33,24 +35,25 @@
 //! # let variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
 //! # let variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
 //! # let landmark_keys: HashSet<VarKey> = HashSet::new();
-//! use apex_solver::linalg::{SparseSchurComplementSolver, SchurVariant, SchurPreconditioner};
+//! use apex_solver::linalg::{ExplicitSparseSchur, ExplicitSchurVariant, SchurPreconditioner};
 //! use apex_solver::linalg::StructureAware;
 //!
-//! let mut solver = SparseSchurComplementSolver::new()
-//!     .with_variant(SchurVariant::Sparse) // Explicit Schur with Cholesky
+//! let mut solver = ExplicitSparseSchur::new()
+//!     .with_variant(ExplicitSchurVariant::Sparse) // Cholesky
 //!     .with_preconditioner(SchurPreconditioner::None);
 //! solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 //! # Ok(())
 //! # }
 //! ```
 
-use super::schur_partition::{BlockSpan, EliminatedBlocks, SchurPartition};
 use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::error::ErrorLogging;
+use crate::linalg::schur::{BlockSpan, EliminatedBlocks, SchurOrdering, SchurPartition};
+use crate::linalg::schur::{PcgParams, SchurPreconditioner, solve_pcg};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
+use crate::linalg::sparse::pattern;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
-use apex_manifolds::ManifoldType;
 use faer::sparse::{SparseColMat, Triplet};
 use faer::{
     Accum, Mat, Side,
@@ -61,9 +64,10 @@ use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 use tracing::debug;
 
-/// Schur complement solver variant
+/// Explicit Schur complement solver variant: how the reduced camera system
+/// `S` is built and solved once elimination is set up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SchurVariant {
+pub enum ExplicitSchurVariant {
     /// Form `S` explicitly, then factorize it with sparse Cholesky.
     ///
     /// Most accurate and fastest per iteration, but `S` is accumulated into a
@@ -71,25 +75,15 @@ pub enum SchurVariant {
     /// set. Equivalent to Ceres's `SPARSE_SCHUR`.
     #[default]
     Sparse,
-    /// Never form `S`: apply the Schur operator through `H_ke`/`H_ee⁻¹`
-    /// products inside PCG.
-    ///
-    /// Memory is linear in the problem size, which is what makes very large
-    /// camera sets tractable. Equivalent to Ceres's `ITERATIVE_SCHUR` in its
-    /// default (implicit) mode, and the variant that honours
-    /// [`SchurPreconditioner`].
-    ///
-    /// Requires 3-DOF eliminated blocks in contiguous column ranges; use
-    /// [`Self::Sparse`] or [`Self::ExplicitIterative`] otherwise.
-    Iterative,
     /// Form `S` explicitly, then solve it with PCG instead of Cholesky.
     ///
     /// Carries the same `kept_dof²` memory cost as [`Self::Sparse`] while
-    /// solving less exactly, so it is rarely the right choice — it exists
-    /// because it is what `Iterative` used to do, and it supports the general
-    /// partitions the matrix-free path does not. Equivalent to Ceres's
-    /// `ITERATIVE_SCHUR` with `use_explicit_schur_complement = true`.
-    ExplicitIterative,
+    /// solving less exactly, so it is rarely the right choice, but it
+    /// supports arbitrary partitions the way
+    /// [`ImplicitSparseSchur`](super::implicit::ImplicitSparseSchur) does
+    /// not. Equivalent to Ceres's `ITERATIVE_SCHUR` with
+    /// `use_explicit_schur_complement = true`.
+    Iterative,
     /// Form `S` chunk by chunk **directly from `J`**, then factorize with
     /// sparse Cholesky.
     ///
@@ -101,113 +95,18 @@ pub enum SchurVariant {
     /// Requires each eliminated variable's rows to be contiguous;
     /// `Problem::group_rows_for_elimination` arranges that when a Schur solver
     /// is selected.
-    ChunkedSparse,
+    Chunked,
 }
 
-/// Preconditioner type for iterative solvers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SchurPreconditioner {
-    /// No preconditioning
-    None,
-    /// Block diagonal of H_cc only (fast but less effective)
-    BlockDiagonal,
-    /// True Schur-Jacobi: Block diagonal of S = H_cc - H_cp * H_pp^{-1} * H_cp^T
-    /// This is what Ceres uses and provides much better PCG convergence
-    #[default]
-    SchurJacobi,
-}
-
-/// Configuration for Schur complement variable ordering
-///
-/// Note the default eliminates **nothing** until variables are marked with
-/// [`Problem::mark_for_elimination`](crate::core::problem::Problem::mark_for_elimination):
-/// `auto_detect` is off because `Rn(3)` is ambiguous (landmarks vs
-/// self-calibration intrinsics), so a default-constructed ordering only
-/// *classifies* — the marks still have to exist.
+/// Explicit Schur Complement Solver for Bundle Adjustment, over a sparse
+/// Hessian. Equivalent to Ceres's `SPARSE_SCHUR`.
 #[derive(Debug, Clone)]
-pub struct SchurOrdering {
-    pub eliminate_types: Vec<ManifoldType>,
-    /// Only eliminate RN variables with this exact size (default: 3 for 3D landmarks)
-    /// This prevents intrinsic variables (6 DOF) from being eliminated
-    pub eliminate_rn_size: Option<usize>,
-    /// Auto-classify *unmarked* variables as landmarks when their type and size
-    /// match [`Self::should_eliminate`].
-    ///
-    /// Off by default: `Rn(3)` is also how self-calibration represents intrinsic
-    /// parameters (`[focal, k1, k2]`), and eliminating those as landmarks
-    /// silently corrupts the Schur complement. Manual marks via
-    /// `Problem::mark_for_elimination` always apply, with or without this flag.
-    pub auto_detect: bool,
-}
-
-impl Default for SchurOrdering {
-    fn default() -> Self {
-        Self {
-            eliminate_types: vec![ManifoldType::RN],
-            eliminate_rn_size: Some(3), // Only eliminate 3D landmarks, not intrinsics
-            auto_detect: false,
-        }
-    }
-}
-
-impl SchurOrdering {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Enable auto-classification of unmarked variables (see [`Self::auto_detect`]).
-    pub fn with_auto_detect(mut self, enabled: bool) -> Self {
-        self.auto_detect = enabled;
-        self
-    }
-
-    /// Check if a variable should be eliminated (treated as landmark).
-    ///
-    /// Classification is based solely on manifold type and DOF size.
-    /// By default, RN variables with exactly 3 DOF are treated as landmarks.
-    pub fn should_eliminate(&self, manifold_type: &ManifoldType, size: usize) -> bool {
-        if !self.eliminate_types.contains(manifold_type) {
-            return false;
-        }
-        if let Some(required_size) = self.eliminate_rn_size
-            && size != required_size
-        {
-            return false;
-        }
-        true
-    }
-
-    /// [`Self::should_eliminate`] for a variable identified by its manifold's
-    /// [`LieGroup::NAME`] string (`"Rn"`, `"SE3"`, …), as reported by
-    /// [`ManifoldVariable::manifold_type_name`]. Unknown names never eliminate.
-    pub fn should_eliminate_by_name(&self, name: &str, size: usize) -> bool {
-        match ManifoldType::from_name(name) {
-            Some(manifold_type) => self.should_eliminate(&manifold_type, size),
-            None => false,
-        }
-    }
-}
-/// Superseded by [`SchurPartition`], which supports eliminated blocks of any
-/// DOF, mixed sizes within one problem, and non-contiguous partitions.
-///
-/// This alias keeps existing imports resolving. The replacement exposes
-/// accessors (`kept_blocks()`, `eliminated_dof()`, …) rather than public
-/// fields, so code that read the old fields must be updated.
-#[deprecated(
-    since = "1.6.0",
-    note = "renamed and generalized to `SchurPartition`; eliminated blocks are no longer \
-            restricted to 3 DOF and the partition may be non-contiguous"
-)]
-pub type SchurBlockStructure = SchurPartition;
-
-/// Sparse Schur Complement Solver for Bundle Adjustment
-#[derive(Debug, Clone)]
-pub struct SparseSchurComplementSolver {
+pub struct ExplicitSparseSchur {
     partition: Option<SchurPartition>,
     /// Diagonal blocks of `H_ee`; allocated once per structure and reused.
     eliminated: EliminatedBlocks,
-    /// Chunk-wise eliminator, built lazily for [`SchurVariant::ChunkedSparse`].
-    chunked: Option<super::schur_eliminator::ChunkedSchurEliminator>,
+    /// Chunk-wise eliminator, built lazily for [`ExplicitSchurVariant::Chunked`].
+    chunked: Option<super::chunk_eliminator::ChunkedSchurEliminator>,
     /// `J` from the last chunked solve.
     ///
     /// The chunked path never forms `JᵀJ`, so the quadratic model is served as
@@ -219,12 +118,12 @@ pub struct SparseSchurComplementSolver {
     ///
     /// The check is structural, so it only has to run when the sparsity
     /// changes — not on every solve. Keyed on the full
-    /// [`PatternFingerprint`](super::pattern::PatternFingerprint): the old
+    /// [`PatternFingerprint`](pattern::PatternFingerprint): the old
     /// `(nrows, ncols, nnz)` triple aliased equal-`nnz` permutations and could
     /// skip the check for a coupled pattern.
-    verified_pattern: Option<super::pattern::PatternFingerprint>,
+    verified_pattern: Option<pattern::PatternFingerprint>,
     ordering: SchurOrdering,
-    variant: SchurVariant,
+    variant: ExplicitSchurVariant,
     preconditioner: SchurPreconditioner,
 
     // CG parameters
@@ -239,7 +138,7 @@ pub struct SparseSchurComplementSolver {
     gradient: Option<Mat<f64>>,
 }
 
-impl SparseSchurComplementSolver {
+impl ExplicitSparseSchur {
     pub fn new() -> Self {
         Self {
             partition: None,
@@ -248,7 +147,7 @@ impl SparseSchurComplementSolver {
             chunked_jacobian: None,
             verified_pattern: None,
             ordering: SchurOrdering::default(),
-            variant: SchurVariant::default(),
+            variant: ExplicitSchurVariant::default(),
             preconditioner: SchurPreconditioner::default(),
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
@@ -263,7 +162,7 @@ impl SparseSchurComplementSolver {
         self
     }
 
-    pub fn with_variant(mut self, variant: SchurVariant) -> Self {
+    pub fn with_variant(mut self, variant: ExplicitSchurVariant) -> Self {
         self.variant = variant;
         self
     }
@@ -289,7 +188,7 @@ impl SparseSchurComplementSolver {
     /// so this is checked rather than assumed — but the check is structural,
     /// so repeating it every iteration would be pure overhead.
     fn ensure_block_diagonal(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
-        let fingerprint = super::pattern::PatternFingerprint::of(hessian);
+        let fingerprint = pattern::PatternFingerprint::of(hessian);
         if self.verified_pattern == Some(fingerprint) {
             return Ok(());
         }
@@ -308,25 +207,6 @@ impl SparseSchurComplementSolver {
         })
     }
 
-    /// Union of the manually marked landmark keys and — when
-    /// [`SchurOrdering::auto_detect`] is enabled — the variables matching the
-    /// configured ordering.
-    fn effective_landmark_keys(
-        variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-        schur_landmark_keys: &std::collections::HashSet<VarKey>,
-        ordering: &SchurOrdering,
-    ) -> std::collections::HashSet<VarKey> {
-        let mut keys = schur_landmark_keys.clone();
-        if ordering.auto_detect {
-            for (key, variable) in variables {
-                if ordering.should_eliminate_by_name(variable.manifold_type_name(), variable.dof())
-                {
-                    keys.insert(key);
-                }
-            }
-        }
-        keys
-    }
     /// Partition the variables into eliminated and retained sets.
     ///
     /// Both sides accept arbitrary DOF and arbitrary column interleaving: the
@@ -561,8 +441,6 @@ impl SparseSchurComplementSolver {
     /// SpMV uses faer's parallel sparse×dense kernel into a hoisted buffer.
     fn solve_with_pcg(&self, a: &SparseColMat<usize, f64>, b: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
         let n = b.nrows();
-        let max_iterations = self.cg_max_iterations;
-        let tolerance = self.cg_tolerance;
 
         // Extract diagonal for Jacobi preconditioner
         let symbolic = a.symbolic();
@@ -580,76 +458,25 @@ impl SparseSchurComplementSolver {
         }
         let precond_m = Mat::from_fn(n, 1, |i, _| precond[i]);
 
-        // Initialize
-        let mut x = Mat::<f64>::zeros(n, 1);
-
-        // r = b - A*x (x starts at 0, so r = b)
-        let mut r = b.clone();
-
-        // z = M^{-1} * r (Jacobi preconditioning)
-        let mut z = Mat::<f64>::zeros(n, 1);
-        faer::zip!(&mut z, &precond_m, &r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
-
-        let mut p = z.clone();
-
-        let mut rz_old: f64 = (r.transpose() * &z)[(0, 0)];
-
-        // Compute initial residual norm for relative tolerance
-        let abs_tol = tolerance * r.norm_l2().max(1.0);
-
-        // Ap buffer (reused each iteration)
-        let mut ap = Mat::<f64>::zeros(n, 1);
-
-        for _iter in 0..max_iterations {
-            // Ap = A * p (parallel sparse×dense faer kernel)
-            faer::sparse::linalg::matmul::sparse_dense_matmul(
-                ap.as_mut(),
-                Accum::Replace,
-                a.as_ref(),
-                p.as_ref(),
-                1.0,
-                faer::get_global_parallelism(),
-            );
-
-            // alpha = (r^T z) / (p^T Ap)
-            let p_ap: f64 = (p.transpose() * &ap)[(0, 0)];
-
-            if p_ap.abs() < 1e-30 {
-                break;
-            }
-
-            let alpha = rz_old / p_ap;
-
-            // x = x + alpha * p
-            faer::zip!(&mut x, &p).for_each(|faer::unzip!(x, p)| *x += alpha * p);
-
-            // r = r - alpha * Ap
-            faer::zip!(&mut r, &ap).for_each(|faer::unzip!(r, ap)| *r -= alpha * ap);
-
-            // Check convergence
-            if r.norm_l2() < abs_tol {
-                break;
-            }
-
-            // z = M^{-1} * r
-            faer::zip!(&mut z, &precond_m, &r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
-
-            // beta = (r_{k+1}^T z_{k+1}) / (r_k^T z_k)
-            let rz_new: f64 = (r.transpose() * &z)[(0, 0)];
-
-            if rz_old.abs() < 1e-30 {
-                break;
-            }
-
-            let beta = rz_new / rz_old;
-
-            // p = z + beta * p
-            faer::zip!(&mut p, &z).for_each(|faer::unzip!(p, z)| *p = *z + beta * *p);
-
-            rz_old = rz_new;
-        }
-
-        Ok(x)
+        let result = solve_pcg(
+            b,
+            &PcgParams::new(self.cg_max_iterations, self.cg_tolerance),
+            |p, ap| {
+                // Ap = A * p (parallel sparse×dense faer kernel)
+                faer::sparse::linalg::matmul::sparse_dense_matmul(
+                    ap.as_mut(),
+                    Accum::Replace,
+                    a.as_ref(),
+                    p.as_ref(),
+                    1.0,
+                    faer::get_global_parallelism(),
+                );
+            },
+            |r, z| {
+                faer::zip!(z, &precond_m, r).for_each(|faer::unzip!(z, m, r)| *z = m * r);
+            },
+        );
+        Ok(result.x)
     }
     /// Form the Schur complement `S = H_kk − H_ke·H_ee⁻¹·H_keᵀ`.
     ///
@@ -912,13 +739,13 @@ impl SparseSchurComplementSolver {
     }
 }
 
-impl Default for SparseSchurComplementSolver {
+impl Default for ExplicitSparseSchur {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl StructureAware for SparseSchurComplementSolver {
+impl StructureAware for ExplicitSparseSchur {
     fn initialize_structure(
         &mut self,
         variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
@@ -928,26 +755,28 @@ impl StructureAware for SparseSchurComplementSolver {
         // Effective landmark set: manual marks plus the SchurOrdering
         // auto-classification, so both the outer structure and the delegate
         // solver partition identically.
-        let effective_keys =
-            Self::effective_landmark_keys(variables, schur_landmark_keys, &self.ordering);
+        let effective_keys = crate::linalg::schur::effective_landmark_keys(
+            variables,
+            schur_landmark_keys,
+            &self.ordering,
+        );
 
         self.build_partition(variables, variable_index_map, &effective_keys)?;
 
-        // `SchurVariant::Iterative` is handled by `IterativeSchurSolver`, which
+        // The matrix-free path is `ImplicitSparseSchur`, a different solver
         // the optimizer constructs directly — this solver only ever forms S.
-        // A delegate used to be built here and then never read.
         Ok(())
     }
 }
 
-impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
+impl LinearSolver<SparseMode> for ExplicitSparseSchur {
     fn solve_normal_equation(
         &mut self,
         residuals: &Mat<f64>,
         jacobian: &SparseColMat<usize, f64>,
     ) -> LinAlgResult<Mat<f64>> {
         self.require_partition()?;
-        if self.variant == SchurVariant::ChunkedSparse {
+        if self.variant == ExplicitSchurVariant::Chunked {
             return self.solve_chunked(residuals, jacobian, None);
         }
 
@@ -999,7 +828,7 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
         damping: &Damping,
     ) -> LinAlgResult<Mat<f64>> {
         self.require_partition()?;
-        if self.variant == SchurVariant::ChunkedSparse {
+        if self.variant == ExplicitSchurVariant::Chunked {
             return self.solve_chunked(residuals, jacobian, Some(damping));
         }
 
@@ -1103,8 +932,8 @@ impl LinearSolver<SparseMode> for SparseSchurComplementSolver {
     }
 }
 
-// Helper methods for SparseSchurComplementSolver
-impl SparseSchurComplementSolver {
+// Helper methods for ExplicitSparseSchur
+impl ExplicitSparseSchur {
     /// Chunk-wise solve: `J` straight to the reduced system, no `JᵀJ`.
     ///
     /// The gradient published for the optimizers is `Jᵀr` over the *whole*
@@ -1121,7 +950,7 @@ impl SparseSchurComplementSolver {
         // Rebuild the chunk layout only when the sparsity changes.
         if self.chunked.as_ref().is_none_or(|c| !c.matches(jacobian)) {
             let partition = self.require_partition()?;
-            self.chunked = Some(super::schur_eliminator::ChunkedSchurEliminator::new(
+            self.chunked = Some(super::chunk_eliminator::ChunkedSchurEliminator::new(
                 jacobian, partition,
             )?);
         }
@@ -1208,7 +1037,7 @@ impl SparseSchurComplementSolver {
     fn back_substitute_chunked(
         &self,
         delta_k: &Mat<f64>,
-        reduced: &super::schur_eliminator::ReducedSystem,
+        reduced: &super::chunk_eliminator::ReducedSystem,
         jacobian: &SparseColMat<usize, f64>,
         partition: &SchurPartition,
     ) -> LinAlgResult<Mat<f64>> {
@@ -1290,20 +1119,8 @@ impl SparseSchurComplementSolver {
         let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
         let delta_k = match self.variant {
-            SchurVariant::ExplicitIterative => self.solve_with_pcg(&s, &g_reduced)?,
-            // `Iterative` is the matrix-free solver, which the optimizer
-            // constructs directly; standing in with Cholesky here would make
-            // the variant a lie.
-            SchurVariant::Iterative => {
-                return Err(LinAlgError::InvalidInput(
-                    "SchurVariant::Iterative is the matrix-free solver, dispatched by the \
-                     optimizer to IterativeSchurSolver; SparseSchurComplementSolver handles \
-                     only Sparse, ChunkedSparse and ExplicitIterative"
-                        .to_string(),
-                )
-                .log());
-            }
-            SchurVariant::Sparse | SchurVariant::ChunkedSparse => {
+            ExplicitSchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced)?,
+            ExplicitSchurVariant::Sparse | ExplicitSchurVariant::Chunked => {
                 self.solve_with_cholesky(&s, &g_reduced)?
             }
         };
@@ -1422,7 +1239,7 @@ mod tests {
     use super::*;
     use crate::core::VarKey;
     use crate::core::variable::Variable;
-    use apex_manifolds::{LieGroup, rn, se3};
+    use apex_manifolds::{LieGroup, ManifoldType, rn, se3};
     use nalgebra::DVector;
     use slotmap::{SecondaryMap, SlotMap};
 
@@ -1513,7 +1330,7 @@ mod tests {
     fn schur_complement_matches_naive_dense() -> TestResult {
         let (variables, variable_index_map, jacobian, _residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Dense J, then H = JᵀJ.
@@ -1663,7 +1480,7 @@ mod tests {
         // and the unmarked pt1 stays a camera.
         let mut marks = std::collections::HashSet::new();
         marks.insert(pt0);
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &index_map, &marks)?;
         let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
@@ -1676,7 +1493,7 @@ mod tests {
 
         // Opt-in: unmarked Rn(3) variables are eliminated as landmarks.
         let ordering = SchurOrdering::default().with_auto_detect(true);
-        let mut solver = SparseSchurComplementSolver::new().with_ordering(ordering);
+        let mut solver = ExplicitSparseSchur::new().with_ordering(ordering);
         solver.initialize_structure(&variables, &index_map, &empty_marks)?;
         let structure = solver.partition().ok_or("partition missing")?;
         assert_eq!(
@@ -1693,7 +1510,7 @@ mod tests {
         // Manual marks still eliminate regardless of type/size.
         let mut marks = std::collections::HashSet::new();
         marks.insert(cam1);
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &index_map, &marks)?;
         let structure = solver.partition().ok_or("partition missing")?;
         assert!(structure.eliminated_blocks().iter().any(|b| b.key == cam1));
@@ -1709,14 +1526,14 @@ mod tests {
 
     #[test]
     fn test_solver_creation() {
-        let solver = SparseSchurComplementSolver::new();
+        let solver = ExplicitSparseSchur::new();
         assert!(solver.partition().is_none());
     }
 
     #[test]
     fn test_schur_variants() {
-        let solver = SparseSchurComplementSolver::new()
-            .with_variant(SchurVariant::Iterative)
+        let solver = ExplicitSparseSchur::new()
+            .with_variant(ExplicitSchurVariant::Iterative)
             .with_preconditioner(SchurPreconditioner::BlockDiagonal)
             .with_cg_params(100, 1e-8);
 
@@ -1729,7 +1546,7 @@ mod tests {
         kept_dof: usize,
         dof: usize,
         inverse: &[f64],
-    ) -> Result<(SparseSchurComplementSolver, EliminatedBlocks), LinAlgError> {
+    ) -> Result<(ExplicitSparseSchur, EliminatedBlocks), LinAlgError> {
         let kept = (0..kept_dof)
             .map(|i| BlockSpan {
                 key: VarKey::default(),
@@ -1745,7 +1562,7 @@ mod tests {
         let partition = SchurPartition::new(kept, eliminated)?;
         let mut blocks = EliminatedBlocks::new(&partition);
         blocks.block_mut(0).copy_from_slice(inverse);
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.partition = Some(partition);
         Ok((solver, blocks))
     }
@@ -1850,10 +1667,10 @@ mod tests {
     // New tests for uncovered code paths
     // -------------------------------------------------------------------------
 
-    /// Test SparseSchurComplementSolver::default() equals new()
+    /// Test ExplicitSparseSchur::default() equals new()
     #[test]
     fn test_solver_default() {
-        let solver = SparseSchurComplementSolver::default();
+        let solver = ExplicitSparseSchur::default();
         assert!(solver.partition().is_none());
         assert!(solver.hessian.is_none());
         assert!(solver.gradient.is_none());
@@ -1863,7 +1680,7 @@ mod tests {
     #[test]
     fn test_partition_getter() -> TestResult {
         let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
 
         assert!(solver.partition().is_none());
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
@@ -1879,7 +1696,7 @@ mod tests {
             eliminate_rn_size: Some(3),
             auto_detect: false,
         };
-        let solver = SparseSchurComplementSolver::new().with_ordering(ordering);
+        let solver = ExplicitSparseSchur::new().with_ordering(ordering);
         assert_eq!(solver.ordering.eliminate_rn_size, Some(3));
     }
     /// Diagonal 3-DOF block inversion, the classic-BA case, through the
@@ -1913,7 +1730,7 @@ mod tests {
     #[test]
     fn test_explicit_schur_initialize_structure() -> TestResult {
         let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let bs = solver.partition().ok_or("partition is None")?;
@@ -1928,7 +1745,7 @@ mod tests {
     #[test]
     fn test_extract_gradient_blocks() -> TestResult {
         let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Gradient over full variable space (21 DOF)
@@ -1945,7 +1762,7 @@ mod tests {
     fn test_explicit_schur_solve_normal_equation() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
+        let mut solver = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Sparse);
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta =
@@ -1960,7 +1777,7 @@ mod tests {
     fn test_explicit_schur_solve_augmented_equation() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
+        let mut solver = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Sparse);
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         let delta = LinearSolver::<SparseMode>::solve_augmented_equation(
@@ -1973,24 +1790,39 @@ mod tests {
         Ok(())
     }
 
-    /// Test Schur solve with Iterative (PCG) variant exercises solve_with_pcg path
+    /// `ExplicitSchurVariant::Iterative` forms `S` explicitly, then solves it
+    /// with PCG (`solve_with_pcg`) instead of Cholesky — exercise that path
+    /// and check it agrees with the Cholesky variant on the same system.
     #[test]
     fn test_explicit_schur_solve_iterative_variant() -> TestResult {
-        let (variables, variable_index_map, _jacobian, residuals, landmark_keys) =
+        let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new()
-            .with_variant(SchurVariant::Iterative)
-            .with_cg_params(200, 1e-6);
+        let mut solver = ExplicitSparseSchur::new()
+            .with_variant(ExplicitSchurVariant::Iterative)
+            .with_cg_params(200, 1e-10);
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
-        // `Iterative` is the matrix-free solver; handing it to this solver
-        // must be an error, not a silent Cholesky fallback.
-        let result =
-            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &_jacobian);
-        let Err(err) = result else {
-            panic!("Iterative must not silently run Cholesky on the formed S");
-        };
-        assert!(err.to_string().contains("matrix-free"), "{err}");
+        let delta =
+            LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
+        assert_eq!(delta.nrows(), 21);
+
+        let mut cholesky_solver =
+            ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Sparse);
+        cholesky_solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+        let cholesky_delta = LinearSolver::<SparseMode>::solve_normal_equation(
+            &mut cholesky_solver,
+            &residuals,
+            &jacobian,
+        )?;
+
+        for i in 0..21 {
+            assert!(
+                (delta[(i, 0)] - cholesky_delta[(i, 0)]).abs() < 1e-4,
+                "PCG-on-S must agree with Cholesky-on-S at {i}: {} vs {}",
+                delta[(i, 0)],
+                cholesky_delta[(i, 0)]
+            );
+        }
         Ok(())
     }
 
@@ -1999,7 +1831,7 @@ mod tests {
     fn test_explicit_schur_get_hessian_gradient() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         assert!(LinearSolver::<SparseMode>::get_hessian(&solver).is_none());
@@ -2024,7 +1856,7 @@ mod tests {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
 
-        let mut solver1 = SparseSchurComplementSolver::new();
+        let mut solver1 = ExplicitSparseSchur::new();
         solver1.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let delta1 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver1,
@@ -2033,7 +1865,7 @@ mod tests {
             &Damping::identity(0.001),
         )?;
 
-        let mut solver2 = SparseSchurComplementSolver::new();
+        let mut solver2 = ExplicitSparseSchur::new();
         solver2.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let delta2 = LinearSolver::<SparseMode>::solve_augmented_equation(
             &mut solver2,
@@ -2057,7 +1889,7 @@ mod tests {
     #[test]
     fn test_combine_updates() -> TestResult {
         let (variables, variable_index_map, _, _, landmark_keys) = create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Camera delta: 12×1, landmark delta: 9×1
@@ -2085,7 +1917,7 @@ mod tests {
         let jacobian =
             SparseColMat::try_new_from_triplets(1, 1, &triplets).map_err(|e| format!("{e:?}"))?;
         let residuals = Mat::from_fn(1, 1, |_, _| 1.0);
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
 
         let result =
             LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian);
@@ -2111,14 +1943,14 @@ mod tests {
     fn test_extract_camera_block() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         // Build Hessian H = J^T J
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
-        let mut fresh = SparseSchurComplementSolver::new();
+        let mut fresh = ExplicitSparseSchur::new();
         fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let h_cc = fresh.extract_kept_block(&hessian)?;
 
@@ -2133,13 +1965,13 @@ mod tests {
     fn test_extract_coupling_block() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
-        let mut fresh = SparseSchurComplementSolver::new();
+        let mut fresh = ExplicitSparseSchur::new();
         fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let h_cp = fresh.extract_coupling_block(&hessian)?;
 
@@ -2154,13 +1986,13 @@ mod tests {
     fn test_gather_eliminated_blocks() -> TestResult {
         let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
             create_schur_test_setup()?;
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
         let hessian = solver.hessian.clone().ok_or("hessian is None")?;
 
-        let mut fresh = SparseSchurComplementSolver::new();
+        let mut fresh = ExplicitSparseSchur::new();
         fresh.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
         let partition = fresh.partition().ok_or("partition is None")?;
         let mut blocks = EliminatedBlocks::new(partition);
@@ -2236,7 +2068,7 @@ mod tests {
                 &jacobian,
             )?;
 
-        let mut schur = SparseSchurComplementSolver::new();
+        let mut schur = ExplicitSparseSchur::new();
         schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
         let first =
             crate::linalg::LinearSolver::<crate::linalg::SparseMode>::solve_normal_equation(
@@ -2306,7 +2138,7 @@ mod tests {
         eliminate.insert(keys[3]);
 
         let mut cholesky = SparseCholeskySolver::new();
-        let mut schur = SparseSchurComplementSolver::new();
+        let mut schur = ExplicitSparseSchur::new();
         schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
 
         for iter in 0..3 {
@@ -2399,7 +2231,7 @@ mod tests {
         };
 
         let mut cholesky = SparseCholeskySolver::new();
-        let mut schur = SparseSchurComplementSolver::new();
+        let mut schur = ExplicitSparseSchur::new();
         schur.initialize_structure(&state.variables, &state.variable_index_map, &eliminate)?;
 
         for iter in 0..3 {
@@ -2442,7 +2274,7 @@ mod tests {
 
     #[test]
     fn test_solve_with_cholesky_small_spd() -> TestResult {
-        let solver = SparseSchurComplementSolver::new();
+        let solver = ExplicitSparseSchur::new();
 
         // 2×2 SPD matrix A = [[4,1],[1,3]]
         let triplets = vec![
@@ -2470,7 +2302,7 @@ mod tests {
     /// Test solve_with_pcg converges on a small diagonal (trivial) system.
     #[test]
     fn test_solve_with_pcg_diagonal_system() -> TestResult {
-        let solver = SparseSchurComplementSolver::new();
+        let solver = ExplicitSparseSchur::new();
 
         // Diagonal SPD: [[2,0],[0,3]]
         let triplets = vec![
@@ -2502,7 +2334,7 @@ mod tests {
         let mut landmark_keys = std::collections::HashSet::new();
         landmark_keys.insert(k);
 
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),
@@ -2524,7 +2356,7 @@ mod tests {
         variable_index_map.insert(_k, 0);
         let landmark_keys = std::collections::HashSet::<VarKey>::new(); // no landmarks
 
-        let mut solver = SparseSchurComplementSolver::new();
+        let mut solver = ExplicitSparseSchur::new();
         let result = solver.initialize_structure(&variables, &variable_index_map, &landmark_keys);
         assert!(
             result.is_err(),

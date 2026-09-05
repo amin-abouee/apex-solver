@@ -43,8 +43,9 @@
 use faer::Mat;
 use faer::sparse::SparseColMat;
 
-use super::schur_partition::{EliminatedBlocks, SchurPartition};
 use crate::error::ErrorLogging;
+use crate::linalg::schur::{EliminatedBlocks, SchurPartition};
+use crate::linalg::sparse::pattern;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult};
 
 /// Which rows belong to which eliminated variable.
@@ -67,9 +68,9 @@ pub struct ChunkLayout {
     ///
     /// The triple `(nrows, ncols, nnz)` alone aliases patterns that permute
     /// entries at equal nonzero count; the hash in
-    /// [`PatternFingerprint`](super::pattern::PatternFingerprint) closes that
+    /// [`PatternFingerprint`](pattern::PatternFingerprint) closes that
     /// hole, so `matches` rejects any structural change.
-    pattern: super::pattern::PatternFingerprint,
+    pattern: pattern::PatternFingerprint,
 }
 
 impl ChunkLayout {
@@ -194,7 +195,7 @@ impl ChunkLayout {
             ranges,
             chunk_cols,
             col_spans,
-            pattern: super::pattern::PatternFingerprint::of(jacobian),
+            pattern: pattern::PatternFingerprint::of(jacobian),
         })
     }
 
@@ -238,13 +239,13 @@ impl ChunkLayout {
 
     /// Whether this layout still describes `jacobian`.
     ///
-    /// Compares the full [`PatternFingerprint`](super::pattern::PatternFingerprint):
+    /// Compares the full [`PatternFingerprint`](pattern::PatternFingerprint):
     /// dimensions and nonzero count reject fast, and the pattern hash rejects
     /// equal-`nnz` permutations that the old triple check aliased. The cached
     /// chunk columns follow the sparsity pattern, so any structural change at
     /// equal row count must invalidate the layout.
     pub fn matches(&self, jacobian: &SparseColMat<usize, f64>) -> bool {
-        self.pattern == super::pattern::PatternFingerprint::of(jacobian)
+        self.pattern == pattern::PatternFingerprint::of(jacobian)
     }
 }
 
@@ -673,7 +674,7 @@ impl ChunkData {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::linalg::sparse::schur_partition::BlockSpan;
+    use crate::linalg::schur::BlockSpan;
     use faer::sparse::Triplet;
     use slotmap::KeyData;
 
