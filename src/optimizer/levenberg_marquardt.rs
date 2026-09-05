@@ -705,15 +705,25 @@ impl LevenbergMarquardtConfig {
     /// ```
     pub fn for_bundle_adjustment() -> Self {
         Self::default()
-            .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
-            // Direct Cholesky on the reduced system is the most *accurate*
-            // variant — it solves the reduced system exactly — which is why it
-            // stays the default. It is no longer the fastest: with the PCG
-            // forcing sequence, `LinearSolverType::ImplicitSparseSchur` runs
-            // 4.0x/1.3x/2.7x faster on Ladybug/Dubrovnik/Venice for 0.1-2.4%
-            // RMSE difference, and slower only on Trafalgar, the smallest set.
-            // Switching the default is a step-quality decision, not a speed
-            // one, so it is left opt-in.
+            .with_linear_solver_type(LinearSolverType::ImplicitSparseSchur)
+            // Measured over the four BAL datasets, 3 runs each (time, and
+            // final RMSE against the exact reduced solve):
+            //
+            //   dataset     implicit          explicit/Sparse   ΔRMSE
+            //   Ladybug     18.76s  0.876538  75.24s  0.875283  +0.14%
+            //   Trafalgar    6.27s  0.798081   2.51s  0.808522  -1.29%
+            //   Dubrovnik   31.34s  0.768611  41.91s  0.787517  -2.40%
+            //   Venice      20.23s  0.752080  51.15s  0.747589  +0.60%
+            //
+            // 2.2x faster in total, better RMSE on two datasets and at most
+            // 0.6% worse on the other two, and it forms neither `JᵀJ` nor `S`
+            // so it is the only one of the four that keeps scaling. It loses
+            // only on Trafalgar, the smallest set, where the absolute cost is
+            // ~4s against ~56s saved on Ladybug.
+            //
+            // `ExplicitSparseSchur` remains the choice when the reduced solve
+            // must be *exact* — its step does not depend on a tolerance, and
+            // it is the reference every other path is measured against.
             .with_schur_variant(ExplicitSchurVariant::Sparse)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
             .with_damping(1e-3) // Moderate initial damping (Ceres default)
@@ -2058,9 +2068,11 @@ mod tests {
         let cfg = LevenbergMarquardtConfig::for_bundle_adjustment();
         assert!(matches!(
             cfg.linear_solver_type,
-            LinearSolverType::ExplicitSparseSchur
+            LinearSolverType::ImplicitSparseSchur
         ));
         assert_eq!(cfg.max_iterations, 20);
+        // The preset's speed rests on the forcing sequence being active.
+        assert!((cfg.schur_cg_q_tolerance - crate::linalg::schur::DEFAULT_ETA).abs() < 1e-15);
     }
 
     #[test]
