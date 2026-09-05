@@ -48,7 +48,7 @@ const SOLVER_TIMEOUT: Duration = Duration::from_secs(600);
 
 // apex-solver imports
 use apex_camera_models::{BALPinholeCameraStrict, DistortionModel, PinholeParams};
-use apex_io::{BalLoader, utils::DatasetRegistry};
+use apex_io::{BalDataset, BalLoader, utils::DatasetRegistry};
 use apex_manifolds::LieGroup;
 use apex_manifolds::se3::SE3;
 use apex_manifolds::so3::SO3;
@@ -58,7 +58,7 @@ use apex_solver::core::problem::Problem;
 use apex_solver::factors::SelfCalibration;
 use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::init_logger;
-use apex_solver::linalg::JacobianMode;
+use apex_solver::linalg::{ExplicitSchurVariant, JacobianMode, LinearSolverType};
 use apex_solver::optimizer::OptimizationStatus;
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -94,6 +94,22 @@ fn get_datasets() -> Vec<DatasetConfig> {
                     name: display.to_string(),
                     path: p.to_string_lossy().into_owned(),
                 })
+        })
+        .collect()
+}
+
+/// The single dataset the dense-mode row runs: Ladybug, truncated to
+/// [`dense_bench_cameras`] cameras by [`build_ba_problem`].
+///
+/// Named apart from `Ladybug` so its row can never be read as comparable to
+/// the full-dataset table in `doc/performance.md`.
+fn dense_bench_datasets() -> Vec<DatasetConfig> {
+    get_datasets()
+        .into_iter()
+        .filter(|d| d.name == "Ladybug")
+        .map(|d| DatasetConfig {
+            name: format!("Ladybug-mini-{}cam", dense_bench_cameras()),
+            path: d.path,
         })
         .collect()
 }
@@ -178,16 +194,129 @@ fn is_converged(status: &OptimizationStatus) -> bool {
     )
 }
 
-/// Run Apex Solver bundle adjustment with SelfCalibration + Iterative Schur
-fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
-    info!("Running Apex-Solver ...");
+/// Cameras kept from Ladybug for the dense-mode row.
+///
+/// `ExplicitDenseSchur` forms a *dense* `JᵀJ`, so its problem has to stay in
+/// dense mode's target range; the full BAL datasets are ~485k columns and
+/// cannot be run this way at all. Cost grows as roughly `rows · cols²`, and
+/// Ladybug's landmark count grows sublinearly in cameras, so measured dense
+/// runtime is 11 s at 2 cameras, 36 s at 4, and would pass a minute by 8 —
+/// 4 buys a representative row without spending the benchmark's whole budget
+/// on it. Override with `APEX_BENCH_DENSE_CAMERAS`.
+const DENSE_BENCH_CAMERAS: usize = 4;
+
+/// One apex-solver benchmark row: how the problem is built and which linear
+/// solver solves it.
+///
+/// Every field except `solver` is fixed by `APEX_BENCH_SCHUR`; `solver` is the
+/// CSV label, so the dense row can carry its sparse reference alongside it.
+#[derive(Debug, Clone, Copy)]
+struct ApexRun {
+    solver: &'static str,
+    jacobian_mode: JacobianMode,
+    /// Keep only observations made by the first N cameras; `None` uses the
+    /// whole dataset.
+    max_cameras: Option<usize>,
+    linear_solver_type: LinearSolverType,
+    /// Ignored unless `linear_solver_type` is `ExplicitSparseSchur`.
+    schur_variant: ExplicitSchurVariant,
+}
+
+impl ApexRun {
+    /// The `for_bundle_adjustment` default: `ExplicitSparseSchur` / `Sparse`
+    /// over the full dataset, which is what `doc/performance.md` measured.
+    fn default_sparse() -> Self {
+        Self {
+            solver: "Apex-Solver",
+            jacobian_mode: JacobianMode::Sparse,
+            max_cameras: None,
+            linear_solver_type: LinearSolverType::ExplicitSparseSchur,
+            schur_variant: ExplicitSchurVariant::Sparse,
+        }
+    }
+}
+
+/// Number of leading cameras the dense row keeps, from
+/// `APEX_BENCH_DENSE_CAMERAS` or [`DENSE_BENCH_CAMERAS`].
+fn dense_bench_cameras() -> usize {
+    std::env::var("APEX_BENCH_DENSE_CAMERAS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(DENSE_BENCH_CAMERAS)
+}
+
+/// True when `APEX_BENCH_SCHUR` selects the dense Schur solver, which runs a
+/// truncated problem instead of the four BAL datasets.
+fn is_dense_schur_bench() -> bool {
+    std::env::var("APEX_BENCH_SCHUR").is_ok_and(|v| v == "explicit-dense")
+}
+
+/// The apex-solver rows `APEX_BENCH_SCHUR` asks for.
+///
+/// Unset keeps `for_bundle_adjustment`'s default. `explicit-dense` yields two
+/// rows on the same truncated problem — the dense solver plus the sparse
+/// explicit solver as its accuracy reference — because a dense row has no
+/// counterpart in the full-dataset table to be compared against.
+fn apex_runs() -> Vec<ApexRun> {
+    let Ok(v) = std::env::var("APEX_BENCH_SCHUR") else {
+        return vec![ApexRun::default_sparse()];
+    };
+
+    let runs = match v.as_str() {
+        "sparse" => vec![ApexRun::default_sparse()],
+        "iterative" => vec![ApexRun {
+            linear_solver_type: LinearSolverType::ImplicitSparseSchur,
+            ..ApexRun::default_sparse()
+        }],
+        "explicit-iterative" => vec![ApexRun {
+            schur_variant: ExplicitSchurVariant::Iterative,
+            ..ApexRun::default_sparse()
+        }],
+        "chunked" => vec![ApexRun {
+            schur_variant: ExplicitSchurVariant::Chunked,
+            ..ApexRun::default_sparse()
+        }],
+        "explicit-dense" => {
+            let max_cameras = Some(dense_bench_cameras());
+            vec![
+                ApexRun {
+                    solver: "Apex-ExplicitDenseSchur",
+                    jacobian_mode: JacobianMode::Dense,
+                    max_cameras,
+                    linear_solver_type: LinearSolverType::ExplicitDenseSchur,
+                    ..ApexRun::default_sparse()
+                },
+                ApexRun {
+                    solver: "Apex-ExplicitSparseSchur",
+                    max_cameras,
+                    ..ApexRun::default_sparse()
+                },
+            ]
+        }
+        other => panic!("APEX_BENCH_SCHUR: unknown variant {other}"),
+    };
+
+    for run in &runs {
+        info!(
+            "APEX_BENCH_SCHUR={v} -> {}: {:?} / {:?} / {:?}",
+            run.solver, run.jacobian_mode, run.linear_solver_type, run.schur_variant
+        );
+    }
+    runs
+}
+
+/// Run Apex Solver bundle adjustment with SelfCalibration + the Schur solver
+/// `run` selects.
+fn apex_solver_ba(dataset_name: &str, dataset_path: &str, run: ApexRun) -> BABenchmarkResult {
+    info!("Running {} ...", run.solver);
 
     // Run solver in separate thread with timeout
     let dataset_name_owned = dataset_name.to_string();
     let dataset_path_owned = dataset_path.to_string();
 
     let handle =
-        thread::spawn(move || apex_solver_ba_impl(&dataset_name_owned, &dataset_path_owned));
+        thread::spawn(move || apex_solver_ba_impl(&dataset_name_owned, &dataset_path_owned, run));
 
     // Wait for completion with timeout
     let start = Instant::now();
@@ -200,7 +329,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
             );
             return BABenchmarkResult::failed(
                 dataset_name,
-                "Apex-Solver",
+                run.solver,
                 "Rust",
                 &format!("TIMEOUT ({} minutes)", timeout_mins),
             );
@@ -209,7 +338,7 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
         // Check if thread completed
         if handle.is_finished() {
             return handle.join().unwrap_or_else(|_| {
-                BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", "Thread panicked")
+                BABenchmarkResult::failed(dataset_name, run.solver, "Rust", "Thread panicked")
             });
         }
 
@@ -218,66 +347,94 @@ fn apex_solver_ba(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
     }
 }
 
-/// Implementation of Apex Solver BA (runs in separate thread)
-fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkResult {
-    // Load dataset
-    let dataset = match BalLoader::load(dataset_path) {
-        Ok(d) => d,
-        Err(e) => {
-            error!("Failed to load BAL dataset: {}", e);
-            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
-        }
-    };
-
-    // Setup problem
-    let mut problem = Problem::new(JacobianMode::Sparse);
-
-    // Helper function to convert axis-angle to SO3
-    fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
-        let angle = axis_angle.norm();
-        if angle < 1e-10 {
-            SO3::identity()
-        } else {
-            let axis = axis_angle / angle;
-            SO3::from_axis_angle(&axis, angle)
-        }
+/// Convert a BAL axis-angle rotation to `SO3`.
+fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
+    let angle = axis_angle.norm();
+    if angle < 1e-10 {
+        SO3::identity()
+    } else {
+        let axis = axis_angle / angle;
+        SO3::from_axis_angle(&axis, angle)
     }
+}
 
-    let mut pose_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
-    let mut intr_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.cameras.len());
+/// Problem sizes for one benchmark row.
+///
+/// These are the counts actually added to the problem, not the file's — a
+/// truncated row keeps fewer, and RMSE normalizes by observations, so using
+/// the file's totals would silently rescale the reported error.
+#[derive(Debug, Clone, Copy)]
+struct ProblemSize {
+    cameras: usize,
+    points: usize,
+    observations: usize,
+}
 
-    // Add cameras as SE3 poses
-    for cam in &dataset.cameras {
+/// Build the SelfCalibration BA problem: an SE3 pose and 3-parameter
+/// intrinsics per camera, an eliminated `Rn` landmark per point, one
+/// Huber(1 px) projection factor per observation, camera 0 fixed for gauge
+/// freedom.
+///
+/// `run.max_cameras` keeps only the observations made by the first N cameras
+/// and the points those observations reference — the truncation
+/// `tests/schur_ba_agreement.rs` already uses — so a dense-mode row can run on
+/// a subset whose Hessian actually fits densely. `None` keeps the whole
+/// dataset, which is what every sparse row uses.
+fn build_ba_problem(dataset: &BalDataset, run: ApexRun) -> Result<(Problem, ProblemSize), String> {
+    let num_cameras = run
+        .max_cameras
+        .unwrap_or(dataset.cameras.len())
+        .min(dataset.cameras.len());
+    let observations: Vec<_> = dataset
+        .observations
+        .iter()
+        .filter(|o| o.camera_index < num_cameras)
+        .collect();
+
+    let mut problem = Problem::new(run.jacobian_mode);
+
+    // Add cameras as SE3 poses plus a 3-parameter intrinsics block each
+    let mut pose_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(num_cameras);
+    let mut intr_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(num_cameras);
+    for cam in dataset.cameras.iter().take(num_cameras) {
         let axis_angle = Vector3::new(cam.rotation.x, cam.rotation.y, cam.rotation.z);
         let translation = Vector3::new(cam.translation.x, cam.translation.y, cam.translation.z);
-        let so3 = axis_angle_to_so3(&axis_angle);
-        let pose = SE3::from_translation_so3(translation, so3);
+        let pose = SE3::from_translation_so3(translation, axis_angle_to_so3(&axis_angle));
 
-        let pose_key = problem.add_variable(
+        pose_keys.push(problem.add_variable(
             ManifoldType::SE3,
             DVector::from_column_slice(pose.as_param_slice()),
-        );
-        pose_keys.push(pose_key);
-
-        let intrinsics_vec = DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]);
-        let intr_key = problem.add_variable(ManifoldType::RN, intrinsics_vec);
-        intr_keys.push(intr_key);
+        ));
+        intr_keys.push(problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![cam.focal_length, cam.k1, cam.k2]),
+        ));
     }
 
-    let mut pt_keys: Vec<apex_solver::core::VarKey> = Vec::with_capacity(dataset.points.len());
-    for point in &dataset.points {
-        let point_vec =
-            DVector::from_vec(vec![point.position.x, point.position.y, point.position.z]);
-        let pt_key = problem.add_variable(ManifoldType::RN, point_vec);
+    // Only points the kept observations reference become variables: an
+    // unobserved landmark contributes no residual and would leave its
+    // `H_ee` block singular for every Schur solver to trip over.
+    let mut point_indices: Vec<usize> = observations.iter().map(|o| o.point_index).collect();
+    point_indices.sort_unstable();
+    point_indices.dedup();
+
+    let mut pt_keys: HashMap<usize, apex_solver::core::VarKey> =
+        HashMap::with_capacity(point_indices.len());
+    for index in point_indices {
+        let position = &dataset.points[index].position;
+        let pt_key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![position.x, position.y, position.z]),
+        );
         problem.mark_for_elimination(pt_key);
-        pt_keys.push(pt_key);
+        pt_keys.insert(index, pt_key);
     }
 
     // Add projection factors using ProjectionFactor with SE3 + BALPinholeCameraStrict
     // SelfCalibration mode: optimize pose + landmarks + intrinsics
-    for obs in &dataset.observations {
+    for obs in &observations {
         let cam = &dataset.cameras[obs.camera_index];
-        let camera = match BALPinholeCameraStrict::new(
+        let camera = BALPinholeCameraStrict::new(
             PinholeParams {
                 fx: cam.focal_length,
                 fy: cam.focal_length,
@@ -288,73 +445,72 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
                 k1: cam.k1,
                 k2: cam.k2,
             },
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                return BABenchmarkResult::failed(
-                    dataset_name,
-                    "Apex-Solver",
-                    "Rust",
-                    &format!("Invalid camera parameters: {}", e),
-                );
-            }
-        };
+        )
+        .map_err(|e| format!("Invalid camera parameters: {e}"))?;
 
-        let observations = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
+        let measurements = Matrix2xX::from_columns(&[Vector2::new(obs.x, obs.y)]);
         let factor: ProjectionFactor<BALPinholeCameraStrict, SelfCalibration> =
-            ProjectionFactor::new(observations, camera);
+            ProjectionFactor::new(measurements, camera);
 
-        let pose_key = pose_keys[obs.camera_index];
-        let intr_key = intr_keys[obs.camera_index];
-        let pt_key = pt_keys[obs.point_index];
+        let pt_key = *pt_keys
+            .get(&obs.point_index)
+            .ok_or_else(|| format!("no variable for point {}", obs.point_index))?;
 
         // Use Huber loss (matching C++ implementations)
-        let loss = match HuberLoss::new(1.0) {
-            Ok(l) => Box::new(l),
-            Err(_) => continue,
-        };
-        problem.add_residual_block(&[pose_key, pt_key, intr_key], Box::new(factor), Some(loss));
+        let loss = HuberLoss::new(1.0).map_err(|e| format!("Invalid Huber loss: {e}"))?;
+        problem.add_residual_block(
+            &[
+                pose_keys[obs.camera_index],
+                pt_key,
+                intr_keys[obs.camera_index],
+            ],
+            Box::new(factor),
+            Some(Box::new(loss)),
+        );
     }
 
     // Fix first camera pose (gauge freedom) - all 6 DOF
+    let first_pose = *pose_keys.first().ok_or("dataset has no cameras")?;
     for dof in 0..6 {
-        problem.fix_variable(pose_keys[0], dof);
+        problem.fix_variable(first_pose, dof);
     }
 
-    // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
-    let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    let size = ProblemSize {
+        cameras: num_cameras,
+        points: pt_keys.len(),
+        observations: observations.len(),
+    };
+    Ok((problem, size))
+}
 
-    // APEX_BENCH_SCHUR selects the Schur solver/variant so one build can
-    // benchmark several of them. Unset keeps `for_bundle_adjustment`'s default
-    // (`ExplicitSparseSchur` + `ExplicitSchurVariant::Sparse`).
-    if let Ok(v) = std::env::var("APEX_BENCH_SCHUR") {
-        match v.as_str() {
-            "sparse" => {
-                config.linear_solver_type =
-                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
-                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Sparse;
-            }
-            "iterative" => {
-                config.linear_solver_type =
-                    apex_solver::linalg::LinearSolverType::ImplicitSparseSchur;
-            }
-            "explicit-iterative" => {
-                config.linear_solver_type =
-                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
-                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Iterative;
-            }
-            "chunked" => {
-                config.linear_solver_type =
-                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
-                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Chunked;
-            }
-            other => panic!("APEX_BENCH_SCHUR: unknown variant {other}"),
-        };
-        info!(
-            "APEX_BENCH_SCHUR={v} -> {:?} / {:?}",
-            config.linear_solver_type, config.schur_variant
-        );
-    }
+/// Implementation of Apex Solver BA (runs in separate thread)
+fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str, run: ApexRun) -> BABenchmarkResult {
+    // Load dataset
+    let dataset = match BalLoader::load(dataset_path) {
+        Ok(d) => d,
+        Err(e) => {
+            error!("Failed to load BAL dataset: {}", e);
+            return BABenchmarkResult::failed(dataset_name, run.solver, "Rust", &e.to_string());
+        }
+    };
+
+    let (mut problem, size) = match build_ba_problem(&dataset, run) {
+        Ok(built) => built,
+        Err(e) => {
+            error!("Failed to build BA problem: {}", e);
+            return BABenchmarkResult::failed(dataset_name, run.solver, "Rust", &e);
+        }
+    };
+    info!(
+        "{}: {} cameras, {} landmarks, {} observations ({:?} Jacobian)",
+        dataset_name, size.cameras, size.points, size.observations, run.jacobian_mode
+    );
+
+    // Use the same tuned config as bin/bundle_adjustment.rs for consistent
+    // results; `run` overrides only which Schur solver it uses.
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment()
+        .with_linear_solver_type(run.linear_solver_type)
+        .with_schur_variant(run.schur_variant);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
@@ -364,14 +520,14 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
         Ok(r) => r,
         Err(e) => {
             error!("Optimization failed: {}", e);
-            return BABenchmarkResult::failed(dataset_name, "Apex-Solver", "Rust", &e.to_string());
+            return BABenchmarkResult::failed(dataset_name, run.solver, "Rust", &e.to_string());
         }
     };
     let elapsed_seconds = start.elapsed().as_secs_f64();
 
     // Compute initial and final RMSE from solver costs.
     // Solver cost = 0.5 * sum ||r_i||², so MSE = mean ||r_i||² = 2 * cost / n.
-    let num_obs = dataset.observations.len() as f64;
+    let num_obs = size.observations as f64;
     let initial_mse = 2.0 * result.initial_cost / num_obs;
     let initial_rmse = initial_mse.sqrt();
     let final_mse = 2.0 * result.final_cost / num_obs;
@@ -381,11 +537,11 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
 
     BABenchmarkResult::success(
         dataset_name,
-        "Apex-Solver",
+        run.solver,
         "Rust",
-        dataset.cameras.len(),
-        dataset.points.len(),
-        dataset.observations.len(),
+        size.cameras,
+        size.points,
+        size.observations,
         initial_rmse,
         final_rmse,
         elapsed_seconds,
@@ -763,7 +919,14 @@ fn run_benchmark_comparison() {
     info!("BUNDLE ADJUSTMENT BENCHMARK COMPARISON");
     info!("Testing 4 datasets: Ladybug, Trafalgar, Dubrovnik, Venice");
 
-    let datasets = get_datasets();
+    let runs = apex_runs();
+    let datasets = if is_dense_schur_bench() {
+        // A dense Hessian over a full BAL dataset is ~485k x 485k at the
+        // smallest, so the dense solver runs the truncated Ladybug row only.
+        dense_bench_datasets()
+    } else {
+        get_datasets()
+    };
     let mut all_results = Vec::new();
 
     // Run benchmarks for each dataset
@@ -777,8 +940,9 @@ fn run_benchmark_comparison() {
         }
 
         // Phase 1: Apex Solver (Rust)
-        let apex_result = apex_solver_ba(&dataset.name, &dataset.path);
-        all_results.push(apex_result);
+        for run in &runs {
+            all_results.push(apex_solver_ba(&dataset.name, &dataset.path, *run));
+        }
 
         // Phase 2: C++ Solvers (skipped when APEX_BENCH_RUST_ONLY is set)
         if std::env::var_os("APEX_BENCH_RUST_ONLY").is_some() {
