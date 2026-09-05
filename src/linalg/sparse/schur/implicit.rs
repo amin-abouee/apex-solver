@@ -1,25 +1,62 @@
 //! # Implicit Sparse Schur Complement Solver
 //!
-//! This module implements the **implicit** (matrix-free) Schur complement
-//! method using Preconditioned Conjugate Gradients (PCG) for bundle
-//! adjustment. Equivalent to Ceres's `ITERATIVE_SCHUR`.
+//! Matrix-free Schur complement solved with Preconditioned Conjugate
+//! Gradients — Ceres's `ITERATIVE_SCHUR`, and matrix-free in the same sense
+//! Ceres means it: **neither `S` nor `JᵀJ` is ever formed**.
 //!
-//! ## Explicit vs Implicit Schur Complement
+//! ## What "implicit" has to mean
 //!
-//! **Implicit Schur:** This formulation never constructs the reduced camera matrix S
-//! explicitly. Instead, it solves the linear system using a matrix-free approach where
-//! only the matrix-vector product S·x is computed. This is highly memory-efficient for
-//! large-scale problems.
+//! Writing `J = [E | F]` for the eliminated and retained column sets, the
+//! reduced system is
 //!
-//! **Explicit Schur:** The alternative formulation (see [`explicit`](super::explicit))
-//! physically constructs S = B - E C⁻¹ Eᵀ in memory and uses sparse Cholesky factorization.
+//! ```text
+//! S = FᵀF − FᵀE·(EᵀE)⁻¹·EᵀF
+//! ```
 //!
-//! ## When to Use Implicit Schur
+//! and PCG only ever needs its action on a vector. Expanding that action so it
+//! reads `J` and nothing else gives the whole solver:
 //!
-//! - Very large bundle adjustment problems (> 10,000 cameras)
-//! - Memory-constrained environments
-//! - When iterative methods converge well (good preconditioning)
-//! - When the reduced camera system S is too large to store explicitly
+//! ```text
+//! y = F·v                       scatter over the retained columns
+//! t = Eᵀ·y                      gather over the eliminated columns
+//! u = (EᵀE + λD_e)⁻¹·t          block-diagonal, one small solve per block
+//! y ← y − E·u                   scatter over the eliminated columns
+//! S·v = Fᵀ·y + λD_k·v           gather over the retained columns
+//! ```
+//!
+//! Four passes over `J`'s nonzeros, no intermediate matrix. Ceres's own
+//! documentation states the same cost model: "the cost of this evaluation
+//! scales with the number of non-zeros in the Jacobian".
+//!
+//! That distinction is the reason this solver exists. `JᵀJ` for a bundle
+//! adjustment problem carries a dense block for **every pair of cameras
+//! sharing a landmark** — fill-in `J` does not have — so forming it costs far
+//! more memory than `J`, and walking it costs far more time than walking `J`.
+//! A solver that built `JᵀJ` and only skipped `S` would avoid the smaller of
+//! the two costs while paying the larger one.
+//!
+//! ## When to use it
+//!
+//! When `JᵀJ` or `S` will not fit, or barely fits. The explicit solvers
+//! factorize an exact `S` and are faster whenever they fit in memory, so this
+//! is the large-problem fallback rather than the default —
+//! `ExplicitSparseSchur` remains what
+//! [`LevenbergMarquardtConfig::for_bundle_adjustment`](crate::optimizer::levenberg_marquardt::LevenbergMarquardtConfig::for_bundle_adjustment)
+//! selects.
+//!
+//! ## Preconditioning
+//!
+//! [`SchurPreconditioner`] selects between the three Ceres offers for
+//! `ITERATIVE_SCHUR`, all built from `J`:
+//!
+//! | This crate | Ceres | Built from |
+//! |---|---|---|
+//! | [`SchurPreconditioner::None`] | `IDENTITY` | — |
+//! | [`SchurPreconditioner::BlockDiagonal`] | `JACOBI` | diagonal blocks of `FᵀF` |
+//! | [`SchurPreconditioner::SchurJacobi`] | `SCHUR_JACOBI` | diagonal blocks of `S` |
+//!
+//! `SchurJacobi` is the default and generally the best of the three; it costs
+//! one pass over the observations to build.
 //!
 //! ## Automatic group recognition
 //!
@@ -27,16 +64,10 @@
 //! ("group 1") variable sets come from [`SchurPartition`] — the same
 //! structure [`ExplicitSparseSchur`](super::explicit::ExplicitSparseSchur) and
 //! [`ExplicitDenseSchur`](crate::linalg::dense::schur::ExplicitDenseSchur)
-//! use. That means this solver places no restriction on the eliminated
-//! variables' DOF or column layout: 3-D points, 1-DOF inverse-depth
-//! landmarks, or a mix of both in one problem all work identically, and the
-//! retained and eliminated columns may interleave arbitrarily.
-//!
-//! ## Algorithm
-//!
-//! 1. Form Schur complement implicitly: S = H_cc - H_cp * H_pp^{-1} * H_cp^T
-//! 2. Solve S*δc = g_reduced using PCG (matrix-free)
-//! 3. Back-substitute: δp = H_pp^{-1} * (g_p - H_cp^T * δc)
+//! use. This solver places no restriction on the eliminated variables' DOF or
+//! column layout: 3-D points, 1-DOF inverse-depth landmarks, or a mix of both
+//! in one problem all work identically, and the retained and eliminated
+//! columns may interleave arbitrarily.
 //!
 //! ## Usage Example
 //!
@@ -54,7 +85,9 @@
 //! use apex_solver::linalg::{ImplicitSparseSchur, SchurPreconditioner};
 //! use apex_solver::linalg::StructureAware;
 //!
-//! let mut solver = ImplicitSparseSchur::with_config(500, 1e-9, SchurPreconditioner::SchurJacobi);
+//! let mut solver = ImplicitSparseSchur::new()
+//!     .with_preconditioner(SchurPreconditioner::SchurJacobi)
+//!     .with_cg_config(500, 1e-9);
 //! solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
 //! # Ok(())
 //! # }
@@ -64,11 +97,11 @@ use crate::core::VarKey;
 use crate::core::variable::ManifoldVariable;
 use crate::error::ErrorLogging;
 use crate::linalg::regularization::invert_with_retry_dyn;
+use crate::linalg::schur::jacobian_ops::{column_dot, diag_jt_j};
 use crate::linalg::schur::{
     BlockSpan, EliminatedBlocks, PcgParams, SchurOrdering, SchurPartition, SchurPreconditioner,
-    effective_landmark_keys, solve_pcg,
+    effective_landmark_keys, jt_j_vec_product, jt_vec, solve_pcg,
 };
-use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::sparse::pattern;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
 use faer::Mat;
@@ -76,22 +109,32 @@ use faer::sparse::SparseColMat;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
-use std::collections::HashMap;
+
+/// Structural facts about `J` that depend only on its sparsity, so they are
+/// rebuilt when the pattern changes and reused across every solve in between.
+#[derive(Debug, Clone, Default)]
+struct StructureCache {
+    /// Sorted rows touched by each eliminated block.
+    eliminated_rows: Vec<Vec<usize>>,
+    /// Eliminated blocks visible from each kept block — they share a row.
+    visibility: Vec<Vec<usize>>,
+    /// Pattern the cache was built from.
+    fingerprint: Option<pattern::PatternFingerprint>,
+}
 
 /// Implicit (matrix-free) Schur complement solver using Preconditioned
 /// Conjugate Gradients. Equivalent to Ceres's `ITERATIVE_SCHUR`.
+///
+/// Forms neither `S` nor `JᵀJ`; see the module documentation for the operator.
 #[derive(Debug, Clone)]
 pub struct ImplicitSparseSchur {
     partition: Option<SchurPartition>,
-    /// `H_ee⁻¹` per eliminated block, gathered and inverted once per solve.
+    /// `(EᵀE + λD_e)⁻¹` per eliminated block, rebuilt once per solve.
     eliminated: EliminatedBlocks,
     /// Largest eliminated block's DOF, for sizing the block-apply scratch.
     max_eliminated_dof: usize,
     /// Automatic eliminated/retained ("group 0"/"group 1") classification,
-    /// combined with manual marks in `initialize_structure` — the same
-    /// mechanism [`ExplicitSparseSchur`](super::explicit::ExplicitSparseSchur)
-    /// and [`ExplicitDenseSchur`](crate::linalg::dense::schur::ExplicitDenseSchur)
-    /// use, so all three solvers recognize the same groups.
+    /// combined with manual marks in `initialize_structure`.
     ordering: SchurOrdering,
 
     // CG parameters
@@ -101,592 +144,655 @@ pub struct ImplicitSparseSchur {
     // Preconditioner type
     preconditioner_type: SchurPreconditioner,
 
-    // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
-    ne_cache: LazyNormalEquations,
-
-    /// The un-damped `JᵀJ`, published through [`LinearSolver::get_hessian`].
-    hessian: Option<SparseColMat<usize, f64>>,
+    /// `J` of the last successful solve.
+    ///
+    /// Held so [`LinearSolver::hessian_vec_product`] can evaluate `Jᵀ(J·v)`
+    /// for the optimizers' quadratic model — the same arrangement
+    /// `ExplicitSparseSchur`'s chunked variant uses. One copy of `J`, against
+    /// the `JᵀJ` this solver exists to avoid.
+    jacobian: Option<SparseColMat<usize, f64>>,
     /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
 
     // Workspace buffers for the Schur operator (avoid repeated allocations).
-    workspace_lm: Vec<f64>,  // eliminated-DOF sized buffer
-    workspace_cam: Vec<f64>, // kept-DOF sized buffer
-    block_scratch: Vec<f64>, // max-eliminated-block-DOF sized scratch
+    workspace_rows: Vec<f64>, // residual-row sized buffer
+    workspace_lm: Vec<f64>,   // eliminated-DOF sized buffer
+    block_scratch: Vec<f64>,  // max-eliminated-block-DOF sized scratch
 
-    // Visibility index: kept-block index -> Vec<eliminated-block index>.
-    // This avoids O(kept * eliminated) iteration in preconditioner computation.
-    camera_to_landmark_visibility: Vec<Vec<usize>>,
-    /// Structural fingerprint the visibility index was built from, so it is
-    /// rebuilt whenever the sparsity changes.
-    visibility_fingerprint: Option<pattern::PatternFingerprint>,
+    structure: StructureCache,
 }
 
 impl ImplicitSparseSchur {
-    /// Create a new implicit Schur solver with default parameters.
-    /// Default: Schur-Jacobi preconditioner, 500 max iterations, 1e-9 relative tolerance —
-    /// tighter settings that match Ceres Solver behavior for accurate step computation.
+    /// Default: Schur-Jacobi preconditioner, 500 max iterations, 1e-9 relative
+    /// tolerance — matching Ceres's `ITERATIVE_SCHUR` defaults.
     pub fn new() -> Self {
-        Self::with_config(500, 1e-9, SchurPreconditioner::SchurJacobi)
-    }
-
-    /// Create solver with custom CG parameters.
-    pub fn with_cg_params(max_iterations: usize, tolerance: f64) -> Self {
-        Self::with_config(max_iterations, tolerance, SchurPreconditioner::SchurJacobi)
-    }
-
-    /// Create solver with full configuration.
-    pub fn with_config(
-        max_iterations: usize,
-        tolerance: f64,
-        preconditioner: SchurPreconditioner,
-    ) -> Self {
         Self {
             partition: None,
             eliminated: EliminatedBlocks::default(),
-            max_eliminated_dof: 0,
+            max_eliminated_dof: 1,
             ordering: SchurOrdering::default(),
-            max_cg_iterations: max_iterations,
-            cg_tolerance: tolerance,
-            preconditioner_type: preconditioner,
-            ne_cache: LazyNormalEquations::default(),
-            hessian: None,
+            max_cg_iterations: 500,
+            cg_tolerance: 1e-9,
+            preconditioner_type: SchurPreconditioner::default(),
+            jacobian: None,
             gradient: None,
+            workspace_rows: Vec::new(),
             workspace_lm: Vec::new(),
-            workspace_cam: Vec::new(),
             block_scratch: Vec::new(),
-            camera_to_landmark_visibility: Vec::new(),
-            visibility_fingerprint: None,
+            structure: StructureCache::default(),
         }
     }
 
-    /// Set the automatic group-classification ordering (see [`SchurOrdering`]).
+    /// Set the PCG iteration cap and relative residual tolerance.
+    pub fn with_cg_config(mut self, max_iterations: usize, tolerance: f64) -> Self {
+        self.max_cg_iterations = max_iterations;
+        self.cg_tolerance = tolerance;
+        self
+    }
+
+    /// Select the preconditioner — see the table in the module documentation.
+    ///
+    /// Mirrors
+    /// [`ExplicitSparseSchur::with_preconditioner`](super::explicit::ExplicitSparseSchur::with_preconditioner),
+    /// so the two PCG-based solvers are configured the same way.
+    pub fn with_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
+        self.preconditioner_type = preconditioner;
+        self
+    }
+
+    /// Set how eliminated variables are recognized.
     pub fn with_ordering(mut self, ordering: SchurOrdering) -> Self {
         self.ordering = ordering;
         self
     }
 
-    /// Borrow the partition, or report that `initialize_structure` was skipped.
+    /// Construct with explicit CG parameters, keeping the default
+    /// preconditioner.
+    pub fn with_cg_params(max_iterations: usize, tolerance: f64) -> Self {
+        Self::new().with_cg_config(max_iterations, tolerance)
+    }
+
+    /// Construct with explicit CG parameters and preconditioner.
+    pub fn with_config(
+        max_iterations: usize,
+        tolerance: f64,
+        preconditioner: SchurPreconditioner,
+    ) -> Self {
+        Self::new()
+            .with_cg_config(max_iterations, tolerance)
+            .with_preconditioner(preconditioner)
+    }
+
+    /// The partition, once [`StructureAware::initialize_structure`] has run.
+    pub fn partition(&self) -> Option<&SchurPartition> {
+        self.partition.as_ref()
+    }
+
     fn require_partition(&self) -> LinAlgResult<&SchurPartition> {
         self.partition.as_ref().ok_or_else(|| {
             LinAlgError::InvalidInput(
-                "Block structure not built. Call initialize_structure() first.".to_string(),
+                "Schur solver used before initialize_structure; the partition is unknown".into(),
             )
             .log()
         })
     }
 
-    /// Apply Schur complement operator: `S·x = (H_kk − H_ke·H_ee⁻¹·H_keᵀ)·x`.
+    /// Rebuild the structural caches if `J`'s sparsity changed.
     ///
-    /// Computes the matrix-vector product without ever forming `S`, walking
-    /// [`SchurPartition`] rather than assuming a contiguous, fixed-DOF layout —
-    /// this is the generalization over the pre-`SchurPartition` version of
-    /// this solver, which only supported 3-DOF landmarks in a contiguous
-    /// column range.
-    #[allow(clippy::too_many_arguments)]
-    fn apply_schur_operator_fast(
-        &self,
-        partition: &SchurPartition,
-        hessian: &SparseColMat<usize, f64>,
-        x: &Mat<f64>,
-        result: &mut Mat<f64>,
-        temp_lm: &mut [f64],
-        temp_cam: &mut [f64],
-        block_scratch: &mut [f64],
-    ) {
-        let symbolic = hessian.symbolic();
+    /// Also enforces the elimination precondition against `J` directly: a
+    /// residual row touching two eliminated variables means `EᵀE` is not
+    /// block-diagonal, so inverting it blockwise would silently produce a wrong
+    /// step. `SchurPartition::verify_block_diagonal` makes the same check
+    /// against `JᵀJ`, which this solver never forms.
+    fn ensure_structure(&mut self, jacobian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
+        let fingerprint = pattern::PatternFingerprint::of(jacobian);
+        if self.structure.fingerprint == Some(fingerprint) {
+            return Ok(());
+        }
 
-        temp_lm.iter_mut().for_each(|v| *v = 0.0);
-        temp_cam.iter_mut().for_each(|v| *v = 0.0);
+        let partition = self.require_partition()?;
+        let symbolic = jacobian.symbolic();
 
-        // Fused Step 1+2: result = H_kk * x AND temp_lm = H_ke^T * x.
-        // Walking every kept column once extracts both products.
-        for block in partition.kept_blocks() {
+        // Row -> owning eliminated block, and each block's sorted row set.
+        let mut row_owner = vec![usize::MAX; jacobian.nrows()];
+        let mut eliminated_rows = vec![Vec::new(); partition.eliminated_blocks().len()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             for offset in 0..block.dof {
-                let col = block.col_start + offset;
-                let Some(local_col) = partition.kept_local(col) else {
-                    continue;
-                };
-                let x_val = x[(local_col, 0)];
-                if x_val == 0.0 {
-                    continue;
-                }
-                let rows = symbolic.row_idx_of_col_raw(col);
-                let vals = hessian.val_of_col(col);
-                for (idx, &row) in rows.iter().enumerate() {
-                    let val = vals[idx];
-                    if let Some(local_row) = partition.kept_local(row) {
-                        result[(local_row, 0)] += val * x_val;
-                    } else if let Some((block_idx, offset)) = partition.eliminated_local(row) {
-                        let base = partition.eliminated_offset(block_idx);
-                        temp_lm[base + offset] += val * x_val;
+                for &row in symbolic.row_idx_of_col_raw(block.col_start + offset) {
+                    match row_owner[row] {
+                        usize::MAX => {
+                            row_owner[row] = block_idx;
+                            eliminated_rows[block_idx].push(row);
+                        }
+                        owned if owned == block_idx => {}
+                        owned => {
+                            let other = partition.eliminated_blocks()[owned];
+                            return Err(LinAlgError::InvalidInput(format!(
+                                "variables {:?} and {:?} are both marked for elimination but \
+                                 share residual row {row}, so EᵀE is not block-diagonal and \
+                                 the elimination would give a wrong step; eliminate only \
+                                 mutually unconnected variables",
+                                block.key, other.key
+                            ))
+                            .log());
+                        }
                     }
                 }
             }
         }
+        for rows in &mut eliminated_rows {
+            rows.sort_unstable();
+        }
 
-        // Step 3: temp_lm = H_ee^{-1} * temp_lm, blockwise, any DOF.
-        for (block_idx, _) in partition.eliminated_blocks().iter().enumerate() {
+        // Eliminated blocks visible from each kept block, via shared rows.
+        let visibility: Vec<Vec<usize>> = partition
+            .kept_blocks()
+            .par_iter()
+            .map(|block| {
+                let mut seen = Vec::new();
+                for offset in 0..block.dof {
+                    for &row in symbolic.row_idx_of_col_raw(block.col_start + offset) {
+                        let owner = row_owner[row];
+                        if owner != usize::MAX {
+                            seen.push(owner);
+                        }
+                    }
+                }
+                seen.sort_unstable();
+                seen.dedup();
+                seen
+            })
+            .collect();
+
+        self.structure = StructureCache {
+            eliminated_rows,
+            visibility,
+            fingerprint: Some(fingerprint),
+        };
+        Ok(())
+    }
+
+    /// `S·v = Fᵀ(F·v − E·(EᵀE+λD_e)⁻¹·Eᵀ·F·v) + λD_k·v`, reading only `J`.
+    ///
+    /// `damp_kept` carries `λ·D_k` per retained local column, already clamped;
+    /// it is empty for an undamped solve. The eliminated side's damping is
+    /// baked into the inverted blocks before this is ever called.
+    #[allow(clippy::too_many_arguments)]
+    fn apply_schur_operator(
+        &self,
+        partition: &SchurPartition,
+        jacobian: &SparseColMat<usize, f64>,
+        damp_kept: &[f64],
+        v: &Mat<f64>,
+        out: &mut Mat<f64>,
+        rows: &mut [f64],
+        temp_lm: &mut [f64],
+        scratch: &mut [f64],
+    ) {
+        let symbolic = jacobian.symbolic();
+
+        // y = F·v
+        rows.iter_mut().for_each(|r| *r = 0.0);
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let Some(local) = partition.kept_local(col) else {
+                    continue;
+                };
+                let x = v[(local, 0)];
+                if x == 0.0 {
+                    continue;
+                }
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] += vals[k] * x;
+                }
+            }
+        }
+
+        // t = Eᵀ·y
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let mut acc = 0.0;
+                for (k, &row) in idx.iter().enumerate() {
+                    acc += vals[k] * rows[row];
+                }
+                temp_lm[base + offset] = acc;
+            }
+        }
+
+        // u = (EᵀE + λD_e)⁻¹·t, then y ← y − E·u
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             let dof = self.eliminated.dof(block_idx);
             if dof == 0 {
                 continue;
             }
             let base = partition.eliminated_offset(block_idx);
             let inv = self.eliminated.block(block_idx);
-            let scratch = &mut block_scratch[..dof];
+            let slot = &mut scratch[..dof];
             for r in 0..dof {
                 let mut acc = 0.0;
                 for c in 0..dof {
                     acc += inv[c * dof + r] * temp_lm[base + c];
                 }
-                scratch[r] = acc;
+                slot[r] = acc;
             }
-            temp_lm[base..base + dof].copy_from_slice(scratch);
-        }
 
-        // Step 4: temp_cam = H_ke * temp_lm (iterate over eliminated columns).
-        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let base = partition.eliminated_offset(block_idx);
-            for offset in 0..block.dof {
-                let col = block.col_start + offset;
-                let lm_val = temp_lm[base + offset];
-                if lm_val == 0.0 {
+            for (offset, &u) in slot.iter().enumerate() {
+                if u == 0.0 {
                     continue;
                 }
-                let rows = symbolic.row_idx_of_col_raw(col);
-                let vals = hessian.val_of_col(col);
-                for (idx, &row) in rows.iter().enumerate() {
-                    if let Some(local_row) = partition.kept_local(row) {
-                        temp_cam[local_row] += vals[idx] * lm_val;
-                    }
+                let col = block.col_start + offset;
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] -= vals[k] * u;
                 }
             }
         }
 
-        // Step 5: result = result - temp_cam = H_kk*x - H_ke*H_ee^{-1}*H_ke^T*x
-        for i in 0..partition.kept_dof() {
-            result[(i, 0)] -= temp_cam[i];
-        }
-    }
-
-    /// `H_keᵀ · x`: `x` is kept-DOF, the result is eliminated-DOF.
-    fn extract_coupling_transpose_mvp(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-        x: &Mat<f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        let partition = self.require_partition()?;
-        let symbolic = hessian.symbolic();
-        let mut result = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
-
+        // S·v = Fᵀ·y + λD_k·v
         for block in partition.kept_blocks() {
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
-                let Some(local_col) = partition.kept_local(col) else {
+                let Some(local) = partition.kept_local(col) else {
                     continue;
                 };
-                let x_val = x[(local_col, 0)];
-                if x_val == 0.0 {
-                    continue;
-                }
-                let rows = symbolic.row_idx_of_col_raw(col);
-                let vals = hessian.val_of_col(col);
-                for (idx, &row) in rows.iter().enumerate() {
-                    if let Some((block_idx, offset)) = partition.eliminated_local(row) {
-                        let base = partition.eliminated_offset(block_idx);
-                        result[(base + offset, 0)] += vals[idx] * x_val;
-                    }
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    /// `H_ke · x`: `x` is eliminated-DOF, the result is kept-DOF.
-    fn extract_coupling_mvp(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-        x: &Mat<f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        let partition = self.require_partition()?;
-        let symbolic = hessian.symbolic();
-        let mut result = Mat::<f64>::zeros(partition.kept_dof(), 1);
-
-        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let base = partition.eliminated_offset(block_idx);
-            for offset in 0..block.dof {
-                let col = block.col_start + offset;
-                let x_val = x[(base + offset, 0)];
-                if x_val == 0.0 {
-                    continue;
-                }
-                let rows = symbolic.row_idx_of_col_raw(col);
-                let vals = hessian.val_of_col(col);
-                for (idx, &row) in rows.iter().enumerate() {
-                    if let Some(local_row) = partition.kept_local(row) {
-                        result[(local_row, 0)] += vals[idx] * x_val;
-                    }
-                }
-            }
-        }
-        Ok(result)
-    }
-
-    /// Apply `H_ee⁻¹` using the cached block inverses.
-    fn apply_eliminated_inverse(
-        &self,
-        input: &Mat<f64>,
-        output: &mut Mat<f64>,
-    ) -> LinAlgResult<()> {
-        let partition = self.require_partition()?;
-        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let dof = block.dof;
-            let base = partition.eliminated_offset(block_idx);
-            let inv = self.eliminated.block(block_idx);
-            for r in 0..dof {
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
                 let mut acc = 0.0;
-                for c in 0..dof {
-                    acc += inv[c * dof + r] * input[(base + c, 0)];
+                for (k, &row) in idx.iter().enumerate() {
+                    acc += vals[k] * rows[row];
                 }
-                output[(base + r, 0)] = acc;
+                if let Some(d) = damp_kept.get(local) {
+                    acc += d * v[(local, 0)];
+                }
+                out[(local, 0)] = acc;
             }
         }
-        Ok(())
     }
 
-    /// Compute block-Jacobi preconditioner: inverts the kept diagonal blocks
-    /// of `H_kk` only.
+    /// Dense `|rows| × dof` strip of `J` over `rows`, for the columns of
+    /// `block`.
     ///
-    /// NOTE: This is NOT the true Schur-Jacobi preconditioner — it ignores the
-    /// Schur complement's correction entirely. For better convergence use
-    /// [`Self::compute_schur_jacobi_preconditioner`].
-    fn compute_block_preconditioner(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
-        let partition = self.require_partition()?;
-        let symbolic = hessian.symbolic();
-
-        let precond_blocks = partition
-            .kept_blocks()
-            .iter()
-            .map(|block| {
-                let size = block.dof;
-                let mut mat = DMatrix::<f64>::zeros(size, size);
-                for local_col in 0..size {
-                    let global_col = block.col_start + local_col;
-                    let rows = symbolic.row_idx_of_col_raw(global_col);
-                    let vals = hessian.val_of_col(global_col);
-                    for (idx, &global_row) in rows.iter().enumerate() {
-                        if global_row >= block.col_start && global_row < block.col_start + size {
-                            mat[(global_row - block.col_start, local_col)] = vals[idx];
-                        }
-                    }
+    /// `rows` is sorted and each CSC column's row indices are sorted, so each
+    /// entry is one binary search. Rows the column does not touch stay zero.
+    fn gather_strip(
+        jacobian: &SparseColMat<usize, f64>,
+        block: &BlockSpan,
+        rows: &[usize],
+    ) -> DMatrix<f64> {
+        let symbolic = jacobian.symbolic();
+        let mut strip = DMatrix::zeros(rows.len(), block.dof);
+        for offset in 0..block.dof {
+            let col = block.col_start + offset;
+            let idx = symbolic.row_idx_of_col_raw(col);
+            let vals = jacobian.val_of_col(col);
+            for (local_row, &row) in rows.iter().enumerate() {
+                if let Ok(k) = idx.binary_search(&row) {
+                    strip[(local_row, offset)] = vals[k];
                 }
-                invert_with_retry_dyn(&mat).unwrap_or_else(|| DMatrix::identity(size, size))
-            })
-            .collect();
-
-        Ok(precond_blocks)
+            }
+        }
+        strip
     }
 
-    /// Apply block-Jacobi preconditioner: `z = M⁻¹ · r`.
-    fn apply_block_preconditioner(
+    /// Build the PCG preconditioner blocks from `J`.
+    ///
+    /// See the table in the module documentation for what each option is. All
+    /// of them produce one dense `dof × dof` inverse per retained variable,
+    /// or `None` for [`SchurPreconditioner::None`]. A block that will not
+    /// invert falls back to identity: a preconditioner is a convergence aid,
+    /// so a singular block must not fail the solve.
+    fn build_preconditioner(
         &self,
         partition: &SchurPartition,
-        r: &Mat<f64>,
-        precond_blocks: &[DMatrix<f64>],
-    ) -> Mat<f64> {
-        let mut z = Mat::<f64>::zeros(partition.kept_dof(), 1);
-
-        for (block_idx, block) in partition.kept_blocks().iter().enumerate() {
-            let size = block.dof;
-            let inv = &precond_blocks[block_idx];
-            for i in 0..size {
-                let Some(local_row) = partition.kept_local(block.col_start + i) else {
-                    continue;
-                };
-                let mut acc = 0.0;
-                for j in 0..size {
-                    let Some(local_col) = partition.kept_local(block.col_start + j) else {
-                        continue;
-                    };
-                    acc += inv[(i, j)] * r[(local_col, 0)];
-                }
-                z[(local_row, 0)] = acc;
-            }
+        jacobian: &SparseColMat<usize, f64>,
+        damp_kept: &[f64],
+    ) -> Option<Vec<DMatrix<f64>>> {
+        if self.preconditioner_type == SchurPreconditioner::None {
+            return None;
         }
-        z
-    }
 
-    /// Compute the TRUE Schur-Jacobi preconditioner: diagonal blocks of the
-    /// Schur complement `S` itself. This is what Ceres uses for
-    /// `SCHUR_JACOBI`.
-    ///
-    /// For each kept block `i`: `S[i,i] = H_kk[i,i] − Σⱼ H_ke[i,j]·H_ee[j,j]⁻¹·H_ke[i,j]ᵀ`,
-    /// summed over the eliminated blocks `j` visible to `i` — captured by the
-    /// visibility index, so this costs `O(observations)` rather than
-    /// `O(kept × eliminated)`.
-    fn compute_schur_jacobi_preconditioner(
-        &self,
-        hessian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Vec<DMatrix<f64>>> {
-        let partition = self.require_partition()?;
-        let symbolic = hessian.symbolic();
-        let visibility = &self.camera_to_landmark_visibility;
-
-        let precond_blocks: Vec<DMatrix<f64>> = partition
+        let blocks = partition
             .kept_blocks()
             .par_iter()
             .enumerate()
-            .map(|(cam_idx, block)| {
-                let cam_size = block.dof;
-                let mut s_ii = DMatrix::<f64>::zeros(cam_size, cam_size);
+            .map(|(kept_idx, block)| {
+                let dof = block.dof;
+                let base = partition.kept_offset(kept_idx);
 
-                for local_col in 0..cam_size {
-                    let global_col = block.col_start + local_col;
-                    let rows = symbolic.row_idx_of_col_raw(global_col);
-                    let vals = hessian.val_of_col(global_col);
-                    for (idx, &global_row) in rows.iter().enumerate() {
-                        if global_row >= block.col_start && global_row < block.col_start + cam_size
-                        {
-                            s_ii[(global_row - block.col_start, local_col)] = vals[idx];
-                        }
+                // (FᵀF + λD_k) restricted to this block.
+                let mut s_ii = DMatrix::zeros(dof, dof);
+                for c in 0..dof {
+                    for r in 0..dof {
+                        s_ii[(r, c)] =
+                            column_dot(jacobian, block.col_start + r, block.col_start + c);
+                    }
+                    if let Some(d) = damp_kept.get(base + c) {
+                        s_ii[(c, c)] += d;
                     }
                 }
 
-                let visible_landmarks = visibility.get(cam_idx).map_or(&[][..], |v| v.as_slice());
-                for &lm_block_idx in visible_landmarks {
-                    let lm_block = partition.eliminated_blocks()[lm_block_idx];
-                    let dof = lm_block.dof;
-                    let mut h_cp = DMatrix::<f64>::zeros(cam_size, dof);
+                // Schur-Jacobi additionally subtracts the elimination
+                // correction, which is what makes it a preconditioner for `S`
+                // rather than for the unreduced retained block.
+                if self.preconditioner_type == SchurPreconditioner::SchurJacobi {
+                    let visible = self
+                        .structure
+                        .visibility
+                        .get(kept_idx)
+                        .map_or(&[][..], Vec::as_slice);
+                    for &elim_idx in visible {
+                        let elim_block = partition.eliminated_blocks()[elim_idx];
+                        let rows = &self.structure.eliminated_rows[elim_idx];
+                        let f_strip = Self::gather_strip(jacobian, block, rows);
+                        let e_strip = Self::gather_strip(jacobian, &elim_block, rows);
 
-                    for col_offset in 0..dof {
-                        let global_col = lm_block.col_start + col_offset;
-                        let rows = symbolic.row_idx_of_col_raw(global_col);
-                        let vals = hessian.val_of_col(global_col);
-                        for (idx, &global_row) in rows.iter().enumerate() {
-                            if global_row >= block.col_start
-                                && global_row < block.col_start + cam_size
-                            {
-                                h_cp[(global_row - block.col_start, col_offset)] = vals[idx];
-                            }
-                        }
-                    }
-
-                    // H_pp[j,j]^{-1} from the cached inverses, column-major flat.
-                    let hpp_inv = self.eliminated.block(lm_block_idx);
-
-                    // temp = H_cp * H_pp^{-1} (cam_size x dof)
-                    let mut temp = DMatrix::<f64>::zeros(cam_size, dof);
-                    for i in 0..cam_size {
-                        for j in 0..dof {
-                            let mut sum = 0.0;
-                            for k in 0..dof {
-                                sum += h_cp[(i, k)] * hpp_inv[j * dof + k];
-                            }
-                            temp[(i, j)] = sum;
-                        }
-                    }
-
-                    // contribution = temp * H_cp^T (cam_size x cam_size)
-                    for i in 0..cam_size {
-                        for j in 0..cam_size {
-                            let mut sum = 0.0;
-                            for k in 0..dof {
-                                sum += temp[(i, k)] * h_cp[(j, k)];
-                            }
-                            s_ii[(i, j)] -= sum;
-                        }
+                        // m = F_iᵀ·E_j, the (i, j) coupling block of `FᵀE`.
+                        let m = f_strip.transpose() * e_strip;
+                        let elim_dof = elim_block.dof;
+                        let inv = DMatrix::from_column_slice(
+                            elim_dof,
+                            elim_dof,
+                            self.eliminated.block(elim_idx),
+                        );
+                        s_ii -= &m * inv * m.transpose();
                     }
                 }
 
-                invert_with_retry_dyn(&s_ii)
-                    .unwrap_or_else(|| DMatrix::identity(cam_size, cam_size))
+                invert_with_retry_dyn(&s_ii).unwrap_or_else(|| DMatrix::identity(dof, dof))
             })
             .collect();
-
-        Ok(precond_blocks)
+        Some(blocks)
     }
 
-    /// Solve `S·x = b` with the shared PCG primitive and the fast matrix-free
-    /// operator.
-    fn solve_pcg_block(
-        &mut self,
-        partition: &SchurPartition,
-        hessian: &SparseColMat<usize, f64>,
-        b: &Mat<f64>,
-        precond_blocks: &[DMatrix<f64>],
-    ) -> Mat<f64> {
-        // Workspace buffers are taken out of `self` for the duration of the
-        // solve so the operator closure can borrow `self` immutably alongside
-        // them, mirroring `ExplicitSparseSchur`'s `eliminated` handling.
-        let mut workspace_lm = std::mem::take(&mut self.workspace_lm);
-        let mut workspace_cam = std::mem::take(&mut self.workspace_cam);
-        let mut block_scratch = std::mem::take(&mut self.block_scratch);
-
-        let result = solve_pcg(
-            b,
-            &PcgParams::new(self.max_cg_iterations, self.cg_tolerance),
-            |p, ap| {
-                self.apply_schur_operator_fast(
-                    partition,
-                    hessian,
-                    p,
-                    ap,
-                    &mut workspace_lm,
-                    &mut workspace_cam,
-                    &mut block_scratch,
-                );
-            },
-            |r, z| {
-                *z = self.apply_block_preconditioner(partition, r, precond_blocks);
-            },
-        );
-
-        self.workspace_lm = workspace_lm;
-        self.workspace_cam = workspace_cam;
-        self.block_scratch = block_scratch;
-
-        result.x
-    }
-
-    /// Gather and invert the `H_ee` diagonal blocks (any DOF, mixed sizes),
-    /// reusing the same regularized-retry policy every other Schur solver
-    /// uses ([`EliminatedBlocks::invert_in_place`]).
-    fn invert_eliminated_blocks(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
-        let mut eliminated = std::mem::take(&mut self.eliminated);
-        let result = (|| -> LinAlgResult<()> {
-            let partition = self.require_partition()?;
-            eliminated.gather(hessian, partition);
-            eliminated.invert_in_place(partition)
-        })();
-        self.eliminated = eliminated;
-        result
-    }
-
-    /// Build kept-block → visible-eliminated-block visibility index from the
-    /// Hessian's sparsity, enabling `O(observations)` preconditioner
-    /// computation instead of `O(kept × eliminated)`.
-    fn build_visibility_index(&mut self, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<()> {
-        let fingerprint = pattern::PatternFingerprint::of(hessian);
-        if self.visibility_fingerprint == Some(fingerprint)
-            && !self.camera_to_landmark_visibility.is_empty()
-        {
-            return Ok(());
-        }
-
-        let partition = self.require_partition()?;
-        let symbolic = hessian.symbolic();
-        let num_kept_blocks = partition.kept_blocks().len();
-
-        let mut row_to_kept_block: HashMap<usize, usize> = HashMap::new();
-        for (idx, block) in partition.kept_blocks().iter().enumerate() {
-            for offset in 0..block.dof {
-                row_to_kept_block.insert(block.col_start + offset, idx);
-            }
-        }
-
-        let mut visibility: Vec<Vec<usize>> = vec![Vec::new(); num_kept_blocks];
-        for (lm_block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let global_col = block.col_start;
-            if global_col >= hessian.ncols() {
-                continue;
-            }
-            let rows = symbolic.row_idx_of_col_raw(global_col);
-            for &row in rows {
-                if let Some(&kept_idx) = row_to_kept_block.get(&row)
-                    && visibility[kept_idx].last() != Some(&lm_block_idx)
-                {
-                    visibility[kept_idx].push(lm_block_idx);
+    /// `z = M⁻¹·r` for the block-diagonal preconditioner, or `z = r` without one.
+    fn apply_preconditioner(blocks: Option<&[DMatrix<f64>]>, r: &Mat<f64>, z: &mut Mat<f64>) {
+        let Some(blocks) = blocks else {
+            faer::zip!(z, r).for_each(|faer::unzip!(z, r)| *z = *r);
+            return;
+        };
+        let mut offset = 0usize;
+        for inv in blocks {
+            let dof = inv.nrows();
+            for row in 0..dof {
+                let mut acc = 0.0;
+                for col in 0..dof {
+                    acc += inv[(row, col)] * r[(offset + col, 0)];
                 }
+                z[(offset + row, 0)] = acc;
             }
+            offset += dof;
         }
-
-        self.camera_to_landmark_visibility = visibility;
-        self.visibility_fingerprint = Some(fingerprint);
-        Ok(())
     }
 
-    /// Internal solve against an explicit system.
+    /// The whole solve, from `J` and `r` to the full-length update.
     ///
-    /// `hessian` is the *damped* `JᵀJ + λ·D` (or the plain `JᵀJ` for an
-    /// undamped solve) and `gradient` is `−Jᵀr`, the right-hand side of
-    /// `H·dx = −Jᵀr`.
-    fn solve_with_system(
+    /// `damping` is `None` for the plain normal equations.
+    fn solve_from_jacobian(
         &mut self,
-        hessian: &SparseColMat<usize, f64>,
-        gradient: &Mat<f64>,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+        damping: Option<&Damping>,
     ) -> LinAlgResult<Mat<f64>> {
-        self.invert_eliminated_blocks(hessian)?;
-        self.build_visibility_index(hessian)?;
-
-        // Cloned so it no longer borrows `self`: `solve_pcg_block` below needs
-        // `&mut self` for its workspace buffers while the operator closures it
-        // drives still need the partition. Cheap — a handful of `Vec<BlockSpan>`
-        // entries, cloned once per Newton iteration, not per PCG iteration.
+        self.ensure_structure(jacobian)?;
         let partition = self.require_partition()?.clone();
+
+        if jacobian.ncols() != partition.total_dof() {
+            return Err(LinAlgError::InvalidInput(format!(
+                "Jacobian has {} columns but the partition covers {}",
+                jacobian.ncols(),
+                partition.total_dof()
+            ))
+            .log());
+        }
+
+        // g = Jᵀr; the reduced system is built from −g, as in every other
+        // Schur solver here.
+        let gradient = jt_vec(jacobian, residuals);
         let kept_dof = partition.kept_dof();
         let eliminated_dof = partition.eliminated_dof();
 
+        // λ·D per column, from diag(JᵀJ) — the only part of `JᵀJ` needed.
+        let damp_kept: Vec<f64> = match damping {
+            None => Vec::new(),
+            Some(d) => {
+                let diag = diag_jt_j(jacobian);
+                let mut per_kept = vec![0.0; kept_dof];
+                for block in partition.kept_blocks() {
+                    for offset in 0..block.dof {
+                        let col = block.col_start + offset;
+                        if let Some(local) = partition.kept_local(col) {
+                            per_kept[local] = d.diagonal_term(diag[col]);
+                        }
+                    }
+                }
+                per_kept
+            }
+        };
+
+        // (EᵀE + λD_e)⁻¹, blockwise.
+        let mut eliminated = std::mem::take(&mut self.eliminated);
+        eliminated.gather_from_jacobian(jacobian, &partition);
+        if let Some(d) = damping {
+            eliminated.damp(d);
+        }
+        let inversion = eliminated.invert_in_place(&partition);
+        self.eliminated = eliminated;
+        inversion?;
+
+        // g_reduced = −g_k + H_ke·H_ee⁻¹·g_e, assembled with `neg_gradient`
+        // playing the role of `g` (so the reduced right-hand side matches the
+        // explicit solvers' `g_k − H_ke·H_ee⁻¹·g_e` convention).
         let mut g_k = Mat::<f64>::zeros(kept_dof, 1);
         for block in partition.kept_blocks() {
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
                 if let Some(local) = partition.kept_local(col) {
-                    g_k[(local, 0)] = gradient[(col, 0)];
+                    g_k[(local, 0)] = -gradient[(col, 0)];
                 }
             }
         }
-
         let mut g_e = Mat::<f64>::zeros(eliminated_dof, 1);
         for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
             let base = partition.eliminated_offset(block_idx);
             for offset in 0..block.dof {
-                g_e[(base + offset, 0)] = gradient[(block.col_start + offset, 0)];
+                g_e[(base + offset, 0)] = -gradient[(block.col_start + offset, 0)];
             }
         }
 
-        let mut temp = Mat::<f64>::zeros(eliminated_dof, 1);
-        self.apply_eliminated_inverse(&g_e, &mut temp)?;
-        let correction = self.extract_coupling_mvp(hessian, &temp)?;
+        // correction = H_ke·H_ee⁻¹·g_e = Fᵀ·E·H_ee⁻¹·g_e, again through `J`.
+        let mut hee_ge = Mat::<f64>::zeros(eliminated_dof, 1);
+        self.apply_eliminated_inverse(&partition, &g_e, &mut hee_ge);
+        let correction = self.coupling_times(&partition, jacobian, &hee_ge);
 
-        let mut g_reduced = Mat::<f64>::zeros(kept_dof, 1);
-        for i in 0..kept_dof {
-            g_reduced[(i, 0)] = g_k[(i, 0)] - correction[(i, 0)];
-        }
+        let g_reduced = Mat::from_fn(kept_dof, 1, |i, _| g_k[(i, 0)] - correction[(i, 0)]);
 
-        let precond_blocks = match self.preconditioner_type {
-            SchurPreconditioner::SchurJacobi => {
-                self.compute_schur_jacobi_preconditioner(hessian)?
-            }
-            SchurPreconditioner::BlockDiagonal => self.compute_block_preconditioner(hessian)?,
-            SchurPreconditioner::None => partition
-                .kept_blocks()
-                .iter()
-                .map(|b| DMatrix::identity(b.dof, b.dof))
-                .collect(),
-        };
+        let precond = self.build_preconditioner(&partition, jacobian, &damp_kept);
+        let delta_k = self.solve_pcg_block(
+            &partition,
+            jacobian,
+            &damp_kept,
+            &g_reduced,
+            precond.as_deref(),
+        );
 
-        let delta_cam = self.solve_pcg_block(&partition, hessian, &g_reduced, &precond_blocks);
-
-        let hcp_t_delta_cam = self.extract_coupling_transpose_mvp(hessian, &delta_cam)?;
-        let mut rhs_e = Mat::<f64>::zeros(eliminated_dof, 1);
-        for i in 0..eliminated_dof {
-            rhs_e[(i, 0)] = g_e[(i, 0)] - hcp_t_delta_cam[(i, 0)];
-        }
-
+        // δ_e = H_ee⁻¹·(g_e − H_keᵀ·δ_k) = H_ee⁻¹·(g_e − Eᵀ·F·δ_k)
+        let coupling_t = self.coupling_transpose_times(&partition, jacobian, &delta_k);
+        let rhs_e = Mat::from_fn(eliminated_dof, 1, |i, _| g_e[(i, 0)] - coupling_t[(i, 0)]);
         let mut delta_e = Mat::<f64>::zeros(eliminated_dof, 1);
-        self.apply_eliminated_inverse(&rhs_e, &mut delta_e)?;
+        self.apply_eliminated_inverse(&partition, &rhs_e, &mut delta_e);
 
-        self.combine_updates(&delta_cam, &delta_e)
+        let delta = self.combine_updates(&partition, &delta_k, &delta_e);
+
+        self.gradient = Some(gradient);
+        self.jacobian = Some(jacobian.clone());
+        Ok(delta)
+    }
+
+    /// `x = H_ee⁻¹·b`, blockwise.
+    fn apply_eliminated_inverse(&self, partition: &SchurPartition, b: &Mat<f64>, x: &mut Mat<f64>) {
+        for block_idx in 0..partition.eliminated_blocks().len() {
+            let dof = self.eliminated.dof(block_idx);
+            let base = partition.eliminated_offset(block_idx);
+            let inv = self.eliminated.block(block_idx);
+            for r in 0..dof {
+                let mut acc = 0.0;
+                for c in 0..dof {
+                    acc += inv[c * dof + r] * b[(base + c, 0)];
+                }
+                x[(base + r, 0)] = acc;
+            }
+        }
+    }
+
+    /// `H_ke·u = Fᵀ·(E·u)`, from `J`.
+    fn coupling_times(
+        &self,
+        partition: &SchurPartition,
+        jacobian: &SparseColMat<usize, f64>,
+        u: &Mat<f64>,
+    ) -> Mat<f64> {
+        let symbolic = jacobian.symbolic();
+        let mut rows = vec![0.0; jacobian.nrows()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                let x = u[(base + offset, 0)];
+                if x == 0.0 {
+                    continue;
+                }
+                let col = block.col_start + offset;
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] += vals[k] * x;
+                }
+            }
+        }
+
+        let mut out = Mat::<f64>::zeros(partition.kept_dof(), 1);
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let Some(local) = partition.kept_local(col) else {
+                    continue;
+                };
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let mut acc = 0.0;
+                for (k, &row) in idx.iter().enumerate() {
+                    acc += vals[k] * rows[row];
+                }
+                out[(local, 0)] = acc;
+            }
+        }
+        out
+    }
+
+    /// `H_keᵀ·v = Eᵀ·(F·v)`, from `J`.
+    fn coupling_transpose_times(
+        &self,
+        partition: &SchurPartition,
+        jacobian: &SparseColMat<usize, f64>,
+        v: &Mat<f64>,
+    ) -> Mat<f64> {
+        let symbolic = jacobian.symbolic();
+        let mut rows = vec![0.0; jacobian.nrows()];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let Some(local) = partition.kept_local(col) else {
+                    continue;
+                };
+                let x = v[(local, 0)];
+                if x == 0.0 {
+                    continue;
+                }
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] += vals[k] * x;
+                }
+            }
+        }
+
+        let mut out = Mat::<f64>::zeros(partition.eliminated_dof(), 1);
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                let mut acc = 0.0;
+                for (k, &row) in idx.iter().enumerate() {
+                    acc += vals[k] * rows[row];
+                }
+                out[(base + offset, 0)] = acc;
+            }
+        }
+        out
+    }
+
+    /// Solve `S·x = b` with the shared PCG primitive and the matrix-free operator.
+    fn solve_pcg_block(
+        &mut self,
+        partition: &SchurPartition,
+        jacobian: &SparseColMat<usize, f64>,
+        damp_kept: &[f64],
+        b: &Mat<f64>,
+        precond: Option<&[DMatrix<f64>]>,
+    ) -> Mat<f64> {
+        // Workspaces come out of `self` so the operator closure can borrow
+        // `self` immutably alongside them.
+        let mut rows = std::mem::take(&mut self.workspace_rows);
+        let mut temp_lm = std::mem::take(&mut self.workspace_lm);
+        let mut scratch = std::mem::take(&mut self.block_scratch);
+        rows.clear();
+        rows.resize(jacobian.nrows(), 0.0);
+        temp_lm.clear();
+        temp_lm.resize(partition.eliminated_dof(), 0.0);
+        scratch.clear();
+        scratch.resize(self.max_eliminated_dof.max(1), 0.0);
+
+        let result = solve_pcg(
+            b,
+            &PcgParams::new(self.max_cg_iterations, self.cg_tolerance),
+            |p, ap| {
+                self.apply_schur_operator(
+                    partition,
+                    jacobian,
+                    damp_kept,
+                    p,
+                    ap,
+                    &mut rows,
+                    &mut temp_lm,
+                    &mut scratch,
+                );
+            },
+            |r, z| Self::apply_preconditioner(precond, r, z),
+        );
+
+        self.workspace_rows = rows;
+        self.workspace_lm = temp_lm;
+        self.block_scratch = scratch;
+        result.x
     }
 
     /// Scatter the two solution halves back into one full-length update.
-    fn combine_updates(&self, delta_k: &Mat<f64>, delta_e: &Mat<f64>) -> LinAlgResult<Mat<f64>> {
-        let partition = self.require_partition()?;
+    fn combine_updates(
+        &self,
+        partition: &SchurPartition,
+        delta_k: &Mat<f64>,
+        delta_e: &Mat<f64>,
+    ) -> Mat<f64> {
         let mut delta = Mat::zeros(partition.total_dof(), 1);
-
         for block in partition.kept_blocks() {
             for offset in 0..block.dof {
                 let global = block.col_start + offset;
@@ -701,14 +807,50 @@ impl ImplicitSparseSchur {
                 delta[(block.col_start + offset, 0)] = delta_e[(base + offset, 0)];
             }
         }
-
-        Ok(delta)
+        delta
     }
 }
 
 impl Default for ImplicitSparseSchur {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl LinearSolver<SparseMode> for ImplicitSparseSchur {
+    fn solve_normal_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Mat<f64>> {
+        self.solve_from_jacobian(residuals, jacobian, None)
+    }
+
+    fn solve_augmented_equation(
+        &mut self,
+        residuals: &Mat<f64>,
+        jacobian: &SparseColMat<usize, f64>,
+        damping: &Damping,
+    ) -> LinAlgResult<Mat<f64>> {
+        self.solve_from_jacobian(residuals, jacobian, Some(damping))
+    }
+
+    fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
+        // `JᵀJ` was never formed, so evaluate its action from `J`.
+        Some(jt_j_vec_product(self.jacobian.as_ref()?, v))
+    }
+
+    /// Always `None`: this solver never materializes `JᵀJ`.
+    ///
+    /// That is the documented degradation for a matrix-free backend — callers
+    /// use [`LinearSolver::hessian_vec_product`] instead, which is served
+    /// exactly from `J`.
+    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
+        None
+    }
+
+    fn get_gradient(&self) -> Option<&Mat<f64>> {
+        self.gradient.as_ref()
     }
 }
 
@@ -751,75 +893,13 @@ impl StructureAware for ImplicitSparseSchur {
             .max(1);
         self.eliminated = EliminatedBlocks::new(&partition);
         self.workspace_lm = vec![0.0; partition.eliminated_dof()];
-        self.workspace_cam = vec![0.0; partition.kept_dof()];
         self.block_scratch = vec![0.0; self.max_eliminated_dof];
-        self.camera_to_landmark_visibility.clear();
-        self.visibility_fingerprint = None;
+        self.workspace_rows.clear();
+        self.structure = StructureCache::default();
         self.partition = Some(partition);
         Ok(())
     }
 }
-
-impl LinearSolver<SparseMode> for ImplicitSparseSchur {
-    fn solve_normal_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Mat<f64>> {
-        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
-        let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
-        for i in 0..gradient.nrows() {
-            neg_gradient[(i, 0)] = -gradient[(i, 0)];
-        }
-
-        let delta = self.solve_with_system(&hessian, &neg_gradient);
-        if delta.is_ok() {
-            self.gradient = Some(gradient);
-            self.hessian = Some(hessian);
-        }
-        delta
-    }
-
-    fn solve_augmented_equation(
-        &mut self,
-        residuals: &Mat<f64>,
-        jacobian: &SparseColMat<usize, f64>,
-        damping: &Damping,
-    ) -> LinAlgResult<Mat<f64>> {
-        let NormalEquations { hessian, gradient } = self.ne_cache.compute(residuals, jacobian)?;
-        let mut neg_gradient = Mat::<f64>::zeros(gradient.nrows(), 1);
-        for i in 0..gradient.nrows() {
-            neg_gradient[(i, 0)] = -gradient[(i, 0)];
-        }
-
-        let augmented_hessian = self.ne_cache.damped_hessian(damping)?;
-
-        let delta = self.solve_with_system(&augmented_hessian, &neg_gradient);
-        if delta.is_ok() {
-            self.hessian = Some(hessian);
-            self.gradient = Some(gradient);
-        }
-        delta
-    }
-
-    fn hessian_vec_product(&self, v: &Mat<f64>) -> Option<Mat<f64>> {
-        Some(
-            <SparseMode as crate::linearizer::AssemblyBackend>::hessian_vec_product(
-                self.hessian.as_ref()?,
-                v,
-            ),
-        )
-    }
-
-    fn get_hessian(&self) -> Option<&SparseColMat<usize, f64>> {
-        self.hessian.as_ref()
-    }
-
-    fn get_gradient(&self) -> Option<&Mat<f64>> {
-        self.gradient.as_ref()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -928,7 +1008,7 @@ mod tests {
         assert_eq!(solver.max_cg_iterations, 500);
         assert_eq!(solver.cg_tolerance, 1e-9);
         assert!(solver.partition.is_none());
-        assert!(solver.hessian.is_none());
+        assert!(solver.jacobian.is_none());
     }
 
     #[test]
@@ -988,14 +1068,60 @@ mod tests {
 
         LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &residuals, &jacobian)?;
 
-        let h = LinearSolver::<SparseMode>::get_hessian(&solver);
-        let g = LinearSolver::<SparseMode>::get_gradient(&solver);
-        assert!(h.is_some());
-        assert!(g.is_some());
-        let h = h.ok_or("hessian is None")?;
-        let g = g.ok_or("gradient is None")?;
-        assert_eq!(h.nrows(), 21);
+        // `JᵀJ` is never formed, so `get_hessian` stays `None` by design and
+        // the quadratic model is served through `hessian_vec_product`.
+        assert!(
+            LinearSolver::<SparseMode>::get_hessian(&solver).is_none(),
+            "matrix-free solver must not publish a Hessian"
+        );
+        let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("gradient is None")?;
         assert_eq!(g.nrows(), 21);
+
+        let v = faer::Mat::from_fn(21, 1, |i, _| ((i % 3) as f64) - 1.0);
+        let hv = LinearSolver::<SparseMode>::hessian_vec_product(&solver, &v)
+            .ok_or("hessian_vec_product is None")?;
+        assert_eq!(hv.nrows(), 21);
+        Ok(())
+    }
+
+    /// A preconditioner changes how fast PCG converges, never what it
+    /// converges to, so all three must produce the same step on the same
+    /// system. This is what makes each option's implementation testable: a
+    /// preconditioner that was silently ignored, or one built wrongly, shows
+    /// up here as a disagreement or a failure to converge.
+    #[test]
+    fn every_preconditioner_reaches_the_same_step() -> TestResult {
+        let mut steps = Vec::new();
+        for preconditioner in [
+            SchurPreconditioner::None,
+            SchurPreconditioner::BlockDiagonal,
+            SchurPreconditioner::SchurJacobi,
+        ] {
+            let (variables, variable_index_map, jacobian, residuals, landmark_keys) =
+                create_schur_test_setup()?;
+            let mut solver = ImplicitSparseSchur::new()
+                .with_cg_config(1000, 1e-12)
+                .with_preconditioner(preconditioner);
+            solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+            steps.push(LinearSolver::<SparseMode>::solve_normal_equation(
+                &mut solver,
+                &residuals,
+                &jacobian,
+            )?);
+        }
+
+        let reference = &steps[0];
+        for (idx, step) in steps.iter().enumerate().skip(1) {
+            for row in 0..reference.nrows() {
+                let scale = reference[(row, 0)].abs().max(1.0);
+                assert!(
+                    (reference[(row, 0)] - step[(row, 0)]).abs() / scale < 1e-6,
+                    "preconditioner {idx} diverged at row {row}: {} vs {}",
+                    step[(row, 0)],
+                    reference[(row, 0)]
+                );
+            }
+        }
         Ok(())
     }
 

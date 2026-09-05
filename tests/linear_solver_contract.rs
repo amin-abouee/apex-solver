@@ -341,8 +341,12 @@ mod schur_contract {
         assert_publishes_contract("ExplicitSparseSchur", g, &sparse_diagonal(h))
     }
 
+    /// `ImplicitSparseSchur` is matrix-free with respect to `JᵀJ` as well as
+    /// `S` — Ceres's `ITERATIVE_SCHUR` semantics — so like the chunked path it
+    /// must publish no Hessian while still serving the true, un-damped
+    /// quadratic model through `hessian_vec_product`.
     #[test]
-    fn implicit_sparse_schur_publishes_the_contract() -> TestResult {
+    fn implicit_sparse_schur_degrades_hessian_gracefully() -> TestResult {
         let (j, r) = sparse_system()?;
         let (variables, index_map, landmarks) = schur_variables();
         let mut solver = ImplicitSparseSchur::new();
@@ -353,9 +357,40 @@ mod schur_contract {
             &j,
             &probe_damping(),
         )?;
+
+        assert!(
+            LinearSolver::<SparseMode>::get_hessian(&solver).is_none(),
+            "the matrix-free path never forms JᵀJ and must not publish one"
+        );
+
+        let (expected_g, expected_h) = expected_gradient_and_hessian();
         let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
-        let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
-        assert_publishes_contract("ImplicitSparseSchur", g, &sparse_diagonal(h))
+        for i in 0..expected_g.nrows() {
+            assert!(
+                (g[(i, 0)] - expected_g[(i, 0)]).abs() < 1e-9,
+                "ImplicitSparseSchur: get_gradient() must publish +Jᵀr. Entry {i} is {}, \
+                 expected {}",
+                g[(i, 0)],
+                expected_g[(i, 0)]
+            );
+        }
+
+        // The model must be the *un-damped* JᵀJ even though the solve was
+        // damped, or the step-quality ratio would be computed against the
+        // wrong quadratic.
+        let v = Mat::<f64>::from_fn(3, 1, |i, _| (i + 1) as f64);
+        let hv = LinearSolver::<SparseMode>::hessian_vec_product(&solver, &v)
+            .ok_or("no hessian_vec_product")?;
+        let expected_hv = &expected_h * &v;
+        for i in 0..3 {
+            assert!(
+                (hv[(i, 0)] - expected_hv[(i, 0)]).abs() < 1e-9,
+                "hessian_vec_product mismatch at {i}: {} vs {}",
+                hv[(i, 0)],
+                expected_hv[(i, 0)]
+            );
+        }
+        Ok(())
     }
 
     #[test]
