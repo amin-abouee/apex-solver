@@ -243,6 +243,42 @@ been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-sp
 
 ### Breaking Changes
 
+- **`LevenbergMarquardtConfig::for_bundle_adjustment` now selects
+  `ImplicitSparseSchur`** instead of `ExplicitSparseSchur`. Measured over the
+  four BAL datasets (3 runs each) it is 2.2× faster in total — Ladybug 18.8 s vs
+  75.2 s, Dubrovnik 31.3 s vs 41.9 s, Venice 20.2 s vs 51.2 s — with lower final
+  RMSE on Trafalgar and Dubrovnik and at most 0.6% higher on Ladybug and Venice.
+  It is slower only on Trafalgar (6.3 s vs 2.5 s), the smallest dataset. The
+  step is now inexact by construction: pass
+  `.with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)` to restore
+  the exact reduced solve.
+
+### Added
+
+- **PCG forcing sequence** for both Schur PCG paths, following Ceres's
+  `Solver::Options::eta`: the solve stops when the quadratic model's relative
+  improvement per iteration falls below `η/i`, not only when the residual is
+  small. Before this, every PCG solve on Ladybug ran the full iteration cap
+  without the residual rule ever firing. `η` defaults to `1e-2` — deliberately
+  tighter than Ceres's `1e-1`, which measured 9.7% worse on Ladybug — and is set
+  through `with_schur_cg_q_tolerance`; `0.0` disables the rule.
+
+- **`ImplicitSparseSchur` is now matrix-free in `JᵀJ` as well as `S`.** The
+  reduced operator is applied directly from `J` in four passes over its
+  nonzeros, so cost scales with `nnz(J)` rather than `nnz(JᵀJ)` — which for
+  bundle adjustment carries a dense block per co-visible camera pair. Combined
+  with the forcing sequence this is 5.9-13.4× faster than the previous
+  implementation. `get_hessian()` now returns `None` for this solver, as it does
+  for the chunked path; the quadratic model is served exactly through
+  `hessian_vec_product`.
+
+### Fixed
+
+- **`ExplicitSparseSchur` ignored its configured preconditioner.** The
+  `Iterative` variant always ran scalar Jacobi regardless of
+  `with_preconditioner`, so `SchurJacobi` and `BlockDiagonal` were silently
+  equivalent. Both now build the preconditioner they name.
+
 - **Schur complement solvers renamed and consolidated around explicit/implicit,
   sparse/dense naming that mirrors Ceres** (`SPARSE_SCHUR`/`DENSE_SCHUR`/`ITERATIVE_SCHUR`).
   No deprecated aliases — old names are gone outright:

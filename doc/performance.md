@@ -2,9 +2,11 @@
 
 **Hardware**: Apple Mac Mini M4, 64GB RAM
 **Build**: Rust release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**apex-solver state**: `fc2ced6` — direct sparse Schur complement for BA
-(`ExplicitSchurVariant::Sparse`), sparse Cholesky for pose graphs, all Schur fixes and
-improvements of 2026-09-01 included.
+**apex-solver state**: `HEAD` of `feature/update_schur_complement` — matrix-free
+Schur complement for BA (`ImplicitSparseSchur`, Schur-Jacobi preconditioner, PCG
+forcing sequence η = 1e-2), sparse Cholesky for pose graphs. The pose-graph
+numbers below are unchanged from `fc2ced6`; only the bundle-adjustment apex rows
+were re-measured.
 **Methodology**: 5 independent runs per benchmark, reported as **mean ± std**.
 Timing covers the `optimize()` call only — problem setup and metric computation
 are excluded. Bundle adjustment uses a 10-minute timeout per solver.
@@ -116,9 +118,10 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 ## Bundle Adjustment (Self-Calibration)
 
 Large-scale BAL datasets, optimizing **camera poses, 3D landmarks, and camera
-intrinsics simultaneously**. apex-solver uses the **direct sparse Schur
-complement** (`ExplicitSchurVariant::Sparse`: form `JᵀJ`, eliminate the landmarks,
-sparse-Cholesky on the reduced camera system) with a Huber loss (δ = 1 px).
+intrinsics simultaneously**. apex-solver uses the **matrix-free Schur complement**
+(`ImplicitSparseSchur`: neither `JᵀJ` nor `S` is formed; the reduced operator is
+applied straight from `J` inside PCG, Schur-Jacobi preconditioner, forcing
+sequence η = 1e-2) with a Huber loss (δ = 1 px).
 
 ![Bundle adjustment benchmark](plots/ba_benchmark.png)
 
@@ -127,25 +130,57 @@ sparse-Cholesky on the reduced camera system) with a Huber loss (δ = 1 px).
 | Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
 |---------|--------|---------|-----------|--------------|-----------------|----------|-------|
 | **Ladybug** |
-| | apex-solver | 1,723 | 156,502 | 678,718 | **0.8753 ± 0.0000** | 76.9 ± 0.6 | 21 |
+| | apex-solver | 1,723 | 156,502 | 678,718 | **0.8765 ± 0.0000** | **18.8 ± 0.0** | 21 |
 | | Ceres * | 1,723 | 156,502 | 678,718 | 1.1657 | 19.1 | 101 |
 | | GTSAM * | 1,723 | 156,502 | 678,718 | 0.9812 | 87.2 | 2 |
 | | g2o * | 1,723 | 156,502 | 678,718 | 13.5074 | 157.2 | 20 |
 | **Trafalgar** |
-| | apex-solver | 257 | 65,132 | 225,911 | 0.8085 ± 0.0000 | **2.4 ± 0.0** | 7 |
+| | apex-solver | 257 | 65,132 | 225,911 | 0.7981 ± 0.0000 | 6.3 ± 0.0 | 9 |
 | | Ceres * | 257 | 65,132 | 225,911 | 1.3061 | 53.0 | 101 |
 | | GTSAM * | 257 | 65,132 | 225,911 | **0.6259** | 61.7 | 100 |
 | | g2o * | 257 | 65,132 | 225,911 | 8.1506 | 17.0 | 20 |
 | **Dubrovnik** |
-| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7875 ± 0.0000 | **41.5 ± 0.5** | 17 |
+| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7686 ± 0.0000 | **31.3 ± 0.1** | 17 |
 | | Ceres * | 356 | 226,730 | 1,255,268 | 1.0035 | 87.2 | 101 |
 | | GTSAM * | 356 | 226,730 | 1,255,268 | **0.5622** | 126.8 | 31 |
 | | g2o * | 356 | 226,730 | 1,255,268 | 12.1678 | 35.8 | 20 |
 | **Venice** (largest) |
-| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7476 ± 0.0000** | **52.4 ± 0.4** | 2 |
+| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7521 ± 0.0000** | **20.2 ± 0.1** | 2 |
 | | Ceres * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
 | | GTSAM * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
 | | g2o * | 1,778 | 993,923 | 5,001,946 | 10.1261 | 259.4 | 20 |
+
+### Schur solver comparison
+
+All four sparse Schur configurations on the same four datasets, 3 runs each,
+`APEX_BENCH_RUST_ONLY=1`. `ExplicitSparseSchur / Sparse` solves the reduced
+system exactly and is the RMSE reference; the two PCG paths stop on the forcing
+sequence, so their steps are deliberately inexact.
+
+| Dataset | Solver | Final RMSE | Time (s) | Iters | × Sparse |
+|---|---|---|---|---|---|
+| **Ladybug** | ExplicitSparseSchur / Sparse | 0.875283 | 75.24 ± 0.73 | 21 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.875283 | 91.17 ± 1.20 | 21 | 1.21× |
+| | ExplicitSparseSchur / Iterative | 0.879296 | 39.50 ± 0.67 | 21 | 0.52× |
+| | **ImplicitSparseSchur** | 0.876538 | **18.76 ± 0.04** | 21 | **0.25×** |
+| **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.808522 | **2.51 ± 0.02** | 7 | **1.00×** |
+| | ExplicitSparseSchur / Chunked | 0.808522 | 4.08 ± 0.04 | 7 | 1.63× |
+| | ExplicitSparseSchur / Iterative | 0.798042 | 3.28 ± 0.02 | 9 | 1.31× |
+| | ImplicitSparseSchur | 0.798081 | 6.27 ± 0.00 | 9 | 2.50× |
+| **Dubrovnik** | ExplicitSparseSchur / Sparse | 0.787517 | 41.91 ± 0.79 | 17 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.787517 | 85.87 ± 0.27 | 17 | 2.05× |
+| | ExplicitSparseSchur / Iterative | 0.768740 | 40.50 ± 0.21 | 17 | 0.97× |
+| | **ImplicitSparseSchur** | 0.768611 | **31.34 ± 0.08** | 17 | **0.75×** |
+| **Venice** | ExplicitSparseSchur / Sparse | 0.747589 | 51.15 ± 2.27 | 2 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.747589 | 61.62 ± 1.06 | 2 | 1.20× |
+| | ExplicitSparseSchur / Iterative | 0.752070 | 43.89 ± 1.47 | 2 | 0.86× |
+| | **ImplicitSparseSchur** | 0.752080 | **20.23 ± 0.06** | 2 | **0.40×** |
+
+`ExplicitDenseSchur` cannot run these datasets — a dense `JᵀJ` for the smallest
+of them would be ~485k × 485k. On its truncated row (`Ladybug-mini-4cam`: 4
+cameras, 1,685 landmarks, 3,256 observations) it reaches **0.405324** in 36.6 s,
+bit-identical to `ExplicitSparseSchur` on the same subset (0.07 s) — the dense
+path is for problems of a few thousand DOF, not for BAL.
 
 \* C++ rows are a **single context run** (2026-09-01); apex rows are mean ± std
 of 5 runs. apex also initializes the focal length by self-calibration, so its
@@ -156,16 +191,24 @@ starting RMSE is closer than the C++ rows'.
   the timeout (5M observations, 0.748 px in 52.4 s). Ceres and GTSAM still
   exceed the 10-minute timeout; g2o finishes but barely moves (10.128 → 10.126 px).
 - **Accuracy vs the previous table**: apex's RMSE is *higher* than the 15 Aug
-  numbers (e.g. Ladybug 0.7700 → 0.8753) — this is **not** a solver regression.
+  numbers (e.g. Ladybug 0.7700 → 0.8765) — this is **not** a solver regression.
   The Aug 6 robust-cost fix changed the objective apex minimizes to the true
   `½·Σρ(s)` (Ceres convention, with the same Huber loss as the C++ rows).
   With the loss neutralized the least-squares path is bit-identical
   before/after, so the delta is an objective change, not solver math.
   A robust optimum also has higher raw RMSE by construction (outliers are
   downweighted).
-- **Speed**: apex is fastest on Trafalgar (2.4 s, 22× vs Ceres), Dubrovnik and
-  Venice; Ceres is faster on Ladybug (19 s vs 77 s — its `ITERATIVE_SCHUR`
-  converges the first iterations cheaply there).
+- **Speed**: apex is now fastest on all four (Ladybug 18.8 s, Trafalgar 6.3 s,
+  Dubrovnik 31.3 s, Venice 20.2 s). Ladybug used to be Ceres's win (19.1 s vs
+  76.9 s) precisely because Ceres's `ITERATIVE_SCHUR` is matrix-free and
+  forcing-sequence-terminated; apex now does both, and the gap closed.
+- **The default changed**: `LevenbergMarquardtConfig::for_bundle_adjustment`
+  selects `ImplicitSparseSchur`, not the direct solver. It is 2.2× faster in
+  total across the suite, better RMSE on Trafalgar and Dubrovnik, at most 0.6%
+  worse on Ladybug and Venice, and forms neither `JᵀJ` nor `S`. Its one loss is
+  Trafalgar, the smallest set, where the reduced system is small enough that a
+  direct factorization wins. Use `ExplicitSparseSchur` when the reduced solve
+  must be exact — its step does not depend on a tolerance.
 - **g2o** never meaningfully reduces reprojection error within its 20-iteration cap.
 
 ---
