@@ -16,7 +16,7 @@ use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::BundleAdjustment;
 use apex_solver::factors::visual::ProjectionFactor;
-use apex_solver::linalg::{LinearSolverType, SchurVariant};
+use apex_solver::linalg::{ExplicitSchurVariant, LinearSolverType};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 use std::collections::HashMap;
@@ -108,21 +108,35 @@ fn build_mini_ba() -> Result<(Problem, usize), Box<dyn std::error::Error>> {
 fn schur_variants_agree_with_cholesky_on_ladybug8() -> TestResult {
     let mut finals = Vec::new();
     for (solver_type, variant) in [
-        (LinearSolverType::SparseCholesky, SchurVariant::Sparse),
         (
-            LinearSolverType::SparseSchurComplement,
-            SchurVariant::Sparse,
+            LinearSolverType::SparseCholesky,
+            ExplicitSchurVariant::Sparse,
         ),
         (
-            LinearSolverType::SparseSchurComplement,
-            SchurVariant::ChunkedSparse,
+            LinearSolverType::ExplicitSparseSchur,
+            ExplicitSchurVariant::Sparse,
+        ),
+        (
+            LinearSolverType::ExplicitSparseSchur,
+            ExplicitSchurVariant::Chunked,
+        ),
+        (
+            LinearSolverType::ExplicitSparseSchur,
+            ExplicitSchurVariant::Iterative,
+        ),
+        // The variant is ignored by ImplicitSparseSchur, but the config
+        // builder still needs one; `Sparse` is as good as any.
+        (
+            LinearSolverType::ImplicitSparseSchur,
+            ExplicitSchurVariant::Sparse,
         ),
     ] {
         let (mut problem, _) = build_mini_ba()?;
         let config = LevenbergMarquardtConfig::new()
             .with_max_iterations(20)
             .with_linear_solver_type(solver_type)
-            .with_schur_variant(variant);
+            .with_schur_variant(variant)
+            .with_schur_cg_params(1000, 1e-12);
         let mut solver = LevenbergMarquardt::with_config(config);
         let result = solver.optimize(&mut problem)?;
         assert!(

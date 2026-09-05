@@ -276,6 +276,145 @@ fn identity_damping_adds_lambda_to_every_diagonal() -> TestResult {
 }
 
 // -----------------------------------------------------------------------------
+// Schur solvers: same contract, plus StructureAware setup and graceful
+// degradation where `JᵀJ` is never formed.
+// -----------------------------------------------------------------------------
+//
+// Every Schur solver publishes the *full* system's `+Jᵀr`/`JᵀJ` through
+// `get_gradient`/`get_hessian` — not the reduced camera system — so the same
+// `assert_publishes_contract` reference applies unchanged. The fixture below
+// reuses `dense_system`/`sparse_system`'s exact 4x3 shape (so
+// `expected_gradient_and_hessian` is still the ground truth) and marks its
+// last column as the eliminated ("group 0") variable.
+
+mod schur_contract {
+    use super::*;
+    use apex_manifolds::rn::Rn;
+    use apex_solver::core::VarKey;
+    use apex_solver::core::variable::{ManifoldVariable, Variable};
+    use apex_solver::linalg::{
+        ExplicitDenseSchur, ExplicitSchurVariant, ExplicitSparseSchur, ImplicitSparseSchur,
+        StructureAware,
+    };
+    use slotmap::{SecondaryMap, SlotMap};
+    use std::collections::HashSet;
+
+    type Setup = (
+        SlotMap<VarKey, Box<dyn ManifoldVariable>>,
+        SecondaryMap<VarKey, usize>,
+        HashSet<VarKey>,
+    );
+
+    /// One kept 2-DOF variable (columns 0-1, "group 1") and one eliminated
+    /// 1-DOF variable (column 2, "group 0"), matching `dense_system`'s 4x3
+    /// shape column-for-column.
+    fn schur_variables() -> Setup {
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let kept = variables.insert(Box::new(Variable::new(Rn::new(nalgebra::DVector::zeros(
+            2,
+        )))));
+        let eliminated = variables.insert(Box::new(Variable::new(Rn::new(
+            nalgebra::DVector::zeros(1),
+        ))));
+        let mut index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        index_map.insert(kept, 0);
+        index_map.insert(eliminated, 2);
+        let mut landmark_keys = HashSet::new();
+        landmark_keys.insert(eliminated);
+        (variables, index_map, landmark_keys)
+    }
+
+    #[test]
+    fn explicit_sparse_schur_publishes_the_contract() -> TestResult {
+        let (j, r) = sparse_system()?;
+        let (variables, index_map, landmarks) = schur_variables();
+        let mut solver = ExplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &index_map, &landmarks)?;
+        LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &probe_damping(),
+        )?;
+        let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
+        let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
+        assert_publishes_contract("ExplicitSparseSchur", g, &sparse_diagonal(h))
+    }
+
+    #[test]
+    fn implicit_sparse_schur_publishes_the_contract() -> TestResult {
+        let (j, r) = sparse_system()?;
+        let (variables, index_map, landmarks) = schur_variables();
+        let mut solver = ImplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &index_map, &landmarks)?;
+        LinearSolver::<SparseMode>::solve_augmented_equation(
+            &mut solver,
+            &r,
+            &j,
+            &probe_damping(),
+        )?;
+        let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
+        let h = LinearSolver::<SparseMode>::get_hessian(&solver).ok_or("no hessian")?;
+        assert_publishes_contract("ImplicitSparseSchur", g, &sparse_diagonal(h))
+    }
+
+    #[test]
+    fn explicit_dense_schur_publishes_the_contract() -> TestResult {
+        let (j, r) = dense_system();
+        let (variables, index_map, landmarks) = schur_variables();
+        let mut solver = ExplicitDenseSchur::new();
+        solver.initialize_structure(&variables, &index_map, &landmarks)?;
+        LinearSolver::<DenseMode>::solve_augmented_equation(&mut solver, &r, &j, &probe_damping())?;
+        let g = LinearSolver::<DenseMode>::get_gradient(&solver).ok_or("no gradient")?;
+        let h = LinearSolver::<DenseMode>::get_hessian(&solver).ok_or("no hessian")?;
+        let diag: Vec<f64> = (0..h.ncols()).map(|i| h[(i, i)]).collect();
+        assert_publishes_contract("ExplicitDenseSchur", g, &diag)
+    }
+
+    /// The chunked path never forms `JᵀJ`, so it must degrade gracefully:
+    /// `get_hessian` returns `None` while `get_gradient` and
+    /// `hessian_vec_product` still serve the true, un-damped quadratic model.
+    #[test]
+    fn explicit_sparse_schur_chunked_degrades_hessian_gracefully() -> TestResult {
+        let (j, r) = sparse_system()?;
+        let (variables, index_map, landmarks) = schur_variables();
+        let mut solver = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
+        solver.initialize_structure(&variables, &index_map, &landmarks)?;
+        LinearSolver::<SparseMode>::solve_normal_equation(&mut solver, &r, &j)?;
+
+        assert!(
+            LinearSolver::<SparseMode>::get_hessian(&solver).is_none(),
+            "the chunked path never forms JᵀJ and must not publish one"
+        );
+
+        let (expected_g, expected_h) = expected_gradient_and_hessian();
+        let g = LinearSolver::<SparseMode>::get_gradient(&solver).ok_or("no gradient")?;
+        for i in 0..expected_g.nrows() {
+            assert!(
+                (g[(i, 0)] - expected_g[(i, 0)]).abs() < 1e-9,
+                "gradient mismatch at {i}: {} vs {}",
+                g[(i, 0)],
+                expected_g[(i, 0)]
+            );
+        }
+
+        let v = Mat::<f64>::from_fn(3, 1, |i, _| (i + 1) as f64);
+        let hv = LinearSolver::<SparseMode>::hessian_vec_product(&solver, &v)
+            .ok_or("no hessian_vec_product")?;
+        let expected_hv = &expected_h * &v;
+        for i in 0..3 {
+            assert!(
+                (hv[(i, 0)] - expected_hv[(i, 0)]).abs() < 1e-9,
+                "hessian_vec_product mismatch at {i}: {} vs {}",
+                hv[(i, 0)],
+                expected_hv[(i, 0)]
+            );
+        }
+        Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Optimizer dispatch: no silent solver substitution
 // -----------------------------------------------------------------------------
 //
@@ -354,7 +493,7 @@ mod dispatch {
         // Schur is dispatched like any other sparse solver now; the factor has
         // a zero Jacobian so the solve fails numerically — any error other
         // than the dispatch rejection is fine here.
-        let mut optimizer = gn(LinearSolverType::SparseSchurComplement);
+        let mut optimizer = gn(LinearSolverType::ExplicitSparseSchur);
         let mut problem = small_problem(JacobianMode::Sparse);
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
@@ -383,16 +522,58 @@ mod dispatch {
             "GN + SparseCholesky (dense)",
         )?;
         assert_rejected(
-            gn(LinearSolverType::SparseSchurComplement),
+            gn(LinearSolverType::ExplicitSparseSchur),
             JacobianMode::Dense,
-            "GN + Schur (dense)",
+            "GN + ExplicitSparseSchur (dense)",
+        )?;
+        assert_rejected(
+            gn(LinearSolverType::ImplicitSparseSchur),
+            JacobianMode::Dense,
+            "GN + ImplicitSparseSchur (dense)",
         )
+    }
+
+    #[test]
+    fn gn_accepts_implicit_schur_under_sparse_mode() -> TestResult {
+        let mut optimizer = gn(LinearSolverType::ImplicitSparseSchur);
+        let mut problem = small_problem(JacobianMode::Sparse);
+        let result = optimizer.optimize(&mut problem);
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("supports"),
+                "GN + ImplicitSparseSchur (sparse): dispatch must accept, got {e}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn gn_rejects_explicit_dense_schur_under_sparse_mode() -> TestResult {
+        assert_rejected(
+            gn(LinearSolverType::ExplicitDenseSchur),
+            JacobianMode::Sparse,
+            "GN + ExplicitDenseSchur (sparse)",
+        )
+    }
+
+    #[test]
+    fn gn_accepts_explicit_dense_schur_under_dense_mode() -> TestResult {
+        let mut optimizer = gn(LinearSolverType::ExplicitDenseSchur);
+        let mut problem = small_problem(JacobianMode::Dense);
+        let result = optimizer.optimize(&mut problem);
+        if let Err(e) = result {
+            assert!(
+                !e.to_string().contains("supports"),
+                "GN + ExplicitDenseSchur (dense): dispatch must accept, got {e}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
     fn dog_leg_accepts_schur_under_sparse_mode() -> TestResult {
         // See `gn_accepts_schur_under_sparse_mode`: dispatched, not rejected.
-        let mut optimizer = dl(LinearSolverType::SparseSchurComplement);
+        let mut optimizer = dl(LinearSolverType::ExplicitSparseSchur);
         let mut problem = small_problem(JacobianMode::Sparse);
         let result = optimizer.optimize(&mut problem);
         if let Err(e) = result {
