@@ -241,6 +241,92 @@ been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-sp
   (was a hardcoded `rho > 0.0`) and Dog Leg (was `rho > 1e-4`). The default of `1e-3` matches
   Ceres, so marginal steps that used to be accepted are now rejected and the damping raised.
 
+### Breaking Changes
+
+- **`LevenbergMarquardtConfig::for_bundle_adjustment` now selects
+  `ImplicitSparseSchur`** instead of `ExplicitSparseSchur`. Measured over the
+  four BAL datasets (3 runs each) it is 2.2× faster in total — Ladybug 18.8 s vs
+  75.2 s, Dubrovnik 31.3 s vs 41.9 s, Venice 20.2 s vs 51.2 s — with lower final
+  RMSE on Trafalgar and Dubrovnik and at most 0.6% higher on Ladybug and Venice.
+  It is slower only on Trafalgar (6.3 s vs 2.5 s), the smallest dataset. The
+  step is now inexact by construction: pass
+  `.with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)` to restore
+  the exact reduced solve.
+
+### Added
+
+- **PCG forcing sequence** for both Schur PCG paths, following Ceres's
+  `Solver::Options::eta`: the solve stops when the quadratic model's relative
+  improvement per iteration falls below `η/i`, not only when the residual is
+  small. Before this, every PCG solve on Ladybug ran the full iteration cap
+  without the residual rule ever firing. `η` defaults to `1e-2` — deliberately
+  tighter than Ceres's `1e-1`, which measured 9.7% worse on Ladybug — and is set
+  through `with_schur_cg_q_tolerance`; `0.0` disables the rule.
+
+- **`ImplicitSparseSchur` is now matrix-free in `JᵀJ` as well as `S`.** The
+  reduced operator is applied directly from `J` in four passes over its
+  nonzeros, so cost scales with `nnz(J)` rather than `nnz(JᵀJ)` — which for
+  bundle adjustment carries a dense block per co-visible camera pair. Combined
+  with the forcing sequence this is 5.9-13.4× faster than the previous
+  implementation. `get_hessian()` now returns `None` for this solver, as it does
+  for the chunked path; the quadratic model is served exactly through
+  `hessian_vec_product`.
+
+### Fixed
+
+- **`ExplicitSparseSchur` ignored its configured preconditioner.** The
+  `Iterative` variant always ran scalar Jacobi regardless of
+  `with_preconditioner`, so `SchurJacobi` and `BlockDiagonal` were silently
+  equivalent. Both now build the preconditioner they name.
+
+- **Schur complement solvers renamed and consolidated around explicit/implicit,
+  sparse/dense naming that mirrors Ceres** (`SPARSE_SCHUR`/`DENSE_SCHUR`/`ITERATIVE_SCHUR`).
+  No deprecated aliases — old names are gone outright:
+  - `SparseSchurComplementSolver` → **`ExplicitSparseSchur`** (`src/linalg/sparse/schur/explicit.rs`).
+  - `IterativeSchurSolver` → **`ImplicitSparseSchur`** (`src/linalg/sparse/schur/implicit.rs`),
+    generalized off its old `LegacyBlockStructure` (fixed 3-DOF, contiguous columns only) onto
+    the same [`SchurPartition`] every other Schur solver uses — inverse-depth (1-DOF) landmarks,
+    mixed eliminated sizes, and non-contiguous column layouts now all work through the matrix-free
+    path, not just the explicit one.
+  - **`ExplicitDenseSchur`** (`src/linalg/dense/schur/explicit.rs`) — new: the same explicit
+    construction over a dense Hessian, for `JacobianMode::Dense` problems. Equivalent to Ceres's
+    `DENSE_SCHUR`.
+  - `SchurVariant` → **`ExplicitSchurVariant`**, now `ExplicitSparseSchur`-only configuration
+    (`Sparse`, `Iterative` — renamed from `ExplicitIterative`, `Chunked` — renamed from
+    `ChunkedSparse`). The old `SchurVariant::Iterative` — which the optimizers special-cased to
+    construct `IterativeSchurSolver` instead of erroring — no longer exists: `LinearSolverType`
+    now has its own `ImplicitSparseSchur`/`ExplicitDenseSchur` discriminants, so each solver is
+    selected directly instead of through a secondary sub-variant.
+  - Every Schur solver now runs the same automatic eliminated/retained ("group 0"/"group 1")
+    classification (`SchurOrdering`, `Problem::mark_for_elimination`) via the shared
+    `linalg::schur::effective_landmark_keys` — `ImplicitSparseSchur` did not previously support
+    `SchurOrdering::auto_detect` at all.
+  - `SchurPartition`, `EliminatedBlocks`, `SchurOrdering`, `SchurPreconditioner` moved to a new
+    top-level `src/linalg/schur/` module (previously under `src/linalg/sparse/`), reflecting that
+    they are storage-agnostic and shared by both the sparse and dense solvers. The now-unified
+    landmark-block regularization policy drops `implicit_schur.rs`'s old eigenvalue-gated
+    `regularize_landmark_block` in favor of the same `regularization::invert_with_retry_3/dyn`
+    every other Schur solver already used.
+  - The two independent hand-rolled PCG loops (`ExplicitSparseSchur`'s `Iterative` variant and
+    `ImplicitSparseSchur`) now both call one shared primitive, `linalg::schur::pcg`.
+- **`LinearSolverType::SparseSchurComplement` renamed to `ExplicitSparseSchur`**, with
+  `ImplicitSparseSchur` and `ExplicitDenseSchur` added alongside it.
+
+### Added
+
+- Correctness coverage: `tests/schur_math_properties.rs` proves `S` is SPD (via successful
+  Cholesky) and that `ExplicitSparseSchur`, `ExplicitDenseSchur` and `ImplicitSparseSchur` agree
+  on the same step, including on non-contiguous, mixed-DOF partitions. `tests/linear_solver_contract.rs`
+  now covers all three Schur solvers' `get_gradient`/`get_hessian` sign conventions, including the
+  chunked path's graceful `get_hessian() == None` degradation.
+- `benches/micro_kernels.rs`: `ExplicitSparseSchur` (Cholesky-on-`S` and PCG-on-`S`),
+  `ExplicitDenseSchur`, and the shared PCG primitive each get their own micro-benchmark, at
+  matched problem size against the existing `ImplicitSparseSchur` bench.
+- `benches/cpp_comparison`'s `ceres_ba_benchmark` now accepts a `CERES_LINEAR_SOLVER` env var
+  (`sparse_schur`/`dense_schur`/`iterative_schur`) so `bundle_adjustment_benchmark`'s
+  `APEX_BENCH_SCHUR` can drive apex-solver and Ceres through the matching solver on the same
+  dataset for final-cost comparison.
+
 ## [1.4.0] - 2026-07-30
 
 ### Breaking Changes

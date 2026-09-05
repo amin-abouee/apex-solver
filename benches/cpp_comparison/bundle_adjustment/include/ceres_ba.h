@@ -60,5 +60,16 @@ struct BALReprojectionError {
     double observed_y;
 };
 
-// Function declaration for Ceres bundle adjustment benchmark
-benchmark_utils::BenchmarkResult BenchmarkCeres(const std::string& dataset_path);
+// Function declaration for Ceres bundle adjustment benchmark.
+//
+// `linear_solver` selects Ceres's linear solver for the reduced/normal
+// system, mirroring apex-solver's three Schur solvers so the two can be
+// compared directly on the same dataset:
+//   "sparse_schur"    -> ceres::SPARSE_SCHUR    (apex ExplicitSparseSchur)
+//   "dense_schur"     -> ceres::DENSE_SCHUR      (apex ExplicitDenseSchur;
+//                         small datasets only -- O(n_cameras^3))
+//   "iterative_schur" -> ceres::ITERATIVE_SCHUR + SCHUR_JACOBI (default;
+//                         apex ImplicitSparseSchur)
+benchmark_utils::BenchmarkResult BenchmarkCeres(
+    const std::string& dataset_path,
+    const std::string& linear_solver = "iterative_schur");

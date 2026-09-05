@@ -38,7 +38,7 @@ use apex_solver::core::loss_functions::HuberLoss;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::init_logger;
-use apex_solver::linalg::{SchurPreconditioner, SchurVariant};
+use apex_solver::linalg::{ExplicitSchurVariant, LinearSolverType, SchurPreconditioner};
 use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use clap::{Parser, ValueEnum};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
@@ -64,13 +64,28 @@ enum SolverArg {
     Chunked,
 }
 
-impl From<SolverArg> for SchurVariant {
+impl SolverArg {
+    /// Which top-level solver this selects. `Implicit` is a different
+    /// [`LinearSolver`](apex_solver::linalg::LinearSolver) entirely — it
+    /// never forms `S` — so it is not expressible as an
+    /// [`ExplicitSchurVariant`].
+    fn linear_solver_type(self) -> LinearSolverType {
+        match self {
+            SolverArg::Implicit => LinearSolverType::ImplicitSparseSchur,
+            SolverArg::Explicit | SolverArg::ExplicitIterative | SolverArg::Chunked => {
+                LinearSolverType::ExplicitSparseSchur
+            }
+        }
+    }
+}
+
+impl From<SolverArg> for ExplicitSchurVariant {
+    /// Ignored when `arg.linear_solver_type()` is `ImplicitSparseSchur`.
     fn from(arg: SolverArg) -> Self {
         match arg {
-            SolverArg::Explicit => SchurVariant::Sparse,
-            SolverArg::Implicit => SchurVariant::Iterative,
-            SolverArg::ExplicitIterative => SchurVariant::ExplicitIterative,
-            SolverArg::Chunked => SchurVariant::ChunkedSparse,
+            SolverArg::Explicit | SolverArg::Implicit => ExplicitSchurVariant::Sparse,
+            SolverArg::ExplicitIterative => ExplicitSchurVariant::Iterative,
+            SolverArg::Chunked => ExplicitSchurVariant::Chunked,
         }
     }
 }
@@ -233,6 +248,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         &dataset,
         num_points_to_use,
         SchurSettings {
+            linear_solver_type: args.solver.linear_solver_type(),
             variant: args.solver.into(),
             preconditioner: args.preconditioner.into(),
             cg_max_iterations: args.cg_max_iterations,
@@ -258,7 +274,8 @@ fn axis_angle_to_so3(axis_angle: &Vector3<f64>) -> SO3 {
 /// Schur solver settings gathered from the CLI.
 #[derive(Debug, Clone, Copy)]
 struct SchurSettings {
-    variant: SchurVariant,
+    linear_solver_type: LinearSolverType,
+    variant: ExplicitSchurVariant,
     preconditioner: SchurPreconditioner,
     cg_max_iterations: usize,
     cg_tolerance: f64,
@@ -401,6 +418,7 @@ fn run_bundle_adjustment(
 
     // Configure solver
     let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
+    config.linear_solver_type = schur.linear_solver_type;
     config.schur_variant = schur.variant;
     config.schur_preconditioner = schur.preconditioner;
     config.schur_cg_max_iterations = schur.cg_max_iterations;
@@ -408,11 +426,18 @@ fn run_bundle_adjustment(
 
     info!("");
     info!("Solver configuration:");
-    info!("  Solver variant: {:?}", schur.variant);
+    info!("  Linear solver: {:?}", schur.linear_solver_type);
     if matches!(
-        schur.variant,
-        SchurVariant::Iterative | SchurVariant::ExplicitIterative
+        schur.linear_solver_type,
+        LinearSolverType::ExplicitSparseSchur
     ) {
+        info!("  Explicit variant: {:?}", schur.variant);
+    }
+    if matches!(
+        schur.linear_solver_type,
+        LinearSolverType::ImplicitSparseSchur
+    ) || matches!(schur.variant, ExplicitSchurVariant::Iterative)
+    {
         info!("  Preconditioner: {:?}", schur.preconditioner);
         info!(
             "  PCG budget: {} iterations, tol {:.1e}",
@@ -420,8 +445,6 @@ fn run_bundle_adjustment(
         );
     }
     info!("  Optimization type: {:?}", opt_type);
-    info!("  Linear solver: {:?}", config.linear_solver_type);
-    info!("  Preconditioner: {:?}", config.schur_preconditioner);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 

@@ -93,6 +93,8 @@ pub struct SchurPartition {
     elim_block: Vec<u32>,
     /// Global column → local column within its eliminated block.
     elim_offset: Vec<u32>,
+    /// Start of each kept block within the reduced system's column space.
+    kept_offsets: Vec<usize>,
     /// Start of each eliminated block within the eliminated-local column space.
     eliminated_offsets: Vec<usize>,
 }
@@ -132,8 +134,10 @@ impl SchurPartition {
         let mut elim_offset = vec![0u32; total];
         let mut claimed = vec![false; total];
 
+        let mut kept_offsets = Vec::with_capacity(kept.len());
         let mut local = 0usize;
         for block in &kept {
+            kept_offsets.push(local);
             for offset in 0..block.dof {
                 let col = block.col_start + offset;
                 Self::claim(&mut claimed, col, total, block.key)?;
@@ -171,6 +175,7 @@ impl SchurPartition {
             kept_local,
             elim_block,
             elim_offset,
+            kept_offsets,
             eliminated_offsets,
         })
     }
@@ -254,6 +259,17 @@ impl SchurPartition {
     #[inline]
     pub fn eliminated_offset(&self, block_idx: usize) -> usize {
         self.eliminated_offsets[block_idx]
+    }
+
+    /// First kept-local column of block `block_idx`.
+    ///
+    /// Kept blocks are sorted by global column and assigned consecutive local
+    /// indices, so each one owns the contiguous local range
+    /// `[kept_offset(i), kept_offset(i) + kept_blocks()[i].dof)`. Block-diagonal
+    /// preconditioners address the retained system through this.
+    #[inline]
+    pub fn kept_offset(&self, block_idx: usize) -> usize {
+        self.kept_offsets[block_idx]
     }
 
     /// Verify that no factor couples two eliminated variables.
@@ -417,6 +433,47 @@ impl EliminatedBlocks {
                 }
             }
         }
+    }
+
+    /// Gather the diagonal blocks of `H_ee = EᵀE` **straight from `J`**.
+    ///
+    /// The Hessian-based [`Self::gather`] needs `JᵀJ` to exist; this computes
+    /// the same blocks as column dot products, so a matrix-free solver never
+    /// has to form it. Entry `(p, q)` of block `b` is
+    /// `J[:, col_start+p] · J[:, col_start+q]`, and each block is independent,
+    /// so the blocks are filled in parallel.
+    ///
+    /// Block-diagonality of `H_ee` is a precondition, not something this
+    /// checks: cross-block entries are simply never computed. Callers that
+    /// cannot use [`SchurPartition::verify_block_diagonal`] (which needs the
+    /// Hessian) verify it against `J`'s rows instead.
+    pub fn gather_from_jacobian(
+        &mut self,
+        jacobian: &SparseColMat<usize, f64>,
+        partition: &SchurPartition,
+    ) {
+        use crate::linalg::schur::jacobian_ops::column_dot;
+        use rayon::prelude::*;
+
+        // Blocks are laid out consecutively in `values`, each column-major, so
+        // collecting block by block in order reproduces the flat layout.
+        // `collect` preserves order, so the parallel walk is safe.
+        self.values = partition
+            .eliminated_blocks()
+            .par_iter()
+            .flat_map(|block| {
+                let dof = block.dof;
+                (0..dof * dof).into_par_iter().map(move |within| {
+                    let local_col = within / dof;
+                    let local_row = within % dof;
+                    column_dot(
+                        jacobian,
+                        block.col_start + local_row,
+                        block.col_start + local_col,
+                    )
+                })
+            })
+            .collect();
     }
 
     /// Add `λ·D` to every block's diagonal, with `D_jj = clamp(H_jj, …)`.

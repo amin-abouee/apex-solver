@@ -1645,8 +1645,8 @@ mod tests {
     #[allow(deprecated)]
     #[test]
     fn test_create_linear_solver_fallback_for_schur() {
-        // SparseSchurComplement is special; falls back to Cholesky in create_linear_solver
-        let solver = create_linear_solver(&crate::linalg::LinearSolverType::SparseSchurComplement);
+        // ExplicitSparseSchur is special; falls back to Cholesky in create_linear_solver
+        let solver = create_linear_solver(&crate::linalg::LinearSolverType::ExplicitSparseSchur);
         let _ = solver.get_hessian();
     }
 

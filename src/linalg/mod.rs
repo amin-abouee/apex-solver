@@ -1,6 +1,7 @@
 pub mod covariance;
 pub mod dense;
 pub(crate) mod regularization;
+pub mod schur;
 pub mod sparse;
 pub mod utils;
 
@@ -12,17 +13,15 @@ use std::collections::HashSet;
 use std::fmt::{self, Debug, Display, Formatter};
 use thiserror::Error;
 
-pub use sparse::{
-    BlockSpan, ChunkLayout, ChunkedSchurEliminator, ColSlot, EliminatedBlocks, PatternFingerprint,
-    ReducedSystem, SchurPartition,
+pub use schur::{
+    BlockSpan, ColSlot, EliminatedBlocks, SchurOrdering, SchurPartition, SchurPreconditioner,
 };
-#[allow(deprecated)] // re-export kept so existing imports of the old name resolve
 pub use sparse::{
-    IterativeSchurSolver, SchurBlockStructure, SchurOrdering, SchurPreconditioner, SchurVariant,
-    SparseCholeskySolver, SparseQRSolver, SparseSchurComplementSolver,
+    ChunkLayout, ChunkedSchurEliminator, ExplicitSchurVariant, ExplicitSparseSchur,
+    ImplicitSparseSchur, PatternFingerprint, ReducedSystem, SparseCholeskySolver, SparseQRSolver,
 };
 
-pub use dense::{DenseCholeskySolver, DenseQRSolver};
+pub use dense::{DenseCholeskySolver, DenseQRSolver, ExplicitDenseSchur};
 
 pub use covariance::{Covariance, CovarianceAlgorithm, CovarianceError, CovarianceOptions};
 
@@ -60,9 +59,21 @@ pub enum LinearSolverType {
     #[default]
     SparseCholesky,
     SparseQR,
-    SparseSchurComplement,
+    /// Explicit Schur complement over a sparse Hessian: forms `S` and
+    /// factorizes (or PCG-solves) it. Equivalent to Ceres's `SPARSE_SCHUR`.
+    /// Sub-configured by [`ExplicitSchurVariant`] and, for its `Iterative`
+    /// sub-variant, [`SchurPreconditioner`].
+    ExplicitSparseSchur,
+    /// Implicit (matrix-free) Schur complement, solved with PCG. Neither `S`
+    /// nor `JᵀJ` is ever materialized: the operator reads `J` directly, so its
+    /// cost scales with `nnz(J)`. Equivalent to Ceres's `ITERATIVE_SCHUR`.
+    /// Sub-configured by [`SchurPreconditioner`].
+    ImplicitSparseSchur,
     DenseCholesky,
     DenseQR,
+    /// Explicit Schur complement over a dense Hessian: forms `S` densely and
+    /// factorizes it. Equivalent to Ceres's `DENSE_SCHUR`.
+    ExplicitDenseSchur,
 }
 
 impl Display for LinearSolverType {
@@ -70,9 +81,11 @@ impl Display for LinearSolverType {
         match self {
             LinearSolverType::SparseCholesky => write!(f, "Sparse Cholesky"),
             LinearSolverType::SparseQR => write!(f, "Sparse QR"),
-            LinearSolverType::SparseSchurComplement => write!(f, "Sparse Schur Complement"),
+            LinearSolverType::ExplicitSparseSchur => write!(f, "Explicit Sparse Schur Complement"),
+            LinearSolverType::ImplicitSparseSchur => write!(f, "Implicit Sparse Schur Complement"),
             LinearSolverType::DenseCholesky => write!(f, "Dense Cholesky"),
             LinearSolverType::DenseQR => write!(f, "Dense QR"),
+            LinearSolverType::ExplicitDenseSchur => write!(f, "Explicit Dense Schur Complement"),
         }
     }
 }
@@ -345,14 +358,22 @@ mod tests {
         );
         assert_eq!(format!("{}", LinearSolverType::SparseQR), "Sparse QR");
         assert_eq!(
-            format!("{}", LinearSolverType::SparseSchurComplement),
-            "Sparse Schur Complement"
+            format!("{}", LinearSolverType::ExplicitSparseSchur),
+            "Explicit Sparse Schur Complement"
+        );
+        assert_eq!(
+            format!("{}", LinearSolverType::ImplicitSparseSchur),
+            "Implicit Sparse Schur Complement"
         );
         assert_eq!(
             format!("{}", LinearSolverType::DenseCholesky),
             "Dense Cholesky"
         );
         assert_eq!(format!("{}", LinearSolverType::DenseQR), "Dense QR");
+        assert_eq!(
+            format!("{}", LinearSolverType::ExplicitDenseSchur),
+            "Explicit Dense Schur Complement"
+        );
     }
 
     // -------------------------------------------------------------------------

@@ -39,14 +39,12 @@ impl DenseCholeskySolver {
         // g = J^T · r
         let gradient = jacobian.transpose() * residuals;
 
-        // Dense Cholesky factorization
-        let llt = hessian
-            .as_ref()
-            .llt(Side::Lower)
-            .map_err(|e| map_llt_error(e, "Dense Cholesky factorization failed"))?;
-
         // Solve H · dx = -g
-        let dx = llt.solve(-&gradient);
+        let dx = solve_spd(
+            &hessian,
+            &(-&gradient),
+            "Dense Cholesky factorization failed",
+        )?;
 
         self.hessian = Some(hessian);
         self.gradient = Some(gradient);
@@ -73,14 +71,12 @@ impl DenseCholeskySolver {
             augmented[(i, i)] += damping.diagonal_term(hessian[(i, i)]);
         }
 
-        // Dense Cholesky factorization on augmented system
-        let llt = augmented
-            .as_ref()
-            .llt(Side::Lower)
-            .map_err(|e| map_llt_error(e, "Augmented dense Cholesky factorization failed"))?;
-
         // Solve H_aug · dx = -g
-        let dx = llt.solve(-&gradient);
+        let dx = solve_spd(
+            &augmented,
+            &(-&gradient),
+            "Augmented dense Cholesky factorization failed",
+        )?;
 
         // Cache the un-augmented Hessian (DogLeg/LM need the true quadratic model)
         self.hessian = Some(hessian);
@@ -88,6 +84,19 @@ impl DenseCholeskySolver {
 
         Ok(dx)
     }
+}
+
+/// Solve `a · x = b` for SPD `a` via dense Cholesky (LLT).
+///
+/// Shared by every dense solver that reduces to one SPD system —
+/// `DenseCholeskySolver` and `ExplicitDenseSchur`'s reduced camera system —
+/// so the factorization and error-mapping logic exists in exactly one place.
+pub(crate) fn solve_spd(a: &Mat<f64>, b: &Mat<f64>, context: &str) -> LinAlgResult<Mat<f64>> {
+    let llt = a
+        .as_ref()
+        .llt(Side::Lower)
+        .map_err(|e| map_llt_error(e, context))?;
+    Ok(llt.solve(b))
 }
 
 impl Default for DenseCholeskySolver {

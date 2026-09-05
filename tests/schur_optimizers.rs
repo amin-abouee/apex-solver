@@ -13,7 +13,7 @@ use apex_solver::ManifoldType;
 use apex_solver::core::VarKey;
 use apex_solver::core::problem::Problem;
 use apex_solver::factors::pose::{BetweenFactor, PriorFactor};
-use apex_solver::linalg::{JacobianMode, LinearSolverType, SchurVariant};
+use apex_solver::linalg::{ExplicitSchurVariant, JacobianMode, LinearSolverType};
 use apex_solver::optimizer::dog_leg::{DogLeg, DogLegConfig};
 use apex_solver::optimizer::gauss_newton::{GaussNewton, GaussNewtonConfig};
 use nalgebra::dvector;
@@ -73,7 +73,7 @@ fn gauss_newton_schur_matches_cholesky() -> TestResult {
     let mut schur = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(50)
-            .with_linear_solver_type(LinearSolverType::SparseSchurComplement),
+            .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur),
     );
     let schur = schur.optimize(&mut schur_problem)?;
 
@@ -98,8 +98,8 @@ fn gauss_newton_chunked_schur_matches_cholesky() -> TestResult {
     let mut schur = GaussNewton::with_config(
         GaussNewtonConfig::new()
             .with_max_iterations(50)
-            .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-            .with_schur_variant(SchurVariant::ChunkedSparse),
+            .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
+            .with_schur_variant(ExplicitSchurVariant::Chunked),
     );
     let schur = schur.optimize(&mut schur_problem)?;
 
@@ -128,7 +128,7 @@ fn gauss_newton_schur_matches_cholesky_undiagonalized() -> TestResult {
 
     let (mut schur_problem, _) = chain_problem();
     let mut schur = GaussNewton::with_config(
-        base().with_linear_solver_type(LinearSolverType::SparseSchurComplement),
+        base().with_linear_solver_type(LinearSolverType::ExplicitSparseSchur),
     );
     let schur = schur.optimize(&mut schur_problem)?;
 
@@ -155,7 +155,7 @@ fn dog_leg_schur_matches_cholesky() -> TestResult {
     let mut schur = DogLeg::with_config(
         DogLegConfig::new()
             .with_max_iterations(50)
-            .with_linear_solver_type(LinearSolverType::SparseSchurComplement),
+            .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur),
     );
     let schur = schur.optimize(&mut schur_problem)?;
 
@@ -172,8 +172,8 @@ fn dog_leg_schur_matches_cholesky() -> TestResult {
 /// Star graph: center pose observed by four leaf poses.
 ///
 /// All leaves occupy one contiguous column range and share no factor with
-/// each other, which is exactly what the matrix-free (`Iterative`) legacy
-/// path requires (contiguous sides, 3-DOF blocks).
+/// each other — a realistic visibility graph for exercising the matrix-free
+/// (`ImplicitSparseSchur`) path.
 fn star_problem() -> (Problem, Vec<VarKey>) {
     let mut problem = Problem::new(JacobianMode::Sparse);
     let mut keys = Vec::new();
@@ -204,10 +204,10 @@ fn star_problem() -> (Problem, Vec<VarKey>) {
     (problem, keys)
 }
 
-/// Gauss-Newton through the matrix-free (`Iterative`) dispatch arm.
+/// Gauss-Newton through the matrix-free (`ImplicitSparseSchur`) dispatch arm.
 ///
 /// PCG solves approximately, so this compares at 1e-4 relative with a larger
-/// iteration budget — the point is exercising the `IterativeSchurSolver`
+/// iteration budget — the point is exercising the `ImplicitSparseSchur`
 /// construction path inside the optimizer, not PCG accuracy itself.
 #[test]
 fn gauss_newton_iterative_schur_matches_cholesky() -> TestResult {
@@ -224,8 +224,7 @@ fn gauss_newton_iterative_schur_matches_cholesky() -> TestResult {
         GaussNewtonConfig::new()
             .with_max_iterations(100)
             .with_cost_tolerance(1e-9)
-            .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-            .with_schur_variant(SchurVariant::Iterative)
+            .with_linear_solver_type(LinearSolverType::ImplicitSparseSchur)
             .with_schur_cg_params(500, 1e-9),
     );
     let schur = schur.optimize(&mut schur_problem)?;
@@ -252,15 +251,15 @@ fn schur_config_knobs_are_uniform_across_optimizers() -> TestResult {
     use apex_solver::optimizer::levenberg_marquardt::LevenbergMarquardtConfig;
 
     let lm = LevenbergMarquardtConfig::new()
-        .with_schur_variant(SchurVariant::ChunkedSparse)
+        .with_schur_variant(ExplicitSchurVariant::Chunked)
         .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal)
         .with_schur_cg_params(111, 1e-7);
     let gn = GaussNewtonConfig::new()
-        .with_schur_variant(SchurVariant::ChunkedSparse)
+        .with_schur_variant(ExplicitSchurVariant::Chunked)
         .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal)
         .with_schur_cg_params(111, 1e-7);
     let dl = DogLegConfig::new()
-        .with_schur_variant(SchurVariant::ChunkedSparse)
+        .with_schur_variant(ExplicitSchurVariant::Chunked)
         .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal)
         .with_schur_cg_params(111, 1e-7);
     for (label, variant, precond, iters, tol) in [
@@ -287,7 +286,7 @@ fn schur_config_knobs_are_uniform_across_optimizers() -> TestResult {
         ),
     ] {
         assert!(
-            matches!(variant, SchurVariant::ChunkedSparse),
+            matches!(variant, ExplicitSchurVariant::Chunked),
             "{label}: variant builder not applied"
         );
         assert!(
@@ -307,9 +306,9 @@ fn schur_config_knobs_are_uniform_across_optimizers() -> TestResult {
         GaussNewtonConfig::new(),
         DogLegConfig::new(),
     );
-    assert!(matches!(lm_d.schur_variant, SchurVariant::Sparse));
-    assert!(matches!(gn_d.schur_variant, SchurVariant::Sparse));
-    assert!(matches!(dl_d.schur_variant, SchurVariant::Sparse));
+    assert!(matches!(lm_d.schur_variant, ExplicitSchurVariant::Sparse));
+    assert!(matches!(gn_d.schur_variant, ExplicitSchurVariant::Sparse));
+    assert!(matches!(dl_d.schur_variant, ExplicitSchurVariant::Sparse));
     assert_eq!(lm_d.schur_cg_max_iterations, 200);
     assert_eq!(gn_d.schur_cg_max_iterations, 200);
     assert_eq!(dl_d.schur_cg_max_iterations, 200);

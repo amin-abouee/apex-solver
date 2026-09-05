@@ -1,6 +1,7 @@
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
 #include <glog/logging.h>
+#include <cstdlib>
 #include <thread>
 #include "../../common/include/read_bal.h"
 #include "../../common/include/ba_cost.h"
@@ -9,11 +10,12 @@
 
 // Cost functor struct moved to ceres_ba.h
 
-benchmark_utils::BenchmarkResult BenchmarkCeres(const std::string& dataset_path) {
+benchmark_utils::BenchmarkResult BenchmarkCeres(const std::string& dataset_path,
+                                                 const std::string& linear_solver) {
     using namespace benchmark_utils;
     BenchmarkResult result;
     result.dataset = "problem-1723-156502-pre";
-    result.solver = "Ceres";
+    result.solver = "Ceres (" + linear_solver + ")";
     result.language = "C++";
 
     // Load dataset
@@ -74,8 +76,17 @@ benchmark_utils::BenchmarkResult BenchmarkCeres(const std::string& dataset_path)
     
     // Configure solver options
     ceres::Solver::Options options;
-    options.linear_solver_type = ceres::ITERATIVE_SCHUR;
-    options.preconditioner_type = ceres::SCHUR_JACOBI;
+    if (linear_solver == "sparse_schur") {
+        options.linear_solver_type = ceres::SPARSE_SCHUR;
+    } else if (linear_solver == "dense_schur") {
+        options.linear_solver_type = ceres::DENSE_SCHUR;
+    } else if (linear_solver == "iterative_schur") {
+        options.linear_solver_type = ceres::ITERATIVE_SCHUR;
+        options.preconditioner_type = ceres::SCHUR_JACOBI;
+    } else {
+        LOG(FATAL) << "Unknown linear_solver '" << linear_solver
+                   << "'; expected sparse_schur, dense_schur or iterative_schur";
+    }
     options.use_inner_iterations = false;  // Disabled for fair comparison with other solvers
     options.num_threads = static_cast<int>(std::thread::hardware_concurrency());
     options.max_num_iterations = 100;
@@ -119,13 +130,20 @@ int main(int argc, char** argv) {
     FLAGS_minloglevel = google::GLOG_FATAL;  // Silence Ceres' internal glog output
 
     std::string dataset_path = "../../../data/bundle_adjustment/ladybug/problem-1723-156502-pre.txt";
-    
+
     if (argc > 1) {
         dataset_path = argv[1];
     }
-    
+
+    // CERES_LINEAR_SOLVER mirrors the Rust side's APEX_BENCH_SCHUR env var,
+    // so both binaries are driven the same way when comparing solvers.
+    std::string linear_solver = "iterative_schur";
+    if (const char* env = std::getenv("CERES_LINEAR_SOLVER")) {
+        linear_solver = env;
+    }
+
     std::vector<benchmark_utils::BenchmarkResult> results;
-    results.push_back(BenchmarkCeres(dataset_path));
+    results.push_back(BenchmarkCeres(dataset_path, linear_solver));
     
     std::string csv_path = "ceres_ba_benchmark_results.csv";
     if (!benchmark_utils::WriteResultsToCSV(csv_path, results)) {

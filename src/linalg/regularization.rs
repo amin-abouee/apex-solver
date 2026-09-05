@@ -17,14 +17,11 @@
 //!
 //! Level 2 exists because level 3 is the wrong tool for a single bad landmark:
 //! re-factorizing `S` five times over one unobserved point wastes a full
-//! symbolic+numeric cycle per attempt. Conversely, the matrix-free
-//! (`Iterative`) path keeps its own eigen-gated per-block policy
-//! (`regularize_landmark_block` in `implicit_schur.rs`): it already computes
-//! eigenvalues for the Schur-Jacobi preconditioner, so reusing that
-//! information is cheaper than a blind retry there. Both block policies are
-//! pinned by the tests in this module to never fail spuriously and never
-//! produce NaN — beyond that, their exact shift amounts are allowed to differ,
-//! and the cross-solver agreement tests bound the resulting step differences.
+//! symbolic+numeric cycle per attempt. Every Schur solver —
+//! `ExplicitSparseSchur`, `ImplicitSparseSchur`, and `ExplicitDenseSchur` —
+//! shares this same block-retry policy via `EliminatedBlocks::invert_in_place`,
+//! so a landmark regularized the same way regardless of which solver
+//! eliminated it.
 
 use nalgebra::{DMatrix, Matrix3};
 
@@ -128,37 +125,6 @@ mod tests {
         let zd = DMatrix::<f64>::zeros(2, 2);
         let invd = invert_with_retry_dyn(&zd).ok_or("zero dyn must take the shift")?;
         assert!(invd.iter().all(|v| v.is_finite()));
-        Ok(())
-    }
-
-    #[test]
-    fn implicit_and_shared_policies_agree_where_healthy() -> TestResult {
-        use crate::linalg::sparse::implicit_schur::regularize_landmark_block;
-
-        // Below every threshold both policies take the plain inverse, so they
-        // must return bit-comparable answers — this is the precise sense in
-        // which "all policies agree where it matters".
-        let healthy = Matrix3::new(4.0, 1.0, 0.0, 1.0, 3.0, 0.5, 0.0, 0.5, 2.0);
-        let shared = invert_with_retry_3(&healthy).ok_or("shared")?;
-        let implicit = regularize_landmark_block(&healthy).map_err(|e| format!("implicit: {e}"))?;
-        for r in 0..3 {
-            for c in 0..3 {
-                assert!(
-                    (shared[(r, c)] - implicit[(r, c)]).abs() < 1e-15,
-                    "healthy-block divergence at ({r},{c})"
-                );
-            }
-        }
-
-        // Past the thresholds the amounts legitimately differ (eigen-gated
-        // tiers vs trace-scaled retry); both must still succeed finite.
-        // cond ~1e12 trips the implicit severe branch.
-        let ill = Matrix3::new(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1e-12);
-        let shared_ill = invert_with_retry_3(&ill).ok_or("shared ill")?;
-        let implicit_ill =
-            regularize_landmark_block(&ill).map_err(|e| format!("implicit ill: {e}"))?;
-        assert!(shared_ill.iter().all(|v| v.is_finite()));
-        assert!(implicit_ill.iter().all(|v| v.is_finite()));
         Ok(())
     }
 }

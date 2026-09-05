@@ -21,7 +21,7 @@ use apex_manifolds::rn::Rn;
 use apex_solver::core::VarKey;
 use apex_solver::core::variable::{ManifoldVariable, Variable};
 use apex_solver::linalg::{
-    LinearSolver, SparseCholeskySolver, SparseMode, SparseSchurComplementSolver, StructureAware,
+    ExplicitSparseSchur, LinearSolver, SparseCholeskySolver, SparseMode, StructureAware,
 };
 use faer::Mat;
 use faer::sparse::{SparseColMat, Triplet};
@@ -118,7 +118,7 @@ fn solve_both(
         &system.jacobian,
     )?;
 
-    let mut schur = SparseSchurComplementSolver::new();
+    let mut schur = ExplicitSparseSchur::new();
     schur.initialize_structure(&system.variables, &system.index_map, eliminate)?;
     let dx_schur = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut schur,
@@ -256,7 +256,7 @@ fn coupled_eliminated_variables_are_rejected() -> TestResult {
     let system = build_system(&[6, 3, 3], &[(0, 1), (0, 2), (1, 2)])?;
     let eliminate: HashSet<VarKey> = [system.keys[1], system.keys[2]].into_iter().collect();
 
-    let mut schur = SparseSchurComplementSolver::new();
+    let mut schur = ExplicitSparseSchur::new();
     schur.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let result = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut schur,
@@ -312,7 +312,7 @@ fn different_elimination_choices_agree() -> TestResult {
 /// comparisons above — but far tighter than any indexing mistake would survive.
 #[test]
 fn matrix_free_schur_matches_cholesky_on_bundle_adjustment_shape() -> TestResult {
-    use apex_solver::linalg::IterativeSchurSolver;
+    use apex_solver::linalg::ImplicitSparseSchur;
 
     // Two 6-DOF poses kept, three 3-DOF points eliminated: the shape the
     // matrix-free path was written for.
@@ -331,7 +331,9 @@ fn matrix_free_schur_matches_cholesky_on_bundle_adjustment_shape() -> TestResult
         &system.jacobian,
     )?;
 
-    let mut implicit = IterativeSchurSolver::with_cg_params(500, 1e-12);
+    // Agreement with a direct factorization requires an exact solve; the
+    // default forcing sequence deliberately truncates.
+    let mut implicit = ImplicitSparseSchur::with_cg_params(500, 1e-12).with_cg_q_tolerance(0.0);
     implicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut implicit,
@@ -455,7 +457,7 @@ fn build_grouped_system(
 /// `Problem::group_rows_for_elimination` arranges for real problems.
 #[test]
 fn chunked_schur_matches_cholesky() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     // rows are emitted coupling-by-coupling, so listing each eliminated
     // variable's couplings together makes its rows contiguous.
@@ -469,7 +471,7 @@ fn chunked_schur_matches_cholesky() -> TestResult {
         &system.jacobian,
     )?;
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -486,7 +488,7 @@ fn chunked_schur_matches_cholesky() -> TestResult {
 /// components, producing a wrong step for any DOF > 16 with no diagnostic.
 #[test]
 fn chunked_schur_matches_cholesky_for_large_eliminated_block() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_grouped_system(&[6, 6, 18], &[2], &[(0, 2), (1, 2)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2]].into_iter().collect();
@@ -498,7 +500,7 @@ fn chunked_schur_matches_cholesky_for_large_eliminated_block() -> TestResult {
         &system.jacobian,
     )?;
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -517,12 +519,12 @@ fn chunked_schur_matches_cholesky_for_large_eliminated_block() -> TestResult {
 /// The chunked path must serve the quadratic model without ever holding `JᵀJ`.
 #[test]
 fn chunked_schur_serves_hessian_action_without_the_matrix() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -561,37 +563,6 @@ fn chunked_schur_serves_hessian_action_without_the_matrix() -> TestResult {
     Ok(())
 }
 
-/// `Iterative` is the matrix-free solver, which the optimizer constructs
-/// directly. A `SparseSchurComplementSolver` handed that variant must refuse
-/// instead of silently falling back to Cholesky on the formed `S`.
-#[test]
-fn directly_constructed_iterative_variant_is_rejected() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
-
-    let system = build_system(&[6, 3, 3], &[(0, 1), (0, 2)])?;
-    let eliminate: HashSet<VarKey> = [system.keys[1], system.keys[2]].into_iter().collect();
-
-    let mut schur = SparseSchurComplementSolver::new().with_variant(SchurVariant::Iterative);
-    schur.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
-    let result = LinearSolver::<SparseMode>::solve_normal_equation(
-        &mut schur,
-        &system.residuals,
-        &system.jacobian,
-    );
-
-    let Err(err) = result else {
-        panic!(
-            "a SparseSchurComplementSolver given SchurVariant::Iterative must not silently run Cholesky"
-        );
-    };
-    let message = err.to_string();
-    assert!(
-        message.contains("matrix-free"),
-        "error should point at the matrix-free dispatch, got: {message}"
-    );
-    Ok(())
-}
-
 /// The *damped* chunked solve must match the damped direct solve.
 ///
 /// Regression: damping was first applied to `S` rather than to `H_kk`. Since
@@ -600,7 +571,7 @@ fn directly_constructed_iterative_variant_is_rejected() -> TestResult {
 /// not see it — only a solve with `λ > 0` can.
 #[test]
 fn chunked_schur_matches_cholesky_when_damped() -> TestResult {
-    use apex_solver::linalg::{Damping, SchurVariant};
+    use apex_solver::linalg::{Damping, ExplicitSchurVariant};
 
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
@@ -614,7 +585,7 @@ fn chunked_schur_matches_cholesky_when_damped() -> TestResult {
         &damping,
     )?;
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_augmented_equation(
         &mut chunked,
@@ -635,13 +606,13 @@ fn chunked_schur_matches_cholesky_when_damped() -> TestResult {
 /// this path), so it fires before the overlap/gap validation.
 #[test]
 fn chunked_schur_rejects_coupled_eliminated_variables() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     // keys[1] and keys[2] are coupled directly to each other.
     let system = build_system(&[6, 3, 3], &[(0, 1), (0, 2), (1, 2)])?;
     let eliminate: HashSet<VarKey> = [system.keys[1], system.keys[2]].into_iter().collect();
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let result = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -667,12 +638,12 @@ fn chunked_schur_rejects_coupled_eliminated_variables() -> TestResult {
 /// keys[3]'s rows, so no valid chunk ranges exist.
 #[test]
 fn chunked_schur_rejects_non_grouped_rows() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_system(&[6, 6, 3, 3], &[(0, 2), (0, 3), (1, 2), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let result = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -695,12 +666,12 @@ fn chunked_schur_rejects_non_grouped_rows() -> TestResult {
 /// vs J-direct); on the same problem they must agree to round-off.
 #[test]
 fn sparse_and_chunked_variants_agree() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
 
-    let mut sparse = SparseSchurComplementSolver::new().with_variant(SchurVariant::Sparse);
+    let mut sparse = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Sparse);
     sparse.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let sparse_step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut sparse,
@@ -708,7 +679,7 @@ fn sparse_and_chunked_variants_agree() -> TestResult {
         &system.jacobian,
     )?;
 
-    let mut chunked = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut chunked = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     chunked.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let chunked_step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut chunked,
@@ -725,10 +696,10 @@ fn sparse_and_chunked_variants_agree() -> TestResult {
 /// are keyed on structure and must not accumulate values across solves.
 #[test]
 fn repeated_solve_with_same_instance_agrees() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
-    for variant in [SchurVariant::Sparse, SchurVariant::ChunkedSparse] {
-        let system = if variant == SchurVariant::Sparse {
+    for variant in [ExplicitSchurVariant::Sparse, ExplicitSchurVariant::Chunked] {
+        let system = if variant == ExplicitSchurVariant::Sparse {
             build_system(
                 &[6, 6, 3, 3, 3],
                 &[(0, 2), (0, 3), (0, 4), (1, 2), (1, 3), (1, 4)],
@@ -736,7 +707,7 @@ fn repeated_solve_with_same_instance_agrees() -> TestResult {
         } else {
             build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?
         };
-        let eliminate: HashSet<VarKey> = if variant == SchurVariant::Sparse {
+        let eliminate: HashSet<VarKey> = if variant == ExplicitSchurVariant::Sparse {
             [system.keys[2], system.keys[3], system.keys[4]]
                 .into_iter()
                 .collect()
@@ -744,7 +715,7 @@ fn repeated_solve_with_same_instance_agrees() -> TestResult {
             [system.keys[2], system.keys[3]].into_iter().collect()
         };
 
-        let mut solver = SparseSchurComplementSolver::new().with_variant(variant);
+        let mut solver = ExplicitSparseSchur::new().with_variant(variant);
         solver.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
         let first = LinearSolver::<SparseMode>::solve_normal_equation(
             &mut solver,
@@ -770,12 +741,12 @@ fn repeated_solve_with_same_instance_agrees() -> TestResult {
 /// `LinearSolver::get_gradient`).
 #[test]
 fn failed_chunked_solve_keeps_last_good_gradient() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
 
-    let mut solver = SparseSchurComplementSolver::new().with_variant(SchurVariant::ChunkedSparse);
+    let mut solver = ExplicitSparseSchur::new().with_variant(ExplicitSchurVariant::Chunked);
     solver.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let _ = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut solver,
@@ -835,7 +806,7 @@ fn failed_chunked_solve_keeps_last_good_gradient() -> TestResult {
 /// PCG tolerance on a problem both accept (contiguous 3-DOF blocks).
 #[test]
 fn iterative_and_explicit_iterative_agree() -> TestResult {
-    use apex_solver::linalg::{IterativeSchurSolver, SchurVariant};
+    use apex_solver::linalg::{ExplicitSchurVariant, ImplicitSparseSchur};
 
     let system = build_system(
         &[6, 6, 3, 3, 3],
@@ -845,7 +816,7 @@ fn iterative_and_explicit_iterative_agree() -> TestResult {
         .into_iter()
         .collect();
 
-    let mut implicit = IterativeSchurSolver::with_cg_params(1000, 1e-12);
+    let mut implicit = ImplicitSparseSchur::with_cg_params(1000, 1e-12);
     implicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let matrix_free = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut implicit,
@@ -853,8 +824,8 @@ fn iterative_and_explicit_iterative_agree() -> TestResult {
         &system.jacobian,
     )?;
 
-    let mut explicit = SparseSchurComplementSolver::new()
-        .with_variant(SchurVariant::ExplicitIterative)
+    let mut explicit = ExplicitSparseSchur::new()
+        .with_variant(ExplicitSchurVariant::Iterative)
         .with_cg_params(1000, 1e-12);
     explicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let formed = LinearSolver::<SparseMode>::solve_normal_equation(
@@ -883,7 +854,7 @@ fn iterative_and_explicit_iterative_agree() -> TestResult {
 /// this uses the looser 1e-6 comparison like the matrix-free test.
 #[test]
 fn explicit_iterative_matches_cholesky() -> TestResult {
-    use apex_solver::linalg::SchurVariant;
+    use apex_solver::linalg::ExplicitSchurVariant;
 
     let system = build_grouped_system(&[6, 6, 3, 3], &[2, 3], &[(0, 2), (1, 2), (0, 3), (1, 3)])?;
     let eliminate: HashSet<VarKey> = [system.keys[2], system.keys[3]].into_iter().collect();
@@ -895,9 +866,12 @@ fn explicit_iterative_matches_cholesky() -> TestResult {
         &system.jacobian,
     )?;
 
-    let mut iterative = SparseSchurComplementSolver::new()
-        .with_variant(SchurVariant::ExplicitIterative)
-        .with_cg_params(1000, 1e-12);
+    let mut iterative = ExplicitSparseSchur::new()
+        .with_variant(ExplicitSchurVariant::Iterative)
+        .with_cg_params(1000, 1e-12)
+        // Agreement with a direct factorization requires an exact solve; the
+        // default forcing sequence deliberately truncates.
+        .with_cg_q_tolerance(0.0);
     iterative.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut iterative,

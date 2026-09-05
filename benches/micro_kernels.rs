@@ -2,7 +2,10 @@
 //!
 //! - [`normal_eq`]: parallel formation of `H = JᵀJ` and `g = Jᵀr`
 //! - [`cholesky`]/[`qr`]: damped sparse solve `(JᵀJ + λD)·dx = −Jᵀr`
-//! - [`pcg`]: iterative Schur (matrix-free PCG with Schur–Jacobi preconditioner)
+//! - `pcg` group: `ImplicitSparseSchur` (matrix-free PCG), `ExplicitSparseSchur`
+//!   with `Iterative` (PCG on the formed `S`) and default (Cholesky-on-`S`)
+//!   variants, `ExplicitDenseSchur`, and the shared `schur::pcg` primitive in
+//!   isolation — all at matched problem size, so the numbers compare directly
 //! - [`assemble`]: residual/Jacobian assembly for a synthetic factor graph
 //! - [`fingerprint`]: structural pattern hashing guarding the sparse caches
 //!
@@ -15,11 +18,15 @@ use apex_manifolds::{LieGroup, se3::SE3};
 use apex_solver::ManifoldType;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::variable::Variable;
+use apex_solver::linalg::dense::schur::ExplicitDenseSchur;
+use apex_solver::linalg::schur::{PcgParams, solve_pcg};
 use apex_solver::linalg::sparse::normal_eq::NormalEquationsCache;
 use apex_solver::linalg::sparse::pattern::PatternFingerprint;
 use apex_solver::linalg::sparse::qr::SparseQRSolver;
-use apex_solver::linalg::sparse::{IterativeSchurSolver, SparseCholeskySolver};
-use apex_solver::linalg::{Damping, LinearSolver, StructureAware};
+use apex_solver::linalg::sparse::{
+    ExplicitSchurVariant, ExplicitSparseSchur, ImplicitSparseSchur, SparseCholeskySolver,
+};
+use apex_solver::linalg::{Damping, DenseMode, LinearSolver, StructureAware};
 use apex_solver::linearizer::cpu::sparse::assemble_sparse;
 use criterion::{Criterion, criterion_group, criterion_main};
 use faer::Mat;
@@ -119,6 +126,72 @@ fn ba_like_system(groups: usize) -> BaSystem {
     (jacobian, residuals, variables, index_map, landmark_keys)
 }
 
+type BaSystemDense = (
+    Mat<f64>,
+    Mat<f64>,
+    VarMap,
+    SecondaryMap<apex_solver::core::VarKey, usize>,
+    std::collections::HashSet<apex_solver::core::VarKey>,
+);
+
+/// Dense counterpart of [`ba_like_system`], for `ExplicitDenseSchur` (targets
+/// < ~500 DOF, so `groups` should stay small — a handful, not hundreds).
+fn ba_like_system_dense(groups: usize) -> BaSystemDense {
+    let cam_dof = 6;
+    let lm_dof = 3;
+    let cam_block = 2 * groups * cam_dof;
+    let group_rows = 6 * 2 * 3;
+    let total_rows = groups * group_rows;
+    let total_cols = cam_block + 3 * groups * lm_dof;
+
+    let mut variables: SlotMap<
+        apex_solver::core::VarKey,
+        Box<dyn apex_solver::core::variable::ManifoldVariable>,
+    > = SlotMap::with_key();
+    let mut index_map: SecondaryMap<apex_solver::core::VarKey, usize> = SecondaryMap::new();
+    let mut landmark_keys = std::collections::HashSet::new();
+
+    let cam_se3 = nalgebra::DVector::from_vec(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    let pt_zero = nalgebra::DVector::from_vec(vec![0.0, 0.0, 0.0]);
+
+    let mut jacobian = Mat::<f64>::zeros(total_rows, total_cols);
+    for g in 0..groups {
+        let row_base = g * group_rows;
+
+        let mut cam_cols = Vec::new();
+        for c in 0..2 {
+            let key = variables.insert(Box::new(Variable::new(SE3::from_param_slice(
+                cam_se3.as_slice(),
+            ))));
+            let col = (2 * g + c) * cam_dof;
+            index_map.insert(key, col);
+            cam_cols.push(col);
+        }
+        let mut lm_cols = Vec::new();
+        for l in 0..3 {
+            let key = variables.insert(Box::new(Variable::new(Rn::new(pt_zero.clone()))));
+            let col = cam_block + (3 * g + l) * lm_dof;
+            index_map.insert(key, col);
+            landmark_keys.insert(key);
+            lm_cols.push(col);
+        }
+
+        for (ci, &cc) in cam_cols.iter().enumerate() {
+            for (li, &lc) in lm_cols.iter().enumerate() {
+                let rb = row_base + (ci * 3 + li) * 6;
+                for k in 0..6 {
+                    let cam_val = 1.0 + 0.1 * (ci as f64 + 1.0);
+                    let lm_val = 0.3 + 0.05 * ((k + li + 2 * ci) % 5) as f64;
+                    jacobian[(rb + k, cc + k)] = cam_val;
+                    jacobian[(rb + k, lc + (k % 3))] = lm_val;
+                }
+            }
+        }
+    }
+    let residuals = Mat::from_fn(total_rows, 1, |i, _| ((i * 13) % 17) as f64 * 0.1);
+    (jacobian, residuals, variables, index_map, landmark_keys)
+}
+
 fn bench_normal_equations(c: &mut Criterion) {
     let mut group = c.benchmark_group("normal_eq");
     let jacobian = sample_jacobian(20_000, 5_000, 4);
@@ -186,7 +259,7 @@ fn bench_pcg_iterative_schur(c: &mut Criterion) {
     let (jacobian, residuals, variables, index_map, landmark_keys) = ba_like_system(250);
     let damping = Damping::new(1e-3, 1e-6, 1e32).unwrap_or_else(|e| panic!("valid bounds: {e:?}"));
 
-    let mut solver = IterativeSchurSolver::new();
+    let mut solver = ImplicitSparseSchur::new();
     solver
         .initialize_structure(&variables, &index_map, &landmark_keys)
         .unwrap_or_else(|e| panic!("structure init: {e:?}"));
@@ -201,6 +274,133 @@ fn bench_pcg_iterative_schur(c: &mut Criterion) {
                 )
                 .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
             black_box(dx.nrows())
+        })
+    });
+    group.finish();
+}
+
+/// PCG on the *explicit* `S` (`ExplicitSchurVariant::Iterative`), same
+/// fixture as [`bench_pcg_iterative_schur`] — isolates the cost of PCG on a
+/// formed `S` vs. the matrix-free operator, at matched problem size.
+fn bench_pcg_explicit_schur(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pcg");
+    let (jacobian, residuals, variables, index_map, landmark_keys) = ba_like_system(250);
+    let damping = Damping::new(1e-3, 1e-6, 1e32).unwrap_or_else(|e| panic!("valid bounds: {e:?}"));
+
+    let mut solver = ExplicitSparseSchur::new()
+        .with_variant(ExplicitSchurVariant::Iterative)
+        .with_cg_params(200, 1e-6);
+    solver
+        .initialize_structure(&variables, &index_map, &landmark_keys)
+        .unwrap_or_else(|e| panic!("structure init: {e:?}"));
+
+    group.bench_function("explicit_iterative_schur_500_cameras", |b| {
+        b.iter(|| {
+            let dx = solver
+                .solve_augmented_equation(
+                    black_box(&residuals),
+                    black_box(&jacobian),
+                    black_box(&damping),
+                )
+                .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
+            black_box(dx.nrows())
+        })
+    });
+    group.finish();
+}
+
+/// Direct Cholesky on the explicit `S` — the baseline every iterative variant
+/// above is measured against, same fixture and size.
+fn bench_explicit_sparse_schur(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pcg");
+    let (jacobian, residuals, variables, index_map, landmark_keys) = ba_like_system(250);
+    let damping = Damping::new(1e-3, 1e-6, 1e32).unwrap_or_else(|e| panic!("valid bounds: {e:?}"));
+
+    let mut solver = ExplicitSparseSchur::new();
+    solver
+        .initialize_structure(&variables, &index_map, &landmark_keys)
+        .unwrap_or_else(|e| panic!("structure init: {e:?}"));
+
+    group.bench_function("explicit_sparse_schur_500_cameras", |b| {
+        b.iter(|| {
+            let dx = solver
+                .solve_augmented_equation(
+                    black_box(&residuals),
+                    black_box(&jacobian),
+                    black_box(&damping),
+                )
+                .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
+            black_box(dx.nrows())
+        })
+    });
+    group.finish();
+}
+
+/// `ExplicitDenseSchur` on a small BA-like problem — dense mode's target is
+/// < ~500 DOF, so this uses far fewer groups than the sparse PCG benches.
+fn bench_explicit_dense_schur(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pcg");
+    let (jacobian, residuals, variables, index_map, landmark_keys) = ba_like_system_dense(15);
+    let damping = Damping::new(1e-3, 1e-6, 1e32).unwrap_or_else(|e| panic!("valid bounds: {e:?}"));
+
+    let mut solver = ExplicitDenseSchur::new();
+    solver
+        .initialize_structure(&variables, &index_map, &landmark_keys)
+        .unwrap_or_else(|e| panic!("structure init: {e:?}"));
+
+    group.bench_function("explicit_dense_schur_15_groups", |b| {
+        b.iter(|| {
+            let dx = LinearSolver::<DenseMode>::solve_augmented_equation(
+                &mut solver,
+                black_box(&residuals),
+                black_box(&jacobian),
+                black_box(&damping),
+            )
+            .unwrap_or_else(|e| panic!("solve failed: {e:?}"));
+            black_box(dx.nrows())
+        })
+    });
+    group.finish();
+}
+
+/// The shared PCG primitive on its own, against a plain dense SPD system —
+/// decoupled from any Schur-specific operator or preconditioner, so a
+/// regression here can only be the loop itself, not the caller's setup.
+fn bench_pcg_primitive(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pcg");
+    let n = 200;
+    // Diagonally dominant SPD system.
+    let a = Mat::from_fn(n, n, |i, j| {
+        if i == j {
+            10.0
+        } else {
+            ((i + j) % 5) as f64 * 0.05
+        }
+    });
+    let b = Mat::from_fn(n, 1, |i, _| (i % 7) as f64 * 0.1 + 1.0);
+    let inv_diag: Vec<f64> = (0..n).map(|i| 1.0 / a[(i, i)]).collect();
+
+    group.bench_function("shared_pcg_dense_spd_200", |b_| {
+        b_.iter(|| {
+            let result = solve_pcg(
+                black_box(&b),
+                &PcgParams::new(200, 1e-9),
+                |p, ap| {
+                    for i in 0..n {
+                        let mut acc = 0.0;
+                        for j in 0..n {
+                            acc += a[(i, j)] * p[(j, 0)];
+                        }
+                        ap[(i, 0)] += acc;
+                    }
+                },
+                |r, z| {
+                    for i in 0..n {
+                        z[(i, 0)] = inv_diag[i] * r[(i, 0)];
+                    }
+                },
+            );
+            black_box(result.iterations)
         })
     });
     group.finish();
@@ -326,6 +526,10 @@ criterion_group!(
     bench_cholesky,
     bench_qr,
     bench_pcg_iterative_schur,
+    bench_pcg_explicit_schur,
+    bench_explicit_sparse_schur,
+    bench_explicit_dense_schur,
+    bench_pcg_primitive,
     bench_assemble,
     bench_fingerprint
 );

@@ -146,9 +146,9 @@ use crate::core::problem::Problem;
 use crate::error;
 use crate::error::ErrorLogging;
 use crate::linalg::{
-    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver,
-    IterativeSchurSolver, JacobianMode, LinearSolver, LinearSolverType, SchurPreconditioner,
-    SchurVariant, SparseCholeskySolver, SparseMode, SparseQRSolver, SparseSchurComplementSolver,
+    CovarianceOptions, Damping, DenseCholeskySolver, DenseMode, DenseQRSolver, ExplicitDenseSchur,
+    ExplicitSchurVariant, ExplicitSparseSchur, ImplicitSparseSchur, JacobianMode, LinearSolver,
+    LinearSolverType, SchurPreconditioner, SparseCholeskySolver, SparseMode, SparseQRSolver,
     StructureAware,
 };
 use crate::optimizer::{
@@ -358,21 +358,25 @@ pub struct LevenbergMarquardtConfig {
     /// scale `σ̂² = 2·cost/(m−n)` must be estimated from the fit. See
     /// [`CovarianceOptions`](crate::linalg::covariance::CovarianceOptions).
     pub covariance_options: CovarianceOptions,
-    /// Schur complement solver variant (for bundle adjustment problems)
+    /// [`ExplicitSparseSchur`] sub-variant (for
+    /// [`LinearSolverType::ExplicitSparseSchur`]).
     ///
-    /// When using LinearSolverType::SparseSchurComplement, this determines which
-    /// variant of the Schur complement method to use:
-    /// - [`SchurVariant::Sparse`]: form S, sparse Cholesky. Most accurate;
-    ///   memory is O(kept_dof²).
-    /// - [`SchurVariant::ChunkedSparse`]: form S straight from `J`, never
+    /// - [`ExplicitSchurVariant::Sparse`]: form S, sparse Cholesky. Most
+    ///   accurate; memory is O(kept_dof²).
+    /// - [`ExplicitSchurVariant::Chunked`]: form S straight from `J`, never
     ///   materializing `JᵀJ`. Same algebra, far less memory on large problems.
-    /// - [`SchurVariant::Iterative`]: matrix-free PCG, never forms S. Memory is
-    ///   linear, which is what makes very large camera sets tractable.
-    /// - [`SchurVariant::ExplicitIterative`]: form S, then PCG.
+    /// - [`ExplicitSchurVariant::Iterative`]: form S, then PCG instead of
+    ///   Cholesky.
+    ///
+    /// To never form `S` at all, use
+    /// [`LinearSolverType::ImplicitSparseSchur`] instead — a different
+    /// solver, not a variant of this one.
     ///
     /// Default: `Sparse`
-    pub schur_variant: SchurVariant,
-    /// Preconditioner for the PCG used by [`SchurVariant::Iterative`].
+    pub schur_variant: ExplicitSchurVariant,
+    /// Preconditioner for the PCG used by
+    /// [`LinearSolverType::ImplicitSparseSchur`] and by
+    /// [`ExplicitSchurVariant::Iterative`].
     ///
     /// - [`SchurPreconditioner::None`]: unpreconditioned CG.
     /// - [`SchurPreconditioner::BlockDiagonal`]: block diagonal of `H_kk`.
@@ -392,6 +396,16 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: 1e-6
     pub schur_cg_tolerance: f64,
+    /// Forcing-sequence parameter η for the Schur PCG paths (Ceres's
+    /// `Solver::Options::eta`).
+    ///
+    /// PCG stops once the quadratic model's relative improvement per iteration
+    /// falls below `η/i`, which is what makes early Newton steps cheap. `0.0`
+    /// disables the rule, leaving only `schur_cg_tolerance` and the iteration
+    /// cap — ask for that when you want an exact linear solve.
+    ///
+    /// Default: 0.1
+    pub schur_cg_q_tolerance: f64,
     // Note: Visualization is now handled via the observer pattern.
     // Use `solver.add_observer(RerunObserver::new(true)?)` to enable visualization.
     // This provides cleaner separation of concerns and allows multiple observers.
@@ -438,10 +452,11 @@ impl Default for LevenbergMarquardtConfig {
             compute_covariances: false,
             covariance_options: CovarianceOptions::default(),
             // Schur complement parameters
-            schur_variant: SchurVariant::default(),
+            schur_variant: ExplicitSchurVariant::default(),
             schur_preconditioner: SchurPreconditioner::default(),
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
+            schur_cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
         }
     }
 }
@@ -629,8 +644,10 @@ impl LevenbergMarquardtConfig {
         self
     }
 
-    /// Set Schur complement solver variant
-    pub fn with_schur_variant(mut self, variant: SchurVariant) -> Self {
+    /// Set the [`ExplicitSparseSchur`] sub-variant (ignored by
+    /// [`LinearSolverType::ImplicitSparseSchur`] and
+    /// [`LinearSolverType::ExplicitDenseSchur`]).
+    pub fn with_schur_variant(mut self, variant: ExplicitSchurVariant) -> Self {
         self.schur_variant = variant;
         self
     }
@@ -648,6 +665,13 @@ impl LevenbergMarquardtConfig {
         self
     }
 
+    /// Set the PCG forcing-sequence parameter η. `0.0` disables the
+    /// quadratic-model stopping rule; see [`Self::schur_cg_q_tolerance`].
+    pub fn with_schur_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
+        self.schur_cg_q_tolerance = q_tolerance;
+        self
+    }
+
     /// Configuration optimized for bundle adjustment problems.
     ///
     /// This preset uses settings tuned for large-scale bundle adjustment:
@@ -660,8 +684,8 @@ impl LevenbergMarquardtConfig {
     /// - **Very tight tolerances** matching Ceres Solver for accurate reconstruction
     ///
     /// For problems where the reduced system `S` is too large to materialize,
-    /// switch to [`SchurVariant::Iterative`] (matrix-free) or
-    /// [`SchurVariant::ChunkedSparse`] (never forms `JᵀJ`).
+    /// switch to [`LinearSolverType::ImplicitSparseSchur`] (matrix-free) or
+    /// [`ExplicitSchurVariant::Chunked`] (never forms `JᵀJ`).
     ///
     /// This configuration matches Ceres Solver's recommended BA settings and
     /// should achieve similar convergence quality.
@@ -681,13 +705,26 @@ impl LevenbergMarquardtConfig {
     /// ```
     pub fn for_bundle_adjustment() -> Self {
         Self::default()
-            .with_linear_solver_type(LinearSolverType::SparseSchurComplement)
-            // Direct Cholesky on the reduced system is the fastest variant on
-            // every BAL dataset measured, at identical RMSE and iteration
-            // count. The matrix-free variant costs 1.7-4.5x more time and
-            // earns its place only when `S` will not fit in memory, so it is
-            // opt-in through `with_schur_variant` rather than the default.
-            .with_schur_variant(SchurVariant::Sparse)
+            .with_linear_solver_type(LinearSolverType::ImplicitSparseSchur)
+            // Measured over the four BAL datasets, 3 runs each (time, and
+            // final RMSE against the exact reduced solve):
+            //
+            //   dataset     implicit          explicit/Sparse   ΔRMSE
+            //   Ladybug     18.76s  0.876538  75.24s  0.875283  +0.14%
+            //   Trafalgar    6.27s  0.798081   2.51s  0.808522  -1.29%
+            //   Dubrovnik   31.34s  0.768611  41.91s  0.787517  -2.40%
+            //   Venice      20.23s  0.752080  51.15s  0.747589  +0.60%
+            //
+            // 2.2x faster in total, better RMSE on two datasets and at most
+            // 0.6% worse on the other two, and it forms neither `JᵀJ` nor `S`
+            // so it is the only one of the four that keeps scaling. It loses
+            // only on Trafalgar, the smallest set, where the absolute cost is
+            // ~4s against ~56s saved on Ladybug.
+            //
+            // `ExplicitSparseSchur` remains the choice when the reduced solve
+            // must be *exact* — its step does not depend on a tolerance, and
+            // it is the reference every other path is measured against.
+            .with_schur_variant(ExplicitSchurVariant::Sparse)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
             .with_damping(1e-3) // Moderate initial damping (Ceres default)
             .with_max_iterations(20) // Reduced for early stop when RMSE < 1px
@@ -1324,9 +1361,9 @@ impl LevenbergMarquardt {
 
     /// Run optimization, dispatching based on `problem.jacobian_mode`.
     ///
-    /// - `JacobianMode::Dense` → `DenseCholesky` or `DenseQR`
-    /// - `JacobianMode::Sparse` → `SparseCholesky`, `SparseQR` or
-    ///   `SparseSchurComplement`
+    /// - `JacobianMode::Dense` → `DenseCholesky`, `DenseQR` or `ExplicitDenseSchur`
+    /// - `JacobianMode::Sparse` → `SparseCholesky`, `SparseQR`,
+    ///   `ExplicitSparseSchur` or `ImplicitSparseSchur`
     ///
     /// A solver that does not match the problem's Jacobian mode is rejected
     /// with [`OptimizerError::InvalidParameters`] rather than silently replaced,
@@ -1340,7 +1377,7 @@ impl LevenbergMarquardt {
         // leaves the problem and its cost unchanged.
         if matches!(
             self.config.linear_solver_type,
-            LinearSolverType::SparseSchurComplement
+            LinearSolverType::ExplicitSparseSchur | LinearSolverType::ImplicitSparseSchur
         ) {
             problem.group_rows_for_elimination();
         }
@@ -1361,9 +1398,26 @@ impl LevenbergMarquardt {
                     let mut solver = DenseCholeskySolver::new();
                     self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
                 }
+                LinearSolverType::ExplicitDenseSchur => {
+                    let init = |e: crate::linalg::LinAlgError| {
+                        OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    let mut solver = ExplicitDenseSchur::new();
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<DenseMode>(problem, &mut solver, state)
+                }
                 other => Err(OptimizerError::InvalidParameters(format!(
-                    "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky and \
-                     DenseQR only; requested {other}"
+                    "Levenberg-Marquardt in dense Jacobian mode supports DenseCholesky, \
+                     DenseQR and ExplicitDenseSchur only; requested {other}"
                 ))
                 .into()),
             },
@@ -1372,51 +1426,55 @@ impl LevenbergMarquardt {
                     let mut solver = SparseQRSolver::new();
                     self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
-                LinearSolverType::SparseSchurComplement => {
-                    // `Iterative` is the matrix-free path: it never forms S, so
-                    // it is a different solver type rather than a mode of the
-                    // explicit one. Dispatching here is what keeps the
-                    // O(kept_dof²) buffer out of the picture entirely.
+                LinearSolverType::ExplicitSparseSchur => {
                     let init = |e: crate::linalg::LinAlgError| {
                         OptimizerError::LinearSolveFailed(format!(
                             "Failed to initialize Schur solver: {e}"
                         ))
                         .log()
                     };
-                    match self.config.schur_variant {
-                        SchurVariant::Iterative => {
-                            let mut solver = IterativeSchurSolver::with_config(
-                                self.config.schur_cg_max_iterations,
-                                self.config.schur_cg_tolerance,
-                                self.config.schur_preconditioner,
-                            );
-                            solver
-                                .initialize_structure(
-                                    &state.variables,
-                                    &state.variable_index_map,
-                                    &problem.schur_landmark_keys,
-                                )
-                                .map_err(init)?;
-                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
-                        }
-                        variant => {
-                            let mut solver = SparseSchurComplementSolver::new()
-                                .with_variant(variant)
-                                .with_preconditioner(self.config.schur_preconditioner)
-                                .with_cg_params(
-                                    self.config.schur_cg_max_iterations,
-                                    self.config.schur_cg_tolerance,
-                                );
-                            solver
-                                .initialize_structure(
-                                    &state.variables,
-                                    &state.variable_index_map,
-                                    &problem.schur_landmark_keys,
-                                )
-                                .map_err(init)?;
-                            self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
-                        }
-                    }
+                    let mut solver = ExplicitSparseSchur::new()
+                        .with_variant(self.config.schur_variant)
+                        .with_preconditioner(self.config.schur_preconditioner)
+                        .with_cg_params(
+                            self.config.schur_cg_max_iterations,
+                            self.config.schur_cg_tolerance,
+                        )
+                        .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
+                }
+                LinearSolverType::ImplicitSparseSchur => {
+                    // Never forms S, so it is a different solver type rather
+                    // than a mode of the explicit one — this is what keeps
+                    // both the O(kept_dof²) buffer and `JᵀJ` itself out of
+                    // the picture entirely.
+                    let init = |e: crate::linalg::LinAlgError| {
+                        OptimizerError::LinearSolveFailed(format!(
+                            "Failed to initialize Schur solver: {e}"
+                        ))
+                        .log()
+                    };
+                    let mut solver = ImplicitSparseSchur::with_config(
+                        self.config.schur_cg_max_iterations,
+                        self.config.schur_cg_tolerance,
+                        self.config.schur_preconditioner,
+                    )
+                    .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
+                    solver
+                        .initialize_structure(
+                            &state.variables,
+                            &state.variable_index_map,
+                            &problem.schur_landmark_keys,
+                        )
+                        .map_err(init)?;
+                    self.optimize_with_mode::<SparseMode>(problem, &mut solver, state)
                 }
                 LinearSolverType::SparseCholesky => {
                     let mut solver = SparseCholeskySolver::new();
@@ -1424,7 +1482,7 @@ impl LevenbergMarquardt {
                 }
                 other => Err(OptimizerError::InvalidParameters(format!(
                     "Levenberg-Marquardt in sparse Jacobian mode supports SparseCholesky, \
-                     SparseQR and SparseSchurComplement only; requested {other}"
+                     SparseQR, ExplicitSparseSchur and ImplicitSparseSchur only; requested {other}"
                 ))
                 .into()),
             },
@@ -2010,9 +2068,11 @@ mod tests {
         let cfg = LevenbergMarquardtConfig::for_bundle_adjustment();
         assert!(matches!(
             cfg.linear_solver_type,
-            LinearSolverType::SparseSchurComplement
+            LinearSolverType::ImplicitSparseSchur
         ));
         assert_eq!(cfg.max_iterations, 20);
+        // The preset's speed rests on the forcing sequence being active.
+        assert!((cfg.schur_cg_q_tolerance - crate::linalg::schur::DEFAULT_ETA).abs() < 1e-15);
     }
 
     #[test]
@@ -2144,11 +2204,11 @@ mod tests {
 
     #[test]
     fn test_lm_config_schur_variant_and_preconditioner() {
-        use crate::linalg::{SchurPreconditioner, SchurVariant};
+        use crate::linalg::{ExplicitSchurVariant, SchurPreconditioner};
         let cfg = LevenbergMarquardtConfig::new()
-            .with_schur_variant(SchurVariant::Iterative)
+            .with_schur_variant(ExplicitSchurVariant::Iterative)
             .with_schur_preconditioner(SchurPreconditioner::BlockDiagonal);
-        assert!(matches!(cfg.schur_variant, SchurVariant::Iterative));
+        assert!(matches!(cfg.schur_variant, ExplicitSchurVariant::Iterative));
         assert!(matches!(
             cfg.schur_preconditioner,
             SchurPreconditioner::BlockDiagonal
@@ -2373,7 +2433,8 @@ mod tests {
         for solver_type in [
             LinearSolverType::SparseCholesky,
             LinearSolverType::SparseQR,
-            LinearSolverType::SparseSchurComplement,
+            LinearSolverType::ExplicitSparseSchur,
+            LinearSolverType::ImplicitSparseSchur,
         ] {
             let mut problem = rosenbrock(JacobianMode::Dense);
             let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
@@ -2387,7 +2448,11 @@ mod tests {
         }
 
         // Sparse problem, dense solvers requested.
-        for solver_type in [LinearSolverType::DenseCholesky, LinearSolverType::DenseQR] {
+        for solver_type in [
+            LinearSolverType::DenseCholesky,
+            LinearSolverType::DenseQR,
+            LinearSolverType::ExplicitDenseSchur,
+        ] {
             let mut problem = rosenbrock(JacobianMode::Sparse);
             let config = LevenbergMarquardtConfig::new().with_linear_solver_type(solver_type);
             let Err(err) = LevenbergMarquardt::with_config(config).optimize(&mut problem) else {
