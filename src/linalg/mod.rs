@@ -64,8 +64,9 @@ pub enum LinearSolverType {
     /// Sub-configured by [`ExplicitSchurVariant`] and, for its `Iterative`
     /// sub-variant, [`SchurPreconditioner`].
     ExplicitSparseSchur,
-    /// Implicit (matrix-free) Schur complement, solved with PCG; `S` is
-    /// never materialized. Equivalent to Ceres's `ITERATIVE_SCHUR`.
+    /// Implicit (matrix-free) Schur complement, solved with PCG. Neither `S`
+    /// nor `JᵀJ` is ever materialized: the operator reads `J` directly, so its
+    /// cost scales with `nnz(J)`. Equivalent to Ceres's `ITERATIVE_SCHUR`.
     /// Sub-configured by [`SchurPreconditioner`].
     ImplicitSparseSchur,
     DenseCholesky,

@@ -197,7 +197,13 @@ to `ceres_ba_benchmark` so the two sides compare the same conceptual solver:
 | `chunked` | `ExplicitSparseSchur` / `Chunked` | `sparse_schur` (algebraically identical `S`) |
 | `iterative` | `ImplicitSparseSchur` | `iterative_schur` (`ITERATIVE_SCHUR` + `SCHUR_JACOBI`) |
 | `explicit-iterative` | `ExplicitSparseSchur` / `Iterative` | `iterative_schur` (closest Ceres equivalent) |
-| `explicit-dense` | `ExplicitDenseSchur` | `dense_schur` (`DENSE_SCHUR`; small datasets only) |
+| `explicit-dense` | `ExplicitDenseSchur` | `dense_schur` (`DENSE_SCHUR`) |
+
+`explicit-dense` does **not** run the four BAL datasets — a dense `JᵀJ` over the smallest of
+them would be ~485k × 485k. It runs `Ladybug-mini-<N>cam` instead: Ladybug truncated to its
+first `N` cameras (`APEX_BENCH_DENSE_CAMERAS`, default 4) and the landmarks they observe,
+solved twice — once with `ExplicitDenseSchur` and once with `ExplicitSparseSchur` on the
+identical subset, so the row carries its own accuracy reference.
 
 ```bash
 APEX_BENCH_SCHUR=iterative bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5

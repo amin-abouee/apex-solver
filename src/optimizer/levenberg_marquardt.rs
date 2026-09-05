@@ -688,12 +688,13 @@ impl LevenbergMarquardtConfig {
     pub fn for_bundle_adjustment() -> Self {
         Self::default()
             .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
-            // Direct Cholesky on the reduced system is the fastest variant on
-            // every BAL dataset measured, at identical RMSE and iteration
-            // count. The matrix-free variant costs 1.7-4.5x more time and
-            // earns its place only when `S` will not fit in memory, so it is
-            // opt-in through `LinearSolverType::ImplicitSparseSchur` rather
-            // than the default.
+            // Direct Cholesky on the reduced system is the fastest or
+            // near-fastest variant on every BAL dataset measured, at identical
+            // RMSE and iteration count. The matrix-free variant costs 1.25-3.7x
+            // more time (Ladybug/Trafalgar/Dubrovnik/Venice, 3 runs each) and
+            // earns its place when `JᵀJ` or `S` will not fit, so it is opt-in
+            // through `LinearSolverType::ImplicitSparseSchur` rather than the
+            // default.
             .with_schur_variant(ExplicitSchurVariant::Sparse)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
             .with_damping(1e-3) // Moderate initial damping (Ceres default)
@@ -1422,7 +1423,8 @@ impl LevenbergMarquardt {
                 LinearSolverType::ImplicitSparseSchur => {
                     // Never forms S, so it is a different solver type rather
                     // than a mode of the explicit one — this is what keeps
-                    // the O(kept_dof²) buffer out of the picture entirely.
+                    // both the O(kept_dof²) buffer and `JᵀJ` itself out of
+                    // the picture entirely.
                     let init = |e: crate::linalg::LinAlgError| {
                         OptimizerError::LinearSolveFailed(format!(
                             "Failed to initialize Schur solver: {e}"

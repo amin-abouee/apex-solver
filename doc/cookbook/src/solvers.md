@@ -35,11 +35,13 @@ $$
 - **`ExplicitDenseSchur`** (`LinearSolverType::ExplicitDenseSchur`) — the same
   explicit construction over a dense Hessian, for small-to-medium problems
   (`JacobianMode::Dense`). Equivalent to Ceres's `DENSE_SCHUR`.
-- **`ImplicitSparseSchur`** (`LinearSolverType::ImplicitSparseSchur`) — never
-  forms `S`; applies it matrix-free inside preconditioned conjugate gradients.
-  `SchurPreconditioner` selects `None`, `BlockDiagonal`, or `SchurJacobi`
-  (default, and usually the best convergence). The choice for large BA
-  (10,000+ cameras). Equivalent to Ceres's `ITERATIVE_SCHUR`.
+- **`ImplicitSparseSchur`** (`LinearSolverType::ImplicitSparseSchur`) — forms
+  neither `S` nor `JᵀJ`; applies the reduced operator matrix-free from `J`
+  inside preconditioned conjugate gradients, so its cost scales with `nnz(J)`.
+  `SchurPreconditioner` selects `None` (Ceres `IDENTITY`), `BlockDiagonal`
+  (Ceres `JACOBI`), or `SchurJacobi` (Ceres `SCHUR_JACOBI`; the default, and
+  usually the best convergence). The choice for large BA (10,000+ cameras).
+  Equivalent to Ceres's `ITERATIVE_SCHUR`.
 
 All three support the `StructureAware::initialize_structure` step that
 partitions variables into the kept and eliminated sets (manual marks via

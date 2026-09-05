@@ -950,7 +950,8 @@ impl GaussNewton {
                 LinearSolverType::ImplicitSparseSchur => {
                     // Never forms S, so it is a different solver type rather
                     // than a mode of the explicit one — this is what keeps
-                    // the O(kept_dof²) buffer out of the picture entirely.
+                    // both the O(kept_dof²) buffer and `JᵀJ` itself out of
+                    // the picture entirely.
                     let init = |e: linalg::LinAlgError| {
                         optimizer::OptimizerError::LinearSolveFailed(format!(
                             "Failed to initialize Schur solver: {e}"
