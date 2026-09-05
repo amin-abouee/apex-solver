@@ -21,6 +21,11 @@ Supported manifold types: `SO2`, `SO3`, `SE2`, `SE3`, `SE23`, `SGal3`, `Sim3`,
 doubles for SE(3)); optimization happens in the **tangent space** (6 DOF for
 SE(3)) via a right-perturbation retraction.
 
+That distinction runs through everything downstream: Jacobians have tangent
+width, the step is applied with $\boxplus$ rather than addition, and the
+linear system is built in tangent coordinates. See
+[From Factor Graph to Linear System](./linearization.md).
+
 ## Residual blocks
 
 A residual block binds one factor to the variables it reads:
@@ -29,9 +34,15 @@ A residual block binds one factor to the variables it reads:
 problem.add_residual_block(&[k_from, k_to], Box::new(between_factor), loss);
 ```
 
-- The factor implements `Factor::linearize(params, residual, jacobian)`.
+- The factor implements `Factor::linearize(params, residual, jacobian)` — see
+  [Factors](./factors/index.md).
 - `loss` is an optional `Box<dyn LossFunction>`; see
   [Robust Loss Functions](./losses.md).
+- To weight the block by its measurement uncertainty, use
+  `add_residual_block_with_noise` and pass a
+  [`NoiseModel`](./noise.md). Without one the block is unweighted, which is
+  only correct when every residual in the graph is already in comparable
+  units.
 - Use `try_add_residual_block` for a `Result`-returning registration that runs
   the factor's `validate_variables` hook — shape mismatches are caught at
   registration time instead of during parallel evaluation.
@@ -71,3 +82,6 @@ let ordering = SchurOrdering::default().with_auto_detect(true);
 Auto-detection is **off by default**: `Rn(3)` is ambiguous between 3-D
 landmarks and self-calibration intrinsics (`[focal, k1, k2]`), and eliminating
 intrinsics as landmarks silently corrupts the Schur complement.
+
+What elimination buys, and which Schur solver to pick, is in
+[Linear Solvers & the Schur Complement](./solvers.md).

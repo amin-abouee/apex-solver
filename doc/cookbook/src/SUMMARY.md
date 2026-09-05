@@ -5,30 +5,34 @@
 # Getting Started
 
 - [Installation & Quick Start](./quick_start.md)
-- [Problem Construction](./problem.md)
-- [Migrating from 1.3](./migration.md)
 
-# Factors
+# Modelling a Problem
 
-- [Factor Reference](./factors/index.md)
-  - [Pose & Priors](./factors/pose.md)
-  - [Visual](./factors/visual.md)
-  - [IMU](./factors/imu.md)
-  - [LiDAR](./factors/lidar.md)
-  - [GNSS & Navigation](./factors/navigation.md)
-  - [Range & Bearing](./factors/ranging.md)
-  - [Motion Models](./factors/motion.md)
-  - [Marginalization](./factors/marginal.md)
+- [The Problem](./problem.md)
+- [Factors](./factors/index.md)
+- [Noise Models](./noise.md)
+- [Robust Loss Functions](./losses.md)
 
-# Reference
+# How Solving Works
 
 - [From Factor Graph to Linear System](./linearization.md)
 - [Optimizers](./optimizers.md)
-- [Linear Solvers](./solvers.md)
-- [Robust Loss Functions](./losses.md)
+- [Linear Solvers & the Schur Complement](./solvers.md)
+
+# Factor Catalogue
+
+- [Pose & Priors](./factors/pose.md)
+- [Visual](./factors/visual.md)
+- [IMU](./factors/imu.md)
+- [LiDAR](./factors/lidar.md)
+- [GNSS & Navigation](./factors/navigation.md)
+- [Range & Bearing](./factors/ranging.md)
+- [Motion Models](./factors/motion.md)
+- [Marginalization](./factors/marginal.md)
+
+# Tools & Appendices
+
 - [Visualization with Rerun](./visualization.md)
-
-# Appendices
-
 - [Benchmarks & Performance](./benchmarks.md)
+- [Migrating from 1.3](./migration.md)
 - [Mathematical Cookbooks (crates)](./crate_cookbooks.md)
