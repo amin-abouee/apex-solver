@@ -2,9 +2,9 @@
 
 Every optimizer iteration reduces to one linear solve. This chapter documents
 the backends in `src/linalg/`: what each one computes, the equations as
-implemented, and how to configure them. Formulas cite the file and line.
+implemented, and how to configure them. Formulas name the module they come from.
 
-Two traits define the contract (`linalg/mod.rs:265`):
+Two traits define the contract (`linalg/mod.rs`):
 
 | Method | Returns |
 |---|---|
@@ -21,7 +21,7 @@ matrix-free paths expressible.
 
 `JacobianMode` picks the assembly: `Sparse` (default) or `Dense` (below ~500
 DOF). `LinearSolverType` then picks the algorithm within that mode, and the
-optimizer rejects mismatched combinations (`levenberg_marquardt.rs:1362`).
+optimizer rejects mismatched combinations (`levenberg_marquardt.rs`).
 
 ## Normal equations
 
@@ -47,7 +47,7 @@ a higher per-iteration cost.
 ## Dense Cholesky / QR
 
 `DenseCholeskySolver`, `DenseQRSolver` — for `JacobianMode::Dense`. Both route
-their SPD solves through one shared `solve_spd` helper (`dense/cholesky.rs:95`)
+their SPD solves through one shared `solve_spd` helper (`dense/cholesky.rs`)
 so the factorization and error mapping exist in exactly one place.
 
 ---
@@ -66,7 +66,7 @@ system in the cameras alone.
 
 Partition the variables into an eliminated set (**e**, Ceres's "group 0") and a
 retained set (**k**, "group 1"). The system becomes
-(`linalg/schur/partition.rs:7`):
+(`linalg/schur/partition.rs`):
 
 $$
 \begin{bmatrix} H_{kk} & H_{ke} \\\\ H_{ke}^{\mathsf T} & H_{ee} \end{bmatrix}
@@ -99,7 +99,7 @@ eliminated variables are mutually unconnected. Violating it yields a wrong step
 with no other symptom, so it is checked rather than assumed:
 
 - Solvers that form $H$ call `SchurPartition::verify_block_diagonal`
-  (`partition.rs:268`) — one pass over the eliminated columns' nonzeros.
+  (`partition.rs`) — one pass over the eliminated columns' nonzeros.
 - The matrix-free path never forms $H$, so it checks against $J$'s rows
   instead: a residual row touching two eliminated variables is the same
   violation (`sparse/schur/implicit.rs`, `ensure_structure`).
@@ -110,7 +110,7 @@ Both report a typed error naming the two offending variables.
 
 $\lambda D$ is applied to **both** blocks before elimination — damping the
 reduced system instead would not be the same problem
-(`levenberg_marquardt.rs`, and `explicit.rs:920`):
+(`levenberg_marquardt.rs`, and `explicit.rs`):
 
 $$
 S \;=\; (H_{kk} + \lambda D_k) - H_{ke}\,(H_{ee} + \lambda D_e)^{-1} H_{ke}^{\mathsf T}
@@ -120,7 +120,7 @@ $$
 
 $H_{ee}^{-1}$ is formed blockwise. Every Schur solver shares one
 regularized-retry policy, `EliminatedBlocks::invert_in_place`
-(`partition.rs:469`), so a landmark is regularized identically regardless of
+(`partition.rs`), so a landmark is regularized identically regardless of
 which solver eliminated it.
 
 ## Choosing what to eliminate
@@ -139,7 +139,7 @@ default**:
 let ordering = SchurOrdering::new().with_auto_detect(true);
 ```
 
-> The default is off for a specific reason (`ordering.rs:38`): `Rn(3)` is also
+> The default is off for a specific reason (`ordering.rs`): `Rn(3)` is also
 > how self-calibration represents intrinsics `[focal, k1, k2]`. Auto-detecting
 > "any `Rn(3)` is a landmark" would silently eliminate intrinsic blocks and
 > corrupt $S$. Turn it on only when you know every `Rn(3)` in the problem is
@@ -164,7 +164,7 @@ sparse Cholesky. The most accurate: it solves the reduced system exactly, and
 is the reference the other paths are measured against.
 
 $S$ is accumulated into a dense $\text{kept\_dof}^2$ buffer and filtered
-back to sparse (`explicit.rs:545`). That buffer is the current scaling limit —
+back to sparse (`explicit.rs`). That buffer is the current scaling limit —
 1.9 GB at Ladybug's 15,507 retained DOF.
 
 ### `ExplicitSchurVariant::Chunked`
@@ -205,7 +205,7 @@ on time.
 **Forms neither $S$ nor $J^{\mathsf T}J$.** Writing
 $J = [\,E \mid F\,]$, PCG only ever needs $S$'s action on a vector, and
 expanding that action so it reads $J$ alone gives the whole solver
-(`implicit.rs:19`):
+(`implicit.rs`):
 
 $$
 \begin{aligned}

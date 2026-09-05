@@ -22,6 +22,7 @@
 
 # Reference
 
+- [From Factor Graph to Linear System](./linearization.md)
 - [Optimizers](./optimizers.md)
 - [Linear Solvers](./solvers.md)
 - [Robust Loss Functions](./losses.md)

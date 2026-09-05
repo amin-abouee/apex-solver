@@ -2,8 +2,8 @@
 
 This chapter documents what the three optimizers in `src/optimizer/` actually
 do — the equations as implemented, the defaults as coded, and the deviations
-from textbook forms with the reason the code gives for each. Every formula
-cites the file and line it comes from.
+from textbook forms with the reason the code gives for each. Every formula names the module
+it comes from.
 
 ## The problem all three solve
 
@@ -28,10 +28,10 @@ $$
 
 `H` drops the $\sum_i r_i \nabla^2 r_i$ term of the true Hessian, which is
 the Gauss-Newton approximation and is accurate when residuals are small or
-nearly linear (`gauss_newton.rs:25`).
+nearly linear (`gauss_newton.rs`).
 
 > **Sign convention.** `LinearSolver::get_gradient` returns $+J^{\mathsf T}r$,
-> **not** the right-hand side $-J^{\mathsf T}r$ (`linalg/mod.rs:311`). Each
+> **not** the right-hand side $-J^{\mathsf T}r$ (`linalg/mod.rs`). Each
 > optimizer negates it before forming the linear system. `tests/linear_solver_contract.rs`
 > pins this for every backend, because getting it backwards produces a step
 > that ascends.
@@ -41,7 +41,7 @@ nearly linear (`gauss_newton.rs:25`).
 ## Gauss-Newton
 
 `optimizer/gauss_newton.rs`. Solves the normal equations exactly and takes the
-full step, with no step-size control at all (`gauss_newton.rs:31`):
+full step, with no step-size control at all (`gauss_newton.rs`):
 
 $$
 (J^{\mathsf T} J)\, h \;=\; -J^{\mathsf T} r,
@@ -89,7 +89,7 @@ $$
 $$
 
 **`D` is not the identity.** It is the clamped diagonal of the Hessian
-(`linalg/mod.rs:188`):
+(`linalg/mod.rs`):
 
 $$
 D_{jj} \;=\; \operatorname{clamp}\!\bigl((J^{\mathsf T}J)_{jj},\; d_{\min},\; d_{\max}\bigr),
@@ -107,7 +107,7 @@ damping at all, leaving that direction unconstrained.
 ### Step quality
 
 After solving, the step is scored by the gain ratio. Predicted reduction comes
-from the quadratic model (`optimizer/mod.rs:839`):
+from the quadratic model (`optimizer/mod.rs`):
 
 $$
 \Delta_{\text{pred}} \;=\; -h^{\mathsf T} g \;-\; \tfrac12 h^{\mathsf T} H h
@@ -115,7 +115,7 @@ $$
 
 evaluated with the **un-damped** $H$ — `hessian_vec_product` is documented
 to never carry $\lambda D$, because damping in the model would corrupt
-$\rho$ (`linalg/mod.rs:293`). Then (`optimizer/mod.rs:872`):
+$\rho$ (`linalg/mod.rs`). Then (`optimizer/mod.rs`):
 
 $$
 \rho \;=\; \frac{f(x) - f(x \boxplus h)}{\Delta_{\text{pred}}}
@@ -130,12 +130,12 @@ with two guards the textbook ratio does not have:
   actual reduction was positive, else $0$.
 
 The step is **accepted when $\rho > $`min_relative_decrease`**, default
-**1e-3** (`levenberg_marquardt.rs:447`), matching Ceres. This is not the
+**1e-3** (`levenberg_marquardt.rs`), matching Ceres. This is not the
 textbook $\rho > 0$.
 
 ### Damping update — two rules
 
-Selected by `damping_update` (`levenberg_marquardt.rs:170`).
+Selected by `damping_update` (`levenberg_marquardt.rs`).
 
 **`Nielsen` (default, what Ceres uses).** On an accepted step:
 
@@ -162,7 +162,7 @@ $$
 
 A rejected step **always** increases $\lambda$ whatever $\rho$ was — the
 code notes that leaving it unchanged would recompute the identical step next
-iteration and stall (`levenberg_marquardt.rs:989`). Afterwards $\lambda$ is
+iteration and stall (`levenberg_marquardt.rs`). Afterwards $\lambda$ is
 clamped to `[damping_min, damping_max]`.
 
 ### Options
@@ -183,7 +183,7 @@ clamped to `[damping_min, damping_max]`.
 | `cost_tolerance` | 1e-6 | |
 | `parameter_tolerance` | 1e-8 | |
 | `gradient_tolerance` | 1e-10 | |
-| `use_jacobi_scaling` | **`false`** | Off because it is incompatible with Schur block structure (`levenberg_marquardt.rs:450`) |
+| `use_jacobi_scaling` | **`false`** | Off because it is incompatible with Schur block structure (`levenberg_marquardt.rs`) |
 
 Note the scaling default differs between optimizers: **LM defaults to `false`,
 Dog Leg to `true`**. Enable it for LM on mixed-scale problems solved with
@@ -191,7 +191,7 @@ Cholesky or QR.
 
 ### `for_bundle_adjustment()` preset
 
-`levenberg_marquardt.rs:706` overrides: `ImplicitSparseSchur` linear solver,
+`levenberg_marquardt.rs` overrides: `ImplicitSparseSchur` linear solver,
 `SchurJacobi` preconditioner, λ₀ = 1e-3 (the plain default is 1e-4),
 `max_iterations` = 20,
 `cost_tolerance` = 1e-6, `parameter_tolerance` = 1e-8,
@@ -208,7 +208,7 @@ Gauss-Newton directions.
 
 ### Cauchy point
 
-The unconstrained minimiser along $-g$ (`dog_leg.rs:926`):
+The unconstrained minimiser along $-g$ (`dog_leg.rs`):
 
 $$
 \alpha \;=\; \frac{g^{\mathsf T} g}{g^{\mathsf T} H g},
@@ -220,7 +220,7 @@ $\alpha = 1$.
 
 ### Step selection — three cases
 
-From `dog_leg.rs:968`, given $\Delta$:
+From `dog_leg.rs`, given $\Delta$:
 
 **Case 1 — GN step fits.** If $\lVert h_{gn}\rVert \le \Delta$, take
 $h = h_{gn}$ (`StepType::GaussNewton`).
@@ -242,7 +242,7 @@ a = v^{\mathsf T} v, \qquad b = p_c^{\mathsf T} v, \qquad c = \lVert p_c\rVert^2
 $$
 
 **The implementation does not use the textbook quadratic root.** It uses
-Ceres's cancellation-avoiding branch (`dog_leg.rs:1030`), with
+Ceres's cancellation-avoiding branch (`dog_leg.rs`), with
 $d^2 = b^2 - ac$:
 
 $$
@@ -261,7 +261,7 @@ $h = p_c + \beta v$ (`StepType::DogLeg`).
 
 ### Trust-region update
 
-`dog_leg.rs:1059`. **Growth is Ceres's rule, not a fixed doubling:**
+`dog_leg.rs`. **Growth is Ceres's rule, not a fixed doubling:**
 
 $$
 \Delta \leftarrow \min\bigl(\Delta_{\max},\; \max(\Delta,\; 3\lVert h\rVert)\bigr)
@@ -278,12 +278,12 @@ and $\Delta$ is left unchanged in between.
 > **$\lVert h\rVert$ is measured in the *scaled* space** when Jacobi scaling
 > is on — which is Dog Leg's default. The code documents why: the radius bounds
 > the scaled step, so feeding the un-scaled norm would compare two different
-> units and grow $\Delta$ by an arbitrary factor (`dog_leg.rs:1053`).
+> units and grow $\Delta$ by an arbitrary factor (`dog_leg.rs`).
 
 ### Step reuse
 
 On a rejected step Dog Leg caches the GN step, Cauchy point, gradient and
-$\alpha$, and reuses them next iteration (`dog_leg.rs:1087`). Only
+$\alpha$, and reuses them next iteration (`dog_leg.rs`). Only
 $\Delta$ changed, so the expensive linear solve does not have to be redone.
 The cache is invalidated on any accepted step, because the parameters moved.
 Controlled by `enable_step_reuse` (default `true`).
@@ -309,7 +309,7 @@ Controlled by `enable_step_reuse` (default `true`).
 ## Jacobi column scaling
 
 When `use_jacobi_scaling` is on, columns are equilibrated before the solve
-(`optimizer/mod.rs:484`):
+(`optimizer/mod.rs`):
 
 $$
 S_{jj} \;=\; \frac{1}{1 + \lVert J_{:,j}\rVert_2},
@@ -321,7 +321,7 @@ $h = S\,\tilde h$. The $1+$ in the denominator keeps the scaling finite
 for a structurally empty column.
 
 Ordering matters and the code is explicit about it: the **predicted reduction
-is computed before un-scaling** (`levenberg_marquardt.rs:1040`), because the
+is computed before un-scaling** (`levenberg_marquardt.rs`), because the
 solver's cached gradient and Hessian are the scaled ones and all three vectors
 must live in the same space. The predicted reduction is a value of the
 quadratic model and is invariant under the change of variables, so it is
@@ -331,7 +331,7 @@ equally valid for the un-scaled step.
 
 ## Convergence criteria
 
-All three optimizers share `check_convergence` (`optimizer/mod.rs:627`),
+All three optimizers share `check_convergence` (`optimizer/mod.rs`),
 evaluated in this order.
 
 **Always checked, before anything else:**
@@ -354,12 +354,12 @@ evaluated in this order.
 
 LM additionally reports **`StalledNoProgress`** after
 `max_consecutive_rejected_steps` consecutive rejections
-(`levenberg_marquardt.rs:1304`): damping has grown until every trial step is
+(`levenberg_marquardt.rs`): damping has grown until every trial step is
 negligible, so the remaining budget cannot change the cost.
 
 ## Output
 
-All three return `SolverResult<T>` (`optimizer/mod.rs:244`):
+All three return `SolverResult<T>` (`optimizer/mod.rs`):
 
 | Field | Meaning |
 |---|---|
