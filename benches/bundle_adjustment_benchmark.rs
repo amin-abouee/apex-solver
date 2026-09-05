@@ -508,9 +508,30 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str, run: ApexRun) -> 
 
     // Use the same tuned config as bin/bundle_adjustment.rs for consistent
     // results; `run` overrides only which Schur solver it uses.
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment()
+    let mut config = LevenbergMarquardtConfig::for_bundle_adjustment()
         .with_linear_solver_type(run.linear_solver_type)
         .with_schur_variant(run.schur_variant);
+
+    // `APEX_BENCH_MAX_ITERS` raises the optimizer's iteration cap. A solver
+    // whose steps are cheaper but less exact trades iteration count for time,
+    // so comparing two solvers at a fixed cap can hide that trade entirely —
+    // this makes the cap a variable rather than a hidden constant.
+    if let Ok(v) = std::env::var("APEX_BENCH_MAX_ITERS")
+        && let Ok(n) = v.parse::<usize>()
+    {
+        config = config.with_max_iterations(n);
+        info!("APEX_BENCH_MAX_ITERS={n}");
+    }
+
+    // `APEX_BENCH_ETA` sweeps the PCG forcing sequence. It trades linear-solve
+    // accuracy for speed, and where that trade lands is dataset-dependent, so
+    // it has to be measurable rather than assumed.
+    if let Ok(v) = std::env::var("APEX_BENCH_ETA")
+        && let Ok(eta) = v.parse::<f64>()
+    {
+        config = config.with_schur_cg_q_tolerance(eta);
+        info!("APEX_BENCH_ETA={eta}");
+    }
 
     let mut solver = LevenbergMarquardt::with_config(config);
 
