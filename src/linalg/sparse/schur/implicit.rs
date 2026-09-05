@@ -109,11 +109,20 @@ use faer::sparse::SparseColMat;
 use nalgebra::DMatrix;
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
+use tracing::debug;
 
 /// Structural facts about `J` that depend only on its sparsity, so they are
 /// rebuilt when the pattern changes and reused across every solve in between.
 #[derive(Debug, Clone, Default)]
 struct StructureCache {
+    /// Global column of each retained local index, and of each eliminated
+    /// local index.
+    ///
+    /// The operator's two gather passes write one output entry per column, so
+    /// with this mapping they parallelize over the output slice directly —
+    /// every entry written by exactly one task, no aliasing to reason about.
+    kept_cols: Vec<usize>,
+    eliminated_cols: Vec<usize>,
     /// Sorted rows touched by each eliminated block.
     eliminated_rows: Vec<Vec<usize>>,
     /// Eliminated blocks visible from each kept block — they share a row.
@@ -140,6 +149,8 @@ pub struct ImplicitSparseSchur {
     // CG parameters
     max_cg_iterations: usize,
     cg_tolerance: f64,
+    /// Forcing-sequence parameter η; `0.0` disables the quadratic-model rule.
+    cg_q_tolerance: f64,
 
     // Preconditioner type
     preconditioner_type: SchurPreconditioner,
@@ -151,12 +162,16 @@ pub struct ImplicitSparseSchur {
     /// `ExplicitSparseSchur`'s chunked variant uses. One copy of `J`, against
     /// the `JᵀJ` this solver exists to avoid.
     jacobian: Option<SparseColMat<usize, f64>>,
+    /// Pattern the retained `jacobian` was built from, so its storage can be
+    /// reused across solves instead of reallocated.
+    jacobian_pattern: Option<pattern::PatternFingerprint>,
     /// `+Jᵀr`, published through [`LinearSolver::get_gradient`].
     gradient: Option<Mat<f64>>,
 
     // Workspace buffers for the Schur operator (avoid repeated allocations).
     workspace_rows: Vec<f64>, // residual-row sized buffer
     workspace_lm: Vec<f64>,   // eliminated-DOF sized buffer
+    workspace_cam: Vec<f64>,  // kept-DOF sized buffer (parallel gather output)
     block_scratch: Vec<f64>,  // max-eliminated-block-DOF sized scratch
 
     structure: StructureCache,
@@ -173,11 +188,14 @@ impl ImplicitSparseSchur {
             ordering: SchurOrdering::default(),
             max_cg_iterations: 500,
             cg_tolerance: 1e-9,
+            cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
             preconditioner_type: SchurPreconditioner::default(),
             jacobian: None,
+            jacobian_pattern: None,
             gradient: None,
             workspace_rows: Vec::new(),
             workspace_lm: Vec::new(),
+            workspace_cam: Vec::new(),
             block_scratch: Vec::new(),
             structure: StructureCache::default(),
         }
@@ -197,6 +215,13 @@ impl ImplicitSparseSchur {
     /// so the two PCG-based solvers are configured the same way.
     pub fn with_preconditioner(mut self, preconditioner: SchurPreconditioner) -> Self {
         self.preconditioner_type = preconditioner;
+        self
+    }
+
+    /// Set the PCG forcing-sequence parameter η (`0.0` disables the
+    /// quadratic-model stopping rule).
+    pub fn with_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
+        self.cg_q_tolerance = q_tolerance;
         self
     }
 
@@ -304,7 +329,26 @@ impl ImplicitSparseSchur {
             })
             .collect();
 
+        let mut kept_cols = vec![0usize; partition.kept_dof()];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                if let Some(local) = partition.kept_local(col) {
+                    kept_cols[local] = col;
+                }
+            }
+        }
+        let mut eliminated_cols = vec![0usize; partition.eliminated_dof()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                eliminated_cols[base + offset] = block.col_start + offset;
+            }
+        }
+
         self.structure = StructureCache {
+            kept_cols,
+            eliminated_cols,
             eliminated_rows,
             visibility,
             fingerprint: Some(fingerprint),
@@ -325,6 +369,7 @@ impl ImplicitSparseSchur {
         damp_kept: &[f64],
         v: &Mat<f64>,
         out: &mut Mat<f64>,
+        out_buf: &mut [f64],
         rows: &mut [f64],
         temp_lm: &mut [f64],
         scratch: &mut [f64],
@@ -351,20 +396,20 @@ impl ImplicitSparseSchur {
             }
         }
 
-        // t = Eᵀ·y
-        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let base = partition.eliminated_offset(block_idx);
-            for offset in 0..block.dof {
-                let col = block.col_start + offset;
+        // t = Eᵀ·y — a gather, so it parallelizes over the output entries.
+        let rows_ref: &[f64] = rows;
+        temp_lm
+            .par_iter_mut()
+            .zip(self.structure.eliminated_cols.par_iter())
+            .for_each(|(t, &col)| {
                 let idx = symbolic.row_idx_of_col_raw(col);
                 let vals = jacobian.val_of_col(col);
-                let mut acc = 0.0;
-                for (k, &row) in idx.iter().enumerate() {
-                    acc += vals[k] * rows[row];
-                }
-                temp_lm[base + offset] = acc;
-            }
-        }
+                *t = idx
+                    .iter()
+                    .zip(vals)
+                    .map(|(&row, val)| val * rows_ref[row])
+                    .sum();
+            });
 
         // u = (EᵀE + λD_e)⁻¹·t, then y ← y − E·u
         for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
@@ -396,24 +441,29 @@ impl ImplicitSparseSchur {
             }
         }
 
-        // S·v = Fᵀ·y + λD_k·v
-        for block in partition.kept_blocks() {
-            for offset in 0..block.dof {
-                let col = block.col_start + offset;
-                let Some(local) = partition.kept_local(col) else {
-                    continue;
-                };
+        // S·v = Fᵀ·y + λD_k·v — also a gather, also parallel over outputs.
+        // The result lands in `out_buf` and is copied into `out` afterwards:
+        // `Mat` does not hand out a mutable slice rayon can split.
+        let rows_ref: &[f64] = rows;
+        out_buf
+            .par_iter_mut()
+            .enumerate()
+            .zip(self.structure.kept_cols.par_iter())
+            .for_each(|((local, o), &col)| {
                 let idx = symbolic.row_idx_of_col_raw(col);
                 let vals = jacobian.val_of_col(col);
-                let mut acc = 0.0;
-                for (k, &row) in idx.iter().enumerate() {
-                    acc += vals[k] * rows[row];
-                }
+                let mut acc: f64 = idx
+                    .iter()
+                    .zip(vals)
+                    .map(|(&row, val)| val * rows_ref[row])
+                    .sum();
                 if let Some(d) = damp_kept.get(local) {
                     acc += d * v[(local, 0)];
                 }
-                out[(local, 0)] = acc;
-            }
+                *o = acc;
+            });
+        for (local, value) in out_buf.iter().enumerate() {
+            out[(local, 0)] = *value;
         }
     }
 
@@ -632,8 +682,32 @@ impl ImplicitSparseSchur {
         let delta = self.combine_updates(&partition, &delta_k, &delta_e);
 
         self.gradient = Some(gradient);
-        self.jacobian = Some(jacobian.clone());
+        self.retain_jacobian(jacobian);
         Ok(delta)
+    }
+
+    /// Keep `J` for [`LinearSolver::hessian_vec_product`], reusing the existing
+    /// allocation when the sparsity has not changed.
+    ///
+    /// Only the values move in that case — on the largest BAL problem a fresh
+    /// clone would allocate and free ~2 GB per optimizer iteration. The
+    /// fingerprint guards the reuse: identical nonzero counts alone would not
+    /// prove the patterns match.
+    fn retain_jacobian(&mut self, jacobian: &SparseColMat<usize, f64>) {
+        let fingerprint = self.structure.fingerprint;
+        let reusable = self.jacobian_pattern == fingerprint
+            && self
+                .jacobian
+                .as_ref()
+                .is_some_and(|held| held.val().len() == jacobian.val().len());
+
+        match self.jacobian.as_mut() {
+            Some(held) if reusable => held.val_mut().copy_from_slice(jacobian.val()),
+            _ => {
+                self.jacobian = Some(jacobian.clone());
+                self.jacobian_pattern = fingerprint;
+            }
+        }
     }
 
     /// `x = H_ee⁻¹·b`, blockwise.
@@ -753,7 +827,10 @@ impl ImplicitSparseSchur {
         // `self` immutably alongside them.
         let mut rows = std::mem::take(&mut self.workspace_rows);
         let mut temp_lm = std::mem::take(&mut self.workspace_lm);
+        let mut out_buf = std::mem::take(&mut self.workspace_cam);
         let mut scratch = std::mem::take(&mut self.block_scratch);
+        out_buf.clear();
+        out_buf.resize(partition.kept_dof(), 0.0);
         rows.clear();
         rows.resize(jacobian.nrows(), 0.0);
         temp_lm.clear();
@@ -763,7 +840,8 @@ impl ImplicitSparseSchur {
 
         let result = solve_pcg(
             b,
-            &PcgParams::new(self.max_cg_iterations, self.cg_tolerance),
+            &PcgParams::new(self.max_cg_iterations, self.cg_tolerance)
+                .with_q_tolerance(self.cg_q_tolerance),
             |p, ap| {
                 self.apply_schur_operator(
                     partition,
@@ -771,6 +849,7 @@ impl ImplicitSparseSchur {
                     damp_kept,
                     p,
                     ap,
+                    &mut out_buf,
                     &mut rows,
                     &mut temp_lm,
                     &mut scratch,
@@ -781,7 +860,16 @@ impl ImplicitSparseSchur {
 
         self.workspace_rows = rows;
         self.workspace_lm = temp_lm;
+        self.workspace_cam = out_buf;
         self.block_scratch = scratch;
+
+        // The PCG iteration count is the whole cost of this solver — each one
+        // is four passes over `nnz(J)` — so it is the first number to look at
+        // when tuning `cg_tolerance` or comparing preconditioners.
+        debug!(
+            "PCG: {} iterations, residual {:.3e}, {:?} ({:?})",
+            result.iterations, result.final_residual, result.termination, self.preconditioner_type
+        );
         result.x
     }
 
@@ -893,6 +981,7 @@ impl StructureAware for ImplicitSparseSchur {
             .max(1);
         self.eliminated = EliminatedBlocks::new(&partition);
         self.workspace_lm = vec![0.0; partition.eliminated_dof()];
+        self.workspace_cam = vec![0.0; partition.kept_dof()];
         self.block_scratch = vec![0.0; self.max_eliminated_dof];
         self.workspace_rows.clear();
         self.structure = StructureCache::default();
