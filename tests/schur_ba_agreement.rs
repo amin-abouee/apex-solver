@@ -136,7 +136,12 @@ fn schur_variants_agree_with_cholesky_on_ladybug8() -> TestResult {
             .with_max_iterations(20)
             .with_linear_solver_type(solver_type)
             .with_schur_variant(variant)
-            .with_schur_cg_params(1000, 1e-12);
+            .with_schur_cg_params(1000, 1e-12)
+            // This test's whole point is that every variant lands on the same
+            // cost, which needs the linear systems solved *exactly*. The
+            // default forcing sequence deliberately truncates them, so it is
+            // switched off here — see `PcgParams::q_tolerance`.
+            .with_schur_cg_q_tolerance(0.0);
         let mut solver = LevenbergMarquardt::with_config(config);
         let result = solver.optimize(&mut problem)?;
         assert!(

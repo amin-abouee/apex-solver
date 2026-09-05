@@ -267,6 +267,16 @@ pub struct GaussNewtonConfig {
     ///
     /// Default: 1e-6
     pub schur_cg_tolerance: f64,
+    /// Forcing-sequence parameter η for the Schur PCG paths (Ceres's
+    /// `Solver::Options::eta`).
+    ///
+    /// PCG stops once the quadratic model's relative improvement per iteration
+    /// falls below `η/i`, which is what makes early Newton steps cheap. `0.0`
+    /// disables the rule, leaving only `schur_cg_tolerance` and the iteration
+    /// cap — ask for that when you want an exact linear solve.
+    ///
+    /// Default: 0.1
+    pub schur_cg_q_tolerance: f64,
 
     /// Deprecated: never read. Visualization goes through the observer pattern.
     ///
@@ -307,6 +317,7 @@ impl Default for GaussNewtonConfig {
             schur_preconditioner: SchurPreconditioner::default(),
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
+            schur_cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
             #[cfg(feature = "visualization")]
             #[allow(deprecated)]
             enable_visualization: false,
@@ -433,6 +444,13 @@ impl GaussNewtonConfig {
     pub fn with_schur_cg_params(mut self, max_iterations: usize, tolerance: f64) -> Self {
         self.schur_cg_max_iterations = max_iterations;
         self.schur_cg_tolerance = tolerance;
+        self
+    }
+
+    /// Set the PCG forcing-sequence parameter η. `0.0` disables the
+    /// quadratic-model stopping rule; see [`Self::schur_cg_q_tolerance`].
+    pub fn with_schur_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
+        self.schur_cg_q_tolerance = q_tolerance;
         self
     }
 
@@ -937,7 +955,8 @@ impl GaussNewton {
                         .with_cg_params(
                             self.config.schur_cg_max_iterations,
                             self.config.schur_cg_tolerance,
-                        );
+                        )
+                        .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
                     solver
                         .initialize_structure(
                             &state.variables,
@@ -962,7 +981,8 @@ impl GaussNewton {
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
                         self.config.schur_preconditioner,
-                    );
+                    )
+                    .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
                     solver
                         .initialize_structure(
                             &state.variables,

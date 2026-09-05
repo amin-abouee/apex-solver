@@ -396,6 +396,16 @@ pub struct LevenbergMarquardtConfig {
     ///
     /// Default: 1e-6
     pub schur_cg_tolerance: f64,
+    /// Forcing-sequence parameter η for the Schur PCG paths (Ceres's
+    /// `Solver::Options::eta`).
+    ///
+    /// PCG stops once the quadratic model's relative improvement per iteration
+    /// falls below `η/i`, which is what makes early Newton steps cheap. `0.0`
+    /// disables the rule, leaving only `schur_cg_tolerance` and the iteration
+    /// cap — ask for that when you want an exact linear solve.
+    ///
+    /// Default: 0.1
+    pub schur_cg_q_tolerance: f64,
     // Note: Visualization is now handled via the observer pattern.
     // Use `solver.add_observer(RerunObserver::new(true)?)` to enable visualization.
     // This provides cleaner separation of concerns and allows multiple observers.
@@ -446,6 +456,7 @@ impl Default for LevenbergMarquardtConfig {
             schur_preconditioner: SchurPreconditioner::default(),
             schur_cg_max_iterations: 200,
             schur_cg_tolerance: 1e-6,
+            schur_cg_q_tolerance: crate::linalg::schur::DEFAULT_ETA,
         }
     }
 }
@@ -654,6 +665,13 @@ impl LevenbergMarquardtConfig {
         self
     }
 
+    /// Set the PCG forcing-sequence parameter η. `0.0` disables the
+    /// quadratic-model stopping rule; see [`Self::schur_cg_q_tolerance`].
+    pub fn with_schur_cg_q_tolerance(mut self, q_tolerance: f64) -> Self {
+        self.schur_cg_q_tolerance = q_tolerance;
+        self
+    }
+
     /// Configuration optimized for bundle adjustment problems.
     ///
     /// This preset uses settings tuned for large-scale bundle adjustment:
@@ -688,13 +706,14 @@ impl LevenbergMarquardtConfig {
     pub fn for_bundle_adjustment() -> Self {
         Self::default()
             .with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)
-            // Direct Cholesky on the reduced system is the fastest or
-            // near-fastest variant on every BAL dataset measured, at identical
-            // RMSE and iteration count. The matrix-free variant costs 1.25-3.7x
-            // more time (Ladybug/Trafalgar/Dubrovnik/Venice, 3 runs each) and
-            // earns its place when `JᵀJ` or `S` will not fit, so it is opt-in
-            // through `LinearSolverType::ImplicitSparseSchur` rather than the
-            // default.
+            // Direct Cholesky on the reduced system is the most *accurate*
+            // variant — it solves the reduced system exactly — which is why it
+            // stays the default. It is no longer the fastest: with the PCG
+            // forcing sequence, `LinearSolverType::ImplicitSparseSchur` runs
+            // 4.0x/1.3x/2.7x faster on Ladybug/Dubrovnik/Venice for 0.1-2.4%
+            // RMSE difference, and slower only on Trafalgar, the smallest set.
+            // Switching the default is a step-quality decision, not a speed
+            // one, so it is left opt-in.
             .with_schur_variant(ExplicitSchurVariant::Sparse)
             .with_schur_preconditioner(SchurPreconditioner::SchurJacobi)
             .with_damping(1e-3) // Moderate initial damping (Ceres default)
@@ -1410,7 +1429,8 @@ impl LevenbergMarquardt {
                         .with_cg_params(
                             self.config.schur_cg_max_iterations,
                             self.config.schur_cg_tolerance,
-                        );
+                        )
+                        .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
                     solver
                         .initialize_structure(
                             &state.variables,
@@ -1435,7 +1455,8 @@ impl LevenbergMarquardt {
                         self.config.schur_cg_max_iterations,
                         self.config.schur_cg_tolerance,
                         self.config.schur_preconditioner,
-                    );
+                    )
+                    .with_cg_q_tolerance(self.config.schur_cg_q_tolerance);
                     solver
                         .initialize_structure(
                             &state.variables,

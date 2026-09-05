@@ -227,7 +227,10 @@ fn assert_three_way_agreement(system: &System, tolerance: f64) -> TestResult {
         &system.dense_jacobian,
     )?;
 
-    let mut implicit = ImplicitSparseSchur::with_cg_params(1000, 1e-12);
+    // This file's premise is that all three solvers agree on the *same* step,
+    // which needs the linear system solved exactly. The default forcing
+    // sequence deliberately truncates it, so it is disabled here.
+    let mut implicit = ImplicitSparseSchur::with_cg_params(1000, 1e-12).with_cg_q_tolerance(0.0);
     implicit.initialize_structure(&system.variables, &system.index_map, &system.landmark_keys)?;
     let implicit_step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut implicit,

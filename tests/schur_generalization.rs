@@ -331,7 +331,9 @@ fn matrix_free_schur_matches_cholesky_on_bundle_adjustment_shape() -> TestResult
         &system.jacobian,
     )?;
 
-    let mut implicit = ImplicitSparseSchur::with_cg_params(500, 1e-12);
+    // Agreement with a direct factorization requires an exact solve; the
+    // default forcing sequence deliberately truncates.
+    let mut implicit = ImplicitSparseSchur::with_cg_params(500, 1e-12).with_cg_q_tolerance(0.0);
     implicit.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut implicit,
@@ -866,7 +868,10 @@ fn explicit_iterative_matches_cholesky() -> TestResult {
 
     let mut iterative = ExplicitSparseSchur::new()
         .with_variant(ExplicitSchurVariant::Iterative)
-        .with_cg_params(1000, 1e-12);
+        .with_cg_params(1000, 1e-12)
+        // Agreement with a direct factorization requires an exact solve; the
+        // default forcing sequence deliberately truncates.
+        .with_cg_q_tolerance(0.0);
     iterative.initialize_structure(&system.variables, &system.index_map, &eliminate)?;
     let step = LinearSolver::<SparseMode>::solve_normal_equation(
         &mut iterative,

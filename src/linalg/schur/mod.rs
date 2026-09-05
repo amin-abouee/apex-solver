@@ -19,5 +19,5 @@ pub mod preconditioner;
 pub use jacobian_ops::{column_dot, diag_jt_j, jt_j_vec_product, jt_vec};
 pub use ordering::{SchurOrdering, effective_landmark_keys};
 pub use partition::{BlockSpan, ColSlot, EliminatedBlocks, SchurPartition};
-pub use pcg::{PcgParams, PcgResult, pcg as solve_pcg};
+pub use pcg::{DEFAULT_ETA, PcgParams, PcgResult, PcgTermination, pcg as solve_pcg};
 pub use preconditioner::SchurPreconditioner;
