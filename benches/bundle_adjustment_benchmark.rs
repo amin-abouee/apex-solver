@@ -324,17 +324,36 @@ fn apex_solver_ba_impl(dataset_name: &str, dataset_path: &str) -> BABenchmarkRes
     // Use the same tuned config as bin/bundle_adjustment.rs for consistent results
     let mut config = LevenbergMarquardtConfig::for_bundle_adjustment();
 
-    // APEX_BENCH_SCHUR selects the Schur variant so one build can benchmark
-    // several of them. Unset keeps `for_bundle_adjustment`'s default.
+    // APEX_BENCH_SCHUR selects the Schur solver/variant so one build can
+    // benchmark several of them. Unset keeps `for_bundle_adjustment`'s default
+    // (`ExplicitSparseSchur` + `ExplicitSchurVariant::Sparse`).
     if let Ok(v) = std::env::var("APEX_BENCH_SCHUR") {
-        config.schur_variant = match v.as_str() {
-            "sparse" => apex_solver::linalg::SchurVariant::Sparse,
-            "iterative" => apex_solver::linalg::SchurVariant::Iterative,
-            "explicit-iterative" => apex_solver::linalg::SchurVariant::ExplicitIterative,
-            "chunked" => apex_solver::linalg::SchurVariant::ChunkedSparse,
+        match v.as_str() {
+            "sparse" => {
+                config.linear_solver_type =
+                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
+                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Sparse;
+            }
+            "iterative" => {
+                config.linear_solver_type =
+                    apex_solver::linalg::LinearSolverType::ImplicitSparseSchur;
+            }
+            "explicit-iterative" => {
+                config.linear_solver_type =
+                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
+                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Iterative;
+            }
+            "chunked" => {
+                config.linear_solver_type =
+                    apex_solver::linalg::LinearSolverType::ExplicitSparseSchur;
+                config.schur_variant = apex_solver::linalg::ExplicitSchurVariant::Chunked;
+            }
             other => panic!("APEX_BENCH_SCHUR: unknown variant {other}"),
         };
-        info!("APEX_BENCH_SCHUR={v} -> {:?}", config.schur_variant);
+        info!(
+            "APEX_BENCH_SCHUR={v} -> {:?} / {:?}",
+            config.linear_solver_type, config.schur_variant
+        );
     }
 
     let mut solver = LevenbergMarquardt::with_config(config);
@@ -451,11 +470,37 @@ fn build_cpp_benchmarks() -> Result<PathBuf, String> {
     Ok(build_dir)
 }
 
-/// Run a C++ benchmark executable and return path to CSV output
+/// Map `APEX_BENCH_SCHUR`'s value to the matching Ceres `linear_solver_type`
+/// string `ceres_ba_benchmark` understands, so the Rust and C++ sides always
+/// compare the same conceptual solver:
+///
+/// - `"sparse"`/`"chunked"` (both build the same `S`) -> `sparse_schur`
+///   (Ceres's `SPARSE_SCHUR`, apex's `ExplicitSparseSchur`)
+/// - `"iterative"`/`"explicit-iterative"` (both PCG-based) -> `iterative_schur`
+///   (Ceres's `ITERATIVE_SCHUR`+`SCHUR_JACOBI`, apex's `ImplicitSparseSchur`/
+///   `ExplicitSparseSchur` with `ExplicitSchurVariant::Iterative`)
+/// - unset -> `None`, so the C++ binary keeps its own default
+///   (`iterative_schur`, unchanged from before this mapping existed)
+fn ceres_linear_solver_for_apex_bench_schur() -> Option<&'static str> {
+    match std::env::var("APEX_BENCH_SCHUR").ok()?.as_str() {
+        "sparse" | "chunked" => Some("sparse_schur"),
+        "iterative" | "explicit-iterative" => Some("iterative_schur"),
+        "explicit-dense" => Some("dense_schur"),
+        _ => None,
+    }
+}
+
+/// Run a C++ benchmark executable and return path to CSV output.
+///
+/// `extra_env` is forwarded as an additional environment variable for the
+/// spawned process — used to pass `CERES_LINEAR_SOLVER` to
+/// `ceres_ba_benchmark` so it runs the solver `APEX_BENCH_SCHUR` selected on
+/// the Rust side.
 fn run_cpp_benchmark(
     exe_name: &str,
     build_dir: &Path,
     dataset_path: &str,
+    extra_env: Option<(&str, &str)>,
 ) -> Result<PathBuf, String> {
     let exe_path = build_dir.join(exe_name);
 
@@ -467,11 +512,16 @@ fn run_cpp_benchmark(
 
     // Spawn process (non-blocking). The benchmark itself is silent; only genuine
     // failures reach stderr, which is inherited so they stay visible.
-    let mut child = Command::new(&exe_path)
+    let mut command = Command::new(&exe_path);
+    command
         .arg(dataset_path)
         .current_dir(build_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
+        .stderr(Stdio::inherit());
+    if let Some((key, value)) = extra_env {
+        command.env(key, value);
+    }
+    let mut child = command
         .spawn()
         .map_err(|e| format!("Failed to spawn {}: {}", exe_name, e))?;
 
@@ -583,9 +633,15 @@ fn run_cpp_ba_benchmarks(dataset_name: &str, dataset_path: &str) -> Vec<BABenchm
         "gtsam_ba_benchmark",
         "g2o_ba_benchmark",
     ];
+    let ceres_solver = ceres_linear_solver_for_apex_bench_schur();
 
     for exe_name in cpp_benchmarks {
-        match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path) {
+        let extra_env = if exe_name == "ceres_ba_benchmark" {
+            ceres_solver.map(|s| ("CERES_LINEAR_SOLVER", s))
+        } else {
+            None
+        };
+        match run_cpp_benchmark(exe_name, &build_dir, &abs_dataset_path, extra_env) {
             Ok(csv_path) => match parse_cpp_ba_results(&csv_path, dataset_name) {
                 Ok(results) => {
                     all_results.extend(results);
