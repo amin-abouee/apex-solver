@@ -3,7 +3,7 @@
 **Hardware**: Apple Mac Mini M4, 64GB RAM
 **Build**: Rust release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
 **apex-solver state**: `fc2ced6` — direct sparse Schur complement for BA
-(`SchurVariant::Sparse`), sparse Cholesky for pose graphs, all Schur fixes and
+(`ExplicitSchurVariant::Sparse`), sparse Cholesky for pose graphs, all Schur fixes and
 improvements of 2026-09-01 included.
 **Methodology**: 5 independent runs per benchmark, reported as **mean ± std**.
 Timing covers the `optimize()` call only — problem setup and metric computation
@@ -117,7 +117,7 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 
 Large-scale BAL datasets, optimizing **camera poses, 3D landmarks, and camera
 intrinsics simultaneously**. apex-solver uses the **direct sparse Schur
-complement** (`SchurVariant::Sparse`: form `JᵀJ`, eliminate the landmarks,
+complement** (`ExplicitSchurVariant::Sparse`: form `JᵀJ`, eliminate the landmarks,
 sparse-Cholesky on the reduced camera system) with a Huber loss (δ = 1 px).
 
 ![Bundle adjustment benchmark](plots/ba_benchmark.png)
@@ -183,6 +183,28 @@ APEX_BENCH_RUST_ONLY=1 bash benches/tools/run_repeated.sh bundle_adjustment_benc
 # aggregate to output/*_aggregated.csv and render doc/plots/*.{html,png}
 uv run --with plotly --with kaleido --with pandas benches/tools/plot_benchmarks.py
 ```
+
+### Selecting a Schur solver
+
+`APEX_BENCH_SCHUR` selects which of apex-solver's three Schur complement
+solvers `bundle_adjustment_benchmark` runs, and — when the C++ comparison
+binaries are also built — forwards the matching `CERES_LINEAR_SOLVER` value
+to `ceres_ba_benchmark` so the two sides compare the same conceptual solver:
+
+| `APEX_BENCH_SCHUR` | apex-solver | Ceres (`CERES_LINEAR_SOLVER`) |
+|---|---|---|
+| `sparse` (default) | `ExplicitSparseSchur` / `Sparse` | `sparse_schur` (`SPARSE_SCHUR`) |
+| `chunked` | `ExplicitSparseSchur` / `Chunked` | `sparse_schur` (algebraically identical `S`) |
+| `iterative` | `ImplicitSparseSchur` | `iterative_schur` (`ITERATIVE_SCHUR` + `SCHUR_JACOBI`) |
+| `explicit-iterative` | `ExplicitSparseSchur` / `Iterative` | `iterative_schur` (closest Ceres equivalent) |
+| `explicit-dense` | `ExplicitDenseSchur` | `dense_schur` (`DENSE_SCHUR`; small datasets only) |
+
+```bash
+APEX_BENCH_SCHUR=iterative bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5
+```
+
+`ceres_ba_benchmark` can also be pointed at a specific solver directly:
+`CERES_LINEAR_SOLVER=dense_schur ./ceres_ba_benchmark path/to/problem.txt`.
 
 ---
 

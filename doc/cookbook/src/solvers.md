@@ -18,22 +18,33 @@ ill-conditioned problems at a higher cost per iteration.
 
 ## Schur complement
 
-Bundle adjustment decomposes into camera and landmark blocks:
+Bundle adjustment decomposes into retained ("kept") and eliminated blocks —
+classically cameras and landmarks, but the partition works for any DOF and
+any manifold type (3-D points, inverse-depth landmarks, marginalized poses):
 
 $$
 \mathbf{S} = \mathbf{H}_{cc} - \mathbf{H}_{cp}\,\mathbf{H}_{pp}^{-1}\,\mathbf{H}_{pc}
 $$
 
-- **`SparseSchurComplementSolver`** — forms `S` explicitly and Cholesky-factors
-  it. Best when the camera count is moderate.
-- **`IterativeSchurSolver`** — never forms `S`; applies it matrix-free inside
-  preconditioned conjugate gradients with a block-Jacobi (Schur–Jacobi)
-  preconditioner. The choice for large BA (10,000+ cameras).
+- **`ExplicitSparseSchur`** (`LinearSolverType::ExplicitSparseSchur`) — forms
+  `S` explicitly over a sparse Hessian. `ExplicitSchurVariant` selects how it
+  is then solved: `Sparse` (Cholesky, default), `Iterative` (PCG on the
+  formed `S`), or `Chunked` (built chunk-by-chunk straight from `J`, never
+  materializing `JᵀJ` — Ceres's `SchurEliminator` strategy). Best when the
+  camera count is moderate. Equivalent to Ceres's `SPARSE_SCHUR`.
+- **`ExplicitDenseSchur`** (`LinearSolverType::ExplicitDenseSchur`) — the same
+  explicit construction over a dense Hessian, for small-to-medium problems
+  (`JacobianMode::Dense`). Equivalent to Ceres's `DENSE_SCHUR`.
+- **`ImplicitSparseSchur`** (`LinearSolverType::ImplicitSparseSchur`) — never
+  forms `S`; applies it matrix-free inside preconditioned conjugate gradients.
+  `SchurPreconditioner` selects `None`, `BlockDiagonal`, or `SchurJacobi`
+  (default, and usually the best convergence). The choice for large BA
+  (10,000+ cameras). Equivalent to Ceres's `ITERATIVE_SCHUR`.
 
-Both variants support the `StructureAware::initialize_structure` step that
-partitions variables into cameras and landmarks (manual marks via
-`Problem::mark_as_schur_landmark`, or opt-in auto-detection — see
-[Problem Construction](./problem.md)).
+All three support the `StructureAware::initialize_structure` step that
+partitions variables into the kept and eliminated sets (manual marks via
+`Problem::mark_for_elimination`, or opt-in auto-detection via
+`SchurOrdering::with_auto_detect` — see [Problem Construction](./problem.md)).
 
 ## Covariance estimation
 

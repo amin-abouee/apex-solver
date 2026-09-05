@@ -55,11 +55,12 @@ Schur-complement solvers eliminate landmark blocks. Mark the variables to
 eliminate:
 
 ```rust
-problem.mark_as_schur_landmark(point_key);
+problem.mark_for_elimination(point_key);
 ```
 
-`SparseSchurComplementSolver` can also classify automatically from manifold
-type and size when the ordering is explicitly opted in:
+Every Schur solver (`ExplicitSparseSchur`, `ExplicitDenseSchur`,
+`ImplicitSparseSchur`) can also classify automatically from manifold type and
+size when the ordering is explicitly opted in:
 
 ```rust
 use apex_solver::linalg::SchurOrdering;

@@ -241,6 +241,56 @@ been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-sp
   (was a hardcoded `rho > 0.0`) and Dog Leg (was `rho > 1e-4`). The default of `1e-3` matches
   Ceres, so marginal steps that used to be accepted are now rejected and the damping raised.
 
+### Breaking Changes
+
+- **Schur complement solvers renamed and consolidated around explicit/implicit,
+  sparse/dense naming that mirrors Ceres** (`SPARSE_SCHUR`/`DENSE_SCHUR`/`ITERATIVE_SCHUR`).
+  No deprecated aliases — old names are gone outright:
+  - `SparseSchurComplementSolver` → **`ExplicitSparseSchur`** (`src/linalg/sparse/schur/explicit.rs`).
+  - `IterativeSchurSolver` → **`ImplicitSparseSchur`** (`src/linalg/sparse/schur/implicit.rs`),
+    generalized off its old `LegacyBlockStructure` (fixed 3-DOF, contiguous columns only) onto
+    the same [`SchurPartition`] every other Schur solver uses — inverse-depth (1-DOF) landmarks,
+    mixed eliminated sizes, and non-contiguous column layouts now all work through the matrix-free
+    path, not just the explicit one.
+  - **`ExplicitDenseSchur`** (`src/linalg/dense/schur/explicit.rs`) — new: the same explicit
+    construction over a dense Hessian, for `JacobianMode::Dense` problems. Equivalent to Ceres's
+    `DENSE_SCHUR`.
+  - `SchurVariant` → **`ExplicitSchurVariant`**, now `ExplicitSparseSchur`-only configuration
+    (`Sparse`, `Iterative` — renamed from `ExplicitIterative`, `Chunked` — renamed from
+    `ChunkedSparse`). The old `SchurVariant::Iterative` — which the optimizers special-cased to
+    construct `IterativeSchurSolver` instead of erroring — no longer exists: `LinearSolverType`
+    now has its own `ImplicitSparseSchur`/`ExplicitDenseSchur` discriminants, so each solver is
+    selected directly instead of through a secondary sub-variant.
+  - Every Schur solver now runs the same automatic eliminated/retained ("group 0"/"group 1")
+    classification (`SchurOrdering`, `Problem::mark_for_elimination`) via the shared
+    `linalg::schur::effective_landmark_keys` — `ImplicitSparseSchur` did not previously support
+    `SchurOrdering::auto_detect` at all.
+  - `SchurPartition`, `EliminatedBlocks`, `SchurOrdering`, `SchurPreconditioner` moved to a new
+    top-level `src/linalg/schur/` module (previously under `src/linalg/sparse/`), reflecting that
+    they are storage-agnostic and shared by both the sparse and dense solvers. The now-unified
+    landmark-block regularization policy drops `implicit_schur.rs`'s old eigenvalue-gated
+    `regularize_landmark_block` in favor of the same `regularization::invert_with_retry_3/dyn`
+    every other Schur solver already used.
+  - The two independent hand-rolled PCG loops (`ExplicitSparseSchur`'s `Iterative` variant and
+    `ImplicitSparseSchur`) now both call one shared primitive, `linalg::schur::pcg`.
+- **`LinearSolverType::SparseSchurComplement` renamed to `ExplicitSparseSchur`**, with
+  `ImplicitSparseSchur` and `ExplicitDenseSchur` added alongside it.
+
+### Added
+
+- Correctness coverage: `tests/schur_math_properties.rs` proves `S` is SPD (via successful
+  Cholesky) and that `ExplicitSparseSchur`, `ExplicitDenseSchur` and `ImplicitSparseSchur` agree
+  on the same step, including on non-contiguous, mixed-DOF partitions. `tests/linear_solver_contract.rs`
+  now covers all three Schur solvers' `get_gradient`/`get_hessian` sign conventions, including the
+  chunked path's graceful `get_hessian() == None` degradation.
+- `benches/micro_kernels.rs`: `ExplicitSparseSchur` (Cholesky-on-`S` and PCG-on-`S`),
+  `ExplicitDenseSchur`, and the shared PCG primitive each get their own micro-benchmark, at
+  matched problem size against the existing `ImplicitSparseSchur` bench.
+- `benches/cpp_comparison`'s `ceres_ba_benchmark` now accepts a `CERES_LINEAR_SOLVER` env var
+  (`sparse_schur`/`dense_schur`/`iterative_schur`) so `bundle_adjustment_benchmark`'s
+  `APEX_BENCH_SCHUR` can drive apex-solver and Ceres through the matching solver on the same
+  dataset for final-cost comparison.
+
 ## [1.4.0] - 2026-07-30
 
 ### Breaking Changes

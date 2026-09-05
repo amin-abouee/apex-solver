@@ -90,5 +90,5 @@ cargo run --release --bin bundle_adjustment -- \
 
 Programmatically the same shape is: SE(3) pose variable per camera, `Rn(3)`
 variable per landmark, optional `Rn(3)` intrinsics per camera
-(`mark_as_schur_landmark` on the point keys), `ProjectionFactor` with a
+(`mark_for_elimination` on the point keys), `ProjectionFactor` with a
 `HuberLoss`. See [Problem Construction](./problem.md) next.
