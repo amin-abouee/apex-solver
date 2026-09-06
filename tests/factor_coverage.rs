@@ -16,7 +16,9 @@
 #![allow(clippy::print_stderr)]
 
 mod common;
-use common::{Trajectory, anchor_rn, anchor_se3, build_imu_dataset, imu_params, lm_solver};
+use common::{
+    Trajectory, anchor_rn, anchor_se3, anchor_se23, build_imu_dataset, imu_params, lm_solver,
+};
 
 use apex_solver::JacobianMode;
 use apex_solver::apex_manifolds::se3::{SE3, SE3Tangent};
@@ -33,7 +35,7 @@ use apex_solver::factors::lidar::{
     IcpFactor, LidarEdgeFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
-use apex_solver::factors::ranging::bearing::BearingFactor;
+use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
@@ -596,6 +598,72 @@ fn bearing_and_pose_pose_range_recover_a_landmark() {
     let hat = result.parameters[lm_key].as_param_slice();
     let err = (Vector3::new(hat[0], hat[1], hat[2]) - landmark).norm();
     assert!(err < 0.05, "landmark error {err:.4} from bearing-only rays");
+}
+
+/// The same landmark, seen by `SE23` navigation states instead of `SE3` poses —
+/// the shape a visual-inertial window actually has, where the state the IMU
+/// factor constrains is the one the vision factor must attach to.
+///
+/// The states carry non-zero velocity, which the bearing measurements say
+/// nothing about; the test asserts it is left alone.
+#[test]
+fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
+    let states: Vec<SE23> = (0..4)
+        .map(|k| {
+            SE23::new(
+                Vector3::new(k as f64 * 1.5, 0.0, 0.0),
+                Vector3::new(1.5, 0.2 * k as f64, -0.1),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1 * k as f64),
+            )
+        })
+        .collect();
+    let landmark = Vector3::new(3.0, 5.0, 1.5);
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    for (k, key) in state_keys.iter().enumerate() {
+        anchor_se23(&mut problem, *key, &states[k]);
+    }
+    let lm_key = problem.add_variable(
+        ManifoldType::RN,
+        DVector::from_vec(vec![2.0, 3.0, 0.5]), // deliberately off
+    );
+
+    for (k, key) in state_keys.iter().enumerate() {
+        let delta = landmark - states[k].translation();
+        let bearing = states[k].rotation_matrix().transpose() * (delta / delta.norm());
+        problem.add_residual_block(
+            &[*key, lm_key],
+            Box::new(BearingFactorSe23::new_isotropic(bearing, 0.01)),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(150);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("SE23 bearing graph failed: {e}"));
+
+    let hat = result.parameters[lm_key].as_param_slice();
+    let err = (Vector3::new(hat[0], hat[1], hat[2]) - landmark).norm();
+    assert!(err < 0.05, "landmark error {err:.4} from SE23 bearing rays");
+
+    for (k, key) in state_keys.iter().enumerate() {
+        let solved = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let drift = (solved.velocity() - states[k].velocity()).norm();
+        assert!(
+            drift < 1e-6,
+            "state {k} velocity moved by {drift:.3e}; bearing carries no velocity information"
+        );
+    }
 }
 
 // ── 5. Epipolar geometry ─────────────────────────────────────────────────────
