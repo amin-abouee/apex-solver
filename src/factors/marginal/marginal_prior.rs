@@ -126,6 +126,13 @@ impl Factor for MarginalPriorFactor {
         }
     }
 
+    /// Whitens with the square-root information supplied at construction, so
+    /// it must be registered with `NoiseModel::null()`. Without this a caller
+    /// could pair it with a noise model and whiten twice.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
+
     fn residual_dim(&self) -> usize {
         self.sqrt_info.nrows()
     }

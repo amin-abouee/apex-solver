@@ -628,6 +628,12 @@ impl Problem {
         self.total_residual_dimension
     }
 
+    /// The variable map, for in-crate consumers that assemble their own
+    /// linear system (marginalization, covariance).
+    pub(crate) fn variables(&self) -> &SlotMap<VarKey, Box<dyn ManifoldVariable>> {
+        &self.variables
+    }
+
     pub(crate) fn residual_blocks(&self) -> &SlotMap<FactorKey, ResidualBlock> {
         &self.residual_blocks
     }
