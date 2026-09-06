@@ -10,8 +10,8 @@ mod common;
 use common::lm_solver;
 
 use apex_solver::JacobianEvaluation;
-use apex_solver::apex_manifolds::rn::Rn;
 use apex_solver::apex_manifolds::ManifoldType;
+use apex_solver::apex_manifolds::rn::Rn;
 use apex_solver::core::noise::NoiseModel;
 use apex_solver::core::problem::Problem;
 use apex_solver::core::{CoreError, VarKey};

@@ -308,8 +308,21 @@ impl ImuPreintegration {
             let c_integral_1 = c_integral_old + c_mid * dt;
             let acc_integral_1 = acc_integral_old + c_mid * acc_true * dt;
 
-            self.c_doubleintegral += c_integral_old * dt + 0.25 * c_mid * dt * dt;
-            self.acc_doubleintegral += acc_integral_old * dt + 0.25 * c_mid * acc_true * dt * dt;
+            // 0.5, not OKVIS's 0.25. `redoPreintegration` writes
+            //
+            //     acc_doubleintegral += acc_integral*dt
+            //                         + 0.25*(C*a + C_1*a_1)*dt*dt
+            //
+            // where the bracket is a **sum** of the two rotated accelerations,
+            // so its 0.25 is 0.5 (the trapezoid) times 0.5 (the `½at²`).
+            // `c_mid` above is already the average, so carrying 0.25 across
+            // halves the quadratic term. The consequence is not noise: the
+            // position increment comes out short by 0.25*a*dt per second of
+            // integration — 5 % of Δp at 200 Hz over a 20 Hz frame interval —
+            // in the same direction every interval, which the estimator can
+            // only absorb by inflating the accelerometer bias.
+            self.c_doubleintegral += c_integral_old * dt + 0.5 * c_mid * dt * dt;
+            self.acc_doubleintegral += acc_integral_old * dt + 0.5 * c_mid * acc_true * dt * dt;
             self.c_integral = c_integral_1;
             self.acc_integral = acc_integral_1;
 
@@ -333,7 +346,7 @@ impl ImuPreintegration {
             self.cross = cross_new;
 
             // ── Covariance propagation (OKVIS F_delta and K matrices) ──────
-            let acc_doubleintegral_step = acc_integral_old * dt + 0.25 * c_mid * acc_true * dt * dt;
+            let acc_doubleintegral_step = acc_integral_old * dt + 0.5 * c_mid * acc_true * dt * dt;
             let acc_integral_step = c_mid * acc_true * dt;
 
             let mut f_delta = SMatrix::<f64, 15, 15>::identity();
@@ -348,7 +361,9 @@ impl ImuPreintegration {
                 .copy_from(&dp_db_g_step);
             f_delta
                 .fixed_view_mut::<3, 3>(0, 12)
-                .copy_from(&(-c_integral_old * dt + 0.25 * c_mid * dt * dt));
+                // OKVIS's `-C_integral*dt + 0.25*(C + C_1)*dt*dt`, with the
+                // same sum-to-average correction as the integrals above.
+                .copy_from(&(-c_integral_old * dt + 0.5 * c_mid * dt * dt));
             f_delta
                 .fixed_view_mut::<3, 3>(3, 9)
                 .copy_from(&(-dt * c_after));
@@ -513,7 +528,9 @@ impl ImuPreintegration {
             let c_mid = 0.5 * (c_before + c_after);
 
             let acc_integral_old = acc_integral;
-            acc_doubleintegral += acc_integral_old * dt + 0.25 * c_mid * acc_true * dt * dt;
+            // See `integrate_from`: `c_mid` is an average, so the quadratic
+            // term carries 0.5 rather than OKVIS's sum-form 0.25.
+            acc_doubleintegral += acc_integral_old * dt + 0.5 * c_mid * acc_true * dt * dt;
             acc_integral += c_mid * acc_true * dt;
             delta_q = delta_q_new;
             time = next_time;
@@ -711,6 +728,120 @@ mod tests {
                 accelerometers: acc,
             },
         )
+    }
+
+    /// Constant specific force with no rotation and no gravity: the position
+    /// increment must be exactly `½aT²` and the velocity increment exactly
+    /// `aT`.
+    ///
+    /// This is a closed form, not an approximation. With `C ≡ I` the midpoint
+    /// scheme is *exact* for a constant integrand — summing
+    /// `v_k·dt + ½a·dt²` over `n` steps telescopes to `½a·(n·dt)²` — so any
+    /// disagreement is a coefficient error rather than discretization.
+    ///
+    /// # The bug this pins
+    ///
+    /// The double-integral lines carried OKVIS's `0.25*(C + C_1)` coefficient
+    /// while multiplying by `c_mid`, which is already `½(C + C_1)`. That halves
+    /// the quadratic term, so `Δp` comes out short by `¼·a·dt·T` — a
+    /// *systematic* deficit proportional to the sample period, in the same
+    /// direction on every interval. At 200 Hz over a 20 Hz frame interval it is
+    /// 5 % of `Δp`, which an estimator can only absorb by inflating the
+    /// accelerometer bias.
+    #[test]
+    fn constant_acceleration_matches_the_closed_form() -> Result<(), PreintegrationError> {
+        let params = ImuParameters {
+            g: 0.0,
+            ..euroc_params()
+        };
+        let acceleration = Vector3::new(0.3, -0.7, 1.1);
+        let dt = 0.005_f64;
+        let span = 0.1_f64;
+        let steps = (span / dt).round() as usize;
+
+        let measurements: Vec<ImuMeasurement> = (0..=steps)
+            .map(|k| make_meas(k as f64 * dt, Vector3::zeros(), acceleration))
+            .collect();
+
+        let preint =
+            ImuPreintegration::try_new(measurements, params, 0.0, span, &SpeedAndBias::zeros())?;
+
+        let expected_velocity = acceleration * span;
+        let expected_position = 0.5 * acceleration * span * span;
+        assert!(
+            (preint.acc_integral() - expected_velocity).norm() < 1e-12,
+            "Δv {} against {expected_velocity}",
+            preint.acc_integral()
+        );
+        assert!(
+            (preint.acc_doubleintegral() - expected_position).norm() < 1e-12,
+            "Δp {} against {expected_position}; a deficit of ~{:.2e} is the \
+             halved quadratic term",
+            preint.acc_doubleintegral(),
+            0.25 * acceleration.norm() * dt * span
+        );
+        Ok(())
+    }
+
+    /// The same closed form through the static propagator, which shares the
+    /// coefficient and therefore shared the bug.
+    ///
+    /// It matters separately: this is what predicts the next frame's pose, so
+    /// a deficit here biases every initial guess the estimator hands the
+    /// solver, and PnP then has to pull it back.
+    #[test]
+    fn propagation_matches_the_closed_form() {
+        let params = ImuParameters {
+            g: 0.0,
+            ..euroc_params()
+        };
+        let acceleration = Vector3::new(0.0, 0.0, 2.0);
+        let dt = 0.005_f64;
+        let span = 0.2_f64;
+        let steps = (span / dt).round() as usize;
+
+        let measurements: Vec<ImuMeasurement> = (0..=steps)
+            .map(|k| make_meas(k as f64 * dt, Vector3::zeros(), acceleration))
+            .collect();
+
+        let mut pose = SE3::identity();
+        let mut sb = SpeedAndBias::zeros();
+        ImuPreintegration::propagation(&measurements, &params, &mut pose, &mut sb, 0.0, span);
+
+        let expected_position = 0.5 * acceleration * span * span;
+        assert!(
+            (pose.translation() - expected_position).norm() < 1e-12,
+            "position {} against {expected_position}",
+            pose.translation()
+        );
+        assert!((sb.velocity() - acceleration * span).norm() < 1e-12);
+    }
+
+    /// A stationary, level platform must stay put. Velocity was always right
+    /// here — position was not, which is what made the defect easy to miss:
+    /// every velocity-based check passed.
+    #[test]
+    fn a_stationary_platform_does_not_drift() {
+        let params = euroc_params();
+        let dt = 0.005_f64;
+        let span = 0.5_f64;
+        let steps = (span / dt).round() as usize;
+        let reading = Vector3::new(0.0, 0.0, params.g);
+
+        let measurements: Vec<ImuMeasurement> = (0..=steps)
+            .map(|k| make_meas(k as f64 * dt, Vector3::zeros(), reading))
+            .collect();
+
+        let mut pose = SE3::identity();
+        let mut sb = SpeedAndBias::zeros();
+        ImuPreintegration::propagation(&measurements, &params, &mut pose, &mut sb, 0.0, span);
+
+        assert!(
+            pose.translation().norm() < 1e-12,
+            "a stationary platform moved {} m over {span} s",
+            pose.translation().norm()
+        );
+        assert!(sb.velocity().norm() < 1e-12);
     }
 
     #[test]
