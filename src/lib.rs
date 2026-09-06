@@ -77,6 +77,7 @@ pub use core::noise::{InformationRepair, NoiseModel, RepairStrategy, RepairSumma
 pub use factors::Factor;
 pub use factors::pose::{BetweenFactor, EuclideanPriorFactor, PriorFactor};
 pub use factors::visual::ProjectionFactor;
+pub use linearizer::JacobianEvaluation;
 
 // Re-export linear algebra types
 pub use linalg::{

@@ -38,6 +38,8 @@ pub struct Problem {
     manifold_types: SecondaryMap<VarKey, ManifoldType>,
     /// Set when a removal leaves a hole in the residual row layout.
     rows_dirty: bool,
+    /// Where Jacobians are evaluated for this problem.
+    jacobian_evaluation: crate::linearizer::JacobianEvaluation,
 }
 
 impl Default for Problem {
@@ -58,6 +60,7 @@ impl Problem {
             schur_landmark_keys: HashSet::new(),
             manifold_types: SecondaryMap::new(),
             rows_dirty: false,
+            jacobian_evaluation: crate::linearizer::JacobianEvaluation::CurrentEstimate,
         }
     }
 
@@ -442,6 +445,64 @@ impl Problem {
             self.set_variable_params(key, value.as_param_slice())?;
         }
         Ok(())
+    }
+
+    /// Where Jacobians are evaluated. Default
+    /// [`JacobianEvaluation::CurrentEstimate`](crate::linearizer::JacobianEvaluation::CurrentEstimate).
+    pub fn jacobian_evaluation(&self) -> crate::linearizer::JacobianEvaluation {
+        self.jacobian_evaluation
+    }
+
+    /// Evaluate Jacobians at the current estimate, or at frozen linearization
+    /// points where they exist.
+    ///
+    /// Setting [`FirstEstimate`](crate::linearizer::JacobianEvaluation::FirstEstimate)
+    /// alone changes nothing: it takes effect for the variables that have been
+    /// frozen with [`Self::freeze_linearization_point`].
+    pub fn set_jacobian_evaluation(&mut self, evaluation: crate::linearizer::JacobianEvaluation) {
+        self.jacobian_evaluation = evaluation;
+    }
+
+    /// Freeze `key`'s linearization point at its current value.
+    ///
+    /// Freeze exactly the states a marginal prior touches, and nothing else:
+    /// a frozen Jacobian is a *stale* Jacobian, and paying that cost anywhere
+    /// it is not buying consistency is simply accuracy given away.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown or the variable does not
+    /// support freezing.
+    pub fn freeze_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .freeze_linearization_point()
+            .map_err(CoreError::Variable)
+    }
+
+    /// Release `key`'s frozen linearization point.
+    ///
+    /// Call this whenever the quantity the Jacobian was frozen against is
+    /// re-derived — repropagating an IMU edge at a new bias, for instance,
+    /// re-linearizes its own bias correction and invalidates the freeze.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown.
+    pub fn clear_linearization_point(&mut self, key: VarKey) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .clear_linearization_point();
+        Ok(())
+    }
+
+    /// Whether `key` has a frozen linearization point.
+    pub fn is_linearization_point_frozen(&self, key: VarKey) -> bool {
+        self.variables
+            .get(key)
+            .is_some_and(|v| v.linearization_point().is_some())
     }
 
     /// Remove a variable, returning it.

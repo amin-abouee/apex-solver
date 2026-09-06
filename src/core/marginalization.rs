@@ -631,7 +631,6 @@ mod tests {
     use crate::core::noise::NoiseModel;
     use crate::factors::pose::{BetweenFactor, EuclideanPriorFactor};
     use crate::linalg::JacobianMode;
-    use crate::optimizer::Optimizer;
     use crate::optimizer::levenberg_marquardt::LevenbergMarquardt;
     use apex_manifolds::rn::Rn;
 

@@ -236,12 +236,16 @@ impl Covariance {
             problem, variables, &index_map, total_dof,
         )?;
         let mut workspace = crate::linearizer::AssemblyWorkspace::build(problem);
-        let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse(
+        // Explicitly at the current estimate, never FEJ: a covariance is a
+        // property of the problem *here*, and a frozen Jacobian would report
+        // the uncertainty of a linearization the estimate has already left.
+        let (residuals, jacobian) = crate::linearizer::cpu::sparse::assemble_sparse_with(
             problem,
             variables,
             &index_map,
             &symbolic,
             &mut workspace,
+            crate::linearizer::JacobianEvaluation::CurrentEstimate,
         )?;
 
         // H = JᵀJ via parallel faer kernels with cached symbolic structure.

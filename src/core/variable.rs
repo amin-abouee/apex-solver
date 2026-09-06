@@ -123,6 +123,13 @@ pub struct Variable<M: LieGroup> {
     pub fixed_indices: HashSet<usize>,
     /// Bounds constraints on the tangent space representation
     pub bounds: HashMap<usize, (f64, f64)>,
+    /// Linearization point held frozen for first-estimate Jacobians.
+    ///
+    /// `None` means Jacobians follow the estimate, which is ordinary
+    /// Gauss-Newton. When set, [`crate::linearizer::JacobianEvaluation::FirstEstimate`]
+    /// evaluates this variable's Jacobian here while the residual still uses
+    /// the current value.
+    pub linearization_point: Option<M>,
     /// Covariance matrix in the tangent space (uncertainty estimation)
     ///
     /// This is `None` if covariance has not been computed.
@@ -155,6 +162,7 @@ where
     pub fn new(value: M) -> Self {
         Variable {
             value,
+            linearization_point: None,
             fixed_indices: HashSet::new(),
             bounds: HashMap::new(),
             covariance: None,
@@ -331,6 +339,22 @@ pub trait ManifoldVariable: Send + Sync + 'static {
     // ── I/O (NOT hot path — allocates) ───────────────────────────────────
     fn to_dvector(&self) -> DVector<f64>;
 
+    // ── First-estimate Jacobians ─────────────────────────────────────────
+    /// The frozen linearization point, or `None` when Jacobians follow the
+    /// estimate.
+    fn linearization_point(&self) -> Option<&[f64]> {
+        None
+    }
+    /// Freeze the linearization point at the variable's current value.
+    ///
+    /// # Errors
+    /// If the implementor does not support freezing.
+    fn freeze_linearization_point(&mut self) -> Result<(), String> {
+        Err("this variable does not support a frozen linearization point".to_string())
+    }
+    /// Clear the frozen linearization point.
+    fn clear_linearization_point(&mut self) {}
+
     // ── Downcast support ─────────────────────────────────────────────────
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -348,6 +372,21 @@ where
     M: LieGroup + Clone + Send + Sync + 'static,
     M::TangentVector: Tangent<M> + Send + Sync + 'static,
 {
+    fn linearization_point(&self) -> Option<&[f64]> {
+        self.linearization_point
+            .as_ref()
+            .map(LieGroup::as_param_slice)
+    }
+
+    fn freeze_linearization_point(&mut self) -> Result<(), String> {
+        self.linearization_point = Some(self.value.clone());
+        Ok(())
+    }
+
+    fn clear_linearization_point(&mut self) {
+        self.linearization_point = None;
+    }
+
     fn as_param_slice(&self) -> &[f64] {
         self.value.as_param_slice()
     }

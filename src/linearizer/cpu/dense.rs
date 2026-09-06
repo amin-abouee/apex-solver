@@ -11,7 +11,7 @@ use slotmap::{SecondaryMap, SlotMap};
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linearizer::{
-    AssemblyWorkspace, BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
+    AssemblyWorkspace, BlockLinearization, LinearizerError, LinearizerResult,
     split_by_row_offsets_mut,
 };
 
@@ -44,7 +44,14 @@ pub fn assemble_dense(
         .map(|((res_slice, jac_buf), key)| {
             let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, Some(jac_buf)).map(|(bl, _)| bl)
+            crate::linearizer::compute_block_into_with(
+                block,
+                variables,
+                res_slice,
+                Some(jac_buf),
+                problem.jacobian_evaluation(),
+            )
+            .map(|(bl, _)| bl)
         })
         .collect();
 
