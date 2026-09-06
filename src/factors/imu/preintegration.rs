@@ -15,7 +15,9 @@ use apex_manifolds::sgal3::SGal3;
 use apex_manifolds::so3::SO3Tangent;
 use nalgebra::{Matrix3, SMatrix, UnitQuaternion, Vector3};
 
-use super::types::{ImuMeasurement, ImuParameters, SpeedAndBias, SpeedAndBiasExt};
+use super::types::{
+    ImuMeasurement, ImuParameters, PreintegrationError, SpeedAndBias, SpeedAndBiasExt,
+};
 use crate::factors::common::math::{sinc, skew, symm_sqrt_inverse};
 
 /// Accumulated preintegration state between two keyframes.
@@ -61,6 +63,53 @@ pub struct ImuPreintegration {
 
 impl ImuPreintegration {
     /// Create and immediately integrate measurements over `[t0, t1]`.
+    /// Create and integrate, rejecting inputs that would integrate to a
+    /// misleading result rather than to an error.
+    ///
+    /// Two conditions are checked, and neither is implied by the other:
+    ///
+    /// * the interval must be finite and run forwards, because the IMU factors
+    ///   apply a gravity correction over `delta_t()` and a non-positive span
+    ///   silently flips or zeroes it;
+    /// * the samples must overlap the interval, because both boundaries
+    ///   zero-order-hold the nearest reading, and a buffer lying wholly outside
+    ///   `[t0, t1]` would be extrapolated across the whole span and returned as
+    ///   though it had been measured.
+    ///
+    /// # Errors
+    ///
+    /// [`PreintegrationError::NonPositiveInterval`] or
+    /// [`PreintegrationError::EmptyIntegration`].
+    pub fn try_new(
+        measurements: Vec<ImuMeasurement>,
+        imu_params: ImuParameters,
+        t0: f64,
+        t1: f64,
+        speed_and_biases: &SpeedAndBias,
+    ) -> Result<Self, PreintegrationError> {
+        if !t0.is_finite() || !t1.is_finite() || t1 <= t0 {
+            return Err(PreintegrationError::NonPositiveInterval { t0, t1 });
+        }
+        if let (Some(first), Some(last)) = (measurements.first(), measurements.last())
+            && (last.timestamp < t0 || first.timestamp > t1)
+        {
+            return Err(PreintegrationError::EmptyIntegration {
+                got: measurements.len(),
+                first: first.timestamp,
+                last: last.timestamp,
+                t0,
+                t1,
+            });
+        }
+        Ok(Self::new(
+            measurements,
+            imu_params,
+            t0,
+            t1,
+            speed_and_biases,
+        ))
+    }
+
     pub fn new(
         measurements: Vec<ImuMeasurement>,
         imu_params: ImuParameters,
@@ -217,9 +266,24 @@ impl ImuPreintegration {
                 1.0_f64
             };
 
-            // Midpoint bias-corrected measurements
-            let omega_true = 0.5 * (omega_s_0 + omega_s_1) - b_g;
-            let acc_true = 0.5 * (acc_s_0 + acc_s_1) - b_a;
+            // ── Sensor → body frame, then bias and scale correction ────────
+            //
+            // Bias and scale are **sensor-frame** corrections, so they apply to
+            // the raw reading *before* the extrinsic rotation, not after:
+            //
+            // ```text
+            // correct:  omega = R_bs · (omega_meas − b_g)
+            // wrong:    omega = R_bs ·  omega_meas − b_g
+            // ```
+            //
+            // The two differ by `(R_bs − I)·b_g`, identically zero while `t_bs`
+            // is the identity and of order the bias itself once a real
+            // extrinsic is supplied — a visual-inertial front end that
+            // integrates in the camera frame passes exactly such a rotation.
+            let r_bs = self.imu_params.rotation_body_from_sensor();
+            let omega_true = r_bs * (0.5 * (omega_s_0 + omega_s_1) - b_g);
+            let acc_true =
+                r_bs * (0.5 * (acc_s_0 + acc_s_1) - b_a).component_div(&self.imu_params.s_a);
 
             // ── Quaternion propagation ──────────────────────────────────────
             let theta_half = omega_true.norm() * 0.5 * dt;
@@ -254,9 +318,9 @@ impl ImuPreintegration {
             let jr = SO3Tangent::new(omega_dt).right_jacobian();
 
             let dq_inv_rot = dq.inverse().to_rotation_matrix().into_inner();
-            let cross_new = dq_inv_rot * cross_old + jr * dt;
+            let cross_new = dq_inv_rot * cross_old + jr * r_bs * dt;
 
-            self.dalpha_db_g += c_after * jr * dt;
+            self.dalpha_db_g += c_after * jr * r_bs * dt;
 
             let acc_skew = skew(&acc_true);
             let dv_db_g_step =
@@ -431,8 +495,9 @@ impl ImuPreintegration {
                 continue;
             }
 
-            let omega_true = 0.5 * (omega_s_0 + omega_s_1) - b_g;
-            let acc_true = 0.5 * (acc_s_0 + acc_s_1) - b_a;
+            let r_bs = imu_params.rotation_body_from_sensor();
+            let omega_true = r_bs * (0.5 * (omega_s_0 + omega_s_1) - b_g);
+            let acc_true = r_bs * (0.5 * (acc_s_0 + acc_s_1) - b_a).component_div(&imu_params.s_a);
 
             let theta_half = omega_true.norm() * 0.5 * dt;
             let dq = {
@@ -519,6 +584,30 @@ impl ImuPreintegration {
     }
 
     /// d(Δα)/d(b_g).
+    /// `R_bs · diag(1/s_a)` — the map from a sensor-frame accelerometer bias
+    /// to its effect on the integrated, body-frame specific force.
+    ///
+    /// `acc_true = R_bs · ((a_meas − b_a) ⊘ s_a)`, so `∂acc_true/∂b_a` is
+    /// `−R_bs · diag(1/s_a)`; the sign lives at the call site.
+    fn bias_to_target(&self) -> Matrix3<f64> {
+        let inverse_scale = Matrix3::from_diagonal(&Vector3::new(
+            1.0 / self.imu_params.s_a.x,
+            1.0 / self.imu_params.s_a.y,
+            1.0 / self.imu_params.s_a.z,
+        ));
+        self.imu_params.rotation_body_from_sensor() * inverse_scale
+    }
+
+    /// `∂Δv/∂b_a`, up to sign.
+    pub fn dv_db_a(&self) -> Matrix3<f64> {
+        self.c_integral * self.bias_to_target()
+    }
+
+    /// `∂Δp/∂b_a`, up to sign. See [`Self::dv_db_a`].
+    pub fn dp_db_a(&self) -> Matrix3<f64> {
+        self.c_doubleintegral * self.bias_to_target()
+    }
+
     pub fn dalpha_db_g(&self) -> &Matrix3<f64> {
         &self.dalpha_db_g
     }
@@ -737,5 +826,141 @@ mod tests {
 
         let p_diff = (one_shot.acc_doubleintegral() - split.acc_doubleintegral()).norm();
         assert!(p_diff < 1e-12, "position integral mismatch: {p_diff}");
+    }
+    // ── try_new validation ──────────────────────────────────────────────────
+
+    fn steady_samples(t0: f64, t1: f64, n: usize) -> Vec<ImuMeasurement> {
+        (0..n)
+            .map(|k| {
+                let t = t0 + (t1 - t0) * k as f64 / (n - 1).max(1) as f64;
+                make_meas(t, Vector3::zeros(), Vector3::new(0.0, 0.0, 9.81))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn try_new_accepts_a_well_formed_interval() -> Result<(), PreintegrationError> {
+        let preint = ImuPreintegration::try_new(
+            steady_samples(0.0, 0.1, 11),
+            euroc_params(),
+            0.0,
+            0.1,
+            &SpeedAndBias::zeros(),
+        )?;
+        assert!((preint.delta_t() - 0.1).abs() < 1e-12);
+        Ok(())
+    }
+
+    #[test]
+    fn try_new_rejects_a_backwards_interval() {
+        let err = ImuPreintegration::try_new(
+            steady_samples(0.0, 0.1, 11),
+            euroc_params(),
+            0.1,
+            0.0,
+            &SpeedAndBias::zeros(),
+        );
+        let Err(PreintegrationError::NonPositiveInterval { t0, t1 }) = err else {
+            panic!("expected NonPositiveInterval");
+        };
+        assert_eq!((t0, t1), (0.1, 0.0));
+    }
+
+    /// A buffer sitting wholly outside the interval satisfies every count-based
+    /// proxy and still integrates nothing but extrapolation.
+    #[test]
+    fn try_new_rejects_samples_that_do_not_overlap() {
+        let err = ImuPreintegration::try_new(
+            steady_samples(1.0, 1.1, 11),
+            euroc_params(),
+            0.0,
+            0.1,
+            &SpeedAndBias::zeros(),
+        );
+        let Err(PreintegrationError::EmptyIntegration { first, last, .. }) = err else {
+            panic!("expected EmptyIntegration");
+        };
+        assert!((first - 1.0).abs() < 1e-12 && (last - 1.1).abs() < 1e-12);
+    }
+
+    #[test]
+    fn try_new_accepts_an_empty_buffer_like_new_does() -> Result<(), PreintegrationError> {
+        // No samples is not the same failure as samples in the wrong place:
+        // an empty window integrates to identity, which is a legitimate result
+        // for a caller that has not received IMU data yet.
+        ImuPreintegration::try_new(Vec::new(), euroc_params(), 0.0, 0.1, &SpeedAndBias::zeros())?;
+        Ok(())
+    }
+    // ── t_bs and s_a are live parameters ────────────────────────────────────
+
+    fn rotating_samples() -> Vec<ImuMeasurement> {
+        (0..11)
+            .map(|k| {
+                make_meas(
+                    k as f64 * 0.01,
+                    Vector3::new(0.0, 0.0, 0.7),
+                    Vector3::new(0.3, -0.2, 9.81),
+                )
+            })
+            .collect()
+    }
+
+    fn integrate(params: ImuParameters) -> ImuPreintegration {
+        ImuPreintegration::new(rotating_samples(), params, 0.0, 0.1, &SpeedAndBias::zeros())
+    }
+
+    /// `t_bs` and `s_a` were declared, documented and read by nothing: any
+    /// caller supplying an extrinsic got silently unrotated results. These two
+    /// tests are what stop that recurring — they fail if either parameter goes
+    /// back to being ignored.
+    #[test]
+    fn a_non_identity_extrinsic_rotates_the_integrated_delta() {
+        let identity = integrate(euroc_params());
+        let rotated = integrate(ImuParameters {
+            t_bs: SE3::new(
+                Vector3::zeros(),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, std::f64::consts::FRAC_PI_2),
+            ),
+            ..euroc_params()
+        });
+
+        let dv = (identity.acc_integral() - rotated.acc_integral()).norm();
+        assert!(
+            dv > 1e-3,
+            "a 90 degree extrinsic left the velocity integral unchanged ({dv:.3e}); \
+             t_bs is being ignored"
+        );
+    }
+
+    #[test]
+    fn accelerometer_scale_changes_the_integrated_velocity() {
+        let unit = integrate(euroc_params());
+        let scaled = integrate(ImuParameters {
+            s_a: Vector3::new(2.0, 2.0, 2.0),
+            ..euroc_params()
+        });
+
+        let dv = (unit.acc_integral() - scaled.acc_integral()).norm();
+        assert!(
+            dv > 1e-3,
+            "doubling s_a left the velocity integral unchanged ({dv:.3e}); \
+             s_a is being ignored"
+        );
+    }
+
+    /// The accel-bias Jacobians carry the same sensor-to-body map, so they move
+    /// with the extrinsic too.
+    #[test]
+    fn accel_bias_jacobians_follow_the_extrinsic() {
+        let identity = integrate(euroc_params());
+        let rotated = integrate(ImuParameters {
+            t_bs: SE3::new(
+                Vector3::zeros(),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, std::f64::consts::FRAC_PI_2),
+            ),
+            ..euroc_params()
+        });
+        let diff = (identity.dv_db_a() - rotated.dv_db_a()).norm();
+        assert!(diff > 1e-6, "dv_db_a ignored the extrinsic ({diff:.3e})");
     }
 }

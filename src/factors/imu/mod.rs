@@ -51,4 +51,7 @@ pub mod types;
 
 pub use bias::{bias_random_walk, bias_random_walk_noise};
 pub use preintegration::ImuPreintegration;
-pub use types::{ImuMeasurement, ImuParameters, ImuSensorReadings, SpeedAndBias, SpeedAndBiasExt};
+pub use types::{
+    ImuMeasurement, ImuParameters, ImuSensorReadings, PreintegrationError, SpeedAndBias,
+    SpeedAndBiasExt,
+};
