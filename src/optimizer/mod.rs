@@ -563,6 +563,11 @@ pub(crate) fn build_variable_index_map(
 ///
 /// The assembly mode is determined by `problem.jacobian_mode`.
 pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<InitializedState> {
+    // A removed residual block leaves a hole in the row layout, and every
+    // assembly path below assumes there is none. Closing it here rather than at
+    // each removal keeps it O(#blocks) per solve instead of per removal.
+    problem.compact_residual_rows();
+
     let mut variables = problem.variables.clone();
     problem.apply_constraints_to_variables(&mut variables);
 

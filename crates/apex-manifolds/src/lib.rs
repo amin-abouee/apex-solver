@@ -90,7 +90,7 @@ pub enum ManifoldError {
     NormalizationFailed(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ManifoldType {
     RN,
     SE2,
