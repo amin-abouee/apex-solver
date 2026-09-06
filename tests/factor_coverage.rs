@@ -37,11 +37,12 @@ use apex_solver::factors::lidar::{
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
+use apex_solver::factors::visual::InverseDepthSe23Factor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
     OneSidedDepthFactor,
 };
-use nalgebra::{DVector, UnitQuaternion, Vector3, Vector4};
+use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
 /// Perturb an SE3 pose in its tangent so the optimizer has work to do.
 fn nudge_se3(pose: &SE3, tangent: [f64; 6]) -> DVector<f64> {
@@ -664,6 +665,117 @@ fn bearing_se23_recovers_a_landmark_without_touching_velocity() {
             "state {k} velocity moved by {drift:.3e}; bearing carries no velocity information"
         );
     }
+}
+
+/// Inverse-depth landmarks anchored in a host keyframe, reprojected into two
+/// others through a fixed camera-IMU extrinsic — the shape a sliding-window VIO
+/// carries, where a landmark is one scalar rather than three coordinates.
+///
+/// Keyframes 0 and 1 are anchored (that pins the gauge *and* the scale, which a
+/// monocular graph cannot otherwise see); keyframe 2 and every inverse depth
+/// start perturbed and must be recovered.
+#[test]
+fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
+    let states: Vec<SE23> = [0.0, 0.6, 1.25]
+        .iter()
+        .enumerate()
+        .map(|(k, x)| {
+            SE23::new(
+                Vector3::new(*x, 0.05 * k as f64, 0.0),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.03 * k as f64),
+            )
+        })
+        .collect();
+    let extrinsic = SE3::new(
+        Vector3::new(0.02, -0.065, 0.01),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+    );
+
+    // Ground-truth chain, mirroring the factor's own.
+    let project = |host: &SE23, observer: &SE23, bearing: Vector3<f64>, rho: f64| -> Vector3<f64> {
+        let r_bc = extrinsic.rotation_so3().rotation_matrix();
+        let p_bc = extrinsic.translation();
+        let p_bk = r_bc * (bearing / rho) + p_bc;
+        let p_w = host.rotation_matrix() * p_bk + host.translation();
+        let p_bi = observer.rotation_matrix().transpose() * (p_w - observer.translation());
+        r_bc.transpose() * (p_bi - p_bc)
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    // Keyframe 2 starts wrong; 0 and 1 are held.
+    problem
+        .set_variable_params(
+            state_keys[2],
+            SE23::new(
+                Vector3::new(1.05, -0.03, 0.04),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.10),
+            )
+            .as_param_slice(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    anchor_se23(&mut problem, state_keys[0], &states[0]);
+    anchor_se23(&mut problem, state_keys[1], &states[1]);
+
+    let extrinsic_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(extrinsic.as_param_slice()),
+    );
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+
+    let noise = NoiseModel::from_sigmas(&[1.0 / 460.0; 2]).unwrap_or_else(|e| panic!("{e}"));
+    let mut depth_keys = Vec::new();
+    let mut truth = Vec::new();
+    for j in 0..8 {
+        let f = j as f64;
+        let bearing = Vector3::new(0.25 * (f * 0.9).sin(), 0.2 * (f * 1.7).cos(), 1.0);
+        let rho = 1.0 / (3.0 + 0.4 * f);
+        truth.push(rho);
+
+        // Deliberately off, and by a different amount per landmark.
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.25 * (f * 0.5).sin())]),
+        );
+        depth_keys.push(key);
+
+        for observer in 1..3 {
+            let point = project(&states[0], &states[observer], bearing, rho);
+            let measurement = Vector2::new(point.x / point.z, point.y / point.z);
+            problem.add_residual_block_with_noise(
+                &[state_keys[0], state_keys[observer], extrinsic_key, key],
+                Box::new(InverseDepthSe23Factor::new(bearing, measurement)),
+                None,
+                noise.clone(),
+            );
+        }
+    }
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("inverse-depth graph failed: {e}"));
+
+    for (key, expected) in depth_keys.iter().zip(truth.iter()) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "inverse depth {got:.6} != {expected:.6}"
+        );
+    }
+    let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
+    let error = (pose.translation() - states[2].translation()).norm();
+    assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
 }
 
 // ── 5. Epipolar geometry ─────────────────────────────────────────────────────
