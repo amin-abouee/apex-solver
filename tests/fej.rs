@@ -188,3 +188,141 @@ fn covariance_ignores_frozen_linearization_points() -> TestResult {
     }
     Ok(())
 }
+
+// ── The marginalize → freeze → solve → write back → re-marginalize loop ──────
+//
+// Everything above tests freezing in isolation. What a sliding window actually
+// runs is the loop, and until now nothing exercised `Marginalizer` together with
+// `JacobianEvaluation::FirstEstimate` at all.
+
+/// Writing a solve result back must not clear the freezes the caller just set.
+///
+/// `update_values_from` is built on `set_variable_params`, which rebuilds the
+/// variable. It used to carry over only the fixed indices and the bounds, so a
+/// window that wrote its result back after every step silently reverted to
+/// current-estimate Jacobians from the second step onwards — invisible in the
+/// cost, and the exact inconsistency FEJ exists to prevent.
+#[test]
+fn writing_values_back_preserves_the_freeze() -> TestResult {
+    let (mut problem, keys) = chain(&[0.0, 1.0, 2.0])?;
+    problem.freeze_linearization_point(keys[1])?;
+    let frozen = problem
+        .variable(keys[1])
+        .and_then(|v| v.linearization_point())
+        .map(<[f64]>::to_vec);
+
+    let mut solver = lm_solver(20);
+    let result = solver.optimize(&mut problem)?;
+    problem.update_values_from(&result.parameters)?;
+
+    assert!(
+        problem.is_linearization_point_frozen(keys[1]),
+        "the freeze must survive a write-back"
+    );
+    let after = problem
+        .variable(keys[1])
+        .and_then(|v| v.linearization_point())
+        .map(<[f64]>::to_vec);
+    assert_eq!(
+        frozen, after,
+        "the frozen point must not follow the estimate"
+    );
+    Ok(())
+}
+
+/// A caller that rebuilds its problem restores `x₀` explicitly.
+///
+/// `freeze_linearization_point` captures wherever the variable sits, which in a
+/// rebuilt problem is the solved value — a moving target. `set_linearization_
+/// point` is what makes the frozen point stable across rebuilds.
+#[test]
+fn an_explicit_linearization_point_survives_a_rebuild() -> TestResult {
+    let (mut problem, keys) = chain(&[0.0, 1.0, 2.0])?;
+    let x0 = vec![7.5, -3.25];
+    problem.set_linearization_point(keys[1], &x0)?;
+
+    assert!(problem.is_linearization_point_frozen(keys[1]));
+    assert_eq!(
+        problem
+            .variable(keys[1])
+            .and_then(|v| v.linearization_point())
+            .map(<[f64]>::to_vec),
+        Some(x0.clone())
+    );
+    // The estimate itself is untouched.
+    assert_eq!(
+        problem.variable_params(keys[1]).map(<[f64]>::to_vec),
+        Some(vec![1.0, 0.0])
+    );
+
+    let Err(CoreError::Variable(message)) = problem.set_linearization_point(keys[1], &[1.0]) else {
+        return Err("a wrong-length linearization point must be rejected".into());
+    };
+    assert!(message.contains("takes 2 parameters"), "{message}");
+    Ok(())
+}
+
+/// The whole loop: marginalize, freeze what the prior touches, solve, write
+/// back, marginalize again. Ten times, asserting the prior stays well formed and
+/// the answer stays where the full batch put it.
+#[test]
+fn a_repeated_marginalize_and_freeze_loop_stays_consistent() -> TestResult {
+    use apex_solver::{JacobianEvaluation as Eval, Marginalizer};
+
+    // The full-batch answer, for reference.
+    let (mut full, full_keys) = chain(&[0.0, 1.0, 2.0])?;
+    let mut solver = lm_solver(50);
+    let reference = solver.optimize(&mut full)?;
+    let truth: Vec<f64> = full_keys
+        .iter()
+        .map(|k| reference.parameters[*k].as_param_slice()[0])
+        .collect();
+
+    let (mut problem, keys) = chain(&[0.0, 1.0, 2.0])?;
+    problem.set_jacobian_evaluation(Eval::FirstEstimate);
+    let marginalizer = Marginalizer::new();
+
+    let applied = marginalizer.apply(&mut problem, &[keys[0]])?;
+    assert_eq!(applied.kept, vec![keys[1]]);
+    for key in &applied.kept {
+        problem.freeze_linearization_point(*key)?;
+    }
+
+    for round in 0..10 {
+        let mut solver = lm_solver(50);
+        let result = solver.optimize(&mut problem)?;
+        problem.update_values_from(&result.parameters)?;
+        assert!(
+            problem.is_linearization_point_frozen(keys[1]),
+            "round {round}: the freeze was lost"
+        );
+
+        // Re-marginalizing the same set is a no-op on the variable set — the
+        // point is that the recursive absorb of the previous prior stays sane.
+        let marginal = marginalizer.compute(&problem, &[keys[1]])?;
+        assert_eq!(marginal.kept, vec![keys[2]]);
+        let information = &marginal.information;
+        let asymmetry = (information - information.transpose()).abs().max();
+        assert!(
+            asymmetry < 1e-9,
+            "round {round}: Lambda_p is not symmetric ({asymmetry:.3e})"
+        );
+        assert!(
+            information.iter().all(|v| v.is_finite()),
+            "round {round}: Lambda_p went non-finite"
+        );
+        assert!(marginal.rank <= marginal.dim());
+    }
+
+    for (index, expected) in truth.iter().enumerate().skip(1) {
+        let got = problem
+            .variable_params(keys[index])
+            .and_then(|p| p.first().copied())
+            .ok_or("missing variable")?;
+        assert!(
+            (got - expected).abs() < 1e-6,
+            "variable {index} drifted to {got} from {expected}"
+        );
+    }
+    Ok(())
+}

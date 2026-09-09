@@ -352,6 +352,23 @@ pub trait ManifoldVariable: Send + Sync + 'static {
     fn freeze_linearization_point(&mut self) -> Result<(), String> {
         Err("this variable does not support a frozen linearization point".to_string())
     }
+    /// Freeze the linearization point at an **explicit** value.
+    ///
+    /// [`Self::freeze_linearization_point`] captures wherever the variable
+    /// currently sits, which is what a caller that marginalizes in place wants.
+    /// A caller that rebuilds its problem every step cannot use it: by the time
+    /// the variable exists again it holds the *solved* value, and freezing there
+    /// would pin `x₀` to a point that moves every step — the opposite of what
+    /// first-estimate Jacobians are for. Such a caller stores `x₀` alongside its
+    /// marginal and restores it here.
+    ///
+    /// # Errors
+    /// If the implementor does not support freezing, or `params` is the wrong
+    /// length for the manifold.
+    fn set_linearization_point(&mut self, params: &[f64]) -> Result<(), String> {
+        let _ = params;
+        Err("this variable does not support a frozen linearization point".to_string())
+    }
     /// Clear the frozen linearization point.
     fn clear_linearization_point(&mut self) {}
 
@@ -380,6 +397,18 @@ where
 
     fn freeze_linearization_point(&mut self) -> Result<(), String> {
         self.linearization_point = Some(self.value.clone());
+        Ok(())
+    }
+
+    fn set_linearization_point(&mut self, params: &[f64]) -> Result<(), String> {
+        let expected = self.value.as_param_slice().len();
+        if params.len() != expected {
+            return Err(format!(
+                "linearization point takes {expected} parameters, got {}",
+                params.len()
+            ));
+        }
+        self.linearization_point = Some(M::from_param_slice(params));
         Ok(())
     }
 
