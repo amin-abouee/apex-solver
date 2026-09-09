@@ -387,7 +387,8 @@ impl Problem {
     /// Constraints survive: [`Self::fix_variable`] and
     /// [`Self::set_variable_bounds`] record into the problem, not into the
     /// variable, and are re-applied to the working copy at the start of each
-    /// solve. Anything set directly on the variable is carried over too.
+    /// solve. Fixed indices, bounds and any frozen linearization point are
+    /// carried over; the covariance is not, since it describes the old value.
     ///
     /// # Errors
     ///
@@ -414,10 +415,22 @@ impl Problem {
 
         let fixed = existing.get_fixed_indices().clone();
         let bounds = existing.get_bounds().clone();
+        // The frozen linearization point survives a value update, and must.
+        // `update_values_from` is built on this method, so a window that writes
+        // its solve result back would otherwise clear every freeze it had just
+        // set — first-estimate Jacobians would silently degrade to current-
+        // estimate ones after the first step, which is exactly the failure FEJ
+        // exists to prevent and is invisible in the cost.
+        let frozen = existing.linearization_point().map(<[f64]>::to_vec);
         let mut replacement =
             Self::create_variable(&manifold_type, &DVector::from_column_slice(params));
         replacement.set_fixed_indices(fixed);
         replacement.set_bounds(bounds);
+        if let Some(point) = frozen {
+            replacement
+                .set_linearization_point(&point)
+                .map_err(CoreError::Variable)?;
+        }
         self.variables[key] = replacement;
         Ok(())
     }
@@ -478,6 +491,25 @@ impl Problem {
             .get_mut(key)
             .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
             .freeze_linearization_point()
+            .map_err(CoreError::Variable)
+    }
+
+    /// Freeze `key`'s linearization point at an **explicit** value.
+    ///
+    /// See [`crate::core::variable::ManifoldVariable::set_linearization_point`]:
+    /// a caller that rebuilds its `Problem` every step has to restore `x₀` from
+    /// its stored marginal, because by then the variable holds the solved value
+    /// and [`Self::freeze_linearization_point`] would pin a moving target.
+    ///
+    /// # Errors
+    ///
+    /// [`CoreError::Variable`] if the key is unknown, the variable does not
+    /// support freezing, or `params` is the wrong length.
+    pub fn set_linearization_point(&mut self, key: VarKey, params: &[f64]) -> CoreResult<()> {
+        self.variables
+            .get_mut(key)
+            .ok_or_else(|| CoreError::Variable(format!("unknown variable key {key:?}")))?
+            .set_linearization_point(params)
             .map_err(CoreError::Variable)
     }
 

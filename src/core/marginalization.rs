@@ -450,6 +450,11 @@ fn pseudo_inverse(matrix: &DMatrix<f64>, relative_tolerance: f64) -> Option<DMat
 }
 
 /// The Gaussian left behind by eliminating a set of variables.
+///
+/// `Clone` because a sliding window that rebuilds its `Problem` every step has
+/// to re-register the same prior each time. [`Self::to_factor`] does that
+/// without consuming the marginal; [`Self::into_factor`] is the one-shot form.
+#[derive(Clone)]
 pub struct Marginal {
     /// Kept variables, in the order the prior's blocks must be registered.
     pub kept: Vec<VarKey>,
@@ -484,7 +489,24 @@ impl Marginal {
         self.dim().saturating_sub(self.rank)
     }
 
-    /// Build the prior. The returned keys are [`Self::kept`], in order.
+    /// Build the prior without consuming the marginal.
+    ///
+    /// The returned keys are [`Self::kept`], in order. **The factor addresses
+    /// its blocks positionally** — the `i`-th key maps to `dims[i]`, to that
+    /// slice of `S`, and to `params[i]` inside the local-log closure — so a
+    /// caller whose `Problem` has been rebuilt since may substitute its own
+    /// keys, provided it keeps the order. The `VarKey`s returned here are then
+    /// stale and must not be used against the new problem.
+    ///
+    /// # Errors
+    ///
+    /// [`MarginalizationError::Factor`] if the factor rejects the dimensions.
+    pub fn to_factor(&self) -> MarginalizationResult<(Vec<VarKey>, MarginalPriorFactor)> {
+        self.clone().into_factor()
+    }
+
+    /// Build the prior. The returned keys are [`Self::kept`], in order, with
+    /// the positional caveat documented on [`Self::to_factor`].
     ///
     /// # Errors
     ///
