@@ -23,6 +23,32 @@ pub fn skew(v: &Vector3<f64>) -> Matrix3<f64> {
     )
 }
 
+/// Orthonormal basis (3×2) for the tangent plane of `S²` at the unit vector `n`.
+///
+/// Picks the coordinate axis least aligned with `n`, crosses it with `n` to get
+/// `e1`, then `e2 = n × e1`. The result satisfies `Eᵀn = 0` and `EᵀE = I₂`, so
+/// `Eᵀ·(n_est − n_meas)` is the 2-D bearing error in the tangent plane at
+/// `n_meas` — the residual every bearing-domain factor shares.
+///
+/// The least-aligned axis matters: crossing `n` with a nearly parallel axis
+/// gives a short, badly conditioned `e1`.
+pub fn tangent_basis(n: &Vector3<f64>) -> SMatrix<f64, 3, 2> {
+    let abs_n = Vector3::new(n[0].abs(), n[1].abs(), n[2].abs());
+    let axis = if abs_n[0] <= abs_n[1] && abs_n[0] <= abs_n[2] {
+        Vector3::x()
+    } else if abs_n[1] <= abs_n[2] {
+        Vector3::y()
+    } else {
+        Vector3::z()
+    };
+
+    let mut e1 = n.cross(&axis);
+    e1.normalize_mut();
+    let e2 = n.cross(&e1);
+
+    SMatrix::<f64, 3, 2>::from_columns(&[e1, e2])
+}
+
 /// Symmetric pseudo-inverse square root of a `D`×`D` PSD matrix.
 ///
 /// Returns `U` such that `Uᵀ · U ≈ M⁻¹`. Eigenvalues below `1e-12` are clamped
@@ -70,6 +96,29 @@ mod tests {
     fn sinc_large_angle() {
         let x = 1.0_f64;
         assert!((sinc(x) - x.sin() / x).abs() < 1e-15);
+    }
+
+    #[test]
+    fn tangent_basis_is_orthonormal_and_perpendicular() {
+        let directions = [
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            Vector3::new(1.0, 1.0, 1.0).normalize(),
+            // Past the equator: what a 182° fisheye actually produces.
+            Vector3::new(0.7, 0.2, -0.68).normalize(),
+        ];
+
+        for n in &directions {
+            let basis = tangent_basis(n);
+            let e1 = basis.column(0);
+            let e2 = basis.column(1);
+            assert!(e1.dot(n).abs() < 1e-12);
+            assert!(e2.dot(n).abs() < 1e-12);
+            assert!((e1.norm() - 1.0).abs() < 1e-12);
+            assert!((e2.norm() - 1.0).abs() < 1e-12);
+            assert!(e1.dot(&e2).abs() < 1e-12);
+        }
     }
 
     #[test]

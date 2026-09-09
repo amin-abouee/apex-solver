@@ -839,7 +839,7 @@ mod tests {
             ManifoldType::SO3,
         ];
         for t in &all_types {
-            let t2 = t.clone();
+            let t2 = *t;
             assert_eq!(t, &t2);
         }
         // Ensure different variants are not equal
