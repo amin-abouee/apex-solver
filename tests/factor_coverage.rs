@@ -37,11 +37,11 @@ use apex_solver::factors::lidar::{
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
 use apex_solver::factors::ranging::range::PosePoseRangeFactor;
-use apex_solver::factors::visual::InverseDepthSe23Factor;
 use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
     OneSidedDepthFactor,
 };
+use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
 /// Perturb an SE3 pose in its tangent so the optimizer has work to do.
@@ -771,6 +771,155 @@ fn inverse_depth_se23_recovers_a_pose_and_its_depths() {
         assert!(
             (got - expected).abs() < 1e-4,
             "inverse depth {got:.6} != {expected:.6}"
+        );
+    }
+    let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());
+    let error = (pose.translation() - states[2].translation()).norm();
+    assert!(error < 1e-3, "keyframe 2 translation error {error:.3e}");
+}
+
+/// The same window as above, but with the landmarks spread across a 182° field
+/// and the residual on the unit sphere.
+///
+/// Incidence sweeps to 91°, which is what a double-sphere lens images. Two
+/// things break the normalized-plane factor out there and only one of them is
+/// the obvious one:
+///
+/// - Past 90° the anchor has `z < 0`, so rescaling it to `z = 1` mirrors the
+///   ray through the origin. That is a thin annulus of the image.
+/// - Everywhere outside the centre, the gnomonic Jacobian stretches by
+///   `1/cos²θ` — 4× at 60°, 33× at 80°, 131× at 85° — against a whitening of
+///   `1 px / f` that is uniform. That is most of the image, and it is the term
+///   that actually deforms the Hessian.
+///
+/// Here neither happens: the residual is an angle everywhere.
+#[test]
+fn inverse_depth_bearing_se23_recovers_depths_across_a_fisheye_field() {
+    let states: Vec<SE23> = [0.0, 0.6, 1.25]
+        .iter()
+        .enumerate()
+        .map(|(k, x)| {
+            SE23::new(
+                Vector3::new(*x, 0.05 * k as f64, 0.0),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.03 * k as f64),
+            )
+        })
+        .collect();
+    let extrinsic = SE3::new(
+        Vector3::new(0.02, -0.065, 0.01),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.0),
+    );
+
+    let project = |host: &SE23, observer: &SE23, bearing: Vector3<f64>, rho: f64| -> Vector3<f64> {
+        let r_bc = extrinsic.rotation_so3().rotation_matrix();
+        let p_bc = extrinsic.translation();
+        let p_bk = r_bc * (bearing / rho) + p_bc;
+        let p_w = host.rotation_matrix() * p_bk + host.translation();
+        let p_bi = observer.rotation_matrix().transpose() * (p_w - observer.translation());
+        r_bc.transpose() * (p_bi - p_bc)
+    };
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let state_keys: Vec<_> = states
+        .iter()
+        .map(|s| {
+            problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(s.as_param_slice()),
+            )
+        })
+        .collect();
+    problem
+        .set_variable_params(
+            state_keys[2],
+            SE23::new(
+                Vector3::new(1.05, -0.03, 0.04),
+                Vector3::new(0.6, 0.0, 0.0),
+                UnitQuaternion::from_euler_angles(0.0, 0.0, 0.10),
+            )
+            .as_param_slice(),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+    anchor_se23(&mut problem, state_keys[0], &states[0]);
+    anchor_se23(&mut problem, state_keys[1], &states[1]);
+
+    let extrinsic_key = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(extrinsic.as_param_slice()),
+    );
+    anchor_se3(&mut problem, extrinsic_key, &extrinsic);
+
+    // One pixel at f = 190, in radians — the TUM VI fisheye's scale.
+    let sigma = 1.0 / 190.0;
+    let mut depth_keys = Vec::new();
+    let mut truth = Vec::new();
+    let mut past_the_equator = 0usize;
+    let mut steep = 0usize;
+
+    for j in 0..10 {
+        let f = j as f64;
+        // Incidence sweeping 0° → 91° off the host optical axis, the field a
+        // 182° double sphere actually covers. The sweep is `sqrt`-spaced
+        // because image area on a spherical cap grows with `sin θ`: a linear
+        // sweep under-samples exactly the rim this factor exists for.
+        let theta = (f / 9.0).sqrt() * 91.0_f64.to_radians();
+        let phi = f * 1.3;
+        let bearing = Vector3::new(
+            theta.sin() * phi.cos(),
+            theta.sin() * phi.sin(),
+            theta.cos(),
+        );
+        let rho = 1.0 / (3.0 + 0.4 * f);
+        truth.push(rho);
+
+        let key = problem.add_variable(
+            ManifoldType::RN,
+            DVector::from_vec(vec![rho * (1.0 + 0.25 * (f * 0.5).sin())]),
+        );
+        depth_keys.push(key);
+
+        for observer in 1..3 {
+            let point = project(&states[0], &states[observer], bearing, rho);
+            if point.z < 0.0 {
+                past_the_equator += 1;
+            }
+            if point.z < 0.18 * point.norm() {
+                steep += 1;
+            }
+            let factor = InverseDepthBearingSe23Factor::new_isotropic(bearing, point, sigma)
+                .unwrap_or_else(|e| panic!("{e}"));
+            problem.add_residual_block_with_noise(
+                &[state_keys[0], state_keys[observer], extrinsic_key, key],
+                Box::new(factor),
+                None,
+                NoiseModel::null(),
+            );
+        }
+    }
+
+    // Without these the scenario could silently degrade into a narrow-FOV one
+    // and keep passing while testing nothing this factor exists for. `steep` is
+    // `cos θ < 0.18`, i.e. beyond 80°, where the gnomonic stretch exceeds 30×.
+    assert!(
+        steep >= 6,
+        "expected a genuinely wide field, only {steep} observations were beyond 80°"
+    );
+    assert!(
+        past_the_equator >= 1,
+        "expected at least one observation past the equator, got {past_the_equator}"
+    );
+
+    let mut solver = lm_solver(200);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("bearing inverse-depth graph failed: {e}"));
+
+    for (key, expected) in depth_keys.iter().zip(truth.iter()) {
+        let got = result.parameters[*key].as_param_slice()[0];
+        assert!(
+            (got - expected).abs() < 1e-4,
+            "inverse range {got:.6} != {expected:.6}"
         );
     }
     let pose = SE23::from_param_slice(result.parameters[state_keys[2]].as_param_slice());

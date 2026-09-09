@@ -34,30 +34,8 @@ use apex_manifolds::se23::SE23;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
-use crate::factors::common::math::skew;
+use crate::factors::common::math::{skew, tangent_basis};
 use crate::factors::common::validate::expect_block_sizes;
-
-/// Compute an orthonormal basis (3×2) for the tangent plane at unit vector `n`.
-///
-/// Picks the coordinate axis least aligned with `n`, crosses it with `n` to get
-/// `e1`, then `e2 = n × e1`. Both are normalized.
-fn tangent_basis(n: &Vector3<f64>) -> SMatrix<f64, 3, 2> {
-    // Pick axis least aligned with n
-    let abs_n = Vector3::new(n[0].abs(), n[1].abs(), n[2].abs());
-    let axis = if abs_n[0] <= abs_n[1] && abs_n[0] <= abs_n[2] {
-        Vector3::x()
-    } else if abs_n[1] <= abs_n[2] {
-        Vector3::y()
-    } else {
-        Vector3::z()
-    };
-
-    let mut e1 = n.cross(&axis);
-    e1.normalize_mut();
-    let e2 = n.cross(&e1);
-
-    SMatrix::<f64, 3, 2>::from_columns(&[e1, e2])
-}
 
 /// Bearing factor: constrains the direction from a pose to a 3D landmark.
 pub struct BearingFactor {
@@ -506,34 +484,6 @@ mod tests {
                     fd
                 );
             }
-        }
-    }
-
-    // ── Test 4: tangent basis orthonormality ────────────────────────────────
-
-    #[test]
-    fn tangent_basis_orthonormal() {
-        let dirs = [
-            Vector3::new(1.0, 0.0, 0.0),
-            Vector3::new(0.0, 1.0, 0.0),
-            Vector3::new(0.0, 0.0, 1.0),
-            Vector3::new(1.0, 1.0, 1.0).normalize(),
-            Vector3::new(-0.3, 0.7, 0.5).normalize(),
-        ];
-
-        for n in &dirs {
-            let basis = tangent_basis(n);
-            let e1 = basis.column(0);
-            let e2 = basis.column(1);
-
-            // Orthogonal to n
-            assert!(e1.dot(n).abs() < 1e-12, "e1 not perpendicular to n");
-            assert!(e2.dot(n).abs() < 1e-12, "e2 not perpendicular to n");
-
-            // Orthonormal
-            assert!((e1.norm() - 1.0).abs() < 1e-12);
-            assert!((e2.norm() - 1.0).abs() < 1e-12);
-            assert!(e1.dot(&e2).abs() < 1e-12, "e1 and e2 not orthogonal");
         }
     }
 

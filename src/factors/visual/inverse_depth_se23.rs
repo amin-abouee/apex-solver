@@ -64,7 +64,7 @@ use crate::factors::common::validate::expect_block_sizes;
 const MIN_DEPTH: f64 = 1.0e-3;
 
 /// Columns of the Jacobian: 9 + 9 + 6 + 1.
-const JACOBIAN_COLUMNS: usize = 25;
+pub(super) const JACOBIAN_COLUMNS: usize = 25;
 
 /// Reprojection of an inverse-depth landmark anchored in a host keyframe.
 pub struct InverseDepthSe23Factor {
@@ -104,7 +104,7 @@ impl InverseDepthSe23Factor {
 }
 
 /// Write a `2 x 25` Jacobian into the caller's buffer.
-fn write_jacobian(
+pub(super) fn write_jacobian(
     source: &SMatrix<f64, 2, JACOBIAN_COLUMNS>,
     jac: &mut faer::mat::MatMut<'_, f64>,
 ) {
@@ -227,23 +227,29 @@ impl Factor for InverseDepthSe23Factor {
 
 /// The transform chain evaluated once, so the residual and its Jacobian read
 /// the same quantities instead of recomputing them.
-struct Chain {
+pub(super) struct Chain {
     /// `R_bcᵀ·R_iᵀ·R_k`, host camera to observer camera.
-    a: Matrix3<f64>,
+    pub(super) a: Matrix3<f64>,
     /// Body-from-camera rotation.
-    r_bc: Matrix3<f64>,
+    pub(super) r_bc: Matrix3<f64>,
     /// Landmark in the host body frame.
-    p_bk: Vector3<f64>,
+    pub(super) p_bk: Vector3<f64>,
     /// Landmark in the observer body frame.
-    p_bi: Vector3<f64>,
+    pub(super) p_bi: Vector3<f64>,
     /// Landmark in the observer camera frame.
-    point: Vector3<f64>,
+    pub(super) point: Vector3<f64>,
     /// Landmark in the host camera frame, `m_host / rho`.
-    f: Vector3<f64>,
-    /// Anchoring bearing, normalized to `z = 1`.
-    host_bearing: Vector3<f64>,
-    /// Inverse depth.
-    rho: f64,
+    pub(super) f: Vector3<f64>,
+    /// Anchoring bearing.
+    ///
+    /// Scaled to `z = 1` by [`InverseDepthSe23Factor`] and left as a **unit**
+    /// vector by [`super::InverseDepthBearingSe23Factor`]. `point_jacobians`
+    /// works for either: `f = m/ρ` gives `∂f/∂ρ = −m/ρ²` whatever `m`'s length,
+    /// and the scale is what makes `ρ` an inverse depth in the first case and
+    /// an inverse range in the second.
+    pub(super) host_bearing: Vector3<f64>,
+    /// Inverse depth along `host_bearing`.
+    pub(super) rho: f64,
 }
 
 /// `∂P/∂(host, observer, T_bc, rho)`, a `3 x 25` block.
@@ -254,7 +260,7 @@ struct Chain {
 /// measures where a point appears, which says nothing about how fast the body
 /// carrying the camera is moving. Velocity is observable here only through the
 /// IMU factors that share these states.
-fn point_jacobians(chain: &Chain) -> SMatrix<f64, 3, JACOBIAN_COLUMNS> {
+pub(super) fn point_jacobians(chain: &Chain) -> SMatrix<f64, 3, JACOBIAN_COLUMNS> {
     let mut d = SMatrix::<f64, 3, JACOBIAN_COLUMNS>::zeros();
 
     // Host: ∂P/∂δρ_k = A, ∂P/∂δθ_k = −A·[p_bk]ₓ.
