@@ -216,18 +216,21 @@ impl LossFunction for L2Loss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = 2√s
-/// ρ'(s) = 1/√s
-/// ρ''(s) = -1/(2s^(3/2))
+/// ρ(s) = 2(√(s+ε) - √ε)
+/// ρ'(s) = 1/√(s+ε)
+/// ρ''(s) = -1/(2(s+ε)^(3/2))
 /// ```
 ///
-/// where `s = ||r||²` is the squared residual norm.
+/// where `s = ||r||²` is the squared residual norm and `ε` is a small fixed
+/// smoothing constant so the curve is smooth (C∞) at `s = 0`, matching true
+/// L1 (`ρ(s) = 2√s`) for `s ≫ ε` (ISSUE-0011).
 ///
 /// # Properties
 ///
 /// - **Convex**: Globally optimal solution
 /// - **Moderately robust**: Linear growth vs quadratic
-/// - **Unstable at zero**: Derivative undefined at s=0
+/// - **Smooth at zero**: True L1's infinite slope at s=0 is replaced by a
+///   large but finite derivative, `1/√ε`
 /// - **Median estimator**: Minimizes to median instead of mean
 ///
 /// # Use Cases
@@ -244,7 +247,9 @@ impl LossFunction for L2Loss {
 /// let l1 = L1Loss::new();
 ///
 /// let [rho, rho_prime, _] = l1.evaluate(4.0);
-/// assert!((rho - 4.0).abs() < 1e-10);  // ρ(4) = 2√4 = 4
+/// // Smoothed near the origin (ISSUE-0011), so this matches true L1
+/// // (ρ(4) = 2√4 = 4) only up to the smoothing scale, not to machine precision.
+/// assert!((rho - 4.0).abs() < 1e-5);
 /// assert!((rho_prime - 0.5).abs() < 1e-10);  // ρ'(4) = 1/√4 = 0.5
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -263,18 +268,27 @@ impl Default for L1Loss {
     }
 }
 
+/// Smoothing scale for [`L1Loss`]/[`LpNormLoss`] near `s = 0`, in squared-
+/// residual units — see the "ISSUE-0011" note on `L1Loss::evaluate`.
+const ORIGIN_SMOOTHING_EPS: f64 = 1e-12;
+
 impl LossFunction for L1Loss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        if s < f64::EPSILON {
-            // Near zero: use L2 to avoid singularity
-            return [s, 1.0, 0.0];
-        }
-        let sqrt_s = s.sqrt();
+        // ISSUE-0011: the previous `if s < f64::EPSILON { [s,1.0,0.0] }`
+        // guard spliced in the *unrelated* L2 branch, whose value/derivative
+        // don't match `2√s`/`1/√s` just outside the guard — an ~8-order-of-
+        // magnitude jump right at the boundary, well inside the residual
+        // range a converging solve passes through. A single Charbonnier-
+        // style shifted formula, smooth for every `s ≥ 0` with no branch to
+        // mismatch, replaces it: `ρ(s) = 2(√(s+ε) - √ε)` is exactly `2√s`
+        // for `s ≫ ε` and finite (not the true L1's infinite slope) at
+        // `s = 0`, where `ε` only keeps the curve C∞.
+        let shifted = (s + ORIGIN_SMOOTHING_EPS).sqrt();
         [
-            2.0 * sqrt_s,              // ρ(s) = 2√s
-            1.0 / sqrt_s,              // ρ'(s) = 1/√s
-            -1.0 / (2.0 * s * sqrt_s), // ρ''(s) = -1/(2s√s)
+            2.0 * (shifted - ORIGIN_SMOOTHING_EPS.sqrt()), // ρ(s) = 2(√(s+ε) - √ε)
+            1.0 / shifted,                                 // ρ'(s) = 1/√(s+ε)
+            -0.5 / (shifted * shifted * shifted),          // ρ''(s) = -1/(2(s+ε)^1.5)
         ]
     }
 }
@@ -1250,12 +1264,16 @@ impl LossFunction for TrimmedMeanLoss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = |x|^p = s^(p/2)
-/// ρ'(s) = (p/2) * s^(p/2-1)
-/// ρ''(s) = (p/2) * (p/2-1) * s^(p/2-2)
+/// ρ(s) = (s+ε)^(p/2) - ε^(p/2)
+/// ρ'(s) = (p/2) * (s+ε)^(p/2-1)
+/// ρ''(s) = (p/2) * (p/2-1) * (s+ε)^(p/2-2)
 /// ```
 ///
-/// where `p` is the norm parameter, `x = √s`, and `s = ||r||²`.
+/// where `p` is the norm parameter, `s = ||r||²`, and `ε` is a small fixed
+/// smoothing constant so the curve is smooth (C∞) at `s = 0` for every `p`,
+/// matching true `|x|^p` for `s ≫ ε` (ISSUE-0011: the previous `s < f64::EPSILON`
+/// guard spliced in an unrelated L2 branch with a large value/derivative
+/// jump right at the boundary).
 ///
 /// # Properties
 ///
@@ -1307,18 +1325,18 @@ impl LpNormLoss {
 impl LossFunction for LpNormLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        if s < f64::EPSILON {
-            return [s, 1.0, 0.0];
-        }
-
+        // ISSUE-0011: same fix as `L1Loss` (its `p=1` special case) — a
+        // single shifted power, smooth for every `s ≥ 0`, replacing the old
+        // `s < f64::EPSILON` splice into the unrelated `[s,1,0]` L2 branch.
+        let shifted = s + ORIGIN_SMOOTHING_EPS;
         let exp_rho = self.p / 2.0;
         let exp_rho_prime = exp_rho - 1.0;
         let exp_rho_double_prime = exp_rho_prime - 1.0;
 
         [
-            s.powf(exp_rho),                                        // ρ(s) = s^(p/2)
-            exp_rho * s.powf(exp_rho_prime),                        // ρ'(s) = (p/2) * s^(p/2-1)
-            exp_rho * exp_rho_prime * s.powf(exp_rho_double_prime), // ρ''(s)
+            shifted.powf(exp_rho) - ORIGIN_SMOOTHING_EPS.powf(exp_rho), // ρ(s) = (s+ε)^(p/2) - ε^(p/2)
+            exp_rho * shifted.powf(exp_rho_prime), // ρ'(s) = (p/2) * (s+ε)^(p/2-1)
+            exp_rho * exp_rho_prime * shifted.powf(exp_rho_double_prime), // ρ''(s)
         ]
     }
 }
@@ -1796,9 +1814,11 @@ mod tests {
         assert!(rho_prime.is_finite());
         assert!(rho_double_prime.is_finite());
 
-        // Test at s = 4.0 (√s = 2.0, ρ(s) = 2√s = 4.0)
+        // Test at s = 4.0 (√s = 2.0, ρ(s) = 2√s = 4.0). ISSUE-0011: rho is
+        // now smoothed near the origin, so it matches true L1 only up to
+        // the smoothing scale, not to `EPSILON`, even at s=4.
         let [rho, rho_prime, _] = loss.evaluate(4.0);
-        assert!((rho - 4.0).abs() < EPSILON); // ρ(s) = 2√s = 2*2 = 4
+        assert!((rho - 4.0).abs() < 1e-5); // ρ(s) = 2√s = 2*2 = 4
         assert!((rho_prime - 0.5).abs() < EPSILON); // ρ'(s) = 1/√s = 1/2 = 0.5
 
         Ok(())
@@ -2045,10 +2065,11 @@ mod tests {
 
     #[test]
     fn test_lp_norm_loss() -> TestResult {
-        // Test L1 (p = 1)
+        // Test L1 (p = 1). ISSUE-0011: smoothed near the origin, so this
+        // matches true L1 (||r||₁ = 2) only up to the smoothing scale.
         let l1 = LpNormLoss::new(1.0)?;
         let [rho_l1, _, _] = l1.evaluate(4.0);
-        assert!((rho_l1 - 2.0).abs() < EPSILON); // ||r||₁ = 2
+        assert!((rho_l1 - 2.0).abs() < 1e-5);
 
         // Test L2 (p = 2)
         let l2 = LpNormLoss::new(2.0)?;
@@ -2071,6 +2092,99 @@ mod tests {
         assert!((rho_double_prime - rho_double_prime_num).abs() < 1e-3);
 
         Ok(())
+    }
+
+    /// ISSUE-0011 regression: value and derivative must stay continuous
+    /// across the *old* `s < f64::EPSILON` guard boundary — the previous
+    /// splice into the unrelated L2 branch jumped by orders of magnitude
+    /// right there, for every `p` including L1's own `p=1` special case.
+    #[test]
+    fn test_l1_lp_continuous_across_old_guard_boundary() -> TestResult {
+        // The bug was an ~8-order-of-magnitude *relative* jump right at the
+        // old branch (e.g. L1's rho' went 1.0 -> 6.7e7); check the new
+        // single-formula value/derivative agree within a small relative
+        // tolerance across that same boundary, rather than an absolute one
+        // that would be miscalibrated for small p's steeper local slope.
+        let eps = f64::EPSILON;
+        for p in [0.5, 1.0, 1.5, 2.0] {
+            let loss = LpNormLoss::new(p)?;
+            let below = loss.evaluate(eps / 2.0);
+            let above = loss.evaluate(eps * 2.0);
+            let prime_scale = 1.0 + below[1].abs().max(above[1].abs());
+            assert!(
+                (above[1] - below[1]).abs() < 1e-3 * prime_scale,
+                "p={p}: rho' jumps from {} to {} across the old guard boundary",
+                below[1],
+                above[1]
+            );
+        }
+
+        let l1 = L1Loss::new();
+        let below = l1.evaluate(eps / 2.0);
+        let above = l1.evaluate(eps * 2.0);
+        let prime_scale = 1.0 + below[1].abs().max(above[1].abs());
+        assert!((above[1] - below[1]).abs() < 1e-3 * prime_scale);
+
+        Ok(())
+    }
+
+    /// Sweep `s` geometrically from the origin through the old guard's
+    /// transition region and confirm both value and derivative vary
+    /// smoothly — no discontinuity anywhere — for `p ∈ {0.5, 1, 1.5, 2}`.
+    #[test]
+    fn test_lp_norm_smooth_sweep_through_origin() -> TestResult {
+        for p in [0.5, 1.0, 1.5, 2.0] {
+            let loss = LpNormLoss::new(p)?;
+            let mut prev: Option<[f64; 3]> = None;
+            let mut s = 1e-20;
+            while s < 1.0 {
+                let cur = loss.evaluate(s);
+                assert!(
+                    cur.iter().all(|v| v.is_finite()),
+                    "p={p} s={s}: non-finite output {cur:?}"
+                );
+                if let Some(prev_vals) = prev {
+                    let d_rho = (cur[0] - prev_vals[0]).abs();
+                    assert!(
+                        d_rho < 0.5,
+                        "p={p} s={s}: rho jumped by {d_rho} between geometrically \
+                         adjacent samples (10x apart in s)"
+                    );
+                }
+                prev = Some(cur);
+                s *= 10.0;
+            }
+        }
+        Ok(())
+    }
+
+    /// One-dimensional LM/DogLeg-style check: `Corrector::robust_cost()` is
+    /// exactly what step acceptance compares, so as a residual's magnitude
+    /// crosses the old guard boundary, it must vary continuously with state
+    /// — not jump, the way the previous L2 splice made it.
+    #[test]
+    fn test_l1_robust_cost_continuous_across_guard_boundary() {
+        use crate::core::corrector::Corrector;
+
+        // Fine (20%) steps confined to the immediate neighborhood of the OLD
+        // `s < f64::EPSILON` guard — where the bug actually was — rather
+        // than a coarse sweep across many decades, where cost legitimately
+        // changes a lot per step and isn't a "boundary jump" at all.
+        let loss = L1Loss::new();
+        let eps = f64::EPSILON;
+        let mut prev_cost: Option<f64> = None;
+        let mut s = eps / 8.0;
+        while s < eps * 8.0 {
+            let cost = Corrector::new(&loss, s).robust_cost();
+            if let Some(p) = prev_cost {
+                assert!(
+                    (cost - p).abs() < 1e-8,
+                    "s={s}: robust_cost jumped from {p} to {cost}"
+                );
+            }
+            prev_cost = Some(cost);
+            s *= 1.2;
+        }
     }
 
     #[test]
@@ -2376,12 +2490,31 @@ mod tests {
             // Sanity at the origin: zero cost and a sane (unit-or-less,
             // non-negative) weight. Conventions differ per kernel (Welsch
             // uses ρ'(0) = 1/2), so only the bounds are pinned here.
+            //
+            // L1/Lp (p<2) are the documented exception (ISSUE-0011): their
+            // *true* ρ is genuinely singular at s=0 (ρ'(s)=1/√s → ∞), so any
+            // faithful smoothing must trade off between a bounded weight at
+            // the exact origin and staying close to the true loss for
+            // ordinary (non-infinitesimal) residuals. This module keeps the
+            // smoothing scale tiny — matching true L1/Lp everywhere but a
+            // sliver near s=0 — which is the right choice for a robust loss
+            // (its whole point is its shape at moderate/large residuals),
+            // at the cost of a large-but-finite ρ'(0) instead of a "sane"
+            // one; the origin weight is still finite and positive, never
+            // NaN/Inf, which is what the corrector actually depends on.
             let [rho, rho_prime, _] = loss.evaluate(0.0);
             assert_eq!(rho, 0.0, "{name}: ρ(0) must be 0");
-            assert!(
-                (0.0..=1.0).contains(&rho_prime),
-                "{name}: ρ'(0) must be a sane weight, got {rho_prime}"
-            );
+            if name == "l1" || name == "lp" {
+                assert!(
+                    rho_prime.is_finite() && rho_prime > 0.0,
+                    "{name}: ρ'(0) must be finite and positive, got {rho_prime}"
+                );
+            } else {
+                assert!(
+                    (0.0..=1.0).contains(&rho_prime),
+                    "{name}: ρ'(0) must be a sane weight, got {rho_prime}"
+                );
+            }
             assert_eq!(
                 name.to_lowercase(),
                 name,
