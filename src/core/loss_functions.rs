@@ -84,6 +84,35 @@
 
 use crate::core::{CoreError, CoreResult};
 
+/// Validate a scale/shape parameter used in division, multiplication, a
+/// threshold, or a logarithm: it must be finite and strictly positive.
+///
+/// A bare `value <= 0.0` guard lets `NaN` through silently (every IEEE-754
+/// comparison with `NaN` is `false`), and `+infinity` also passes such a
+/// guard while producing indeterminate expressions like `infinity * 0`
+/// downstream. `DcsLoss` was the only constructor in this module to already
+/// guard against both (ISSUE-0007); every other parameterized loss now uses
+/// this shared validator instead of repeating the incomplete check.
+fn finite_positive(name: &str, value: f64) -> CoreResult<f64> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(CoreError::InvalidInput(format!(
+            "{name} must be finite and positive, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Validate a shape parameter (e.g. Barron's `alpha`) that is used in
+/// `powf`/exponentiation but is not required to be positive — only finite.
+fn finite(name: &str, value: f64) -> CoreResult<f64> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 /// Trait for robust loss functions used in nonlinear least squares optimization.
 ///
 /// A loss function transforms the squared residual `s = ||r||²` into a robust cost `ρ(s)`
@@ -339,11 +368,7 @@ impl HuberLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(HuberLoss {
             scale,
             scale2: scale * scale,
@@ -471,11 +496,7 @@ impl CauchyLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(CauchyLoss {
             scale2,
@@ -583,11 +604,7 @@ impl FairLoss {
     ///
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(FairLoss { scale })
     }
 }
@@ -671,11 +688,7 @@ impl GemanMcClureLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(GemanMcClureLoss { c: 1.0 / scale2 })
     }
@@ -763,11 +776,7 @@ impl DcsLoss {
     ///
     /// * `phi` - Free parameter Φ (must be positive; 1.0 is the paper default)
     pub fn new(phi: f64) -> CoreResult<Self> {
-        if phi <= 0.0 || !phi.is_finite() {
-            return Err(CoreError::InvalidInput(
-                "DCS phi must be finite and positive".to_string(),
-            ));
-        }
+        let phi = finite_positive("phi", phi)?;
         Ok(DcsLoss { phi })
     }
 }
@@ -843,11 +852,7 @@ impl WelschLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(WelschLoss {
             scale2,
@@ -933,11 +938,7 @@ impl TukeyBiweightLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(TukeyBiweightLoss {
             scale,
             scale2: scale * scale,
@@ -1034,11 +1035,7 @@ impl AndrewsWaveLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(AndrewsWaveLoss {
             scale,
             scale2: scale * scale,
@@ -1135,11 +1132,7 @@ impl RamsayEaLoss {
     ///
     /// * `scale` - The scale parameter a (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(RamsayEaLoss {
             scale,
             inv_scale2: 1.0 / (scale * scale),
@@ -1231,11 +1224,7 @@ impl TrimmedMeanLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(TrimmedMeanLoss {
             scale2: scale * scale,
         })
@@ -1310,9 +1299,7 @@ impl LpNormLoss {
     ///
     /// * `p` - The norm parameter (0 < p ≤ 2 for practical use)
     pub fn new(p: f64) -> CoreResult<Self> {
-        if p <= 0.0 {
-            return Err(CoreError::InvalidInput("p must be positive".to_string()));
-        }
+        let p = finite_positive("p", p)?;
         Ok(LpNormLoss { p })
     }
 }
@@ -1412,11 +1399,8 @@ impl BarronGeneralLoss {
     /// * `alpha` - The shape parameter (controls robustness)
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(alpha: f64, scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale must be positive".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
+        let alpha = finite("alpha", alpha)?;
         Ok(BarronGeneralLoss {
             alpha,
             scale2: scale * scale,
@@ -1546,11 +1530,7 @@ impl TDistributionLoss {
     /// - ν = 3.0-4.0: More robust to outliers
     /// - ν = 10.0: Less aggressive, closer to Gaussian
     pub fn new(nu: f64) -> CoreResult<Self> {
-        if nu <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "degrees of freedom must be positive".to_string(),
-            ));
-        }
+        let nu = finite_positive("nu", nu)?;
         Ok(TDistributionLoss {
             nu,
             half_nu_plus_1: (nu + 1.0) / 2.0,
@@ -2220,6 +2200,49 @@ mod tests {
         assert!(BarronGeneralLoss::new(1.0, 1.0).is_ok());
 
         Ok(())
+    }
+
+    /// ISSUE-0007 regression: every parameterized-loss constructor must
+    /// reject `NaN` and `+infinity` (not just non-positive finite values) —
+    /// a bare `<= 0.0` guard lets both through, since every comparison with
+    /// `NaN` is `false`. `-infinity` is finite-checked the same way as any
+    /// other negative value (rejected by the positivity check).
+    #[test]
+    fn test_constructor_rejects_nonfinite_scale_parameters() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 0.0] {
+            assert!(HuberLoss::new(bad).is_err(), "Huber({bad})");
+            assert!(CauchyLoss::new(bad).is_err(), "Cauchy({bad})");
+            assert!(FairLoss::new(bad).is_err(), "Fair({bad})");
+            assert!(GemanMcClureLoss::new(bad).is_err(), "GemanMcClure({bad})");
+            assert!(DcsLoss::new(bad).is_err(), "Dcs({bad})");
+            assert!(WelschLoss::new(bad).is_err(), "Welsch({bad})");
+            assert!(TukeyBiweightLoss::new(bad).is_err(), "Tukey({bad})");
+            assert!(AndrewsWaveLoss::new(bad).is_err(), "Andrews({bad})");
+            assert!(RamsayEaLoss::new(bad).is_err(), "Ramsay({bad})");
+            assert!(TrimmedMeanLoss::new(bad).is_err(), "TrimmedMean({bad})");
+            assert!(LpNormLoss::new(bad).is_err(), "Lp({bad})");
+            assert!(TDistributionLoss::new(bad).is_err(), "TDistribution({bad})");
+            assert!(
+                BarronGeneralLoss::new(1.0, bad).is_err(),
+                "Barron(1,{bad}) scale"
+            );
+            assert!(
+                AdaptiveBarronLoss::new(1.0, bad).is_err(),
+                "AdaptiveBarron(1,{bad})"
+            );
+        }
+        // Barron's alpha is finite-only (no positivity requirement).
+        assert!(BarronGeneralLoss::new(f64::NAN, 1.0).is_err());
+        assert!(BarronGeneralLoss::new(f64::INFINITY, 1.0).is_err());
+        assert!(BarronGeneralLoss::new(f64::NEG_INFINITY, 1.0).is_err());
+        // A negative finite alpha is a valid shape parameter.
+        assert!(BarronGeneralLoss::new(-2.0, 1.0).is_ok());
+
+        // Every valid finite parameter must still construct successfully.
+        assert!(HuberLoss::new(1.345).is_ok());
+        assert!(CauchyLoss::new(2.3849).is_ok());
+        assert!(DcsLoss::new(1.0).is_ok());
+        assert!(TDistributionLoss::new(5.0).is_ok());
     }
 
     #[test]
