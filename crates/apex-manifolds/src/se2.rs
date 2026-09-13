@@ -331,7 +331,9 @@ impl LieGroup for SE2 {
     }
 
     fn is_valid(&self, _tolerance: f64) -> bool {
-        self.params[2].is_finite()
+        // ISSUE-0008: every stored scalar must be finite, not just θ — a
+        // NaN/Inf translation previously passed silently.
+        self.params.iter().all(|p| p.is_finite())
     }
 
     fn as_param_slice(&self) -> &[f64] {
@@ -781,6 +783,24 @@ mod tests {
         assert_eq!(identity.x(), 0.0);
         assert_eq!(identity.y(), 0.0);
         assert_eq!(identity.angle(), 0.0);
+    }
+
+    /// ISSUE-0008 regression: every stored parameter must be checked, not
+    /// just θ — a NaN/Inf translation previously passed `is_valid` silently.
+    #[test]
+    fn test_se2_is_valid_rejects_nonfinite_at_every_index() {
+        let base = SE2::identity();
+        for idx in 0..SE2::REP_SIZE {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut params: Vec<f64> = base.as_param_slice().to_vec();
+                params[idx] = bad;
+                let perturbed = SE2::from_param_slice(&params);
+                assert!(
+                    !perturbed.is_valid(TOLERANCE),
+                    "index {idx} = {bad} must be rejected"
+                );
+            }
+        }
     }
 
     #[test]

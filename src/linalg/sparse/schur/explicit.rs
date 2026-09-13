@@ -255,7 +255,9 @@ impl ExplicitSparseSchur {
             let span = BlockSpan {
                 key,
                 col_start,
-                dof: variable.dof(),
+                // Free columns only — fixed tangent coordinates own no
+                // column in the linear solve (ISSUE-0003).
+                dof: variable.free_dof(),
             };
             if eliminate_keys.contains(&key) {
                 eliminated.push(span);

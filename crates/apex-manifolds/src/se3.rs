@@ -386,7 +386,10 @@ impl LieGroup for SE3 {
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        self.rotation_impl().is_valid(tolerance)
+        // ISSUE-0008: the translation was never checked, only the rotation —
+        // a NaN/Inf translation previously passed silently.
+        self.translation_impl().iter().all(|t| t.is_finite())
+            && self.rotation_impl().is_valid(tolerance)
     }
 
     fn as_param_slice(&self) -> &[f64] {
@@ -509,7 +512,9 @@ impl SE3Tangent {
     /// Equation 180: Q(ρ, θ) function for SE(3) Jacobians
     /// Q(ρ, θ) = (1/2)ρₓ + (θ - sin θ)/θ³ (θₓρₓ + ρₓθₓ + θₓρₓθₓ)
     ///           - (1 - θ²/2 - cos θ)/θ⁴ (θ²ₓρₓ + ρₓθ²ₓ - 3θₓρₓθₓ)
-    ///           - (1/2) * ( (1 - θ²/2 - cos θ)/θ⁴ - (3.0 * (θ - sin θ - θ³/6))/θ⁵ ) * (θₓρₓθ²ₓ + θ²ₓρₓθₓ)
+    ///           - (1/2) * (c - 3e) * (θₓρₓθ²ₓ + θ²ₓρₓθₓ)
+    ///
+    /// where `c = (1 - θ²/2 - cos θ)/θ⁴` and `e = (θ - sin θ - θ³/6)/θ⁵`.
     pub fn q_block_jacobian_matrix(rho: Vector3<f64>, theta: Vector3<f64>) -> Matrix3<f64> {
         let rho_skew = SO3Tangent::new(rho).hat();
         let theta_skew = SO3Tangent::new(theta).hat();
@@ -518,7 +523,8 @@ impl SE3Tangent {
         let a = 0.5;
         let mut b = 1.0 / 6.0 + 1.0 / 120.0 * theta_squared;
         let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
-        let mut d = -1.0 / 60.0;
+        // d = (1/2)(c - 3e); Taylor series of that combination near θ = 0.
+        let mut d = -1.0 / 120.0 + theta_squared / 2520.0;
 
         if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
@@ -530,17 +536,21 @@ impl SE3Tangent {
 
             b = (theta_norm - sin_theta) / theta_norm_3;
             c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
-            d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
+            let e = (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
+            d = 0.5 * (c - 3.0 * e);
         }
 
         let tr = theta_skew * rho_skew;
         let rt = rho_skew * theta_skew;
         let trt = tr * theta_skew;
         let rt_t2 = rt * theta_skew;
+        // The last term needs both θₓρₓθ²ₓ (= trt·θₓ) and θ²ₓρₓθₓ (= θₓ·trt).
+        let trt2 = trt * theta_skew;
+        let t2rt = theta_skew * trt;
 
         rho_skew * a + (tr + rt + trt) * b
             - (rt_t2 - rt_t2.transpose() - trt * 3.0) * c
-            - (trt * theta_skew) * d
+            - (trt2 + t2rt) * d
     }
 }
 
@@ -935,6 +945,30 @@ mod tests {
 
         assert!(translation.norm() < TOLERANCE);
         assert!((rotation.angle()) < TOLERANCE);
+    }
+
+    /// ISSUE-0008 regression: every stored parameter must be checked, not
+    /// just the quaternion — a NaN/Inf translation previously passed
+    /// `is_valid` silently. Also covers a non-finite tolerance.
+    #[test]
+    fn test_se3_is_valid_rejects_nonfinite_at_every_index() {
+        let base = SE3::identity();
+        for idx in 0..SE3::REP_SIZE {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut params: Vec<f64> = base.as_param_slice().to_vec();
+                params[idx] = bad;
+                let perturbed = SE3::from_param_slice(&params);
+                assert!(
+                    !perturbed.is_valid(TOLERANCE),
+                    "index {idx} = {bad} must be rejected"
+                );
+            }
+        }
+        assert!(
+            !base.is_valid(f64::INFINITY),
+            "infinite tolerance must be rejected"
+        );
+        assert!(!base.is_valid(f64::NAN), "NaN tolerance must be rejected");
     }
 
     #[test]
@@ -1612,5 +1646,83 @@ mod tests {
         let t = SE3Tangent::random();
         let recovered = SE3Tangent::from_slice(t.as_slice());
         assert!(t.is_approx(&recovered, 1e-14));
+    }
+}
+
+/// Independent central-difference regression tests for ISSUE-0001 (SE(3)
+/// `Q`-block coefficient). Built from `exp()`/`matrix()`/`inverse()` alone —
+/// never from `log()` or `right_jacobian_inv()` — so a bug shared between an
+/// analytic Jacobian and its "inverse" cannot hide here.
+#[cfg(test)]
+mod se3_jacobian_fd_tests {
+    use super::*;
+
+    const FD_STEP: f64 = 1e-4;
+    const FD_TOL: f64 = 1e-5;
+
+    /// Extract [ρ,θ] from a 4x4 SE(3) Lie-algebra matrix `[θ×, ρ; 0, 0]`.
+    fn vee(m: &Matrix4<f64>) -> Vector6<f64> {
+        let mut v = Vector6::zeros();
+        v[0] = m[(0, 3)];
+        v[1] = m[(1, 3)];
+        v[2] = m[(2, 3)];
+        v[3] = m[(2, 1)];
+        v[4] = m[(0, 2)];
+        v[5] = m[(1, 0)];
+        v
+    }
+
+    fn perturbed(xi: &SE3Tangent, k: usize, eps: f64) -> SE3Tangent {
+        let mut data = xi.data;
+        data[k] += eps;
+        SE3Tangent { data }
+    }
+
+    fn fd_right_jacobian(xi: &SE3Tangent) -> Matrix6<f64> {
+        let x_inv_mat = xi.exp(None).inverse(None).matrix();
+        let mut jac = Matrix6::zeros();
+        for k in 0..6 {
+            let plus = perturbed(xi, k, FD_STEP).exp(None).matrix();
+            let minus = perturbed(xi, k, -FD_STEP).exp(None).matrix();
+            let d_dxi_k = (plus - minus) / (2.0 * FD_STEP);
+            jac.set_column(k, &vee(&(x_inv_mat * d_dxi_k)));
+        }
+        jac
+    }
+
+    #[test]
+    fn se3_right_jacobian_matches_matrix_exp_central_difference() {
+        let cases = [
+            (Vector3::new(0.7, -0.2, 0.4), Vector3::new(0.4, -0.3, 0.25)),
+            (Vector3::new(0.1, 0.2, -0.3), Vector3::new(2.8, 0.1, -0.2)), // near pi
+            (Vector3::new(-0.5, 0.3, 0.2), Vector3::zeros()),             // theta = 0
+            (
+                Vector3::new(1e-8, -2e-8, 3e-8),
+                Vector3::new(1e-8, 2e-8, -1e-8),
+            ), // small angle
+        ];
+        for (rho, theta) in cases {
+            let xi = SE3Tangent::from_components(rho.x, rho.y, rho.z, theta.x, theta.y, theta.z);
+            let analytic = xi.right_jacobian();
+            let numeric = fd_right_jacobian(&xi);
+            let err = (analytic - numeric).norm();
+            assert!(
+                err < FD_TOL,
+                "right_jacobian mismatch at rho={rho:?} theta={theta:?}: error={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn se3_right_jacobian_continuous_near_zero() {
+        for scale in [1e-1, 1e-3, 1e-5, 1e-7, 1e-9] {
+            let rho = Vector3::new(0.3, -0.2, 0.1) * scale;
+            let theta = Vector3::new(0.2, 0.1, -0.3) * scale;
+            let xi = SE3Tangent::from_components(rho.x, rho.y, rho.z, theta.x, theta.y, theta.z);
+            let analytic = xi.right_jacobian();
+            let numeric = fd_right_jacobian(&xi);
+            let err = (analytic - numeric).norm();
+            assert!(err < FD_TOL, "discontinuity at scale={scale}: error={err}");
+        }
     }
 }

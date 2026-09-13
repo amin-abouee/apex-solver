@@ -318,24 +318,33 @@ fn apply_signed_parameter_step(
     variable_order: &[VarKey],
     sign: f64,
 ) -> f64 {
+    // `step` is sized to `total_dof` from `build_variable_index_map`, i.e.
+    // free columns only (see ISSUE-0003) — its norm below is already the
+    // norm of the step actually applied, with no fixed-coordinate entries
+    // inflating it.
     let mut step_offset = 0;
 
-    // SmallVec-backed buffer: inline for the common case (DOF ≤ 16, covering
+    // SmallVec-backed buffers: inline for the common case (DOF ≤ 16, covering
     // SE3/SO3/SE2/SO2 and small RN), spills to heap only for large RN
     // variables. Mirrors the `[0f64; 16]` buffer pattern used inside
     // `Variable::apply_tangent_step`.
-    let mut step_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut free_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut full_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
     for &var_key in variable_order {
         if let Some(var) = variables.get_mut(var_key) {
-            let var_size = var.dof();
-            let var_step = step.subrows(step_offset, var_size);
-            step_buf.clear();
-            step_buf.resize(var_size, 0.0);
-            for i in 0..var_size {
-                step_buf[i] = sign * var_step[(i, 0)];
+            let free_size = var.free_dof();
+            let dof = var.dof();
+            let var_step = step.subrows(step_offset, free_size);
+            free_buf.clear();
+            free_buf.resize(free_size, 0.0);
+            for i in 0..free_size {
+                free_buf[i] = sign * var_step[(i, 0)];
             }
-            var.apply_tangent_step(&step_buf);
-            step_offset += var_size;
+            full_buf.clear();
+            full_buf.resize(dof, 0.0);
+            var.expand_free_step(&free_buf, &mut full_buf);
+            var.apply_tangent_step(&full_buf);
+            step_offset += free_size;
         }
     }
 
@@ -527,13 +536,18 @@ pub fn process_jacobian(
     Ok(jacobian * scaling)
 }
 
-/// Assign each variable a contiguous range of tangent-space columns.
+/// Assign each variable a contiguous range of tangent-space **free** columns.
 ///
 /// Ordering follows `variables.keys()` — slotmap insertion order, which is already
-/// deterministic — and each variable is given `dof()` consecutive columns starting
-/// at the running offset.
+/// deterministic — and each variable is given `free_dof()` (its tangent
+/// dimension minus any fixed local indices) consecutive columns starting at
+/// the running offset. Fixed tangent coordinates never occupy a column: they
+/// must be eliminated before the linear solve rather than solved for and
+/// zeroed afterward, since free and fixed columns generally couple through
+/// `JᵀJ` (see `codex/issues/ISSUE-0003-fixed-dofs-solved-as-free.md`).
 ///
-/// Returns `(column offset per variable, variable keys in column order, total DOF)`.
+/// Returns `(free-column offset per variable, variable keys in column order,
+/// total free DOF)`.
 ///
 /// This is shared by [`initialize_optimization_state`] and by covariance
 /// estimation ([`crate::linalg::covariance`]). Both must agree on the column
@@ -547,7 +561,7 @@ pub(crate) fn build_variable_index_map(
     let mut col_offset = 0;
     for &var_key in &sorted_vars {
         variable_index_map.insert(var_key, col_offset);
-        col_offset += variables[var_key].dof();
+        col_offset += variables[var_key].free_dof();
     }
 
     (variable_index_map, sorted_vars, col_offset)
@@ -562,7 +576,31 @@ pub(crate) fn build_variable_index_map(
 /// 4. Compute initial cost
 ///
 /// The assembly mode is determined by `problem.jacobian_mode`.
+///
+/// # Unsupported: variable bounds
+///
+/// `Problem::set_variable_bounds` is validated and stored, but no optimizer
+/// step here enforces it — solving anyway would silently return the
+/// unconstrained answer (see `codex/issues/ISSUE-0004-variable-bounds-ignored.md`).
+/// Until bounded optimization is implemented, any variable carrying a
+/// non-trivial bound (`lower > -inf` or `upper < inf`) is rejected here with
+/// a typed error rather than silently ignored.
 pub fn initialize_optimization_state(problem: &mut Problem) -> OptimizerResult<InitializedState> {
+    if let Some((var_key, idx, lower, upper)) = problem.variable_bounds.iter().find_map(|(k, m)| {
+        m.iter()
+            .find(|&(_, &(lower, upper))| lower > f64::NEG_INFINITY || upper < f64::INFINITY)
+            .map(|(&idx, &(lower, upper))| (k, idx, lower, upper))
+    }) {
+        let core_err = crate::core::CoreError::InvalidConstraint(format!(
+            "variable {var_key:?} component {idx} has bound [{lower}, {upper}], but no \
+             optimizer currently enforces variable bounds during the solve — set_variable_bounds \
+             is accepted and stored but silently ignored, which would return the unconstrained \
+             answer; remove the bound (Problem::remove_variable_bounds) or wait for constrained \
+             optimization support"
+        ));
+        return Err(OptimizerError::from(core_err));
+    }
+
     let mut variables = problem.variables.clone();
     problem.apply_constraints_to_variables(&mut variables);
 
@@ -844,6 +882,28 @@ pub fn compute_predicted_reduction(
     let linear_term = (step.transpose() * gradient)[(0, 0)];
     let quadratic_term = (step.transpose() * hessian_step)[(0, 0)];
     -linear_term - 0.5 * quadratic_term
+}
+
+/// `‖g‖` for the *unscaled* gradient, from a gradient computed against a
+/// Jacobi-column-scaled Jacobian (GitHub #57).
+///
+/// `gradient_tolerance`'s contract (documented on every optimizer's
+/// `optimize`) is `‖Jᵀr‖ < gradient_tolerance` — the plain, un-scaled
+/// gradient, matching Ceres' own convention. But `LinearSolver::get_gradient`
+/// reflects whatever Jacobian it was last handed: under Jacobi scaling
+/// (`J̃ = J·diag(scaling)`), that is `g̃ = J̃ᵀr = diag(scaling)·g`, not `g`.
+/// Column scaling and gradient transform in *opposite* directions — compare
+/// [`AssemblyBackend::apply_inverse_scaling`](crate::linearizer::AssemblyBackend::apply_inverse_scaling),
+/// which un-scales a *step* by multiplying by `scaling` — so this divides
+/// instead: `g = g̃ ⊘ scaling`. Most impactful for Dog Leg, which enables
+/// Jacobi scaling by default.
+pub(crate) fn unscaled_gradient_norm(gradient: &Mat<f64>, scaling: &[f64]) -> f64 {
+    let mut sum_sq = 0.0;
+    for i in 0..gradient.nrows() {
+        let g = gradient[(i, 0)] / scaling[i];
+        sum_sq += g * g;
+    }
+    sum_sq.sqrt()
 }
 
 /// Compute step quality ratio (actual vs predicted reduction).
@@ -1884,6 +1944,60 @@ mod tests {
         assert_eq!(state.total_dof, 1);
         assert!(state.initial_cost > 0.0);
         assert!(state.sorted_vars.contains(&k));
+        Ok(())
+    }
+
+    /// ISSUE-0004 regression: a variable bound is validated and stored, but no
+    /// optimizer currently enforces it — `initialize_optimization_state` must
+    /// reject with a typed error rather than silently solving the
+    /// unconstrained problem, for zero-width, one-sided, and interior bounds.
+    #[test]
+    fn initialize_optimization_state_rejects_active_variable_bounds() {
+        use crate::core::problem::Problem;
+
+        for (lower, upper) in [(0.0, 0.0), (f64::NEG_INFINITY, 5.0), (-5.0, f64::INFINITY)] {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let k = problem.add_variable(ManifoldType::RN, dvector![10.0]);
+            problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+            problem.set_variable_bounds(k, 0, lower, upper);
+
+            let Err(err) = initialize_optimization_state(&mut problem) else {
+                panic!("a non-trivial bound must be rejected, not silently ignored");
+            };
+            let message = err.to_string();
+            assert!(
+                message.contains("bound") && message.contains("component"),
+                "error must reference the offending bound, got: {message}"
+            );
+        }
+    }
+
+    /// A bound of exactly `(-inf, inf)` is a documented no-op (equivalent to
+    /// no bound at all) and must not trip the rejection.
+    #[test]
+    fn initialize_optimization_state_allows_unbounded_interval() -> TestResult {
+        use crate::core::problem::Problem;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+        problem.set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY);
+
+        initialize_optimization_state(&mut problem)?;
+        Ok(())
+    }
+
+    /// Problems that never set a bound at all are completely unaffected.
+    #[test]
+    fn initialize_optimization_state_unaffected_without_bounds() -> TestResult {
+        use crate::core::problem::Problem;
+
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let k = problem.add_variable(ManifoldType::RN, dvector![5.0]);
+        problem.add_residual_block(&[k], Box::new(LinearFactor { target: 0.0 }), None);
+
+        let state = initialize_optimization_state(&mut problem)?;
+        assert_eq!(state.total_dof, 1);
         Ok(())
     }
 }

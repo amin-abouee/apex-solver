@@ -84,6 +84,35 @@
 
 use crate::core::{CoreError, CoreResult};
 
+/// Validate a scale/shape parameter used in division, multiplication, a
+/// threshold, or a logarithm: it must be finite and strictly positive.
+///
+/// A bare `value <= 0.0` guard lets `NaN` through silently (every IEEE-754
+/// comparison with `NaN` is `false`), and `+infinity` also passes such a
+/// guard while producing indeterminate expressions like `infinity * 0`
+/// downstream. `DcsLoss` was the only constructor in this module to already
+/// guard against both (ISSUE-0007); every other parameterized loss now uses
+/// this shared validator instead of repeating the incomplete check.
+fn finite_positive(name: &str, value: f64) -> CoreResult<f64> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(CoreError::InvalidInput(format!(
+            "{name} must be finite and positive, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
+/// Validate a shape parameter (e.g. Barron's `alpha`) that is used in
+/// `powf`/exponentiation but is not required to be positive — only finite.
+fn finite(name: &str, value: f64) -> CoreResult<f64> {
+    if !value.is_finite() {
+        return Err(CoreError::InvalidInput(format!(
+            "{name} must be finite, got {value}"
+        )));
+    }
+    Ok(value)
+}
+
 /// Trait for robust loss functions used in nonlinear least squares optimization.
 ///
 /// A loss function transforms the squared residual `s = ||r||²` into a robust cost `ρ(s)`
@@ -187,18 +216,21 @@ impl LossFunction for L2Loss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = 2√s
-/// ρ'(s) = 1/√s
-/// ρ''(s) = -1/(2s^(3/2))
+/// ρ(s) = 2(√(s+ε) - √ε)
+/// ρ'(s) = 1/√(s+ε)
+/// ρ''(s) = -1/(2(s+ε)^(3/2))
 /// ```
 ///
-/// where `s = ||r||²` is the squared residual norm.
+/// where `s = ||r||²` is the squared residual norm and `ε` is a small fixed
+/// smoothing constant so the curve is smooth (C∞) at `s = 0`, matching true
+/// L1 (`ρ(s) = 2√s`) for `s ≫ ε` (ISSUE-0011).
 ///
 /// # Properties
 ///
 /// - **Convex**: Globally optimal solution
 /// - **Moderately robust**: Linear growth vs quadratic
-/// - **Unstable at zero**: Derivative undefined at s=0
+/// - **Smooth at zero**: True L1's infinite slope at s=0 is replaced by a
+///   large but finite derivative, `1/√ε`
 /// - **Median estimator**: Minimizes to median instead of mean
 ///
 /// # Use Cases
@@ -215,7 +247,9 @@ impl LossFunction for L2Loss {
 /// let l1 = L1Loss::new();
 ///
 /// let [rho, rho_prime, _] = l1.evaluate(4.0);
-/// assert!((rho - 4.0).abs() < 1e-10);  // ρ(4) = 2√4 = 4
+/// // Smoothed near the origin (ISSUE-0011), so this matches true L1
+/// // (ρ(4) = 2√4 = 4) only up to the smoothing scale, not to machine precision.
+/// assert!((rho - 4.0).abs() < 1e-5);
 /// assert!((rho_prime - 0.5).abs() < 1e-10);  // ρ'(4) = 1/√4 = 0.5
 /// ```
 #[derive(Debug, Clone, Copy)]
@@ -234,18 +268,27 @@ impl Default for L1Loss {
     }
 }
 
+/// Smoothing scale for [`L1Loss`]/[`LpNormLoss`] near `s = 0`, in squared-
+/// residual units — see the "ISSUE-0011" note on `L1Loss::evaluate`.
+const ORIGIN_SMOOTHING_EPS: f64 = 1e-12;
+
 impl LossFunction for L1Loss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        if s < f64::EPSILON {
-            // Near zero: use L2 to avoid singularity
-            return [s, 1.0, 0.0];
-        }
-        let sqrt_s = s.sqrt();
+        // ISSUE-0011: the previous `if s < f64::EPSILON { [s,1.0,0.0] }`
+        // guard spliced in the *unrelated* L2 branch, whose value/derivative
+        // don't match `2√s`/`1/√s` just outside the guard — an ~8-order-of-
+        // magnitude jump right at the boundary, well inside the residual
+        // range a converging solve passes through. A single Charbonnier-
+        // style shifted formula, smooth for every `s ≥ 0` with no branch to
+        // mismatch, replaces it: `ρ(s) = 2(√(s+ε) - √ε)` is exactly `2√s`
+        // for `s ≫ ε` and finite (not the true L1's infinite slope) at
+        // `s = 0`, where `ε` only keeps the curve C∞.
+        let shifted = (s + ORIGIN_SMOOTHING_EPS).sqrt();
         [
-            2.0 * sqrt_s,              // ρ(s) = 2√s
-            1.0 / sqrt_s,              // ρ'(s) = 1/√s
-            -1.0 / (2.0 * s * sqrt_s), // ρ''(s) = -1/(2s√s)
+            2.0 * (shifted - ORIGIN_SMOOTHING_EPS.sqrt()), // ρ(s) = 2(√(s+ε) - √ε)
+            1.0 / shifted,                                 // ρ'(s) = 1/√(s+ε)
+            -0.5 / (shifted * shifted * shifted),          // ρ''(s) = -1/(2(s+ε)^1.5)
         ]
     }
 }
@@ -339,11 +382,7 @@ impl HuberLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(HuberLoss {
             scale,
             scale2: scale * scale,
@@ -389,7 +428,7 @@ impl LossFunction for HuberLoss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = (δ²/2) * log(1 + s/δ²)
+/// ρ(s) = δ² * log(1 + s/δ²)
 ///
 /// ρ'(s) = 1 / (1 + s/δ²)
 ///
@@ -429,12 +468,12 @@ impl LossFunction for HuberLoss {
 ///
 /// // Small residual: ||r||² = 0.5
 /// let [rho, rho_prime, _] = cauchy.evaluate(0.5);
-/// // ρ ≈ 0.47, slightly less than 0.5 (mild downweighting)
+/// // ρ ≈ 0.48, slightly less than 0.5 (mild downweighting)
 /// // ρ' ≈ 0.92, close to 1.0 (near full weight)
 ///
 /// // Large residual: ||r||² = 100.0
 /// let [rho, rho_prime, _] = cauchy.evaluate(100.0);
-/// // ρ ≈ 8.0, logarithmic growth (much less than 100)
+/// // ρ ≈ 16.6, logarithmic growth (much less than 100)
 /// // ρ' ≈ 0.05, heavily downweighted (5% of original)
 /// # Ok(())
 /// # }
@@ -471,11 +510,7 @@ impl CauchyLoss {
     /// # example().unwrap();
     /// ```
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(CauchyLoss {
             scale2,
@@ -500,10 +535,19 @@ impl LossFunction for CauchyLoss {
         let inv = 1.0 / sum; // 1 / (1 + s/δ²)
 
         // Note: sum and inv are always positive, assuming s ≥ 0
+        //
+        // ISSUE-0005 / GH-57: ρ must be the antiderivative of the returned
+        // ρ'/ρ'' — the standard Ceres/g2o Cauchy normalization is
+        // ρ(s) = δ²·ln(1+s/δ²) (no extra 1/2), which is exactly what
+        // differentiating [inv, -c·inv²] below already assumes. The previous
+        // `/2.0` here made ρ half of what ρ'/ρ'' implied, so the corrector's
+        // reported cost was internally inconsistent (a global rescale of ρ
+        // does not change the Gauss-Newton step, so this only cost the
+        // solver extra iterations rather than a wrong optimum).
         [
-            self.scale2 * sum.ln() / 2.0, // ρ(s) = (δ²/2) * ln(1 + s/δ²)
-            inv.max(f64::MIN),            // ρ'(s) = 1 / (1 + s/δ²)
-            -self.c * (inv * inv),        // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
+            self.scale2 * sum.ln(), // ρ(s) = δ² * ln(1 + s/δ²)
+            inv.max(f64::MIN),      // ρ'(s) = 1 / (1 + s/δ²)
+            -self.c * (inv * inv),  // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
         ]
     }
 }
@@ -518,8 +562,8 @@ impl LossFunction for CauchyLoss {
 ///
 /// ```text
 /// ρ(s) = c² * (|x|/c - ln(1 + |x|/c))
-/// ρ'(s) = |x| / (c + |x|)
-/// ρ''(s) = sign(x) * c / ((c + |x|)²√s)
+/// ρ'(s) = c / (2(c + |x|))
+/// ρ''(s) = -c / (4|x|(c + |x|)²)
 /// ```
 ///
 /// where `c` is the scale parameter, `s = ||r||²`, and `x = √s = ||r||`.
@@ -574,11 +618,7 @@ impl FairLoss {
     ///
     /// `Ok(FairLoss)` if scale > 0, otherwise an error
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(FairLoss { scale })
     }
 }
@@ -590,18 +630,18 @@ impl LossFunction for FairLoss {
             return [s, 1.0, 0.0];
         }
 
-        let x = s.sqrt(); // ||r||
+        let x = s.sqrt(); // ||r|| = √s
         let abs_x = x.abs();
         let c_plus_x = self.scale + abs_x;
 
         // ρ(s) = c² * (|x|/c - ln(1 + |x|/c))
         let rho = self.scale * self.scale * (abs_x / self.scale - (1.0 + abs_x / self.scale).ln());
 
-        // ρ'(s) = |x| / (c + |x|) * (1 / 2|x|) = 1 / (2(c + |x|))
-        let rho_prime = 0.5 / c_plus_x;
+        // dρ/ds = dρ/dx * dx/ds, x = √s: ρ'(s) = c / (2(c + |x|))
+        let rho_prime = self.scale / (2.0 * c_plus_x);
 
-        // ρ''(s) = -1 / (4s(c + |x|)²)
-        let rho_double_prime = -1.0 / (4.0 * s * c_plus_x * c_plus_x);
+        // ρ''(s) = -c / (4|x|(c + |x|)²)
+        let rho_double_prime = -self.scale / (4.0 * abs_x * c_plus_x * c_plus_x);
 
         [rho, rho_prime, rho_double_prime]
     }
@@ -662,11 +702,7 @@ impl GemanMcClureLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(GemanMcClureLoss { c: 1.0 / scale2 })
     }
@@ -696,24 +732,29 @@ impl LossFunction for GemanMcClureLoss {
 ///
 /// # Mathematical Definition
 ///
-/// With `s = ||r||²` and `scale = 2Φ/(Φ+s)`:
+/// With `s = ||r||²`:
 ///
 /// ```text
-/// s ≤ Φ:  ρ(s) = s,  ρ'(s) = 1,  ρ''(s) = 0                    (inlier: plain LS)
-/// s > Φ:  ρ(s) = scale²·s,  ρ'(s) = 4Φ²(Φ−s)/(Φ+s)³,
-///         ρ''(s) = −8Φ²(2Φ−s)/(Φ+s)⁴
+/// s ≤ Φ:  ρ(s) = s,    ρ'(s) = 1,  ρ''(s) = 0     (inlier: plain LS)
+/// s > Φ:  ρ(s) = Φ,    ρ'(s) = 0,  ρ''(s) = 0      (outlier: saturating plateau)
 /// ```
 ///
-/// This mirrors g2o's `RobustKernelDCS` (`_delta` used as Φ) term for term, so
-/// χ² values crossing this backend agree with a g2o backend on the same graph.
+/// # Why this differs from g2o's `RobustKernelDCS`
 ///
-/// # Negative weights
-///
-/// Past `s = Φ` the effective weight `ρ'(s)` goes *negative* — DCS suppresses
-/// outliers harder than any saturating kernel. The [`Corrector`](crate::core::corrector::Corrector)
-/// clamps `√ρ'` at zero there, so such blocks contribute nothing to the step
-/// (like Tukey's flat region) while their cost `½ρ(s)` is still counted.
-/// DCS is the first kernel in this module with that property.
+/// g2o's own DCS term is `ρ(s) = scale²·s` with `scale = 2Φ/(Φ+s)`, which
+/// keeps *declining* toward 0 past `s = Φ` rather than saturating — but g2o
+/// applies it through its own explicit information-matrix reweighting, not
+/// through a generic square-root [`Corrector`](crate::core::corrector::Corrector).
+/// Run through this crate's Ceres/Triggs-style corrector, `ρ'(s) < 0` past
+/// `s = Φ` gets clamped to zero (the corrected residual and Jacobian both
+/// become exactly zero, the same "no gradient" treatment as Tukey's flat
+/// outlier region) — but g2o's declining `ρ(s)` would keep changing the
+/// *reported* cost with state while contributing zero to the model the
+/// optimizer actually descends, so actual and predicted reduction disagree
+/// past the threshold. Freezing `ρ` at its peak value `Φ` once `ρ'` would go
+/// negative keeps the reported cost consistent with the zero-gradient model:
+/// a genuine saturating plateau, matching Tukey/Geman-McClure in kind, not a
+/// cost that silently keeps moving with no corresponding gradient.
 ///
 /// # Scale Parameter Selection
 ///
@@ -749,11 +790,7 @@ impl DcsLoss {
     ///
     /// * `phi` - Free parameter Φ (must be positive; 1.0 is the paper default)
     pub fn new(phi: f64) -> CoreResult<Self> {
-        if phi <= 0.0 || !phi.is_finite() {
-            return Err(CoreError::InvalidInput(
-                "DCS phi must be finite and positive".to_string(),
-            ));
-        }
+        let phi = finite_positive("phi", phi)?;
         Ok(DcsLoss { phi })
     }
 }
@@ -761,18 +798,13 @@ impl DcsLoss {
 impl LossFunction for DcsLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        let scale = (2.0 * self.phi) / (self.phi + s);
-        if scale >= 1.0 {
+        if s <= self.phi {
             // s ≤ Φ: unscaled least squares.
             [s, 1.0, 0.0]
         } else {
-            let phi_sqr = self.phi * self.phi;
-            let denom = self.phi + s;
-            [
-                scale * s * scale,
-                (4.0 * phi_sqr * (self.phi - s)) / (denom * denom * denom),
-                -(8.0 * phi_sqr * (2.0 * self.phi - s)) / (denom * denom * denom * denom),
-            ]
+            // s > Φ: saturating plateau at the inlier/outlier boundary value
+            // — see "Why this differs from g2o's RobustKernelDCS" above.
+            [self.phi, 0.0, 0.0]
         }
     }
 }
@@ -834,11 +866,7 @@ impl WelschLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         let scale2 = scale * scale;
         Ok(WelschLoss {
             scale2,
@@ -871,7 +899,7 @@ impl LossFunction for WelschLoss {
 /// ```text
 /// ρ(s) = c²/6 * (1 - (1 - (x/c)²)³)
 /// ρ'(s) = (1/2) * (1 - (x/c)²)²
-/// ρ''(s) = -(x/c²) * (1 - (x/c)²)
+/// ρ''(s) = -(1 - (x/c)²) / c²
 /// ```
 ///
 /// For |x| > c:
@@ -924,11 +952,7 @@ impl TukeyBiweightLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(TukeyBiweightLoss {
             scale,
             scale2: scale * scale,
@@ -953,7 +977,7 @@ impl LossFunction for TukeyBiweightLoss {
             [
                 (self.scale2 / 6.0) * (1.0 - one_minus_ratio2 * one_minus_ratio2_sq), // ρ(s)
                 0.5 * one_minus_ratio2_sq,                                            // ρ'(s)
-                -(ratio / self.scale2) * one_minus_ratio2,                            // ρ''(s)
+                -one_minus_ratio2 / self.scale2, // ρ''(s) = -(1-s/c²)/c²
             ]
         }
     }
@@ -969,9 +993,10 @@ impl LossFunction for TukeyBiweightLoss {
 /// For |x| ≤ πc:
 /// ```text
 /// ρ(s) = c² * (1 - cos(x/c))
-/// ρ'(s) = (1/2) * sin(x/c)
-/// ρ''(s) = (1/4c) * cos(x/c) / √s
+/// ρ'(s) = c * sin(x/c) / (2x)
+/// ρ''(s) = (x*cos(x/c) - c*sin(x/c)) / (4x³)
 /// ```
+/// with the analytic limits `ρ'(0) = 1/2` and `ρ''(0) = -1/(12c²)` at `x = 0`.
 ///
 /// For |x| > πc:
 /// ```text
@@ -1024,11 +1049,7 @@ impl AndrewsWaveLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(AndrewsWaveLoss {
             scale,
             scale2: scale * scale,
@@ -1045,15 +1066,27 @@ impl LossFunction for AndrewsWaveLoss {
         if x > self.threshold {
             // Complete suppression beyond π*c
             [2.0 * self.scale2, 0.0, 0.0]
+        } else if s < 1e-6 {
+            // ρ'(s) = c·sin(x/c)/(2x) and ρ''(s) = (x·cos(x/c)-c·sin(x/c))/(4x³)
+            // both hit 0/0 as x→0 and lose precision to cancellation well
+            // before that (two O(x) terms agreeing to O(x³)); use the Taylor
+            // series in s near the origin instead. Matches the closed form's
+            // own analytic limit: ρ'(0) = 1/2, not the 0 the removable
+            // singularity naively returns.
+            let rho = self.scale2 * (1.0 - (x / self.scale).cos());
+            let rho_prime = 0.5 - s / (12.0 * self.scale2);
+            let rho_double_prime =
+                -1.0 / (12.0 * self.scale2) + s / (120.0 * self.scale2 * self.scale2);
+            [rho, rho_prime, rho_double_prime]
         } else {
             let arg = x / self.scale;
             let sin_val = arg.sin();
             let cos_val = arg.cos();
 
             [
-                self.scale2 * (1.0 - cos_val),                       // ρ(s)
-                0.5 * sin_val,                                       // ρ'(s)
-                (0.25 / self.scale) * cos_val / x.max(f64::EPSILON), // ρ''(s)
+                self.scale2 * (1.0 - cos_val),                            // ρ(s)
+                self.scale * sin_val / (2.0 * x),                         // ρ'(s) = c·sin(x/c)/(2x)
+                (x * cos_val - self.scale * sin_val) / (4.0 * x * x * x), // ρ''(s)
             ]
         }
     }
@@ -1113,11 +1146,7 @@ impl RamsayEaLoss {
     ///
     /// * `scale` - The scale parameter a (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(RamsayEaLoss {
             scale,
             inv_scale2: 1.0 / (scale * scale),
@@ -1209,11 +1238,7 @@ impl TrimmedMeanLoss {
     ///
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale needs to be larger than zero".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
         Ok(TrimmedMeanLoss {
             scale2: scale * scale,
         })
@@ -1239,12 +1264,16 @@ impl LossFunction for TrimmedMeanLoss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = |x|^p = s^(p/2)
-/// ρ'(s) = (p/2) * s^(p/2-1)
-/// ρ''(s) = (p/2) * (p/2-1) * s^(p/2-2)
+/// ρ(s) = (s+ε)^(p/2) - ε^(p/2)
+/// ρ'(s) = (p/2) * (s+ε)^(p/2-1)
+/// ρ''(s) = (p/2) * (p/2-1) * (s+ε)^(p/2-2)
 /// ```
 ///
-/// where `p` is the norm parameter, `x = √s`, and `s = ||r||²`.
+/// where `p` is the norm parameter, `s = ||r||²`, and `ε` is a small fixed
+/// smoothing constant so the curve is smooth (C∞) at `s = 0` for every `p`,
+/// matching true `|x|^p` for `s ≫ ε` (ISSUE-0011: the previous `s < f64::EPSILON`
+/// guard spliced in an unrelated L2 branch with a large value/derivative
+/// jump right at the boundary).
 ///
 /// # Properties
 ///
@@ -1288,9 +1317,7 @@ impl LpNormLoss {
     ///
     /// * `p` - The norm parameter (0 < p ≤ 2 for practical use)
     pub fn new(p: f64) -> CoreResult<Self> {
-        if p <= 0.0 {
-            return Err(CoreError::InvalidInput("p must be positive".to_string()));
-        }
+        let p = finite_positive("p", p)?;
         Ok(LpNormLoss { p })
     }
 }
@@ -1298,18 +1325,18 @@ impl LpNormLoss {
 impl LossFunction for LpNormLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        if s < f64::EPSILON {
-            return [s, 1.0, 0.0];
-        }
-
+        // ISSUE-0011: same fix as `L1Loss` (its `p=1` special case) — a
+        // single shifted power, smooth for every `s ≥ 0`, replacing the old
+        // `s < f64::EPSILON` splice into the unrelated `[s,1,0]` L2 branch.
+        let shifted = s + ORIGIN_SMOOTHING_EPS;
         let exp_rho = self.p / 2.0;
         let exp_rho_prime = exp_rho - 1.0;
         let exp_rho_double_prime = exp_rho_prime - 1.0;
 
         [
-            s.powf(exp_rho),                                        // ρ(s) = s^(p/2)
-            exp_rho * s.powf(exp_rho_prime),                        // ρ'(s) = (p/2) * s^(p/2-1)
-            exp_rho * exp_rho_prime * s.powf(exp_rho_double_prime), // ρ''(s)
+            shifted.powf(exp_rho) - ORIGIN_SMOOTHING_EPS.powf(exp_rho), // ρ(s) = (s+ε)^(p/2) - ε^(p/2)
+            exp_rho * shifted.powf(exp_rho_prime), // ρ'(s) = (p/2) * (s+ε)^(p/2-1)
+            exp_rho * exp_rho_prime * shifted.powf(exp_rho_double_prime), // ρ''(s)
         ]
     }
 }
@@ -1379,7 +1406,6 @@ impl LossFunction for LpNormLoss {
 #[derive(Debug, Clone)]
 pub struct BarronGeneralLoss {
     alpha: f64,
-    scale: f64,
     scale2: f64,
 }
 
@@ -1391,14 +1417,10 @@ impl BarronGeneralLoss {
     /// * `alpha` - The shape parameter (controls robustness)
     /// * `scale` - The scale parameter c (must be positive)
     pub fn new(alpha: f64, scale: f64) -> CoreResult<Self> {
-        if scale <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "scale must be positive".to_string(),
-            ));
-        }
+        let scale = finite_positive("scale", scale)?;
+        let alpha = finite("alpha", alpha)?;
         Ok(BarronGeneralLoss {
             alpha,
-            scale,
             scale2: scale * scale,
         })
     }
@@ -1407,39 +1429,44 @@ impl BarronGeneralLoss {
 impl LossFunction for BarronGeneralLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        // Handle special case α ≈ 0 (Cauchy loss)
+        let c2 = self.scale2;
+
+        // α → 0 limit (Barron 2019, eq. 13): ρ(s) = ln(s/(2c²) + 1).
+        // This is the α → 0 limit of the general branch below, taken via
+        // L'Hôpital as `(b/α)(inner^(α/2)-1) → ln(inner)`; evaluating the
+        // general formula directly at α = 0 is a 0/0 indeterminate form.
         if self.alpha.abs() < 1e-6 {
-            let denom = 1.0 + s / self.scale2;
-            let inv = 1.0 / denom;
-            return [
-                (self.scale2 / 2.0) * denom.ln(),
-                inv.max(f64::MIN),
-                -inv * inv / self.scale2,
-            ];
+            let inner = s / (2.0 * c2) + 1.0;
+            let rho = inner.ln();
+            let rho_prime = 1.0 / (2.0 * c2 * inner);
+            let rho_double_prime = -1.0 / (4.0 * c2 * c2 * inner * inner);
+            return [rho, rho_prime, rho_double_prime];
         }
 
-        // Handle special case α ≈ 2 (L2 loss)
+        // α → 2 limit: ordinary (scaled) L2, ρ(s) = s/(2c²). The general
+        // branch's `b = |α-2|` denominator vanishes here, so this must be
+        // taken as a limit rather than evaluated directly.
         if (self.alpha - 2.0).abs() < 1e-6 {
-            return [s, 1.0, 0.0];
+            return [s / (2.0 * c2), 1.0 / (2.0 * c2), 0.0];
         }
 
-        // General case
-        let x = s.sqrt();
-        let normalized = x / self.scale;
-        let normalized2 = normalized * normalized;
+        // General case (Barron 2019, eq. 8, x² = s):
+        //   b = |α - 2|,  inner(s) = s/(c²·b) + 1
+        //   ρ(s)   = (b/α) · (inner^(α/2) - 1)
+        //   ρ'(s)  = inner^(α/2 - 1) / (2c²)
+        //   ρ''(s) = sign(α - 2) · inner^(α/2 - 2) / (4c⁴)
+        // (ρ'/ρ'' are the exact derivatives of ρ above w.r.t. s — the `b`
+        // factor cancels in ρ'; nonnegative and finite for every α, unlike
+        // the previous `|α|`-based normalization, which could go negative
+        // for α < 0.)
+        let b = (self.alpha - 2.0).abs();
+        let inner = s / (c2 * b) + 1.0;
+        let half_alpha = self.alpha / 2.0;
 
-        let inner = self.alpha.abs() / 2.0 * normalized2 + 1.0;
-        let power = inner.powf(self.alpha / 2.0);
-
-        // ρ(s) = (|α|/c²) * (power - 1)
-        let rho = (self.alpha.abs() / self.scale2) * (power - 1.0);
-
-        // ρ'(s) = (1/2) * inner^(α/2 - 1)
-        let rho_prime = 0.5 * inner.powf(self.alpha / 2.0 - 1.0);
-
-        // ρ''(s) = (α - 2)/(4c²) * inner^(α/2 - 2)
-        let rho_double_prime =
-            (self.alpha - 2.0) / (4.0 * self.scale2) * inner.powf(self.alpha / 2.0 - 2.0);
+        let rho = (b / self.alpha) * (inner.powf(half_alpha) - 1.0);
+        let rho_prime = inner.powf(half_alpha - 1.0) / (2.0 * c2);
+        let sign = if self.alpha > 2.0 { 1.0 } else { -1.0 };
+        let rho_double_prime = sign * inner.powf(half_alpha - 2.0) / (4.0 * c2 * c2);
 
         [rho, rho_prime, rho_double_prime]
     }
@@ -1521,11 +1548,7 @@ impl TDistributionLoss {
     /// - ν = 3.0-4.0: More robust to outliers
     /// - ν = 10.0: Less aggressive, closer to Gaussian
     pub fn new(nu: f64) -> CoreResult<Self> {
-        if nu <= 0.0 {
-            return Err(CoreError::InvalidInput(
-                "degrees of freedom must be positive".to_string(),
-            ));
-        }
+        let nu = finite_positive("nu", nu)?;
         Ok(TDistributionLoss {
             nu,
             half_nu_plus_1: (nu + 1.0) / 2.0,
@@ -1650,7 +1673,6 @@ impl AdaptiveBarronLoss {
         AdaptiveBarronLoss {
             inner: BarronGeneralLoss {
                 alpha: 0.0,
-                scale: 1.0,
                 scale2: 1.0,
             },
         }
@@ -1792,11 +1814,80 @@ mod tests {
         assert!(rho_prime.is_finite());
         assert!(rho_double_prime.is_finite());
 
-        // Test at s = 4.0 (√s = 2.0, ρ(s) = 2√s = 4.0)
+        // Test at s = 4.0 (√s = 2.0, ρ(s) = 2√s = 4.0). ISSUE-0011: rho is
+        // now smoothed near the origin, so it matches true L1 only up to
+        // the smoothing scale, not to `EPSILON`, even at s=4.
         let [rho, rho_prime, _] = loss.evaluate(4.0);
-        assert!((rho - 4.0).abs() < EPSILON); // ρ(s) = 2√s = 2*2 = 4
+        assert!((rho - 4.0).abs() < 1e-5); // ρ(s) = 2√s = 2*2 = 4
         assert!((rho_prime - 0.5).abs() < EPSILON); // ρ'(s) = 1/√s = 1/2 = 0.5
 
+        Ok(())
+    }
+
+    /// ISSUE-0005 / GH-57 regression: `rho'`/`rho''` must be the actual
+    /// derivatives of the loss's own returned `rho`, for Cauchy, Fair, Tukey,
+    /// and Andrews — table-driven against central differences over
+    /// log-spaced `s`, away from each loss's own removable-singularity guard
+    /// (`s < f64::EPSILON` for Fair, `s < 1e-6` for Andrews — ISSUE-0011
+    /// covers the L1/Lp version of that guard separately).
+    #[test]
+    fn test_robust_loss_derivative_contract_table() -> TestResult {
+        let losses: Vec<(&str, Box<dyn LossFunction>, f64)> = vec![
+            ("cauchy", Box::new(CauchyLoss::new(2.3849)?), 1e-3),
+            ("fair", Box::new(FairLoss::new(1.3999)?), 1e-3),
+            ("tukey", Box::new(TukeyBiweightLoss::new(4.6851)?), 1e-3),
+            ("andrews", Box::new(AndrewsWaveLoss::new(1.339)?), 1e-3),
+        ];
+
+        for (name, loss, min_s) in losses {
+            for &s in &[min_s, 0.1, 0.5, 1.0, 2.0, 4.0, 10.0, 25.0, 50.0] {
+                let [rho, rho_prime, rho_double_prime] = loss.evaluate(s);
+                assert!(
+                    rho.is_finite() && rho_prime.is_finite() && rho_double_prime.is_finite(),
+                    "{name} s={s}: non-finite output"
+                );
+
+                let (num_prime, num_double_prime) = numerical_derivative(loss.as_ref(), s, 1e-5);
+                let prime_err = (rho_prime - num_prime).abs();
+                let double_prime_err = (rho_double_prime - num_double_prime).abs();
+                assert!(
+                    prime_err < 1e-3 * (1.0 + rho_prime.abs()),
+                    "{name} s={s}: rho'={rho_prime} vs numeric {num_prime} (err={prime_err})"
+                );
+                assert!(
+                    double_prime_err < 1e-2 * (1.0 + rho_double_prime.abs()),
+                    "{name} s={s}: rho''={rho_double_prime} vs numeric {num_double_prime} \
+                     (err={double_prime_err})"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Andrews' removable singularity at `s=0`: the code's own small-s
+    /// series branch must agree with the closed-form branch just outside its
+    /// threshold, and both must agree with the analytic limits `rho'(0)=1/2`,
+    /// `rho''(0)=-1/(12c²)`.
+    #[test]
+    fn test_andrews_wave_loss_small_s_continuity() -> TestResult {
+        let scale = 1.339;
+        let loss = AndrewsWaveLoss::new(scale)?;
+
+        let [_, rho_prime_0, rho_double_prime_0] = loss.evaluate(0.0);
+        assert!((rho_prime_0 - 0.5).abs() < 1e-12);
+        assert!((rho_double_prime_0 - (-1.0 / (12.0 * scale * scale))).abs() < 1e-12);
+
+        for &s in &[1e-7, 1e-6, 1e-5, 1e-4] {
+            let [_, rho_prime, rho_double_prime] = loss.evaluate(s);
+            assert!(
+                (rho_prime - 0.5).abs() < 1e-4,
+                "s={s}: rho'={rho_prime} far from the s=0 limit 0.5"
+            );
+            assert!(
+                rho_double_prime.is_finite(),
+                "s={s}: rho'' must stay finite near the branch boundary"
+            );
+        }
         Ok(())
     }
 
@@ -1812,7 +1903,7 @@ mod tests {
 
         // Test inlier region (s = 1.0)
         let [_, rho_prime, _] = loss.evaluate(1.0);
-        assert!(rho_prime > 0.2 && rho_prime < 0.25); // ρ'(s) = 1/(2(c+|x|)) where x=1, c≈1.4 → ~0.208
+        assert!(rho_prime > 0.28 && rho_prime < 0.30); // ρ'(s) = c/(2(c+|x|)) where x=1, c≈1.4 → ~0.292
 
         // Test outlier region (s = 100.0)
         let [_, rho_prime_outlier, _] = loss.evaluate(100.0);
@@ -1906,14 +1997,15 @@ mod tests {
     fn test_andrews_wave_loss() -> TestResult {
         let loss = AndrewsWaveLoss::new(1.339)?;
 
-        // Test at s = 0: ρ'(0) = 0.5 * sin(0) = 0
+        // Test at s = 0: ρ'(s) = c·sin(x/c)/(2x) → 1/2 as x→0 (analytic limit
+        // of ρ(s) = c²(1-cos(x/c)) itself, not the 0 a naive 0/0 gives).
         let [rho, rho_prime, _] = loss.evaluate(0.0);
         assert_eq!(rho, 0.0);
-        assert!(rho_prime.abs() < EPSILON); // ρ'(s) = 0.5 * sin(x/c), at s=0: 0
+        assert!((rho_prime - 0.5).abs() < EPSILON);
 
         // Test within threshold (small s where sin(x/c) gives moderate weight)
         let [_, rho_prime_in, _] = loss.evaluate(1.0);
-        assert!(rho_prime_in > 0.33 && rho_prime_in < 0.35); // ~0.3397
+        assert!(rho_prime_in > 0.44 && rho_prime_in < 0.47); // ~0.455
 
         // Test beyond threshold
         let scale = 1.339;
@@ -1973,10 +2065,11 @@ mod tests {
 
     #[test]
     fn test_lp_norm_loss() -> TestResult {
-        // Test L1 (p = 1)
+        // Test L1 (p = 1). ISSUE-0011: smoothed near the origin, so this
+        // matches true L1 (||r||₁ = 2) only up to the smoothing scale.
         let l1 = LpNormLoss::new(1.0)?;
         let [rho_l1, _, _] = l1.evaluate(4.0);
-        assert!((rho_l1 - 2.0).abs() < EPSILON); // ||r||₁ = 2
+        assert!((rho_l1 - 2.0).abs() < 1e-5);
 
         // Test L2 (p = 2)
         let l2 = LpNormLoss::new(2.0)?;
@@ -2001,6 +2094,99 @@ mod tests {
         Ok(())
     }
 
+    /// ISSUE-0011 regression: value and derivative must stay continuous
+    /// across the *old* `s < f64::EPSILON` guard boundary — the previous
+    /// splice into the unrelated L2 branch jumped by orders of magnitude
+    /// right there, for every `p` including L1's own `p=1` special case.
+    #[test]
+    fn test_l1_lp_continuous_across_old_guard_boundary() -> TestResult {
+        // The bug was an ~8-order-of-magnitude *relative* jump right at the
+        // old branch (e.g. L1's rho' went 1.0 -> 6.7e7); check the new
+        // single-formula value/derivative agree within a small relative
+        // tolerance across that same boundary, rather than an absolute one
+        // that would be miscalibrated for small p's steeper local slope.
+        let eps = f64::EPSILON;
+        for p in [0.5, 1.0, 1.5, 2.0] {
+            let loss = LpNormLoss::new(p)?;
+            let below = loss.evaluate(eps / 2.0);
+            let above = loss.evaluate(eps * 2.0);
+            let prime_scale = 1.0 + below[1].abs().max(above[1].abs());
+            assert!(
+                (above[1] - below[1]).abs() < 1e-3 * prime_scale,
+                "p={p}: rho' jumps from {} to {} across the old guard boundary",
+                below[1],
+                above[1]
+            );
+        }
+
+        let l1 = L1Loss::new();
+        let below = l1.evaluate(eps / 2.0);
+        let above = l1.evaluate(eps * 2.0);
+        let prime_scale = 1.0 + below[1].abs().max(above[1].abs());
+        assert!((above[1] - below[1]).abs() < 1e-3 * prime_scale);
+
+        Ok(())
+    }
+
+    /// Sweep `s` geometrically from the origin through the old guard's
+    /// transition region and confirm both value and derivative vary
+    /// smoothly — no discontinuity anywhere — for `p ∈ {0.5, 1, 1.5, 2}`.
+    #[test]
+    fn test_lp_norm_smooth_sweep_through_origin() -> TestResult {
+        for p in [0.5, 1.0, 1.5, 2.0] {
+            let loss = LpNormLoss::new(p)?;
+            let mut prev: Option<[f64; 3]> = None;
+            let mut s = 1e-20;
+            while s < 1.0 {
+                let cur = loss.evaluate(s);
+                assert!(
+                    cur.iter().all(|v| v.is_finite()),
+                    "p={p} s={s}: non-finite output {cur:?}"
+                );
+                if let Some(prev_vals) = prev {
+                    let d_rho = (cur[0] - prev_vals[0]).abs();
+                    assert!(
+                        d_rho < 0.5,
+                        "p={p} s={s}: rho jumped by {d_rho} between geometrically \
+                         adjacent samples (10x apart in s)"
+                    );
+                }
+                prev = Some(cur);
+                s *= 10.0;
+            }
+        }
+        Ok(())
+    }
+
+    /// One-dimensional LM/DogLeg-style check: `Corrector::robust_cost()` is
+    /// exactly what step acceptance compares, so as a residual's magnitude
+    /// crosses the old guard boundary, it must vary continuously with state
+    /// — not jump, the way the previous L2 splice made it.
+    #[test]
+    fn test_l1_robust_cost_continuous_across_guard_boundary() {
+        use crate::core::corrector::Corrector;
+
+        // Fine (20%) steps confined to the immediate neighborhood of the OLD
+        // `s < f64::EPSILON` guard — where the bug actually was — rather
+        // than a coarse sweep across many decades, where cost legitimately
+        // changes a lot per step and isn't a "boundary jump" at all.
+        let loss = L1Loss::new();
+        let eps = f64::EPSILON;
+        let mut prev_cost: Option<f64> = None;
+        let mut s = eps / 8.0;
+        while s < eps * 8.0 {
+            let cost = Corrector::new(&loss, s).robust_cost();
+            if let Some(p) = prev_cost {
+                assert!(
+                    (cost - p).abs() < 1e-8,
+                    "s={s}: robust_cost jumped from {p} to {cost}"
+                );
+            }
+            prev_cost = Some(cost);
+            s *= 1.2;
+        }
+    }
+
     #[test]
     fn test_barron_general_loss_special_cases() -> TestResult {
         // α = 0 (Cauchy-like)
@@ -2009,11 +2195,11 @@ mod tests {
         let [_, rho_prime_large, _] = cauchy.evaluate(100.0);
         assert!(rho_prime_large < rho_prime_small);
 
-        // α = 2 (L2)
+        // α = 2 (L2, scaled): ρ(s) = s/(2c²)
         let l2 = BarronGeneralLoss::new(2.0, 1.0)?;
         let [rho, rho_prime, rho_double_prime] = l2.evaluate(4.0);
-        assert!((rho - 4.0).abs() < EPSILON);
-        assert!((rho_prime - 1.0).abs() < EPSILON);
+        assert!((rho - 2.0).abs() < EPSILON);
+        assert!((rho_prime - 0.5).abs() < EPSILON);
         assert!(rho_double_prime.abs() < EPSILON);
 
         // α = 1 (Charbonnier-like)
@@ -2028,6 +2214,79 @@ mod tests {
         assert!(rho_prime_large < rho_prime_small); // Redescending behavior
         assert!(rho_prime_large < 0.1); // Strong suppression
 
+        Ok(())
+    }
+
+    /// ISSUE-0006 regression: `BarronGeneralLoss`'s returned `rho'`/`rho''`
+    /// must be the actual derivatives of its own returned `rho`, `rho(0)=0`,
+    /// and cost must stay nonnegative for every alpha — including negative
+    /// alpha, where the previous `|α|`-normalized formula went negative.
+    #[test]
+    fn test_barron_general_loss_derivative_contract() -> TestResult {
+        for alpha in [2.0, 1.0, 0.5, 0.0, -1.0, -2.0, -10.0, -100.0] {
+            let loss = BarronGeneralLoss::new(alpha, 1.0)?;
+
+            let [rho0, _, _] = loss.evaluate(0.0);
+            assert!(
+                rho0.abs() < 1e-9,
+                "alpha={alpha}: rho(0) = {rho0}, expected 0"
+            );
+
+            for &s in &[1e-3, 0.5, 1.0, 4.0, 25.0, 100.0] {
+                let [rho, rho_prime, rho_double_prime] = loss.evaluate(s);
+                assert!(rho.is_finite() && rho_prime.is_finite() && rho_double_prime.is_finite());
+                assert!(
+                    rho >= -1e-9,
+                    "alpha={alpha} s={s}: rho={rho} is negative (ISSUE-0006 reproduction)"
+                );
+
+                let (num_prime, num_double_prime) = numerical_derivative(&loss, s, 1e-4);
+                let prime_err = (rho_prime - num_prime).abs();
+                let double_prime_err = (rho_double_prime - num_double_prime).abs();
+                assert!(
+                    prime_err < 1e-3 * (1.0 + rho_prime.abs()),
+                    "alpha={alpha} s={s}: rho'={rho_prime} vs numeric {num_prime}"
+                );
+                assert!(
+                    double_prime_err < 1e-2 * (1.0 + rho_double_prime.abs()),
+                    "alpha={alpha} s={s}: rho''={rho_double_prime} vs numeric {num_double_prime}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The general branch must agree with the special-cased α→0 and α→2
+    /// limits just outside the 1e-6 switch-over threshold, in both value and
+    /// first derivative.
+    #[test]
+    fn test_barron_general_loss_continuous_at_shape_limits() -> TestResult {
+        let scale = 1.7;
+        let s = 3.0;
+
+        for &(alpha, name) in &[(0.0, "alpha=0"), (2.0, "alpha=2")] {
+            let at_limit = BarronGeneralLoss::new(alpha, scale)?.evaluate(s);
+            for delta in [1e-5, 1e-4, 1e-3] {
+                let near = BarronGeneralLoss::new(alpha + delta, scale)?.evaluate(s);
+                let rho_err = (at_limit[0] - near[0]).abs();
+                let prime_err = (at_limit[1] - near[1]).abs();
+                assert!(
+                    rho_err < 10.0 * delta,
+                    "{name}: rho discontinuous approaching from +{delta}: {rho_err}"
+                );
+                assert!(
+                    prime_err < 10.0 * delta,
+                    "{name}: rho' discontinuous approaching from +{delta}: {prime_err}"
+                );
+
+                let near_below = BarronGeneralLoss::new(alpha - delta, scale)?.evaluate(s);
+                let rho_err_below = (at_limit[0] - near_below[0]).abs();
+                assert!(
+                    rho_err_below < 10.0 * delta,
+                    "{name}: rho discontinuous approaching from -{delta}: {rho_err_below}"
+                );
+            }
+        }
         Ok(())
     }
 
@@ -2055,6 +2314,49 @@ mod tests {
         assert!(BarronGeneralLoss::new(1.0, 1.0).is_ok());
 
         Ok(())
+    }
+
+    /// ISSUE-0007 regression: every parameterized-loss constructor must
+    /// reject `NaN` and `+infinity` (not just non-positive finite values) —
+    /// a bare `<= 0.0` guard lets both through, since every comparison with
+    /// `NaN` is `false`. `-infinity` is finite-checked the same way as any
+    /// other negative value (rejected by the positivity check).
+    #[test]
+    fn test_constructor_rejects_nonfinite_scale_parameters() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5, 0.0] {
+            assert!(HuberLoss::new(bad).is_err(), "Huber({bad})");
+            assert!(CauchyLoss::new(bad).is_err(), "Cauchy({bad})");
+            assert!(FairLoss::new(bad).is_err(), "Fair({bad})");
+            assert!(GemanMcClureLoss::new(bad).is_err(), "GemanMcClure({bad})");
+            assert!(DcsLoss::new(bad).is_err(), "Dcs({bad})");
+            assert!(WelschLoss::new(bad).is_err(), "Welsch({bad})");
+            assert!(TukeyBiweightLoss::new(bad).is_err(), "Tukey({bad})");
+            assert!(AndrewsWaveLoss::new(bad).is_err(), "Andrews({bad})");
+            assert!(RamsayEaLoss::new(bad).is_err(), "Ramsay({bad})");
+            assert!(TrimmedMeanLoss::new(bad).is_err(), "TrimmedMean({bad})");
+            assert!(LpNormLoss::new(bad).is_err(), "Lp({bad})");
+            assert!(TDistributionLoss::new(bad).is_err(), "TDistribution({bad})");
+            assert!(
+                BarronGeneralLoss::new(1.0, bad).is_err(),
+                "Barron(1,{bad}) scale"
+            );
+            assert!(
+                AdaptiveBarronLoss::new(1.0, bad).is_err(),
+                "AdaptiveBarron(1,{bad})"
+            );
+        }
+        // Barron's alpha is finite-only (no positivity requirement).
+        assert!(BarronGeneralLoss::new(f64::NAN, 1.0).is_err());
+        assert!(BarronGeneralLoss::new(f64::INFINITY, 1.0).is_err());
+        assert!(BarronGeneralLoss::new(f64::NEG_INFINITY, 1.0).is_err());
+        // A negative finite alpha is a valid shape parameter.
+        assert!(BarronGeneralLoss::new(-2.0, 1.0).is_ok());
+
+        // Every valid finite parameter must still construct successfully.
+        assert!(HuberLoss::new(1.345).is_ok());
+        assert!(CauchyLoss::new(2.3849).is_ok());
+        assert!(DcsLoss::new(1.0).is_ok());
+        assert!(TDistributionLoss::new(5.0).is_ok());
     }
 
     #[test]
@@ -2188,12 +2490,31 @@ mod tests {
             // Sanity at the origin: zero cost and a sane (unit-or-less,
             // non-negative) weight. Conventions differ per kernel (Welsch
             // uses ρ'(0) = 1/2), so only the bounds are pinned here.
+            //
+            // L1/Lp (p<2) are the documented exception (ISSUE-0011): their
+            // *true* ρ is genuinely singular at s=0 (ρ'(s)=1/√s → ∞), so any
+            // faithful smoothing must trade off between a bounded weight at
+            // the exact origin and staying close to the true loss for
+            // ordinary (non-infinitesimal) residuals. This module keeps the
+            // smoothing scale tiny — matching true L1/Lp everywhere but a
+            // sliver near s=0 — which is the right choice for a robust loss
+            // (its whole point is its shape at moderate/large residuals),
+            // at the cost of a large-but-finite ρ'(0) instead of a "sane"
+            // one; the origin weight is still finite and positive, never
+            // NaN/Inf, which is what the corrector actually depends on.
             let [rho, rho_prime, _] = loss.evaluate(0.0);
             assert_eq!(rho, 0.0, "{name}: ρ(0) must be 0");
-            assert!(
-                (0.0..=1.0).contains(&rho_prime),
-                "{name}: ρ'(0) must be a sane weight, got {rho_prime}"
-            );
+            if name == "l1" || name == "lp" {
+                assert!(
+                    rho_prime.is_finite() && rho_prime > 0.0,
+                    "{name}: ρ'(0) must be finite and positive, got {rho_prime}"
+                );
+            } else {
+                assert!(
+                    (0.0..=1.0).contains(&rho_prime),
+                    "{name}: ρ'(0) must be a sane weight, got {rho_prime}"
+                );
+            }
             assert_eq!(
                 name.to_lowercase(),
                 name,
@@ -2224,18 +2545,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dcs_matches_g2o_reference_values() -> TestResult {
-        // Hand-computed from g2o's RobustKernelDCS with Φ = 1 at s = 4:
-        // scale = 2/5 = 0.4; ρ = 0.4·4·0.4 = 0.64;
-        // ρ' = 4·(1−4)/125 = −0.096; ρ'' = −8·(2−4)/625 = 0.0256.
+    fn test_dcs_saturates_past_phi_instead_of_declining() -> TestResult {
+        // ISSUE-0010: past s = Φ, ρ must freeze at the peak value Φ (with
+        // ρ' = ρ'' = 0) rather than g2o's own declining ρ(s) = scale²·s —
+        // the latter changes the reported cost while the corrector's
+        // clamped-negative-weight path already contributes zero gradient,
+        // so actual and predicted reduction would silently disagree.
         let dcs = DcsLoss::new(1.0)?;
-        let [rho, rho_prime, rho_double_prime] = dcs.evaluate(4.0);
-        assert!((rho - 0.64).abs() < 1e-12, "ρ(4) = {rho}");
-        assert!((rho_prime + 0.096).abs() < 1e-12, "ρ'(4) = {rho_prime}");
-        assert!(
-            (rho_double_prime - 0.0256).abs() < 1e-12,
-            "ρ''(4) = {rho_double_prime}"
-        );
+        for s in [1.5, 4.0, 100.0, 1e12] {
+            let [rho, rho_prime, rho_double_prime] = dcs.evaluate(s);
+            assert!((rho - 1.0).abs() < 1e-12, "ρ({s}) = {rho}, expected Φ=1");
+            assert_eq!(rho_prime, 0.0, "ρ'({s})");
+            assert_eq!(rho_double_prime, 0.0, "ρ''({s})");
+        }
         Ok(())
     }
 
@@ -2249,11 +2571,14 @@ mod tests {
             assert_eq!(rho_prime, 1.0, "inlier ρ'({s})");
             assert_eq!(rho_double_prime, 0.0, "inlier ρ''({s})");
         }
-        // Far outliers saturate: ρ(s) → 0 as s → ∞, never negative, always
-        // finite — the cost stays bounded like Tukey/Geman-McClure.
+        // Far outliers saturate at Φ exactly — never negative, never
+        // declining back toward 0, always finite.
         let [rho, _, _] = dcs.evaluate(1e12);
         assert!(rho.is_finite() && rho >= 0.0, "saturated ρ = {rho}");
-        assert!(rho < 1e-6, "saturated ρ must vanish, got {rho}");
+        assert!(
+            (rho - 1.0).abs() < 1e-12,
+            "saturated ρ must equal Φ, got {rho}"
+        );
         // Rejects non-positive or non-finite Φ like the other scaled losses.
         assert!(DcsLoss::new(0.0).is_err());
         assert!(DcsLoss::new(-1.0).is_err());

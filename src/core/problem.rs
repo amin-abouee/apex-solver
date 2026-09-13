@@ -365,6 +365,14 @@ impl Problem {
                 "cannot bound component {idx} of a {dof}-DOF variable"
             )));
         }
+        // NaN comparisons are always false, so `lower_bound > upper_bound`
+        // alone lets a NaN bound through silently. ±infinity remains valid —
+        // it is the legitimate "unbounded on this side" sentinel.
+        if lower_bound.is_nan() || upper_bound.is_nan() {
+            return Err(CoreError::Variable(format!(
+                "bound [{lower_bound}, {upper_bound}] must not be NaN"
+            )));
+        }
         if lower_bound > upper_bound {
             return Err(CoreError::Variable(format!(
                 "lower bound {lower_bound} exceeds upper bound {upper_bound}"
@@ -1068,6 +1076,31 @@ mod tests {
         };
         assert!(err.to_string().contains("exceeds upper bound"), "{err}");
         assert!(!p.variable_bounds.contains_key(k));
+    }
+
+    /// ISSUE-0004 regression: `NaN` bounds pass `lower > upper` silently
+    /// (every NaN comparison is false), so this must be checked explicitly.
+    /// `±infinity` remains a valid one-sided-bound sentinel.
+    #[test]
+    fn test_set_variable_bounds_rejects_nan() {
+        let mut p = Problem::new(JacobianMode::Sparse);
+        let k = p.add_variable(ManifoldType::SE2, dvector![0.0, 0.0, 0.0]);
+
+        let Err(err) = p.try_set_variable_bounds(k, 0, f64::NAN, 1.0) else {
+            panic!("NaN lower bound must be rejected");
+        };
+        assert!(err.to_string().contains("NaN"), "{err}");
+
+        let Err(err) = p.try_set_variable_bounds(k, 0, -1.0, f64::NAN) else {
+            panic!("NaN upper bound must be rejected");
+        };
+        assert!(err.to_string().contains("NaN"), "{err}");
+
+        assert!(!p.variable_bounds.contains_key(k));
+        assert!(
+            p.try_set_variable_bounds(k, 0, f64::NEG_INFINITY, f64::INFINITY)
+                .is_ok()
+        );
     }
 
     /// A component index beyond the variable's DOF can never be applied, so it

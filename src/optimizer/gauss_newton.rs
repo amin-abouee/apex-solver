@@ -620,21 +620,26 @@ impl GaussNewton {
             optimizer::OptimizerError::LinearSolveFailed(e.to_string()).log_with_source(e)
         })?;
 
-        // Get gradient from the solver (J^T * r)
+        // Get gradient from the solver (J^T * r) — scaled when Jacobi scaling
+        // is enabled, since `scaled_jacobian` is what the solver last saw.
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             optimizer::OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
-        let gradient_norm = gradient.norm_l2();
 
-        // Apply inverse Jacobi scaling to get final step (if enabled)
-        let step = if self.config.use_jacobi_scaling {
+        // Apply inverse Jacobi scaling to get final step (if enabled), and
+        // report `gradient_tolerance`'s convergence check against the same
+        // un-scaled gradient in both cases (GitHub #57).
+        let (step, gradient_norm) = if self.config.use_jacobi_scaling {
             let scaling = self
                 .jacobi_scaling
                 .as_ref()
                 .ok_or_else(|| optimizer::OptimizerError::JacobiScalingNotInitialized.log())?;
-            M::apply_inverse_scaling(&scaled_step, scaling)
+            (
+                M::apply_inverse_scaling(&scaled_step, scaling),
+                optimizer::unscaled_gradient_norm(gradient, scaling),
+            )
         } else {
-            scaled_step
+            (scaled_step, gradient.norm_l2())
         };
 
         Ok(StepResult {
