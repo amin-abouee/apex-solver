@@ -1025,7 +1025,20 @@ impl LevenbergMarquardt {
         let gradient = linear_solver.get_gradient().ok_or_else(|| {
             OptimizerError::NumericalInstability("Gradient not available".into()).log()
         })?;
-        let gradient_norm = gradient.norm_l2();
+        // `gradient` is the (possibly Jacobi-scaled) gradient against
+        // `scaled_jacobian`; report `gradient_tolerance`'s convergence check
+        // against the un-scaled one (GitHub #57). `predicted_reduction`
+        // below deliberately keeps using the scaled `gradient` — it must
+        // stay in the same space as `scaled_step`/`hessian_step`.
+        let gradient_norm = if self.config.use_jacobi_scaling {
+            let scaling = self
+                .jacobi_scaling
+                .as_ref()
+                .ok_or_else(|| OptimizerError::JacobiScalingNotInitialized.log())?;
+            crate::optimizer::unscaled_gradient_norm(gradient, scaling)
+        } else {
+            gradient.norm_l2()
+        };
         let hessian_step = linear_solver
             .hessian_vec_product(&scaled_step)
             .ok_or_else(|| {
@@ -2013,6 +2026,79 @@ mod tests {
     #[test]
     fn test_lm_predicted_reduction_matches_model_with_scaling() -> TestResult {
         assert_predicted_reduction_matches_model(true)
+    }
+
+    /// GitHub #57: the reported `gradient_norm` must be `‖Jᵀr‖` from the
+    /// *un-scaled* Jacobian — matching `gradient_tolerance`'s documented
+    /// contract — regardless of whether Jacobi column scaling was used to
+    /// condition the solve, not `‖J̃ᵀr‖` from the scaled one. `IllScaledFactor`
+    /// (columns of norm 100 and 1) makes the two differ by roughly two
+    /// orders of magnitude, so a stale scaled value is easy to detect.
+    fn assert_gradient_norm_matches_unscaled_jacobian(use_jacobi_scaling: bool) -> TestResult {
+        let mut problem = Problem::new(JacobianMode::Sparse);
+        let x1 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+        let x2 = problem.add_variable(ManifoldType::RN, dvector![0.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+
+        let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let (residuals, jacobian) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+            &mut state.workspace,
+        )?;
+
+        // Reference: ||J^T r|| from a plain, un-scaled solve.
+        let mut reference_solver = SparseCholeskySolver::new();
+        reference_solver.solve_normal_equation(&residuals, &jacobian)?;
+        let expected = reference_solver
+            .get_gradient()
+            .ok_or("reference solver produced no gradient")?
+            .norm_l2();
+
+        let config = LevenbergMarquardtConfig::new()
+            .with_damping(1e-1)
+            .with_jacobi_scaling(use_jacobi_scaling);
+        let mut solver = LevenbergMarquardt::with_config(config);
+
+        let solver_jacobian = if use_jacobi_scaling {
+            crate::optimizer::process_jacobian_generic::<SparseMode>(
+                &jacobian,
+                &mut solver.jacobi_scaling,
+                0,
+            )?
+        } else {
+            jacobian.clone()
+        };
+
+        let mut linear_solver = SparseCholeskySolver::new();
+        let step_result = solver.compute_step_generic::<SparseMode>(
+            &residuals,
+            &solver_jacobian,
+            &mut linear_solver,
+        )?;
+
+        assert!(
+            (step_result.gradient_norm - expected).abs() < 1e-6 * expected.max(1.0),
+            "gradient_norm {} disagrees with the un-scaled ||J^T r|| {} \
+             (use_jacobi_scaling = {})",
+            step_result.gradient_norm,
+            expected,
+            use_jacobi_scaling,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_lm_gradient_norm_matches_unscaled_jacobian_without_scaling() -> TestResult {
+        assert_gradient_norm_matches_unscaled_jacobian(false)
+    }
+
+    #[test]
+    fn test_lm_gradient_norm_matches_unscaled_jacobian_with_scaling() -> TestResult {
+        assert_gradient_norm_matches_unscaled_jacobian(true)
     }
 
     // -------------------------------------------------------------------------

@@ -448,6 +448,12 @@ impl LieGroup for SO3 {
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
+        // ISSUE-0008: an infinite tolerance made `< tolerance` accept any
+        // finite (however non-normalized) quaternion; reject that input
+        // rather than silently treating it as "anything goes".
+        if !tolerance.is_finite() {
+            return false;
+        }
         let norm_sq = self.params[0] * self.params[0]
             + self.params[1] * self.params[1]
             + self.params[2] * self.params[2]
