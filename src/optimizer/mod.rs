@@ -884,6 +884,28 @@ pub fn compute_predicted_reduction(
     -linear_term - 0.5 * quadratic_term
 }
 
+/// `‖g‖` for the *unscaled* gradient, from a gradient computed against a
+/// Jacobi-column-scaled Jacobian (GitHub #57).
+///
+/// `gradient_tolerance`'s contract (documented on every optimizer's
+/// `optimize`) is `‖Jᵀr‖ < gradient_tolerance` — the plain, un-scaled
+/// gradient, matching Ceres' own convention. But `LinearSolver::get_gradient`
+/// reflects whatever Jacobian it was last handed: under Jacobi scaling
+/// (`J̃ = J·diag(scaling)`), that is `g̃ = J̃ᵀr = diag(scaling)·g`, not `g`.
+/// Column scaling and gradient transform in *opposite* directions — compare
+/// [`AssemblyBackend::apply_inverse_scaling`](crate::linearizer::AssemblyBackend::apply_inverse_scaling),
+/// which un-scales a *step* by multiplying by `scaling` — so this divides
+/// instead: `g = g̃ ⊘ scaling`. Most impactful for Dog Leg, which enables
+/// Jacobi scaling by default.
+pub(crate) fn unscaled_gradient_norm(gradient: &Mat<f64>, scaling: &[f64]) -> f64 {
+    let mut sum_sq = 0.0;
+    for i in 0..gradient.nrows() {
+        let g = gradient[(i, 0)] / scaling[i];
+        sum_sq += g * g;
+    }
+    sum_sq.sqrt()
+}
+
 /// Compute step quality ratio (actual vs predicted reduction).
 ///
 /// Used by Levenberg-Marquardt and Dog Leg optimizers to evaluate
