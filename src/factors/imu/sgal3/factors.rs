@@ -174,6 +174,31 @@ fn write_jacobian<const R: usize, const C: usize>(
     }
 }
 
+/// How far `state_i.time()` may sit from zero and still count as
+/// interval-relative — a generous margin around exact zero to tolerate
+/// ordinary optimizer movement, not a physically meaningful scale.
+const INTERVAL_RELATIVE_TIME_TOLERANCE: f64 = 1e-6;
+
+/// Reject a `state_i` whose SGal(3) time coordinate is not interval-relative
+/// (ISSUE-0009): the residual's translation entangles `state_i`'s *absolute*
+/// timestamp with `v_i − v_j` (see the module's "Known limitation" doc), so
+/// anything but `s_i ≈ 0` silently corrupts the spatial rows in a
+/// multi-keyframe chain on a common clock. Checked once at registration,
+/// against the initial value `state_i` is registered with.
+fn reject_absolute_time(state_i: &dyn ManifoldVariable) -> Result<(), String> {
+    let time = SGal3::from_param_slice(state_i.as_param_slice()).time();
+    if time.abs() > INTERVAL_RELATIVE_TIME_TOLERANCE {
+        return Err(format!(
+            "SGal3 IMU factor requires an interval-relative state_i (time ≈ 0), got \
+             time = {time}; this factor's residual depends on the absolute timestamp \
+             origin and silently corrupts multi-keyframe chains sharing a common clock \
+             (see the `factors::imu::sgal3` module docs) — re-zero the epoch before \
+             this keyframe, or use the SE_2(3) IMU factors for multi-keyframe chains"
+        ));
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// IMU factor over two `SGal3` states with a shared bias.
@@ -274,7 +299,8 @@ impl Factor for ImuFactor {
             variables,
             &[SGal3::REP_SIZE, SGal3::REP_SIZE, 6],
             "ImuFactor expects [SGal3 state_i, SGal3 state_j, bias]",
-        )
+        )?;
+        reject_absolute_time(variables[0])
     }
 }
 
@@ -403,6 +429,7 @@ impl Factor for CombinedImuFactor {
             variables,
             &[SGal3::REP_SIZE, 6, SGal3::REP_SIZE, 6],
             "CombinedImuFactor expects [SGal3 state_i, bias_i, SGal3 state_j, bias_j]",
-        )
+        )?;
+        reject_absolute_time(variables[0])
     }
 }

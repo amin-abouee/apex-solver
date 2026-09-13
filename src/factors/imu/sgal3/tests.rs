@@ -311,3 +311,38 @@ fn factors_validate_their_layouts() {
     let wrong: Vec<&dyn ManifoldVariable> = vec![&state, &state, &bias];
     assert!(combined.validate_variables(&wrong).is_err());
 }
+
+/// ISSUE-0009 regression: `state_i.time() != 0` (an absolute, non-interval-
+/// relative timestamp) must be rejected at registration rather than silently
+/// producing a residual corrupted by the group law's `s_i`-dependent coupling
+/// — see the module doc's "Known limitation: timestamps must be
+/// interval-relative".
+#[test]
+fn imu_factors_reject_absolute_state_i_time() {
+    let (preint, _, _, _) = scenario();
+    let state_relative = Variable::new(SGal3::identity()); // time = 0
+    let state_absolute = Variable::new(SGal3::new(
+        Vector3::zeros(),
+        Vector3::zeros(),
+        nalgebra::UnitQuaternion::identity(),
+        1_700_000_000.0, // a Unix-scale epoch, not an interval-relative time
+    ));
+    let bias = Variable::new(Rn::new(DVector::zeros(6)));
+
+    let imu = ImuFactor::new(preint.clone());
+    let bad: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &state_relative, &bias];
+    let Err(err) = imu.validate_variables(&bad) else {
+        panic!("ImuFactor must reject an absolute state_i timestamp");
+    };
+    assert!(err.contains("interval-relative"), "{err}");
+    // state_j's absolute time is not the problem — only state_i's is.
+    let ok: Vec<&dyn ManifoldVariable> = vec![&state_relative, &state_absolute, &bias];
+    assert!(imu.validate_variables(&ok).is_ok());
+
+    let combined = CombinedImuFactor::new(preint);
+    let bad: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &bias, &state_relative, &bias];
+    let Err(err) = combined.validate_variables(&bad) else {
+        panic!("CombinedImuFactor must reject an absolute state_i timestamp");
+    };
+    assert!(err.contains("interval-relative"), "{err}");
+}
