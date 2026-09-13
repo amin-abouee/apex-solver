@@ -696,24 +696,29 @@ impl LossFunction for GemanMcClureLoss {
 ///
 /// # Mathematical Definition
 ///
-/// With `s = ||r||²` and `scale = 2Φ/(Φ+s)`:
+/// With `s = ||r||²`:
 ///
 /// ```text
-/// s ≤ Φ:  ρ(s) = s,  ρ'(s) = 1,  ρ''(s) = 0                    (inlier: plain LS)
-/// s > Φ:  ρ(s) = scale²·s,  ρ'(s) = 4Φ²(Φ−s)/(Φ+s)³,
-///         ρ''(s) = −8Φ²(2Φ−s)/(Φ+s)⁴
+/// s ≤ Φ:  ρ(s) = s,    ρ'(s) = 1,  ρ''(s) = 0     (inlier: plain LS)
+/// s > Φ:  ρ(s) = Φ,    ρ'(s) = 0,  ρ''(s) = 0      (outlier: saturating plateau)
 /// ```
 ///
-/// This mirrors g2o's `RobustKernelDCS` (`_delta` used as Φ) term for term, so
-/// χ² values crossing this backend agree with a g2o backend on the same graph.
+/// # Why this differs from g2o's `RobustKernelDCS`
 ///
-/// # Negative weights
-///
-/// Past `s = Φ` the effective weight `ρ'(s)` goes *negative* — DCS suppresses
-/// outliers harder than any saturating kernel. The [`Corrector`](crate::core::corrector::Corrector)
-/// clamps `√ρ'` at zero there, so such blocks contribute nothing to the step
-/// (like Tukey's flat region) while their cost `½ρ(s)` is still counted.
-/// DCS is the first kernel in this module with that property.
+/// g2o's own DCS term is `ρ(s) = scale²·s` with `scale = 2Φ/(Φ+s)`, which
+/// keeps *declining* toward 0 past `s = Φ` rather than saturating — but g2o
+/// applies it through its own explicit information-matrix reweighting, not
+/// through a generic square-root [`Corrector`](crate::core::corrector::Corrector).
+/// Run through this crate's Ceres/Triggs-style corrector, `ρ'(s) < 0` past
+/// `s = Φ` gets clamped to zero (the corrected residual and Jacobian both
+/// become exactly zero, the same "no gradient" treatment as Tukey's flat
+/// outlier region) — but g2o's declining `ρ(s)` would keep changing the
+/// *reported* cost with state while contributing zero to the model the
+/// optimizer actually descends, so actual and predicted reduction disagree
+/// past the threshold. Freezing `ρ` at its peak value `Φ` once `ρ'` would go
+/// negative keeps the reported cost consistent with the zero-gradient model:
+/// a genuine saturating plateau, matching Tukey/Geman-McClure in kind, not a
+/// cost that silently keeps moving with no corresponding gradient.
 ///
 /// # Scale Parameter Selection
 ///
@@ -761,18 +766,13 @@ impl DcsLoss {
 impl LossFunction for DcsLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        let scale = (2.0 * self.phi) / (self.phi + s);
-        if scale >= 1.0 {
+        if s <= self.phi {
             // s ≤ Φ: unscaled least squares.
             [s, 1.0, 0.0]
         } else {
-            let phi_sqr = self.phi * self.phi;
-            let denom = self.phi + s;
-            [
-                scale * s * scale,
-                (4.0 * phi_sqr * (self.phi - s)) / (denom * denom * denom),
-                -(8.0 * phi_sqr * (2.0 * self.phi - s)) / (denom * denom * denom * denom),
-            ]
+            // s > Φ: saturating plateau at the inlier/outlier boundary value
+            // — see "Why this differs from g2o's RobustKernelDCS" above.
+            [self.phi, 0.0, 0.0]
         }
     }
 }
@@ -2299,18 +2299,19 @@ mod tests {
     }
 
     #[test]
-    fn test_dcs_matches_g2o_reference_values() -> TestResult {
-        // Hand-computed from g2o's RobustKernelDCS with Φ = 1 at s = 4:
-        // scale = 2/5 = 0.4; ρ = 0.4·4·0.4 = 0.64;
-        // ρ' = 4·(1−4)/125 = −0.096; ρ'' = −8·(2−4)/625 = 0.0256.
+    fn test_dcs_saturates_past_phi_instead_of_declining() -> TestResult {
+        // ISSUE-0010: past s = Φ, ρ must freeze at the peak value Φ (with
+        // ρ' = ρ'' = 0) rather than g2o's own declining ρ(s) = scale²·s —
+        // the latter changes the reported cost while the corrector's
+        // clamped-negative-weight path already contributes zero gradient,
+        // so actual and predicted reduction would silently disagree.
         let dcs = DcsLoss::new(1.0)?;
-        let [rho, rho_prime, rho_double_prime] = dcs.evaluate(4.0);
-        assert!((rho - 0.64).abs() < 1e-12, "ρ(4) = {rho}");
-        assert!((rho_prime + 0.096).abs() < 1e-12, "ρ'(4) = {rho_prime}");
-        assert!(
-            (rho_double_prime - 0.0256).abs() < 1e-12,
-            "ρ''(4) = {rho_double_prime}"
-        );
+        for s in [1.5, 4.0, 100.0, 1e12] {
+            let [rho, rho_prime, rho_double_prime] = dcs.evaluate(s);
+            assert!((rho - 1.0).abs() < 1e-12, "ρ({s}) = {rho}, expected Φ=1");
+            assert_eq!(rho_prime, 0.0, "ρ'({s})");
+            assert_eq!(rho_double_prime, 0.0, "ρ''({s})");
+        }
         Ok(())
     }
 
@@ -2324,11 +2325,14 @@ mod tests {
             assert_eq!(rho_prime, 1.0, "inlier ρ'({s})");
             assert_eq!(rho_double_prime, 0.0, "inlier ρ''({s})");
         }
-        // Far outliers saturate: ρ(s) → 0 as s → ∞, never negative, always
-        // finite — the cost stays bounded like Tukey/Geman-McClure.
+        // Far outliers saturate at Φ exactly — never negative, never
+        // declining back toward 0, always finite.
         let [rho, _, _] = dcs.evaluate(1e12);
         assert!(rho.is_finite() && rho >= 0.0, "saturated ρ = {rho}");
-        assert!(rho < 1e-6, "saturated ρ must vanish, got {rho}");
+        assert!(
+            (rho - 1.0).abs() < 1e-12,
+            "saturated ρ must equal Φ, got {rho}"
+        );
         // Rejects non-positive or non-finite Φ like the other scaled losses.
         assert!(DcsLoss::new(0.0).is_err());
         assert!(DcsLoss::new(-1.0).is_err());
