@@ -335,17 +335,22 @@ impl LieGroup for Sim3 {
         if let Some(jac_self) = jacobian_self {
             let rotated_vector = rot.act(vector, None, None);
 
+            // y = s·R·p + t; under a right perturbation X·Exp(δ) the
+            // translation column is d(sRp+t)/dρ = s·R (not the identity —
+            // the point is transformed by the full scaled rotation first).
             jac_self
                 .fixed_view_mut::<3, 3>(0, 0)
-                .copy_from(&Matrix3::identity());
+                .copy_from(&(scale * rotation_matrix));
 
             jac_self
                 .fixed_view_mut::<3, 3>(0, 3)
                 .copy_from(&(-scale * rotation_matrix * SO3Tangent::new(*vector).hat()));
 
+            // d(sRp)/dσ = s·R·p (the exponential's scale term contributes a
+            // factor of the already-scaled-and-rotated point, not R·p alone).
             jac_self
                 .fixed_view_mut::<3, 1>(0, 6)
-                .copy_from(&rotated_vector);
+                .copy_from(&(scale * rotated_vector));
         }
 
         if let Some(jac_vector) = jacobian_vector {
@@ -361,21 +366,26 @@ impl LieGroup for Sim3 {
         let scale = self.scale_impl();
         let mut adjoint_matrix = Matrix7::zeros();
 
-        // Block structure for Sim(3):
-        // [sR   [t]×sR   0]
+        // From X·ξ^·X⁻¹ = (Ad_X ξ)^, block structure for Sim(3):
+        // [sR   [t]×R   -t]
         // [0      R      0]
-        // [0      0      1]
+        // [0      0       1]
 
         // Top-left: s*R
         adjoint_matrix
             .fixed_view_mut::<3, 3>(0, 0)
             .copy_from(&(scale * rotation_matrix));
 
-        // Top-middle: [t]× * s*R
-        let top_middle = SO3Tangent::new(translation).hat() * scale * rotation_matrix;
+        // Top-middle: [t]× * R (the scale factors cancel against X⁻¹'s 1/s)
+        let top_middle = SO3Tangent::new(translation).hat() * rotation_matrix;
         adjoint_matrix
             .fixed_view_mut::<3, 3>(0, 3)
             .copy_from(&top_middle);
+
+        // Top-right: -t (scale perturbation of X⁻¹'s translation contributes -t)
+        adjoint_matrix
+            .fixed_view_mut::<3, 1>(0, 6)
+            .copy_from(&(-translation));
 
         // Middle-middle: R
         adjoint_matrix
@@ -578,49 +588,34 @@ impl Sim3Tangent {
 
         a * Matrix3::identity() + b * theta_hat + c * theta_hat * theta_hat
     }
+}
 
-    /// Compute the Q matrix for Sim(3) Jacobians.
-    fn q_matrix(rho: Vector3<f64>, theta: Vector3<f64>, sigma: f64) -> Matrix3<f64> {
-        let rho_skew = SO3Tangent::new(rho).hat();
-        let theta_skew = SO3Tangent::new(theta).hat();
-        let theta_squared = theta.norm_squared();
+/// `∫₀¹ Ad(Exp(-t·ξ)) dt` via composite Simpson's rule — see
+/// [`Sim3Tangent::right_jacobian`] for why this replaces a closed-form `Q` block.
+fn integrate_adjoint_of_negated_exp(xi: &Sim3Tangent) -> Matrix7<f64> {
+    // Every adjoint()/exp() entry integrated here is closed-form and
+    // singularity-free for all θ, σ, so the integrand is smooth (built from
+    // sin/cos/exp) with no small-angle branch to mistune; 256 intervals gives
+    // several orders of magnitude of margin below central-difference test
+    // tolerances (error bound ~1e-11 even at θ near π).
+    const INTERVALS: usize = 256;
+    let h = 1.0 / INTERVALS as f64;
 
-        if theta_squared < crate::SMALL_ANGLE_THRESHOLD && sigma.abs() < f64::EPSILON {
-            return 0.5 * rho_skew;
-        }
+    let adjoint_at = |t: f64| -> Matrix7<f64> {
+        let scaled = Sim3Tangent {
+            data: xi.data * (-t),
+        };
+        scaled.exp(None).adjoint()
+    };
 
-        let a = 0.5;
-        let mut b = 1.0 / 6.0;
-        let mut c = -1.0 / 24.0;
-        let mut d = -1.0 / 60.0;
-
-        if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
-            let theta_norm = theta_squared.sqrt();
-            let theta_norm_3 = theta_norm * theta_squared;
-            let theta_norm_4 = theta_squared * theta_squared;
-            let theta_norm_5 = theta_norm_3 * theta_squared;
-            let sin_theta = theta_norm.sin();
-            let cos_theta = theta_norm.cos();
-
-            b = (theta_norm - sin_theta) / theta_norm_3;
-            c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
-            d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
-        }
-
-        let rho_skew_theta_skew = rho_skew * theta_skew;
-        let theta_skew_rho_skew = theta_skew * rho_skew;
-        let theta_skew_rho_skew_theta_skew = theta_skew * rho_skew * theta_skew;
-        let rho_skew_theta_skew_sq2 = rho_skew * theta_skew * theta_skew;
-
-        let m1 = rho_skew;
-        let m2 = theta_skew_rho_skew + rho_skew_theta_skew + theta_skew_rho_skew_theta_skew;
-        let m3 = rho_skew_theta_skew_sq2
-            - rho_skew_theta_skew_sq2.transpose()
-            - 3.0 * theta_skew_rho_skew_theta_skew;
-        let m4 = theta_skew_rho_skew_theta_skew * theta_skew;
-
-        m1 * a + m2 * b - m3 * c - m4 * d
+    let mut sum = adjoint_at(0.0) + adjoint_at(1.0);
+    for i in 1..INTERVALS {
+        let t = i as f64 * h;
+        let weight = if i % 2 == 1 { 4.0 } else { 2.0 };
+        sum += adjoint_at(t) * weight;
     }
+
+    sum * (h / 3.0)
 }
 
 impl Tangent<Sim3> for Sim3Tangent {
@@ -646,51 +641,22 @@ impl Tangent<Sim3> for Sim3Tangent {
     }
 
     /// Right Jacobian for Sim(3).
+    ///
+    /// Computed from the general Lie-group identity `Jr(ξ) = ∫₀¹ Ad(Exp(-tξ)) dt`
+    /// (e.g. Solà, "A micro Lie theory for state estimation in robotics", eq. 146),
+    /// evaluated by [`integrate_adjoint_of_negated_exp`]. Unlike SE(3)'s `Q`
+    /// block, Sim(3)'s exact translation/rotation/scale coupling does not
+    /// reduce to a compact closed form; this identity sidesteps re-deriving
+    /// one by hand and is verified against central differences of `Exp` in
+    /// the test suite.
     fn right_jacobian(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix7::zeros();
-        let rho = self.rho();
-        let theta = self.theta();
-        let sigma = self.sigma();
-
-        let theta_right_jac = SO3Tangent::new(-theta).right_jacobian();
-        let q_block = Self::q_matrix(-rho, -theta, -sigma);
-
-        // Block structure for Sim(3)
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_right_jac);
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&q_block);
-
-        // Scale part
-        jac[(6, 6)] = 1.0;
-
-        // Coupling between translation and scale
-        let v_deriv = Self::v_matrix(&SO3Tangent::new(-theta), -sigma);
-        jac.fixed_view_mut::<3, 1>(0, 6)
-            .copy_from(&(v_deriv * (-rho)));
-
-        jac
+        integrate_adjoint_of_negated_exp(self)
     }
 
-    /// Left Jacobian for Sim(3).
+    /// Left Jacobian for Sim(3): `Jl(ξ) = Jr(-ξ)` (general Lie-group identity).
     fn left_jacobian(&self) -> <Sim3 as LieGroup>::JacobianMatrix {
-        let mut jac = Matrix7::zeros();
-        let rho = self.rho();
-        let theta = self.theta();
-        let sigma = self.sigma();
-
-        let theta_left_jac = SO3Tangent::new(theta).left_jacobian();
-        let q_block = Self::q_matrix(rho, theta, sigma);
-
-        jac.fixed_view_mut::<3, 3>(0, 0).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(3, 3).copy_from(&theta_left_jac);
-        jac.fixed_view_mut::<3, 3>(0, 3).copy_from(&q_block);
-
-        jac[(6, 6)] = 1.0;
-
-        let v_deriv = Self::v_matrix(&SO3Tangent::new(theta), sigma);
-        jac.fixed_view_mut::<3, 1>(0, 6).copy_from(&(v_deriv * rho));
-
-        jac
+        let negated = Sim3Tangent { data: -self.data };
+        negated.right_jacobian()
     }
 
     /// Inverse of right Jacobian.
@@ -1620,5 +1586,218 @@ mod regularized_inverse_tests {
             (inv - Matrix3::identity()).norm() > 1e-3,
             "regularized inverse must not silently fall back to identity"
         );
+    }
+}
+
+/// Independent central-difference regression tests for ISSUE-0002 (Sim(3)
+/// differential geometry). These build their own finite-difference oracle
+/// from `exp()`/`matrix()`/`inverse()` alone — never from `log()`,
+/// `right_jacobian_inv()`, `left_jacobian_inv()`, or `v_matrix()` — so a bug
+/// shared between an analytic Jacobian and its "inverse" cannot hide here
+/// (see `codex/issues/ISSUE-0002-sim3-differentials.md`, "Do not validate an
+/// analytic Jacobian solely with an inverse built from that same Jacobian.").
+#[cfg(test)]
+mod sim3_jacobian_fd_tests {
+    use super::*;
+
+    // `SMALL_ANGLE_THRESHOLD` (1e-10, compared against θ²) means a step below
+    // ~1e-5 can leave a perturbed θ inside `v_matrix`'s small-angle branch,
+    // silently discarding the perturbation and making the central difference
+    // artificially zero — not a bug in the analytic Jacobian. 1e-4 clears
+    // that threshold with comfortable margin while keeping truncation error
+    // far below `FD_TOL`.
+    const FD_STEP: f64 = 1e-4;
+    const FD_TOL: f64 = 1e-5;
+
+    /// Extract [ρ,θ,σ] from a 4x4 Sim(3) Lie-algebra matrix
+    /// `[θ× + σI, ρ; 0, 0]` (the "vee" map). Purely algebraic — no calls into
+    /// this module's own `log`/`v_matrix`/Jacobian code.
+    fn vee(m: &Matrix4<f64>) -> Vector7<f64> {
+        let mut v = Vector7::zeros();
+        v[0] = m[(0, 3)];
+        v[1] = m[(1, 3)];
+        v[2] = m[(2, 3)];
+        v[3] = m[(2, 1)];
+        v[4] = m[(0, 2)];
+        v[5] = m[(1, 0)];
+        v[6] = (m[(0, 0)] + m[(1, 1)] + m[(2, 2)]) / 3.0;
+        v
+    }
+
+    fn perturbed(xi: &Sim3Tangent, k: usize, eps: f64) -> Sim3Tangent {
+        let mut data = xi.data;
+        data[k] += eps;
+        Sim3Tangent { data }
+    }
+
+    /// Central-difference right Jacobian from first principles: column k is
+    /// `vee(X(ξ)⁻¹ · dX/dξ_k)`, using only `exp()` and `matrix()`.
+    fn fd_right_jacobian(xi: &Sim3Tangent) -> Matrix7<f64> {
+        let x_inv_mat = xi.exp(None).inverse(None).matrix();
+        let mut jac = Matrix7::zeros();
+        for k in 0..7 {
+            let plus = perturbed(xi, k, FD_STEP).exp(None).matrix();
+            let minus = perturbed(xi, k, -FD_STEP).exp(None).matrix();
+            let d_dxi_k = (plus - minus) / (2.0 * FD_STEP);
+            jac.set_column(k, &vee(&(x_inv_mat * d_dxi_k)));
+        }
+        jac
+    }
+
+    #[test]
+    fn sim3_right_jacobian_matches_matrix_exp_central_difference() {
+        let cases = [
+            (
+                Vector3::new(0.7, -0.2, 0.4),
+                Vector3::new(0.4, -0.3, 0.25),
+                0.3,
+            ),
+            (
+                Vector3::new(0.1, 0.2, -0.3),
+                Vector3::new(2.8, 0.1, -0.2),
+                0.5,
+            ), // near pi
+            (Vector3::new(-0.5, 0.3, 0.2), Vector3::zeros(), 0.4), // theta = 0
+            (
+                Vector3::new(0.3, -0.1, 0.2),
+                Vector3::new(0.2, 0.1, -0.1),
+                0.0,
+            ), // sigma = 0
+            (
+                Vector3::new(1e-8, -2e-8, 3e-8),
+                Vector3::new(1e-8, 2e-8, -1e-8),
+                1e-8,
+            ), // joint small-angle/small-scale limit
+        ];
+        for (rho, theta, sigma) in cases {
+            let xi = Sim3Tangent::new(rho, theta, sigma);
+            let analytic = xi.right_jacobian();
+            let numeric = fd_right_jacobian(&xi);
+            let err = (analytic - numeric).norm();
+            assert!(
+                err < FD_TOL,
+                "right_jacobian mismatch at rho={rho:?} theta={theta:?} sigma={sigma}: error={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn sim3_left_jacobian_matches_matrix_exp_central_difference() {
+        let xi = Sim3Tangent::new(
+            Vector3::new(0.6, -0.3, 0.2),
+            Vector3::new(-0.4, 0.5, 0.1),
+            0.35,
+        );
+        let x_inv_mat = xi.exp(None).inverse(None).matrix();
+
+        let mut numeric = Matrix7::zeros();
+        for k in 0..7 {
+            let plus = perturbed(&xi, k, FD_STEP).exp(None).matrix();
+            let minus = perturbed(&xi, k, -FD_STEP).exp(None).matrix();
+            let d_dxi_k = (plus - minus) / (2.0 * FD_STEP);
+            // Left Jacobian definition: dX/dξ_k = (Jl(ξ)e_k)^ · X(ξ).
+            numeric.set_column(k, &vee(&(d_dxi_k * x_inv_mat)));
+        }
+
+        let analytic = xi.left_jacobian();
+        let err = (analytic - numeric).norm();
+        assert!(err < FD_TOL, "left_jacobian mismatch: error={err}");
+    }
+
+    #[test]
+    fn sim3_act_jacobian_matches_finite_difference_at_nonunit_scale() {
+        let sim3 = Sim3::new(
+            Vector3::new(0.3, -0.2, 0.5),
+            UnitQuaternion::from_euler_angles(0.2, -0.4, 0.3),
+            1.7,
+        );
+        let p = Vector3::new(0.9, -1.1, 0.4);
+
+        let mut jac_self = Matrix7::zeros();
+        let mut jac_point = Matrix3::zeros();
+        sim3.act(&p, Some(&mut jac_self), Some(&mut jac_point));
+
+        for k in 0..3 {
+            let mut p_plus = p;
+            p_plus[k] += FD_STEP;
+            let mut p_minus = p;
+            p_minus[k] -= FD_STEP;
+            let numeric =
+                (sim3.act(&p_plus, None, None) - sim3.act(&p_minus, None, None)) / (2.0 * FD_STEP);
+            let analytic = jac_point.column(k).into_owned();
+            let err = (analytic - numeric).norm();
+            assert!(err < FD_TOL, "act jacobian_vector col {k} mismatch: {err}");
+        }
+
+        for k in 0..7 {
+            let mut e = Vector7::zeros();
+            e[k] = FD_STEP;
+            let plus = sim3.right_plus(&Sim3Tangent { data: e }, None, None);
+            e[k] = -FD_STEP;
+            let minus = sim3.right_plus(&Sim3Tangent { data: e }, None, None);
+            let numeric = (plus.act(&p, None, None) - minus.act(&p, None, None)) / (2.0 * FD_STEP);
+            let analytic = Vector3::new(jac_self[(0, k)], jac_self[(1, k)], jac_self[(2, k)]);
+            let err = (analytic - numeric).norm();
+            assert!(err < FD_TOL, "act jacobian_self col {k} mismatch: {err}");
+        }
+    }
+
+    #[test]
+    fn sim3_adjoint_matches_conjugation_finite_difference() {
+        let cases = [
+            (
+                Vector3::new(0.8, -0.4, 0.6),
+                Vector3::new(0.3, -0.2, 0.5),
+                1.6,
+            ), // general
+            (Vector3::new(1.2, 0.5, -0.7), Vector3::zeros(), 1.0), // pure translation
+            (Vector3::zeros(), Vector3::zeros(), 2.3),             // pure scale
+        ];
+        for (t, r, s) in cases {
+            let x = Sim3::new(t, UnitQuaternion::from_euler_angles(r.x, r.y, r.z), s);
+            let analytic = x.adjoint();
+            let x_mat = x.matrix();
+            let x_inv_mat = x.inverse(None).matrix();
+
+            let mut numeric = Matrix7::zeros();
+            for k in 0..7 {
+                let mut e_plus = Vector7::zeros();
+                e_plus[k] = FD_STEP;
+                let g_plus = (Sim3Tangent { data: e_plus }).exp(None).matrix();
+                let mut e_minus = Vector7::zeros();
+                e_minus[k] = -FD_STEP;
+                let g_minus = (Sim3Tangent { data: e_minus }).exp(None).matrix();
+
+                let conj_plus = x_mat * g_plus * x_inv_mat;
+                let conj_minus = x_mat * g_minus * x_inv_mat;
+                let d = (conj_plus - conj_minus) / (2.0 * FD_STEP);
+                numeric.set_column(k, &vee(&d));
+            }
+
+            let err = (analytic - numeric).norm();
+            assert!(
+                err < FD_TOL,
+                "adjoint mismatch at t={t:?} r={r:?} s={s}: error={err}"
+            );
+        }
+    }
+
+    #[test]
+    fn sim3_right_jacobian_continuous_near_zero_and_joint_limit() {
+        // Sweep theta and sigma norms down toward zero (independently and
+        // jointly) and assert the analytic Jacobian stays close to the
+        // matrix-exp finite-difference oracle throughout — no discontinuity
+        // at the small-angle boundary.
+        for scale in [1e-1, 1e-3, 1e-5, 1e-7, 1e-9] {
+            let xi = Sim3Tangent::new(
+                Vector3::new(0.3, -0.2, 0.1) * scale,
+                Vector3::new(0.2, 0.1, -0.3) * scale,
+                0.15 * scale,
+            );
+            let analytic = xi.right_jacobian();
+            let numeric = fd_right_jacobian(&xi);
+            let err = (analytic - numeric).norm();
+            assert!(err < FD_TOL, "discontinuity at scale={scale}: error={err}");
+        }
     }
 }
