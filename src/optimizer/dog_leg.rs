@@ -1125,7 +1125,14 @@ impl DogLeg {
             // Increment reuse counter
             self.cache_reuse_count += 1;
 
-            let gradient_norm = cached_grad.norm_l2();
+            // `cached_grad` is the (possibly Jacobi-scaled) gradient the
+            // solver cached; report `gradient_tolerance`'s convergence check
+            // against the un-scaled one (GitHub #57).
+            let gradient_norm = if self.config.use_jacobi_scaling {
+                optimizer::unscaled_gradient_norm(cached_grad, self.jacobi_scaling.as_ref()?)
+            } else {
+                cached_grad.norm_l2()
+            };
             let mut steepest_descent = faer::Mat::zeros(cached_grad.nrows(), 1);
             for i in 0..cached_grad.nrows() {
                 steepest_descent[(i, 0)] = -cached_grad[(i, 0)];
@@ -1189,7 +1196,17 @@ impl DogLeg {
 
         // 2. Get gradient and Hessian (cached by solve_augmented_equation)
         let gradient = linear_solver.get_gradient()?;
-        let gradient_norm = gradient.norm_l2();
+        // `gradient` is the (possibly Jacobi-scaled) gradient against
+        // `scaled_jacobian`; report `gradient_tolerance`'s convergence check
+        // against the un-scaled one (GitHub #57). Every other use of
+        // `gradient` below (steepest descent, Cauchy point, predicted
+        // reduction) deliberately stays in the scaled space it was computed
+        // in — only this reported norm changes.
+        let gradient_norm = if self.config.use_jacobi_scaling {
+            optimizer::unscaled_gradient_norm(gradient, self.jacobi_scaling.as_ref()?)
+        } else {
+            gradient.norm_l2()
+        };
 
         // 3. Compute steepest descent direction: δ_sd = -gradient
         let mut steepest_descent = faer::Mat::zeros(gradient.nrows(), 1);
@@ -2077,6 +2094,112 @@ mod tests {
         let result = solver.optimize(&mut problem)?;
         assert!(result.final_cost < 1e-6);
         Ok(())
+    }
+
+    /// A residual whose two columns have very different norms (100 vs 1),
+    /// so Jacobi scaling actually changes the gradient it would report if
+    /// left un-corrected.
+    struct IllScaledFactor {
+        a: f64,
+    }
+
+    impl factors::Factor for IllScaledFactor {
+        fn linearize(
+            &self,
+            params: &[&[f64]],
+            residual: &mut [f64],
+            jacobian: Option<faer::mat::MatMut<'_, f64>>,
+        ) {
+            let x1 = params[0][0];
+            let x2 = params[1][0];
+            residual[0] = self.a * x1 - 1.0;
+            residual[1] = x2 - 1.0;
+            if let Some(mut jac) = jacobian {
+                *jac.rb_mut().get_mut(0, 0) = self.a;
+                *jac.rb_mut().get_mut(0, 1) = 0.0;
+                *jac.rb_mut().get_mut(1, 0) = 0.0;
+                *jac.rb_mut().get_mut(1, 1) = 1.0;
+            }
+        }
+        fn residual_dim(&self) -> usize {
+            2
+        }
+        fn jacobian_shape(&self) -> (usize, usize) {
+            (2, 2)
+        }
+    }
+
+    /// GitHub #57: the reported `gradient_norm` must be `‖Jᵀr‖` from the
+    /// *un-scaled* Jacobian — matching `gradient_tolerance`'s documented
+    /// contract — regardless of Jacobi column scaling, which DogLeg enables
+    /// by default. `IllScaledFactor`'s columns (norm 100 vs 1) make the
+    /// scaled and un-scaled gradients differ by roughly two orders of
+    /// magnitude, so a stale scaled value is easy to detect.
+    fn assert_dl_gradient_norm_matches_unscaled_jacobian(use_jacobi_scaling: bool) -> TestResult {
+        let mut problem = problem::Problem::new(JacobianMode::Sparse);
+        let x1 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+        let x2 = problem.add_variable(manifold::ManifoldType::RN, nalgebra::dvector![0.0]);
+        problem.add_residual_block(&[x1, x2], Box::new(IllScaledFactor { a: 100.0 }), None);
+
+        let mut state = crate::optimizer::initialize_optimization_state(&mut problem)?;
+        let (residuals, jacobian) = SparseMode::assemble(
+            &problem,
+            &state.variables,
+            &state.variable_index_map,
+            state.symbolic_structure.as_ref(),
+            state.total_dof,
+            &mut state.workspace,
+        )?;
+
+        // Reference: ||J^T r|| from a plain, un-scaled solve.
+        let mut reference_solver = SparseCholeskySolver::new();
+        reference_solver.solve_normal_equation(&residuals, &jacobian)?;
+        let expected = reference_solver
+            .get_gradient()
+            .ok_or("reference solver produced no gradient")?
+            .norm_l2();
+
+        let cfg = DogLegConfig::new().with_jacobi_scaling(use_jacobi_scaling);
+        let mut solver = DogLeg::with_config(cfg);
+
+        let solver_jacobian = if use_jacobi_scaling {
+            crate::optimizer::process_jacobian_generic::<SparseMode>(
+                &jacobian,
+                &mut solver.jacobi_scaling,
+                0,
+            )?
+        } else {
+            jacobian.clone()
+        };
+
+        let mut linear_solver = SparseCholeskySolver::new();
+        let step_result = solver
+            .compute_optimization_step_generic::<SparseMode>(
+                &residuals,
+                &solver_jacobian,
+                &mut linear_solver,
+            )
+            .ok_or("compute_optimization_step_generic returned None")?;
+
+        assert!(
+            (step_result.gradient_norm - expected).abs() < 1e-6 * expected.max(1.0),
+            "gradient_norm {} disagrees with the un-scaled ||J^T r|| {} \
+             (use_jacobi_scaling = {})",
+            step_result.gradient_norm,
+            expected,
+            use_jacobi_scaling,
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_dl_gradient_norm_matches_unscaled_jacobian_without_scaling() -> TestResult {
+        assert_dl_gradient_norm_matches_unscaled_jacobian(false)
+    }
+
+    #[test]
+    fn test_dl_gradient_norm_matches_unscaled_jacobian_with_scaling() -> TestResult {
+        assert_dl_gradient_norm_matches_unscaled_jacobian(true)
     }
 
     #[test]

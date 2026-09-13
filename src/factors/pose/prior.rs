@@ -285,22 +285,13 @@ mod tests {
         fd
     }
 
-    /// FD-vs-analytic check for the SE(3) prior Jacobian. Currently IGNORED:
-    /// the delegation target (`BetweenFactor<SE3>`'s analytic chain) does not
-    /// reproduce the central-difference derivative through the crate's own
-    /// `compose`/`log` — its wrt-X block behaves as identity, and the
-    /// rotation-to-translation coupling block (`Q`) of
-    /// `SE3Tangent::right_jacobian_inv` still disagrees with FD by ~8e-3.
+    /// FD-vs-analytic check for the SE(3) prior Jacobian.
     ///
-    /// Narrowed since this was first written: the *diagonal* blocks were the
-    /// larger error and are now correct (they were using the left SO(3)
-    /// Jacobian; see the `right_jacobian` fix), which took the overall
-    /// `right_minus` Jacobian error from 4.8e-1 to 7.6e-3. What remains is the
-    /// `Q` block alone. The SE(2) variant below passes and pins the same code
-    /// path for 3-DOF groups. Un-ignore this test when `Q` is fixed.
+    /// Was ignored (ISSUE-0001): `SE3Tangent::q_block_jacobian_matrix`'s last
+    /// term computed `(c - 3.0) * e` instead of `0.5 * (c - 3.0 * e)` and
+    /// multiplied only `T·P·T²`, omitting the distinct `T²·P·T` term. Fixed;
+    /// this now agrees with central differences like the SE(2) variant below.
     #[test]
-    #[ignore = "SE3 right-Jacobian Q-block (rotation->translation coupling) is FD-inconsistent; \
-                the diagonal blocks are fixed, SE2 variant pins the path"]
     fn prior_factor_se3_jacobian_matches_central_difference() -> TestResult {
         let prior = SE3::from_translation_quaternion(
             Vector3::new(0.2, -0.4, 0.7),

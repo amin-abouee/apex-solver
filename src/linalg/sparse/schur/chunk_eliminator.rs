@@ -484,7 +484,7 @@ impl ChunkedSchurEliminator {
         let mut g_reduced = g_k;
         for (chunk, data) in chunk_data.iter().enumerate() {
             let dof = data.dof;
-            if dof == 0 || data.cols.is_empty() {
+            if dof == 0 {
                 continue;
             }
             let block = partition.eliminated_blocks()[chunk];
@@ -492,13 +492,24 @@ impl ChunkedSchurEliminator {
             let inv = eliminated_inverse.block(chunk);
             let base = partition.eliminated_offset(chunk);
 
-            // w = H_ee⁻¹·Eᵀr, retained for back-substitution.
+            // w = H_ee⁻¹·Eᵀr, retained for back-substitution. Must run even
+            // when this chunk has no kept-column coupling at all — e.g. a
+            // landmark observed only by a fully-fixed camera (ISSUE-0003:
+            // such a camera now contributes zero kept columns, so its
+            // landmarks' chunks can have `cols.is_empty()` while still
+            // having real rows/dof). δ_e for that landmark still needs its
+            // unconstrained update; only the S/g_reduced *correction* below
+            // is legitimately zero without any coupling.
             for r in 0..dof {
                 let mut acc = 0.0;
                 for c in 0..dof {
                     acc += inv[c * dof + r] * data.etr[(c, 0)];
                 }
                 eliminated_rhs[(base + r, 0)] = acc;
+            }
+
+            if data.cols.is_empty() {
+                continue;
             }
 
             let mut contrib = Mat::<f64>::zeros(dof, 1);
@@ -841,6 +852,168 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// ISSUE-0003 regression: a fully-fixed kept variable (`free_dof() == 0`,
+    /// sharing `col_start` with the next kept block since it claims no
+    /// column) must not perturb the reduced system chunk-wise elimination
+    /// produces for the remaining columns.
+    #[test]
+    fn chunked_elimination_handles_zero_dof_kept_block() -> TestResult {
+        let (j, r, _) = tiny_system()?;
+        let partition = SchurPartition::new(
+            vec![
+                BlockSpan {
+                    key: key(4),
+                    col_start: 0,
+                    dof: 0,
+                },
+                BlockSpan {
+                    key: key(0),
+                    col_start: 0,
+                    dof: 2,
+                },
+                BlockSpan {
+                    key: key(1),
+                    col_start: 2,
+                    dof: 2,
+                },
+            ],
+            vec![
+                BlockSpan {
+                    key: key(2),
+                    col_start: 4,
+                    dof: 1,
+                },
+                BlockSpan {
+                    key: key(3),
+                    col_start: 5,
+                    dof: 1,
+                },
+            ],
+        )?;
+        let (want_s, want_g) = dense_reference(&j, &r, &partition);
+
+        let mut elim = ChunkedSchurEliminator::new(&j, &partition)?;
+        let got = elim.eliminate(&j, &r, &partition, None)?;
+
+        assert_eq!(got.kept_dof, 4);
+        for i in 0..4 {
+            assert!(
+                (got.g_reduced[(i, 0)] - want_g[i]).abs() < 1e-10,
+                "g_reduced[{i}]: got {}, want {}",
+                got.g_reduced[(i, 0)],
+                want_g[i]
+            );
+            for k in 0..4 {
+                assert!(
+                    (got.s[(i, k)] - want_s[i * 4 + k]).abs() < 1e-10,
+                    "S[{i},{k}]: got {}, want {}",
+                    got.s[(i, k)],
+                    want_s[i * 4 + k]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Mixed chunk: one row touches ONLY the eliminated column (from a
+    /// fully-fixed kept variable contributing zero columns), another row in
+    /// the SAME chunk touches both a real kept column and the eliminated
+    /// column — mirroring a landmark observed by both a fixed and a free
+    /// camera.
+    #[test]
+    fn chunked_elimination_handles_mixed_zero_dof_row_in_chunk() -> TestResult {
+        let t = vec![
+            Triplet::new(0usize, 3usize, 2.0f64),
+            Triplet::new(1, 0, 1.0),
+            Triplet::new(1, 1, 0.5),
+            Triplet::new(1, 2, 0.3),
+            Triplet::new(1, 3, 1.5),
+        ];
+        let j = SparseColMat::try_new_from_triplets(2, 4, &t)?;
+        let r = Mat::from_fn(2, 1, |i, _| 0.3 + i as f64 * 0.2);
+
+        let partition = SchurPartition::new(
+            vec![
+                BlockSpan {
+                    key: key(4),
+                    col_start: 0,
+                    dof: 0,
+                },
+                BlockSpan {
+                    key: key(0),
+                    col_start: 0,
+                    dof: 3,
+                },
+            ],
+            vec![BlockSpan {
+                key: key(2),
+                col_start: 3,
+                dof: 1,
+            }],
+        )?;
+        let (want_s, want_g) = dense_reference(&j, &r, &partition);
+
+        let mut elim = ChunkedSchurEliminator::new(&j, &partition)?;
+        let got = elim.eliminate(&j, &r, &partition, None)?;
+
+        assert_eq!(got.kept_dof, 3);
+        for i in 0..3 {
+            assert!(
+                (got.g_reduced[(i, 0)] - want_g[i]).abs() < 1e-10,
+                "g_reduced[{i}]: got {}, want {}",
+                got.g_reduced[(i, 0)],
+                want_g[i]
+            );
+            for k in 0..3 {
+                assert!(
+                    (got.s[(i, k)] - want_s[i * 3 + k]).abs() < 1e-10,
+                    "S[{i},{k}]: got {}, want {}",
+                    got.s[(i, k)],
+                    want_s[i * 3 + k]
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// ISSUE-0003 regression: a landmark observed *only* by a fully-fixed
+    /// camera has real rows and dof but zero kept-column coupling
+    /// (`cols.is_empty()`) — structurally impossible before a kept block
+    /// could have zero dof. `δ_e` must still receive its unconstrained
+    /// `H_ee⁻¹·Eᵀr` update rather than the initial zero it would keep if that
+    /// computation were skipped alongside the (legitimately empty) S/g
+    /// correction.
+    #[test]
+    fn chunked_elimination_computes_delta_e_for_chunk_with_no_kept_coupling() -> TestResult {
+        let t = vec![Triplet::new(0usize, 0usize, 2.0f64)];
+        let j = SparseColMat::try_new_from_triplets(1, 1, &t)?;
+        let r = Mat::from_fn(1, 1, |_, _| 0.7);
+
+        let partition = SchurPartition::new(
+            vec![BlockSpan {
+                key: key(4),
+                col_start: 0,
+                dof: 0,
+            }],
+            vec![BlockSpan {
+                key: key(2),
+                col_start: 0,
+                dof: 1,
+            }],
+        )?;
+
+        let mut elim = ChunkedSchurEliminator::new(&j, &partition)?;
+        let got = elim.eliminate(&j, &r, &partition, None)?;
+
+        // H_ee = 2.0² = 4.0, Eᵀr = 2.0·0.7 = 1.4, H_ee⁻¹·Eᵀr = 0.35.
+        assert!(
+            (got.eliminated_rhs[(0, 0)] - 0.35).abs() < 1e-10,
+            "eliminated_rhs must be H_ee⁻¹·Eᵀr even with no kept coupling, got {}",
+            got.eliminated_rhs[(0, 0)]
+        );
         Ok(())
     }
 

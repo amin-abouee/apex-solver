@@ -116,7 +116,13 @@ fn test_trafalgar_21_self_calibration() -> Result<(), Box<dyn std::error::Error>
 
     // Iterative Schur is required for SelfCalibration because intrinsics (RN, 3 DOF) and
     // landmarks (RN, 3 DOF) are indistinguishable for the Sparse Schur block classifier.
-    let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(50);
+    // ISSUE-0003 fix: eliminating the fixed gauge pose's 6 DOF from the linear
+    // solve (rather than solving them as free and zeroing afterward) makes
+    // this a mathematically harder, correctly-constrained problem — it now
+    // needs more iterations to reach the same convergence criteria (~67 per
+    // an independent before/after measurement on this exact dataset), not
+    // fewer as the old, wrong solve implied. 150 leaves comfortable margin.
+    let config = LevenbergMarquardtConfig::for_bundle_adjustment().with_max_iterations(150);
 
     let mut solver = LevenbergMarquardt::with_config(config);
 

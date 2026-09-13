@@ -151,9 +151,9 @@ impl Corrector {
         let rho_2 = rho[2]; // ρ''(s)
 
         // Compute scaling factors. The square root is clamped at zero: kernels
-        // whose effective weight goes negative past their threshold (DCS past
-        // s = Φ) fully suppress the block instead of producing NaN — the same
-        // outcome as Tukey's flat region, which yields sqrt(0) = 0.
+        // whose effective weight is zero or negative past their threshold
+        // (e.g. Tukey's flat outlier region, or DCS's saturating plateau
+        // past s = Φ) fully suppress the block instead of producing NaN.
         let sqrt_rho1 = rho_1.max(0.0).sqrt(); // √(max(ρ'(s), 0))
 
         // Handle special cases (common case: rho[2] <= 0)
@@ -421,5 +421,41 @@ mod tests {
         assert!(!corrector.sqrt_rho1.is_nan());
         assert!(!corrector.residual_scaling.is_nan());
         assert!(!corrector.alpha_sq_norm.is_nan());
+    }
+
+    /// ISSUE-0010 regression: for every loss (not just DCS past its
+    /// threshold), the model the optimizer actually descends — `J̃ᵀr̃`, the
+    /// Gauss-Newton gradient of the corrected residual — must equal the true
+    /// derivative of `robust_cost()` with respect to state, on both sides of
+    /// any internal branch threshold. Before the fix, DCS's declining ρ(s)
+    /// past s = Φ kept moving `robust_cost()` while the clamped-negative-ρ'
+    /// path already contributed zero gradient/Jacobian.
+    #[test]
+    fn test_dcs_cost_gradient_consistency_across_threshold() -> TestResult {
+        use crate::core::loss_functions::DcsLoss;
+
+        let phi = 1.0;
+        let loss = DcsLoss::new(phi)?;
+        let h = 1e-6;
+        let cost = |x: f64| Corrector::new(&loss, x * x).robust_cost();
+
+        // Scalar residual r(x) = x: sweep both sides of s = x² = Φ (x = 1).
+        for x in [0.3, 0.9, 1.5, 3.0, 10.0] {
+            let corrector = Corrector::new(&loss, x * x);
+            let mut residual = [x];
+            let mut jacobian = [1.0];
+            corrector.correct_jacobian_in_place(&residual, &mut jacobian, 1, 1);
+            corrector.correct_residual_in_place(&mut residual);
+            let modeled_gradient = jacobian[0] * residual[0];
+
+            let numeric_gradient = (cost(x + h) - cost(x - h)) / (2.0 * h);
+
+            assert!(
+                (modeled_gradient - numeric_gradient).abs() < 1e-3,
+                "x={x} (s={}, phi={phi}): modeled={modeled_gradient} numeric={numeric_gradient}",
+                x * x
+            );
+        }
+        Ok(())
     }
 }
