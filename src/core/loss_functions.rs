@@ -1379,7 +1379,6 @@ impl LossFunction for LpNormLoss {
 #[derive(Debug, Clone)]
 pub struct BarronGeneralLoss {
     alpha: f64,
-    scale: f64,
     scale2: f64,
 }
 
@@ -1398,7 +1397,6 @@ impl BarronGeneralLoss {
         }
         Ok(BarronGeneralLoss {
             alpha,
-            scale,
             scale2: scale * scale,
         })
     }
@@ -1407,39 +1405,44 @@ impl BarronGeneralLoss {
 impl LossFunction for BarronGeneralLoss {
     #[inline]
     fn evaluate(&self, s: f64) -> [f64; 3] {
-        // Handle special case α ≈ 0 (Cauchy loss)
+        let c2 = self.scale2;
+
+        // α → 0 limit (Barron 2019, eq. 13): ρ(s) = ln(s/(2c²) + 1).
+        // This is the α → 0 limit of the general branch below, taken via
+        // L'Hôpital as `(b/α)(inner^(α/2)-1) → ln(inner)`; evaluating the
+        // general formula directly at α = 0 is a 0/0 indeterminate form.
         if self.alpha.abs() < 1e-6 {
-            let denom = 1.0 + s / self.scale2;
-            let inv = 1.0 / denom;
-            return [
-                (self.scale2 / 2.0) * denom.ln(),
-                inv.max(f64::MIN),
-                -inv * inv / self.scale2,
-            ];
+            let inner = s / (2.0 * c2) + 1.0;
+            let rho = inner.ln();
+            let rho_prime = 1.0 / (2.0 * c2 * inner);
+            let rho_double_prime = -1.0 / (4.0 * c2 * c2 * inner * inner);
+            return [rho, rho_prime, rho_double_prime];
         }
 
-        // Handle special case α ≈ 2 (L2 loss)
+        // α → 2 limit: ordinary (scaled) L2, ρ(s) = s/(2c²). The general
+        // branch's `b = |α-2|` denominator vanishes here, so this must be
+        // taken as a limit rather than evaluated directly.
         if (self.alpha - 2.0).abs() < 1e-6 {
-            return [s, 1.0, 0.0];
+            return [s / (2.0 * c2), 1.0 / (2.0 * c2), 0.0];
         }
 
-        // General case
-        let x = s.sqrt();
-        let normalized = x / self.scale;
-        let normalized2 = normalized * normalized;
+        // General case (Barron 2019, eq. 8, x² = s):
+        //   b = |α - 2|,  inner(s) = s/(c²·b) + 1
+        //   ρ(s)   = (b/α) · (inner^(α/2) - 1)
+        //   ρ'(s)  = inner^(α/2 - 1) / (2c²)
+        //   ρ''(s) = sign(α - 2) · inner^(α/2 - 2) / (4c⁴)
+        // (ρ'/ρ'' are the exact derivatives of ρ above w.r.t. s — the `b`
+        // factor cancels in ρ'; nonnegative and finite for every α, unlike
+        // the previous `|α|`-based normalization, which could go negative
+        // for α < 0.)
+        let b = (self.alpha - 2.0).abs();
+        let inner = s / (c2 * b) + 1.0;
+        let half_alpha = self.alpha / 2.0;
 
-        let inner = self.alpha.abs() / 2.0 * normalized2 + 1.0;
-        let power = inner.powf(self.alpha / 2.0);
-
-        // ρ(s) = (|α|/c²) * (power - 1)
-        let rho = (self.alpha.abs() / self.scale2) * (power - 1.0);
-
-        // ρ'(s) = (1/2) * inner^(α/2 - 1)
-        let rho_prime = 0.5 * inner.powf(self.alpha / 2.0 - 1.0);
-
-        // ρ''(s) = (α - 2)/(4c²) * inner^(α/2 - 2)
-        let rho_double_prime =
-            (self.alpha - 2.0) / (4.0 * self.scale2) * inner.powf(self.alpha / 2.0 - 2.0);
+        let rho = (b / self.alpha) * (inner.powf(half_alpha) - 1.0);
+        let rho_prime = inner.powf(half_alpha - 1.0) / (2.0 * c2);
+        let sign = if self.alpha > 2.0 { 1.0 } else { -1.0 };
+        let rho_double_prime = sign * inner.powf(half_alpha - 2.0) / (4.0 * c2 * c2);
 
         [rho, rho_prime, rho_double_prime]
     }
@@ -1650,7 +1653,6 @@ impl AdaptiveBarronLoss {
         AdaptiveBarronLoss {
             inner: BarronGeneralLoss {
                 alpha: 0.0,
-                scale: 1.0,
                 scale2: 1.0,
             },
         }
@@ -2009,11 +2011,11 @@ mod tests {
         let [_, rho_prime_large, _] = cauchy.evaluate(100.0);
         assert!(rho_prime_large < rho_prime_small);
 
-        // α = 2 (L2)
+        // α = 2 (L2, scaled): ρ(s) = s/(2c²)
         let l2 = BarronGeneralLoss::new(2.0, 1.0)?;
         let [rho, rho_prime, rho_double_prime] = l2.evaluate(4.0);
-        assert!((rho - 4.0).abs() < EPSILON);
-        assert!((rho_prime - 1.0).abs() < EPSILON);
+        assert!((rho - 2.0).abs() < EPSILON);
+        assert!((rho_prime - 0.5).abs() < EPSILON);
         assert!(rho_double_prime.abs() < EPSILON);
 
         // α = 1 (Charbonnier-like)
@@ -2028,6 +2030,79 @@ mod tests {
         assert!(rho_prime_large < rho_prime_small); // Redescending behavior
         assert!(rho_prime_large < 0.1); // Strong suppression
 
+        Ok(())
+    }
+
+    /// ISSUE-0006 regression: `BarronGeneralLoss`'s returned `rho'`/`rho''`
+    /// must be the actual derivatives of its own returned `rho`, `rho(0)=0`,
+    /// and cost must stay nonnegative for every alpha — including negative
+    /// alpha, where the previous `|α|`-normalized formula went negative.
+    #[test]
+    fn test_barron_general_loss_derivative_contract() -> TestResult {
+        for alpha in [2.0, 1.0, 0.5, 0.0, -1.0, -2.0, -10.0, -100.0] {
+            let loss = BarronGeneralLoss::new(alpha, 1.0)?;
+
+            let [rho0, _, _] = loss.evaluate(0.0);
+            assert!(
+                rho0.abs() < 1e-9,
+                "alpha={alpha}: rho(0) = {rho0}, expected 0"
+            );
+
+            for &s in &[1e-3, 0.5, 1.0, 4.0, 25.0, 100.0] {
+                let [rho, rho_prime, rho_double_prime] = loss.evaluate(s);
+                assert!(rho.is_finite() && rho_prime.is_finite() && rho_double_prime.is_finite());
+                assert!(
+                    rho >= -1e-9,
+                    "alpha={alpha} s={s}: rho={rho} is negative (ISSUE-0006 reproduction)"
+                );
+
+                let (num_prime, num_double_prime) = numerical_derivative(&loss, s, 1e-4);
+                let prime_err = (rho_prime - num_prime).abs();
+                let double_prime_err = (rho_double_prime - num_double_prime).abs();
+                assert!(
+                    prime_err < 1e-3 * (1.0 + rho_prime.abs()),
+                    "alpha={alpha} s={s}: rho'={rho_prime} vs numeric {num_prime}"
+                );
+                assert!(
+                    double_prime_err < 1e-2 * (1.0 + rho_double_prime.abs()),
+                    "alpha={alpha} s={s}: rho''={rho_double_prime} vs numeric {num_double_prime}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The general branch must agree with the special-cased α→0 and α→2
+    /// limits just outside the 1e-6 switch-over threshold, in both value and
+    /// first derivative.
+    #[test]
+    fn test_barron_general_loss_continuous_at_shape_limits() -> TestResult {
+        let scale = 1.7;
+        let s = 3.0;
+
+        for &(alpha, name) in &[(0.0, "alpha=0"), (2.0, "alpha=2")] {
+            let at_limit = BarronGeneralLoss::new(alpha, scale)?.evaluate(s);
+            for delta in [1e-5, 1e-4, 1e-3] {
+                let near = BarronGeneralLoss::new(alpha + delta, scale)?.evaluate(s);
+                let rho_err = (at_limit[0] - near[0]).abs();
+                let prime_err = (at_limit[1] - near[1]).abs();
+                assert!(
+                    rho_err < 10.0 * delta,
+                    "{name}: rho discontinuous approaching from +{delta}: {rho_err}"
+                );
+                assert!(
+                    prime_err < 10.0 * delta,
+                    "{name}: rho' discontinuous approaching from +{delta}: {prime_err}"
+                );
+
+                let near_below = BarronGeneralLoss::new(alpha - delta, scale)?.evaluate(s);
+                let rho_err_below = (at_limit[0] - near_below[0]).abs();
+                assert!(
+                    rho_err_below < 10.0 * delta,
+                    "{name}: rho discontinuous approaching from -{delta}: {rho_err_below}"
+                );
+            }
+        }
         Ok(())
     }
 
