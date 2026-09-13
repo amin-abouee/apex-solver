@@ -318,24 +318,33 @@ fn apply_signed_parameter_step(
     variable_order: &[VarKey],
     sign: f64,
 ) -> f64 {
+    // `step` is sized to `total_dof` from `build_variable_index_map`, i.e.
+    // free columns only (see ISSUE-0003) — its norm below is already the
+    // norm of the step actually applied, with no fixed-coordinate entries
+    // inflating it.
     let mut step_offset = 0;
 
-    // SmallVec-backed buffer: inline for the common case (DOF ≤ 16, covering
+    // SmallVec-backed buffers: inline for the common case (DOF ≤ 16, covering
     // SE3/SO3/SE2/SO2 and small RN), spills to heap only for large RN
     // variables. Mirrors the `[0f64; 16]` buffer pattern used inside
     // `Variable::apply_tangent_step`.
-    let mut step_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut free_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
+    let mut full_buf: smallvec::SmallVec<[f64; 16]> = smallvec::SmallVec::new();
     for &var_key in variable_order {
         if let Some(var) = variables.get_mut(var_key) {
-            let var_size = var.dof();
-            let var_step = step.subrows(step_offset, var_size);
-            step_buf.clear();
-            step_buf.resize(var_size, 0.0);
-            for i in 0..var_size {
-                step_buf[i] = sign * var_step[(i, 0)];
+            let free_size = var.free_dof();
+            let dof = var.dof();
+            let var_step = step.subrows(step_offset, free_size);
+            free_buf.clear();
+            free_buf.resize(free_size, 0.0);
+            for i in 0..free_size {
+                free_buf[i] = sign * var_step[(i, 0)];
             }
-            var.apply_tangent_step(&step_buf);
-            step_offset += var_size;
+            full_buf.clear();
+            full_buf.resize(dof, 0.0);
+            var.expand_free_step(&free_buf, &mut full_buf);
+            var.apply_tangent_step(&full_buf);
+            step_offset += free_size;
         }
     }
 
@@ -527,13 +536,18 @@ pub fn process_jacobian(
     Ok(jacobian * scaling)
 }
 
-/// Assign each variable a contiguous range of tangent-space columns.
+/// Assign each variable a contiguous range of tangent-space **free** columns.
 ///
 /// Ordering follows `variables.keys()` — slotmap insertion order, which is already
-/// deterministic — and each variable is given `dof()` consecutive columns starting
-/// at the running offset.
+/// deterministic — and each variable is given `free_dof()` (its tangent
+/// dimension minus any fixed local indices) consecutive columns starting at
+/// the running offset. Fixed tangent coordinates never occupy a column: they
+/// must be eliminated before the linear solve rather than solved for and
+/// zeroed afterward, since free and fixed columns generally couple through
+/// `JᵀJ` (see `codex/issues/ISSUE-0003-fixed-dofs-solved-as-free.md`).
 ///
-/// Returns `(column offset per variable, variable keys in column order, total DOF)`.
+/// Returns `(free-column offset per variable, variable keys in column order,
+/// total free DOF)`.
 ///
 /// This is shared by [`initialize_optimization_state`] and by covariance
 /// estimation ([`crate::linalg::covariance`]). Both must agree on the column
@@ -547,7 +561,7 @@ pub(crate) fn build_variable_index_map(
     let mut col_offset = 0;
     for &var_key in &sorted_vars {
         variable_index_map.insert(var_key, col_offset);
-        col_offset += variables[var_key].dof();
+        col_offset += variables[var_key].free_dof();
     }
 
     (variable_index_map, sorted_vars, col_offset)

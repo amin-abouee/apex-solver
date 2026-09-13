@@ -193,12 +193,37 @@ pub type CovarianceResult<T> = Result<T, CovarianceError>;
 ///
 /// Blocks are in **tangent space**: a variable with `dof() == d` has a `d × d`
 /// covariance block, regardless of its ambient parameterization. For an `SE3`
-/// pose this is `6 × 6`, even though the variable stores 7 numbers.
+/// pose this is `6 × 6`, even though the variable stores 7 numbers. Fixed
+/// tangent coordinates are excluded from `H` before inversion (see
+/// `codex/issues/ISSUE-0003-fixed-dofs-solved-as-free.md`) and appear as
+/// exact `0.0` rows/columns in [`block`](Covariance::block)/
+/// [`block_pair`](Covariance::block_pair) — a fixed coordinate is held at a
+/// known constant, so it has zero variance and zero covariance with
+/// everything else by construction, not by approximation.
 #[derive(Debug, Clone)]
 pub struct Covariance {
+    /// `H⁻¹` restricted to free columns only — `total_free_dof × total_free_dof`.
     matrix: Mat<f64>,
+    /// Free-column offset per variable, in the same reduced space as `matrix`.
     index_map: SecondaryMap<VarKey, usize>,
-    dofs: SecondaryMap<VarKey, usize>,
+    /// Full (un-reduced) tangent dimension per variable — the shape callers see.
+    full_dofs: SecondaryMap<VarKey, usize>,
+    /// Fixed local tangent indices per variable, used to place exact zeros.
+    fixed_indices: SecondaryMap<VarKey, std::collections::HashSet<usize>>,
+}
+
+/// Map a local tangent index to its offset in free-column space, or `None`
+/// if fixed — same rule as `ManifoldVariable::local_free_offset`, inlined
+/// here since `Covariance` stores plain `HashSet`s rather than variable
+/// trait objects.
+fn local_free_offset(fixed: &std::collections::HashSet<usize>, local: usize) -> Option<usize> {
+    if fixed.is_empty() {
+        return Some(local);
+    }
+    if fixed.contains(&local) {
+        return None;
+    }
+    Some(local - fixed.iter().filter(|&&i| i < local).count())
 }
 
 impl Covariance {
@@ -215,19 +240,13 @@ impl Covariance {
             return Err(CovarianceError::EmptyProblem);
         }
 
+        // Free-column space: fixed tangent coordinates own no column here, so
+        // `H` below never contains them and this is a true conditional
+        // covariance, not a marginal that over-states free-parameter
+        // uncertainty (see `block`/`block_pair`, which reinsert them as
+        // exact zeros for the caller).
         let (index_map, _sorted_vars, total_dof) =
             crate::optimizer::build_variable_index_map(variables);
-
-        if variables
-            .values()
-            .any(|v| !v.get_fixed_indices().is_empty())
-        {
-            warn!(
-                "Covariance requested for a problem with fixed variable indices. Fixed degrees \
-                 of freedom are currently included in H, so the reported blocks are marginals \
-                 rather than conditionals and over-state uncertainty on the free parameters."
-            );
-        }
 
         // Re-linearize at the given point. Note this deliberately ignores any
         // `use_jacobi_scaling` setting: the covariance must not depend on the
@@ -267,41 +286,61 @@ impl Covariance {
             matrix *= faer::Scale(sigma_squared);
         }
 
-        let dofs = variables.iter().map(|(k, v)| (k, v.dof())).collect();
+        let full_dofs = variables.iter().map(|(k, v)| (k, v.dof())).collect();
+        let fixed_indices = variables
+            .iter()
+            .map(|(k, v)| (k, v.get_fixed_indices().clone()))
+            .collect();
 
         Ok(Self {
             matrix,
             index_map,
-            dofs,
+            full_dofs,
+            fixed_indices,
         })
     }
 
-    /// Marginal covariance of one variable: a `dof × dof` block in tangent space.
-    pub fn block(&self, key: VarKey) -> Option<MatRef<'_, f64>> {
+    /// Marginal covariance of one variable: a `dof × dof` block in tangent
+    /// space, with exact `0.0` rows/columns at any fixed local index.
+    pub fn block(&self, key: VarKey) -> Option<Mat<f64>> {
         self.block_pair(key, key)
     }
 
-    /// Cross-covariance between two variables: a `dof_a × dof_b` block.
-    pub fn block_pair(&self, a: VarKey, b: VarKey) -> Option<MatRef<'_, f64>> {
-        let (&row, &col) = (self.index_map.get(a)?, self.index_map.get(b)?);
-        let (rows, cols) = (*self.dofs.get(a)?, *self.dofs.get(b)?);
-        Some(self.matrix.as_ref().submatrix(row, col, rows, cols))
+    /// Cross-covariance between two variables: a `dof_a × dof_b` block, with
+    /// exact `0.0` rows/columns at any fixed local index of either variable.
+    pub fn block_pair(&self, a: VarKey, b: VarKey) -> Option<Mat<f64>> {
+        let (&free_row0, &free_col0) = (self.index_map.get(a)?, self.index_map.get(b)?);
+        let (full_a, full_b) = (*self.full_dofs.get(a)?, *self.full_dofs.get(b)?);
+        let (fixed_a, fixed_b) = (self.fixed_indices.get(a)?, self.fixed_indices.get(b)?);
+
+        Some(Mat::from_fn(full_a, full_b, |local_a, local_b| {
+            let (Some(free_a), Some(free_b)) = (
+                local_free_offset(fixed_a, local_a),
+                local_free_offset(fixed_b, local_b),
+            ) else {
+                return 0.0;
+            };
+            self.matrix[(free_row0 + free_a, free_col0 + free_b)]
+        }))
     }
 
     /// Every variable's marginal block, keyed by variable.
     pub fn per_variable(&self) -> SecondaryMap<VarKey, Mat<f64>> {
         self.index_map
             .keys()
-            .filter_map(|key| Some((key, self.block(key)?.to_owned())))
+            .filter_map(|key| Some((key, self.block(key)?)))
             .collect()
     }
 
-    /// The full covariance matrix, `total_dof × total_dof`.
+    /// The full reduced covariance matrix, `total_free_dof × total_free_dof`
+    /// — free columns only, in the same space as [`index_map`](Self::index_map).
+    /// Use [`block`](Self::block)/[`block_pair`](Self::block_pair) for the
+    /// per-variable view with fixed coordinates reinserted as exact zeros.
     pub fn full(&self) -> MatRef<'_, f64> {
         self.matrix.as_ref()
     }
 
-    /// Column offset of each variable within [`full`](Self::full).
+    /// Free-column offset of each variable within [`full`](Self::full).
     pub fn index_map(&self) -> &SecondaryMap<VarKey, usize> {
         &self.index_map
     }

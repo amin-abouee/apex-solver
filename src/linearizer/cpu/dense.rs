@@ -63,7 +63,14 @@ pub fn assemble_dense(
         .zip(jac_slices.iter())
     {
         let block = &residual_blocks[*key];
-        scatter_dense_block(bl, block, variable_index_map, jac_buf, &mut jacobian_dense)?;
+        scatter_dense_block(
+            bl,
+            block,
+            variables,
+            variable_index_map,
+            jac_buf,
+            &mut jacobian_dense,
+        )?;
     }
 
     // Convert residual buffer to faer Mat
@@ -76,6 +83,7 @@ pub fn assemble_dense(
 fn scatter_dense_block(
     bl: &BlockLinearization,
     residual_block: &crate::core::residual_block::ResidualBlock,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     variable_index_map: &SecondaryMap<VarKey, usize>,
     jacobian_buf: &[f64],
     jacobian_dense: &mut Mat<f64>,
@@ -88,11 +96,16 @@ fn scatter_dense_block(
             ))
             .log()
         })?;
+        let var = &variables[var_key];
         let (local_col, var_size) = bl.variable_local_idx_size_list[i];
         for col in 0..var_size {
+            // Fixed tangent coordinates own no column — see ISSUE-0003.
+            let Some(free_col) = var.local_free_offset(col) else {
+                continue;
+            };
             let col_start = (local_col + col) * bl.residual_dim;
             for row in 0..bl.residual_dim {
-                jacobian_dense[(bl.residual_row_start_idx + row, global_col + col)] =
+                jacobian_dense[(bl.residual_row_start_idx + row, global_col + free_col)] =
                     jacobian_buf[col_start + row];
             }
         }
@@ -146,7 +159,7 @@ mod tests {
         let mut offset = 0;
         for (k, v) in &problem.variables {
             map.insert(k, offset);
-            offset += v.dof();
+            offset += v.free_dof();
         }
         (map, offset)
     }

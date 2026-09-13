@@ -323,6 +323,52 @@ pub trait ManifoldVariable: Send + Sync + 'static {
     /// Static name of the underlying manifold type ("SE3", "SO3", …).
     fn manifold_type_name(&self) -> &'static str;
 
+    // ── Fixed/free column layout (ISSUE-0003) ───────────────────────────
+    // Fixed tangent coordinates must never occupy a column in the linear
+    // solve — solving the full system and zeroing the fixed entries of the
+    // step afterward is not equivalent, since free and fixed columns
+    // generally couple through JᵀJ. These map a variable's local tangent
+    // indices to a compacted "free-column" space instead.
+    /// Number of un-fixed tangent coordinates.
+    fn free_dof(&self) -> usize {
+        self.dof() - self.get_fixed_indices().len()
+    }
+
+    /// Map a local tangent index (`0..dof()`) to its offset within this
+    /// variable's free-column block, or `None` if that index is fixed.
+    fn local_free_offset(&self, local: usize) -> Option<usize> {
+        let fixed = self.get_fixed_indices();
+        if fixed.is_empty() {
+            // Fast path: identity mapping, no HashSet touch.
+            return Some(local);
+        }
+        if fixed.contains(&local) {
+            return None;
+        }
+        Some(local - fixed.iter().filter(|&&i| i < local).count())
+    }
+
+    /// Expand a free-space step (length `free_dof()`) into a `dof()`-length
+    /// buffer, writing `0.0` at every fixed local index in ascending order.
+    fn expand_free_step(&self, free_step: &[f64], out: &mut [f64]) {
+        let fixed = self.get_fixed_indices();
+        let dof = self.dof();
+        if fixed.is_empty() {
+            out[..dof].copy_from_slice(&free_step[..dof]);
+            return;
+        }
+        let mut free_idx = 0usize;
+        for (local, slot) in out.iter_mut().enumerate().take(dof) {
+            *slot = if fixed.contains(&local) {
+                0.0
+            } else {
+                let v = free_step.get(free_idx).copied().unwrap_or(0.0);
+                free_idx += 1;
+                v
+            };
+        }
+    }
+
     // ── Covariance ───────────────────────────────────────────────────────
     fn set_covariance(&mut self, cov: faer::Mat<f64>);
     fn covariance(&self) -> Option<&faer::Mat<f64>>;

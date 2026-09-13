@@ -23,6 +23,17 @@ pub struct SymbolicStructure {
     pub order: Argsort<usize>,
 }
 
+/// Free local columns of `variable`, as `(local_col, free_offset)` pairs —
+/// shared by [`build_symbolic_structure`] and [`scatter_sparse_block`] so
+/// their column ordering can never drift apart. Fixed tangent coordinates
+/// (see ISSUE-0003) own no column and are skipped by both.
+fn free_local_columns(
+    variable: &dyn ManifoldVariable,
+    var_size: usize,
+) -> impl Iterator<Item = (usize, usize)> + '_ {
+    (0..var_size).filter_map(move |col| variable.local_free_offset(col).map(|free| (col, free)))
+}
+
 /// Build the symbolic sparsity structure for the Jacobian matrix.
 ///
 /// Blocks are visited in `residual_row_start_idx` order, matching
@@ -56,14 +67,15 @@ pub fn build_symbolic_structure(
         }
 
         for (i, &var_key) in block.variable_keys.iter().enumerate() {
-            if let Some(&global_col) = variable_index_map.get(var_key)
+            if let Some(variable) = variables.get(var_key)
+                && let Some(&global_col) = variable_index_map.get(var_key)
                 && let Some((_, var_size)) = var_local_sizes.get(i)
             {
                 for row in 0..block.factor.residual_dim() {
-                    for col in 0..*var_size {
+                    for (_, free_col) in free_local_columns(variable.as_ref(), *var_size) {
                         indices.push(Pair::new(
                             block.residual_row_start_idx + row,
-                            global_col + col,
+                            global_col + free_col,
                         ));
                     }
                 }
@@ -139,7 +151,14 @@ pub fn assemble_sparse(
         .zip(jac_slices.iter())
     {
         let block = &residual_blocks[*key];
-        scatter_sparse_block(bl, block, variable_index_map, jac_buf, &mut jacobian_values)?;
+        scatter_sparse_block(
+            bl,
+            block,
+            variables,
+            variable_index_map,
+            jac_buf,
+            &mut jacobian_values,
+        )?;
     }
 
     // Convert residual buffer to faer Mat
@@ -167,26 +186,32 @@ pub fn assemble_sparse(
 fn scatter_sparse_block(
     bl: &BlockLinearization,
     residual_block: &crate::core::residual_block::ResidualBlock,
+    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
     variable_index_map: &SecondaryMap<VarKey, usize>,
     jacobian_buf: &[f64],
     jacobian_values: &mut Vec<f64>,
 ) -> LinearizerResult<()> {
     for (i, &var_key) in residual_block.variable_keys.iter().enumerate() {
-        if variable_index_map.contains_key(var_key) {
-            let (local_col, var_size) = bl.variable_local_idx_size_list[i];
-            // symbolic indices are pushed row-major: (row outer, col inner)
-            // jacobian_buf is column-major: buf[(local_col + col) * residual_dim + row]
-            for row in 0..bl.residual_dim {
-                for col in 0..var_size {
-                    jacobian_values.push(jacobian_buf[(local_col + col) * bl.residual_dim + row]);
-                }
-            }
-        } else {
+        let variable = variables
+            .get(var_key)
+            .filter(|_| variable_index_map.contains_key(var_key));
+        let Some(variable) = variable else {
             return Err(LinearizerError::Variable(format!(
                 "VarKey {:?} missing in variable-to-column-index mapping",
                 var_key
             ))
             .log());
+        };
+        let (local_col, var_size) = bl.variable_local_idx_size_list[i];
+        // symbolic indices are pushed row-major: (row outer, col inner), over
+        // FREE local columns only — must iterate in exactly the same order as
+        // `build_symbolic_structure`'s `free_local_columns` call, or J's
+        // values desync from its sparsity pattern.
+        // jacobian_buf is column-major: buf[(local_col + col) * residual_dim + row]
+        for row in 0..bl.residual_dim {
+            for (col, _free_col) in free_local_columns(variable.as_ref(), var_size) {
+                jacobian_values.push(jacobian_buf[(local_col + col) * bl.residual_dim + row]);
+            }
         }
     }
     Ok(())
@@ -265,7 +290,7 @@ mod tests {
         let mut offset = 0;
         for (k, v) in &problem.variables {
             map.insert(k, offset);
-            offset += v.dof();
+            offset += v.free_dof();
         }
         (map, offset)
     }

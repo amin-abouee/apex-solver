@@ -431,11 +431,11 @@ mod tests {
     /// past s = Φ kept moving `robust_cost()` while the clamped-negative-ρ'
     /// path already contributed zero gradient/Jacobian.
     #[test]
-    fn test_dcs_cost_gradient_consistency_across_threshold() {
+    fn test_dcs_cost_gradient_consistency_across_threshold() -> TestResult {
         use crate::core::loss_functions::DcsLoss;
 
         let phi = 1.0;
-        let loss = DcsLoss::new(phi).unwrap();
+        let loss = DcsLoss::new(phi)?;
         let h = 1e-6;
         let cost = |x: f64| Corrector::new(&loss, x * x).robust_cost();
 
@@ -456,5 +456,6 @@ mod tests {
                 x * x
             );
         }
+        Ok(())
     }
 }
