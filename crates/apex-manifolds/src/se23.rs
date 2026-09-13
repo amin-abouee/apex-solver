@@ -383,7 +383,11 @@ impl LieGroup for SE23 {
     }
 
     fn is_valid(&self, tolerance: f64) -> bool {
-        self.rotation_impl().is_valid(tolerance)
+        // ISSUE-0008: translation and velocity were never checked, only the
+        // rotation — a NaN/Inf value in either previously passed silently.
+        self.translation_impl().iter().all(|t| t.is_finite())
+            && self.velocity_impl().iter().all(|v| v.is_finite())
+            && self.rotation_impl().is_valid(tolerance)
     }
 
     fn as_param_slice(&self) -> &[f64] {
@@ -821,6 +825,30 @@ mod tests {
         assert!(identity.translation().norm() < TOLERANCE);
         assert!(identity.velocity().norm() < TOLERANCE);
         assert!(identity.rotation_quaternion().angle() < TOLERANCE);
+    }
+
+    /// ISSUE-0008 regression: every stored parameter must be checked, not
+    /// just the quaternion — a NaN/Inf translation or velocity previously
+    /// passed `is_valid` silently. Also covers a non-finite tolerance.
+    #[test]
+    fn test_se23_is_valid_rejects_nonfinite_at_every_index() {
+        let base = SE23::identity();
+        for idx in 0..SE23::REP_SIZE {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut params: Vec<f64> = base.as_param_slice().to_vec();
+                params[idx] = bad;
+                let perturbed = SE23::from_param_slice(&params);
+                assert!(
+                    !perturbed.is_valid(TOLERANCE),
+                    "index {idx} = {bad} must be rejected"
+                );
+            }
+        }
+        assert!(
+            !base.is_valid(f64::INFINITY),
+            "infinite tolerance must be rejected"
+        );
+        assert!(!base.is_valid(f64::NAN), "NaN tolerance must be rejected");
     }
 
     #[test]
