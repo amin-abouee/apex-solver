@@ -500,7 +500,8 @@ impl SE23Tangent {
         let a = 0.5;
         let mut b = 1.0 / 6.0 + 1.0 / 120.0 * theta_squared;
         let mut c = -1.0 / 24.0 + 1.0 / 720.0 * theta_squared;
-        let mut d = -1.0 / 60.0;
+        // d = (1/2)(c - 3e); Taylor series of that combination near θ = 0.
+        let mut d = -1.0 / 120.0 + theta_squared / 2520.0;
 
         if theta_squared > crate::SMALL_ANGLE_THRESHOLD {
             let theta_norm = theta_squared.sqrt();
@@ -512,7 +513,8 @@ impl SE23Tangent {
 
             b = (theta_norm - sin_theta) / theta_norm_3;
             c = (1.0 - theta_squared / 2.0 - cos_theta) / theta_norm_4;
-            d = (c - 3.0) * (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
+            let e = (theta_norm - sin_theta - theta_norm_3 / 6.0) / theta_norm_5;
+            d = 0.5 * (c - 3.0 * e);
         }
 
         let rho_skew_theta_skew = rho_skew * theta_skew;
@@ -525,7 +527,9 @@ impl SE23Tangent {
         let m3 = rho_skew_theta_skew_sq2
             - rho_skew_theta_skew_sq2.transpose()
             - 3.0 * theta_skew_rho_skew_theta_skew;
-        let m4 = theta_skew_rho_skew_theta_skew * theta_skew;
+        // The last term needs both θₓρₓθ²ₓ and θ²ₓρₓθₓ, not just one.
+        let m4 = theta_skew_rho_skew_theta_skew * theta_skew
+            + theta_skew * theta_skew_rho_skew_theta_skew;
 
         m1 * a + m2 * b - m3 * c - m4 * d
     }
@@ -1544,5 +1548,94 @@ mod tests {
         let t = SE23Tangent::random();
         let recovered = SE23Tangent::from_slice(t.as_slice());
         assert!(t.is_approx(&recovered, 1e-14));
+    }
+}
+
+/// Independent central-difference regression tests for ISSUE-0001 (SE_2(3)
+/// `Q`-block coefficient, duplicated from SE(3) for both the position and
+/// velocity coupling blocks). Built from `exp()`/`matrix()`/`inverse()`
+/// alone — never from `log()` or `right_jacobian_inv()`.
+#[cfg(test)]
+mod se23_jacobian_fd_tests {
+    use super::*;
+
+    const FD_STEP: f64 = 1e-4;
+    const FD_TOL: f64 = 1e-5;
+
+    /// Extract [ρ,θ,ν] from a 5x5 se_2(3) Lie-algebra matrix
+    /// `[θ×, ρ, ν; 0, 0, 0; 0, 0, 0]`.
+    fn vee(m: &SMatrix<f64, 5, 5>) -> Vector9<f64> {
+        let mut v = Vector9::zeros();
+        v[0] = m[(0, 3)];
+        v[1] = m[(1, 3)];
+        v[2] = m[(2, 3)];
+        v[3] = m[(2, 1)];
+        v[4] = m[(0, 2)];
+        v[5] = m[(1, 0)];
+        v[6] = m[(0, 4)];
+        v[7] = m[(1, 4)];
+        v[8] = m[(2, 4)];
+        v
+    }
+
+    fn perturbed(xi: &SE23Tangent, k: usize, eps: f64) -> SE23Tangent {
+        let mut data = xi.data;
+        data[k] += eps;
+        SE23Tangent { data }
+    }
+
+    fn fd_right_jacobian(xi: &SE23Tangent) -> Matrix9<f64> {
+        let x_inv_mat = xi.exp(None).inverse(None).matrix();
+        let mut jac = Matrix9::zeros();
+        for k in 0..9 {
+            let plus = perturbed(xi, k, FD_STEP).exp(None).matrix();
+            let minus = perturbed(xi, k, -FD_STEP).exp(None).matrix();
+            let d_dxi_k = (plus - minus) / (2.0 * FD_STEP);
+            jac.set_column(k, &vee(&(x_inv_mat * d_dxi_k)));
+        }
+        jac
+    }
+
+    #[test]
+    fn se23_right_jacobian_matches_matrix_exp_central_difference() {
+        let cases = [
+            (
+                Vector3::new(0.7, -0.2, 0.4),
+                Vector3::new(0.4, -0.3, 0.25),
+                Vector3::new(-0.1, 0.8, 0.3),
+            ),
+            (
+                Vector3::new(0.1, 0.2, -0.3),
+                Vector3::new(2.8, 0.1, -0.2), // near pi
+                Vector3::new(0.3, -0.4, 0.2),
+            ),
+            (
+                Vector3::new(-0.5, 0.3, 0.2),
+                Vector3::zeros(), // theta = 0
+                Vector3::new(0.2, 0.2, 0.2),
+            ),
+        ];
+        for (rho, theta, nu) in cases {
+            let xi = SE23Tangent::from_components(
+                rho.x, rho.y, rho.z, theta.x, theta.y, theta.z, nu.x, nu.y, nu.z,
+            );
+            let analytic = xi.right_jacobian();
+            let numeric = fd_right_jacobian(&xi);
+            let err = (analytic - numeric).norm();
+            assert!(
+                err < FD_TOL,
+                "right_jacobian mismatch at rho={rho:?} theta={theta:?} nu={nu:?}: error={err}"
+            );
+
+            // Position and velocity coupling blocks independently: rows 0-2
+            // (ρ output) against columns 3-5 (θ input), and rows 6-8 (ν
+            // output) against columns 3-5.
+            let q_rho_err =
+                (analytic.fixed_view::<3, 3>(0, 3) - numeric.fixed_view::<3, 3>(0, 3)).norm();
+            let q_nu_err =
+                (analytic.fixed_view::<3, 3>(6, 3) - numeric.fixed_view::<3, 3>(6, 3)).norm();
+            assert!(q_rho_err < FD_TOL, "position Q-block error={q_rho_err}");
+            assert!(q_nu_err < FD_TOL, "velocity Q-block error={q_nu_err}");
+        }
     }
 }
