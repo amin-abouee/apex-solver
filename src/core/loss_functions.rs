@@ -389,7 +389,7 @@ impl LossFunction for HuberLoss {
 /// # Mathematical Definition
 ///
 /// ```text
-/// ρ(s) = (δ²/2) * log(1 + s/δ²)
+/// ρ(s) = δ² * log(1 + s/δ²)
 ///
 /// ρ'(s) = 1 / (1 + s/δ²)
 ///
@@ -429,12 +429,12 @@ impl LossFunction for HuberLoss {
 ///
 /// // Small residual: ||r||² = 0.5
 /// let [rho, rho_prime, _] = cauchy.evaluate(0.5);
-/// // ρ ≈ 0.47, slightly less than 0.5 (mild downweighting)
+/// // ρ ≈ 0.48, slightly less than 0.5 (mild downweighting)
 /// // ρ' ≈ 0.92, close to 1.0 (near full weight)
 ///
 /// // Large residual: ||r||² = 100.0
 /// let [rho, rho_prime, _] = cauchy.evaluate(100.0);
-/// // ρ ≈ 8.0, logarithmic growth (much less than 100)
+/// // ρ ≈ 16.6, logarithmic growth (much less than 100)
 /// // ρ' ≈ 0.05, heavily downweighted (5% of original)
 /// # Ok(())
 /// # }
@@ -500,10 +500,19 @@ impl LossFunction for CauchyLoss {
         let inv = 1.0 / sum; // 1 / (1 + s/δ²)
 
         // Note: sum and inv are always positive, assuming s ≥ 0
+        //
+        // ISSUE-0005 / GH-57: ρ must be the antiderivative of the returned
+        // ρ'/ρ'' — the standard Ceres/g2o Cauchy normalization is
+        // ρ(s) = δ²·ln(1+s/δ²) (no extra 1/2), which is exactly what
+        // differentiating [inv, -c·inv²] below already assumes. The previous
+        // `/2.0` here made ρ half of what ρ'/ρ'' implied, so the corrector's
+        // reported cost was internally inconsistent (a global rescale of ρ
+        // does not change the Gauss-Newton step, so this only cost the
+        // solver extra iterations rather than a wrong optimum).
         [
-            self.scale2 * sum.ln() / 2.0, // ρ(s) = (δ²/2) * ln(1 + s/δ²)
-            inv.max(f64::MIN),            // ρ'(s) = 1 / (1 + s/δ²)
-            -self.c * (inv * inv),        // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
+            self.scale2 * sum.ln(), // ρ(s) = δ² * ln(1 + s/δ²)
+            inv.max(f64::MIN),      // ρ'(s) = 1 / (1 + s/δ²)
+            -self.c * (inv * inv),  // ρ''(s) = -1 / (δ² * (1 + s/δ²)²)
         ]
     }
 }
@@ -518,8 +527,8 @@ impl LossFunction for CauchyLoss {
 ///
 /// ```text
 /// ρ(s) = c² * (|x|/c - ln(1 + |x|/c))
-/// ρ'(s) = |x| / (c + |x|)
-/// ρ''(s) = sign(x) * c / ((c + |x|)²√s)
+/// ρ'(s) = c / (2(c + |x|))
+/// ρ''(s) = -c / (4|x|(c + |x|)²)
 /// ```
 ///
 /// where `c` is the scale parameter, `s = ||r||²`, and `x = √s = ||r||`.
@@ -590,18 +599,18 @@ impl LossFunction for FairLoss {
             return [s, 1.0, 0.0];
         }
 
-        let x = s.sqrt(); // ||r||
+        let x = s.sqrt(); // ||r|| = √s
         let abs_x = x.abs();
         let c_plus_x = self.scale + abs_x;
 
         // ρ(s) = c² * (|x|/c - ln(1 + |x|/c))
         let rho = self.scale * self.scale * (abs_x / self.scale - (1.0 + abs_x / self.scale).ln());
 
-        // ρ'(s) = |x| / (c + |x|) * (1 / 2|x|) = 1 / (2(c + |x|))
-        let rho_prime = 0.5 / c_plus_x;
+        // dρ/ds = dρ/dx * dx/ds, x = √s: ρ'(s) = c / (2(c + |x|))
+        let rho_prime = self.scale / (2.0 * c_plus_x);
 
-        // ρ''(s) = -1 / (4s(c + |x|)²)
-        let rho_double_prime = -1.0 / (4.0 * s * c_plus_x * c_plus_x);
+        // ρ''(s) = -c / (4|x|(c + |x|)²)
+        let rho_double_prime = -self.scale / (4.0 * abs_x * c_plus_x * c_plus_x);
 
         [rho, rho_prime, rho_double_prime]
     }
@@ -871,7 +880,7 @@ impl LossFunction for WelschLoss {
 /// ```text
 /// ρ(s) = c²/6 * (1 - (1 - (x/c)²)³)
 /// ρ'(s) = (1/2) * (1 - (x/c)²)²
-/// ρ''(s) = -(x/c²) * (1 - (x/c)²)
+/// ρ''(s) = -(1 - (x/c)²) / c²
 /// ```
 ///
 /// For |x| > c:
@@ -953,7 +962,7 @@ impl LossFunction for TukeyBiweightLoss {
             [
                 (self.scale2 / 6.0) * (1.0 - one_minus_ratio2 * one_minus_ratio2_sq), // ρ(s)
                 0.5 * one_minus_ratio2_sq,                                            // ρ'(s)
-                -(ratio / self.scale2) * one_minus_ratio2,                            // ρ''(s)
+                -one_minus_ratio2 / self.scale2, // ρ''(s) = -(1-s/c²)/c²
             ]
         }
     }
@@ -969,9 +978,10 @@ impl LossFunction for TukeyBiweightLoss {
 /// For |x| ≤ πc:
 /// ```text
 /// ρ(s) = c² * (1 - cos(x/c))
-/// ρ'(s) = (1/2) * sin(x/c)
-/// ρ''(s) = (1/4c) * cos(x/c) / √s
+/// ρ'(s) = c * sin(x/c) / (2x)
+/// ρ''(s) = (x*cos(x/c) - c*sin(x/c)) / (4x³)
 /// ```
+/// with the analytic limits `ρ'(0) = 1/2` and `ρ''(0) = -1/(12c²)` at `x = 0`.
 ///
 /// For |x| > πc:
 /// ```text
@@ -1045,15 +1055,27 @@ impl LossFunction for AndrewsWaveLoss {
         if x > self.threshold {
             // Complete suppression beyond π*c
             [2.0 * self.scale2, 0.0, 0.0]
+        } else if s < 1e-6 {
+            // ρ'(s) = c·sin(x/c)/(2x) and ρ''(s) = (x·cos(x/c)-c·sin(x/c))/(4x³)
+            // both hit 0/0 as x→0 and lose precision to cancellation well
+            // before that (two O(x) terms agreeing to O(x³)); use the Taylor
+            // series in s near the origin instead. Matches the closed form's
+            // own analytic limit: ρ'(0) = 1/2, not the 0 the removable
+            // singularity naively returns.
+            let rho = self.scale2 * (1.0 - (x / self.scale).cos());
+            let rho_prime = 0.5 - s / (12.0 * self.scale2);
+            let rho_double_prime =
+                -1.0 / (12.0 * self.scale2) + s / (120.0 * self.scale2 * self.scale2);
+            [rho, rho_prime, rho_double_prime]
         } else {
             let arg = x / self.scale;
             let sin_val = arg.sin();
             let cos_val = arg.cos();
 
             [
-                self.scale2 * (1.0 - cos_val),                       // ρ(s)
-                0.5 * sin_val,                                       // ρ'(s)
-                (0.25 / self.scale) * cos_val / x.max(f64::EPSILON), // ρ''(s)
+                self.scale2 * (1.0 - cos_val),                            // ρ(s)
+                self.scale * sin_val / (2.0 * x),                         // ρ'(s) = c·sin(x/c)/(2x)
+                (x * cos_val - self.scale * sin_val) / (4.0 * x * x * x), // ρ''(s)
             ]
         }
     }
@@ -1802,6 +1824,73 @@ mod tests {
         Ok(())
     }
 
+    /// ISSUE-0005 / GH-57 regression: `rho'`/`rho''` must be the actual
+    /// derivatives of the loss's own returned `rho`, for Cauchy, Fair, Tukey,
+    /// and Andrews — table-driven against central differences over
+    /// log-spaced `s`, away from each loss's own removable-singularity guard
+    /// (`s < f64::EPSILON` for Fair, `s < 1e-6` for Andrews — ISSUE-0011
+    /// covers the L1/Lp version of that guard separately).
+    #[test]
+    fn test_robust_loss_derivative_contract_table() -> TestResult {
+        let losses: Vec<(&str, Box<dyn LossFunction>, f64)> = vec![
+            ("cauchy", Box::new(CauchyLoss::new(2.3849)?), 1e-3),
+            ("fair", Box::new(FairLoss::new(1.3999)?), 1e-3),
+            ("tukey", Box::new(TukeyBiweightLoss::new(4.6851)?), 1e-3),
+            ("andrews", Box::new(AndrewsWaveLoss::new(1.339)?), 1e-3),
+        ];
+
+        for (name, loss, min_s) in losses {
+            for &s in &[min_s, 0.1, 0.5, 1.0, 2.0, 4.0, 10.0, 25.0, 50.0] {
+                let [rho, rho_prime, rho_double_prime] = loss.evaluate(s);
+                assert!(
+                    rho.is_finite() && rho_prime.is_finite() && rho_double_prime.is_finite(),
+                    "{name} s={s}: non-finite output"
+                );
+
+                let (num_prime, num_double_prime) = numerical_derivative(loss.as_ref(), s, 1e-5);
+                let prime_err = (rho_prime - num_prime).abs();
+                let double_prime_err = (rho_double_prime - num_double_prime).abs();
+                assert!(
+                    prime_err < 1e-3 * (1.0 + rho_prime.abs()),
+                    "{name} s={s}: rho'={rho_prime} vs numeric {num_prime} (err={prime_err})"
+                );
+                assert!(
+                    double_prime_err < 1e-2 * (1.0 + rho_double_prime.abs()),
+                    "{name} s={s}: rho''={rho_double_prime} vs numeric {num_double_prime} \
+                     (err={double_prime_err})"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Andrews' removable singularity at `s=0`: the code's own small-s
+    /// series branch must agree with the closed-form branch just outside its
+    /// threshold, and both must agree with the analytic limits `rho'(0)=1/2`,
+    /// `rho''(0)=-1/(12c²)`.
+    #[test]
+    fn test_andrews_wave_loss_small_s_continuity() -> TestResult {
+        let scale = 1.339;
+        let loss = AndrewsWaveLoss::new(scale)?;
+
+        let [_, rho_prime_0, rho_double_prime_0] = loss.evaluate(0.0);
+        assert!((rho_prime_0 - 0.5).abs() < 1e-12);
+        assert!((rho_double_prime_0 - (-1.0 / (12.0 * scale * scale))).abs() < 1e-12);
+
+        for &s in &[1e-7, 1e-6, 1e-5, 1e-4] {
+            let [_, rho_prime, rho_double_prime] = loss.evaluate(s);
+            assert!(
+                (rho_prime - 0.5).abs() < 1e-4,
+                "s={s}: rho'={rho_prime} far from the s=0 limit 0.5"
+            );
+            assert!(
+                rho_double_prime.is_finite(),
+                "s={s}: rho'' must stay finite near the branch boundary"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn test_fair_loss() -> TestResult {
         let loss = FairLoss::new(1.3999)?;
@@ -1814,7 +1903,7 @@ mod tests {
 
         // Test inlier region (s = 1.0)
         let [_, rho_prime, _] = loss.evaluate(1.0);
-        assert!(rho_prime > 0.2 && rho_prime < 0.25); // ρ'(s) = 1/(2(c+|x|)) where x=1, c≈1.4 → ~0.208
+        assert!(rho_prime > 0.28 && rho_prime < 0.30); // ρ'(s) = c/(2(c+|x|)) where x=1, c≈1.4 → ~0.292
 
         // Test outlier region (s = 100.0)
         let [_, rho_prime_outlier, _] = loss.evaluate(100.0);
@@ -1908,14 +1997,15 @@ mod tests {
     fn test_andrews_wave_loss() -> TestResult {
         let loss = AndrewsWaveLoss::new(1.339)?;
 
-        // Test at s = 0: ρ'(0) = 0.5 * sin(0) = 0
+        // Test at s = 0: ρ'(s) = c·sin(x/c)/(2x) → 1/2 as x→0 (analytic limit
+        // of ρ(s) = c²(1-cos(x/c)) itself, not the 0 a naive 0/0 gives).
         let [rho, rho_prime, _] = loss.evaluate(0.0);
         assert_eq!(rho, 0.0);
-        assert!(rho_prime.abs() < EPSILON); // ρ'(s) = 0.5 * sin(x/c), at s=0: 0
+        assert!((rho_prime - 0.5).abs() < EPSILON);
 
         // Test within threshold (small s where sin(x/c) gives moderate weight)
         let [_, rho_prime_in, _] = loss.evaluate(1.0);
-        assert!(rho_prime_in > 0.33 && rho_prime_in < 0.35); // ~0.3397
+        assert!(rho_prime_in > 0.44 && rho_prime_in < 0.47); // ~0.455
 
         // Test beyond threshold
         let scale = 1.339;
