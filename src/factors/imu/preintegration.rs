@@ -969,6 +969,74 @@ mod tests {
             .collect()
     }
 
+    /// The preintegrated covariance must match the closed form it is defined by.
+    ///
+    /// For a stationary, non-rotating platform the orientation increment is a
+    /// random walk driven by white gyro noise of continuous density
+    /// `sigma_g_c` \[rad/s/sqrt(Hz)\], so after `T` seconds
+    ///
+    /// ```text
+    /// sigma_theta = sigma_g_c * sqrt(T)
+    /// ```
+    ///
+    /// exactly — independent of the sample rate, which is the whole point of a
+    /// *density*. Likewise the velocity increment integrates white accelerometer
+    /// noise, giving `sigma_v = sigma_a_c * sqrt(T)`, and position
+    /// double-integrates it:
+    ///
+    /// ```text
+    /// var_p = sigma_a_c^2 * int_0^T (T-s)^2 ds = sigma_a_c^2 * T^3 / 3
+    /// ```
+    ///
+    /// This pins the units. Nothing else in the suite checks the covariance's
+    /// magnitude: every other test reads the mean, and the mean is blind to a
+    /// noise model that is off by a factor of `dt` or of the sample rate. A
+    /// covariance that is too small by such a factor does not fail any of them,
+    /// it just silently over-weights every IMU factor in every graph.
+    #[test]
+    fn the_preintegrated_covariance_matches_its_closed_form() -> Result<(), PreintegrationError> {
+        let params = euroc_params();
+        // Two rates over the same span: a density-based model must agree.
+        for (span, samples) in [(0.05, 11usize), (0.05, 21), (0.2, 41)] {
+            let preint = ImuPreintegration::try_new(
+                steady_samples(0.0, span, samples),
+                params.clone(),
+                0.0,
+                span,
+                &SpeedAndBias::zeros(),
+            )?;
+            let p = preint.p_delta();
+            // Tangent order is [position, orientation, velocity, b_g, b_a].
+            let sigma_p = p.fixed_view::<3, 3>(0, 0)[(0, 0)].sqrt();
+            let sigma_theta = p.fixed_view::<3, 3>(3, 3)[(0, 0)].sqrt();
+            let sigma_v = p.fixed_view::<3, 3>(6, 6)[(0, 0)].sqrt();
+            let expect_theta = params.sigma_g_c * span.sqrt();
+            let expect_v = params.sigma_a_c * span.sqrt();
+            // Position double-integrates the same white noise:
+            // var = sigma_a^2 * int_0^T (T-s)^2 ds = sigma_a^2 * T^3 / 3.
+            let expect_p = params.sigma_a_c * span.powf(1.5) / 3.0_f64.sqrt();
+            assert!(
+                (sigma_p / expect_p - 1.0).abs() < 0.07,
+                "span {span} n {samples}: sigma_p {sigma_p:.6e} \
+                 should be {expect_p:.6e} (ratio {:.4})",
+                sigma_p / expect_p
+            );
+            assert!(
+                (sigma_theta / expect_theta - 1.0).abs() < 0.02,
+                "span {span} n {samples}: sigma_theta {sigma_theta:.6e} \
+                 should be {expect_theta:.6e} (ratio {:.4})",
+                sigma_theta / expect_theta
+            );
+            assert!(
+                (sigma_v / expect_v - 1.0).abs() < 0.05,
+                "span {span} n {samples}: sigma_v {sigma_v:.6e} \
+                 should be {expect_v:.6e} (ratio {:.4})",
+                sigma_v / expect_v
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn try_new_accepts_a_well_formed_interval() -> Result<(), PreintegrationError> {
         let preint = ImuPreintegration::try_new(
