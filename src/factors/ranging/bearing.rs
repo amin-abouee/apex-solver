@@ -236,6 +236,8 @@ pub struct BearingFactorSe23 {
     sqrt_information: SMatrix<f64, 2, 2>,
     /// Precomputed tangent basis at `measured_bearing` (3×2).
     tangent_basis: SMatrix<f64, 3, 2>,
+    /// Fixed body-from-camera calibration.
+    t_bc: SE3,
 }
 
 impl BearingFactorSe23 {
@@ -251,6 +253,7 @@ impl BearingFactorSe23 {
             measured_bearing: n,
             sqrt_information,
             tangent_basis: basis,
+            t_bc: SE3::identity(),
         }
     }
 
@@ -258,6 +261,34 @@ impl BearingFactorSe23 {
     pub fn new_isotropic(measured_bearing: Vector3<f64>, sigma: f64) -> Self {
         let sqrt_info = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
         Self::new(measured_bearing, sqrt_info)
+    }
+
+    /// Create a bearing factor measured in a camera with fixed body-from-camera
+    /// calibration `t_bc`.
+    pub fn new_with_extrinsic(
+        measured_bearing: Vector3<f64>,
+        sqrt_information: SMatrix<f64, 2, 2>,
+        t_bc: SE3,
+    ) -> Self {
+        let n = measured_bearing.normalize();
+        let basis = tangent_basis(&n);
+        Self {
+            measured_bearing: n,
+            sqrt_information,
+            tangent_basis: basis,
+            t_bc,
+        }
+    }
+
+    /// Create an isotropic camera-bearing factor with fixed body-from-camera
+    /// calibration `t_bc`.
+    pub fn new_isotropic_with_extrinsic(
+        measured_bearing: Vector3<f64>,
+        sigma: f64,
+        t_bc: SE3,
+    ) -> Self {
+        let sqrt_info = SMatrix::<f64, 2, 2>::identity() * (1.0 / sigma);
+        Self::new_with_extrinsic(measured_bearing, sqrt_info, t_bc)
     }
 }
 
@@ -279,41 +310,44 @@ impl Factor for BearingFactorSe23 {
         let state = SE23::from_param_slice(params[0]);
         let p_j = Vector3::new(params[1][0], params[1][1], params[1][2]);
         let r_i = state.rotation_matrix();
-
-        let Some(geometry) = bearing_geometry(
-            &self.measured_bearing,
-            &self.tangent_basis,
-            &self.sqrt_information,
-            &r_i,
-            &state.translation(),
-            &p_j,
-        ) else {
+        let p_body = r_i.transpose() * (p_j - state.translation());
+        let r_bc = self.t_bc.rotation_so3().rotation_matrix();
+        let p_camera = r_bc.transpose() * (p_body - self.t_bc.translation());
+        let norm = p_camera.norm();
+        if norm < 1e-16 {
             residual[0] = 0.0;
             residual[1] = 0.0;
             if let Some(mut jac) = jacobian {
                 zero_jacobian(&mut jac, 12);
             }
             return;
-        };
+        }
 
-        residual[0] = geometry.residual[0];
-        residual[1] = geometry.residual[1];
+        let n_est = p_camera / norm;
+        let e_2d = self.tangent_basis.transpose() * (n_est - self.measured_bearing);
+        let dn_dp = (Matrix3::identity() - n_est * n_est.transpose()) / norm;
+        let prefix = self.sqrt_information * self.tangent_basis.transpose() * dn_dp;
+        let weighted = self.sqrt_information * e_2d;
+        residual[0] = weighted[0];
+        residual[1] = weighted[1];
 
         let Some(mut jac) = jacobian else {
             return;
         };
 
-        // Columns 6..9 (ν) stay zero — see the type-level comment.
+        // The velocity columns stay zero. Pose derivatives are transported
+        // through the fixed body-from-camera calibration, including its lever arm.
+        let camera_from_body = r_bc.transpose();
         let mut j_full = SMatrix::<f64, 2, 12>::zeros();
         j_full
             .fixed_view_mut::<2, 3>(0, 0)
-            .copy_from(&(-geometry.prefix));
+            .copy_from(&(-prefix * camera_from_body));
         j_full
             .fixed_view_mut::<2, 3>(0, 3)
-            .copy_from(&(geometry.prefix * skew(&geometry.p_body)));
+            .copy_from(&(prefix * camera_from_body * skew(&p_body)));
         j_full
             .fixed_view_mut::<2, 3>(0, 9)
-            .copy_from(&(geometry.prefix * r_i.transpose()));
+            .copy_from(&(prefix * camera_from_body * r_i.transpose()));
 
         for row in 0..2 {
             for col in 0..12 {
