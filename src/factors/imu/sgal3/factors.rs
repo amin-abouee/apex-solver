@@ -20,32 +20,34 @@
 //! companion [`bias_random_walk`](crate::factors::imu::bias::bias_random_walk)
 //! edge, [`CombinedImuFactor`] embeds the walk and needs none.
 //!
-//! # Known limitation: timestamps must be interval-relative
+//! # Absolute timestamps are supported (formerly ISSUE-0009)
 //!
-//! SGal(3)'s group law is `t = R₁·(t₂ + s₁·v₂) + t₁` — the **left** operand's
-//! time coordinate couples the right operand's velocity into translation. The
-//! residual composes `gc_i⁻¹ ∘ state_j`, so it depends on the absolute `s_i`
-//! and not only on `s_j − s_i`, while the preintegrated delta it is compared
-//! against corresponds to `s_i = 0`.
-//!
-//! In practice: a **single interval** with `s_i = 0` and `s_j = Δt` is correct
-//! (that is what the tests cover), but chaining these factors across keyframes
-//! carrying a common absolute clock is **not** — the residual picks up a
-//! spurious `s_i`-dependent translation term that grows with the timestamp.
-//! Making the residual origin-invariant requires re-deriving it in terms of
-//! `Δs = s_j − s_i`; until then prefer the [`se23`](super::super::se23) factors
-//! for multi-keyframe chains.
+//! `SGal(3)`'s group law is `t = R₁·t₂ + t₁ + v₁·s₂` — the **left** operand's
+//! velocity couples the right operand's time into translation. `evaluate`
+//! builds its gravity-corrected `gc_i` from `state_i` alone and composes
+//! `gc_i⁻¹ ∘ state_j`, so a naive construction would pick up a coupling
+//! artifact of `gc_i⁻¹`'s velocity times `state_j.time() − state_i.time()` —
+//! real per the group law, but not part of the standard kinematic
+//! prediction, and it does not vanish just because `state_i.time() ≈ 0`
+//! (only `state_j.time() = state_i.time()` would zero it, which is never
+//! true for a real interval). An explicit `correction_element`, composed on
+//! the left of `gc_i`, cancels it exactly for any `state_i.time()` — not
+//! only near zero — so keyframes on a shared absolute clock (not just
+//! interval-relative timestamps starting at `state_i.time() = 0`) are a
+//! valid registration. See `residuals_vanish_at_ground_truth_with_nonzero_
+//! absolute_time` and the Jacobian-FD counterpart in `tests.rs`.
 
 use apex_manifolds::sgal3::{SGal3, SGal3Tangent};
 use apex_manifolds::{LieGroup, Tangent};
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, SMatrix, SVector, Vector3};
+use nalgebra::{Matrix3, SMatrix, SVector, UnitQuaternion, Vector3};
 
 /// A 10×10 SGal(3) Jacobian.
 type Matrix10 = SMatrix<f64, 10, 10>;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_block_sizes;
 use crate::factors::imu::preintegration::ImuPreintegration;
 use crate::factors::imu::types::SpeedAndBiasExt;
@@ -82,14 +84,77 @@ fn evaluate(
     let dt = preint.delta_t();
     let gravity = Vector3::new(0.0, 0.0, preint.imu_params().g);
     let v_i = state_i.velocity();
+    let v_gc = v_i - gravity * dt;
+    let delta_s = state_j.time() - state_i.time();
 
-    let gc_i = SGal3::new(
-        state_i.translation() + v_i * dt - 0.5 * gravity * dt * dt,
-        v_i - gravity * dt,
-        state_i.rotation_quaternion(),
-        state_i.time(),
+    // `gc_i_uncorrected` folds gravity into state_i's own translation/
+    // velocity so the comparison against the preintegrated delta is a plain
+    // right-minus (see the SE_2(3) sibling). On `SGal3`, `compose`'s `s·v`
+    // coupling is real: composing `gc_i.inverse()` (time = state_i.time(), so
+    // its own velocity `v_gc` is nonzero) against `state_j` (time =
+    // state_j.time(), generally ≠ state_i.time()) would pick up a spurious
+    // `v_gc·Δs` term on top of the standard kinematic prediction, where
+    // `Δs = state_j.time() - state_i.time()`.
+    //
+    // `correction` (translation `-v_gc·Δs`, everything else identity) cancels
+    // it exactly — composed on the *left*, unrotated, it shifts
+    // `gc_i_uncorrected`'s translation by `-v_gc·Δs` with no `R_i` factor,
+    // matching the sign of the artifact. Left composition also keeps
+    // `correction`'s own rotation at `I`, which is what makes its Jacobian
+    // w.r.t. `state_i`/`state_j` a plain (unrotated) vector derivative below,
+    // instead of needing a hand-derived raw-to-tangent conversion through
+    // `R_i` (an earlier version of this fix got exactly that conversion
+    // wrong: it forgot `gc_i`'s own time coordinate shifts at the same time
+    // as its translation under a `state_i` time-DOF perturbation, so `R_i^T`
+    // alone wasn't the right map — using `compose`'s own Jacobian convention
+    // here instead sidesteps re-deriving it by hand).
+    //
+    // The time row is untouched: composing `gc_i` (time = state_i.time())
+    // with `state_j` (time = state_j.time()) still gives
+    // `state_j.time() - state_i.time()`, compared against `delta_sgal3()`'s
+    // `Δt`.
+    //
+    // `gc_i_uncorrected` is itself built as `state_i.compose(&flow)` rather
+    // than a raw `SGal3::new` with a hand-added translation/velocity offset.
+    // The two give numerically identical results (verified), but only the
+    // composition form has a Jacobian obtainable from `compose`'s own
+    // machinery: `state_i`'s own `s`-tangent shifts its raw translation by
+    // `v_i·δs` (the same real `SGal3` time coupling this file works around
+    // above, now in the *variable's* own manifold structure) *while its own
+    // time also shifts by `δs`* — with `flow`'s velocity component (`-g·Δt`,
+    // large relative to the orbital scale here) nonzero, those two
+    // simultaneous shifts interact through `right_minus`'s nonlinear log map
+    // in a way a hand-derived "raw shift, converted by `R_i^T`" formula does
+    // not capture (an earlier version of this fix got exactly that wrong).
+    // `flow` has rotation `I` and time `0`, so its own dependence on
+    // `state_i` (through `R_i`, `v_i`) needs no such conversion.
+    let r_i = state_i.rotation_matrix();
+    let flow = SGal3::new(
+        r_i.transpose() * (v_i * dt - 0.5 * gravity * dt * dt),
+        r_i.transpose() * (-gravity * dt),
+        UnitQuaternion::identity(),
+        0.0,
     );
-    let predicted = gc_i.inverse(None).compose(state_j, None, None);
+    let mut jac_state_i_direct = Matrix10::zeros();
+    let mut jac_flow = Matrix10::zeros();
+    let gc_i_uncorrected =
+        state_i.compose(&flow, Some(&mut jac_state_i_direct), Some(&mut jac_flow));
+
+    let correction_element = SGal3::new(
+        -v_gc * delta_s,
+        Vector3::zeros(),
+        UnitQuaternion::identity(),
+        0.0,
+    );
+    let mut jac_correction = Matrix10::zeros();
+    let mut jac_gc_uncorrected = Matrix10::zeros();
+    let gc_i = correction_element.compose(
+        &gc_i_uncorrected,
+        Some(&mut jac_correction),
+        Some(&mut jac_gc_uncorrected),
+    );
+    let gc_i_inv = gc_i.inverse(None);
+    let predicted = gc_i_inv.compose(state_j, None, None);
 
     let reference = preint.speed_and_biases_ref();
     let db_g = b_g - reference.gyro_bias();
@@ -112,12 +177,52 @@ fn evaluate(
 
     let d_predicted_d_gc = -predicted.inverse(None).adjoint();
 
-    // (δρ, δν, δθ, δs) ↦ (δρ + Δt·δν, δν, δθ, δs): velocity feeds position,
-    // everything else — the time coordinate included — passes through.
-    let mut d_gc_d_state_i = Matrix10::identity();
-    d_gc_d_state_i
+    // `flow`'s translation/velocity are `R_i^T·(v_i·Δt − ½g·Δt²)` and
+    // `-R_i^T·g·Δt` — plain vector formulas in `state_i`'s raw `R_i`, `v_i`,
+    // with `flow`'s own rotation fixed at `I` (no further rotation
+    // conversion needed for *its* tangent, same reasoning as
+    // `correction_element` below). `state_i`'s raw `v_i` shifts by `R_i·δν_i`
+    // under its own ν-tangent (the `R_i`/`R_i^T` cancel, leaving `Δt·I`); its
+    // raw `R_i` shifts by `R_i·Exp(δθ_i)` under its own θ-tangent, giving the
+    // standard `skew(R_i^T·X)` derivative of `R_i^T·X` for each of `flow`'s
+    // two vector fields.
+    let mut d_flow_d_state_i = Matrix10::zeros();
+    d_flow_d_state_i
         .fixed_view_mut::<3, 3>(0, 3)
         .copy_from(&(Matrix3::identity() * dt));
+    d_flow_d_state_i
+        .fixed_view_mut::<3, 3>(0, 6)
+        .copy_from(&skew(&flow.translation()));
+    d_flow_d_state_i
+        .fixed_view_mut::<3, 3>(3, 6)
+        .copy_from(&skew(&flow.velocity()));
+    let d_gc_uncorrected_d_state_i = jac_state_i_direct + jac_flow * d_flow_d_state_i;
+
+    // `correction_element`'s translation is `-v_gc·(s_j - s_i)`, a plain
+    // vector formula in the *raw* (v_i, s_i, s_j), with `correction_element`'s
+    // own rotation fixed at `I` — so unlike `gc_i`/`flow`, no rotation
+    // conversion is needed between a raw-parameter shift and its own
+    // tangent-ρ. `state_i`'s raw `v_i` shifts by `R_i·δν_i` under its own
+    // ν-tangent, and its raw `s_i` shifts by `δs_i` directly under its own
+    // s-tangent (ordinary `SGal3` manifold coupling, independent of this
+    // fix); `state_j`'s raw `s_j` shifts by `δs_j` directly under its own
+    // s-tangent.
+    let mut d_correction_d_state_i = Matrix10::zeros();
+    d_correction_d_state_i
+        .fixed_view_mut::<3, 3>(0, 3)
+        .copy_from(&(-delta_s * r_i));
+    d_correction_d_state_i
+        .fixed_view_mut::<3, 1>(0, 9)
+        .copy_from(&v_gc);
+
+    let mut d_correction_d_state_j = Matrix10::zeros();
+    d_correction_d_state_j
+        .fixed_view_mut::<3, 1>(0, 9)
+        .copy_from(&(-v_gc));
+
+    let d_gc_d_state_i =
+        jac_gc_uncorrected * d_gc_uncorrected_d_state_i + jac_correction * d_correction_d_state_i;
+    let d_gc_d_state_j = jac_correction * d_correction_d_state_j;
 
     // The correction enters as [ρ, ν, θ] blocks; it does not touch time.
     let mut d_correction_d_bias = SMatrix::<f64, 10, 6>::zeros();
@@ -140,7 +245,10 @@ fn evaluate(
     Interval {
         residual: SVector::<f64, 10>::from_column_slice(tangent.as_slice()),
         d_state_i: d_r_d_predicted * d_predicted_d_gc * d_gc_d_state_i,
-        d_state_j: d_r_d_predicted,
+        // `state_j` enters both directly (as `compose`'s right operand, the
+        // existing `d_r_d_predicted` term) and indirectly through `gc_i`'s
+        // new dependency on `state_j.time()`.
+        d_state_j: d_r_d_predicted + d_r_d_predicted * d_predicted_d_gc * d_gc_d_state_j,
         d_bias: d_r_d_delta * d_delta_d_correction * d_correction_d_bias,
     }
 }
@@ -172,31 +280,6 @@ fn write_jacobian<const R: usize, const C: usize>(
             *jac.rb_mut().get_mut(row, col) = weighted[(row, col)];
         }
     }
-}
-
-/// How far `state_i.time()` may sit from zero and still count as
-/// interval-relative — a generous margin around exact zero to tolerate
-/// ordinary optimizer movement, not a physically meaningful scale.
-const INTERVAL_RELATIVE_TIME_TOLERANCE: f64 = 1e-6;
-
-/// Reject a `state_i` whose SGal(3) time coordinate is not interval-relative
-/// (ISSUE-0009): the residual's translation entangles `state_i`'s *absolute*
-/// timestamp with `v_i − v_j` (see the module's "Known limitation" doc), so
-/// anything but `s_i ≈ 0` silently corrupts the spatial rows in a
-/// multi-keyframe chain on a common clock. Checked once at registration,
-/// against the initial value `state_i` is registered with.
-fn reject_absolute_time(state_i: &dyn ManifoldVariable) -> Result<(), String> {
-    let time = SGal3::from_param_slice(state_i.as_param_slice()).time();
-    if time.abs() > INTERVAL_RELATIVE_TIME_TOLERANCE {
-        return Err(format!(
-            "SGal3 IMU factor requires an interval-relative state_i (time ≈ 0), got \
-             time = {time}; this factor's residual depends on the absolute timestamp \
-             origin and silently corrupts multi-keyframe chains sharing a common clock \
-             (see the `factors::imu::sgal3` module docs) — re-zero the epoch before \
-             this keyframe, or use the SE_2(3) IMU factors for multi-keyframe chains"
-        ));
-    }
-    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -299,8 +382,7 @@ impl Factor for ImuFactor {
             variables,
             &[SGal3::REP_SIZE, SGal3::REP_SIZE, 6],
             "ImuFactor expects [SGal3 state_i, SGal3 state_j, bias]",
-        )?;
-        reject_absolute_time(variables[0])
+        )
     }
 }
 
@@ -429,7 +511,6 @@ impl Factor for CombinedImuFactor {
             variables,
             &[SGal3::REP_SIZE, 6, SGal3::REP_SIZE, 6],
             "CombinedImuFactor expects [SGal3 state_i, bias_i, SGal3 state_j, bias_j]",
-        )?;
-        reject_absolute_time(variables[0])
+        )
     }
 }

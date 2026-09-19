@@ -312,13 +312,16 @@ fn factors_validate_their_layouts() {
     assert!(combined.validate_variables(&wrong).is_err());
 }
 
-/// ISSUE-0009 regression: `state_i.time() != 0` (an absolute, non-interval-
-/// relative timestamp) must be rejected at registration rather than silently
-/// producing a residual corrupted by the group law's `s_i`-dependent coupling
-/// — see the module doc's "Known limitation: timestamps must be
-/// interval-relative".
+/// ISSUE-0009 regression (resolved): `state_i.time() != 0` (an absolute,
+/// non-interval-relative timestamp, e.g. a shared clock across a
+/// multi-keyframe chain) is a valid registration, and both factors'
+/// `validate_variables` accept it — the `s_i`-dependent coupling artifact
+/// this used to be rejected for is cancelled in `evaluate` (see the module
+/// doc). `residuals_vanish_at_ground_truth_with_nonzero_absolute_time` and
+/// `imu_factor_jacobians_match_finite_differences_with_nonzero_absolute_time`
+/// cover the residual and Jacobian correctness this enables.
 #[test]
-fn imu_factors_reject_absolute_state_i_time() {
+fn imu_factors_accept_absolute_state_i_time() {
     let (preint, _, _, _) = scenario();
     let state_relative = Variable::new(SGal3::identity()); // time = 0
     let state_absolute = Variable::new(SGal3::new(
@@ -330,19 +333,79 @@ fn imu_factors_reject_absolute_state_i_time() {
     let bias = Variable::new(Rn::new(DVector::zeros(6)));
 
     let imu = ImuFactor::new(preint.clone());
-    let bad: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &state_relative, &bias];
-    let Err(err) = imu.validate_variables(&bad) else {
-        panic!("ImuFactor must reject an absolute state_i timestamp");
-    };
-    assert!(err.contains("interval-relative"), "{err}");
-    // state_j's absolute time is not the problem — only state_i's is.
-    let ok: Vec<&dyn ManifoldVariable> = vec![&state_relative, &state_absolute, &bias];
+    let ok: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &state_relative, &bias];
     assert!(imu.validate_variables(&ok).is_ok());
 
     let combined = CombinedImuFactor::new(preint);
-    let bad: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &bias, &state_relative, &bias];
-    let Err(err) = combined.validate_variables(&bad) else {
-        panic!("CombinedImuFactor must reject an absolute state_i timestamp");
-    };
-    assert!(err.contains("interval-relative"), "{err}");
+    let ok: Vec<&dyn ManifoldVariable> = vec![&state_absolute, &bias, &state_relative, &bias];
+    assert!(combined.validate_variables(&ok).is_ok());
+}
+
+/// Same ground-truth check as `residuals_vanish_at_ground_truth`, but with
+/// both keyframes carrying a large, shared absolute-clock offset — the exact
+/// multi-keyframe scenario ISSUE-0009 used to warn against.
+#[test]
+fn residuals_vanish_at_ground_truth_with_nonzero_absolute_time() {
+    let (preint, pose_j, sb_j, dt) = scenario();
+    let s0 = 137.5_f64;
+    let state_i = state_of(&SE3::identity(), Vector3::zeros(), s0);
+    let state_j = state_of(&pose_j, sb_j.velocity(), s0 + dt);
+    let bias = DVector::zeros(6);
+
+    let imu = ImuFactor::new(preint.clone());
+    for (i, v) in residual_of(
+        &imu,
+        &[state_i.as_slice(), state_j.as_slice(), bias.as_slice()],
+    )
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            v.abs() < 1e-6,
+            "ImuFactor residual[{i}] = {v:.3e} (s0={s0})"
+        );
+    }
+
+    let combined = CombinedImuFactor::new(preint);
+    for (i, v) in residual_of(
+        &combined,
+        &[
+            state_i.as_slice(),
+            bias.as_slice(),
+            state_j.as_slice(),
+            bias.as_slice(),
+        ],
+    )
+    .iter()
+    .enumerate()
+    {
+        assert!(
+            v.abs() < 1e-6,
+            "CombinedImuFactor residual[{i}] = {v:.3e} (s0={s0})"
+        );
+    }
+}
+
+/// Same Jacobian check as `imu_factor_jacobians_match_finite_differences`,
+/// but with both keyframes carrying a large, shared absolute-clock offset.
+#[test]
+fn imu_factor_jacobians_match_finite_differences_with_nonzero_absolute_time() {
+    let (preint, pose_j, sb_j, dt) = scenario();
+    let s0 = 137.5_f64;
+    let pose_i = SE3::from_param_slice(&[0.05, -0.02, 0.01, 0.99875, 0.03, 0.02, 0.02]);
+    let si = state_of(&pose_i, Vector3::new(0.03, -0.01, 0.02), s0);
+    let sj = state_of(
+        &pose_j,
+        sb_j.velocity() + Vector3::new(0.01, -0.02, 0.005),
+        s0 + dt + 2e-3,
+    );
+    let bias = DVector::from_vec(vec![1e-3, -2e-3, 5e-4, 1e-2, -5e-3, 2e-3]);
+
+    let factor = ImuFactor::new(preint);
+    check_jacobian(
+        &factor,
+        &[si, sj, bias],
+        &[true, true, false],
+        "sgal3::ImuFactor (nonzero absolute time)",
+    );
 }

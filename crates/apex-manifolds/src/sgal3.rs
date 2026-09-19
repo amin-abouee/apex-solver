@@ -212,16 +212,30 @@ impl SGal3 {
     }
 
     /// Get the 5x5 homogeneous matrix representation.
+    ///
+    /// `M = [R v t; 0 1 s; 0 0 1]` — velocity in column 3, translation in
+    /// column 4, with `s` paired to the translation column. This matches the
+    /// `manif` and `Lie-plusplus` reference layouts and is the layout under
+    /// which [`LieGroup::compose`]/[`LieGroup::inverse`]/[`LieGroup::adjoint`]
+    /// are consistent: multiplying two such matrices reproduces `compose`'s
+    /// `t1 + R1*t2 + v1*s2` (translation is the one that picks up the
+    /// velocity/time coupling, not velocity). An earlier version put
+    /// translation in column 3 and velocity in column 4 — internally
+    /// consistent with a *different*, non-physical group law, which is what
+    /// let the `compose()`/`inverse()` bug ship unnoticed (nothing cross-
+    /// checked `matrix()` against `compose()`). Regression:
+    /// `test_sgal3_compose_matches_matrix_multiplication`,
+    /// `test_sgal3_inverse_matches_matrix_inverse`.
     pub fn matrix(&self) -> SMatrix<f64, 5, 5> {
         let mut mat = SMatrix::<f64, 5, 5>::identity();
         let rot = self.rotation_matrix();
         mat.fixed_view_mut::<3, 3>(0, 0).copy_from(&rot);
-        mat[(0, 3)] = self.params[0];
-        mat[(1, 3)] = self.params[1];
-        mat[(2, 3)] = self.params[2];
-        mat[(0, 4)] = self.params[7];
-        mat[(1, 4)] = self.params[8];
-        mat[(2, 4)] = self.params[9];
+        mat[(0, 3)] = self.params[7];
+        mat[(1, 3)] = self.params[8];
+        mat[(2, 3)] = self.params[9];
+        mat[(0, 4)] = self.params[0];
+        mat[(1, 4)] = self.params[1];
+        mat[(2, 4)] = self.params[2];
         mat[(3, 4)] = self.params[10];
         mat
     }
@@ -235,7 +249,13 @@ impl LieGroup for SGal3 {
 
     /// Get the inverse.
     ///
-    /// For SGal(3): g^{-1} = (R^T, -R^T * (t - s*v), -R^T * v, -s)
+    /// For SGal(3): g^{-1} = (R^T, -R^T * (t - s*v), -R^T * v, -s).
+    ///
+    /// This formula was already correct (it matches `manif`'s and
+    /// `Lie-plusplus`'s `SGal3`/`Gal3::inv()` exactly) — the bug was
+    /// entirely in [`Self::compose`]. Verified block-wise against `M^{-1}`
+    /// on the (now-corrected) `matrix()` layout. Regression:
+    /// `test_sgal3_inverse_matches_matrix_inverse`.
     fn inverse(&self, jacobian: Option<&mut Self::JacobianMatrix>) -> Self {
         let rot = self.rotation_impl();
         let rot_inv = rot.inverse(None);
@@ -255,7 +275,25 @@ impl LieGroup for SGal3 {
 
     /// Composition of this and another SGal(3) element.
     ///
-    /// g1 ∘ g2 = (R1*R2, R1*(t2 + s1*v2) + t1, R1*v2 + v1, s1 + s2)
+    /// g1 ∘ g2 = (R1*R2, R1*t2 + t1 + v1*s2, R1*v2 + v1, s1 + s2).
+    ///
+    /// **Regression fix**: the previous formula coupled translation with
+    /// `s1*v2` (this element's own time times the *other* element's
+    /// velocity, itself rotated by R1): `R1*(t2 + s1*v2) + t1`. Cross-checked
+    /// against `manif`'s `SGal3Base::compose` and `Lie-plusplus`'s
+    /// `Gal3::operator*`/`multiplyRight` (both open-source SGal(3)/Gal(3)
+    /// reference implementations, and matching a from-scratch spacetime
+    /// derivation): the correct coupling is `v1*s2` — this element's
+    /// velocity times the *other* element's elapsed time, added unrotated —
+    /// because translation is what accrues extra distance from this
+    /// element's own velocity persisting for the other element's elapsed
+    /// time; velocity composition has no time coupling at all. With
+    /// `state_i.time() == 0` (the single-interval IMU-factor case) the old
+    /// formula's `s1*v2` term vanished, which is why it went unnoticed — but
+    /// it was masking a missing `v1*s2` term that does *not* vanish, since
+    /// the right-hand operand's time is the nonzero preintegration `dt`.
+    /// Regression: `test_sgal3_compose_matches_matrix_multiplication`,
+    /// `test_sgal3_compose_matches_reference_libraries`.
     fn compose(
         &self,
         other: &Self,
@@ -263,15 +301,13 @@ impl LieGroup for SGal3 {
         jacobian_other: Option<&mut Self::JacobianMatrix>,
     ) -> Self {
         let rot = self.rotation_impl();
-        let s = self.time_impl();
+        let v = self.velocity_impl();
+        let s2 = other.time_impl();
         let composed_rotation = rot.compose(&other.rotation_impl(), None, None);
-        let composed_translation = rot.act(
-            &(other.translation_impl() + s * other.velocity_impl()),
-            None,
-            None,
-        ) + self.translation_impl();
-        let composed_velocity = rot.act(&other.velocity_impl(), None, None) + self.velocity_impl();
-        let composed_time = s + other.time_impl();
+        let composed_translation =
+            rot.act(&other.translation_impl(), None, None) + self.translation_impl() + v * s2;
+        let composed_velocity = rot.act(&other.velocity_impl(), None, None) + v;
+        let composed_time = self.time_impl() + s2;
 
         let result = SGal3::from_parts(
             composed_translation,
@@ -359,18 +395,26 @@ impl LieGroup for SGal3 {
         let mut adj = Matrix10::zeros();
 
         // Tangent ordering [ρ, ν, θ, s]. Derived from the corrected group law
-        // g₁∘g₂ = (R₁R₂, R₁(t₂+s₁ν₂)+ρ₁, R₁ν₂+ν₁, t₁+t₂): conjugating
-        // exp(ξ) ≈ (I+θ̂, ρ, ν, σ) by g gives
-        //   ρ' = Rρ + t·Rν + ρ̂Rθ − ν·σ
+        // g₁∘g₂ = (R₁R₂, R₁ρ₂+ρ₁+ν₁·s₂, R₁ν₂+ν₁, t₁+s₂) by conjugating
+        // g·ξ̂·g⁻¹ on the 5x5 homogeneous representation (see [`Self::matrix`]
+        // and [`Self::compose`]/[`Self::inverse`]):
+        //   ρ' = Rρ − t·Rν + (ρ̂ − t·ν̂)Rθ + ν·σ
         //   ν' = Rν + ν̂Rθ,  θ' = Rθ,  s' = σ.
-        // Verified against Log(g ∘ exp(ξ) ∘ g⁻¹) by
-        // `adjoint_matches_group_conjugation`.
+        // (`ρ̂`/`ν̂` denote `skew(rho)`/`skew(nu)` here, not the tangent's own
+        // ρ/ν input.) This matches `manif`'s `SGal3Base::adj()` and
+        // `Lie-plusplus`'s `Gal3::Adjoint()` term-for-term once their
+        // differing tangent-block order is accounted for; the previous
+        // formula here was derived from the buggy `compose()` (its own
+        // doc comment said so) and had three sign/term errors relative to
+        // both reference libraries. Verified against
+        // `Log(g ∘ exp(ξ) ∘ g⁻¹)` by
+        // `test_sgal3_adjoint_matches_conjugation`.
 
         adj.fixed_view_mut::<3, 3>(0, 0).copy_from(&r);
-        adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&(t * r));
+        adj.fixed_view_mut::<3, 3>(0, 3).copy_from(&(-t * r));
         adj.fixed_view_mut::<3, 3>(0, 6)
-            .copy_from(&(SO3Tangent::new(rho).hat() * r));
-        adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&(-nu));
+            .copy_from(&((SO3Tangent::new(rho).hat() - t * SO3Tangent::new(nu).hat()) * r));
+        adj.fixed_view_mut::<3, 1>(0, 9).copy_from(&nu);
 
         adj.fixed_view_mut::<3, 3>(3, 3).copy_from(&r);
         adj.fixed_view_mut::<3, 3>(3, 6)
@@ -513,26 +557,37 @@ impl SGal3Tangent {
     }
 
     /// The ρ–ν coupling matrix of the SGal(3) exponential:
-    /// `M(ω) = ½I + α·ω̂ + β·ω̂²` with
-    /// `α = (sin w − w·cos w)/w³`, `β = (1 − cos w)/w⁴ − sin w/w³ + 1/(2w²)`,
-    /// derived by integrating `∫₀¹ Exp(σω)·σ dσ` over the time flow. The
-    /// small-angle limit is `½I + ⅓ω̂ + ⅛ω̂²`. This is the term the old,
-    /// uncoupled exponential dropped entirely.
+    /// `M(ω) = ½I + A·ω̂ + B·ω̂²` with
+    /// `A = (w − sin w)/w³`, `B = (w² + 2cos w − 2)/(2w⁴)`. The small-angle
+    /// limit is `½I + ⅙ω̂ + 1/24·ω̂²`.
+    ///
+    /// **Regression fix**: the previous `α`/`β` coefficients
+    /// (`α=(sin w − w cos w)/w³`, `β=(1−cos w)/w⁴ − sin w/w³ + 1/(2w²)`) were
+    /// a different, numerically non-equivalent closed form — not a
+    /// reparameterization, an outright different function (e.g. at w=0.8,
+    /// α≈0.312 vs the correct A≈0.161). This `A`/`B` form matches `manif`'s
+    /// `SGal3TangentBase::fillE` exactly, and is what let the *structurally*
+    /// correct `ρ' = Jl(θ)ρ + s·M(θ)·ν` in [`Tangent::exp`] produce a
+    /// numerically wrong element for any non-infinitesimal ξ: the previous
+    /// coefficients passed a first-order (infinitesimal-ξ) adjoint check but
+    /// failed the exact `Ad(g)ξ = Log(g·Exp(ξ)·g⁻¹)` identity in
+    /// `adjoint_check::adjoint_matches_group_conjugation` by ~2.8e-4 — well
+    /// above its 1e-8 tolerance — until fixed here.
     pub(crate) fn s_nu_coupling(theta: &Vector3<f64>) -> Matrix3<f64> {
         let w_squared = theta.norm_squared();
         let w = w_squared.sqrt();
         let theta_skew = SO3Tangent::new(*theta).hat();
 
         if w_squared <= crate::SMALL_ANGLE_THRESHOLD {
-            // Series: ½I + (1/3 − w²/30)ω̂ + (1/8 − w²/120)ω̂²
+            // Series: ½I + (1/6 − w²/120)ω̂ + (1/24 − w²/720)ω̂²
             return Matrix3::identity() * 0.5
-                + theta_skew * (1.0 / 3.0 - w_squared / 30.0)
-                + (theta_skew * theta_skew) * (1.0 / 8.0 - w_squared / 120.0);
+                + theta_skew * (1.0 / 6.0 - w_squared / 120.0)
+                + (theta_skew * theta_skew) * (1.0 / 24.0 - w_squared / 720.0);
         }
 
-        let alpha = (w.sin() - w * w.cos()) / w.powi(3);
-        let beta = (1.0 - w.cos()) / w.powi(4) - w.sin() / w.powi(3) + 1.0 / (2.0 * w_squared);
-        Matrix3::identity() * 0.5 + theta_skew * alpha + (theta_skew * theta_skew) * beta
+        let a = (w - w.sin()) / w.powi(3);
+        let b = (w_squared + 2.0 * w.cos() - 2.0) / (2.0 * w_squared * w_squared);
+        Matrix3::identity() * 0.5 + theta_skew * a + (theta_skew * theta_skew) * b
     }
 
     /// Get the s (time) part.
@@ -908,6 +963,80 @@ mod tests {
         let identity = SGal3::identity();
 
         assert!(composed.is_approx(&identity, TOLERANCE));
+    }
+
+    /// `compose()` must reproduce `M1 * M2` on the 5x5 homogeneous
+    /// representation, for many random samples. Regression for the
+    /// translation-coupling bug: see [`LieGroup::compose`]'s doc comment.
+    #[test]
+    fn test_sgal3_compose_matches_matrix_multiplication() {
+        for _ in 0..20 {
+            let g1 = SGal3::random();
+            let g2 = SGal3::random();
+
+            let composed = g1.compose(&g2, None, None);
+            let expected = g1.matrix() * g2.matrix();
+            let actual = composed.matrix();
+
+            assert!(
+                (expected - actual).norm() < 1e-9,
+                "compose() does not match matrix multiplication:\nexpected:\n{expected}\nactual:\n{actual}"
+            );
+        }
+    }
+
+    /// `inverse()` must reproduce `M^{-1}` on the 5x5 homogeneous
+    /// representation, and `g.compose(g.inverse())` must be identity.
+    #[test]
+    fn test_sgal3_inverse_matches_matrix_inverse() {
+        for _ in 0..20 {
+            let g = SGal3::random();
+            let g_inv = g.inverse(None);
+
+            let raw_inverse = g.matrix().try_inverse();
+            assert!(raw_inverse.is_some(), "SGal3 matrix is always invertible");
+            let expected = raw_inverse.unwrap_or_else(SMatrix::<f64, 5, 5>::identity);
+            let actual = g_inv.matrix();
+            assert!(
+                (expected - actual).norm() < 1e-9,
+                "inverse() does not match matrix inverse"
+            );
+
+            let identity_check = g.compose(&g_inv, None, None);
+            assert!(identity_check.is_approx(&SGal3::identity(), 1e-9));
+        }
+    }
+
+    /// Cross-checked against `manif`'s `SGal3Base::compose`
+    /// (github.com/artivis/manif, `include/manif/impl/sgal3/SGal3_base.h`)
+    /// and `Lie-plusplus`'s `Gal3::operator*`
+    /// (github.com/aau-cns/Lie-plusplus, `include/groups/Gal3.hpp`), both of
+    /// which give `t_composed = R1*t2 + t1 + v1*s2`,
+    /// `v_composed = R1*v2 + v1`. Values below are hand-computable: R1 is a
+    /// 90° rotation about z (so `R1*(2,0,0) = (0,2,0)`, `R1*(0,0,1) =
+    /// (0,0,1)`), R2 is identity.
+    #[test]
+    fn test_sgal3_compose_matches_reference_libraries() {
+        let r1 = UnitQuaternion::from_axis_angle(&Vector3::z_axis(), std::f64::consts::FRAC_PI_2);
+        let g1 = SGal3::new(
+            Vector3::new(1.0, 0.0, 0.0),
+            Vector3::new(0.0, 1.0, 0.0),
+            r1,
+            0.5,
+        );
+        let g2 = SGal3::new(
+            Vector3::new(2.0, 0.0, 0.0),
+            Vector3::new(0.0, 0.0, 1.0),
+            UnitQuaternion::identity(),
+            2.0,
+        );
+
+        let composed = g1.compose(&g2, None, None);
+
+        assert!((composed.translation() - Vector3::new(1.0, 4.0, 0.0)).norm() < 1e-9);
+        assert!((composed.velocity() - Vector3::new(0.0, 1.0, 1.0)).norm() < 1e-9);
+        assert!((composed.time() - 2.5).abs() < 1e-9);
+        assert!(composed.rotation_quaternion().angle_to(&r1) < 1e-9);
     }
 
     #[test]
@@ -1288,14 +1417,14 @@ mod tests {
                 assert!((mat[(i, j)] - expected).abs() < TOLERANCE);
             }
         }
-        // Translation column
-        assert!((mat[(0, 3)] - 1.0).abs() < TOLERANCE);
-        assert!((mat[(1, 3)] - 2.0).abs() < TOLERANCE);
-        assert!((mat[(2, 3)] - 3.0).abs() < TOLERANCE);
         // Velocity column
-        assert!((mat[(0, 4)] - 4.0).abs() < TOLERANCE);
-        assert!((mat[(1, 4)] - 5.0).abs() < TOLERANCE);
-        assert!((mat[(2, 4)] - 6.0).abs() < TOLERANCE);
+        assert!((mat[(0, 3)] - 4.0).abs() < TOLERANCE);
+        assert!((mat[(1, 3)] - 5.0).abs() < TOLERANCE);
+        assert!((mat[(2, 3)] - 6.0).abs() < TOLERANCE);
+        // Translation column
+        assert!((mat[(0, 4)] - 1.0).abs() < TOLERANCE);
+        assert!((mat[(1, 4)] - 2.0).abs() < TOLERANCE);
+        assert!((mat[(2, 4)] - 3.0).abs() < TOLERANCE);
         // Time
         assert!((mat[(3, 4)] - 0.5).abs() < TOLERANCE);
         // Bottom row
