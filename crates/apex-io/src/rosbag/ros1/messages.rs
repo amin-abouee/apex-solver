@@ -158,6 +158,49 @@ impl PoseStamped {
     }
 }
 
+/// `geometry_msgs/Transform`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Transform {
+    pub translation: Vector3,
+    pub rotation: Quaternion,
+}
+
+impl Transform {
+    pub fn from_ros1(d: &mut Ros1Deserializer<'_>) -> Result<Self> {
+        Ok(Self {
+            translation: Vector3::from_ros1(d)?,
+            rotation: Quaternion::from_ros1(d)?,
+        })
+    }
+    pub fn to_ros1(&self, s: &mut Ros1Serializer) {
+        self.translation.to_ros1(s);
+        self.rotation.to_ros1(s);
+    }
+}
+
+/// `geometry_msgs/TransformStamped`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransformStamped {
+    pub header: Header,
+    pub child_frame_id: String,
+    pub transform: Transform,
+}
+
+impl TransformStamped {
+    pub fn from_ros1(d: &mut Ros1Deserializer<'_>) -> Result<Self> {
+        Ok(Self {
+            header: Header::from_ros1(d)?,
+            child_frame_id: d.read_string()?,
+            transform: Transform::from_ros1(d)?,
+        })
+    }
+    pub fn to_ros1(&self, s: &mut Ros1Serializer) {
+        self.header.to_ros1(s);
+        s.write_string(&self.child_frame_id);
+        self.transform.to_ros1(s);
+    }
+}
+
 /// `sensor_msgs/Imu`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Imu {
@@ -453,6 +496,36 @@ mod tests {
         p.to_ros1(&mut s);
         let mut d = Ros1Deserializer::new(s.as_slice());
         assert_eq!(Pose::from_ros1(&mut d)?, p);
+        Ok(())
+    }
+
+    #[test]
+    fn transform_stamped_round_trip() -> Result<()> {
+        let msg = TransformStamped {
+            header: Header {
+                seq: 7,
+                stamp_ns: 1_520_530_308_181_901_469,
+                frame_id: "world".into(),
+            },
+            child_frame_id: "vrpn_marker".into(),
+            transform: Transform {
+                translation: Vector3 {
+                    x: 0.1,
+                    y: -0.2,
+                    z: 1.3,
+                },
+                rotation: Quaternion {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.707,
+                    w: 0.707,
+                },
+            },
+        };
+        let mut s = Ros1Serializer::new();
+        msg.to_ros1(&mut s);
+        let mut d = Ros1Deserializer::new(s.as_slice());
+        assert_eq!(TransformStamped::from_ros1(&mut d)?, msg);
         Ok(())
     }
 
