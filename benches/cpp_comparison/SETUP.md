@@ -29,13 +29,15 @@ Files land in `data/odometry/{2d,3d}/` (g2o) and `data/bundle_adjustment/<name>/
 
 ```bash
 # 1. Install dependencies (if not already installed)
-brew install eigen ceres-solver gtsam g2o tbb
+brew install eigen ceres-solver gtsam g2o tbb       # macOS
+sudo apt install libeigen3-dev libceres-dev \
+    libg2o-dev libtbb-dev                           # Ubuntu/Debian (GTSAM: see below)
 
 # 2. Build benchmarks
 cd benches/cpp_comparison
 mkdir build && cd build
 cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+cmake --build . --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 
 # 3. Run benchmarks
 ./ceres_odometry_benchmark     # Ceres odometry (pose graph)
@@ -104,27 +106,32 @@ After building, the following executables are available:
 
 ## Eigen Version Requirements
 
-The benchmark suite handles the Eigen version mismatch between solvers:
+All solvers link the same Eigen — there is **no version pin** in `CMakeLists.txt`:
 
-| Library | Eigen Version Required |
-|---------|----------------------|
-| Ceres Solver | Eigen 5.0.x |
-| g2o | Eigen 5.0.x |
-| GTSAM | Eigen 3.4.x |
+| Platform | Eigen provided by package manager |
+|----------|-----------------------------------|
+| macOS (Homebrew) | Eigen 5.0.x (`brew install eigen`) |
+| Ubuntu/Debian | Eigen 3.4.x (`sudo apt install libeigen3-dev`) |
 
-The CMakeLists.txt automatically manages these dependencies by:
-- Using Eigen 5.0.x for Ceres and g2o benchmarks
-- Using Eigen@3 (3.4.x) for GTSAM benchmarks
-- Building separate common libraries for each Eigen version
+CMake's version files make any fixed pin unworkable across both platforms: a
+`3.4` request rejects macOS's 5.x, and a `5.0` request rejects Ubuntu's 3.4.x
+as well as any future 5.1. So `find_package(Eigen3 QUIET NO_MODULE)` is
+unpinned, and one `Eigen3::Eigen` target is shared by every benchmark.
+
+Two safeguards keep an unpinned find honest:
+
+- Homebrew's `eigen@3` is keg-only, so it is invisible to the default search
+  and cannot be picked by accident.
+- Ceres independently requires the *exact* Eigen it was compiled against and
+  reports a clear error otherwise.
 
 ## Installation
 
 ### macOS (Homebrew)
 
 ```bash
-# Install Eigen (both versions)
+# Install Eigen
 brew install eigen
-brew install eigen@3
 
 # Install optimization libraries
 brew install ceres-solver
@@ -136,13 +143,26 @@ brew install tbb       # For GTSAM
 brew install libomp    # For OpenMP (optional)
 ```
 
+### Ubuntu / Debian (apt)
+
+```bash
+# Eigen, Ceres, g2o, TBB
+sudo apt install libeigen3-dev libceres-dev libg2o-dev libtbb-dev
+
+# GTSAM: this project requires >= 4.3, but apt ships 4.2.0.
+# Build from source instead, or skip GTSAM (the other benchmarks still build):
+#   https://github.com/borglab/gtsam
+```
+
+OpenMP needs no separate package on Linux — GCC ships with it.
+
 ### Rebuild after installation
 
 ```bash
 cd benches/cpp_comparison/build
 rm -rf *
 cmake .. -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+cmake --build . --config Release -j$(nproc 2>/dev/null || sysctl -n hw.ncpu)
 ```
 
 ## Datasets
@@ -237,11 +257,13 @@ cargo run --release -p apex-io --bin download_datasets -- --select 10
 
 ### "No C++ optimization libraries found"
 **Cause:** None of Ceres, GTSAM, or g2o are installed/detected.
-**Solution:** Install at least one library using Homebrew.
+**Solution:** Install at least one library with `brew install <library>` (macOS)
+or `sudo apt install <library>` (Ubuntu/Debian) — see [Installation](#installation).
 
 ### "Failed to find Ceres - Missing required Ceres dependency: Eigen version X.X.X"
-**Cause:** Eigen version mismatch
-**Solution:** `brew reinstall ceres-solver`
+**Cause:** Ceres was compiled against a different Eigen than the one CMake found.
+**Solution:** `brew reinstall ceres-solver` (macOS), or
+`sudo apt install --reinstall libceres-dev` (Ubuntu/Debian).
 
 ### "Cannot open file ../../data/..."
 **Cause:** Running benchmark from wrong directory
@@ -249,11 +271,12 @@ cargo run --release -p apex-io --bin download_datasets -- --select 10
 
 ### Compilation errors with headers not found
 **Cause:** Library not properly installed or detected
-**Solution:** Check installation with `brew info <library>` and ensure paths are correct
+**Solution:** Check with `brew info <library>` or `dpkg -l <library>` and ensure
+paths are correct.
 
 ### OpenMP not found warning
-**Cause:** OpenMP not installed on macOS
-**Solution:** `brew install libomp` (optional - benchmarks will run single-threaded)
+**Cause:** AppleClang ships without OpenMP (Linux GCC has it built in).
+**Solution:** `brew install libomp` (macOS only — benchmarks will otherwise run single-threaded)
 
 ## References
 
