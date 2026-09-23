@@ -41,6 +41,7 @@ CMake 3.15+, Eigen3, and the solvers themselves:
 
 ```bash
 brew install ceres-solver gtsam g2o eigen   # macOS
+sudo apt install libceres-dev libg2o-dev libeigen3-dev   # Ubuntu/Debian
 ```
 
 If they are unavailable the benchmarks run with the Rust solvers only and log a warning.
