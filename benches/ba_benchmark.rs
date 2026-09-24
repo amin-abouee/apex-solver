@@ -23,21 +23,15 @@
 //!
 //! ## Solver variants
 //!
-//! - `schur_implicit` — the `for_bundle_adjustment()` preset (implicit Schur,
-//!   matrix-free PCG; read from the config, never restated, so a library
-//!   default change is reflected rather than silently measured against the
-//!   old one)
 //! - `schur_explicit_sparse` — [`ExplicitSchurVariant::Sparse`]: forms the
 //!   reduced system `S`, sparse-Cholesky factorizes it
 //! - `schur_explicit_iterative` — [`ExplicitSchurVariant::Iterative`]: PCG on
 //!   the formed `S`
-//! - `schur_explicit_chunked` — [`ExplicitSchurVariant::Chunked`]: builds `S`
-//!   chunk-by-chunk straight from `J` (slower, far less memory)
 //!
-//! The two explicit-chunked/iterative variants are strictly dominated on time
-//! by `schur_explicit_sparse` (1.13x–2.01x and 0.84x–1.47x respectively,
-//! measured across BAL), so they run only on trafalgar-21; every other
-//! dataset runs the preset and `schur_explicit_sparse`.
+//! These two are the optimization targets (explicit Schur is the VIO path);
+//! the implicit and chunked variants were dropped from the routine matrix to
+//! keep each benchmark iteration fast — they live in git history and in
+//! `bundle_adjustment_benchmark` for occasional deep checks.
 //!
 //! ## Accuracy guard
 //!
@@ -90,22 +84,44 @@ use tracing::debug;
 /// Pinned golden final costs per `(dataset, variant)`, bound by
 /// [`COST_TOLERANCE_RATIO`] and [`RMSE_TOLERANCE_PX`].
 ///
-/// Pinned from this benchmark's validation run on the configs below (see
+/// Pinned from this benchmark's validation runs on the configs below (see
 /// `benchmarking_results/baseline_criterion.md` for the matching timings).
-/// Explicit variants may legitimately converge to slightly different optima
-/// than the implicit PCG path — each variant is guarded against its own
-/// golden, never across variants.
+/// The iterative variant may legitimately converge to a slightly different
+/// optimum than the sparse direct solve — each variant is guarded against its
+/// own golden, never across variants.
 const GOLDEN_FINAL_COSTS: &[(&str, &str, f64)] = &[
-    ("trafalgar-21", "schur_implicit", 1.370_020_709_053e4),
     ("trafalgar-21", "schur_explicit_sparse", 1.370_013_056_594e4),
-    ("trafalgar-21", "schur_explicit_iterative", 1.370_020_699_431e4),
-    ("trafalgar-21", "schur_explicit_chunked", 1.370_013_056_593e4),
-    ("trafalgar-257", "schur_implicit", 6.744_369_802_557e4),
-    ("trafalgar-257", "schur_explicit_sparse", 6.863_327_074_594e4),
-    ("dubrovnik-135", "schur_implicit", 1.905_531_026_013e5),
-    ("dubrovnik-135", "schur_explicit_sparse", 1.888_767_976_834e5),
-    ("venice-52", "schur_implicit", 9.195_848_912_839e4),
+    (
+        "trafalgar-21",
+        "schur_explicit_iterative",
+        1.370_020_699_431e4,
+    ),
+    (
+        "trafalgar-257",
+        "schur_explicit_sparse",
+        6.863_327_074_594e4,
+    ),
+    (
+        "trafalgar-257",
+        "schur_explicit_iterative",
+        6.799_201_774_758e4,
+    ),
+    (
+        "dubrovnik-135",
+        "schur_explicit_sparse",
+        1.888_767_976_834e5,
+    ),
+    (
+        "dubrovnik-135",
+        "schur_explicit_iterative",
+        1.905_530_913_190e5,
+    ),
     ("venice-52", "schur_explicit_sparse", 9.716_652_695_390e4),
+    (
+        "venice-52",
+        "schur_explicit_iterative",
+        9.195_236_768_263e4,
+    ),
 ];
 
 /// Maximum ratio of a timed run's final cost to its golden.
@@ -115,46 +131,41 @@ const COST_TOLERANCE_RATIO: f64 = 1.0005;
 const RMSE_TOLERANCE_PX: f64 = 0.01;
 
 /// Which BAL problem to run: registry key for download, label for benchmark
-/// IDs and goldens, and whether the dominated Schur variants run too.
+/// IDs and goldens.
 #[derive(Debug, Clone, Copy)]
 struct BaDataset {
     registry: &'static str,
     label: &'static str,
     cameras: u32,
     points: u32,
-    all_variants: bool,
 }
 
-/// trafalgar-21 runs the full variant matrix; the three larger datasets carry
-/// the scaling signal at a bounded suite runtime.
+/// Every dataset runs the two explicit variants; trafalgar-21 doubles as the
+/// fast per-hypothesis probe via Criterion filters.
 const DATASETS: &[BaDataset] = &[
     BaDataset {
         registry: "trafalgar",
         label: "trafalgar-21",
         cameras: 21,
         points: 11315,
-        all_variants: true,
     },
     BaDataset {
         registry: "trafalgar",
         label: "trafalgar-257",
         cameras: 257,
         points: 65132,
-        all_variants: false,
     },
     BaDataset {
         registry: "dubrovnik",
         label: "dubrovnik-135",
         cameras: 135,
         points: 90642,
-        all_variants: false,
     },
     BaDataset {
         registry: "venice",
         label: "venice-52",
         cameras: 52,
         points: 64053,
-        all_variants: false,
     },
 ];
 
@@ -167,41 +178,20 @@ struct SolverVariant {
     schur_variant: ExplicitSchurVariant,
 }
 
-/// The variant matrix for a dataset. `schur_implicit` is whatever
-/// `for_bundle_adjustment()` currently selects, read from the config.
-fn variants_for(all_variants: bool) -> Vec<SolverVariant> {
-    let preset = LevenbergMarquardtConfig::for_bundle_adjustment();
-    let implicit = SolverVariant {
-        label: "schur_implicit",
-        linear_solver_type: preset.linear_solver_type,
-        schur_variant: preset.schur_variant,
-    };
-    let explicit_sparse = SolverVariant {
-        label: "schur_explicit_sparse",
-        linear_solver_type: LinearSolverType::ExplicitSparseSchur,
-        schur_variant: ExplicitSchurVariant::Sparse,
-    };
-    let explicit_iterative = SolverVariant {
-        label: "schur_explicit_iterative",
-        linear_solver_type: LinearSolverType::ExplicitSparseSchur,
-        schur_variant: ExplicitSchurVariant::Iterative,
-    };
-    let explicit_chunked = SolverVariant {
-        label: "schur_explicit_chunked",
-        linear_solver_type: LinearSolverType::ExplicitSparseSchur,
-        schur_variant: ExplicitSchurVariant::Chunked,
-    };
-
-    if all_variants {
-        vec![
-            implicit,
-            explicit_sparse,
-            explicit_iterative,
-            explicit_chunked,
-        ]
-    } else {
-        vec![implicit, explicit_sparse]
-    }
+/// The variant matrix: the two explicit Schur paths on every dataset.
+fn variants_for() -> Vec<SolverVariant> {
+    vec![
+        SolverVariant {
+            label: "schur_explicit_sparse",
+            linear_solver_type: LinearSolverType::ExplicitSparseSchur,
+            schur_variant: ExplicitSchurVariant::Sparse,
+        },
+        SolverVariant {
+            label: "schur_explicit_iterative",
+            linear_solver_type: LinearSolverType::ExplicitSparseSchur,
+            schur_variant: ExplicitSchurVariant::Iterative,
+        },
+    ]
 }
 
 /// The preset with the variant's Schur solver selected; everything else
@@ -354,7 +344,7 @@ fn bench_bundle_adjustment(c: &mut Criterion) {
         let dataset =
             BalLoader::load(&path).unwrap_or_else(|e| panic!("failed to load {}: {e}", spec.label));
 
-        for variant in variants_for(spec.all_variants) {
+        for variant in variants_for() {
             group.bench_with_input(
                 BenchmarkId::new("solve", format!("{}/{}", spec.label, variant.label)),
                 &dataset,
