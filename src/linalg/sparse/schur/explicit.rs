@@ -55,7 +55,7 @@ use crate::linalg::schur::{PcgParams, SchurPreconditioner, solve_pcg};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::sparse::pattern;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
 use faer::{
     Accum, Mat, Side,
     linalg::solvers::Solve,
@@ -152,9 +152,162 @@ pub struct ExplicitSparseSchur {
     // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
     ne_cache: LazyNormalEquations,
 
+    /// Cached value-position maps from `JᵀJ`'s sparsity into the extracted
+    /// `H_kk`/`H_ke` value arrays; rebuilt only when the pattern changes.
+    extraction: Option<ExtractionCache>,
+
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
+}
+
+/// Cached extraction of `H_kk` and `H_ke` from a `JᵀJ` with a fixed
+/// sparsity pattern.
+///
+/// [`Self::extract_kept_block`] and [`Self::extract_coupling_block`] re-walk
+/// every `JᵀJ` nonzero and rebuild CSC matrices through triplets (allocate +
+/// sort) on every solve, though the pattern is static per structure — within
+/// one optimizer run it never changes. The cache instead records, once per
+/// pattern, which `JᵀJ` value feeds which extracted value slot; a solve is
+/// then two parallel gathers. Entries the extraction drops (eliminated rows
+/// of kept columns, or anything touching a fixed column) never appear in the
+/// maps.
+#[derive(Debug, Clone)]
+struct ExtractionCache {
+    fingerprint: pattern::PatternFingerprint,
+    h_kk_symbolic: SymbolicSparseColMat<usize>,
+    h_ke_symbolic: SymbolicSparseColMat<usize>,
+    /// `H_kk` value slot → `JᵀJ` flat value index.
+    h_kk_src: Vec<u32>,
+    /// `H_ke` value slot → `JᵀJ` flat value index.
+    h_ke_src: Vec<u32>,
+}
+
+impl ExtractionCache {
+    /// Build the maps for one `JᵀJ` pattern against `partition`.
+    ///
+    /// One-time cost: two sorted triplet builds plus one HashMap pass, paid
+    /// on the first solve (and never again while the pattern holds).
+    fn build(
+        partition: &SchurPartition,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<Self> {
+        let symbolic = hessian.symbolic();
+
+        // Kept- / eliminated-local column of each global column; `u32::MAX`
+        // for columns outside the partition (fully fixed variables).
+        let mut kept_cols = vec![u32::MAX; hessian.ncols()];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let global = block.col_start + offset;
+                if let Some(local) = partition.kept_local(global) {
+                    kept_cols[global] = local as u32;
+                }
+            }
+        }
+        let mut elim_cols = vec![u32::MAX; hessian.ncols()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                elim_cols[block.col_start + offset] = (base + offset) as u32;
+            }
+        }
+
+        // Classify every `JᵀJ` value once: kept×kept feeds `H_kk`, kept×elim
+        // feeds `H_ke`; everything else is dropped, matching the uncached
+        // extraction's predicates exactly.
+        let mut kk_triplets: Vec<(usize, usize, u32)> = Vec::new();
+        let mut ke_triplets: Vec<(usize, usize, u32)> = Vec::new();
+        for col in 0..hessian.ncols() {
+            let col_start = symbolic.col_range(col).start;
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let c_kept = kept_cols[col];
+            let c_elim = elim_cols[col];
+            for (k, &row) in rows.iter().enumerate() {
+                let src = (col_start + k) as u32;
+                if c_kept != u32::MAX {
+                    if let Some(r) = partition.kept_local(row) {
+                        kk_triplets.push((r, c_kept as usize, src));
+                    }
+                } else if c_elim != u32::MAX
+                    && let Some(r) = partition.kept_local(row)
+                {
+                    ke_triplets.push((r, c_elim as usize, src));
+                }
+            }
+        }
+
+        let (h_kk_symbolic, h_kk_src) =
+            Self::symbolic_and_src(kk_triplets, partition.kept_dof(), partition.kept_dof())?;
+        let (h_ke_symbolic, h_ke_src) = Self::symbolic_and_src(
+            ke_triplets,
+            partition.kept_dof(),
+            partition.eliminated_dof(),
+        )?;
+
+        Ok(Self {
+            fingerprint: pattern::PatternFingerprint::of(hessian),
+            h_kk_symbolic,
+            h_ke_symbolic,
+            h_kk_src,
+            h_ke_src,
+        })
+    }
+
+    /// Sorted-CSC construction from `(row, col, src)` triplets.
+    ///
+    /// Entries of one `JᵀJ` bucket are unique in `(row, col)` — they come
+    /// from distinct entries of a product with a unique pattern — so the sort
+    /// needs no dedup pass.
+    fn symbolic_and_src(
+        mut triplets: Vec<(usize, usize, u32)>,
+        nrows: usize,
+        ncols: usize,
+    ) -> LinAlgResult<(SymbolicSparseColMat<usize>, Vec<u32>)> {
+        triplets.sort_unstable_by_key(|&(r, c, _)| (c, r));
+
+        let nnz = triplets.len();
+        let mut col_ptr = vec![0usize; ncols + 1];
+        let mut row_idx = Vec::with_capacity(nnz);
+        let mut src = Vec::with_capacity(nnz);
+        for &(r, c, s) in &triplets {
+            col_ptr[c + 1] += 1;
+            row_idx.push(r);
+            src.push(s);
+        }
+        for c in 0..ncols {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+
+        let symbolic = SymbolicSparseColMat::new_checked(nrows, ncols, col_ptr, None, row_idx);
+        Ok((symbolic, src))
+    }
+
+    /// Gather the current values into the cached patterns.
+    ///
+    /// Every slot has exactly one source, so the gathers parallelize without
+    /// aliasing; the symbolic handles are `Arc`-backed, so cloning them per
+    /// solve is free.
+    fn extract(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> (SparseColMat<usize, f64>, SparseColMat<usize, f64>) {
+        let values = hessian.as_ref().val();
+        let kk: Vec<f64> = self
+            .h_kk_src
+            .par_iter()
+            .map(|&s| values[s as usize])
+            .collect();
+        let ke: Vec<f64> = self
+            .h_ke_src
+            .par_iter()
+            .map(|&s| values[s as usize])
+            .collect();
+        (
+            SparseColMat::new(self.h_kk_symbolic.clone(), kk),
+            SparseColMat::new(self.h_ke_symbolic.clone(), ke),
+        )
+    }
 }
 
 impl ExplicitSparseSchur {
@@ -172,6 +325,7 @@ impl ExplicitSparseSchur {
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             ne_cache: LazyNormalEquations::default(),
+            extraction: None,
             hessian: None,
             gradient: None,
         }
@@ -272,10 +426,38 @@ impl ExplicitSparseSchur {
         self.verified_pattern = None;
         Ok(())
     }
+
+    /// Extract `H_kk` and `H_ke` through the pattern cache.
+    ///
+    /// The first call for a sparsity pattern pays [`ExtractionCache::build`];
+    /// every later call with the same pattern is two parallel gathers — the
+    /// uncached path's per-solve triplet rebuild and CSC conversion
+    /// disappears. [`Self::extract_kept_block`] and
+    /// [`Self::extract_coupling_block`] remain the reference implementations
+    /// the cache must agree with.
+    fn extract_kept_and_coupling(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<(SparseColMat<usize, f64>, SparseColMat<usize, f64>)> {
+        let fingerprint = pattern::PatternFingerprint::of(hessian);
+        let cache = match self.extraction.take() {
+            Some(cache) if cache.fingerprint == fingerprint => cache,
+            _ => ExtractionCache::build(self.require_partition()?, hessian)?,
+        };
+        let out = cache.extract(hessian);
+        self.extraction = Some(cache);
+        Ok(out)
+    }
+
     /// Extract `H_kk`, the retained-retained block.
     ///
     /// Indices go through the partition rather than a contiguous range, so the
     /// retained variables need not be adjacent in column space.
+    ///
+    /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache:
+    /// production paths go through the cache, and these remain so tests can
+    /// compare cached extraction against the direct one.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn extract_kept_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
@@ -308,6 +490,10 @@ impl ExplicitSparseSchur {
     ///
     /// Columns follow the eliminated-local ordering, so block `i` occupies
     /// `partition.eliminated_offset(i) .. + dof`.
+    ///
+    /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache;
+    /// see [`Self::extract_kept_block`].
+    #[cfg_attr(not(test), allow(dead_code))]
     fn extract_coupling_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
@@ -850,12 +1036,8 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
         // 2. Split the system. `H_ee` must be block-diagonal for the
         //    elimination to be exact; that is checked, not assumed.
         self.ensure_block_diagonal(&hessian)?;
-        let (h_kk, h_ke, g_k, g_e) = {
-            let h_kk = self.extract_kept_block(&hessian)?;
-            let h_ke = self.extract_coupling_block(&hessian)?;
-            let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
-            (h_kk, h_ke, g_k, g_e)
-        };
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
+        let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         // 3. Gather and invert the H_ee diagonal blocks (any DOF, mixed sizes).
         let mut eliminated = std::mem::take(&mut self.eliminated);
@@ -903,8 +1085,8 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
         self.ensure_block_diagonal(&hessian)?;
         let partition = self.require_partition()?;
         let kept_dof = partition.kept_dof();
-        let h_kk = self.extract_kept_block(&hessian)?;
-        let h_ke = self.extract_coupling_block(&hessian)?;
+        let num_eliminated_blocks = partition.eliminated_blocks().len();
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
         let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         debug!(
@@ -915,7 +1097,7 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
             h_kk.ncols(),
             h_ke.nrows(),
             h_ke.ncols(),
-            partition.eliminated_blocks().len()
+            num_eliminated_blocks
         );
 
         // 3. λ·D is applied to *both* sides before elimination — damping the
@@ -1419,6 +1601,56 @@ mod tests {
             residuals,
             landmark_keys,
         ))
+    }
+
+    /// The pattern-cached extraction must agree exactly with the direct
+    /// reference extractors: same pattern, same values, and a second call on
+    /// the same pattern must hit the cache and reproduce the first.
+    #[test]
+    fn cached_extraction_matches_direct_reference() -> TestResult {
+        let (variables, variable_index_map, jacobian, _residuals, landmark_keys) =
+            create_schur_test_setup()?;
+        let mut solver = ExplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+
+        let h_full = {
+            let mut cache =
+                crate::linalg::sparse::normal_eq::NormalEquationsCache::try_new(&jacobian)?;
+            let residuals = Mat::zeros(jacobian.nrows(), 1);
+            cache.compute(&residuals, &jacobian)?.hessian
+        };
+
+        let kk_ref = solver.extract_kept_block(&h_full)?;
+        let ke_ref = solver.extract_coupling_block(&h_full)?;
+        let (kk_first, ke_first) = solver.extract_kept_and_coupling(&h_full)?;
+        let (kk_second, ke_second) = solver.extract_kept_and_coupling(&h_full)?;
+
+        for (cached, direct, what) in [
+            (&kk_first, &kk_ref, "H_kk first call"),
+            (&kk_second, &kk_ref, "H_kk cached call"),
+            (&ke_first, &ke_ref, "H_ke first call"),
+            (&ke_second, &ke_ref, "H_ke cached call"),
+        ] {
+            assert_eq!(
+                (cached.nrows(), cached.ncols()),
+                (direct.nrows(), direct.ncols()),
+                "{what}: shape mismatch"
+            );
+            assert_eq!(cached.compute_nnz(), direct.compute_nnz(), "{what}: nnz");
+            for col in 0..direct.ncols() {
+                assert_eq!(
+                    cached.symbolic().row_idx_of_col_raw(col),
+                    direct.symbolic().row_idx_of_col_raw(col),
+                    "{what}: pattern mismatch in column {col}"
+                );
+                assert_eq!(
+                    cached.val_of_col(col),
+                    direct.val_of_col(col),
+                    "{what}: value mismatch in column {col}"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// The reduced camera matrix against naive dense algebra.
