@@ -199,10 +199,7 @@ impl ExtractionCache {
     ///
     /// One-time cost: two sorted triplet builds plus one HashMap pass, paid
     /// on the first solve (and never again while the pattern holds).
-    fn build(
-        partition: &SchurPartition,
-        hessian: &SparseColMat<usize, f64>,
-    ) -> LinAlgResult<Self> {
+    fn build(partition: &SchurPartition, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<Self> {
         let symbolic = hessian.symbolic();
 
         // Kept- / eliminated-local column of each global column; `u32::MAX`
@@ -403,13 +400,7 @@ fn build_schur_output(
         }
     }
 
-    let symbolic = SymbolicSparseColMat::new_checked(
-        kept_dof,
-        kept_dof,
-        col_ptr,
-        None,
-        row_idx,
-    );
+    let symbolic = SymbolicSparseColMat::new_checked(kept_dof, kept_dof, col_ptr, None, row_idx);
     (symbolic, s_values, pattern_hash)
 }
 
@@ -668,12 +659,10 @@ impl ExplicitSparseSchur {
         // ordering analysis — a fixed per-iteration cost the numerics never
         // see — can be reused as-is. Identical symbolic + identical values
         // means the factorization is bit-identical to the uncached path.
-        if let (Some(hash), Some((cached_hash, sym))) =
-            (pattern_hash, self.s_llt_cache.as_ref())
+        if let (Some(hash), Some((cached_hash, sym))) = (pattern_hash, self.s_llt_cache.as_ref())
             && *cached_hash == hash
         {
-            if let Ok(cholesky) = Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower)
-            {
+            if let Ok(cholesky) = Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
                 return Ok(cholesky.solve(b));
             }
             // The cached symbolic disagrees with this matrix (pattern drift
@@ -1035,8 +1024,7 @@ impl ExplicitSparseSchur {
             // Force exact symmetry: accumulation over many blocks drifts.
             for i in 0..kept_dof {
                 for j in (i + 1)..kept_dof {
-                    let avg =
-                        (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
+                    let avg = (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
                     s_dense[i * kept_dof + j] = avg;
                     s_dense[j * kept_dof + i] = avg;
                 }
@@ -1053,9 +1041,7 @@ impl ExplicitSparseSchur {
                 }
             }
             SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
-                .map_err(|e| {
-                    LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e))
-                })?
+                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))?
         };
 
         self.s_bitmap = Some((extraction_fp.unwrap_or_default(), bits));
@@ -1405,8 +1391,7 @@ impl ExplicitSparseSchur {
 
             // δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k); the eliminator already holds
             // H_ee⁻¹·g_e, so only the coupling term is left to apply.
-            let delta_e =
-                self.back_substitute_chunked(&delta_k, &reduced, jacobian, &partition)?;
+            let delta_e = self.back_substitute_chunked(&delta_k, &reduced, jacobian, &partition)?;
             self.combine_updates(&delta_k, &delta_e)
         })();
 

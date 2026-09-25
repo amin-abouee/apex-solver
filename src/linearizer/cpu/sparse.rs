@@ -1,6 +1,9 @@
 //! Sparse Jacobian assembly using symbolic sparsity patterns.
 
-use faer::{Mat, sparse::{SparseColMat, SymbolicSparseColMat}};
+use faer::{
+    Mat,
+    sparse::{SparseColMat, SymbolicSparseColMat},
+};
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 
@@ -223,8 +226,7 @@ pub fn assemble_sparse(
             .zip(symbolic_structure.scatter_ops.par_iter())
             .for_each(|(v, op)| *v = workspace.jac_arena[op.src as usize]);
     }
-    let jacobian_sparse =
-        SparseColMat::new(symbolic_structure.pattern.clone(), csc_values);
+    let jacobian_sparse = SparseColMat::new(symbolic_structure.pattern.clone(), csc_values);
 
     // The value buffer was consumed by the matrix; give the workspace a
     // fresh one (same capacity class) for the next call.

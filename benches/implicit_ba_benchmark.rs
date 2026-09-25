@@ -65,9 +65,7 @@ use apex_solver::factors::SelfCalibration;
 use apex_solver::factors::visual::ProjectionFactor;
 use apex_solver::init_logger;
 use apex_solver::linalg::{ExplicitSchurVariant, JacobianMode, LinearSolverType};
-use apex_solver::optimizer::levenberg_marquardt::{
-    LevenbergMarquardt, LevenbergMarquardtConfig,
-};
+use apex_solver::optimizer::levenberg_marquardt::{LevenbergMarquardt, LevenbergMarquardtConfig};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use nalgebra::{DVector, Matrix2xX, Vector2, Vector3};
 use tracing::debug;
@@ -301,9 +299,8 @@ fn bench_bundle_adjustment(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(4));
 
     for spec in DATASETS {
-        let path = ensure_ba_dataset(spec.registry, spec.cameras, spec.points).unwrap_or_else(
-            |e| panic!("failed to provision BAL dataset {}: {e}", spec.label),
-        );
+        let path = ensure_ba_dataset(spec.registry, spec.cameras, spec.points)
+            .unwrap_or_else(|e| panic!("failed to provision BAL dataset {}: {e}", spec.label));
         let dataset =
             BalLoader::load(&path).unwrap_or_else(|e| panic!("failed to load {}: {e}", spec.label));
 
