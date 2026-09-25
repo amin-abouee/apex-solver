@@ -1,16 +1,13 @@
 //! Sparse Jacobian assembly using symbolic sparsity patterns.
 
-use faer::{
-    Mat,
-    sparse::{Argsort, Pair, SparseColMat, SymbolicSparseColMat},
-};
+use faer::{Mat, sparse::{SparseColMat, SymbolicSparseColMat}};
 use rayon::prelude::*;
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::core::VarKey;
 use crate::error::ErrorLogging;
 use crate::linearizer::{
-    AssemblyWorkspace, BlockLinearization, LinearizerError, LinearizerResult, compute_block_into,
+    AssemblyWorkspace, LinearizerError, LinearizerResult, compute_block_into,
     split_by_row_offsets_mut,
 };
 
@@ -20,7 +17,24 @@ use crate::core::variable::ManifoldVariable;
 /// Symbolic structure for sparse matrix operations.
 pub struct SymbolicStructure {
     pub pattern: SymbolicSparseColMat<usize>,
-    pub order: Argsort<usize>,
+    /// Scatter plan for the CSC value array: `(csc_slot, arena_index,
+    /// accumulate)`. Each plan step either overwrites or adds-to the CSC
+    /// slot from one Jacobian-arena position. Duplicated `(row, col)` pairs
+    /// (a factor listing one variable twice) produce a first overwrite
+    /// followed by accumulate steps; the common no-duplicate case is a pure
+    /// parallel gather.
+    pub scatter_ops: Vec<ScatterOp>,
+    /// True when any plan step accumulates (duplicate pairs exist), which
+    /// forces a serial scatter; the common case gathers in parallel.
+    pub scatter_has_duplicates: bool,
+}
+
+/// One step of the CSC value scatter plan.
+#[derive(Debug, Clone, Copy)]
+pub struct ScatterOp {
+    pub dest: u32,
+    pub src: u32,
+    pub accumulate: bool,
 }
 
 /// Free local columns of `variable`, as `(local_col, free_offset)` pairs —
@@ -51,11 +65,22 @@ pub fn build_symbolic_structure(
     variable_index_map: &SecondaryMap<VarKey, usize>,
     total_dof: usize,
 ) -> LinearizerResult<SymbolicStructure> {
-    let mut indices = Vec::<Pair<usize, usize>>::new();
+    // Triples in push order: `(col, row, arena_index)` — the arena index is
+    // where `assemble_sparse`'s parallel factor evaluation left the value,
+    // so the CSC values are a pure permutation (plus duplicate sums) of the
+    // arena.
+    let mut triples = Vec::<(usize, usize, u32)>::new();
+    let mut total_jac_len = 0usize;
 
     let mut blocks: Vec<_> = problem.residual_blocks().iter().collect();
     blocks.sort_by_key(|(_, block)| block.residual_row_start_idx);
-    blocks.iter().for_each(|(_, block)| {
+    for (_, block) in &blocks {
+        let residual_dim = block.factor.residual_dim();
+        let (jac_rows, jac_cols) = block.factor.jacobian_shape();
+        debug_assert_eq!(jac_rows, residual_dim);
+        let jac_base = total_jac_len;
+        total_jac_len += jac_rows * jac_cols;
+
         let mut var_local_sizes = Vec::<(usize, usize)>::new();
         let mut local_offset = 0;
 
@@ -67,35 +92,82 @@ pub fn build_symbolic_structure(
         }
 
         for (i, &var_key) in block.variable_keys.iter().enumerate() {
-            if let Some(variable) = variables.get(var_key)
-                && let Some(&global_col) = variable_index_map.get(var_key)
-                && let Some((_, var_size)) = var_local_sizes.get(i)
-            {
-                for row in 0..block.factor.residual_dim() {
-                    for (_, free_col) in free_local_columns(variable.as_ref(), *var_size) {
-                        indices.push(Pair::new(
-                            block.residual_row_start_idx + row,
+            if let Some(variable) = variables.get(var_key) {
+                let Some(&global_col) = variable_index_map.get(var_key) else {
+                    return Err(LinearizerError::Variable(format!(
+                        "VarKey {var_key:?} missing in variable-to-column-index mapping"
+                    ))
+                    .log());
+                };
+                let Some(&(local_col, var_size)) = var_local_sizes.get(i) else {
+                    continue;
+                };
+                for row in 0..residual_dim {
+                    for (col, free_col) in free_local_columns(variable.as_ref(), var_size) {
+                        // Jacobian arena is column-major over the block:
+                        // buf[(local_col + col) * residual_dim + row].
+                        triples.push((
                             global_col + free_col,
+                            block.residual_row_start_idx + row,
+                            (jac_base + (local_col + col) * residual_dim + row) as u32,
                         ));
                     }
                 }
             }
         }
-    });
+    }
 
-    let (pattern, order) = SymbolicSparseColMat::try_new_from_indices(
+    // CSC order: grouped by column, rows ascending within a column. A stable
+    // sort keeps duplicate pairs in push order, so their summation order
+    // matches the pre-plan behavior.
+    triples.sort_by_key(|&(c, r, _)| (c, r));
+
+    let mut col_ptr = vec![0usize; total_dof + 1];
+    let mut row_idx = Vec::with_capacity(triples.len());
+    let mut scatter_ops = Vec::<ScatterOp>::with_capacity(triples.len());
+    let mut has_duplicates = false;
+    let mut prev: Option<(usize, usize)> = None;
+    let mut last_dest = 0u32;
+    for &(c, r, src) in &triples {
+        let duplicate = prev == Some((c, r));
+        if duplicate {
+            // faer's argsort semantics: a duplicated (row, col) pair sums
+            // into the first occurrence's value slot.
+            has_duplicates = true;
+            scatter_ops.push(ScatterOp {
+                dest: last_dest,
+                src,
+                accumulate: true,
+            });
+        } else {
+            col_ptr[c + 1] += 1;
+            row_idx.push(r);
+            last_dest = row_idx.len() as u32 - 1;
+            scatter_ops.push(ScatterOp {
+                dest: last_dest,
+                src,
+                accumulate: false,
+            });
+        }
+        prev = Some((c, r));
+    }
+    for c in 0..total_dof {
+        col_ptr[c + 1] += col_ptr[c];
+    }
+
+    let pattern = SymbolicSparseColMat::new_checked(
         problem.total_residual_dimension,
         total_dof,
-        &indices,
-    )
-    .map_err(|e| {
-        LinearizerError::SymbolicStructure(
-            "Failed to build symbolic sparse matrix structure".to_string(),
-        )
-        .log_with_source(e)
-    })?;
+        col_ptr,
+        None,
+        row_idx,
+    );
 
-    Ok(SymbolicStructure { pattern, order })
+    Ok(SymbolicStructure {
+        pattern,
+        scatter_ops,
+        scatter_has_duplicates: has_duplicates,
+    })
 }
 
 /// Assemble residuals and sparse Jacobian from the current variable values.
@@ -105,7 +177,7 @@ pub fn build_symbolic_structure(
 pub fn assemble_sparse(
     problem: &Problem,
     variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    variable_index_map: &SecondaryMap<VarKey, usize>,
+    _variable_index_map: &SecondaryMap<VarKey, usize>,
     symbolic_structure: &SymbolicStructure,
     workspace: &mut AssemblyWorkspace,
 ) -> LinearizerResult<(Mat<f64>, SparseColMat<usize, f64>)> {
@@ -121,100 +193,48 @@ pub fn assemble_sparse(
 
     // Parallel evaluation: each task gets a unique residual slice and a unique
     // Jacobian buffer (mutable, non-aliasing) — pure zero-copy through factor.linearize.
-    let block_results: Vec<LinearizerResult<BlockLinearization>> = residual_slices
+    residual_slices
         .into_par_iter()
         .zip(jac_slices)
         .zip(workspace.block_order.par_iter())
         .map(|((res_slice, jac_buf), key)| {
             let block = &residual_blocks[*key];
             jac_buf.fill(0.0);
-            compute_block_into(block, variables, res_slice, Some(jac_buf)).map(|(bl, _)| bl)
+            compute_block_into(block, variables, res_slice, Some(jac_buf)).map(|_| ())
         })
-        .collect();
+        .collect::<LinearizerResult<()>>()?;
 
-    let block_results = block_results
-        .into_iter()
-        .collect::<LinearizerResult<Vec<_>>>()?;
-
-    // Re-split the arena to read the corrected Jacobian blocks back for scattering.
-    let jac_slices = split_by_row_offsets_mut(&mut workspace.jac_arena, &workspace.jac_offsets);
-
-    // Scatter Jacobian blocks into CSC value array (serial, pre-computed positions).
-    // Reuse the workspace buffer; `scatter_sparse_block` pushes into it, so it
-    // must start empty while keeping its capacity across calls.
-    let mut jacobian_values = std::mem::take(&mut workspace.jacobian_values);
-    jacobian_values.clear();
-    jacobian_values.reserve(total_nnz);
-    for ((bl, key), jac_buf) in block_results
-        .iter()
-        .zip(workspace.block_order.iter())
-        .zip(jac_slices.iter())
-    {
-        let block = &residual_blocks[*key];
-        scatter_sparse_block(
-            bl,
-            block,
-            variables,
-            variable_index_map,
-            jac_buf,
-            &mut jacobian_values,
-        )?;
+    // CSC values are a fixed permutation (plus duplicate sums) of the arena,
+    // precomputed in the symbolic structure — no serial scatter, no argsort.
+    let mut csc_values = std::mem::take(&mut workspace.jacobian_values);
+    csc_values.resize(total_nnz, 0.0);
+    if symbolic_structure.scatter_has_duplicates {
+        for op in &symbolic_structure.scatter_ops {
+            let v = workspace.jac_arena[op.src as usize];
+            if op.accumulate {
+                csc_values[op.dest as usize] += v;
+            } else {
+                csc_values[op.dest as usize] = v;
+            }
+        }
+    } else {
+        csc_values
+            .par_iter_mut()
+            .zip(symbolic_structure.scatter_ops.par_iter())
+            .for_each(|(v, op)| *v = workspace.jac_arena[op.src as usize]);
     }
+    let jacobian_sparse =
+        SparseColMat::new(symbolic_structure.pattern.clone(), csc_values);
+
+    // The value buffer was consumed by the matrix; give the workspace a
+    // fresh one (same capacity class) for the next call.
+    workspace.jacobian_values = Vec::with_capacity(total_nnz);
 
     // Convert residual buffer to faer Mat
     let n = problem.total_residual_dimension;
     let residual_faer = faer::Mat::from_fn(n, 1, |i, _| workspace.residual_buf[i]);
 
-    let jacobian_sparse = SparseColMat::new_from_argsort(
-        symbolic_structure.pattern.clone(),
-        &symbolic_structure.order,
-        jacobian_values.as_slice(),
-    )
-    .map_err(|e| {
-        LinearizerError::SymbolicStructure(
-            "Failed to create sparse Jacobian from argsort".to_string(),
-        )
-        .log_with_source(e)
-    });
-
-    // Return the buffer to the workspace before propagating any error.
-    workspace.jacobian_values = jacobian_values;
-
-    Ok((residual_faer, jacobian_sparse?))
-}
-
-fn scatter_sparse_block(
-    bl: &BlockLinearization,
-    residual_block: &crate::core::residual_block::ResidualBlock,
-    variables: &SlotMap<VarKey, Box<dyn ManifoldVariable>>,
-    variable_index_map: &SecondaryMap<VarKey, usize>,
-    jacobian_buf: &[f64],
-    jacobian_values: &mut Vec<f64>,
-) -> LinearizerResult<()> {
-    for (i, &var_key) in residual_block.variable_keys.iter().enumerate() {
-        let variable = variables
-            .get(var_key)
-            .filter(|_| variable_index_map.contains_key(var_key));
-        let Some(variable) = variable else {
-            return Err(LinearizerError::Variable(format!(
-                "VarKey {:?} missing in variable-to-column-index mapping",
-                var_key
-            ))
-            .log());
-        };
-        let (local_col, var_size) = bl.variable_local_idx_size_list[i];
-        // symbolic indices are pushed row-major: (row outer, col inner), over
-        // FREE local columns only — must iterate in exactly the same order as
-        // `build_symbolic_structure`'s `free_local_columns` call, or J's
-        // values desync from its sparsity pattern.
-        // jacobian_buf is column-major: buf[(local_col + col) * residual_dim + row]
-        for row in 0..bl.residual_dim {
-            for (col, _free_col) in free_local_columns(variable.as_ref(), var_size) {
-                jacobian_values.push(jacobian_buf[(local_col + col) * bl.residual_dim + row]);
-            }
-        }
-    }
-    Ok(())
+    Ok((residual_faer, jacobian_sparse))
 }
 
 #[cfg(test)]
@@ -501,18 +521,11 @@ mod tests {
     fn test_assemble_sparse_missing_variable_key_returns_error() -> TestResult {
         let (problem, _) = one_var_problem();
         let (_, total_dof) = build_index_map(&problem);
-        let (index_map_full, _) = build_index_map(&problem);
-        let sym =
-            build_symbolic_structure(&problem, &problem.variables, &index_map_full, total_dof)?;
-
+        // The variable-to-column mapping is consumed at symbolic-structure
+        // build time (it produces the scatter plan), so a missing entry is
+        // reported there.
         let empty: SecondaryMap<VarKey, usize> = SecondaryMap::new();
-        let result = assemble_sparse(
-            &problem,
-            &problem.variables,
-            &empty,
-            &sym,
-            &mut AssemblyWorkspace::build(&problem),
-        );
+        let result = build_symbolic_structure(&problem, &problem.variables, &empty, total_dof);
         assert!(result.is_err(), "expected Err for missing variable key");
         Ok(())
     }

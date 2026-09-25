@@ -4,7 +4,7 @@
 - **Target Category:** Bundle Adjustment (Global Engine — linear solver)
 - **Scope Type:** Algorithm Enhancement (zero-copy output derivation)
 - **Status:** ACCEPTED
-- **Commit SHA:** TBD (filled at commit)
+- **Commit SHA:** e34a117
 
 ## 1. Rationale & Approach ("Why?")
 
