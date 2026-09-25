@@ -166,6 +166,10 @@ pub struct ExplicitSparseSchur {
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
+    /// Symbolic Cholesky of the last reduced system, keyed on the filtered
+    /// `S` pattern hash — reused while the pattern holds instead of re-running
+    /// the fill-reducing ordering analysis every iteration.
+    s_llt_cache: Option<(u64, SymbolicLlt<usize>)>,
 }
 
 /// Cached extraction of `H_kk` and `H_ke` from a `JᵀJ` with a fixed
@@ -336,7 +340,13 @@ fn build_schur_output(
     wpc: usize,
     bits: &[u64],
     s_dense: &[f64],
-) -> (SymbolicSparseColMat<usize>, Vec<f64>) {
+) -> (SymbolicSparseColMat<usize>, Vec<f64>, u64) {
+    // Pattern hash (FNV-1a over the CSC structure) — lets the caller cache
+    // factorization symbolics keyed on "the filtered S pattern is unchanged".
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut pattern_hash = FNV_OFFSET;
+
     // Pass 1: count slots passing the filter, per column.
     let mut col_counts = vec![0usize; kept_dof];
     let mut nnz = 0usize;
@@ -371,6 +381,8 @@ fn build_schur_output(
     let mut offsets = col_ptr[..kept_dof].to_vec();
     for c in 0..kept_dof {
         let base = c * wpc;
+        pattern_hash = (pattern_hash ^ (c as u64)).wrapping_mul(FNV_PRIME);
+        pattern_hash = (pattern_hash ^ (col_counts[c] as u64)).wrapping_mul(FNV_PRIME);
         for w in 0..wpc {
             let mut word = bits[base + w];
             while word != 0 {
@@ -384,6 +396,7 @@ fn build_schur_output(
                         offsets[c] += 1;
                         row_idx[slot] = r;
                         s_values[slot] = avg;
+                        pattern_hash = (pattern_hash ^ (r as u64)).wrapping_mul(FNV_PRIME);
                     }
                 }
             }
@@ -397,7 +410,7 @@ fn build_schur_output(
         None,
         row_idx,
     );
-    (symbolic, s_values)
+    (symbolic, s_values, pattern_hash)
 }
 
 impl ExplicitSparseSchur {
@@ -419,6 +432,7 @@ impl ExplicitSparseSchur {
             s_bitmap: None,
             hessian: None,
             gradient: None,
+            s_llt_cache: None,
         }
     }
 
@@ -644,13 +658,37 @@ impl ExplicitSparseSchur {
     /// If the initial factorization fails (matrix not positive definite),
     /// we add small regularization to the diagonal and retry.
     fn solve_with_cholesky(
-        &self,
+        &mut self,
         a: &SparseColMat<usize, f64>,
         b: &Mat<f64>,
+        pattern_hash: Option<u64>,
     ) -> LinAlgResult<Mat<f64>> {
+        // Fast path: the caller proved the filtered `S` pattern is unchanged
+        // since the last solve (same bitmap hash), so the fill-reducing
+        // ordering analysis — a fixed per-iteration cost the numerics never
+        // see — can be reused as-is. Identical symbolic + identical values
+        // means the factorization is bit-identical to the uncached path.
+        if let (Some(hash), Some((cached_hash, sym))) =
+            (pattern_hash, self.s_llt_cache.as_ref())
+            && *cached_hash == hash
+        {
+            if let Ok(cholesky) = Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower)
+            {
+                return Ok(cholesky.solve(b));
+            }
+            // The cached symbolic disagrees with this matrix (pattern drift
+            // the hash missed, or a singular value structure change) — fall
+            // through and rebuild from scratch.
+            self.s_llt_cache = None;
+        }
+
         let sym = SymbolicLlt::try_new(a.symbolic(), Side::Lower).map_err(|e| {
             LinAlgError::FactorizationFailed(format!("Symbolic Cholesky failed: {:?}", e))
         })?;
+        // Cache only a first-attempt symbolic built from `a` itself: the
+        // regularization retries below widen the pattern with synthetic
+        // diagonal entries, which would poison future solves.
+        self.s_llt_cache = pattern_hash.map(|hash| (hash, sym.clone()));
 
         // First attempt: direct factorization
         match Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
@@ -830,7 +868,7 @@ impl ExplicitSparseSchur {
         h_kk: &SparseColMat<usize, f64>,
         h_ke: &SparseColMat<usize, f64>,
         h_ee_inv: &EliminatedBlocks,
-    ) -> LinAlgResult<SparseColMat<usize, f64>> {
+    ) -> LinAlgResult<(SparseColMat<usize, f64>, Option<u64>)> {
         let partition = self.require_partition()?.clone();
         let kept_dof = h_kk.nrows();
         let h_ke_symbolic = h_ke.symbolic();
@@ -989,8 +1027,10 @@ impl ExplicitSparseSchur {
         // values fall out of the same walk. Falls back to the literal
         // legacy path when no extraction cache exists (direct test use).
         let output = if self.extraction.is_some() {
-            let (symbolic, s_values) = build_schur_output(kept_dof, wpc, &bits, &s_dense);
-            SparseColMat::new(symbolic, s_values)
+            let (symbolic, s_values, pattern_hash) =
+                build_schur_output(kept_dof, wpc, &bits, &s_dense);
+            let s = SparseColMat::new(symbolic, s_values);
+            return Ok((s, Some(pattern_hash)));
         } else {
             // Force exact symmetry: accumulation over many blocks drifts.
             for i in 0..kept_dof {
@@ -1019,7 +1059,7 @@ impl ExplicitSparseSchur {
         };
 
         self.s_bitmap = Some((extraction_fp.unwrap_or_default(), bits));
-        Ok(output)
+        Ok((output, None))
     }
     /// Reduced right-hand side `g_k − H_ke·H_ee⁻¹·g_e`.
     fn compute_reduced_gradient(
@@ -1334,8 +1374,8 @@ impl ExplicitSparseSchur {
         // previous solve's published system (freshness contract on
         // `LinearSolver::get_hessian`).
         let outcome = (|| -> LinAlgResult<Mat<f64>> {
-            let partition = self.require_partition()?;
-            let reduced = eliminator.eliminate(jacobian, residuals, partition, damping)?;
+            let partition = self.require_partition()?.clone();
+            let reduced = eliminator.eliminate(jacobian, residuals, &partition, damping)?;
 
             // S is accumulated dense; hand Cholesky a sparse view of it.
             let kept_dof = reduced.kept_dof;
@@ -1359,11 +1399,14 @@ impl ExplicitSparseSchur {
             for i in 0..kept_dof {
                 rhs[(i, 0)] = -reduced.g_reduced[(i, 0)];
             }
-            let delta_k = self.solve_with_cholesky(&s, &rhs)?;
+            // The chunked path rebuilds S from a different representation and
+            // carries no pattern hash — the symbolic cache stays cold here.
+            let delta_k = self.solve_with_cholesky(&s, &rhs, None)?;
 
             // δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k); the eliminator already holds
             // H_ee⁻¹·g_e, so only the coupling term is left to apply.
-            let delta_e = self.back_substitute_chunked(&delta_k, &reduced, jacobian, partition)?;
+            let delta_e =
+                self.back_substitute_chunked(&delta_k, &reduced, jacobian, &partition)?;
             self.combine_updates(&delta_k, &delta_e)
         })();
 
@@ -1479,13 +1522,13 @@ impl ExplicitSparseSchur {
         g_e: &Mat<f64>,
         h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<Mat<f64>> {
-        let s = self.compute_schur_complement(h_kk, h_ke, h_ee_inv)?;
+        let (s, s_pattern_hash) = self.compute_schur_complement(h_kk, h_ke, h_ee_inv)?;
         let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
         let delta_k = match self.variant {
             ExplicitSchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced, h_kk)?,
             ExplicitSchurVariant::Sparse | ExplicitSchurVariant::Chunked => {
-                self.solve_with_cholesky(&s, &g_reduced)?
+                self.solve_with_cholesky(&s, &g_reduced, s_pattern_hash)?
             }
         };
 
@@ -1834,7 +1877,7 @@ mod tests {
         let mut blocks = EliminatedBlocks::new(solver.partition().ok_or("partition missing")?);
         blocks.gather(&h_full, solver.partition().ok_or("partition missing")?);
         blocks.invert_in_place(solver.partition().ok_or("partition missing")?)?;
-        let s = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;
+        let (s, _) = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;
 
         // Exact symmetry, then value agreement with naive dense math.
         // Entries the solver filters (|v| <= 1e-12) read back as 0.0, which
@@ -2127,7 +2170,7 @@ mod tests {
         )
         .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
-        let s = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
+        let (s, _) = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
 
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
@@ -2811,7 +2854,7 @@ mod tests {
 
     #[test]
     fn test_solve_with_cholesky_small_spd() -> TestResult {
-        let solver = ExplicitSparseSchur::new();
+        let mut solver = ExplicitSparseSchur::new();
 
         // 2×2 SPD matrix A = [[4,1],[1,3]]
         let triplets = vec![
@@ -2824,7 +2867,7 @@ mod tests {
             SparseColMat::try_new_from_triplets(2, 2, &triplets).map_err(|e| format!("{e:?}"))?;
         let b = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
 
-        let x = solver.solve_with_cholesky(&a, &b)?;
+        let x = solver.solve_with_cholesky(&a, &b, None)?;
         assert_eq!(x.nrows(), 2);
 
         // Verify: A·x ≈ b
