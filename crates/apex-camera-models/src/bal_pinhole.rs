@@ -187,6 +187,18 @@ impl CameraModel for BALPinholeCameraStrict {
         Ok(Vector2::new(self.f * x_d, self.f * y_d))
     }
 
+    /// BAL is a **z-backward** convention: `project` accepts a point only
+    /// while `z < -MIN_DEPTH`, so the invalid region is `z ≥ -MIN_DEPTH` and
+    /// the deficit must *grow* with `+z`. The trait default (`-z`, gradient
+    /// `-e_z`) would be actively harmful here — it would push points further
+    /// behind the camera instead of back in front of it. Note this is also
+    /// why `project` reports the condition as `ProjectionOutOfBounds` rather
+    /// than `PointBehindCamera`: the `PointBehindCamera { z, min_z }` shape
+    /// assumes a z-forward inequality.
+    fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
+        (p_cam.z + crate::MIN_DEPTH, Vector3::new(0.0, 0.0, 1.0))
+    }
+
     /// Returns the 2×3 Jacobian of the projection with respect to the 3D point in
     /// camera frame. See the [BAL pinhole cookbook chapter][chap] for the full
     /// derivation.

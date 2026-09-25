@@ -397,6 +397,61 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// model-specific; see the per-model cookbook page.
     fn jacobian_intrinsics(&self, p_cam: &Vector3<f64>) -> Self::IntrinsicJacobian;
 
+    /// Signed depth deficit of a camera-frame point outside the projection
+    /// domain of [`project`](Self::project), plus its gradient.
+    ///
+    /// Returns `(deficit, ∂deficit/∂p_cam)`. A positive `deficit` means
+    /// `p_cam` is outside the domain `project` accepts, and its magnitude is
+    /// the distance to that domain measured along the model's optical axis
+    /// (in metres), so a caller can scale it into a penalty that grows as the
+    /// point moves deeper into the invalid region. The second element is the
+    /// gradient of the deficit with respect to the camera-frame point, which
+    /// is what lets that penalty have a real derivative — a barrier an
+    /// optimizer can be pushed *back* across, rather than one it can only be
+    /// charged for.
+    ///
+    /// The default implementation is the z-forward deficit
+    /// `deficit = -z`, gradient `-e_z`, which is correct for every model
+    /// whose domain is `z > GEOMETRIC_PRECISION`. Models with a different
+    /// domain must override it:
+    ///
+    /// * **z-backward models** (the BAL convention, valid for
+    ///   `z < -MIN_DEPTH`) must return a deficit that grows with `+z`;
+    ///   keeping the default there would produce a gradient that drives
+    ///   points *further* behind the camera.
+    /// * **models with a non-planar domain** — double sphere's
+    ///   `z > -w₂·‖p_cam‖` cone, whose boundary moves with the point — must
+    ///   return the distance to that boundary rather than to a fixed plane.
+    ///
+    /// A model that cannot express its failure smoothly should return a
+    /// non-positive deficit: callers clamp it, which degrades to a constant
+    /// barrier with no gradient — never free, and never wrong-signed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use apex_camera_models::{CameraModel, PinholeCamera};
+    /// use nalgebra::Vector3;
+    ///
+    /// let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+    ///
+    /// // Two metres behind the camera ⇒ a two-metre deficit …
+    /// let (deficit, grad) =
+    ///     camera.projection_deficit(&Vector3::new(0.3, -0.1, -2.0));
+    /// assert!((deficit - 2.0).abs() < 1e-12);
+    /// // … whose gradient points along −z, i.e. toward validity.
+    /// assert_eq!(grad, Vector3::new(0.0, 0.0, -1.0));
+    ///
+    /// // In front of the camera the deficit is non-positive: the model is
+    /// // inside its domain, so any projection failure there is numerical
+    /// // and has no smooth direction out of.
+    /// let (deficit, _) = camera.projection_deficit(&Vector3::new(0.3, -0.1, 2.0));
+    /// assert!(deficit <= 0.0);
+    /// ```
+    fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
+        (-p_cam.z, Vector3::new(0.0, 0.0, -1.0))
+    }
+
     /// Projects N 3D points in one call. Invalid projections are replaced
     /// by the sentinel `(1e6, 1e6)`. Models may override with a vectorised
     /// implementation.
