@@ -134,6 +134,13 @@ impl Factor for MarginalPriorFactor {
         (self.sqrt_info.nrows(), self.total_dim())
     }
 
+    /// The residual `S·(θ − b)` and the Jacobian are pre-multiplied by the
+    /// marginal's square-root information inside [`Self::linearize`], so an
+    /// external noise model would whiten twice.
+    fn whitens_internally(&self) -> bool {
+        true
+    }
+
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         if variables.len() != self.dims.len() {
             return Err(format!(
@@ -141,6 +148,19 @@ impl Factor for MarginalPriorFactor {
                 self.dims.len(),
                 variables.len()
             ));
+        }
+        // Each block's tangent dim must match the variable it is registered
+        // with: `sqrt_info` is indexed by `dims`, while the assembly scatters
+        // Jacobian columns by the variable's own dof. A mismatch would land
+        // the columns in the wrong place without any error.
+        for (i, (variable, &dim)) in variables.iter().zip(&self.dims).enumerate() {
+            let dof = variable.dof();
+            if dof != dim {
+                return Err(format!(
+                    "MarginalPriorFactor block {i} declares tangent dim {dim} but the \
+                     registered variable has dof {dof}"
+                ));
+            }
         }
         Ok(())
     }
@@ -302,6 +322,54 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn whitens_internally_flag_is_set() {
+        let a = sample_pose([0.0; 3], [0.0; 3]);
+        let b = sample_pose([0.0; 3], [0.0; 3]);
+        let factor = MarginalPriorFactor::new(
+            vec![6, 6],
+            DMatrix::identity(12, 12),
+            DVector::zeros(12),
+            se2_local_log(&a, &b),
+        )
+        .unwrap_or_else(|e| panic!("construction: {e}"));
+        assert!(
+            factor.whitens_internally(),
+            "sqrt_info is applied inside linearize, so the factor must claim to whiten \
+             internally — otherwise an attached noise model whitens a second time"
+        );
+    }
+
+    /// `sqrt_info` is indexed by the declared `dims`, while assembly scatters
+    /// Jacobian columns by the variables' dofs. Registering a block whose dof
+    /// differs from `dims[i]` would land the columns in the wrong place — it
+    /// must be rejected at registration.
+    #[test]
+    fn rejects_registration_with_variable_of_wrong_dof() -> TestResult<()> {
+        let a = sample_pose([0.0; 3], [0.0; 3]);
+        let b = sample_pose([0.0; 3], [0.0; 3]);
+        let factor = MarginalPriorFactor::new(
+            vec![6, 6],
+            DMatrix::identity(12, 12),
+            DVector::zeros(12),
+            se2_local_log(&a, &b),
+        )?;
+
+        // Two blocks of dof 6 are expected; an Rn(1) block has dof 1.
+        let se3_var: &dyn ManifoldVariable = &crate::core::variable::Variable::new(a.clone());
+        let rn_var: &dyn ManifoldVariable = &crate::core::variable::Variable::new(
+            apex_manifolds::rn::Rn::new(nalgebra::DVector::zeros(1)),
+        );
+
+        assert!(factor.validate_variables(&[se3_var, se3_var]).is_ok());
+        let err = factor
+            .validate_variables(&[se3_var, rn_var])
+            .err()
+            .ok_or("dof mismatch must be rejected")?;
+        assert!(err.contains("dof 1"), "{err}");
         Ok(())
     }
 }
