@@ -156,6 +156,13 @@ pub struct ExplicitSparseSchur {
     /// `H_kk`/`H_ke` value arrays; rebuilt only when the pattern changes.
     extraction: Option<ExtractionCache>,
 
+    /// Column-major occupancy bitmap of the dense Schur accumulator: bit
+    /// `(col, row)` is set once `S[row, col]` has been written. Captured as
+    /// a side effect of the updates (one OR each), it seeds the sparse
+    /// output pattern without ever sorting triplets. Keyed on the `JᵀJ`
+    /// fingerprint so a structure change resets it.
+    s_bitmap: Option<(pattern::PatternFingerprint, Vec<u64>)>,
+
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
@@ -310,6 +317,89 @@ impl ExtractionCache {
     }
 }
 
+/// Set the occupancy bit for dense slot `S[row, col]` in the column-major
+/// bitmap (`bits` holds one aligned word range per column).
+#[inline]
+fn set_dense_bit(bits: &mut [u64], wpc: usize, row: usize, col: usize) {
+    bits[col * wpc + (row >> 6)] |= 1u64 << (row & 63);
+}
+
+/// Derive the sparse `S` output from the occupancy bitmap: one CSC pattern
+/// over every slot the dense accumulator wrote whose symmetrized value
+/// passes the noise filter, plus the values themselves. The threshold
+/// applies to the averaged value — `(dense[r,c] + dense[c,r])·0.5` —
+/// exactly matching the dense path's symmetrize-then-filter semantics, so
+/// the output is bit-identical to the triplet path. Column-major bitmap
+/// layout makes this a sequential word scan — no triplet sort anywhere.
+fn build_schur_output(
+    kept_dof: usize,
+    wpc: usize,
+    bits: &[u64],
+    s_dense: &[f64],
+) -> (SymbolicSparseColMat<usize>, Vec<f64>) {
+    // Pass 1: count slots passing the filter, per column.
+    let mut col_counts = vec![0usize; kept_dof];
+    let mut nnz = 0usize;
+    for c in 0..kept_dof {
+        let base = c * wpc;
+        for w in 0..wpc {
+            let mut word = bits[base + w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let r = (w << 6) | bit;
+                if r < kept_dof {
+                    let avg = (s_dense[r * kept_dof + c] + s_dense[c * kept_dof + r]) * 0.5;
+                    if avg.abs() > 1e-12 {
+                        col_counts[c] += 1;
+                        nnz += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut col_ptr = Vec::with_capacity(kept_dof + 1);
+    col_ptr.push(0usize);
+    for c in 0..kept_dof {
+        col_ptr.push(col_ptr[c] + col_counts[c]);
+    }
+
+    // Pass 2: fill rows and values at the counted positions.
+    let mut row_idx = vec![0usize; nnz];
+    let mut s_values = vec![0.0f64; nnz];
+    let mut offsets = col_ptr[..kept_dof].to_vec();
+    for c in 0..kept_dof {
+        let base = c * wpc;
+        for w in 0..wpc {
+            let mut word = bits[base + w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let r = (w << 6) | bit;
+                if r < kept_dof {
+                    let avg = (s_dense[r * kept_dof + c] + s_dense[c * kept_dof + r]) * 0.5;
+                    if avg.abs() > 1e-12 {
+                        let slot = offsets[c];
+                        offsets[c] += 1;
+                        row_idx[slot] = r;
+                        s_values[slot] = avg;
+                    }
+                }
+            }
+        }
+    }
+
+    let symbolic = SymbolicSparseColMat::new_checked(
+        kept_dof,
+        kept_dof,
+        col_ptr,
+        None,
+        row_idx,
+    );
+    (symbolic, s_values)
+}
+
 impl ExplicitSparseSchur {
     pub fn new() -> Self {
         Self {
@@ -326,6 +416,7 @@ impl ExplicitSparseSchur {
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             ne_cache: LazyNormalEquations::default(),
             extraction: None,
+            s_bitmap: None,
             hessian: None,
             gradient: None,
         }
@@ -735,16 +826,30 @@ impl ExplicitSparseSchur {
     /// sparse; that buffer is the current scaling limit for very large
     /// retained sets.
     fn compute_schur_complement(
-        &self,
+        &mut self,
         h_kk: &SparseColMat<usize, f64>,
         h_ke: &SparseColMat<usize, f64>,
         h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let partition = self.require_partition()?;
+        let partition = self.require_partition()?.clone();
         let kept_dof = h_kk.nrows();
         let h_ke_symbolic = h_ke.symbolic();
+        let wpc = kept_dof.div_ceil(64);
 
         let mut s_dense = vec![0.0f64; kept_dof * kept_dof];
+
+        // Occupancy bitmap of the dense accumulator, one aligned word range
+        // per column: bit `(col, row)` set ⟺ `S[row, col]` was written.
+        // Captured as a side effect of the writes (one OR each — the update
+        // loop is bandwidth-bound, so this is free), it seeds the sparse
+        // output pattern without ever enumerating cliques or sorting
+        // triplets.
+        let extraction_fp = self.extraction.as_ref().map(|c| c.fingerprint);
+        let words = kept_dof * wpc;
+        let mut bits = match self.s_bitmap.take() {
+            Some((fp, b)) if Some(fp) == extraction_fp && b.len() == words => b,
+            _ => vec![0u64; words],
+        };
 
         // S starts as H_kk.
         let h_kk_symbolic = h_kk.symbolic();
@@ -753,6 +858,7 @@ impl ExplicitSparseSchur {
             let vals = h_kk.val_of_col(col);
             for (idx, &row) in rows.iter().enumerate() {
                 s_dense[row * kept_dof + col] += vals[idx];
+                set_dense_bit(&mut bits, wpc, row, col);
             }
         }
 
@@ -855,6 +961,7 @@ impl ExplicitSparseSchur {
                             + c1 * h_ke_rows[j * 3 + 1]
                             + c2 * h_ke_rows[j * 3 + 2];
                         s_dense[base + row_j] -= dot;
+                        set_dense_bit(&mut bits, wpc, row_i, row_j);
                     }
                 }
             } else {
@@ -868,36 +975,51 @@ impl ExplicitSparseSchur {
                             dot += contrib_i[k] * h_ke_j[k];
                         }
                         s_dense[base + row_j] -= dot;
+                        set_dense_bit(&mut bits, wpc, row_i, row_j);
                     }
                 }
             }
         }
 
-        // Force exact symmetry: accumulation over many blocks drifts.
-        for i in 0..kept_dof {
-            for j in (i + 1)..kept_dof {
-                let avg = (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
-                s_dense[i * kept_dof + j] = avg;
-                s_dense[j * kept_dof + i] = avg;
-            }
-        }
-
-        // Back to sparse, filtering numerical noise. Row-major outer loop keeps
-        // the read sequential over the row-major buffer.
-        let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
-            Vec::with_capacity(kept_dof.saturating_mul(8));
-        for row in 0..kept_dof {
-            let row_base = row * kept_dof;
-            for col in 0..kept_dof {
-                let val = s_dense[row_base + col];
-                if val.abs() > 1e-12 {
-                    s_triplets.push(Triplet::new(row, col, val));
+        // The bitmap-derived output reproduces the legacy symmetrize →
+        // filter → sort pipeline bit-for-bit — same per-iteration pattern
+        // (the threshold applies to the current averaged values), same CSC
+        // ordering — without the triplet sort or the symmetrize pass: the
+        // pattern comes from the occupancy bits the updates set, and the
+        // values fall out of the same walk. Falls back to the literal
+        // legacy path when no extraction cache exists (direct test use).
+        let output = if self.extraction.is_some() {
+            let (symbolic, s_values) = build_schur_output(kept_dof, wpc, &bits, &s_dense);
+            SparseColMat::new(symbolic, s_values)
+        } else {
+            // Force exact symmetry: accumulation over many blocks drifts.
+            for i in 0..kept_dof {
+                for j in (i + 1)..kept_dof {
+                    let avg =
+                        (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
+                    s_dense[i * kept_dof + j] = avg;
+                    s_dense[j * kept_dof + i] = avg;
                 }
             }
-        }
+            let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
+                Vec::with_capacity(kept_dof.saturating_mul(8));
+            for row in 0..kept_dof {
+                let row_base = row * kept_dof;
+                for col in 0..kept_dof {
+                    let val = s_dense[row_base + col];
+                    if val.abs() > 1e-12 {
+                        s_triplets.push(Triplet::new(row, col, val));
+                    }
+                }
+            }
+            SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
+                .map_err(|e| {
+                    LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e))
+                })?
+        };
 
-        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))
+        self.s_bitmap = Some((extraction_fp.unwrap_or_default(), bits));
+        Ok(output)
     }
     /// Reduced right-hand side `g_k − H_ke·H_ee⁻¹·g_e`.
     fn compute_reduced_gradient(
@@ -1350,7 +1472,7 @@ impl ExplicitSparseSchur {
     /// Shared by the damped and undamped paths, which differ only in whether
     /// `h_kk` and the `H_ee` blocks already carry `λ·D`.
     fn solve_reduced_system(
-        &self,
+        &mut self,
         h_kk: &SparseColMat<usize, f64>,
         h_ke: &SparseColMat<usize, f64>,
         g_k: &Mat<f64>,
@@ -1990,7 +2112,7 @@ mod tests {
 
         // H_ee⁻¹ = 0.5·I₃
         let inv = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5];
-        let (solver, blocks) = solver_with_block(2, 3, &inv)?;
+        let (mut solver, blocks) = solver_with_block(2, 3, &inv)?;
 
         let h_kk = SparseColMat::try_new_from_triplets(
             2,
