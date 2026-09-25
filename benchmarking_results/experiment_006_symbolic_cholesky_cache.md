@@ -4,7 +4,7 @@
 - **Target Category:** Bundle Adjustment (Global Engine — linear solver)
 - **Scope Type:** Algorithm Enhancement (caching)
 - **Status:** ACCEPTED
-- **Commit SHA:** TBD (filled at commit)
+- **Commit SHA:** a3ef66d
 
 ## 1. Rationale & Approach ("Why?")
 
