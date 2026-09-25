@@ -300,6 +300,202 @@ mod tests {
         Ok(())
     }
 
+    /// FD the factor's full Jacobian at `(a, b)` by central differences on
+    /// the right-plus tangent of each connected block, column by column.
+    fn fd_jacobian(factor: &MarginalPriorFactor, a: &SE3, b: &SE3, eps: f64) -> DMatrix<f64> {
+        let eval = |a: &SE3, b: &SE3| -> Vec<f64> {
+            let mut r = vec![0.0; factor.residual_dim()];
+            factor.linearize(&[a.as_param_slice(), b.as_param_slice()], &mut r, None);
+            r
+        };
+
+        let rows = factor.residual_dim();
+        let mut jac = DMatrix::zeros(rows, factor.total_dim());
+        for col in 0..factor.total_dim() {
+            let (first_block, k) = if col < 6 {
+                (true, col)
+            } else {
+                (false, col - 6)
+            };
+            let mut tan = [0.0f64; 6];
+            tan[k] = eps;
+            let plus = SE3Tangent::from_slice(&tan);
+            tan[k] = -eps;
+            let minus = SE3Tangent::from_slice(&tan);
+
+            let (a_plus, b_plus) = if first_block {
+                (a.right_plus(&plus, None, None), b.clone())
+            } else {
+                (a.clone(), b.right_plus(&plus, None, None))
+            };
+            let (a_minus, b_minus) = if first_block {
+                (a.right_plus(&minus, None, None), b.clone())
+            } else {
+                (a.clone(), b.right_plus(&minus, None, None))
+            };
+
+            let r_plus = eval(&a_plus, &b_plus);
+            let r_minus = eval(&a_minus, &b_minus);
+            for (row, (p, m)) in r_plus.iter().zip(&r_minus).enumerate() {
+                jac[(row, col)] = (p - m) / (2.0 * eps);
+            }
+        }
+        jac
+    }
+
+    /// Evaluate the factor's analytic Jacobian — the frozen `S` — as a matrix.
+    fn analytic_jacobian(factor: &MarginalPriorFactor, a: &SE3, b: &SE3) -> DMatrix<f64> {
+        let rows = factor.residual_dim();
+        let cols = factor.total_dim();
+        let mut residual = vec![0.0; rows];
+        let mut buf = vec![0.0; rows * cols];
+        let jac_mut = faer::mat::MatMut::from_column_major_slice_mut(&mut buf, rows, cols);
+        factor.linearize(
+            &[a.as_param_slice(), b.as_param_slice()],
+            &mut residual,
+            Some(jac_mut),
+        );
+        DMatrix::from_column_slice(rows, cols, &buf)
+    }
+
+    /// Relative Frobenius distance between two Jacobians, i.e. how far the
+    /// factor's Jacobian is from the reference.
+    fn rel_err(a: &DMatrix<f64>, b: &DMatrix<f64>) -> f64 {
+        (a - b).norm() / b.norm()
+    }
+
+    /// Cosine of the angle between the two Jacobians flattened as vectors —
+    /// 1.0 means they point the same way, whatever their magnitude.
+    fn cosine(a: &DMatrix<f64>, b: &DMatrix<f64>) -> f64 {
+        let (fa, fb) = (a.as_slice(), b.as_slice());
+        let dot: f64 = fa.iter().zip(fb).map(|(x, y)| x * y).sum();
+        dot / (a.norm() * b.norm())
+    }
+
+    /// The container contract, pinned numerically rather than trusted from
+    /// the doc comment.
+    ///
+    /// `MarginalPriorFactor` deliberately holds its Jacobian at the constant
+    /// square-root information `S` while recomputing the residual from
+    /// `θ(x ⊟ x₀)` on every evaluation — exactly GTSAM's
+    /// `LinearContainerFactor` semantics, and for the same reason: the
+    /// linearization is the model. `∂θ/∂δ = I` only at `x₀`, so away from it
+    /// the frozen Jacobian is *not* the derivative of the residual it is
+    /// paired with. This test quantifies that gap instead of leaving it as
+    /// "rebuild when the estimate drifts":
+    ///
+    /// 1. at `x₀` the frozen `S` equals central-difference FD over **all**
+    ///    columns, to solver precision (the pre-existing test perturbed one
+    ///    column with a one-sided difference);
+    /// 2. the gap grows monotonically with displacement, so the rebuild
+    ///    rule is measurable rather than a matter of taste;
+    /// 3. over the drift a windowed estimator actually sees, the frozen
+    ///    Jacobian still points the same way as the true one (cosine ≈ 1),
+    ///    so the Gauss–Newton step stays a descent step while the residual
+    ///    itself remains exact — only the step direction is approximated.
+    ///
+    /// If any of the three breaks, either `local_log` has stopped being a
+    /// consistent tangent parametrization or `S` has stopped being written
+    /// into the Jacobian, and a marginal prior would be silently steering
+    /// the estimate with a stale model.
+    #[test]
+    fn frozen_jacobian_matches_fd_at_x0_and_drifts_monotonically() -> TestResult<()> {
+        // Non-identity, non-diagonal S: a scalar multiple of the identity
+        // would hide a scaling error, and a diagonal one would hide a
+        // column permutation.
+        let mut sqrt_info = DMatrix::identity(12, 12);
+        sqrt_info[(0, 0)] = 2.0;
+        sqrt_info[(6, 6)] = 3.0;
+        sqrt_info[(0, 6)] = 0.5;
+        sqrt_info[(7, 1)] = -0.25;
+        let x0_a = sample_pose([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]);
+        let x0_b = sample_pose([1.0, -0.5, 0.2], [-0.02, 0.01, 0.0]);
+        let factor = MarginalPriorFactor::new(
+            vec![6, 6],
+            sqrt_info.clone(),
+            DVector::zeros(12),
+            se2_local_log(&x0_a, &x0_b),
+        )?;
+
+        // (1) Exactness at the linearization point, every column.
+        let analytic = analytic_jacobian(&factor, &x0_a, &x0_b);
+        assert_close(
+            rel_err(&analytic, &sqrt_info),
+            0.0,
+            1e-12,
+            "frozen J vs S at x0",
+        );
+        let fd0 = fd_jacobian(&factor, &x0_a, &x0_b, 1e-6);
+        assert!(
+            rel_err(&fd0, &analytic) < 1e-6,
+            "frozen Jacobian must be the exact derivative at x0: FD differs by {}",
+            rel_err(&fd0, &analytic)
+        );
+
+        // (2) + (3) Drift the *first* block away from x₀ along an all-six
+        // tangent (translation and rotation together — a pure translation
+        // would barely exercise the rotational coupling) and measure.
+        let drifts = [0.0, 0.02, 0.05, 0.15];
+        let mut errors: Vec<f64> = Vec::with_capacity(drifts.len());
+        let mut cosines: Vec<f64> = Vec::with_capacity(drifts.len());
+        for &d in &drifts {
+            let tan = [d; 6];
+            let a = x0_a.right_plus(&SE3Tangent::from_slice(&tan), None, None);
+            let fd = fd_jacobian(&factor, &a, &x0_b, 1e-6);
+            let err = rel_err(&fd, &analytic);
+            let cos = cosine(&fd, &analytic);
+            errors.push(err);
+            cosines.push(cos);
+        }
+
+        // Monotone growth: every larger displacement is strictly worse.
+        for w in errors.windows(2) {
+            assert!(
+                w[1] > w[0],
+                "container drift must grow with displacement, got {:?}",
+                errors
+            );
+        }
+
+        // Measured on this `S` and scene: the error is essentially *linear*
+        // in the displacement (0.0114 / 0.0285 / 0.0856 at drifts
+        // 0.02 / 0.05 / 0.15 — a constant ≈0.57 per unit), not quadratic.
+        // That is the expected shape: `S` is exact for the residual, and
+        // only `∂θ/∂δ` departs from `I`, linearly in `θ`. So the residual
+        // *value* the optimizer sees is always right and only the step
+        // direction is approximated — which is what LM's
+        // actual-vs-predicted reduction check is there to absorb.
+        //
+        // Budget: a 0.05-unit drift (a large step for a windowed rig) stays
+        // under 6% Jacobian error; a 0.02-unit drift under 2.5%. Those are
+        // the numbers that turn "rebuild when the estimate drifts" into
+        // something a caller can check.
+        assert!(
+            errors[1] < 0.025,
+            "at drift 0.02 the frozen Jacobian is {:.1}% off the true \
+             derivative — over the 2.5% container budget",
+            errors[1] * 100.0
+        );
+        assert!(
+            errors[2] < 0.06,
+            "at drift 0.05 the frozen Jacobian is {:.1}% off the true \
+             derivative — over the 6% container budget",
+            errors[2] * 100.0
+        );
+
+        // Descent direction preserved across the whole range: the frozen
+        // Jacobian may be inaccurate, but it must never point the other way.
+        for (d, cos) in drifts.iter().zip(&cosines) {
+            assert!(
+                *cos > 0.99,
+                "at drift {d} the frozen Jacobian is no longer aligned with the \
+                 true derivative (cos = {cos})"
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn rejects_dimension_mismatch() -> TestResult<()> {
         let a = sample_pose([0.0; 3], [0.0; 3]);
