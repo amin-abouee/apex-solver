@@ -210,6 +210,10 @@ harness = false
 name = "ba_benchmark"
 harness = false
 
+[[bench]]
+name = "implicit_ba_benchmark"
+harness = false
+
 [lints]
 workspace = true
 

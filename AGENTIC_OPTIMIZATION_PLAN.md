@@ -319,6 +319,13 @@ Defer until then.
   (a changed trajectory moves the converged cost).
 - Sequential benching; 2-pass thermal protocol; interleaved A/B for micro
   decisions; never trust cross-session absolute times on this laptop.
+- **Load signature (learned 2026-09-25 afternoon session):** with the user's
+  desktop active, ALL points inflate uniformly 30–100 %+ and the
+  memory-heaviest points inflate most (t257/iterative +15 %, torus3D
+  +1550 %). The same code measured v52 at 30.8 s quiet vs 44.0 s loaded.
+  Before interpreting ANY regression, check `uptime`/`ps aux --sort=-%cpu`;
+  if the desktop is busy, re-measure in a quiet window (early morning) —
+  do not revert code based on loaded numbers.
 - Library code only (`src/`, `crates/`); benches/tests frozen post-baseline.
 - No `unsafe` (workspace-forbidden), no `.unwrap()`/`.expect()`, no
   `println!` in library code, no `target-cpu=native`, no tolerance loosening.
