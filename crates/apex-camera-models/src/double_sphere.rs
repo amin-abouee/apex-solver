@@ -288,9 +288,10 @@ impl CameraModel for DoubleSphereCamera {
     /// so the deficit is the distance to that cone and its gradient follows
     /// `‖p_cam‖`; the trait default (`-z`, gradient `-e_z`) would be wrong
     /// everywhere the cone boundary differs from `z = 0`. As with FOV,
-    /// `project` reports this condition as `ProjectionOutOfBounds`, so this
-    /// override — not a `PointBehindCamera` arm — is what gives the factor a
-    /// gradient here.
+    /// `project` reports this condition as `ProjectionOutOfBounds` rather
+    /// than `PointBehindCamera`, so this override is what describes that
+    /// boundary correctly (the solver does not charge it yet — see the
+    /// trait's Status note).
     fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
         let w2 = self.cone_ratio();
         let d1 = p_cam.norm();

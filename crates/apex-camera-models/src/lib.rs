@@ -427,6 +427,18 @@ pub trait CameraModel: Send + Sync + Clone + std::fmt::Debug + 'static {
     /// non-positive deficit: callers clamp it, which degrades to a constant
     /// barrier with no gradient — never free, and never wrong-signed.
     ///
+    /// # Status: not currently charged by the solver
+    ///
+    /// `ProjectionFactor` does **not** apply this deficit yet: the attempt to
+    /// route every non-cheirality camera error through a barrier built from it
+    /// was measured and reverted, because at BAL t257/dubrovnik-135 it charged
+    /// more than the entire problem was worth at the initial guess (3.29e12
+    /// and 2.20e10 against 6.86e4 / 1.89e5 goldens) and the solve stopped
+    /// making progress. The per-model definitions below stay: they are the
+    /// correct domain geometry, unit-tested here, ready for a formulation that
+    /// survives those benchmarks. See
+    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`.
+    ///
     /// # Examples
     ///
     /// ```

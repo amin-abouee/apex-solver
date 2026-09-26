@@ -275,29 +275,32 @@ where
                         warn!("Invalid projection for point {}: {}", i, cam_err);
                     }
                     // Invalid for a reason other than an explicit
-                    // `PointBehindCamera`. This is not an exotic corner:
-                    // `fov`, `bal_pinhole` and `double_sphere` report their
-                    // *cheirality* failure as `ProjectionOutOfBounds`, and
-                    // `eucm` can trip `DenominatorTooSmall` first — so for
-                    // those models a behind-camera point landed here and got
-                    // a zero residual, i.e. the penalty this factor exists
-                    // to charge was bypassed entirely. Ask the model how far
-                    // outside its domain the point is and charge that; when
-                    // the failure has no smooth boundary (a numerical
-                    // singularity, a point at the optical axis) the deficit
-                    // clamps to zero and the observation still pays the
-                    // constant base penalty rather than going free.
-                    let (deficit, d_deficit_d_pcam) = camera.projection_deficit(&p_cam);
-                    self.write_projection_barrier(
-                        i,
-                        deficit,
-                        &d_deficit_d_pcam,
-                        &p_world,
-                        pose,
-                        camera,
-                        residual,
-                        jacobian.as_mut(),
-                    );
+                    // `PointBehindCamera`: zero residual, zero Jacobian rows.
+                    //
+                    // Charging this arm was implemented and measured, then
+                    // reverted. Routing every out-of-domain observation to a
+                    // `CHEIRALITY_BASE_PENALTY` barrier put the *initial*
+                    // cost of BAL t257 at 3.29e12 and dubrovnik-135 at
+                    // 2.20e10 — against goldens of 6.86e4 and 1.89e5 — and
+                    // the LM solve then stopped making progress at all
+                    // (final/initial = 1 − 1e-7): 5 of the 8 BA benchmark ids
+                    // regressed, 1 improved, 2 were unchanged. Halving the
+                    // penalty 1000x did not help, so it is not a
+                    // conditioning artifact but an irreducible barrier cost
+                    // at the initial guess. See
+                    // `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
+                    // and scenario S12 in `docs/factor_correctness_audit.md`.
+                    //
+                    // Consequence: `fov`, `bal_pinhole` and `double_sphere`
+                    // report their cheirality failure as
+                    // `ProjectionOutOfBounds`, so for those models this arm
+                    // still lets a behind-camera point go free — the
+                    // incentive S12 describes stays open, and the model-side
+                    // [`CameraModel::projection_deficit`] metadata is kept
+                    // ready for a formulation that survives the benchmark
+                    // goldens.
+                    residual[i * 2] = 0.0;
+                    residual[i * 2 + 1] = 0.0;
                     continue;
                 }
             };
@@ -359,25 +362,26 @@ where
         }
     }
 
-    /// Writes a smooth projection-domain barrier for observation `i`, used
-    /// in place of the normal reprojection residual when `camera.project`
-    /// fails.
+    /// Writes a smooth cheirality barrier for observation `i`, used in
+    /// place of the normal reprojection residual when `camera.project`
+    /// fails with `PointBehindCamera { z, min_z }` — `deficit = min_z - z`,
+    /// gradient `-e_z`, i.e. a z-forward depth deficit.
     ///
-    /// Two call sites feed it:
+    /// # Scope note (one call site, deliberately)
     ///
-    /// * an explicit `PointBehindCamera { z, min_z }`, with
-    ///   `deficit = min_z - z` and gradient `-e_z`;
-    /// * any other camera error, with the model's own
-    ///   [`CameraModel::projection_deficit`], which describes that model's
-    ///   domain (the FOV plane, the BAL `z < -MIN_DEPTH` half-space, the
-    ///   double-sphere cone, …) instead of a z-forward one.
+    /// Routing the *other* camera errors through the model's own
+    /// [`CameraModel::projection_deficit`] — which describes that model's
+    /// domain (the FOV plane, the BAL `z < -MIN_DEPTH` half-space, the
+    /// double-sphere cone, …) instead of a z-forward one — was implemented,
+    /// measured and then reverted; the call site records the numbers, and
+    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
+    /// has the full per-dataset table. Only the cheirality arm charges here.
     ///
     /// # Why not zero
     ///
     /// A hard zero residual/Jacobian for an invalid projection (the
     /// behaviour before the cheirality fix, and still the behaviour for
-    /// every error class other than `PointBehindCamera` until models
-    /// started supplying a deficit) makes "invalid" a free way to reduce
+    /// every error class other than `PointBehindCamera`) makes "invalid" a free way to reduce
     /// total cost — and worse than free, since a valid-but-grazing-incidence
     /// point can have a very large residual, so pushing it just past a
     /// validity boundary (residual → 0) is actually *cheaper* than fitting
@@ -398,20 +402,16 @@ where
     ///
     /// # Degenerate failures
     ///
-    /// A non-positive deficit (a numerical singularity away from the domain
-    /// boundary, a point exactly at the optical axis) clamps to zero, which
-    /// leaves only the constant base penalty and no Jacobian. That is
-    /// deliberate: there is no direction "out" of such a failure to write
-    /// down, and a wrong-signed gradient would be worse than none.
+    /// A non-positive deficit clamps to zero, which leaves only the
+    /// constant base penalty and no Jacobian. With the cheirality arm the
+    /// deficit is `min_z - z ≥ 0` by construction, so this is defensive;
+    /// where there is no direction "out" of a failure to write down, a
+    /// wrong-signed gradient would be worse than none.
     ///
     /// # Intrinsics block
     ///
     /// Left at zero. For a depth deficit based on `z_cam` that is exact —
-    /// depth does not depend on intrinsics. For a model-supplied cone the
-    /// deficit can depend weakly on the distortion parameters (double
-    /// sphere's `w₂` does); treating that term as zero is an approximation,
-    /// documented rather than silent, and one that leaves the barrier's
-    /// *value* — the part that removes the incentive — exactly right.
+    /// depth does not depend on intrinsics.
     ///
     /// # Rank property (deliberate)
     ///
@@ -625,9 +625,7 @@ mod tests {
         BundleAdjustment, LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose,
         PoseAndIntrinsics, SelfCalibration,
     };
-    use apex_camera_models::{
-        BALPinholeCameraStrict, DoubleSphereCamera, FovCamera, PinholeCamera,
-    };
+    use apex_camera_models::{DoubleSphereCamera, PinholeCamera};
     use apex_manifolds::Tangent;
     use apex_manifolds::se3::SE3Tangent;
     use nalgebra::{DMatrix, DVector, Vector2, Vector3};
@@ -951,162 +949,6 @@ mod tests {
             DoubleSphereCamera::from(DOUBLE_SPHERE_INTRINSICS),
             &DOUBLE_SPHERE_INTRINSICS,
         )
-    }
-
-    /// Builds a one-observation bundle-adjustment probe for a point stated in
-    /// the *camera* frame — the frame `project` (and therefore the barrier)
-    /// sees — by carrying it to world coordinates through a fixed pose.
-    fn barrier_probe<CAM>(
-        camera: &CAM,
-        p_cam: Vector3<f64>,
-    ) -> (ProjectionFactor<CAM, BundleAdjustment>, Vec<DVector<f64>>)
-    where
-        CAM: CameraModel + for<'a> TryFrom<&'a [f64]>,
-    {
-        let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
-            nalgebra::Translation3::new(0.3, -0.4, 0.2),
-            nalgebra::UnitQuaternion::from_euler_angles(0.2, -0.15, 0.35),
-        ));
-        let p_world = pose.inverse(None).act(&p_cam, None, None);
-
-        // The observation is arbitrary on the barrier branch — the residual
-        // is the penalty, not a reprojection error — but it has to be a
-        // plausible pixel so that the *valid* counterpart below reads as a
-        // normal, near-zero residual.
-        let factor = ProjectionFactor::<CAM, BundleAdjustment>::new(
-            Matrix2xX::from_columns(&[Vector2::new(320.0, 240.0)]),
-            camera.clone(),
-        );
-        let params = vec![
-            DVector::from_column_slice(pose.as_param_slice()),
-            DVector::from_vec(vec![p_world.x, p_world.y, p_world.z]),
-        ];
-        (factor, params)
-    }
-
-    /// Regression coverage for the projection-domain barrier on models whose
-    /// failure to project is **not** reported as `PointBehindCamera`.
-    ///
-    /// `fov`, `bal_pinhole` and `double_sphere` all report their cheirality
-    /// failure as `ProjectionOutOfBounds`, so an `evaluate_internal` that
-    /// special-cased only `PointBehindCamera` handed those models a zero
-    /// residual for a behind-camera point — strictly cheaper than any valid
-    /// fit, i.e. the optimizer was paid to invalidate the point. This checks
-    /// both halves of the fix: the observation is charged, *and* the gradient
-    /// that is supposed to push it back has the right value (a sign error in
-    /// the z-backward BAL convention would otherwise look plausible).
-    fn assert_invalid_projection_is_charged<CAM>(
-        camera: &CAM,
-        invalid_p_cam: &Vector3<f64>,
-        valid_p_cam: &Vector3<f64>,
-    ) -> TestResult
-    where
-        CAM: CameraModel + for<'a> TryFrom<&'a [f64]>,
-    {
-        // Preconditions, so the assertions below are provably exercising the
-        // invalid branch rather than a mistyped scene.
-        assert!(
-            camera.project(invalid_p_cam).is_err(),
-            "expected the invalid point to be rejected by {invalid_p_cam:?}"
-        );
-        assert!(
-            camera.project(valid_p_cam).is_ok(),
-            "expected the valid point to be accepted by {valid_p_cam:?}"
-        );
-
-        let (factor, params) = barrier_probe(camera, *invalid_p_cam);
-
-        let (residual, _) = call_linearize(&factor, &params, false);
-        assert!(
-            residual[0] >= CHEIRALITY_BASE_PENALTY,
-            "invalid projection is free: residual[0] = {}",
-            residual[0]
-        );
-        assert!(
-            residual[1] >= CHEIRALITY_BASE_PENALTY,
-            "invalid projection is free: residual[1] = {}",
-            residual[1]
-        );
-
-        // …and the barrier carries a correct analytic gradient, verified the
-        // same way as the valid path (right-plus on the pose, Euclidean on
-        // the landmark).
-        assert_jacobian_matches_fd(&factor, &params, 1e-6, 1e-4)?;
-
-        Ok(())
-    }
-
-    #[test]
-    fn charged_domain_violation_fov() -> TestResult {
-        let camera = FovCamera::from([500.0, 500.0, 320.0, 240.0, 0.9]);
-        // z = -1 < GEOMETRIC_PRECISION ⇒ `ProjectionOutOfBounds`.
-        assert_invalid_projection_is_charged(
-            &camera,
-            &Vector3::new(0.2, -0.1, -1.0),
-            &Vector3::new(0.2, -0.1, 3.0),
-        )
-    }
-
-    #[test]
-    fn charged_domain_violation_double_sphere() -> TestResult {
-        let camera = DoubleSphereCamera::from(DOUBLE_SPHERE_INTRINSICS);
-        // On-axis behind the camera: `z > -w₂·‖p‖` fails ⇒
-        // `ProjectionOutOfBounds`.
-        assert_invalid_projection_is_charged(
-            &camera,
-            &Vector3::new(0.0, 0.0, -1.0),
-            &Vector3::new(0.2, -0.1, 3.0),
-        )
-    }
-
-    #[test]
-    fn charged_domain_violation_bal_pinhole() -> TestResult {
-        let camera = BALPinholeCameraStrict::from([500.0, -0.1, 0.01]);
-        // BAL is z-*backward*: the point in front of this camera has
-        // z = -3, so z = +1 is the one that is behind it.
-        assert_invalid_projection_is_charged(
-            &camera,
-            &Vector3::new(0.5, 0.2, 1.0),
-            &Vector3::new(0.5, 0.2, -3.0),
-        )
-    }
-
-    #[test]
-    fn degenerate_projection_failure_gets_constant_barrier() -> TestResult {
-        // With α = ξ = 0.5 the double-sphere cone ratio is exactly w₂ = 1,
-        // which collapses the cone domain onto the negative z-axis: points
-        // just off it clear the cone check and are rejected by the
-        // denominator check instead. Their smooth cone deficit is then
-        // (slightly) negative, so there is no direction "out" of this
-        // failure to write down.
-        //
-        // The observation must still be charged — never free — and the
-        // Jacobian must stay zero rather than take a sign that happens to
-        // come from the wrong side of the boundary.
-        let camera = DoubleSphereCamera::from([500.0, 500.0, 320.0, 240.0, 0.5, 0.5]);
-        let p_cam = Vector3::new(1e-3, 0.0, -1.0);
-        assert!(camera.project(&p_cam).is_err());
-
-        let (factor, params) = barrier_probe(&camera, p_cam);
-        let (residual, jacobian) = call_linearize(&factor, &params, true);
-
-        assert!(
-            residual[0] >= CHEIRALITY_BASE_PENALTY,
-            "degenerate failure is free: residual[0] = {}",
-            residual[0]
-        );
-
-        let jac = jacobian.ok_or("Jacobian should be Some")?;
-        for c in 0..jac.ncols() {
-            assert_eq!(
-                jac[(0, c)],
-                0.0,
-                "degenerate barrier must carry no gradient, column {c}"
-            );
-            assert_eq!(jac[(1, c)], 0.0, "column {c}");
-        }
-
-        Ok(())
     }
 
     #[test]

@@ -255,9 +255,12 @@ impl CameraModel for FovCamera {
     /// The FOV domain is exactly `z ≥ GEOMETRIC_PRECISION` (the sole
     /// condition `project` checks), so its deficit is measured from that
     /// plane rather than from `z = 0`. Reporting `ProjectionOutOfBounds`
-    /// for this condition means the factor would otherwise never see a
-    /// `PointBehindCamera`, so without this override behind-camera points
-    /// would fall back to a constant barrier with no gradient.
+    /// for this condition means a `PointBehindCamera` arm never fires for
+    /// this model, so this override is the only way to get a deficit here:
+    /// the trait default (`-z`) would go non-positive for a point that is
+    /// invalid but still slightly in front of `z = 0`, collapsing to a
+    /// constant, gradient-less barrier. (The solver does not charge the
+    /// deficit yet — see the trait's Status note.)
     fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
         (
             crate::GEOMETRIC_PRECISION - p_cam.z,
