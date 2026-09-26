@@ -442,7 +442,7 @@ fn run_battery<G: LieGroup>() {
 
 /// Record `what` as a failure unless `err` is within `tol`.
 fn note(failures: &mut Vec<String>, what: &str, err: f64, tol: f64) {
-    if !(err <= tol) {
+    if err.is_nan() || err > tol {
         failures.push(format!("{what}: err={err:.3e} > tol={tol:.1e}"));
     }
 }
