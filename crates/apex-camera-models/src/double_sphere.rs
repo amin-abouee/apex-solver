@@ -57,18 +57,27 @@ impl DoubleSphereCamera {
         }
     }
 
-    /// Returns `Ok(true)` if the projection is valid for the given `z` and Euclidean
-    /// distance `d1`; `Ok(false)` if not. Returns an error only for unrecoverable
-    /// numerical failures.
-    fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
+    /// Returns the cone ratio `w₂ = (w₁ + ξ) / √(2·w₁·ξ + ξ² + 1)` of the
+    /// double-sphere domain condition `z > -w₂·‖p_cam‖`. Factored out so the
+    /// validity check and [`CameraModel::projection_deficit`] cannot drift
+    /// apart about where the boundary sits — a barrier derived from a
+    /// different `w₂` than the one `project` enforces would be worse than no
+    /// barrier at all.
+    fn cone_ratio(&self) -> f64 {
         let (xi, alpha) = self.distortion_params();
         let w1 = if alpha > 0.5 {
             (1.0 - alpha) / alpha
         } else {
             alpha / (1.0 - alpha)
         };
-        let w2 = (w1 + xi) / (2.0 * w1 * xi + xi * xi + 1.0).sqrt();
-        Ok(z > -w2 * d1)
+        (w1 + xi) / (2.0 * w1 * xi + xi * xi + 1.0).sqrt()
+    }
+
+    /// Returns `Ok(true)` if the projection is valid for the given `z` and Euclidean
+    /// distance `d1`; `Ok(false)` if not. Returns an error only for unrecoverable
+    /// numerical failures.
+    fn check_projection_condition(&self, z: f64, d1: f64) -> Result<bool, CameraModelError> {
+        Ok(z > -self.cone_ratio() * d1)
     }
 
     /// Returns `Ok(true)` if the squared normalised radius is within the unprojection
@@ -238,8 +247,13 @@ impl CameraModel for DoubleSphereCamera {
     type PointJacobian = SMatrix<f64, 2, 3>;
 
     /// Projects a 3D point in the camera frame to 2D image coordinates.
-    /// Returns [`CameraModelError::PointBehindCamera`] / `PointOutsideImage` if the
-    /// point violates the model's domain (`check_projection_condition`).
+    /// Returns [`CameraModelError::ProjectionOutOfBounds`] if the point is outside
+    /// the cone domain (`check_projection_condition`), or
+    /// [`CameraModelError::DenominatorTooSmall`] if the projection denominator
+    /// collapses. Note the cone failure is *not* reported as
+    /// `PointBehindCamera`: for wide-FOV parameterisations the model can
+    /// legitimately image points with `z < 0`, so "behind the camera" is not
+    /// the right description of the boundary.
     fn project(&self, p_cam: &Vector3<f64>) -> Result<Vector2<f64>, CameraModelError> {
         let x = p_cam[0];
         let y = p_cam[1];
@@ -268,6 +282,33 @@ impl CameraModel for DoubleSphereCamera {
             self.pinhole.fx * x / denom + self.pinhole.cx,
             self.pinhole.fy * y / denom + self.pinhole.cy,
         ))
+    }
+
+    /// The double-sphere domain is the cone `z > -w₂·‖p_cam‖`, not a plane,
+    /// so the deficit is the distance to that cone and its gradient follows
+    /// `‖p_cam‖`; the trait default (`-z`, gradient `-e_z`) would be wrong
+    /// everywhere the cone boundary differs from `z = 0`. As with FOV,
+    /// `project` reports this condition as `ProjectionOutOfBounds` rather
+    /// than `PointBehindCamera`, so this override is what describes that
+    /// boundary correctly (the solver does not charge it yet — see the
+    /// trait's Status note).
+    fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
+        let w2 = self.cone_ratio();
+        let d1 = p_cam.norm();
+        let deficit = -(p_cam.z + w2 * d1);
+
+        // ∂‖p‖/∂p is undefined at the origin; fall back to the z-forward
+        // direction there rather than propagate a NaN into the Jacobian.
+        let grad = if d1 > crate::GEOMETRIC_PRECISION {
+            Vector3::new(
+                -w2 * p_cam.x / d1,
+                -w2 * p_cam.y / d1,
+                -(1.0 + w2 * p_cam.z / d1),
+            )
+        } else {
+            Vector3::new(0.0, 0.0, -1.0)
+        };
+        (deficit, grad)
     }
 
     /// Unprojects a 2D image point to a unit 3D ray via the double-sphere algebraic

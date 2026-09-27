@@ -258,10 +258,10 @@ where
                             i, z, min_z
                         );
                     }
-                    self.write_cheirality_penalty(
+                    self.write_projection_barrier(
                         i,
-                        z,
-                        min_z,
+                        min_z - z,
+                        &Vector3::new(0.0, 0.0, -1.0),
                         &p_world,
                         pose,
                         camera,
@@ -274,13 +274,33 @@ where
                     if self.verbose_cheirality {
                         warn!("Invalid projection for point {}: {}", i, cam_err);
                     }
-                    // Invalid projection for a reason other than cheirality
-                    // (e.g. a model-specific numerical singularity): no
-                    // principled penalty gradient is available, so fall
-                    // back to a zero residual as before.
+                    // Invalid for a reason other than an explicit
+                    // `PointBehindCamera`: zero residual, zero Jacobian rows.
+                    //
+                    // Charging this arm was implemented and measured, then
+                    // reverted. Routing every out-of-domain observation to a
+                    // `CHEIRALITY_BASE_PENALTY` barrier put the *initial*
+                    // cost of BAL t257 at 3.29e12 and dubrovnik-135 at
+                    // 2.20e10 — against goldens of 6.86e4 and 1.89e5 — and
+                    // the LM solve then stopped making progress at all
+                    // (final/initial = 1 − 1e-7): 5 of the 8 BA benchmark ids
+                    // regressed, 1 improved, 2 were unchanged. Halving the
+                    // penalty 1000x did not help, so it is not a
+                    // conditioning artifact but an irreducible barrier cost
+                    // at the initial guess. See
+                    // `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
+                    // and scenario S12 in `docs/factor_correctness_audit.md`.
+                    //
+                    // Consequence: `fov`, `bal_pinhole` and `double_sphere`
+                    // report their cheirality failure as
+                    // `ProjectionOutOfBounds`, so for those models this arm
+                    // still lets a behind-camera point go free — the
+                    // incentive S12 describes stays open, and the model-side
+                    // [`CameraModel::projection_deficit`] metadata is kept
+                    // ready for a formulation that survives the benchmark
+                    // goldens.
                     residual[i * 2] = 0.0;
                     residual[i * 2 + 1] = 0.0;
-                    // Jacobian rows remain zero
                     continue;
                 }
             };
@@ -342,26 +362,56 @@ where
         }
     }
 
-    /// Writes a smooth cheirality-violation penalty for observation `i`,
-    /// used in place of the normal reprojection residual when the point
-    /// fails `camera.project`'s `PointBehindCamera` check.
+    /// Writes a smooth cheirality barrier for observation `i`, used in
+    /// place of the normal reprojection residual when `camera.project`
+    /// fails with `PointBehindCamera { z, min_z }` — `deficit = min_z - z`,
+    /// gradient `-e_z`, i.e. a z-forward depth deficit.
     ///
-    /// A hard zero residual/Jacobian there (the previous behaviour) makes
-    /// "point behind camera" a free way to reduce total cost — and worse
-    /// than free, since a valid-but-grazing-incidence point can have a very
-    /// large residual, so pushing it just past the cheirality boundary
-    /// (residual → 0) is actually *cheaper* than fitting it. That gives the
-    /// optimizer a standing incentive to make points invalid rather than
-    /// fit them, which is backwards for a residual meant to be minimized.
+    /// # Scope note (one call site, deliberately)
+    ///
+    /// Routing the *other* camera errors through the model's own
+    /// [`CameraModel::projection_deficit`] — which describes that model's
+    /// domain (the FOV plane, the BAL `z < -MIN_DEPTH` half-space, the
+    /// double-sphere cone, …) instead of a z-forward one — was implemented,
+    /// measured and then reverted; the call site records the numbers, and
+    /// `benchmarking_results/experiment_007_projection_domain_barrier_REJECTED.md`
+    /// has the full per-dataset table. Only the cheirality arm charges here.
+    ///
+    /// # Why not zero
+    ///
+    /// A hard zero residual/Jacobian for an invalid projection (the
+    /// behaviour before the cheirality fix, and still the behaviour for
+    /// every error class other than `PointBehindCamera`) makes "invalid" a free way to reduce
+    /// total cost — and worse than free, since a valid-but-grazing-incidence
+    /// point can have a very large residual, so pushing it just past a
+    /// validity boundary (residual → 0) is actually *cheaper* than fitting
+    /// it. That gives the optimizer a standing incentive to make points
+    /// invalid rather than fit them, which is backwards for a residual meant
+    /// to be minimized. Because `fov`, `bal_pinhole` and `double_sphere`
+    /// report their cheirality failure as `ProjectionOutOfBounds`, that
+    /// incentive was live for them specifically: the penalty only ever fired
+    /// on the `PointBehindCamera` arm.
     ///
     /// Instead this returns a residual that (a) is unconditionally larger
     /// than any plausible in-image residual, so becoming invalid is never
-    /// attractive, and (b) grows with how far behind the camera the point
-    /// is, with a real gradient — built from `∂z_cam/∂pose` and
-    /// `∂z_cam/∂p_world`, both well-defined for any point regardless of
-    /// cheirality — that pushes the optimizer back toward `z_cam > min_z`.
-    /// The intrinsics block is left at zero: `z_cam` does not depend on the
-    /// intrinsic parameters.
+    /// attractive, and (b) grows with the depth deficit, with a real
+    /// gradient — built from `∂deficit/∂p_cam`, `∂p_cam/∂pose` and
+    /// `∂p_cam/∂p_world = R`, all well-defined for any point regardless of
+    /// whether the projection itself is — that pushes the optimizer back
+    /// across the boundary.
+    ///
+    /// # Degenerate failures
+    ///
+    /// A non-positive deficit clamps to zero, which leaves only the
+    /// constant base penalty and no Jacobian. With the cheirality arm the
+    /// deficit is `min_z - z ≥ 0` by construction, so this is defensive;
+    /// where there is no direction "out" of a failure to write down, a
+    /// wrong-signed gradient would be worse than none.
+    ///
+    /// # Intrinsics block
+    ///
+    /// Left at zero. For a depth deficit based on `z_cam` that is exact —
+    /// depth does not depend on intrinsics.
     ///
     /// # Rank property (deliberate)
     ///
@@ -371,43 +421,50 @@ where
     /// layout is fixed at 2 rows per observation, and a violating point
     /// contributes one scalar constraint however it is laid out. Under LM
     /// damping the resulting singular normal block is harmless; under plain
-    /// Gauss–Newton a solve made only of cheirality blocks would be
+    /// Gauss–Newton a solve made only of barrier blocks would be
     /// rank-deficient by construction.
     #[allow(clippy::too_many_arguments)]
-    fn write_cheirality_penalty(
+    fn write_projection_barrier(
         &self,
         i: usize,
-        z: f64,
-        min_z: f64,
+        deficit: f64,
+        d_deficit_d_pcam: &Vector3<f64>,
         p_world: &Vector3<f64>,
         pose: &SE3,
         camera: &CAM,
         residual: &mut [f64],
         jacobian: Option<&mut faer::mat::MatMut<'_, f64>>,
     ) {
-        let depth_deficit = (min_z - z).max(0.0);
-        let penalty = CHEIRALITY_BASE_PENALTY + CHEIRALITY_DEPTH_SCALE * depth_deficit;
+        // Clamp before use: `deficit > 0` is the precondition for both the
+        // growth term and the gradient below.
+        let deficit = deficit.max(0.0);
+        let penalty = CHEIRALITY_BASE_PENALTY + CHEIRALITY_DEPTH_SCALE * deficit;
         residual[i * 2] = penalty;
         residual[i * 2 + 1] = penalty;
 
+        if deficit <= 0.0 {
+            return;
+        }
+
         let Some(jac) = jacobian else { return };
 
-        // ∂penalty/∂z_cam = -CHEIRALITY_DEPTH_SCALE (increasing z_cam
-        // shrinks the deficit).
-        let d_penalty_d_zcam = -CHEIRALITY_DEPTH_SCALE;
+        // ∂penalty/∂p_cam = CHEIRALITY_DEPTH_SCALE · ∂deficit/∂p_cam.
+        let d_penalty_d_pcam = *d_deficit_d_pcam * CHEIRALITY_DEPTH_SCALE;
         let mut col_offset = 0;
 
         if OP::POSE {
-            // `d_pcam_d_pose`'s 3rd row is ∂z_cam/∂(pose tangent) — a pure
+            // `d_pcam_d_pose` is `∂p_cam/∂(pose tangent)`, a pure
             // rotation/skew(p_world) quantity (see the default
-            // `CameraModel::jacobian_pose` body) independent of the camera
-            // model's own projection formula, so it is exactly as valid
-            // here as it is behind the cheirality boundary. The first
-            // tuple element (∂uv/∂p_cam) is intentionally unused: it is
-            // not defined in a meaningful way for an invalid projection.
+            // `CameraModel::jacobian_pose` body) that is independent of the
+            // camera model's own projection formula, so it is exactly as
+            // valid here as it is on a valid projection. The first tuple
+            // element (∂uv/∂p_cam) is intentionally unused: it is not
+            // defined in a meaningful way for an invalid projection.
             let (_, d_pcam_d_pose) = camera.jacobian_pose(p_world, pose);
             for c in 0..6 {
-                let d = d_penalty_d_zcam * d_pcam_d_pose[(2, c)];
+                let d = (0..3)
+                    .map(|r| d_penalty_d_pcam[r] * d_pcam_d_pose[(r, c)])
+                    .sum::<f64>();
                 *jac.rb_mut().get_mut(i * 2, col_offset + c) = d;
                 *jac.rb_mut().get_mut(i * 2 + 1, col_offset + c) = d;
             }
@@ -415,16 +472,17 @@ where
         }
 
         if OP::LANDMARK {
-            // z_cam = (R p_world + t).z, so ∂z_cam/∂p_world = R's 3rd row.
+            // p_cam = R p_world + t, so ∂p_cam/∂p_world = R.
             let rotation = pose.rotation_so3().rotation_matrix();
             for c in 0..3 {
-                let d = d_penalty_d_zcam * rotation[(2, c)];
+                let d = (0..3)
+                    .map(|r| d_penalty_d_pcam[r] * rotation[(r, c)])
+                    .sum::<f64>();
                 *jac.rb_mut().get_mut(i * 2, col_offset + i * 3 + c) = d;
                 *jac.rb_mut().get_mut(i * 2 + 1, col_offset + i * 3 + c) = d;
             }
         }
-        // Intrinsics block (if present) is left at zero: z_cam does not
-        // depend on the intrinsic parameters.
+        // Intrinsics block (if present) stays zero — see the doc comment.
     }
 }
 
@@ -563,11 +621,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::factors::{BundleAdjustment, OnlyIntrinsics, SelfCalibration};
-    use apex_camera_models::PinholeCamera;
+    use crate::factors::{
+        BundleAdjustment, LandmarksAndIntrinsics, OnlyIntrinsics, OnlyLandmarks, OnlyPose,
+        PoseAndIntrinsics, SelfCalibration,
+    };
+    use apex_camera_models::{DoubleSphereCamera, PinholeCamera};
+    use apex_manifolds::Tangent;
+    use apex_manifolds::se3::SE3Tangent;
     use nalgebra::{DMatrix, DVector, Vector2, Vector3};
 
     type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    /// `[fx, fy, cx, cy]` — layout expected by `PinholeCamera::try_from`,
+    /// which is what the factor decodes the intrinsics block with.
+    const PINHOLE_INTRINSICS: [f64; 4] = [500.0, 500.0, 320.0, 240.0];
+
+    /// `[fx, fy, cx, cy, xi, alpha]` — layout expected by
+    /// `DoubleSphereCamera::try_from`.
+    const DOUBLE_SPHERE_INTRINSICS: [f64; 6] = [500.0, 500.0, 320.0, 240.0, 0.0, 0.3];
 
     fn call_linearize(
         factor: &impl Factor,
@@ -587,6 +658,297 @@ mod tests {
             factor.linearize(&param_slices, &mut residual, None);
             (residual, None)
         }
+    }
+
+    /// Compares one analytic Jacobian column against the central difference
+    /// of the residuals along the parameter direction that column represents.
+    ///
+    /// The tolerance is deliberately relative-and-offset (`tol·(1+|ana|)`):
+    /// projection Jacobian entries span several orders of magnitude between
+    /// focal-length and principal-point columns, so a single absolute
+    /// tolerance would be vacuous at one end and unachievable at the other.
+    fn assert_fd_agrees(
+        label: &str,
+        col: usize,
+        r_plus: &[f64],
+        r_minus: &[f64],
+        jac: &DMatrix<f64>,
+        eps: f64,
+        tol: f64,
+    ) {
+        for (row, (plus, minus)) in r_plus.iter().zip(r_minus.iter()).enumerate() {
+            let fd = (plus - minus) / (2.0 * eps);
+            let ana = jac[(row, col)];
+            assert!(
+                (fd - ana).abs() <= tol * (1.0 + ana.abs()),
+                "{label} column {col}, row {row}: finite difference {fd} \
+                 vs analytic {ana} (diff {})",
+                (fd - ana).abs()
+            );
+        }
+    }
+
+    /// Finite-difference check of every column of `factor`'s Jacobian, for
+    /// one concrete parameter vector.
+    ///
+    /// The column blocks are `[pose(6)] [landmarks(3N)] [intrinsics(D)]`
+    /// (see [`Factor::jacobian_shape`]) and each is perturbed on the space
+    /// the block actually lives on: pose columns through `right_plus` with a
+    /// unit `se(3)` tangent — the convention `CameraModel::jacobian_pose`
+    /// documents, so a convention mismatch between the perturbation and the
+    /// analytic formula shows up as a sign/row swap rather than passing —
+    /// and landmark/intrinsic columns by a plain Euclidean ±`eps`.
+    ///
+    /// This validates the *assembly*: block offsets, which rows each block
+    /// writes, and the product `∂uv/∂p_cam · ∂p_cam/∂ξ`.
+    fn assert_jacobian_matches_fd<CAM, OP>(
+        factor: &ProjectionFactor<CAM, OP>,
+        params: &[DVector<f64>],
+        eps: f64,
+        tol: f64,
+    ) -> TestResult
+    where
+        CAM: CameraModel + for<'a> TryFrom<&'a [f64]>,
+        OP: OptimizationConfig,
+    {
+        let (analytic, jacobian) = call_linearize(factor, params, true);
+        let jac = jacobian.ok_or("Jacobian should be Some")?;
+        assert_eq!(jac.nrows(), analytic.len());
+        // Non-vacuity guard: a factor that wrote no Jacobian at all would
+        // otherwise agree with zero finite differences and pass.
+        assert!(
+            jac.norm() > 1.0,
+            "analytic Jacobian norm {} — nothing to check",
+            jac.norm()
+        );
+
+        let residual_at = |p: &[DVector<f64>]| -> Vec<f64> { call_linearize(factor, p, false).0 };
+        let mut col = 0usize;
+
+        if OP::POSE {
+            let base = SE3::from_param_slice(params[0].as_slice());
+            for c in 0..6 {
+                let mut tangent = [0.0f64; 6];
+                tangent[c] = eps;
+                let plus = base.right_plus(&SE3Tangent::from_slice(&tangent), None, None);
+                tangent[c] = -eps;
+                let minus = base.right_plus(&SE3Tangent::from_slice(&tangent), None, None);
+
+                let mut p_plus = params.to_vec();
+                p_plus[0] = DVector::from_column_slice(plus.as_param_slice());
+                let mut p_minus = params.to_vec();
+                p_minus[0] = DVector::from_column_slice(minus.as_param_slice());
+
+                assert_fd_agrees(
+                    "pose",
+                    col + c,
+                    &residual_at(&p_plus),
+                    &residual_at(&p_minus),
+                    &jac,
+                    eps,
+                    tol,
+                );
+            }
+            col += 6;
+        }
+
+        if OP::LANDMARK {
+            // Landmarks occupy a single flat parameter block, and the factor
+            // writes observation `i`'s three columns at `offset + 3i`, so the
+            // parameter order and the column order coincide exactly.
+            let idx = usize::from(OP::POSE);
+            for c in 0..params[idx].len() {
+                let mut p_plus = params.to_vec();
+                p_plus[idx][c] += eps;
+                let mut p_minus = params.to_vec();
+                p_minus[idx][c] -= eps;
+
+                assert_fd_agrees(
+                    "landmark",
+                    col + c,
+                    &residual_at(&p_plus),
+                    &residual_at(&p_minus),
+                    &jac,
+                    eps,
+                    tol,
+                );
+            }
+            col += params[idx].len();
+        }
+
+        if OP::INTRINSIC {
+            let idx = params.len() - 1;
+            for c in 0..params[idx].len() {
+                let mut p_plus = params.to_vec();
+                p_plus[idx][c] += eps;
+                let mut p_minus = params.to_vec();
+                p_minus[idx][c] -= eps;
+
+                assert_fd_agrees(
+                    "intrinsics",
+                    col + c,
+                    &residual_at(&p_plus),
+                    &residual_at(&p_minus),
+                    &jac,
+                    eps,
+                    tol,
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Builds a fully-observed scene (three landmarks, exact reprojection
+    /// observations) for one camera model and optimization mode, then runs
+    /// [`assert_jacobian_matches_fd`] on it.
+    ///
+    /// Landmarks are specified in the *camera* frame — comfortably in front
+    /// of the camera and near the image centre — and carried to world
+    /// coordinates, which guarantees every projection succeeds and that no
+    /// finite-difference stencil crosses a validity boundary. Crossing one
+    /// would compare the analytic reprojection Jacobian against the
+    /// cheirality penalty's derivative, which is a different quantity by
+    /// design.
+    fn run_fd_scenario<CAM, OP>(camera: CAM, intrinsics: &[f64]) -> TestResult
+    where
+        CAM: CameraModel + for<'a> TryFrom<&'a [f64]>,
+        OP: OptimizationConfig,
+    {
+        let pose = SE3::from_isometry(nalgebra::Isometry3::from_parts(
+            nalgebra::Translation3::new(0.3, -0.4, 0.2),
+            nalgebra::UnitQuaternion::from_euler_angles(0.2, -0.15, 0.35),
+        ));
+
+        let p_cams = [
+            Vector3::new(0.4, -0.3, 4.0),
+            Vector3::new(-1.2, 0.8, 6.0),
+            Vector3::new(0.05, 0.1, 5.0),
+        ];
+        let to_world = pose.inverse(None);
+        let p_worlds: Vec<Vector3<f64>> =
+            p_cams.iter().map(|p| to_world.act(p, None, None)).collect();
+
+        let mut observations = Vec::with_capacity(p_cams.len());
+        for p_cam in &p_cams {
+            observations.push(camera.project(p_cam)?);
+        }
+
+        let mut factor =
+            ProjectionFactor::<CAM, OP>::new(Matrix2xX::from_columns(&observations), camera);
+        if !OP::POSE {
+            factor = factor.with_fixed_pose(pose.clone());
+        }
+        if !OP::LANDMARK {
+            factor = factor.with_fixed_landmarks(Matrix3xX::from_columns(&p_worlds));
+        }
+
+        // Parameter blocks appear in `OptimizationConfig` order: pose,
+        // landmarks, intrinsics — the same order the Jacobian columns use.
+        let mut params: Vec<DVector<f64>> = Vec::new();
+        if OP::POSE {
+            params.push(DVector::from_column_slice(pose.as_param_slice()));
+        }
+        if OP::LANDMARK {
+            params.push(DVector::from_vec(
+                p_worlds.iter().flat_map(|p| [p.x, p.y, p.z]).collect(),
+            ));
+        }
+        if OP::INTRINSIC {
+            params.push(DVector::from_column_slice(intrinsics));
+        }
+
+        assert_jacobian_matches_fd(&factor, &params, 1e-6, 1e-5)?;
+
+        // A nonzero count means the intrinsics block decoded to the
+        // constructor-time camera instead of `params`, in which case the
+        // intrinsics columns above would be comparing against a stale model.
+        assert_eq!(
+            factor.intrinsics_fallback_count(),
+            0,
+            "intrinsics decoding fell back to the constructor-time camera \
+             during the finite-difference sweep"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn fd_bundle_adjustment_pinhole() -> TestResult {
+        run_fd_scenario::<PinholeCamera, BundleAdjustment>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_self_calibration_pinhole() -> TestResult {
+        run_fd_scenario::<PinholeCamera, SelfCalibration>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_only_pose_pinhole() -> TestResult {
+        run_fd_scenario::<PinholeCamera, OnlyPose>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_only_landmarks_pinhole() -> TestResult {
+        run_fd_scenario::<PinholeCamera, OnlyLandmarks>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_only_intrinsics_pinhole() -> TestResult {
+        run_fd_scenario::<PinholeCamera, OnlyIntrinsics>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_pose_and_intrinsics_pinhole() -> TestResult {
+        // No landmark block: the intrinsics columns must sit directly after
+        // the pose block rather than at `6 + 3N`.
+        run_fd_scenario::<PinholeCamera, PoseAndIntrinsics>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_landmarks_and_intrinsics_pinhole() -> TestResult {
+        // No pose block: the intrinsics columns must sit at `3N` rather
+        // than after an implicit pose block.
+        run_fd_scenario::<PinholeCamera, LandmarksAndIntrinsics>(
+            PinholeCamera::from(PINHOLE_INTRINSICS),
+            &PINHOLE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_bundle_adjustment_double_sphere() -> TestResult {
+        run_fd_scenario::<DoubleSphereCamera, BundleAdjustment>(
+            DoubleSphereCamera::from(DOUBLE_SPHERE_INTRINSICS),
+            &DOUBLE_SPHERE_INTRINSICS,
+        )
+    }
+
+    #[test]
+    fn fd_self_calibration_double_sphere() -> TestResult {
+        // The double-sphere model exercises `jacobian_intrinsics`'s
+        // distortion columns (xi, alpha), which the pinhole runs never touch.
+        run_fd_scenario::<DoubleSphereCamera, SelfCalibration>(
+            DoubleSphereCamera::from(DOUBLE_SPHERE_INTRINSICS),
+            &DOUBLE_SPHERE_INTRINSICS,
+        )
     }
 
     #[test]
@@ -712,7 +1074,7 @@ mod tests {
         let (residual, _) = call_linearize(&factor, &params, false);
 
         // A point behind the camera must NOT be a free (zero-residual) way
-        // to reduce cost: see `write_cheirality_penalty`. The point is 1m
+        // to reduce cost: see `write_projection_barrier`. The point is 1m
         // behind the camera (min_z is ~0), so the penalty is at least the
         // base penalty.
         assert!(
@@ -763,9 +1125,12 @@ mod tests {
     #[test]
     fn test_cheirality_penalty_jacobian_numerical() -> TestResult {
         // Numerically verify the pose and landmark Jacobians written by
-        // `write_cheirality_penalty` against finite differences of the
-        // penalty residual itself, the same style used for the camera
-        // models' own Jacobian tests.
+        // `write_projection_barrier` against finite differences of the
+        // penalty residuals themselves, the same style used for the camera
+        // models' own Jacobian tests. Both residual rows and both parameter
+        // blocks (pose and landmark) are covered: a penalty whose gradient
+        // only matched in one row or in Euclidean coordinates would still
+        // look correct to a narrower check.
         let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
         let observations = Matrix2xX::from_columns(&[Vector2::new(100.0, 150.0)]);
         let factor: ProjectionFactor<PinholeCamera, BundleAdjustment> =
@@ -777,12 +1142,11 @@ mod tests {
         ));
         let landmark = Vector3::new(0.2, -0.1, -0.5); // behind the camera
 
-        let eval = |pose: &SE3, landmark: &Vector3<f64>| -> f64 {
+        let eval = |pose: &SE3, landmark: &Vector3<f64>| -> Vec<f64> {
             let pose_vec = DVector::from_column_slice(pose.as_param_slice());
             let landmarks_vec = DVector::from_vec(vec![landmark.x, landmark.y, landmark.z]);
             let params = vec![pose_vec, landmarks_vec];
-            let (residual, _) = call_linearize(&factor, &params, false);
-            residual[0]
+            call_linearize(&factor, &params, false).0
         };
 
         let params = vec![
@@ -792,18 +1156,56 @@ mod tests {
         let (_, jacobian) = call_linearize(&factor, &params, true);
         let jac = jacobian.ok_or("Jacobian should be Some")?;
 
-        // ∂residual/∂landmark (columns 6..9), numerically.
         let eps = 1e-6;
+
+        // ∂penalty/∂(pose tangent), columns 0..6. The perturbation is the
+        // same right-plus `se(3)` exponential the analytic row is derived
+        // for, so a left/right convention error fails rather than passes.
+        for c in 0..6 {
+            let mut tangent = [0.0f64; 6];
+            tangent[c] = eps;
+            let plus = pose.right_plus(&SE3Tangent::from_slice(&tangent), None, None);
+            tangent[c] = -eps;
+            let minus = pose.right_plus(&SE3Tangent::from_slice(&tangent), None, None);
+
+            let r_plus = eval(&plus, &landmark);
+            let r_minus = eval(&minus, &landmark);
+            for (row, (p, m)) in r_plus.iter().zip(r_minus.iter()).enumerate() {
+                let num = (p - m) / (2.0 * eps);
+                let ana = jac[(row, c)];
+                assert!(
+                    (num - ana).abs() < 1e-4 * (1.0 + ana.abs()),
+                    "pose col {c}, row {row}: numerical={num}, analytical={ana}"
+                );
+            }
+        }
+
+        // ∂penalty/∂landmark, columns 6..9.
         for c in 0..3 {
             let mut plus = landmark;
             let mut minus = landmark;
             plus[c] += eps;
             minus[c] -= eps;
-            let num = (eval(&pose, &plus) - eval(&pose, &minus)) / (2.0 * eps);
-            let ana = jac[(0, 6 + c)];
-            assert!(
-                (num - ana).abs() < 1e-2,
-                "landmark col {c}: numerical={num}, analytical={ana}"
+            let r_plus = eval(&pose, &plus);
+            let r_minus = eval(&pose, &minus);
+            for (row, (p, m)) in r_plus.iter().zip(r_minus.iter()).enumerate() {
+                let num = (p - m) / (2.0 * eps);
+                let ana = jac[(row, 6 + c)];
+                assert!(
+                    (num - ana).abs() < 1e-4 * (1.0 + ana.abs()),
+                    "landmark col {c}, row {row}: numerical={num}, analytical={ana}"
+                );
+            }
+        }
+
+        // Both rows carry the same scalar penalty, so their Jacobian rows
+        // are identical — the deliberate rank-1 property documented on
+        // `write_projection_barrier`.
+        for c in 0..jac.ncols() {
+            assert_eq!(
+                jac[(0, c)],
+                jac[(1, c)],
+                "penalty Jacobian rows differ at column {c}"
             );
         }
 

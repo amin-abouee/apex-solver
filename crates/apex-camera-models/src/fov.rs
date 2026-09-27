@@ -252,6 +252,22 @@ impl CameraModel for FovCamera {
         ))
     }
 
+    /// The FOV domain is exactly `z ≥ GEOMETRIC_PRECISION` (the sole
+    /// condition `project` checks), so its deficit is measured from that
+    /// plane rather than from `z = 0`. Reporting `ProjectionOutOfBounds`
+    /// for this condition means a `PointBehindCamera` arm never fires for
+    /// this model, so this override is the only way to get a deficit here:
+    /// the trait default (`-z`) would go non-positive for a point that is
+    /// invalid but still slightly in front of `z = 0`, collapsing to a
+    /// constant, gradient-less barrier. (The solver does not charge the
+    /// deficit yet — see the trait's Status note.)
+    fn projection_deficit(&self, p_cam: &Vector3<f64>) -> (f64, Vector3<f64>) {
+        (
+            crate::GEOMETRIC_PRECISION - p_cam.z,
+            Vector3::new(0.0, 0.0, -1.0),
+        )
+    }
+
     /// Unprojects a 2D image point to a unit 3D ray. Inverts the projection via the
     /// trigonometric relationship of the FOV model.
     fn unproject(&self, point_2d: &Vector2<f64>) -> Result<Vector3<f64>, CameraModelError> {
