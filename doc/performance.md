@@ -2,18 +2,19 @@
 
 **Hardware**: Apple Mac mini M4 (10 cores), 32 GB RAM, macOS
 **Build**: Rust 1.98 release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**Solvers**: apex-solver on `feature/criterion` — pose-graph rows measured at
-`a3ef66d`, bundle-adjustment rows at `69f717e` (row-parallel implicit Schur
-operator, Exp 008). Solver numerics are identical across that range on every
-dataset (see `benchmarking_results/verification_post_a3ef66d.md` and
-`baseline_vs_current_m4.md`), so only BA timing moved; Ceres 2.2.0; **GTSAM 4.3.0**;
+**Solvers**: apex-solver on `feature/criterion` — pose-graph rows at `13518e0`
+(counting-sort CSC plan, Exp 009), bundle-adjustment rows at `69f717e` (row-parallel
+implicit Schur operator, Exp 008); the other solvers' rows are from the `a3ef66d`
+session. Solver numerics are identical across that range on every dataset (see
+`benchmarking_results/verification_post_a3ef66d.md` and `baseline_vs_current_m4.md`),
+so only apex timing moved; Ceres 2.2.0; **GTSAM 4.3.0**;
 g2o 20241228; factrs and tiny-solver from `Cargo.lock`. Eigen 5.0.1 for all C++ solvers.
 apex uses the matrix-free Schur complement for BA (`ImplicitSparseSchur`,
 Schur-Jacobi preconditioner, PCG forcing sequence η = 1e-2) and sparse Cholesky
 for pose graphs.
 **Measured**: 2026-09-27.
 **Methodology**: 5 independent runs per benchmark **for every solver, C++ included**
-(apex BA rows: 3 runs of `69f717e`), reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
+(apex rows re-measured apex-only: pose graphs 5 runs of `13518e0`, BA 3 runs of `69f717e`), reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
 and metric computation are excluded. Bundle adjustment uses a 10-minute timeout per solver.
 **Metrics**: final objective value (cost) and runtime, following the pose graph
 optimization literature ([SE-Sync, Rosen et al. IJRR 2019](https://david-m-rosen.github.io/publication/sesync-ijrr/SESync-IJRR.pdf); [Carlone et al. ICRA 2015](https://dellaert.github.io/files/Carlone15icra1.pdf)). Bundle adjustment uses reprojection RMSE and runtime ([arXiv:2409.12190](https://arxiv.org/abs/2409.12190)).
@@ -37,32 +38,31 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 
 ### 2D Datasets (SE2)
 
-
 | Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
 |---------|--------|-----------|------------|-----------|-------|
 | **M3500** (3500 poses, 5453 edges) |
-| | apex-solver | 1.5238e+00 | 7.802e-04 | **39.2 ± 3.3** | 6 |
+| | apex-solver | 1.5238e+00 | 7.802e-04 | **34.9 ± 6.5** | 6 |
 | | factrs | 1.5238e+00 | 7.802e-04 | 57.5 ± 0.6 | - |
 | | tiny-solver | 2.8604e+04 | 1.465e+01 | 210.6 ± 3.2 | - |
 | | Ceres | 4.5437e+03 | 2.327e+00 | 75.3 ± 0.3 | 18 |
 | | GTSAM | 1.5109e+00 | **7.737e-04** | 43.5 ± 0.4 | 6 |
 | | g2o | 1.5109e+00 | **7.737e-04** | 107.9 ± 0.5 | 33 |
 | **mit** (808 poses, 827 edges) |
-| | apex-solver | 4.9970e+01 | 2.630e+00 | 9.6 ± 0.1 | 15 |
+| | apex-solver | 4.9970e+01 | 2.630e+00 | 9.5 ± 0.2 | 15 |
 | | factrs | 1.4831e+04 | 7.806e+02 | **3.4 ± 0.0** | - |
 | | tiny-solver | 1.1933e+04 | 6.280e+02 | 5.8 ± 0.1 | - |
 | | Ceres | 3.4865e+02 | 1.835e+01 | 11.5 ± 0.1 | 29 |
 | | GTSAM | 4.4154e+00 | **2.324e-01** | 77.2 ± 1.3 | 25 |
 | | g2o | 1.2571e+03 | 6.616e+01 | 46.6 ± 0.3 | 100 |
 | **city10000** (10000 poses, 20687 edges) |
-| | apex-solver | 4.4330e+00 | 4.148e-04 | **115.8 ± 1.0** | 5 |
+| | apex-solver | 4.4330e+00 | 4.148e-04 | **108.3 ± 1.2** | 5 |
 | | factrs | 4.4330e+00 | 4.148e-04 | 225.8 ± 2.0 | - |
 | | tiny-solver | 1.2237e+05 | 1.145e+01 | 1081.7 ± 5.0 | - |
 | | Ceres | 1.8045e+04 | 1.689e+00 | 392.2 ± 2.2 | 27 |
 | | GTSAM | 4.3620e+00 | **4.082e-04** | 156.6 ± 1.3 | 6 |
 | | g2o | 4.4232e+02 | 4.139e-02 | 4192.6 ± 12.8 | 100 |
 | **ring** (434 poses, 459 edges) |
-| | apex-solver | 3.0176e-02 | 1.207e-03 | **2.5 ± 0.1** | 5 |
+| | apex-solver | 3.0176e-02 | 1.207e-03 | **2.4 ± 0.1** | 5 |
 | | factrs | 3.0176e-02 | 1.207e-03 | 4.3 ± 0.0 | - |
 | | tiny-solver | 9.8712e+02 | 3.948e+01 | 20.6 ± 0.2 | - |
 | | Ceres | 2.2188e-02 | 8.875e-04 | 3.1 ± 0.0 | 14 |
@@ -71,32 +71,31 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 
 ### 3D Datasets (SE3)
 
-
 | Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
 |---------|--------|-----------|------------|-----------|-------|
 | **sphere2500** (2500 poses, 4949 edges) |
-| | apex-solver | 3.4912e+01 | 1.426e-02 | 143.9 ± 0.3 | 5 |
+| | apex-solver | 3.4912e+01 | 1.426e-02 | 137.1 ± 1.9 | 5 |
 | | factrs | - | - | - | ✗ |
 | | tiny-solver | 4.0584e+04 | 1.657e+01 | 2048.9 ± 7.0 | - |
 | | Ceres | 1.1654e+05 | 4.759e+01 | 1112.2 ± 6.9 | 90 |
 | | GTSAM | 2.1291e+01 | **8.694e-03** | **88.8 ± 1.8** | 6 |
 | | g2o | 6.4554e+01 | 2.636e-02 | 10893.4 ± 52.9 | 84 |
 | **parking-garage** (1661 poses, 6275 edges) |
-| | apex-solver | 6.2809e-01 | 1.361e-04 | 47.8 ± 0.2 | 2 |
+| | apex-solver | 6.2809e-01 | 1.361e-04 | 38.9 ± 0.5 | 2 |
 | | factrs | 6.2777e-01 | 1.361e-04 | 440.9 ± 1.4 | - |
 | | tiny-solver | 1.2116e+05 | 2.626e+01 | 852.6 ± 7.9 | - |
 | | Ceres | 2.0103e+05 | 4.357e+01 | 267.8 ± 1.1 | 34 |
 | | GTSAM | 6.2456e-01 | **1.354e-04** | **28.3 ± 0.9** | 4 |
 | | g2o | 6.2869e-01 | 1.363e-04 | 634.5 ± 2.3 | 56 |
 | **torus3D** (5000 poses, 9048 edges) |
-| | apex-solver | 1.2488e+02 | 3.085e-02 | 1907.8 ± 3.6 | 38 |
+| | apex-solver | 1.2488e+02 | 3.085e-02 | 1891.1 ± 3.8 | 38 |
 | | factrs | - | - | - | ✗ |
 | | tiny-solver | - | - | - | ✗ |
 | | Ceres | 2.3940e+04 | 5.914e+00 | 1006.1 ± 6.3 | 38 |
 | | GTSAM | 1.2035e+02 | **2.973e-02** | **402.9 ± 2.0** | 10 |
 | | g2o | 1.4131e+02 | 3.491e-02 | 31136.3 ± 67.6 | 96 |
 | **cubicle** (5750 poses, 16869 edges) |
-| | apex-solver | 9.3491e+00 | 8.408e-04 | **361.8 ± 2.0** | 5 |
+| | apex-solver | 9.3491e+00 | 8.408e-04 | **334.9 ± 1.1** | 5 |
 | | factrs | - | - | - | ✗ |
 | | tiny-solver | 9.9185e+03 | 8.920e-01 | 1982.1 ± 23.9 | - |
 | | Ceres | 1.7144e+04 | 1.542e+00 | 955.3 ± 3.3 | 29 |
@@ -104,12 +103,15 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 | | g2o | 1.2771e+01 | 1.149e-03 | 8497.3 ± 5.7 | 47 |
 
 **Observations**:
-- **Speed**: apex-solver is the fastest solver on 5 of 8 datasets — M3500 (39 ms),
-  city10000 (116 ms, 1.35× GTSAM, 3.4× Ceres), ring (2.5 ms), cubicle (362 ms, level
-  with GTSAM's 370 ms) and, among solvers that reach a good solution, mit (9.6 ms;
+- **Speed**: apex-solver is the fastest solver on 5 of 8 datasets — M3500 (35 ms,
+  1.25× GTSAM), city10000 (108 ms, 1.45× GTSAM, 3.6× Ceres), ring (2.4 ms), cubicle
+  (335 ms, 1.10× GTSAM) and, among solvers that reach a good solution, mit (9.5 ms;
   factrs and tiny-solver are faster there but end at 300× apex's cost). **GTSAM 4.3 is
-  fastest on the three remaining 3D sets**: sphere2500 (89 vs 144 ms), parking-garage
-  (28 vs 48 ms) and torus3D (403 ms vs 1.91 s — apex needs 38 iterations to GTSAM's 10).
+  fastest on the three remaining 3D sets**: sphere2500 (89 vs 137 ms), parking-garage
+  (28 vs 39 ms) and torus3D (403 ms vs 1.89 s — apex needs 38 iterations to GTSAM's 10).
+  Exp 009 (`13518e0`) took 5–20 % off apex's pose-graph times at identical costs by
+  removing a per-solve setup cost Exp 004 had introduced
+  (`benchmarking_results/experiment_009_odometry_assembly_regression.md`).
 - **Cost**: GTSAM 4.3 reaches the lowest `cost/(m−n)` on **all 8** datasets (tied with
   g2o on M3500 and ring). apex's final cost is within 1 % of it on M3500 (1.5238 vs
   1.5109) and parking-garage (0.6281 vs 0.6246), within 4 % on city10000 (+1.6 %) and

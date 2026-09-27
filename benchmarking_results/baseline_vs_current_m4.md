@@ -108,3 +108,48 @@ BASE --bench <id> --save-baseline base ; CUR --bench <id> --save-baseline cur
 APEX_BENCH_RUST_ONLY=1 cargo bench --bench bundle_adjustment_benchmark   # in each worktree
 APEX_BENCH_RUST_ONLY=1 cargo bench --bench odometry_pose_benchmark
 ```
+
+## 5. After Exp 009 (`13518e0`): baseline vs current, odometry fixed
+
+Exp 009 (`experiment_009_odometry_assembly_regression.md`) removed the per-solve
+cost Exp 004 had added. Numerics unchanged (48 g2o runs bit-identical, 10 BAL runs
+identical). Criterion medians: baseline from §1, current from the Exp 009 session
+(same machine, same day, same harness; each column interleaved within its own
+session).
+
+| id | baseline `84e609b` | current `13518e0` | Δ |
+|---|---|---|---|
+| odometry / intel | 5.791 ms | 5.406 ms | **−6.6 %** |
+| odometry / M3500 | 64.13 ms | 60.38 ms | **−5.8 %** |
+| odometry / parking-garage | 97.71 ms | 89.59 ms | **−8.3 %** |
+| odometry / sphere2500 | 161.8 ms | 156.4 ms | **−3.3 %** |
+| odometry / torus3D | 1.271 s | 1.234 s | **−2.9 %** |
+| BA explicit / trafalgar-21 sparse | 857.4 ms | 651.6 ms | **−24.0 %** |
+| BA explicit / trafalgar-21 iterative | 878.8 ms | 672.2 ms | **−23.5 %** |
+| BA explicit / trafalgar-257 sparse | 3.907 s | 3.074 s | **−21.3 %** |
+| BA explicit / trafalgar-257 iterative | 8.036 s | 6.590 s | **−18.0 %** |
+| BA explicit / venice-52 sparse | 11.98 s | 10.67 s | **−10.9 %** |
+| BA explicit / venice-52 iterative | 12.18 s | 10.78 s | **−11.5 %** |
+| BA explicit / dubrovnik-135 sparse | 21.80 s | 19.98 s | **−8.3 %** |
+| BA explicit / dubrovnik-135 iterative | 22.37 s | 20.70 s | **−7.5 %** |
+| BA implicit / trafalgar-21 | 2.403 s | 1.392 s | **−42.1 %** |
+| BA implicit / trafalgar-257 | 18.01 s | 12.88 s | **−28.5 %** |
+| BA implicit / venice-52 | 20.45 s | 14.38 s | **−29.7 %** |
+| BA implicit / dubrovnik-135 | 43.43 s | 31.85 s | **−26.7 %** |
+
+Large odometry harness, apex (ms, mean ± std over 5 rounds): baseline from §2,
+current from the Exp 009 session.
+
+| dataset | baseline `84e609b` | current `13518e0` | Δ |
+|---|---|---|---|
+| M3500 | 37.8 ± 5.1 | 34.9 ± 6.5 | -7.6 % |
+| mit | 10.4 ± 0.1 | 9.5 ± 0.2 | -9.2 % |
+| city10000 | 114.1 ± 2.9 | 108.3 ± 1.2 | -5.1 % |
+| ring | 2.6 ± 0.1 | 2.4 ± 0.1 | -6.3 % |
+| sphere2500 | 136.0 ± 6.6 | 137.1 ± 1.9 | +0.8 % |
+| parking-garage | 45.9 ± 6.2 | 38.9 ± 0.5 | -15.3 % |
+| torus3D | 2028.8 ± 51.4 | 1891.1 ± 3.8 | -6.8 % |
+| cubicle | 360.6 ± 15.0 | 334.9 ± 1.1 | -7.1 % |
+
+Every criterion id is now faster than `true_baseline`; on the noisier large
+harness 7 of 8 graphs are faster and sphere2500 is within its spread.
