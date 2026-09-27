@@ -206,7 +206,30 @@ impl Problem {
             .validate_variables(&variables)
             .map_err(CoreError::DimensionMismatch)?;
 
-        let new_residual_dimension = factor.residual_dim();
+        // Factor-independent shape invariant: the Jacobian block is laid out
+        // column-major over the connected variables' full local dofs (the
+        // scatter in `linearizer` indexes it that way), and its rows are the
+        // residual rows. A factor declaring any other shape would silently
+        // read/write the wrong arena columns — only a `debug_assert` caught
+        // this before, so release builds assembled corrupted Jacobians.
+        let (jac_rows, jac_cols) = factor.jacobian_shape();
+        let residual_dim = factor.residual_dim();
+        if jac_rows != residual_dim {
+            return Err(CoreError::DimensionMismatch(format!(
+                "factor declares a {jac_rows}×{jac_cols} Jacobian but residual_dim() is \
+                 {residual_dim}; jacobian_shape().0 must equal residual_dim()"
+            )));
+        }
+        let total_dof: usize = variables.iter().map(|v| v.dof()).sum();
+        if jac_cols != total_dof {
+            return Err(CoreError::DimensionMismatch(format!(
+                "factor declares a {jac_rows}×{jac_cols} Jacobian but the registered \
+                 variables have {total_dof} dofs in total; jacobian_shape().1 must equal \
+                 the sum of the connected variables' dofs"
+            )));
+        }
+
+        let new_residual_dimension = residual_dim;
         let row_start = self.total_residual_dimension;
         let fk = self.residual_blocks.insert_with_key(|fk| {
             ResidualBlock::with_noise(fk, row_start, variable_keys, factor, loss_func, noise)
@@ -1695,6 +1718,117 @@ mod tests {
                 .err()
                 .ok_or("unknown variable key must be rejected")?;
             assert!(matches!(err, CoreError::Variable(_)), "{err}");
+            Ok(())
+        }
+
+        // ---------------------------------------------------------------------
+        // Factor-independent shape invariant (`jacobian_shape` vs the
+        // residual/variable layout the assembly will actually use)
+        // ---------------------------------------------------------------------
+
+        /// Declares `jacobian_shape().0 != residual_dim()`. Assembly strides the
+        /// arena by `residual_dim`, so a row mismatch corrupts every column.
+        struct WrongRowFactor;
+
+        impl Factor for WrongRowFactor {
+            fn linearize(
+                &self,
+                _params: &[&[f64]],
+                _residual: &mut [f64],
+                _jacobian: Option<faer::mat::MatMut<'_, f64>>,
+            ) {
+            }
+            fn residual_dim(&self) -> usize {
+                2
+            }
+            fn jacobian_shape(&self) -> (usize, usize) {
+                (3, 1)
+            }
+        }
+
+        /// Declares `jacobian_shape().1 != Σ dof` — the scatter indexes columns
+        /// by the variables' dofs, so extra or missing columns read the wrong
+        /// arena slots.
+        struct WrongColFactor;
+
+        impl Factor for WrongColFactor {
+            fn linearize(
+                &self,
+                _params: &[&[f64]],
+                _residual: &mut [f64],
+                _jacobian: Option<faer::mat::MatMut<'_, f64>>,
+            ) {
+            }
+            fn residual_dim(&self) -> usize {
+                1
+            }
+            fn jacobian_shape(&self) -> (usize, usize) {
+                (1, 2)
+            }
+        }
+
+        #[test]
+        fn try_add_rejects_jacobian_rows_not_equal_to_residual_dim() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+            let err = problem
+                .try_add_residual_block(&[x], Box::new(WrongRowFactor), None)
+                .err()
+                .ok_or("row mismatch must be rejected")?;
+            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            Ok(())
+        }
+
+        #[test]
+        fn try_add_rejects_jacobian_cols_not_matching_total_dof() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+            let err = problem
+                .try_add_residual_block(&[x], Box::new(WrongColFactor), None)
+                .err()
+                .ok_or("column mismatch must be rejected")?;
+            assert!(matches!(err, CoreError::DimensionMismatch(_)), "{err}");
+            Ok(())
+        }
+
+        // ---------------------------------------------------------------------
+        // MarginalPriorFactor: self-whitening contract
+        // ---------------------------------------------------------------------
+
+        /// One scalar block whose local tangent is `x − x0` with `x0 = 0`.
+        fn scalar_marginal() -> Box<dyn Factor + Send + Sync> {
+            Box::new(
+                crate::factors::marginal::MarginalPriorFactor::new(
+                    vec![1],
+                    nalgebra::DMatrix::identity(1, 1),
+                    nalgebra::DVector::zeros(1),
+                    Box::new(|params: &[&[f64]], out: &mut [f64]| out[0] = params[0][0]),
+                )
+                .unwrap_or_else(|e| panic!("marginal prior construction: {e}")),
+            )
+        }
+
+        /// The factor folds `sqrt_info` into both the residual and the
+        /// Jacobian inside `linearize`; a second whitening by an attached
+        /// noise model would weight the block twice.
+        #[test]
+        fn try_add_rejects_noise_model_on_self_whitening_marginal_prior() -> TestResult {
+            let mut problem = Problem::new(JacobianMode::Sparse);
+            let x = problem.add_variable(ManifoldType::RN, dvector![1.0]);
+            let noise = NoiseModel::from_sigmas(&[0.5]).map_err(|e| format!("noise model: {e}"))?;
+            let err = problem
+                .try_add_residual_block_with_noise(&[x], scalar_marginal(), None, noise)
+                .err()
+                .ok_or("noise model on a self-whitening factor must be rejected")?;
+            assert!(matches!(err, CoreError::InvalidInput(_)), "{err}");
+
+            // The null model stays acceptable.
+            problem.try_add_residual_block_with_noise(
+                &[x],
+                scalar_marginal(),
+                None,
+                NoiseModel::Null,
+            )?;
             Ok(())
         }
     }

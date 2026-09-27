@@ -127,8 +127,134 @@ struct StructureCache {
     eliminated_rows: Vec<Vec<usize>>,
     /// Eliminated blocks visible from each kept block — they share a row.
     visibility: Vec<Vec<usize>>,
+    /// Residual rows per chunk of the two row-space passes, `F·v` and `E·u`.
+    chunk_rows: usize,
+    /// Per row chunk, every retained column's nonzeros that fall inside it.
+    ///
+    /// The two row-space passes are scatters when run column by column, so
+    /// they cannot split over columns without two tasks writing one row.
+    /// Split over row chunks instead: each chunk owns its slice of `y`, and
+    /// replays the columns in the column-wise scatter's order, so every row
+    /// receives the same additions in the same order — bit-identical results.
+    kept_spans: Vec<Vec<ColumnSpan>>,
+    /// Same, over the eliminated columns; `local` is the eliminated index.
+    eliminated_spans: Vec<Vec<ColumnSpan>>,
+    /// Eliminated block owning each eliminated local index.
+    eliminated_block_of: Vec<u32>,
     /// Pattern the cache was built from.
     fingerprint: Option<pattern::PatternFingerprint>,
+}
+
+/// One column's nonzeros inside one row chunk: `J`'s value range `lo..hi`,
+/// and the column's local index in the vector the pass reads.
+///
+/// `u32` keeps the per-chunk lists cache-friendly; `ensure_structure` rejects
+/// a Jacobian whose nonzero count or dimensions do not fit.
+#[derive(Debug, Clone, Copy)]
+struct ColumnSpan {
+    lo: u32,
+    hi: u32,
+    local: u32,
+}
+
+/// Rows per chunk: enough chunks for load balance across the pool, few
+/// enough that each carries real work.
+fn row_chunk_len(nrows: usize) -> usize {
+    const MIN_CHUNK_ROWS: usize = 4096;
+    let chunks = rayon::current_num_threads().max(1) * 8;
+    nrows.div_ceil(chunks).max(MIN_CHUNK_ROWS)
+}
+
+/// The row-chunk span lists of [`StructureCache`] for one chunk length.
+struct RowSpans {
+    kept: Vec<Vec<ColumnSpan>>,
+    eliminated: Vec<Vec<ColumnSpan>>,
+    block_of: Vec<u32>,
+}
+
+impl RowSpans {
+    /// Push every column in exactly the order the column-wise scatter visits
+    /// them: retained blocks then offsets, eliminated blocks then offsets.
+    fn build(
+        jacobian: &SparseColMat<usize, f64>,
+        partition: &SchurPartition,
+        chunk_rows: usize,
+    ) -> LinAlgResult<Self> {
+        let chunks = jacobian.nrows().div_ceil(chunk_rows);
+        let mut kept = vec![Vec::new(); chunks];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                if let Some(local) = partition.kept_local(col) {
+                    push_column_spans(jacobian, col, local, chunk_rows, &mut kept)?;
+                }
+            }
+        }
+        let mut eliminated = vec![Vec::new(); chunks];
+        let mut block_of = vec![0u32; partition.eliminated_dof()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let owner = u32::try_from(block_idx).map_err(|_| {
+                LinAlgError::InvalidInput(format!(
+                    "{block_idx} eliminated blocks exceed the implicit Schur operator's u32 range"
+                ))
+                .log()
+            })?;
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                block_of[base + offset] = owner;
+                push_column_spans(
+                    jacobian,
+                    block.col_start + offset,
+                    base + offset,
+                    chunk_rows,
+                    &mut eliminated,
+                )?;
+            }
+        }
+        Ok(Self {
+            kept,
+            eliminated,
+            block_of,
+        })
+    }
+}
+
+/// Append `col`'s nonzeros, split at chunk boundaries, to the chunk lists.
+fn push_column_spans(
+    jacobian: &SparseColMat<usize, f64>,
+    col: usize,
+    local: usize,
+    chunk_rows: usize,
+    spans: &mut [Vec<ColumnSpan>],
+) -> LinAlgResult<()> {
+    let symbolic = jacobian.symbolic();
+    let start = symbolic.col_range(col).start;
+    let rows = symbolic.row_idx_of_col_raw(col);
+    let narrow = |x: usize| {
+        u32::try_from(x).map_err(|_| {
+            LinAlgError::InvalidInput(format!(
+                "Jacobian index {x} exceeds the implicit Schur operator's u32 range"
+            ))
+            .log()
+        })
+    };
+    let local = narrow(local)?;
+    let mut k = 0;
+    while let Some(&first_row) = rows.get(k) {
+        let chunk = first_row / chunk_rows;
+        let chunk_end = (chunk + 1) * chunk_rows;
+        let hi = k + rows[k..].partition_point(|&r| r < chunk_end);
+        let slot = spans.get_mut(chunk).ok_or_else(|| {
+            LinAlgError::InvalidInput(format!("row {first_row} outside the Jacobian")).log()
+        })?;
+        slot.push(ColumnSpan {
+            lo: narrow(start + k)?,
+            hi: narrow(start + hi)?,
+            local,
+        });
+        k = hi;
+    }
+    Ok(())
 }
 
 /// Implicit (matrix-free) Schur complement solver using Preconditioned
@@ -172,7 +298,7 @@ pub struct ImplicitSparseSchur {
     workspace_rows: Vec<f64>, // residual-row sized buffer
     workspace_lm: Vec<f64>,   // eliminated-DOF sized buffer
     workspace_cam: Vec<f64>,  // kept-DOF sized buffer (parallel gather output)
-    block_scratch: Vec<f64>,  // max-eliminated-block-DOF sized scratch
+    block_scratch: Vec<f64>,  // eliminated-DOF sized: u = (EᵀE+λD_e)⁻¹·t
 
     structure: StructureCache,
 }
@@ -346,11 +472,18 @@ impl ImplicitSparseSchur {
             }
         }
 
+        let chunk_rows = row_chunk_len(jacobian.nrows());
+        let spans = RowSpans::build(jacobian, partition, chunk_rows)?;
+
         self.structure = StructureCache {
             kept_cols,
             eliminated_cols,
             eliminated_rows,
             visibility,
+            chunk_rows,
+            kept_spans: spans.kept,
+            eliminated_spans: spans.eliminated,
+            eliminated_block_of: spans.block_of,
             fingerprint: Some(fingerprint),
         };
         Ok(())
@@ -375,26 +508,27 @@ impl ImplicitSparseSchur {
         scratch: &mut [f64],
     ) {
         let symbolic = jacobian.symbolic();
+        let row_idx = symbolic.row_idx();
+        let values = jacobian.val();
+        let chunk_rows = self.structure.chunk_rows.max(1);
 
-        // y = F·v
-        rows.iter_mut().for_each(|r| *r = 0.0);
-        for block in partition.kept_blocks() {
-            for offset in 0..block.dof {
-                let col = block.col_start + offset;
-                let Some(local) = partition.kept_local(col) else {
-                    continue;
-                };
-                let x = v[(local, 0)];
-                if x == 0.0 {
-                    continue;
+        // y = F·v — per row chunk, replaying the column-wise scatter's order.
+        rows.par_chunks_mut(chunk_rows)
+            .zip(self.structure.kept_spans.par_iter())
+            .enumerate()
+            .for_each(|(chunk, (y, spans))| {
+                y.fill(0.0);
+                let first = chunk * chunk_rows;
+                for span in spans {
+                    let x = v[(span.local as usize, 0)];
+                    if x == 0.0 {
+                        continue;
+                    }
+                    for k in span.lo as usize..span.hi as usize {
+                        y[row_idx[k] - first] += values[k] * x;
+                    }
                 }
-                let idx = symbolic.row_idx_of_col_raw(col);
-                let vals = jacobian.val_of_col(col);
-                for (k, &row) in idx.iter().enumerate() {
-                    rows[row] += vals[k] * x;
-                }
-            }
-        }
+            });
 
         // t = Eᵀ·y — a gather, so it parallelizes over the output entries.
         let rows_ref: &[f64] = rows;
@@ -411,35 +545,41 @@ impl ImplicitSparseSchur {
                     .sum();
             });
 
-        // u = (EᵀE + λD_e)⁻¹·t, then y ← y − E·u
-        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
-            let dof = self.eliminated.dof(block_idx);
-            if dof == 0 {
-                continue;
-            }
+        // u = (EᵀE + λD_e)⁻¹·t — one output entry per task: entry `base + r`
+        // of block `b` is row `r` of that block's inverse times its slice of t.
+        let t: &[f64] = temp_lm;
+        let eliminated = &self.eliminated;
+        let block_of = &self.structure.eliminated_block_of;
+        scratch.par_iter_mut().enumerate().for_each(|(i, u)| {
+            let block_idx = block_of[i] as usize;
+            let dof = eliminated.dof(block_idx);
             let base = partition.eliminated_offset(block_idx);
-            let inv = self.eliminated.block(block_idx);
-            let slot = &mut scratch[..dof];
-            for r in 0..dof {
-                let mut acc = 0.0;
-                for c in 0..dof {
-                    acc += inv[c * dof + r] * temp_lm[base + c];
-                }
-                slot[r] = acc;
+            let inv = eliminated.block(block_idx);
+            let r = i - base;
+            let mut acc = 0.0;
+            for c in 0..dof {
+                acc += inv[c * dof + r] * t[base + c];
             }
+            *u = acc;
+        });
 
-            for (offset, &u) in slot.iter().enumerate() {
-                if u == 0.0 {
-                    continue;
+        // y ← y − E·u, again per row chunk in the scatter's order.
+        let u: &[f64] = scratch;
+        rows.par_chunks_mut(chunk_rows)
+            .zip(self.structure.eliminated_spans.par_iter())
+            .enumerate()
+            .for_each(|(chunk, (y, spans))| {
+                let first = chunk * chunk_rows;
+                for span in spans {
+                    let u = u[span.local as usize];
+                    if u == 0.0 {
+                        continue;
+                    }
+                    for k in span.lo as usize..span.hi as usize {
+                        y[row_idx[k] - first] -= values[k] * u;
+                    }
                 }
-                let col = block.col_start + offset;
-                let idx = symbolic.row_idx_of_col_raw(col);
-                let vals = jacobian.val_of_col(col);
-                for (k, &row) in idx.iter().enumerate() {
-                    rows[row] -= vals[k] * u;
-                }
-            }
-        }
+            });
 
         // S·v = Fᵀ·y + λD_k·v — also a gather, also parallel over outputs.
         // The result lands in `out_buf` and is copied into `out` afterwards:
@@ -836,7 +976,7 @@ impl ImplicitSparseSchur {
         temp_lm.clear();
         temp_lm.resize(partition.eliminated_dof(), 0.0);
         scratch.clear();
-        scratch.resize(self.max_eliminated_dof.max(1), 0.0);
+        scratch.resize(partition.eliminated_dof(), 0.0);
 
         let result = solve_pcg(
             b,
@@ -1414,6 +1554,182 @@ mod tests {
             col_start: 0,
             dof: 6,
         };
+        Ok(())
+    }
+
+    /// The column-by-column operator the row-chunked passes replaced, kept
+    /// verbatim as the reference they must reproduce bit for bit.
+    fn column_scatter_reference(
+        solver: &ImplicitSparseSchur,
+        partition: &SchurPartition,
+        jacobian: &SparseColMat<usize, f64>,
+        v: &Mat<f64>,
+    ) -> Vec<f64> {
+        let symbolic = jacobian.symbolic();
+        let mut rows = vec![0.0; jacobian.nrows()];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let col = block.col_start + offset;
+                let Some(local) = partition.kept_local(col) else {
+                    continue;
+                };
+                let x = v[(local, 0)];
+                if x == 0.0 {
+                    continue;
+                }
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] += vals[k] * x;
+                }
+            }
+        }
+        let mut t = vec![0.0; partition.eliminated_dof()];
+        for (slot, &col) in t.iter_mut().zip(&solver.structure.eliminated_cols) {
+            let idx = symbolic.row_idx_of_col_raw(col);
+            let vals = jacobian.val_of_col(col);
+            *slot = idx
+                .iter()
+                .zip(vals)
+                .map(|(&row, val)| val * rows[row])
+                .sum();
+        }
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let dof = solver.eliminated.dof(block_idx);
+            let base = partition.eliminated_offset(block_idx);
+            let inv = solver.eliminated.block(block_idx);
+            let mut u = vec![0.0; dof];
+            for (r, out) in u.iter_mut().enumerate() {
+                let mut acc = 0.0;
+                for c in 0..dof {
+                    acc += inv[c * dof + r] * t[base + c];
+                }
+                *out = acc;
+            }
+            for (offset, &u) in u.iter().enumerate() {
+                if u == 0.0 {
+                    continue;
+                }
+                let col = block.col_start + offset;
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                for (k, &row) in idx.iter().enumerate() {
+                    rows[row] -= vals[k] * u;
+                }
+            }
+        }
+        solver
+            .structure
+            .kept_cols
+            .iter()
+            .map(|&col| {
+                let idx = symbolic.row_idx_of_col_raw(col);
+                let vals = jacobian.val_of_col(col);
+                idx.iter()
+                    .zip(vals)
+                    .map(|(&row, val)| val * rows[row])
+                    .sum()
+            })
+            .collect()
+    }
+
+    /// Row-chunked `F·v` and `E·u` must equal the column-wise scatter exactly,
+    /// for every chunk length — including ones that split a column's rows
+    /// and rows that two retained blocks share, where addition order shows.
+    #[test]
+    fn row_chunked_operator_is_bit_identical_to_column_scatter() -> TestResult {
+        let cam = || -> Box<dyn ManifoldVariable> {
+            Box::new(Variable::new(se3::SE3::from_param_slice(&[
+                1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ])))
+        };
+        let point = || -> Box<dyn ManifoldVariable> {
+            Box::new(Variable::new(rn::Rn::new(DVector::from_vec(vec![0.0; 3]))))
+        };
+        let mut variables: SlotMap<VarKey, Box<dyn ManifoldVariable>> = SlotMap::with_key();
+        let cams: Vec<VarKey> = (0..3).map(|_| variables.insert(cam())).collect();
+        let points: Vec<VarKey> = (0..4).map(|_| variables.insert(point())).collect();
+        let mut variable_index_map: SecondaryMap<VarKey, usize> = SecondaryMap::new();
+        for (i, &k) in cams.iter().enumerate() {
+            variable_index_map.insert(k, i * 6);
+        }
+        for (i, &k) in points.iter().enumerate() {
+            variable_index_map.insert(k, 18 + i * 3);
+        }
+        let landmark_keys: std::collections::HashSet<VarKey> = points.iter().copied().collect();
+
+        // Every (camera, point) pair observed, two rows each; odd rows also
+        // touch the next camera, so rows carry two retained blocks. Values are
+        // irrational-ish so a reordered sum would change low bits.
+        let value = |r: usize, c: usize| ((r * 31 + c * 17) as f64 * 0.618_033_988_7).sin() + 1.5;
+        let mut triplets: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        let mut row = 0usize;
+        for p in 0..4 {
+            for c in 0..3 {
+                for _ in 0..2 {
+                    for k in 0..6 {
+                        triplets.push(Triplet::new(row, c * 6 + k, value(row, c * 6 + k)));
+                        if row % 2 == 1 {
+                            let other = ((c + 1) % 3) * 6 + k;
+                            triplets.push(Triplet::new(row, other, value(row, other)));
+                        }
+                    }
+                    for k in 0..3 {
+                        let col = 18 + p * 3 + k;
+                        triplets.push(Triplet::new(row, col, value(row, col)));
+                    }
+                    row += 1;
+                }
+            }
+        }
+        let jacobian = SparseColMat::try_new_from_triplets(row, 30, &triplets)?;
+
+        let mut solver = ImplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+        solver.ensure_structure(&jacobian)?;
+        let partition = solver.require_partition()?.clone();
+        solver
+            .eliminated
+            .gather_from_jacobian(&jacobian, &partition);
+        solver.eliminated.invert_in_place(&partition)?;
+
+        let v = Mat::from_fn(partition.kept_dof(), 1, |i, _| {
+            (i as f64 * 0.37).cos() - 0.2
+        });
+        let want = column_scatter_reference(&solver, &partition, &jacobian, &v);
+
+        for chunk_rows in [1usize, 2, 3, 5, 7, row, row + 4] {
+            let spans = RowSpans::build(&jacobian, &partition, chunk_rows)?;
+            solver.structure.chunk_rows = chunk_rows;
+            solver.structure.kept_spans = spans.kept;
+            solver.structure.eliminated_spans = spans.eliminated;
+            solver.structure.eliminated_block_of = spans.block_of;
+
+            let mut out = Mat::zeros(partition.kept_dof(), 1);
+            let mut out_buf = vec![0.0; partition.kept_dof()];
+            let mut rows = vec![0.0; jacobian.nrows()];
+            let mut temp_lm = vec![0.0; partition.eliminated_dof()];
+            let mut scratch = vec![0.0; partition.eliminated_dof()];
+            solver.apply_schur_operator(
+                &partition,
+                &jacobian,
+                &[],
+                &v,
+                &mut out,
+                &mut out_buf,
+                &mut rows,
+                &mut temp_lm,
+                &mut scratch,
+            );
+            for (i, w) in want.iter().enumerate() {
+                assert_eq!(
+                    out[(i, 0)].to_bits(),
+                    w.to_bits(),
+                    "chunk_rows={chunk_rows}, entry {i}: {} vs {w}",
+                    out[(i, 0)]
+                );
+            }
+        }
         Ok(())
     }
 }

@@ -1824,30 +1824,122 @@ mod tests {
         Ok(())
     }
 
-    /// ISSUE-0005 / GH-57 regression: `rho'`/`rho''` must be the actual
-    /// derivatives of the loss's own returned `rho`, for Cauchy, Fair, Tukey,
-    /// and Andrews — table-driven against central differences over
-    /// log-spaced `s`, away from each loss's own removable-singularity guard
-    /// (`s < f64::EPSILON` for Fair, `s < 1e-6` for Andrews — ISSUE-0011
-    /// covers the L1/Lp version of that guard separately).
+    /// Squared-residual sample grid for the contract sweeps: from the
+    /// inlier region, through each redescending kernel's threshold, out
+    /// five decades into the saturated outlier tail.
+    ///
+    /// `1.0` and `4.0` land exactly on DCS's Φ and the trimmed mean's `c²`
+    /// (both default scales) — deliberately, so the kink handling below is
+    /// exercised rather than dodged by a lucky grid.
+    const CONTRACT_S: &[f64] = &[
+        0.0, 1e-3, 0.05, 0.1, 0.3, 0.7, 1.0, 2.0, 4.0, 10.0, 25.0, 50.0, 200.0, 1e4,
+    ];
+
+    /// Radius around a declared derivative cliff within which the analytic
+    /// `[ρ, ρ′, ρ″]` is one-sided and therefore not comparable to a
+    /// straddling central difference. Finiteness is still required there.
+    const KINK_RADIUS: f64 = 1e-3;
+
+    /// Derivative cliffs of each registered kernel **at the default scale
+    /// `loss_from_name` uses** — keep them in sync with that function.
+    ///
+    /// The values are `s`, not `√s`: a kernel branches on `x = √s`, so the
+    /// switch point in `s` is that threshold squared. An *undeclared* cliff
+    /// is not silently tolerated: the derivative contract below fails at
+    /// that sample and the cliff gets added here.
+    fn derivative_kinks(name: &str) -> Vec<f64> {
+        match name {
+            // ρ′ = 1 inside `c²`, ρ″ = −1/(2c²) outside; ρ′ continuous.
+            "huber" => vec![1.345f64 * 1.345],
+            // ρ′ = 1 for `s ≤ Φ`, ρ′ = 0 above — a value cliff.
+            "dcs" => vec![1.0],
+            // ρ′ → 0 continuously at `πc`, ρ″ jumps to the plateau's 0.
+            "andrews" => {
+                let t = std::f64::consts::PI * 1.339;
+                vec![t * t]
+            }
+            // ρ′ = 1/2 inside `c²`, ρ′ = 0 above — a value cliff.
+            "trimmed" => vec![4.0],
+            _ => Vec::new(),
+        }
+    }
+
+    /// Is `s` too close to a declared cliff for a central difference?
+    fn near_kink(name: &str, s: f64) -> bool {
+        derivative_kinks(name)
+            .iter()
+            .any(|k| (s - k).abs() < KINK_RADIUS)
+    }
+
+    /// ISSUE-0005 / GH-57, widened by the Round-2 audit (F5): `rho'`/`rho''`
+    /// must be the actual derivatives of the loss's own returned `rho`, for
+    /// **every** kernel in the registry — not just the Cauchy/Fair/Tukey/
+    /// Andrews quartet the original table covered — table-driven against
+    /// central differences over [`CONTRACT_S`], which runs five decades past
+    /// each kernel's inlier region into its outlier regime.
+    ///
+    /// Two samples are excluded from the derivative comparison, both
+    /// deliberately:
+    ///
+    /// * `s < 10h`: the stencil would reach `s − h < 0` and take a square
+    ///   root of it. The kernels are only defined for `s ≥ 0`, and the
+    ///   origin-smoothing branch is covered by its own continuity tests
+    ///   (ISSUE-0011).
+    /// * [`near_kink`] — a declared derivative cliff, where the analytic
+    ///   value is one-sided by definition, so comparing it to a straddling
+    ///   difference would assert a falsehood. Finiteness is still required
+    ///   there.
+    ///
+    /// On top of finiteness and the derivative identity, the sweep pins two
+    /// contracts the `Corrector` leans on:
+    ///
+    /// * `ρ ≥ 0` — a negative robust cost would make "better" mean "more
+    ///   negative cost", inverting step acceptance.
+    /// * `ρ′ ≥ 0` — `Corrector::new` clamps a negative weight to zero, so
+    ///   a declining kernel would suppress the block's gradient while
+    ///   `robust_cost()` kept moving: the ISSUE-0010 split, housed in the
+    ///   kernel instead of the corrector. (All redescending kernels here
+    ///   go *flat* rather than declining, which is why they pass.)
+    ///
+    /// Every kernel must leave at least 10 of the 14 grid samples eligible
+    /// for the derivative comparison (L2 leaves 13; the cliff-bearers leave
+    /// 12), so a grid or cliff list that drifts into skipping most of the
+    /// sweep fails instead of passing vacuously.
     #[test]
     fn test_robust_loss_derivative_contract_table() -> TestResult {
-        let losses: Vec<(&str, Box<dyn LossFunction>, f64)> = vec![
-            ("cauchy", Box::new(CauchyLoss::new(2.3849)?), 1e-3),
-            ("fair", Box::new(FairLoss::new(1.3999)?), 1e-3),
-            ("tukey", Box::new(TukeyBiweightLoss::new(4.6851)?), 1e-3),
-            ("andrews", Box::new(AndrewsWaveLoss::new(1.339)?), 1e-3),
-        ];
+        const H: f64 = 1e-5;
+        let names = loss_canonical_names();
+        assert!(
+            names.len() >= 16,
+            "registry shrank to {} kernels — the contract table only means \
+             something if it covers them all",
+            names.len()
+        );
 
-        for (name, loss, min_s) in losses {
-            for &s in &[min_s, 0.1, 0.5, 1.0, 2.0, 4.0, 10.0, 25.0, 50.0] {
+        for name in &names {
+            let loss = loss_from_name(name, None)?;
+            let kinks = derivative_kinks(name);
+            let mut derivative_samples = 0usize;
+
+            for &s in CONTRACT_S {
                 let [rho, rho_prime, rho_double_prime] = loss.evaluate(s);
                 assert!(
                     rho.is_finite() && rho_prime.is_finite() && rho_double_prime.is_finite(),
-                    "{name} s={s}: non-finite output"
+                    "{name} s={s}: non-finite output [{rho}, {rho_prime}, {rho_double_prime}]"
+                );
+                assert!(rho >= 0.0, "{name} s={s}: negative robust cost rho={rho}");
+                assert!(
+                    rho_prime >= 0.0,
+                    "{name} s={s}: negative weight rho'={rho_prime} — Corrector would clamp \
+                     it to zero and the block would stop moving while the cost still did"
                 );
 
-                let (num_prime, num_double_prime) = numerical_derivative(loss.as_ref(), s, 1e-5);
+                if s < 10.0 * H || near_kink(name, s) {
+                    continue;
+                }
+                derivative_samples += 1;
+
+                let (num_prime, num_double_prime) = numerical_derivative(loss.as_ref(), s, H);
                 let prime_err = (rho_prime - num_prime).abs();
                 let double_prime_err = (rho_double_prime - num_double_prime).abs();
                 assert!(
@@ -1860,7 +1952,187 @@ mod tests {
                      (err={double_prime_err})"
                 );
             }
+
+            assert!(
+                derivative_samples >= 10,
+                "{name}: only {derivative_samples} admissible derivative samples — \
+                 too close to skipped samples for the sweep to mean anything"
+            );
+
+            // The cliff list is only meaningful if the grid actually walks
+            // up to and past each declared cliff, so a kernel whose cliff
+            // drifted off the grid (e.g. a changed default scale) is caught
+            // rather than silently skipped forever.
+            for k in &kinks {
+                assert!(
+                    CONTRACT_S.iter().any(|&s| (s - k).abs() < 10.0),
+                    "{name}: declared cliff at s={k} is nowhere near the sample grid"
+                );
+            }
         }
+        Ok(())
+    }
+
+    /// F5: the `Corrector` contract over **every** registered kernel, in
+    /// each of the regimes its branchy `new()` can take.
+    ///
+    /// `Corrector::new` has three exits:
+    ///
+    /// * `sq_norm == 0 || ρ″ ≤ 0 || ρ′ ≤ 0` → early return, `α = 0`.
+    ///   The `ρ″ ≤ 0` half is the *common* case — every classic kernel has
+    ///   non-positive curvature — and `ρ′ ≤ 0` is the suppression path a
+    ///   redescending kernel reaches past its threshold.
+    /// * `ρ′ > 0 && ρ″ > 0` → the general `α` path, which **no registered
+    ///   kernel reaches at its default scale**: the sweep appends two
+    ///   configurations (`LpNorm` with `p = 3`, Barron with `α = 3`, both
+    ///   of which have positive curvature) precisely so the third branch is
+    ///   not dead code in a green run.
+    ///
+    /// The sweep therefore asserts *branch coverage* alongside the
+    /// property, because a green run that never entered a branch says
+    /// nothing about it. The property itself generalizes ISSUE-0010 to
+    /// every kernel: whatever branch is taken, `J̃ᵀr̃` — the Gauss–Newton
+    /// gradient the solver actually descends — must equal the true
+    /// derivative of `robust_cost()` w.r.t. state, and every corrected
+    /// quantity must stay finite.
+    ///
+    /// The residual is two-dimensional with a non-collinear Jacobian
+    /// column, so the `u_c = ⟨r, col⟩` term inside the α correction is
+    /// actually exercised rather than collapsing to a scalar identity.
+    ///
+    /// Measured on [`CONTRACT_S`] across the 20 configurations: 21 samples
+    /// took the `ρ′ ≤ 0` suppression path, 26 took the `ρ″ > 0` α path, and
+    /// 235 of 280 produced a cost change large enough to differentiate
+    /// numerically (the rest are exact plateaus or tails sitting below the
+    /// cost's own rounding error) — the three coverage assertions below
+    /// keep those from quietly going to zero.
+    #[test]
+    fn test_corrector_gradient_consistency_for_every_loss() -> TestResult {
+        use crate::core::corrector::Corrector;
+
+        const H: f64 = 1e-6;
+        /// ∂C/∂x at `x = 0` for `r(x) = r₀ + J·x`, `C = 0.5·ρ(‖r‖²)`.
+        fn true_gradient(rho_prime: f64, r0: &[f64; 2], j: &[f64; 2]) -> f64 {
+            rho_prime * (r0[0] * j[0] + r0[1] * j[1])
+        }
+
+        let mut configs: Vec<(String, Box<dyn LossFunction + Send + Sync>)> = Vec::new();
+        for name in loss_canonical_names() {
+            configs.push((name.to_string(), loss_from_name(name, None)?));
+        }
+        configs.push((
+            "lp p=3 (rho''>0)".to_string(),
+            Box::new(LpNormLoss::new(3.0)?),
+        ));
+        configs.push((
+            "barron alpha=3 (rho''>0)".to_string(),
+            Box::new(BarronGeneralLoss::new(3.0, 1.0)?),
+        ));
+
+        // Fixed Jacobian column, deliberately not aligned with the residual
+        // so the α correction's ⟨r, J⟩ projection is non-trivial.
+        let j = [1.0, -0.3];
+        let mut suppressed_cases = 0usize;
+        let mut curved_cases = 0usize;
+        let mut numeric_checks = 0usize;
+        let mut samples = 0usize;
+
+        for (name, loss) in &configs {
+            for &s in CONTRACT_S {
+                samples += 1;
+                let rho = loss.evaluate(s);
+
+                // Branch bookkeeping: this is `Corrector::new`'s dispatch
+                // condition, read off the public derivatives.
+                if rho[1] <= 0.0 {
+                    suppressed_cases += 1;
+                } else if rho[2] > 0.0 && s > 0.0 {
+                    curved_cases += 1;
+                }
+
+                // Two rows whose squared norm is exactly `s`.
+                let half = (s / 2.0).sqrt();
+                let r0 = [half, half];
+
+                let corrector = Corrector::new(loss.as_ref(), s);
+                assert!(
+                    corrector.robust_cost().is_finite(),
+                    "{name} s={s}: non-finite robust cost"
+                );
+                assert_eq!(
+                    corrector.robust_cost(),
+                    0.5 * rho[0],
+                    "{name} s={s}: robust_cost must be 0.5*rho, not 0.5*||r_tilde||^2"
+                );
+
+                // Modeled gradient: the corrected Jacobian sees the *original*
+                // residual (that is the order both call sites use), the
+                // corrected residual is what it is paired with.
+                let mut modeled_residual = r0;
+                let mut modeled_jacobian = j;
+                corrector.correct_jacobian_in_place(&modeled_residual, &mut modeled_jacobian, 2, 1);
+                corrector.correct_residual_in_place(&mut modeled_residual);
+                let modeled = modeled_jacobian[0] * modeled_residual[0]
+                    + modeled_jacobian[1] * modeled_residual[1];
+
+                assert!(
+                    modeled.is_finite() && modeled_residual.iter().all(|v| v.is_finite()),
+                    "{name} s={s}: non-finite corrected residual/Jacobian [{modeled:?}]"
+                );
+
+                // True gradient of robust_cost() under a linear residual
+                // model r(x) = r0 + J·x, by central difference.
+                let cost = |x: f64| {
+                    let rx = [r0[0] + j[0] * x, r0[1] + j[1] * x];
+                    let sx = rx[0] * rx[0] + rx[1] * rx[1];
+                    Corrector::new(loss.as_ref(), sx).robust_cost()
+                };
+                let expected = true_gradient(rho[1], &r0, &j);
+                assert!(
+                    (modeled - expected).abs() <= 1e-6 * (1.0 + expected.abs()),
+                    "{name} s={s}: modeled gradient {modeled} vs analytic \
+                     rho'*(r.J) = {expected} — the correction algebra does not \
+                     reproduce the loss's own weight"
+                );
+
+                // The cost-based check needs a *resolvable* difference: a
+                // change below the cost's own rounding error is pure noise.
+                // Ramsay at s=1e4 is the extreme case — its cost still
+                // moves by ~1e-18 per step while sitting at ~5.6 — and a
+                // flat plateau (Tukey/trimmed/DCS past their thresholds)
+                // is exactly constant. Both are covered by the analytic
+                // check above instead.
+                let delta = cost(H) - cost(-H);
+                if near_kink(name, s) || delta.abs() <= 1e-14 * (1.0 + cost(0.0).abs()) {
+                    continue;
+                }
+                numeric_checks += 1;
+
+                let numeric = delta / (2.0 * H);
+                assert!(
+                    (modeled - numeric).abs() <= 1e-4 * (1.0 + numeric.abs()),
+                    "{name} s={s}: modeled gradient {modeled} vs numeric derivative of \
+                     robust_cost {numeric} — the solver would descend a cost it is \
+                     not measuring"
+                );
+            }
+        }
+
+        assert!(
+            suppressed_cases > 0,
+            "no sampled (kernel, s) had rho' <= 0 — the suppression path went untested \
+             ({suppressed_cases} suppressed, {curved_cases} curved)"
+        );
+        assert!(
+            curved_cases > 0,
+            "no sampled (kernel, s) had rho'' > 0 — the general alpha path went untested \
+             ({suppressed_cases} suppressed, {curved_cases} curved)"
+        );
+        assert!(
+            numeric_checks * 4 >= samples,
+            "only {numeric_checks}/{samples} samples had a resolvable cost change — \
+             the numeric half of the property went largely unexercised"
+        );
         Ok(())
     }
 
