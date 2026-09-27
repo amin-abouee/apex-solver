@@ -165,9 +165,20 @@ lower than the Ceres / g2o rows' (e.g. Dubrovnik 3.98 px vs 12.98 px); GTSAM's h
 starts lower still (2.81 px).
 
 **Observations**:
+- **Iteration counts are shaped by the parameter-tolerance test, not only by
+  convergence.** apex (like Ceres) stops when `‖Δx‖ ≤ 1e-8·(‖x‖ + 1e-8)` over the whole
+  parameter vector, and three of these BAL files contain a few degenerate cameras
+  (focal length 1.1e10 on Trafalgar, 2.9e9 on Dubrovnik, 3.7e11 on Venice, against
+  ~1e3 elsewhere). They set `‖x‖` alone, turning the test into an *absolute* step
+  threshold of ≈ 110 / 40 / 5 900. Venice therefore stops after **2** iterations for every
+  apex solver, and the explicit solver's 10–11 iterations on Trafalgar / Dubrovnik are the
+  first step shorter than that threshold — not convergence (implicit keeps going and ends
+  at a *lower* cost there, e.g. Trafalgar 6.746e4 vs 6.863e4). Ladybug (‖x‖ = 3.1e5) is
+  unaffected: every solver runs to the cap.
 - **Scalability**: apex-solver is the only solver besides g2o to finish **Venice**
-  (5 M observations) inside the 10-minute timeout — 0.745 px in 22 s; Ceres and GTSAM
-  both time out, and g2o barely moves (10.128 → 10.126 px in 246 s).
+  (5 M observations) inside the 10-minute timeout — 0.745 px in 22 s, i.e. 2 LM
+  iterations ended by the test above; Ceres and GTSAM both time out, and g2o barely
+  moves (10.128 → 10.126 px in 246 s over 20 iterations).
 - **Accuracy — GTSAM 4.3 leads on the three datasets it finishes**: Ladybug 0.637 vs
   apex 0.875 px, Trafalgar 0.624 vs 0.773, Dubrovnik 0.548 vs 0.743. This is the open
   item on this benchmark; the forcing-sequence inexactness accounts for ~1 % of it (the
@@ -218,12 +229,13 @@ deliberately inexact.
   extraction, bitmap Schur output, CSC gather assembly and symbolic-Cholesky cache).
   Dubrovnik (41.9 → 24.7 s) also needs fewer iterations now (17 → 10, after `f078711`),
   so its gain is not purely per-iteration.
-- **The library default is no longer the fastest choice on every dataset.** On
-  Trafalgar and Dubrovnik the exact solve converges in 10–11 iterations while both
-  PCG paths run to the cap, making `ExplicitSparseSchur / Sparse` 5× faster than the
-  implicit default at an RMSE within 1 % (Dubrovnik 0.7440 vs 0.7432, Trafalgar 0.7795
-  vs 0.7728). Implicit remains the right default where
-  memory or problem size rules out forming `S` (Ladybug, Venice: 2.4–2.8× faster).
+- **Read the Trafalgar / Dubrovnik rows with the parameter-tolerance caveat above.**
+  `ExplicitSparseSchur / Sparse` is 5× faster there because its 10th–11th step happens to
+  fall under the ≈ 110 / 40 absolute threshold the degenerate cameras create, while the
+  PCG paths' steps stay longer and run to the cap — reaching a lower cost (Trafalgar
+  RMSE 0.7728 vs 0.7795). Per iteration, explicit / Sparse is 0.31 s vs implicit 0.85 s on
+  Trafalgar and 2.5 s vs 5.9 s on Dubrovnik; implicit is 2.4–2.8× faster in total on
+  Ladybug and Venice, where the iteration counts match.
 - These numbers supersede the previous table, which was recorded while
   `APEX_BENCH_SCHUR=sparse|chunked|explicit-iterative` silently ran the implicit
   solver (fixed in `5a912b8`).
