@@ -71,6 +71,17 @@ if(EIGEN3_AVAILABLE)
     find_package(GTSAM QUIET)
     if(GTSAM_FOUND)
         message(STATUS "Found GTSAM: ${GTSAM_VERSION}")
+        # GTSAM has to be compiled against the Eigen it was built with: its
+        # public types carry Eigen fixed-size members across the library
+        # boundary, so mismatched headers break the ABI and yield wrong
+        # Jacobians without any build error. A system-Eigen GTSAM (e.g.
+        # Homebrew 4.3) was built on the default `eigen`, not on eigen@3.
+        file(READ "${GTSAM_INCLUDE_DIR}/gtsam/config.h" GTSAM_CONFIG_H)
+        if(GTSAM_CONFIG_H MATCHES "#define GTSAM_USE_SYSTEM_EIGEN" AND EIGEN5_AVAILABLE)
+            set(EIGEN3_INCLUDE_DIRS_34 ${EIGEN5_INCLUDE_DIRS})
+            set(EIGEN3_VERSION_34 ${EIGEN5_VERSION})
+            message(STATUS "GTSAM uses the system Eigen: building its benchmarks against Eigen ${EIGEN5_VERSION}")
+        endif()
         set(BUILD_GTSAM_BENCHMARK TRUE)
     else()
         message(WARNING "GTSAM not found - skipping GTSAM benchmark")

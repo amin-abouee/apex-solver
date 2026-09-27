@@ -55,7 +55,7 @@ use crate::linalg::schur::{PcgParams, SchurPreconditioner, solve_pcg};
 use crate::linalg::sparse::normal_eq::{LazyNormalEquations, NormalEquations};
 use crate::linalg::sparse::pattern;
 use crate::linalg::{Damping, LinAlgError, LinAlgResult, LinearSolver, SparseMode, StructureAware};
-use faer::sparse::{SparseColMat, Triplet};
+use faer::sparse::{SparseColMat, SymbolicSparseColMat, Triplet};
 use faer::{
     Accum, Mat, Side,
     linalg::solvers::Solve,
@@ -152,9 +152,256 @@ pub struct ExplicitSparseSchur {
     // Cached symbolic machinery for forming `JᵀJ` and `Jᵀr` in parallel.
     ne_cache: LazyNormalEquations,
 
+    /// Cached value-position maps from `JᵀJ`'s sparsity into the extracted
+    /// `H_kk`/`H_ke` value arrays; rebuilt only when the pattern changes.
+    extraction: Option<ExtractionCache>,
+
+    /// Column-major occupancy bitmap of the dense Schur accumulator: bit
+    /// `(col, row)` is set once `S[row, col]` has been written. Captured as
+    /// a side effect of the updates (one OR each), it seeds the sparse
+    /// output pattern without ever sorting triplets. Keyed on the `JᵀJ`
+    /// fingerprint so a structure change resets it.
+    s_bitmap: Option<(pattern::PatternFingerprint, Vec<u64>)>,
+
     // Cached matrices
     hessian: Option<SparseColMat<usize, f64>>,
     gradient: Option<Mat<f64>>,
+    /// Symbolic Cholesky of the last reduced system, keyed on the filtered
+    /// `S` pattern hash — reused while the pattern holds instead of re-running
+    /// the fill-reducing ordering analysis every iteration.
+    s_llt_cache: Option<(u64, SymbolicLlt<usize>)>,
+}
+
+/// Cached extraction of `H_kk` and `H_ke` from a `JᵀJ` with a fixed
+/// sparsity pattern.
+///
+/// [`Self::extract_kept_block`] and [`Self::extract_coupling_block`] re-walk
+/// every `JᵀJ` nonzero and rebuild CSC matrices through triplets (allocate +
+/// sort) on every solve, though the pattern is static per structure — within
+/// one optimizer run it never changes. The cache instead records, once per
+/// pattern, which `JᵀJ` value feeds which extracted value slot; a solve is
+/// then two parallel gathers. Entries the extraction drops (eliminated rows
+/// of kept columns, or anything touching a fixed column) never appear in the
+/// maps.
+#[derive(Debug, Clone)]
+struct ExtractionCache {
+    fingerprint: pattern::PatternFingerprint,
+    h_kk_symbolic: SymbolicSparseColMat<usize>,
+    h_ke_symbolic: SymbolicSparseColMat<usize>,
+    /// `H_kk` value slot → `JᵀJ` flat value index.
+    h_kk_src: Vec<u32>,
+    /// `H_ke` value slot → `JᵀJ` flat value index.
+    h_ke_src: Vec<u32>,
+}
+
+impl ExtractionCache {
+    /// Build the maps for one `JᵀJ` pattern against `partition`.
+    ///
+    /// One-time cost: two sorted triplet builds plus one HashMap pass, paid
+    /// on the first solve (and never again while the pattern holds).
+    fn build(partition: &SchurPartition, hessian: &SparseColMat<usize, f64>) -> LinAlgResult<Self> {
+        let symbolic = hessian.symbolic();
+
+        // Kept- / eliminated-local column of each global column; `u32::MAX`
+        // for columns outside the partition (fully fixed variables).
+        let mut kept_cols = vec![u32::MAX; hessian.ncols()];
+        for block in partition.kept_blocks() {
+            for offset in 0..block.dof {
+                let global = block.col_start + offset;
+                if let Some(local) = partition.kept_local(global) {
+                    kept_cols[global] = local as u32;
+                }
+            }
+        }
+        let mut elim_cols = vec![u32::MAX; hessian.ncols()];
+        for (block_idx, block) in partition.eliminated_blocks().iter().enumerate() {
+            let base = partition.eliminated_offset(block_idx);
+            for offset in 0..block.dof {
+                elim_cols[block.col_start + offset] = (base + offset) as u32;
+            }
+        }
+
+        // Classify every `JᵀJ` value once: kept×kept feeds `H_kk`, kept×elim
+        // feeds `H_ke`; everything else is dropped, matching the uncached
+        // extraction's predicates exactly.
+        let mut kk_triplets: Vec<(usize, usize, u32)> = Vec::new();
+        let mut ke_triplets: Vec<(usize, usize, u32)> = Vec::new();
+        for col in 0..hessian.ncols() {
+            let col_start = symbolic.col_range(col).start;
+            let rows = symbolic.row_idx_of_col_raw(col);
+            let c_kept = kept_cols[col];
+            let c_elim = elim_cols[col];
+            for (k, &row) in rows.iter().enumerate() {
+                let src = (col_start + k) as u32;
+                if c_kept != u32::MAX {
+                    if let Some(r) = partition.kept_local(row) {
+                        kk_triplets.push((r, c_kept as usize, src));
+                    }
+                } else if c_elim != u32::MAX
+                    && let Some(r) = partition.kept_local(row)
+                {
+                    ke_triplets.push((r, c_elim as usize, src));
+                }
+            }
+        }
+
+        let (h_kk_symbolic, h_kk_src) =
+            Self::symbolic_and_src(kk_triplets, partition.kept_dof(), partition.kept_dof())?;
+        let (h_ke_symbolic, h_ke_src) = Self::symbolic_and_src(
+            ke_triplets,
+            partition.kept_dof(),
+            partition.eliminated_dof(),
+        )?;
+
+        Ok(Self {
+            fingerprint: pattern::PatternFingerprint::of(hessian),
+            h_kk_symbolic,
+            h_ke_symbolic,
+            h_kk_src,
+            h_ke_src,
+        })
+    }
+
+    /// Sorted-CSC construction from `(row, col, src)` triplets.
+    ///
+    /// Entries of one `JᵀJ` bucket are unique in `(row, col)` — they come
+    /// from distinct entries of a product with a unique pattern — so the sort
+    /// needs no dedup pass.
+    fn symbolic_and_src(
+        mut triplets: Vec<(usize, usize, u32)>,
+        nrows: usize,
+        ncols: usize,
+    ) -> LinAlgResult<(SymbolicSparseColMat<usize>, Vec<u32>)> {
+        triplets.sort_unstable_by_key(|&(r, c, _)| (c, r));
+
+        let nnz = triplets.len();
+        let mut col_ptr = vec![0usize; ncols + 1];
+        let mut row_idx = Vec::with_capacity(nnz);
+        let mut src = Vec::with_capacity(nnz);
+        for &(r, c, s) in &triplets {
+            col_ptr[c + 1] += 1;
+            row_idx.push(r);
+            src.push(s);
+        }
+        for c in 0..ncols {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+
+        let symbolic = SymbolicSparseColMat::new_checked(nrows, ncols, col_ptr, None, row_idx);
+        Ok((symbolic, src))
+    }
+
+    /// Gather the current values into the cached patterns.
+    ///
+    /// Every slot has exactly one source, so the gathers parallelize without
+    /// aliasing; the symbolic handles are `Arc`-backed, so cloning them per
+    /// solve is free.
+    fn extract(
+        &self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> (SparseColMat<usize, f64>, SparseColMat<usize, f64>) {
+        let values = hessian.as_ref().val();
+        let kk: Vec<f64> = self
+            .h_kk_src
+            .par_iter()
+            .map(|&s| values[s as usize])
+            .collect();
+        let ke: Vec<f64> = self
+            .h_ke_src
+            .par_iter()
+            .map(|&s| values[s as usize])
+            .collect();
+        (
+            SparseColMat::new(self.h_kk_symbolic.clone(), kk),
+            SparseColMat::new(self.h_ke_symbolic.clone(), ke),
+        )
+    }
+}
+
+/// Set the occupancy bit for dense slot `S[row, col]` in the column-major
+/// bitmap (`bits` holds one aligned word range per column).
+#[inline]
+fn set_dense_bit(bits: &mut [u64], wpc: usize, row: usize, col: usize) {
+    bits[col * wpc + (row >> 6)] |= 1u64 << (row & 63);
+}
+
+/// Derive the sparse `S` output from the occupancy bitmap: one CSC pattern
+/// over every slot the dense accumulator wrote whose symmetrized value
+/// passes the noise filter, plus the values themselves. The threshold
+/// applies to the averaged value — `(dense[r,c] + dense[c,r])·0.5` —
+/// exactly matching the dense path's symmetrize-then-filter semantics, so
+/// the output is bit-identical to the triplet path. Column-major bitmap
+/// layout makes this a sequential word scan — no triplet sort anywhere.
+fn build_schur_output(
+    kept_dof: usize,
+    wpc: usize,
+    bits: &[u64],
+    s_dense: &[f64],
+) -> (SymbolicSparseColMat<usize>, Vec<f64>, u64) {
+    // Pattern hash (FNV-1a over the CSC structure) — lets the caller cache
+    // factorization symbolics keyed on "the filtered S pattern is unchanged".
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut pattern_hash = FNV_OFFSET;
+
+    // Pass 1: count slots passing the filter, per column.
+    let mut col_counts = vec![0usize; kept_dof];
+    let mut nnz = 0usize;
+    for c in 0..kept_dof {
+        let base = c * wpc;
+        for w in 0..wpc {
+            let mut word = bits[base + w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let r = (w << 6) | bit;
+                if r < kept_dof {
+                    let avg = (s_dense[r * kept_dof + c] + s_dense[c * kept_dof + r]) * 0.5;
+                    if avg.abs() > 1e-12 {
+                        col_counts[c] += 1;
+                        nnz += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let mut col_ptr = Vec::with_capacity(kept_dof + 1);
+    col_ptr.push(0usize);
+    for c in 0..kept_dof {
+        col_ptr.push(col_ptr[c] + col_counts[c]);
+    }
+
+    // Pass 2: fill rows and values at the counted positions.
+    let mut row_idx = vec![0usize; nnz];
+    let mut s_values = vec![0.0f64; nnz];
+    let mut offsets = col_ptr[..kept_dof].to_vec();
+    for c in 0..kept_dof {
+        let base = c * wpc;
+        pattern_hash = (pattern_hash ^ (c as u64)).wrapping_mul(FNV_PRIME);
+        pattern_hash = (pattern_hash ^ (col_counts[c] as u64)).wrapping_mul(FNV_PRIME);
+        for w in 0..wpc {
+            let mut word = bits[base + w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= word - 1;
+                let r = (w << 6) | bit;
+                if r < kept_dof {
+                    let avg = (s_dense[r * kept_dof + c] + s_dense[c * kept_dof + r]) * 0.5;
+                    if avg.abs() > 1e-12 {
+                        let slot = offsets[c];
+                        offsets[c] += 1;
+                        row_idx[slot] = r;
+                        s_values[slot] = avg;
+                        pattern_hash = (pattern_hash ^ (r as u64)).wrapping_mul(FNV_PRIME);
+                    }
+                }
+            }
+        }
+    }
+
+    let symbolic = SymbolicSparseColMat::new_checked(kept_dof, kept_dof, col_ptr, None, row_idx);
+    (symbolic, s_values, pattern_hash)
 }
 
 impl ExplicitSparseSchur {
@@ -172,8 +419,11 @@ impl ExplicitSparseSchur {
             cg_max_iterations: 200, // Match Ceres (was 500)
             cg_tolerance: 1e-6,     // Relaxed for speed (was 1e-9)
             ne_cache: LazyNormalEquations::default(),
+            extraction: None,
+            s_bitmap: None,
             hessian: None,
             gradient: None,
+            s_llt_cache: None,
         }
     }
 
@@ -272,10 +522,38 @@ impl ExplicitSparseSchur {
         self.verified_pattern = None;
         Ok(())
     }
+
+    /// Extract `H_kk` and `H_ke` through the pattern cache.
+    ///
+    /// The first call for a sparsity pattern pays [`ExtractionCache::build`];
+    /// every later call with the same pattern is two parallel gathers — the
+    /// uncached path's per-solve triplet rebuild and CSC conversion
+    /// disappears. [`Self::extract_kept_block`] and
+    /// [`Self::extract_coupling_block`] remain the reference implementations
+    /// the cache must agree with.
+    fn extract_kept_and_coupling(
+        &mut self,
+        hessian: &SparseColMat<usize, f64>,
+    ) -> LinAlgResult<(SparseColMat<usize, f64>, SparseColMat<usize, f64>)> {
+        let fingerprint = pattern::PatternFingerprint::of(hessian);
+        let cache = match self.extraction.take() {
+            Some(cache) if cache.fingerprint == fingerprint => cache,
+            _ => ExtractionCache::build(self.require_partition()?, hessian)?,
+        };
+        let out = cache.extract(hessian);
+        self.extraction = Some(cache);
+        Ok(out)
+    }
+
     /// Extract `H_kk`, the retained-retained block.
     ///
     /// Indices go through the partition rather than a contiguous range, so the
     /// retained variables need not be adjacent in column space.
+    ///
+    /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache:
+    /// production paths go through the cache, and these remain so tests can
+    /// compare cached extraction against the direct one.
+    #[cfg_attr(not(test), allow(dead_code))]
     fn extract_kept_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
@@ -308,6 +586,10 @@ impl ExplicitSparseSchur {
     ///
     /// Columns follow the eliminated-local ordering, so block `i` occupies
     /// `partition.eliminated_offset(i) .. + dof`.
+    ///
+    /// Test-only reference for [`Self::extract_kept_and_coupling`]'s cache;
+    /// see [`Self::extract_kept_block`].
+    #[cfg_attr(not(test), allow(dead_code))]
     fn extract_coupling_block(
         &self,
         hessian: &SparseColMat<usize, f64>,
@@ -367,13 +649,35 @@ impl ExplicitSparseSchur {
     /// If the initial factorization fails (matrix not positive definite),
     /// we add small regularization to the diagonal and retry.
     fn solve_with_cholesky(
-        &self,
+        &mut self,
         a: &SparseColMat<usize, f64>,
         b: &Mat<f64>,
+        pattern_hash: Option<u64>,
     ) -> LinAlgResult<Mat<f64>> {
+        // Fast path: the caller proved the filtered `S` pattern is unchanged
+        // since the last solve (same bitmap hash), so the fill-reducing
+        // ordering analysis — a fixed per-iteration cost the numerics never
+        // see — can be reused as-is. Identical symbolic + identical values
+        // means the factorization is bit-identical to the uncached path.
+        if let (Some(hash), Some((cached_hash, sym))) = (pattern_hash, self.s_llt_cache.as_ref())
+            && *cached_hash == hash
+        {
+            if let Ok(cholesky) = Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
+                return Ok(cholesky.solve(b));
+            }
+            // The cached symbolic disagrees with this matrix (pattern drift
+            // the hash missed, or a singular value structure change) — fall
+            // through and rebuild from scratch.
+            self.s_llt_cache = None;
+        }
+
         let sym = SymbolicLlt::try_new(a.symbolic(), Side::Lower).map_err(|e| {
             LinAlgError::FactorizationFailed(format!("Symbolic Cholesky failed: {:?}", e))
         })?;
+        // Cache only a first-attempt symbolic built from `a` itself: the
+        // regularization retries below widen the pattern with synthetic
+        // diagonal entries, which would poison future solves.
+        self.s_llt_cache = pattern_hash.map(|hash| (hash, sym.clone()));
 
         // First attempt: direct factorization
         match Llt::try_new_with_symbolic(sym.clone(), a.as_ref(), Side::Lower) {
@@ -549,16 +853,30 @@ impl ExplicitSparseSchur {
     /// sparse; that buffer is the current scaling limit for very large
     /// retained sets.
     fn compute_schur_complement(
-        &self,
+        &mut self,
         h_kk: &SparseColMat<usize, f64>,
         h_ke: &SparseColMat<usize, f64>,
         h_ee_inv: &EliminatedBlocks,
-    ) -> LinAlgResult<SparseColMat<usize, f64>> {
-        let partition = self.require_partition()?;
+    ) -> LinAlgResult<(SparseColMat<usize, f64>, Option<u64>)> {
+        let partition = self.require_partition()?.clone();
         let kept_dof = h_kk.nrows();
         let h_ke_symbolic = h_ke.symbolic();
+        let wpc = kept_dof.div_ceil(64);
 
         let mut s_dense = vec![0.0f64; kept_dof * kept_dof];
+
+        // Occupancy bitmap of the dense accumulator, one aligned word range
+        // per column: bit `(col, row)` set ⟺ `S[row, col]` was written.
+        // Captured as a side effect of the writes (one OR each — the update
+        // loop is bandwidth-bound, so this is free), it seeds the sparse
+        // output pattern without ever enumerating cliques or sorting
+        // triplets.
+        let extraction_fp = self.extraction.as_ref().map(|c| c.fingerprint);
+        let words = kept_dof * wpc;
+        let mut bits = match self.s_bitmap.take() {
+            Some((fp, b)) if Some(fp) == extraction_fp && b.len() == words => b,
+            _ => vec![0u64; words],
+        };
 
         // S starts as H_kk.
         let h_kk_symbolic = h_kk.symbolic();
@@ -567,6 +885,7 @@ impl ExplicitSparseSchur {
             let vals = h_kk.val_of_col(col);
             for (idx, &row) in rows.iter().enumerate() {
                 s_dense[row * kept_dof + col] += vals[idx];
+                set_dense_bit(&mut bits, wpc, row, col);
             }
         }
 
@@ -669,6 +988,7 @@ impl ExplicitSparseSchur {
                             + c1 * h_ke_rows[j * 3 + 1]
                             + c2 * h_ke_rows[j * 3 + 2];
                         s_dense[base + row_j] -= dot;
+                        set_dense_bit(&mut bits, wpc, row_i, row_j);
                     }
                 }
             } else {
@@ -682,36 +1002,50 @@ impl ExplicitSparseSchur {
                             dot += contrib_i[k] * h_ke_j[k];
                         }
                         s_dense[base + row_j] -= dot;
+                        set_dense_bit(&mut bits, wpc, row_i, row_j);
                     }
                 }
             }
         }
 
-        // Force exact symmetry: accumulation over many blocks drifts.
-        for i in 0..kept_dof {
-            for j in (i + 1)..kept_dof {
-                let avg = (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
-                s_dense[i * kept_dof + j] = avg;
-                s_dense[j * kept_dof + i] = avg;
-            }
-        }
-
-        // Back to sparse, filtering numerical noise. Row-major outer loop keeps
-        // the read sequential over the row-major buffer.
-        let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
-            Vec::with_capacity(kept_dof.saturating_mul(8));
-        for row in 0..kept_dof {
-            let row_base = row * kept_dof;
-            for col in 0..kept_dof {
-                let val = s_dense[row_base + col];
-                if val.abs() > 1e-12 {
-                    s_triplets.push(Triplet::new(row, col, val));
+        // The bitmap-derived output reproduces the legacy symmetrize →
+        // filter → sort pipeline bit-for-bit — same per-iteration pattern
+        // (the threshold applies to the current averaged values), same CSC
+        // ordering — without the triplet sort or the symmetrize pass: the
+        // pattern comes from the occupancy bits the updates set, and the
+        // values fall out of the same walk. Falls back to the literal
+        // legacy path when no extraction cache exists (direct test use).
+        let output = if self.extraction.is_some() {
+            let (symbolic, s_values, pattern_hash) =
+                build_schur_output(kept_dof, wpc, &bits, &s_dense);
+            let s = SparseColMat::new(symbolic, s_values);
+            return Ok((s, Some(pattern_hash)));
+        } else {
+            // Force exact symmetry: accumulation over many blocks drifts.
+            for i in 0..kept_dof {
+                for j in (i + 1)..kept_dof {
+                    let avg = (s_dense[i * kept_dof + j] + s_dense[j * kept_dof + i]) * 0.5;
+                    s_dense[i * kept_dof + j] = avg;
+                    s_dense[j * kept_dof + i] = avg;
                 }
             }
-        }
+            let mut s_triplets: Vec<Triplet<usize, usize, f64>> =
+                Vec::with_capacity(kept_dof.saturating_mul(8));
+            for row in 0..kept_dof {
+                let row_base = row * kept_dof;
+                for col in 0..kept_dof {
+                    let val = s_dense[row_base + col];
+                    if val.abs() > 1e-12 {
+                        s_triplets.push(Triplet::new(row, col, val));
+                    }
+                }
+            }
+            SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
+                .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))?
+        };
 
-        SparseColMat::try_new_from_triplets(kept_dof, kept_dof, &s_triplets)
-            .map_err(|e| LinAlgError::SparseMatrixCreation(format!("Schur S: {:?}", e)))
+        self.s_bitmap = Some((extraction_fp.unwrap_or_default(), bits));
+        Ok((output, None))
     }
     /// Reduced right-hand side `g_k − H_ke·H_ee⁻¹·g_e`.
     fn compute_reduced_gradient(
@@ -850,12 +1184,8 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
         // 2. Split the system. `H_ee` must be block-diagonal for the
         //    elimination to be exact; that is checked, not assumed.
         self.ensure_block_diagonal(&hessian)?;
-        let (h_kk, h_ke, g_k, g_e) = {
-            let h_kk = self.extract_kept_block(&hessian)?;
-            let h_ke = self.extract_coupling_block(&hessian)?;
-            let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
-            (h_kk, h_ke, g_k, g_e)
-        };
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
+        let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         // 3. Gather and invert the H_ee diagonal blocks (any DOF, mixed sizes).
         let mut eliminated = std::mem::take(&mut self.eliminated);
@@ -903,8 +1233,8 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
         self.ensure_block_diagonal(&hessian)?;
         let partition = self.require_partition()?;
         let kept_dof = partition.kept_dof();
-        let h_kk = self.extract_kept_block(&hessian)?;
-        let h_ke = self.extract_coupling_block(&hessian)?;
+        let num_eliminated_blocks = partition.eliminated_blocks().len();
+        let (h_kk, h_ke) = self.extract_kept_and_coupling(&hessian)?;
         let (g_k, g_e) = self.extract_gradient_blocks(&neg_gradient)?;
 
         debug!(
@@ -915,7 +1245,7 @@ impl LinearSolver<SparseMode> for ExplicitSparseSchur {
             h_kk.ncols(),
             h_ke.nrows(),
             h_ke.ncols(),
-            partition.eliminated_blocks().len()
+            num_eliminated_blocks
         );
 
         // 3. λ·D is applied to *both* sides before elimination — damping the
@@ -1030,8 +1360,8 @@ impl ExplicitSparseSchur {
         // previous solve's published system (freshness contract on
         // `LinearSolver::get_hessian`).
         let outcome = (|| -> LinAlgResult<Mat<f64>> {
-            let partition = self.require_partition()?;
-            let reduced = eliminator.eliminate(jacobian, residuals, partition, damping)?;
+            let partition = self.require_partition()?.clone();
+            let reduced = eliminator.eliminate(jacobian, residuals, &partition, damping)?;
 
             // S is accumulated dense; hand Cholesky a sparse view of it.
             let kept_dof = reduced.kept_dof;
@@ -1055,11 +1385,13 @@ impl ExplicitSparseSchur {
             for i in 0..kept_dof {
                 rhs[(i, 0)] = -reduced.g_reduced[(i, 0)];
             }
-            let delta_k = self.solve_with_cholesky(&s, &rhs)?;
+            // The chunked path rebuilds S from a different representation and
+            // carries no pattern hash — the symbolic cache stays cold here.
+            let delta_k = self.solve_with_cholesky(&s, &rhs, None)?;
 
             // δ_e = H_ee⁻¹·(−g_e − H_keᵀ·δ_k); the eliminator already holds
             // H_ee⁻¹·g_e, so only the coupling term is left to apply.
-            let delta_e = self.back_substitute_chunked(&delta_k, &reduced, jacobian, partition)?;
+            let delta_e = self.back_substitute_chunked(&delta_k, &reduced, jacobian, &partition)?;
             self.combine_updates(&delta_k, &delta_e)
         })();
 
@@ -1168,20 +1500,20 @@ impl ExplicitSparseSchur {
     /// Shared by the damped and undamped paths, which differ only in whether
     /// `h_kk` and the `H_ee` blocks already carry `λ·D`.
     fn solve_reduced_system(
-        &self,
+        &mut self,
         h_kk: &SparseColMat<usize, f64>,
         h_ke: &SparseColMat<usize, f64>,
         g_k: &Mat<f64>,
         g_e: &Mat<f64>,
         h_ee_inv: &EliminatedBlocks,
     ) -> LinAlgResult<Mat<f64>> {
-        let s = self.compute_schur_complement(h_kk, h_ke, h_ee_inv)?;
+        let (s, s_pattern_hash) = self.compute_schur_complement(h_kk, h_ke, h_ee_inv)?;
         let g_reduced = self.compute_reduced_gradient(g_k, g_e, h_ke, h_ee_inv)?;
 
         let delta_k = match self.variant {
             ExplicitSchurVariant::Iterative => self.solve_with_pcg(&s, &g_reduced, h_kk)?,
             ExplicitSchurVariant::Sparse | ExplicitSchurVariant::Chunked => {
-                self.solve_with_cholesky(&s, &g_reduced)?
+                self.solve_with_cholesky(&s, &g_reduced, s_pattern_hash)?
             }
         };
 
@@ -1421,6 +1753,56 @@ mod tests {
         ))
     }
 
+    /// The pattern-cached extraction must agree exactly with the direct
+    /// reference extractors: same pattern, same values, and a second call on
+    /// the same pattern must hit the cache and reproduce the first.
+    #[test]
+    fn cached_extraction_matches_direct_reference() -> TestResult {
+        let (variables, variable_index_map, jacobian, _residuals, landmark_keys) =
+            create_schur_test_setup()?;
+        let mut solver = ExplicitSparseSchur::new();
+        solver.initialize_structure(&variables, &variable_index_map, &landmark_keys)?;
+
+        let h_full = {
+            let mut cache =
+                crate::linalg::sparse::normal_eq::NormalEquationsCache::try_new(&jacobian)?;
+            let residuals = Mat::zeros(jacobian.nrows(), 1);
+            cache.compute(&residuals, &jacobian)?.hessian
+        };
+
+        let kk_ref = solver.extract_kept_block(&h_full)?;
+        let ke_ref = solver.extract_coupling_block(&h_full)?;
+        let (kk_first, ke_first) = solver.extract_kept_and_coupling(&h_full)?;
+        let (kk_second, ke_second) = solver.extract_kept_and_coupling(&h_full)?;
+
+        for (cached, direct, what) in [
+            (&kk_first, &kk_ref, "H_kk first call"),
+            (&kk_second, &kk_ref, "H_kk cached call"),
+            (&ke_first, &ke_ref, "H_ke first call"),
+            (&ke_second, &ke_ref, "H_ke cached call"),
+        ] {
+            assert_eq!(
+                (cached.nrows(), cached.ncols()),
+                (direct.nrows(), direct.ncols()),
+                "{what}: shape mismatch"
+            );
+            assert_eq!(cached.compute_nnz(), direct.compute_nnz(), "{what}: nnz");
+            for col in 0..direct.ncols() {
+                assert_eq!(
+                    cached.symbolic().row_idx_of_col_raw(col),
+                    direct.symbolic().row_idx_of_col_raw(col),
+                    "{what}: pattern mismatch in column {col}"
+                );
+                assert_eq!(
+                    cached.val_of_col(col),
+                    direct.val_of_col(col),
+                    "{what}: value mismatch in column {col}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// The reduced camera matrix against naive dense algebra.
     ///
     /// Pins the `dof == 3` unrolled path, the general loop, the flat
@@ -1480,7 +1862,7 @@ mod tests {
         let mut blocks = EliminatedBlocks::new(solver.partition().ok_or("partition missing")?);
         blocks.gather(&h_full, solver.partition().ok_or("partition missing")?);
         blocks.invert_in_place(solver.partition().ok_or("partition missing")?)?;
-        let s = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;
+        let (s, _) = solver.compute_schur_complement(&h_kk2, &h_ke2, &blocks)?;
 
         // Exact symmetry, then value agreement with naive dense math.
         // Entries the solver filters (|v| <= 1e-12) read back as 0.0, which
@@ -1758,7 +2140,7 @@ mod tests {
 
         // H_ee⁻¹ = 0.5·I₃
         let inv = [0.5, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5];
-        let (solver, blocks) = solver_with_block(2, 3, &inv)?;
+        let (mut solver, blocks) = solver_with_block(2, 3, &inv)?;
 
         let h_kk = SparseColMat::try_new_from_triplets(
             2,
@@ -1773,7 +2155,7 @@ mod tests {
         )
         .map_err(|e| LinAlgError::SparseMatrixCreation(format!("{e:?}")))?;
 
-        let s = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
+        let (s, _) = solver.compute_schur_complement(&h_kk, &h_ke, &blocks)?;
 
         assert_eq!(s.nrows(), 2);
         assert_eq!(s.ncols(), 2);
@@ -2457,7 +2839,7 @@ mod tests {
 
     #[test]
     fn test_solve_with_cholesky_small_spd() -> TestResult {
-        let solver = ExplicitSparseSchur::new();
+        let mut solver = ExplicitSparseSchur::new();
 
         // 2×2 SPD matrix A = [[4,1],[1,3]]
         let triplets = vec![
@@ -2470,7 +2852,7 @@ mod tests {
             SparseColMat::try_new_from_triplets(2, 2, &triplets).map_err(|e| format!("{e:?}"))?;
         let b = Mat::from_fn(2, 1, |i, _| (i + 1) as f64); // [1; 2]
 
-        let x = solver.solve_with_cholesky(&a, &b)?;
+        let x = solver.solve_with_cholesky(&a, &b, None)?;
         assert_eq!(x.nrows(), 2);
 
         // Verify: A·x ≈ b

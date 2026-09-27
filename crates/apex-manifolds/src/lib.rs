@@ -342,6 +342,13 @@ pub trait LieGroup: Clone + PartialEq {
     /// * `tangent` - Tangent vector perturbation
     /// * `jacobian_tangent` - Optional Jacobian ∂(φ ⊞ g)/∂φ
     /// * `jacobian_self` - Optional Jacobian ∂(φ ⊞ g)/∂g
+    ///
+    /// # Notes
+    /// Inputs are perturbed on the right and the result is read in its own
+    /// right-local coordinates — the convention [`Self::right_plus`],
+    /// [`Self::compose`] and [`Self::between`] implement. Under it
+    /// `∂(φ ⊞ g)/∂g = I` and `∂(φ ⊞ g)/∂φ = Ad(g)⁻¹·J_r(φ)`; both are
+    /// checked against central differences in `tests/jacobian_identities.rs`.
     fn left_plus(
         &self,
         tangent: &Self::TangentVector,
@@ -352,7 +359,20 @@ pub trait LieGroup: Clone + PartialEq {
         let result = exp_tangent.compose(self, None, None);
 
         if let Some(jac_self) = jacobian_self {
-            *jac_self = self.adjoint();
+            // The result is `exp(φ)∘g`. Perturbing `g` on the right gives
+            // `exp(φ)∘(g·exp(δ)) = (exp(φ)∘g)·exp(δ)`, so in the result's
+            // right-local coordinates the Jacobian is the identity — the
+            // very value `compose` hands back for its `other` operand,
+            // which is what this computation bottoms out in. `Rn`'s
+            // override agrees.
+            //
+            // It used to return `self.adjoint()`, which is the identity
+            // under no convention: not `I` (right perturbation of the
+            // input, right-local output — the convention `compose`,
+            // `between` and `right_plus` implement, and the one
+            // `jacobian_tangent` below already uses), and not `Ad(g)⁻¹`
+            // either (left perturbation of the input).
+            *jac_self = self.jacobian_identity_for();
         }
 
         if let Some(jac_tangent) = jacobian_tangent {
