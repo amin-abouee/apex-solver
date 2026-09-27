@@ -1,23 +1,33 @@
 # Performance Benchmarks
 
-**Hardware**: Apple Mac Mini M4, 64GB RAM
-**Build**: Rust release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**apex-solver state**: `HEAD` of `feature/update_schur_complement` — matrix-free
-Schur complement for BA (`ImplicitSparseSchur`, Schur-Jacobi preconditioner, PCG
-forcing sequence η = 1e-2), sparse Cholesky for pose graphs. The pose-graph
-numbers below are unchanged from `fc2ced6`; only the bundle-adjustment apex rows
-were re-measured.
-**Methodology**: 5 independent runs per benchmark, reported as **mean ± std**.
-Timing covers the `optimize()` call only — problem setup and metric computation
-are excluded. Bundle adjustment uses a 10-minute timeout per solver.
+**Hardware**: Apple Mac mini M4 (10 cores), 32 GB RAM, macOS
+**Build**: Rust 1.98 release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
+**Solvers**: apex-solver at `a3ef66d` (`feature/criterion`) — solver numerics are
+identical at every later commit on that branch (verified on all datasets, see
+`benchmarking_results/verification_post_a3ef66d.md`); Ceres 2.2.0; **GTSAM 4.3.0**;
+g2o 20241228; factrs and tiny-solver from `Cargo.lock`. Eigen 5.0.1 for all C++ solvers.
+apex uses the matrix-free Schur complement for BA (`ImplicitSparseSchur`,
+Schur-Jacobi preconditioner, PCG forcing sequence η = 1e-2) and sparse Cholesky
+for pose graphs.
+**Measured**: 2026-09-27.
+**Methodology**: 5 independent runs per benchmark **for every solver, C++ included**,
+reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
+and metric computation are excluded. Bundle adjustment uses a 10-minute timeout per solver.
 **Metrics**: final objective value (cost) and runtime, following the pose graph
 optimization literature ([SE-Sync, Rosen et al. IJRR 2019](https://david-m-rosen.github.io/publication/sesync-ijrr/SESync-IJRR.pdf); [Carlone et al. ICRA 2015](https://dellaert.github.io/files/Carlone15icra1.pdf)). Bundle adjustment uses reprojection RMSE and runtime ([arXiv:2409.12190](https://arxiv.org/abs/2409.12190)).
 
 Solution cost is deterministic for a fixed input and algorithm, so its std is zero; the error bars reflect runtime variation.
 
+> **GTSAM rows before 2026-09-27 were wrong.** The C++ harness compiled GTSAM
+> against eigen@3 while a system-Eigen GTSAM is built on Eigen 5; the ABI mismatch
+> built cleanly but broke linearization (with 4.3.0: LM rejected every step, 0
+> iterations, cost rising). Fixed in `14d3c82`; every GTSAM number below is from
+> the fixed harness. Earlier GTSAM rows (e.g. mit 8.3e4, BA RMSE on Ladybug 0.98)
+> should not be compared against.
+
 ## Pose Graph Optimization
 
-Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark harness directly from the G2O file for every solver, so values are comparable across implementations. `cost/(m−n)` normalizes by degrees of freedom (m = edges, n = poses) so datasets of different size are comparable.
+Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark harness directly from the G2O file for every solver, so values are comparable across implementations. `cost/(m−n)` normalizes by degrees of freedom (m = edges, n = poses) so datasets of different size are comparable. **Bold** = best cost / fastest time per dataset.
 
 ![Pose graph benchmark](plots/odometry_benchmark.png)
 
@@ -25,240 +35,245 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
 
 ### 2D Datasets (SE2)
 
+
 | Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
 |---------|--------|-----------|------------|-----------|-------|
 | **M3500** (3500 poses, 5453 edges) |
-| | apex-solver | 1.5238e+00 | 7.802e-04 | **48.2 ± 6.8** | 6 |
-| | factrs | 1.5238e+00 | 7.802e-04 | 60.7 ± 0.6 | - |
-| | tiny-solver | 2.8604e+04 | 1.465e+01 | 226.8 ± 6.2 | - |
-| | Ceres | 4.5437e+03 | 2.327e+00 | 77.6 ± 0.2 | 18 |
-| | GTSAM | 1.5111e+00 | **7.737e-04** | 74.3 ± 1.1 | 6 |
-| | g2o | 1.5109e+00 | **7.737e-04** | 112.3 ± 0.7 | 33 |
+| | apex-solver | 1.5238e+00 | 7.802e-04 | **39.2 ± 3.3** | 6 |
+| | factrs | 1.5238e+00 | 7.802e-04 | 57.5 ± 0.6 | - |
+| | tiny-solver | 2.8604e+04 | 1.465e+01 | 210.6 ± 3.2 | - |
+| | Ceres | 4.5437e+03 | 2.327e+00 | 75.3 ± 0.3 | 18 |
+| | GTSAM | 1.5109e+00 | **7.737e-04** | 43.5 ± 0.4 | 6 |
+| | g2o | 1.5109e+00 | **7.737e-04** | 107.9 ± 0.5 | 33 |
 | **mit** (808 poses, 827 edges) |
-| | apex-solver | 4.9970e+01 | **2.630e+00** | 10.4 ± 0.2 | 15 |
+| | apex-solver | 4.9970e+01 | 2.630e+00 | 9.6 ± 0.1 | 15 |
 | | factrs | 1.4831e+04 | 7.806e+02 | **3.4 ± 0.0** | - |
-| | tiny-solver | 1.1933e+04 | 6.280e+02 | 6.0 ± 0.1 | - |
-| | Ceres | 3.4865e+02 | 1.835e+01 | 11.7 ± 0.1 | 29 |
-| | GTSAM | 8.3309e+04 | 4.385e+03 | 43.4 ± 1.1 | 4 |
-| | g2o | 1.2571e+03 | 6.616e+01 | 47.6 ± 0.3 | 100 |
+| | tiny-solver | 1.1933e+04 | 6.280e+02 | 5.8 ± 0.1 | - |
+| | Ceres | 3.4865e+02 | 1.835e+01 | 11.5 ± 0.1 | 29 |
+| | GTSAM | 4.4154e+00 | **2.324e-01** | 77.2 ± 1.3 | 25 |
+| | g2o | 1.2571e+03 | 6.616e+01 | 46.6 ± 0.3 | 100 |
 | **city10000** (10000 poses, 20687 edges) |
-| | apex-solver | 4.4330e+00 | **4.148e-04** | **127.2 ± 1.0** | 5 |
-| | factrs | 4.4330e+00 | **4.148e-04** | 241.2 ± 2.0 | - |
-| | tiny-solver | 1.2237e+05 | 1.145e+01 | 1239.5 ± 5.8 | - |
-| | Ceres | 1.8045e+04 | 1.689e+00 | 389.4 ± 3.3 | 27 |
-| | GTSAM | 2.9292e+05 | 2.741e+01 | 2251.1 ± 18.6 | 22 |
-| | g2o | 4.4232e+02 | 4.139e-02 | 4423.6 ± 15.4 | 100 |
+| | apex-solver | 4.4330e+00 | 4.148e-04 | **115.8 ± 1.0** | 5 |
+| | factrs | 4.4330e+00 | 4.148e-04 | 225.8 ± 2.0 | - |
+| | tiny-solver | 1.2237e+05 | 1.145e+01 | 1081.7 ± 5.0 | - |
+| | Ceres | 1.8045e+04 | 1.689e+00 | 392.2 ± 2.2 | 27 |
+| | GTSAM | 4.3620e+00 | **4.082e-04** | 156.6 ± 1.3 | 6 |
+| | g2o | 4.4232e+02 | 4.139e-02 | 4192.6 ± 12.8 | 100 |
 | **ring** (434 poses, 459 edges) |
 | | apex-solver | 3.0176e-02 | 1.207e-03 | **2.5 ± 0.1** | 5 |
-| | factrs | 3.0176e-02 | 1.207e-03 | 4.4 ± 0.0 | - |
-| | tiny-solver | 9.8712e+02 | 3.948e+01 | 22.6 ± 0.3 | - |
-| | Ceres | 2.2188e-02 | 8.875e-04 | 3.2 ± 0.1 | 14 |
-| | GTSAM | 2.2179e-02 | **8.872e-04** | 11.7 ± 1.0 | 6 |
-| | g2o | 2.2179e-02 | **8.872e-04** | 6.5 ± 0.0 | 34 |
+| | factrs | 3.0176e-02 | 1.207e-03 | 4.3 ± 0.0 | - |
+| | tiny-solver | 9.8712e+02 | 3.948e+01 | 20.6 ± 0.2 | - |
+| | Ceres | 2.2188e-02 | 8.875e-04 | 3.1 ± 0.0 | 14 |
+| | GTSAM | 2.2179e-02 | **8.872e-04** | 9.6 ± 0.4 | 6 |
+| | g2o | 2.2179e-02 | **8.872e-04** | 6.4 ± 0.0 | 34 |
 
 ### 3D Datasets (SE3)
+
 
 | Dataset | Solver | Final Cost | cost/(m−n) | Time (ms) | Iters |
 |---------|--------|-----------|------------|-----------|-------|
 | **sphere2500** (2500 poses, 4949 edges) |
-| | apex-solver | 3.4929e+01 | 1.426e-02 | **147.7 ± 2.7** | 5 |
+| | apex-solver | 3.4912e+01 | 1.426e-02 | 143.9 ± 0.3 | 5 |
 | | factrs | - | - | - | ✗ |
-| | tiny-solver | 4.0584e+04 | 1.657e+01 | 2237.4 ± 30.1 | - |
-| | Ceres | 1.1654e+05 | 4.759e+01 | 1143.2 ± 11.7 | 90 |
-| | GTSAM | 2.1298e+01 | **8.697e-03** | 150.4 ± 2.9 | 7 |
-| | g2o | 6.4554e+01 | 2.636e-02 | 11423.0 ± 77.2 | 84 |
+| | tiny-solver | 4.0584e+04 | 1.657e+01 | 2048.9 ± 7.0 | - |
+| | Ceres | 1.1654e+05 | 4.759e+01 | 1112.2 ± 6.9 | 90 |
+| | GTSAM | 2.1291e+01 | **8.694e-03** | **88.8 ± 1.8** | 6 |
+| | g2o | 6.4554e+01 | 2.636e-02 | 10893.4 ± 52.9 | 84 |
 | **parking-garage** (1661 poses, 6275 edges) |
-| | apex-solver | 6.2789e-01 | 1.361e-04 | 53.8 ± 0.7 | 3 |
-| | factrs | 6.2778e-01 | 1.361e-04 | 466.2 ± 1.9 | - |
-| | tiny-solver | 1.2116e+05 | 2.626e+01 | 944.6 ± 6.5 | - |
-| | Ceres | 2.0103e+05 | 4.357e+01 | 260.1 ± 2.9 | 34 |
-| | GTSAM | 6.2471e-01 | **1.354e-04** | **37.9 ± 2.8** | 3 |
-| | g2o | 6.2869e-01 | 1.363e-04 | 670.7 ± 3.8 | 56 |
+| | apex-solver | 6.2809e-01 | 1.361e-04 | 47.8 ± 0.2 | 2 |
+| | factrs | 6.2777e-01 | 1.361e-04 | 440.9 ± 1.4 | - |
+| | tiny-solver | 1.2116e+05 | 2.626e+01 | 852.6 ± 7.9 | - |
+| | Ceres | 2.0103e+05 | 4.357e+01 | 267.8 ± 1.1 | 34 |
+| | GTSAM | 6.2456e-01 | **1.354e-04** | **28.3 ± 0.9** | 4 |
+| | g2o | 6.2869e-01 | 1.363e-04 | 634.5 ± 2.3 | 56 |
 | **torus3D** (5000 poses, 9048 edges) |
-| | apex-solver | 1.2413e+02 | 3.067e-02 | 1768.4 ± 26.7 | 32 |
+| | apex-solver | 1.2488e+02 | 3.085e-02 | 1907.8 ± 3.6 | 38 |
 | | factrs | - | - | - | ✗ |
 | | tiny-solver | - | - | - | ✗ |
-| | Ceres | 2.3940e+04 | 5.914e+00 | 1027.6 ± 5.3 | 38 |
-| | GTSAM | 1.2032e+02 | **2.972e-02** | **708.4 ± 6.2** | 12 |
-| | g2o | 1.4131e+02 | 3.491e-02 | 32812.1 ± 98.4 | 96 |
+| | Ceres | 2.3940e+04 | 5.914e+00 | 1006.1 ± 6.3 | 38 |
+| | GTSAM | 1.2035e+02 | **2.973e-02** | **402.9 ± 2.0** | 10 |
+| | g2o | 1.4131e+02 | 3.491e-02 | 31136.3 ± 67.6 | 96 |
 | **cubicle** (5750 poses, 16869 edges) |
-| | apex-solver | 4.6435e+03 | 4.176e-01 | 1191.1 ± 19.5 | 18 |
+| | apex-solver | 9.3491e+00 | 8.408e-04 | **361.8 ± 2.0** | 5 |
 | | factrs | - | - | - | ✗ |
-| | tiny-solver | 9.9185e+03 | 8.920e-01 | 2203.9 ± 18.7 | - |
-| | Ceres | 1.7144e+04 | 1.542e+00 | 979.3 ± 4.5 | 29 |
-| | GTSAM | 5.3897e+00 | **4.847e-04** | **603.1 ± 15.1** | 5 |
-| | g2o | 1.2771e+01 | 1.149e-03 | 8883.5 ± 32.8 | 47 |
+| | tiny-solver | 9.9185e+03 | 8.920e-01 | 1982.1 ± 23.9 | - |
+| | Ceres | 1.7144e+04 | 1.542e+00 | 955.3 ± 3.3 | 29 |
+| | GTSAM | 5.3761e+00 | **4.835e-04** | 369.8 ± 2.9 | 5 |
+| | g2o | 1.2771e+01 | 1.149e-03 | 8497.3 ± 5.7 | 47 |
 
 **Observations**:
-- **apex-solver is the fastest solver on 7 of 8 datasets** after parameter
-  tuning (all except parking-garage, where GTSAM's 3-iteration convergence
-  stands): M3500 48 ms, mit 10 ms, city10000 127 ms (3.1× vs Ceres), ring
-  2.5 ms, sphere2500 148 ms, cubicle 1.19 s — and lowest cost on mit
-  (1670× better than the next solver) and city10000.
-- The tuning (adopted 2026-09-02, sweep in `benches/odometry_pose_benchmark.rs`
-  docs): **scalar λ·I damping on the 2D suite and cubicle** (2–7× faster at
-  unchanged cost), **Marquardt λ·diag(H) retained on sphere2500/torus3D** (the
-  scalar rule trades real accuracy there), **looser tolerances on
-  parking-garage** (2.2× faster, identical cost), and **unit-weight repair for
-  indefinite-Ω edges** (cubicle's unweighted cost 3.2e4 → 4.6e3, 6.9×; those
-  edges' Ω is ill-formed input, see the information-matrix audit).
-- **Remaining 3D gaps vs GTSAM are objective trade-offs, not step quality**:
-  apex drives the Ω-weighted χ² lower on sphere2500 (1352 vs 3428) and torus3D
-  (5.68e4 vs 6.20e4) while GTSAM's unweighted cost lands lower — the two
-  objectives rank solutions differently. cubicle's residual gap (4.6e3 vs 5.4)
-  would need direct `AᵀΩA` accumulation for indefinite Ω (algorithm change).
-- **g2o** is consistently the slowest (32.8 s on torus3D, 11.4 s on
-  sphere2500); **factrs** fails on three of four 3D datasets; **tiny-solver**
-  rarely reaches a good solution; **Ceres** trails on cost (its odometry
-  configuration uses `function_tolerance = 1e-3` — configuration, not a Ceres
-  limitation).
-- apex uses sparse Cholesky for every odometry dataset; GN and Dog-Leg variants
-  exist (`pose_graph_g2o` binary) but LM is what this table compares.
+- **Speed**: apex-solver is the fastest solver on 5 of 8 datasets — M3500 (39 ms),
+  city10000 (116 ms, 1.35× GTSAM, 3.4× Ceres), ring (2.5 ms), cubicle (362 ms, level
+  with GTSAM's 370 ms) and, among solvers that reach a good solution, mit (9.6 ms;
+  factrs and tiny-solver are faster there but end at 300× apex's cost). **GTSAM 4.3 is
+  fastest on the three remaining 3D sets**: sphere2500 (89 vs 144 ms), parking-garage
+  (28 vs 48 ms) and torus3D (403 ms vs 1.91 s — apex needs 38 iterations to GTSAM's 10).
+- **Cost**: GTSAM 4.3 reaches the lowest `cost/(m−n)` on **all 8** datasets (tied with
+  g2o on M3500 and ring). apex's final cost is within 1 % of it on M3500 (1.5238 vs
+  1.5109) and parking-garage (0.6281 vs 0.6246), within 4 % on city10000 (+1.6 %) and
+  torus3D (+3.8 %), and materially higher on ring (0.0302 vs 0.0222, +36 %), sphere2500
+  (34.91 vs 21.29), cubicle (9.35 vs 5.38) and mit (49.97 vs 4.42). mit is the one where apex was previously reported as
+  best by a wide margin — that comparison was against the broken GTSAM build.
+- apex's cubicle cost is 9.35 (was 4.6e3 in the previous edition of this page — the
+  indefinite-Ω repair and the estimation-correctness fixes since then).
+- **g2o** is consistently the slowest (31.1 s on torus3D, 10.9 s on sphere2500);
+  **factrs** fails to load three of four 3D datasets; **tiny-solver** rarely reaches a
+  good solution; **Ceres** trails on cost (its odometry configuration uses
+  `function_tolerance = 1e-3` — configuration, not a Ceres limitation).
+- apex uses sparse Cholesky for every odometry dataset; GN and Dog-Leg variants exist
+  (`pose_graph_g2o` binary) but LM is what this table compares.
 
 ## Bundle Adjustment (Self-Calibration)
 
 Large-scale BAL datasets, optimizing **camera poses, 3D landmarks, and camera
-intrinsics simultaneously**. apex-solver uses the **matrix-free Schur complement**
-(`ImplicitSparseSchur`: neither `JᵀJ` nor `S` is formed; the reduced operator is
-applied straight from `J` inside PCG, Schur-Jacobi preconditioner, forcing
-sequence η = 1e-2) with a Huber loss (δ = 1 px).
+intrinsics simultaneously**, Huber loss (δ = 1 px) for every solver. apex-solver
+runs its library default, the **matrix-free Schur complement** (`ImplicitSparseSchur`:
+neither `JᵀJ` nor `S` is formed; the reduced operator is applied straight from `J`
+inside PCG, Schur-Jacobi preconditioner, forcing sequence η = 1e-2), capped at 20
+LM iterations (21 evaluations). **Bold** = best RMSE / fastest time per dataset.
 
 ![Bundle adjustment benchmark](plots/ba_benchmark.png)
 
 *[Interactive version](plots/ba_benchmark.html)*
 
+
 | Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
-|---------|--------|---------|-----------|--------------|-----------------|----------|-------|
+|---|---|---|---|---|---|---|---|
 | **Ladybug** |
-| | apex-solver | 1,723 | 156,502 | 678,718 | **0.8765 ± 0.0000** | **18.8 ± 0.1** | 21 |
-| | Ceres * | 1,723 | 156,502 | 678,718 | 1.1677 | 22.7 | 101 |
-| | GTSAM * | 1,723 | 156,502 | 678,718 | 0.9812 | 83.6 | 2 |
-| | g2o * | 1,723 | 156,502 | 678,718 | 13.5074 | 153.2 | 20 |
+| | apex-solver | 1,723 | 156,502 | 678,718 | 0.8747 ± 0.0000 | 22.0 ± 0.3 | 21 |
+| | Ceres (iterative_schur) | 1,723 | 156,502 | 678,718 | 1.1676 ± 0.0012 | **19.0 ± 1.8** | 101 |
+| | GTSAM | 1,723 | 156,502 | 678,718 | **0.6372 ± 0.0000** | 97.3 ± 0.4 | 16 |
+| | g2o | 1,723 | 156,502 | 678,718 | 13.5074 ± 0.0000 | 150.8 ± 0.2 | 20 |
 | **Trafalgar** |
-| | apex-solver | 257 | 65,132 | 225,911 | 0.7981 ± 0.0000 | **6.3 ± 0.0** | 9 |
-| | Ceres * | 257 | 65,132 | 225,911 | 1.3241 | 37.3 | 101 |
-| | GTSAM * | 257 | 65,132 | 225,911 | **0.6259** | 59.4 | 100 |
-| | g2o * | 257 | 65,132 | 225,911 | 8.1506 | 17.0 | 20 |
+| | apex-solver | 257 | 65,132 | 225,911 | 0.7728 ± 0.0000 | 18.0 ± 0.2 | 21 |
+| | Ceres (iterative_schur) | 257 | 65,132 | 225,911 | 1.3082 ± 0.0135 | 45.6 ± 7.1 | 101 |
+| | GTSAM | 257 | 65,132 | 225,911 | **0.6242 ± 0.0000** | **14.1 ± 0.1** | 26 |
+| | g2o | 257 | 65,132 | 225,911 | 8.1506 ± 0.0000 | 16.2 ± 0.1 | 20 |
 | **Dubrovnik** |
-| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7686 ± 0.0000 | **31.5 ± 0.2** | 17 |
-| | Ceres * | 356 | 226,730 | 1,255,268 | 1.0036 | 80.7 | 101 |
-| | GTSAM * | 356 | 226,730 | 1,255,268 | **0.5622** | 120.3 | 31 |
-| | g2o * | 356 | 226,730 | 1,255,268 | 12.1678 | 35.4 | 20 |
-| **Venice** (largest) |
-| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7521 ± 0.0000** | **20.3 ± 0.1** | 2 |
-| | Ceres * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
-| | GTSAM * | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
-| | g2o * | 1,778 | 993,923 | 5,001,946 | 10.1261 | 253.5 | 20 |
+| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7432 ± 0.0000 | 122.1 ± 0.4 | 21 |
+| | Ceres (iterative_schur) | 356 | 226,730 | 1,255,268 | 1.0036 ± 0.0000 | 78.4 ± 6.7 | 101 |
+| | GTSAM | 356 | 226,730 | 1,255,268 | **0.5476 ± 0.0000** | 74.4 ± 0.3 | 29 |
+| | g2o | 356 | 226,730 | 1,255,268 | 12.1678 ± 0.0000 | **34.7 ± 0.1** | 20 |
+| **Venice** |
+| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7451 ± 0.0000** | **22.2 ± 0.6** | 2 |
+| | Ceres | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
+| | GTSAM | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
+| | g2o | 1,778 | 993,923 | 5,001,946 | 10.1261 ± 0.0000 | 245.7 ± 0.6 | 20 |
+
+apex also initializes the focal length by self-calibration, so its starting RMSE is
+lower than the Ceres / g2o rows' (e.g. Dubrovnik 3.98 px vs 12.98 px); GTSAM's harness
+starts lower still (2.81 px).
+
+**Observations**:
+- **Scalability**: apex-solver is the only solver besides g2o to finish **Venice**
+  (5 M observations) inside the 10-minute timeout — 0.745 px in 22 s; Ceres and GTSAM
+  both time out, and g2o barely moves (10.128 → 10.126 px in 246 s).
+- **Accuracy — GTSAM 4.3 leads on the three datasets it finishes**: Ladybug 0.637 vs
+  apex 0.875 px, Trafalgar 0.624 vs 0.773, Dubrovnik 0.548 vs 0.743. This is the open
+  item on this benchmark; the forcing-sequence inexactness accounts for ~1 % of it (the
+  exact `ExplicitSparseSchur` lands within 1.2 % of the implicit RMSE, table below),
+  so it is a genuine difference in the optimum reached, not a tolerance artefact.
+- **Speed**: apex is fastest on Venice, within 1.2× of the fastest on Ladybug (22.0 s vs
+  Ceres 19.0 s, whose RMSE is 1.17 px), and slower than GTSAM on Trafalgar (18.0 vs
+  14.1 s) and Dubrovnik (122 vs 74 s).
+- **Why apex's BA times are higher than in the previous edition** (Trafalgar 6.3 s →
+  18.0 s, Dubrovnik 31.5 s → 122 s): commit `f078711` fixed the gauge-fixed camera
+  being solved as a free variable and zeroed afterwards. Before it, LM's step-quality
+  check compared the model decrease of one step with the cost change of another and
+  stopped early (9 / 17 iterations) at a worse optimum; with the fix every dataset
+  reaches a **lower** RMSE (Trafalgar 0.798 → 0.773, Dubrovnik 0.769 → 0.743), but the
+  implicit solver now runs to the iteration cap. See
+  `benchmarking_results/verification_post_a3ef66d.md` §6.
+- **g2o** never meaningfully reduces reprojection error within its 20-iteration cap.
 
 ### Schur solver comparison
 
 All four sparse Schur configurations on the same four datasets, 3 runs each,
-`APEX_BENCH_RUST_ONLY=1`. `ExplicitSparseSchur / Sparse` solves the reduced
-system exactly and is the RMSE reference; the two PCG paths stop on the forcing
-sequence, so their steps are deliberately inexact.
+`APEX_BENCH_RUST_ONLY=1`, same machine and revision as above.
+`ExplicitSparseSchur / Sparse` solves the reduced system exactly and is the RMSE
+reference; the two PCG paths stop on the forcing sequence, so their steps are
+deliberately inexact.
 
 | Dataset | Solver | Final RMSE | Time (s) | Iters | × Sparse |
 |---|---|---|---|---|---|
-| **Ladybug** | ExplicitSparseSchur / Sparse | 0.875283 | 75.24 ± 0.73 | 21 | 1.00× |
-| | ExplicitSparseSchur / Chunked | 0.875283 | 91.17 ± 1.20 | 21 | 1.21× |
-| | ExplicitSparseSchur / Iterative | 0.879296 | 39.50 ± 0.67 | 21 | 0.52× |
-| | **ImplicitSparseSchur** | 0.876538 | **18.76 ± 0.04** | 21 | **0.25×** |
-| **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.808522 | **2.51 ± 0.02** | 7 | **1.00×** |
-| | ExplicitSparseSchur / Chunked | 0.808522 | 4.08 ± 0.04 | 7 | 1.63× |
-| | ExplicitSparseSchur / Iterative | 0.798042 | 3.28 ± 0.02 | 9 | 1.31× |
-| | ImplicitSparseSchur | 0.798081 | 6.27 ± 0.00 | 9 | 2.50× |
-| **Dubrovnik** | ExplicitSparseSchur / Sparse | 0.787517 | 41.91 ± 0.79 | 17 | 1.00× |
-| | ExplicitSparseSchur / Chunked | 0.787517 | 85.87 ± 0.27 | 17 | 2.05× |
-| | ExplicitSparseSchur / Iterative | 0.768740 | 40.50 ± 0.21 | 17 | 0.97× |
-| | **ImplicitSparseSchur** | 0.768611 | **31.34 ± 0.08** | 17 | **0.75×** |
-| **Venice** | ExplicitSparseSchur / Sparse | 0.747589 | 51.15 ± 2.27 | 2 | 1.00× |
-| | ExplicitSparseSchur / Chunked | 0.747589 | 61.62 ± 1.06 | 2 | 1.20× |
-| | ExplicitSparseSchur / Iterative | 0.752070 | 43.89 ± 1.47 | 2 | 0.86× |
-| | **ImplicitSparseSchur** | 0.752080 | **20.23 ± 0.06** | 2 | **0.40×** |
+| **Ladybug** | ExplicitSparseSchur / Sparse | 0.874205 | 61.75 ± 0.29 | 21 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.874205 | 88.51 ± 0.26 | 21 | 1.43× |
+| | ExplicitSparseSchur / Iterative | 0.874795 | 31.12 ± 0.05 | 21 | 0.50× |
+| | **ImplicitSparseSchur** | 0.874681 | **21.84 ± 0.13** | 21 | **0.35×** |
+| **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.779496 | **3.36 ± 0.02** | 11 | **1.00×** |
+| | ExplicitSparseSchur / Chunked | 0.779496 | 6.10 ± 0.04 | 11 | 1.82× |
+| | ExplicitSparseSchur / Iterative | 0.770103 | 6.83 ± 0.00 | 21 | 2.03× |
+| | ImplicitSparseSchur | 0.772831 | 17.89 ± 0.02 | 21 | 5.32× |
+| **Dubrovnik** | **ExplicitSparseSchur / Sparse** | 0.743998 | **24.65 ± 0.12** | 10 | **1.00×** |
+| | ExplicitSparseSchur / Chunked | 0.743998 | 51.36 ± 0.07 | 10 | 2.08× |
+| | ExplicitSparseSchur / Iterative | 0.743206 | 51.40 ± 0.04 | 21 | 2.09× |
+| | ImplicitSparseSchur | 0.743193 | 123.11 ± 0.41 | 21 | 4.99× |
+| **Venice** | ExplicitSparseSchur / Sparse | 0.736946 | 53.58 ± 0.57 | 2 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.736946 | 64.24 ± 0.36 | 2 | 1.20× |
+| | ExplicitSparseSchur / Iterative | 0.745048 | 45.32 ± 0.58 | 2 | 0.85× |
+| | **ImplicitSparseSchur** | 0.745052 | **22.27 ± 0.24** | 2 | **0.42×** |
+
+- The explicit-sparse path is 1.22× faster than in the previous edition on Ladybug at
+  the same 21 iterations (75.2 → 61.8 s: the optimization program's pattern-cached
+  extraction, bitmap Schur output, CSC gather assembly and symbolic-Cholesky cache).
+  Dubrovnik (41.9 → 24.7 s) also needs fewer iterations now (17 → 10, after `f078711`),
+  so its gain is not purely per-iteration.
+- **The library default is no longer the fastest choice on every dataset.** On
+  Trafalgar and Dubrovnik the exact solve converges in 10–11 iterations while both
+  PCG paths run to the cap, making `ExplicitSparseSchur / Sparse` 5× faster than the
+  implicit default at an RMSE within 1 % (Dubrovnik 0.7440 vs 0.7432, Trafalgar 0.7795
+  vs 0.7728). Implicit remains the right default where
+  memory or problem size rules out forming `S` (Ladybug, Venice: 2.4–2.8× faster).
+- These numbers supersede the previous table, which was recorded while
+  `APEX_BENCH_SCHUR=sparse|chunked|explicit-iterative` silently ran the implicit
+  solver (fixed in `5a912b8`).
 
 `ExplicitDenseSchur` cannot run these datasets — a dense `JᵀJ` for the smallest
-of them would be ~485k × 485k. On its truncated row (`Ladybug-mini-4cam`: 4
-cameras, 1,685 landmarks, 3,256 observations) it reaches **0.405324** in 36.6 s,
-bit-identical to `ExplicitSparseSchur` on the same subset (0.07 s) — the dense
-path is for problems of a few thousand DOF, not for BAL.
-
-\* C++ rows are a **single context run** (2026-09-05, same session as the apex
-rows); apex rows are mean ± std of 3 runs. apex also initializes the focal length by self-calibration, so its
-starting RMSE is closer than the C++ rows'.
-
-**Observations**:
-- **Scalability**: apex-solver remains the only solver to finish Venice within
-  the timeout (5M observations, 0.748 px in 52.4 s). Ceres and GTSAM still
-  exceed the 10-minute timeout; g2o finishes but barely moves (10.128 → 10.126 px).
-- **Accuracy vs the previous table**: apex's RMSE is *higher* than the 15 Aug
-  numbers (e.g. Ladybug 0.7700 → 0.8765) — this is **not** a solver regression.
-  The Aug 6 robust-cost fix changed the objective apex minimizes to the true
-  `½·Σρ(s)` (Ceres convention, with the same Huber loss as the C++ rows).
-  With the loss neutralized the least-squares path is bit-identical
-  before/after, so the delta is an objective change, not solver math.
-  A robust optimum also has higher raw RMSE by construction (outliers are
-  downweighted).
-- **Speed — apex is fastest on all four**: 18.8 s vs Ceres 22.7 s on Ladybug,
-  6.3 s vs g2o 17.0 s on Trafalgar, 31.5 s vs g2o 35.4 s on Dubrovnik, and
-  20.3 s on Venice where only g2o finishes at all (253.5 s). Ladybug used to be
-  Ceres's win (22.7 s vs our 76.3 s) precisely because Ceres's `ITERATIVE_SCHUR`
-  is matrix-free and forcing-sequence-terminated; apex now does both.
-- **Accuracy — apex is lowest on two of four**, not all: it wins Ladybug
-  (0.8765 vs GTSAM 0.9812) and Venice (0.7521, the only finisher besides g2o's
-  10.1261), but **GTSAM reaches a clearly better optimum on Trafalgar (0.6259 vs
-  0.7981) and Dubrovnik (0.5622 vs 0.7686)** — 22% and 27% margins, far larger
-  than the ~1% the forcing sequence accounts for, so this is a genuine gap in
-  the solution reached rather than a tolerance artefact. It is the open item on
-  this benchmark.
-- **The default changed**: `LevenbergMarquardtConfig::for_bundle_adjustment`
-  selects `ImplicitSparseSchur`, not the direct solver. It is 2.2× faster in
-  total across the suite, better RMSE on Trafalgar and Dubrovnik, at most 0.6%
-  worse on Ladybug and Venice, and forms neither `JᵀJ` nor `S`. Its one loss is
-  Trafalgar, the smallest set, where the reduced system is small enough that a
-  direct factorization wins. Use `ExplicitSparseSchur` when the reduced solve
-  must be exact — its step does not depend on a tolerance.
-- **g2o** never meaningfully reduces reprojection error within its 20-iteration cap.
+of them would be ~485k × 485k; it is for problems of a few thousand DOF
+(`APEX_BENCH_SCHUR=explicit-dense` runs a truncated Ladybug instead).
 
 ---
 
 ## Reproducing
 
 ```bash
-# 5 runs each, raw per-run CSVs archived to output/runs/
+# 5 runs each (Rust and C++ solvers), raw per-run CSVs archived to output/runs/
 bash benches/tools/run_repeated.sh odometry_pose_benchmark 5
+bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5   # ~3 h: Venice times out Ceres and GTSAM
 
-# BA, apex-only 5 runs (C++ rows below were produced by one context run of the
-# same command WITHOUT the env var — Venice Ceres/GTSAM consume the timeout):
-APEX_BENCH_RUST_ONLY=1 bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5
+# Schur solver comparison (apex only)
+for v in sparse chunked explicit-iterative iterative; do
+  APEX_BENCH_RUST_ONLY=1 APEX_BENCH_SCHUR=$v cargo bench --bench bundle_adjustment_benchmark
+done
 
 # aggregate to output/*_aggregated.csv and render doc/plots/*.{html,png}
 uv run --with plotly --with kaleido --with pandas benches/tools/plot_benchmarks.py
 ```
 
+If the C++ solvers were upgraded, delete `benches/cpp_comparison/build/` first: the
+benchmarks skip the CMake step whenever the executables already exist.
+
 ### Selecting a Schur solver
 
-`APEX_BENCH_SCHUR` selects which of apex-solver's three Schur complement
+`APEX_BENCH_SCHUR` selects which of apex-solver's Schur complement
 solvers `bundle_adjustment_benchmark` runs, and — when the C++ comparison
 binaries are also built — forwards the matching `CERES_LINEAR_SOLVER` value
 to `ceres_ba_benchmark` so the two sides compare the same conceptual solver:
 
 | `APEX_BENCH_SCHUR` | apex-solver | Ceres (`CERES_LINEAR_SOLVER`) |
 |---|---|---|
-| `sparse` (default) | `ExplicitSparseSchur` / `Sparse` | `sparse_schur` (`SPARSE_SCHUR`) |
+| unset (default) | library default: `ImplicitSparseSchur` | Ceres default (`iterative_schur` in the harness) |
+| `sparse` | `ExplicitSparseSchur` / `Sparse` | `sparse_schur` (`SPARSE_SCHUR`) |
 | `chunked` | `ExplicitSparseSchur` / `Chunked` | `sparse_schur` (algebraically identical `S`) |
 | `iterative` | `ImplicitSparseSchur` | `iterative_schur` (`ITERATIVE_SCHUR` + `SCHUR_JACOBI`) |
 | `explicit-iterative` | `ExplicitSparseSchur` / `Iterative` | `iterative_schur` (closest Ceres equivalent) |
 | `explicit-dense` | `ExplicitDenseSchur` | `dense_schur` (`DENSE_SCHUR`) |
 
-`explicit-dense` does **not** run the four BAL datasets — a dense `JᵀJ` over the smallest of
-them would be ~485k × 485k. It runs `Ladybug-mini-<N>cam` instead: Ladybug truncated to its
-first `N` cameras (`APEX_BENCH_DENSE_CAMERAS`, default 4) and the landmarks they observe,
-solved twice — once with `ExplicitDenseSchur` and once with `ExplicitSparseSchur` on the
-identical subset, so the row carries its own accuracy reference.
-
-```bash
-APEX_BENCH_SCHUR=iterative bash benches/tools/run_repeated.sh bundle_adjustment_benchmark 5
-```
+`explicit-dense` does **not** run the four BAL datasets. It runs `Ladybug-mini-<N>cam`
+instead: Ladybug truncated to its first `N` cameras (`APEX_BENCH_DENSE_CAMERAS`,
+default 4) and the landmarks they observe, solved twice — once with
+`ExplicitDenseSchur` and once with `ExplicitSparseSchur` on the identical subset, so
+the row carries its own accuracy reference.
 
 `ceres_ba_benchmark` can also be pointed at a specific solver directly:
 `CERES_LINEAR_SOLVER=dense_schur ./ceres_ba_benchmark path/to/problem.txt`.
