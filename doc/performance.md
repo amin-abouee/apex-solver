@@ -2,16 +2,18 @@
 
 **Hardware**: Apple Mac mini M4 (10 cores), 32 GB RAM, macOS
 **Build**: Rust 1.98 release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**Solvers**: apex-solver at `a3ef66d` (`feature/criterion`) — solver numerics are
-identical at every later commit on that branch (verified on all datasets, see
-`benchmarking_results/verification_post_a3ef66d.md`); Ceres 2.2.0; **GTSAM 4.3.0**;
+**Solvers**: apex-solver on `feature/criterion` — pose-graph rows measured at
+`a3ef66d`, bundle-adjustment rows at `69f717e` (row-parallel implicit Schur
+operator, Exp 008). Solver numerics are identical across that range on every
+dataset (see `benchmarking_results/verification_post_a3ef66d.md` and
+`baseline_vs_current_m4.md`), so only BA timing moved; Ceres 2.2.0; **GTSAM 4.3.0**;
 g2o 20241228; factrs and tiny-solver from `Cargo.lock`. Eigen 5.0.1 for all C++ solvers.
 apex uses the matrix-free Schur complement for BA (`ImplicitSparseSchur`,
 Schur-Jacobi preconditioner, PCG forcing sequence η = 1e-2) and sparse Cholesky
 for pose graphs.
 **Measured**: 2026-09-27.
-**Methodology**: 5 independent runs per benchmark **for every solver, C++ included**,
-reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
+**Methodology**: 5 independent runs per benchmark **for every solver, C++ included**
+(apex BA rows: 3 runs of `69f717e`), reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
 and metric computation are excluded. Bundle adjustment uses a 10-minute timeout per solver.
 **Metrics**: final objective value (cost) and runtime, following the pose graph
 optimization literature ([SE-Sync, Rosen et al. IJRR 2019](https://david-m-rosen.github.io/publication/sesync-ijrr/SESync-IJRR.pdf); [Carlone et al. ICRA 2015](https://dellaert.github.io/files/Carlone15icra1.pdf)). Bundle adjustment uses reprojection RMSE and runtime ([arXiv:2409.12190](https://arxiv.org/abs/2409.12190)).
@@ -140,22 +142,22 @@ LM iterations (21 evaluations). **Bold** = best RMSE / fastest time per dataset.
 | Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
 |---|---|---|---|---|---|---|---|
 | **Ladybug** |
-| | apex-solver | 1,723 | 156,502 | 678,718 | 0.8747 ± 0.0000 | 22.0 ± 0.3 | 21 |
+| | apex-solver | 1,723 | 156,502 | 678,718 | 0.8747 ± 0.0000 | 20.0 ± 0.2 | 21 |
 | | Ceres (iterative_schur) | 1,723 | 156,502 | 678,718 | 1.1676 ± 0.0012 | **19.0 ± 1.8** | 101 |
 | | GTSAM | 1,723 | 156,502 | 678,718 | **0.6372 ± 0.0000** | 97.3 ± 0.4 | 16 |
 | | g2o | 1,723 | 156,502 | 678,718 | 13.5074 ± 0.0000 | 150.8 ± 0.2 | 20 |
 | **Trafalgar** |
-| | apex-solver | 257 | 65,132 | 225,911 | 0.7728 ± 0.0000 | 18.0 ± 0.2 | 21 |
+| | apex-solver | 257 | 65,132 | 225,911 | 0.7728 ± 0.0000 | 14.2 ± 0.4 | 21 |
 | | Ceres (iterative_schur) | 257 | 65,132 | 225,911 | 1.3082 ± 0.0135 | 45.6 ± 7.1 | 101 |
 | | GTSAM | 257 | 65,132 | 225,911 | **0.6242 ± 0.0000** | **14.1 ± 0.1** | 26 |
 | | g2o | 257 | 65,132 | 225,911 | 8.1506 ± 0.0000 | 16.2 ± 0.1 | 20 |
 | **Dubrovnik** |
-| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7432 ± 0.0000 | 122.1 ± 0.4 | 21 |
+| | apex-solver | 356 | 226,730 | 1,255,268 | 0.7432 ± 0.0000 | 88.3 ± 0.0 | 21 |
 | | Ceres (iterative_schur) | 356 | 226,730 | 1,255,268 | 1.0036 ± 0.0000 | 78.4 ± 6.7 | 101 |
 | | GTSAM | 356 | 226,730 | 1,255,268 | **0.5476 ± 0.0000** | 74.4 ± 0.3 | 29 |
 | | g2o | 356 | 226,730 | 1,255,268 | 12.1678 ± 0.0000 | **34.7 ± 0.1** | 20 |
 | **Venice** |
-| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7451 ± 0.0000** | **22.2 ± 0.6** | 2 |
+| | apex-solver | 1,778 | 993,923 | 5,001,946 | **0.7451 ± 0.0000** | **19.9 ± 0.4** | 2 |
 | | Ceres | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
 | | GTSAM | 1,778 | 993,923 | 5,001,946 | TIMEOUT | TIMEOUT | - |
 | | g2o | 1,778 | 993,923 | 5,001,946 | 10.1261 ± 0.0000 | 245.7 ± 0.6 | 20 |
@@ -176,7 +178,7 @@ starts lower still (2.81 px).
   at a *lower* cost there, e.g. Trafalgar 6.746e4 vs 6.863e4). Ladybug (‖x‖ = 3.1e5) is
   unaffected: every solver runs to the cap.
 - **Scalability**: apex-solver is the only solver besides g2o to finish **Venice**
-  (5 M observations) inside the 10-minute timeout — 0.745 px in 22 s, i.e. 2 LM
+  (5 M observations) inside the 10-minute timeout — 0.745 px in 20 s, i.e. 2 LM
   iterations ended by the test above; Ceres and GTSAM both time out, and g2o barely
   moves (10.128 → 10.126 px in 246 s over 20 iterations).
 - **Accuracy — GTSAM 4.3 leads on the three datasets it finishes**: Ladybug 0.637 vs
@@ -184,11 +186,13 @@ starts lower still (2.81 px).
   item on this benchmark; the forcing-sequence inexactness accounts for ~1 % of it (the
   exact `ExplicitSparseSchur` lands within 1.2 % of the implicit RMSE, table below),
   so it is a genuine difference in the optimum reached, not a tolerance artefact.
-- **Speed**: apex is fastest on Venice, within 1.2× of the fastest on Ladybug (22.0 s vs
-  Ceres 19.0 s, whose RMSE is 1.17 px), and slower than GTSAM on Trafalgar (18.0 vs
-  14.1 s) and Dubrovnik (122 vs 74 s).
+- **Speed**: apex is fastest on Venice (19.9 s), within 1.05× of the fastest on Ladybug
+  (20.0 s vs Ceres 19.0 s, whose RMSE is 1.17 px) and level with GTSAM on Trafalgar
+  (14.2 vs 14.1 s); GTSAM is faster on Dubrovnik (74 vs 88 s). The row-parallel implicit
+  operator (`69f717e`, Exp 008) took 16–31 % off apex's Ladybug / Trafalgar / Dubrovnik
+  times at identical RMSE and iteration counts (`benchmarking_results/baseline_vs_current_m4.md`).
 - **Why apex's BA times are higher than in the previous edition** (Trafalgar 6.3 s →
-  18.0 s, Dubrovnik 31.5 s → 122 s): commit `f078711` fixed the gauge-fixed camera
+  14.2 s, Dubrovnik 31.5 s → 88 s): commit `f078711` fixed the gauge-fixed camera
   being solved as a free variable and zeroed afterwards. Before it, LM's step-quality
   check compared the model decrease of one step with the cost change of another and
   stopped early (9 / 17 iterations) at a worse optimum; with the fix every dataset
@@ -210,19 +214,19 @@ deliberately inexact.
 | **Ladybug** | ExplicitSparseSchur / Sparse | 0.874205 | 61.75 ± 0.29 | 21 | 1.00× |
 | | ExplicitSparseSchur / Chunked | 0.874205 | 88.51 ± 0.26 | 21 | 1.43× |
 | | ExplicitSparseSchur / Iterative | 0.874795 | 31.12 ± 0.05 | 21 | 0.50× |
-| | **ImplicitSparseSchur** | 0.874681 | **21.84 ± 0.13** | 21 | **0.35×** |
+| | **ImplicitSparseSchur** | 0.874681 | **20.01 ± 0.22** | 21 | **0.32×** |
 | **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.779496 | **3.36 ± 0.02** | 11 | **1.00×** |
 | | ExplicitSparseSchur / Chunked | 0.779496 | 6.10 ± 0.04 | 11 | 1.82× |
 | | ExplicitSparseSchur / Iterative | 0.770103 | 6.83 ± 0.00 | 21 | 2.03× |
-| | ImplicitSparseSchur | 0.772831 | 17.89 ± 0.02 | 21 | 5.32× |
+| | ImplicitSparseSchur | 0.772831 | 14.23 ± 0.44 | 21 | 4.23× |
 | **Dubrovnik** | **ExplicitSparseSchur / Sparse** | 0.743998 | **24.65 ± 0.12** | 10 | **1.00×** |
 | | ExplicitSparseSchur / Chunked | 0.743998 | 51.36 ± 0.07 | 10 | 2.08× |
 | | ExplicitSparseSchur / Iterative | 0.743206 | 51.40 ± 0.04 | 21 | 2.09× |
-| | ImplicitSparseSchur | 0.743193 | 123.11 ± 0.41 | 21 | 4.99× |
+| | ImplicitSparseSchur | 0.743193 | 88.27 ± 0.04 | 21 | 3.58× |
 | **Venice** | ExplicitSparseSchur / Sparse | 0.736946 | 53.58 ± 0.57 | 2 | 1.00× |
 | | ExplicitSparseSchur / Chunked | 0.736946 | 64.24 ± 0.36 | 2 | 1.20× |
 | | ExplicitSparseSchur / Iterative | 0.745048 | 45.32 ± 0.58 | 2 | 0.85× |
-| | **ImplicitSparseSchur** | 0.745052 | **22.27 ± 0.24** | 2 | **0.42×** |
+| | **ImplicitSparseSchur** | 0.745052 | **19.90 ± 0.41** | 2 | **0.37×** |
 
 - The explicit-sparse path is 1.22× faster than in the previous edition on Ladybug at
   the same 21 iterations (75.2 → 61.8 s: the optimization program's pattern-cached
@@ -230,12 +234,13 @@ deliberately inexact.
   Dubrovnik (41.9 → 24.7 s) also needs fewer iterations now (17 → 10, after `f078711`),
   so its gain is not purely per-iteration.
 - **Read the Trafalgar / Dubrovnik rows with the parameter-tolerance caveat above.**
-  `ExplicitSparseSchur / Sparse` is 5× faster there because its 10th–11th step happens to
+  `ExplicitSparseSchur / Sparse` is 3.6–4.2× faster there because its 10th–11th step happens to
   fall under the ≈ 110 / 40 absolute threshold the degenerate cameras create, while the
   PCG paths' steps stay longer and run to the cap — reaching a lower cost (Trafalgar
-  RMSE 0.7728 vs 0.7795). Per iteration, explicit / Sparse is 0.31 s vs implicit 0.85 s on
-  Trafalgar and 2.5 s vs 5.9 s on Dubrovnik; implicit is 2.4–2.8× faster in total on
-  Ladybug and Venice, where the iteration counts match.
+  RMSE 0.7728 vs 0.7795). Per iteration, explicit / Sparse is 0.31 s vs implicit 0.68 s on
+  Trafalgar and 2.5 s vs 4.2 s on Dubrovnik; implicit is 2.7–3.1× faster in total on
+  Ladybug and Venice, where the iteration counts match. (Explicit rows measured at
+  `a3ef66d`; Exp 008 does not touch the explicit path. Implicit rows at `69f717e`.)
 - These numbers supersede the previous table, which was recorded while
   `APEX_BENCH_SCHUR=sparse|chunked|explicit-iterative` silently ran the implicit
   solver (fixed in `5a912b8`).
