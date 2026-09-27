@@ -105,8 +105,11 @@ pub fn build_symbolic_structure(
                 let Some(&(local_col, var_size)) = var_local_sizes.get(i) else {
                     continue;
                 };
+                let free_cols: smallvec::SmallVec<[(usize, usize); 16]> =
+                    free_local_columns(variable.as_ref(), var_size).collect();
+                triples.reserve(residual_dim * free_cols.len());
                 for row in 0..residual_dim {
-                    for (col, free_col) in free_local_columns(variable.as_ref(), var_size) {
+                    for &(col, free_col) in &free_cols {
                         // Jacobian arena is column-major over the block:
                         // buf[(local_col + col) * residual_dim + row].
                         triples.push((
@@ -120,56 +123,103 @@ pub fn build_symbolic_structure(
         }
     }
 
-    // CSC order: grouped by column, rows ascending within a column. A stable
-    // sort keeps duplicate pairs in push order, so their summation order
-    // matches the pre-plan behavior.
-    triples.sort_by_key(|&(c, r, _)| (c, r));
-
-    let mut col_ptr = vec![0usize; total_dof + 1];
-    let mut row_idx = Vec::with_capacity(triples.len());
-    let mut scatter_ops = Vec::<ScatterOp>::with_capacity(triples.len());
-    let mut has_duplicates = false;
-    let mut prev: Option<(usize, usize)> = None;
-    let mut last_dest = 0u32;
-    for &(c, r, src) in &triples {
-        let duplicate = prev == Some((c, r));
-        if duplicate {
-            // faer's argsort semantics: a duplicated (row, col) pair sums
-            // into the first occurrence's value slot.
-            has_duplicates = true;
-            scatter_ops.push(ScatterOp {
-                dest: last_dest,
-                src,
-                accumulate: true,
-            });
-        } else {
-            col_ptr[c + 1] += 1;
-            row_idx.push(r);
-            last_dest = row_idx.len() as u32 - 1;
-            scatter_ops.push(ScatterOp {
-                dest: last_dest,
-                src,
-                accumulate: false,
-            });
-        }
-        prev = Some((c, r));
-    }
-    for c in 0..total_dof {
-        col_ptr[c + 1] += col_ptr[c];
-    }
-
+    let plan = csc_from_triples(triples, total_dof)?;
     let pattern = SymbolicSparseColMat::new_checked(
         problem.total_residual_dimension,
         total_dof,
-        col_ptr,
+        plan.col_ptr,
         None,
-        row_idx,
+        plan.row_idx,
     );
 
     Ok(SymbolicStructure {
         pattern,
+        scatter_ops: plan.scatter_ops,
+        scatter_has_duplicates: plan.has_duplicates,
+    })
+}
+
+/// CSC pattern and scatter plan of the Jacobian, from its `(col, row,
+/// arena_index)` triples in push order.
+struct CscPlan {
+    col_ptr: Vec<usize>,
+    row_idx: Vec<usize>,
+    scatter_ops: Vec<ScatterOp>,
+    has_duplicates: bool,
+}
+
+fn csc_from_triples(
+    triples: Vec<(usize, usize, u32)>,
+    total_dof: usize,
+) -> LinearizerResult<CscPlan> {
+    // CSC order: grouped by column, rows ascending within a column, duplicate
+    // pairs in push order so their summation order matches faer's argsort.
+    // A stable counting sort by column gives exactly that without a full
+    // comparison sort: blocks are visited in ascending row order and push
+    // their rows ascending, so each column's entries already arrive
+    // row-sorted. The per-column check sorts (stably) only if that ever
+    // stops holding.
+    let mut bucket = vec![0usize; total_dof + 1];
+    for &(c, _, _) in &triples {
+        let Some(count) = bucket.get_mut(c + 1) else {
+            return Err(LinearizerError::SymbolicStructure(format!(
+                "Jacobian column {c} outside the {total_dof} solve columns"
+            ))
+            .log());
+        };
+        *count += 1;
+    }
+    for c in 0..total_dof {
+        bucket[c + 1] += bucket[c];
+    }
+    let mut next = bucket.clone();
+    let mut by_column = vec![(0usize, 0u32); triples.len()];
+    for &(c, r, src) in &triples {
+        by_column[next[c]] = (r, src);
+        next[c] += 1;
+    }
+    drop(triples);
+
+    let mut col_ptr = vec![0usize; total_dof + 1];
+    let mut row_idx = Vec::with_capacity(by_column.len());
+    let mut scatter_ops = Vec::<ScatterOp>::with_capacity(by_column.len());
+    let mut has_duplicates = false;
+    let mut last_dest = 0u32;
+    for c in 0..total_dof {
+        let entries = &mut by_column[bucket[c]..bucket[c + 1]];
+        if !entries.is_sorted_by_key(|&(r, _)| r) {
+            entries.sort_by_key(|&(r, _)| r);
+        }
+        let mut prev: Option<usize> = None;
+        for &(r, src) in entries.iter() {
+            if prev == Some(r) {
+                // faer's argsort semantics: a duplicated (row, col) pair sums
+                // into the first occurrence's value slot.
+                has_duplicates = true;
+                scatter_ops.push(ScatterOp {
+                    dest: last_dest,
+                    src,
+                    accumulate: true,
+                });
+            } else {
+                row_idx.push(r);
+                last_dest = row_idx.len() as u32 - 1;
+                scatter_ops.push(ScatterOp {
+                    dest: last_dest,
+                    src,
+                    accumulate: false,
+                });
+            }
+            prev = Some(r);
+        }
+        col_ptr[c + 1] = row_idx.len();
+    }
+
+    Ok(CscPlan {
+        col_ptr,
+        row_idx,
         scatter_ops,
-        scatter_has_duplicates: has_duplicates,
+        has_duplicates,
     })
 }
 
@@ -529,6 +579,80 @@ mod tests {
         let empty: SecondaryMap<VarKey, usize> = SecondaryMap::new();
         let result = build_symbolic_structure(&problem, &problem.variables, &empty, total_dof);
         assert!(result.is_err(), "expected Err for missing variable key");
+        Ok(())
+    }
+
+    /// `(col_ptr, row_idx, (dest, src, accumulate) per op, has_duplicates)`.
+    type PlanParts = (Vec<usize>, Vec<usize>, Vec<(u32, u32, bool)>, bool);
+
+    /// The comparison-sort construction `csc_from_triples` replaced, kept as
+    /// the reference its output must equal.
+    fn csc_by_stable_sort(mut triples: Vec<(usize, usize, u32)>, total_dof: usize) -> PlanParts {
+        triples.sort_by_key(|&(c, r, _)| (c, r));
+        let mut col_ptr = vec![0usize; total_dof + 1];
+        let mut row_idx = Vec::new();
+        let mut ops = Vec::new();
+        let mut dup = false;
+        let mut prev = None;
+        let mut last = 0u32;
+        for &(c, r, src) in &triples {
+            if prev == Some((c, r)) {
+                dup = true;
+                ops.push((last, src, true));
+            } else {
+                col_ptr[c + 1] += 1;
+                row_idx.push(r);
+                last = row_idx.len() as u32 - 1;
+                ops.push((last, src, false));
+            }
+            prev = Some((c, r));
+        }
+        for c in 0..total_dof {
+            col_ptr[c + 1] += col_ptr[c];
+        }
+        (col_ptr, row_idx, ops, dup)
+    }
+
+    fn plan_parts(plan: CscPlan) -> PlanParts {
+        let ops = plan
+            .scatter_ops
+            .iter()
+            .map(|op| (op.dest, op.src, op.accumulate))
+            .collect();
+        (plan.col_ptr, plan.row_idx, ops, plan.has_duplicates)
+    }
+
+    /// Row-ascending push order (what `build_symbolic_structure` produces),
+    /// with duplicate pairs, and a shuffled order that forces the per-column
+    /// fallback sort: both must match the stable comparison sort exactly —
+    /// pattern, destinations, and the summation order of duplicates.
+    #[test]
+    fn counting_sort_plan_matches_stable_comparison_sort() -> TestResult {
+        let total_dof = 7;
+        let mut ordered = Vec::new();
+        let mut src = 0u32;
+        for row in 0..40usize {
+            for col in [row % 7, (row * 3 + 1) % 7, (row * 5 + 2) % 7] {
+                ordered.push((col, row, src));
+                src += 1;
+                if row % 6 == 0 {
+                    // Same variable listed twice by one factor.
+                    ordered.push((col, row, src));
+                    src += 1;
+                }
+            }
+        }
+        let mut shuffled = ordered.clone();
+        let n = shuffled.len();
+        for i in 0..n {
+            shuffled.swap(i, (i * 7919 + 13) % n);
+        }
+        for triples in [ordered, shuffled] {
+            let want = csc_by_stable_sort(triples.clone(), total_dof);
+            let got = plan_parts(csc_from_triples(triples, total_dof)?);
+            assert_eq!(got, want);
+        }
+        assert!(csc_from_triples(vec![(7, 0, 0)], total_dof).is_err());
         Ok(())
     }
 }
