@@ -239,6 +239,19 @@ impl ApexRun {
             schur_variant: config.schur_variant,
         }
     }
+
+    /// `ExplicitSparseSchur` / `Sparse` over the full dataset. The explicit
+    /// `APEX_BENCH_SCHUR` variants start from this, never from
+    /// [`Self::library_default`]: that default is `ImplicitSparseSchur`, which
+    /// ignores `schur_variant`, so deriving from it silently ran the implicit
+    /// solver under every explicit label.
+    fn explicit_sparse() -> Self {
+        Self {
+            linear_solver_type: LinearSolverType::ExplicitSparseSchur,
+            schur_variant: ExplicitSchurVariant::Sparse,
+            ..Self::library_default()
+        }
+    }
 }
 
 /// Number of leading cameras the dense row keeps, from
@@ -269,18 +282,18 @@ fn apex_runs() -> Vec<ApexRun> {
     };
 
     let runs = match v.as_str() {
-        "sparse" => vec![ApexRun::library_default()],
+        "sparse" => vec![ApexRun::explicit_sparse()],
         "iterative" => vec![ApexRun {
             linear_solver_type: LinearSolverType::ImplicitSparseSchur,
             ..ApexRun::library_default()
         }],
         "explicit-iterative" => vec![ApexRun {
             schur_variant: ExplicitSchurVariant::Iterative,
-            ..ApexRun::library_default()
+            ..ApexRun::explicit_sparse()
         }],
         "chunked" => vec![ApexRun {
             schur_variant: ExplicitSchurVariant::Chunked,
-            ..ApexRun::library_default()
+            ..ApexRun::explicit_sparse()
         }],
         "explicit-dense" => {
             let max_cameras = Some(dense_bench_cameras());
@@ -295,7 +308,7 @@ fn apex_runs() -> Vec<ApexRun> {
                 ApexRun {
                     solver: "Apex-ExplicitSparseSchur",
                     max_cameras,
-                    ..ApexRun::library_default()
+                    ..ApexRun::explicit_sparse()
                 },
             ]
         }
