@@ -2,19 +2,22 @@
 
 **Hardware**: Apple Mac mini M4 (10 cores), 32 GB RAM, macOS
 **Build**: Rust 1.98 release (`opt-level=3`, LTO); C++ `-O3 -DNDEBUG -march=native`
-**Solvers**: apex-solver on `feature/criterion` — pose-graph rows at `13518e0`
-(counting-sort CSC plan, Exp 009), bundle-adjustment rows at `69f717e` (row-parallel
-implicit Schur operator, Exp 008); the other solvers' rows are from the `a3ef66d`
-session. Solver numerics are identical across that range on every dataset (see
-`benchmarking_results/verification_post_a3ef66d.md` and `baseline_vs_current_m4.md`),
-so only apex timing moved; Ceres 2.2.0; **GTSAM 4.3.0**;
+**Solvers**: apex-solver at `13518e0` (`feature/criterion` — Exp 001-009: pattern-cached
+extraction, bitmap Schur output, CSC gather assembly with a counting-sort plan, symbolic-
+Cholesky cache, and a row-parallel implicit Schur operator). All apex rows below —
+pose graphs, bundle adjustment, and the Schur solver comparison — are measured at this
+one commit. Ceres/GTSAM/g2o/factrs/tiny-solver rows are from the same session as the
+GTSAM harness fix (`a3ef66d`); solver numerics are identical across the whole `a3ef66d`
+..`13518e0` range on every dataset (see `benchmarking_results/verification_post_a3ef66d.md`
+and `baseline_vs_current_m4.md`), so re-running them was unnecessary; Ceres 2.2.0; **GTSAM 4.3.0**;
 g2o 20241228; factrs and tiny-solver from `Cargo.lock`. Eigen 5.0.1 for all C++ solvers.
 apex uses the matrix-free Schur complement for BA (`ImplicitSparseSchur`,
 Schur-Jacobi preconditioner, PCG forcing sequence η = 1e-2) and sparse Cholesky
 for pose graphs.
 **Measured**: 2026-09-27.
 **Methodology**: 5 independent runs per benchmark **for every solver, C++ included**
-(apex rows re-measured apex-only: pose graphs 5 runs of `13518e0`, BA 3 runs of `69f717e`), reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
+(apex rows re-measured apex-only at `13518e0`: pose graphs and the Schur comparison 3-5
+runs each, BA head-to-head table 3 runs), reported as **mean ± std**. Timing covers the `optimize()` call only — problem setup
 and metric computation are excluded. Bundle adjustment uses a 10-minute timeout per solver.
 **Metrics**: final objective value (cost) and runtime, following the pose graph
 optimization literature ([SE-Sync, Rosen et al. IJRR 2019](https://david-m-rosen.github.io/publication/sesync-ijrr/SESync-IJRR.pdf); [Carlone et al. ICRA 2015](https://dellaert.github.io/files/Carlone15icra1.pdf)). Bundle adjustment uses reprojection RMSE and runtime ([arXiv:2409.12190](https://arxiv.org/abs/2409.12190)).
@@ -109,9 +112,8 @@ Six solvers, Levenberg-Marquardt throughout. Cost is computed by the benchmark h
   factrs and tiny-solver are faster there but end at 300× apex's cost). **GTSAM 4.3 is
   fastest on the three remaining 3D sets**: sphere2500 (89 vs 137 ms), parking-garage
   (28 vs 39 ms) and torus3D (403 ms vs 1.89 s — apex needs 38 iterations to GTSAM's 10).
-  Exp 009 (`13518e0`) took 5–20 % off apex's pose-graph times at identical costs by
-  removing a per-solve setup cost Exp 004 had introduced
-  (`benchmarking_results/experiment_009_odometry_assembly_regression.md`).
+  (Exp 009 removed a per-solve setup cost Exp 004 had introduced; see
+  `benchmarking_results/experiment_009_odometry_assembly_regression.md`.)
 - **Cost**: GTSAM 4.3 reaches the lowest `cost/(m−n)` on **all 8** datasets (tied with
   g2o on M3500 and ring). apex's final cost is within 1 % of it on M3500 (1.5238 vs
   1.5109) and parking-garage (0.6281 vs 0.6246), within 4 % on city10000 (+1.6 %) and
@@ -140,7 +142,6 @@ LM iterations (21 evaluations). **Bold** = best RMSE / fastest time per dataset.
 
 *[Interactive version](plots/ba_benchmark.html)*
 
-
 | Dataset | Solver | Cameras | Landmarks | Observations | Final RMSE (px) | Time (s) | Iters |
 |---|---|---|---|---|---|---|---|
 | **Ladybug** |
@@ -166,7 +167,12 @@ LM iterations (21 evaluations). **Bold** = best RMSE / fastest time per dataset.
 
 apex also initializes the focal length by self-calibration, so its starting RMSE is
 lower than the Ceres / g2o rows' (e.g. Dubrovnik 3.98 px vs 12.98 px); GTSAM's harness
-starts lower still (2.81 px).
+starts lower still (2.81 px). This table's apex/implicit times are from the same
+session as the other solvers, run once against the full 10-minute-timeout sweep; the
+Schur solver comparison below re-measures apex alone with tighter iteration control,
+so the two ImplicitSparseSchur numbers for the same dataset can differ by the
+session-to-session thermal drift this protocol documents (up to ~20%, worst on
+Venice's 2-iteration solve — 19.9 s here vs 16.0 s there).
 
 **Observations**:
 - **Iteration counts are shaped by the parameter-tolerance test, not only by
@@ -191,8 +197,8 @@ starts lower still (2.81 px).
 - **Speed**: apex is fastest on Venice (19.9 s), within 1.05× of the fastest on Ladybug
   (20.0 s vs Ceres 19.0 s, whose RMSE is 1.17 px) and level with GTSAM on Trafalgar
   (14.2 vs 14.1 s); GTSAM is faster on Dubrovnik (74 vs 88 s). The row-parallel implicit
-  operator (`69f717e`, Exp 008) took 16–31 % off apex's Ladybug / Trafalgar / Dubrovnik
-  times at identical RMSE and iteration counts (`benchmarking_results/baseline_vs_current_m4.md`).
+  operator (Exp 008) took 16-31 % off apex's Ladybug / Trafalgar / Dubrovnik times at
+  identical RMSE and iteration counts; see `benchmarking_results/baseline_vs_current_m4.md`.
 - **Why apex's BA times are higher than in the previous edition** (Trafalgar 6.3 s →
   14.2 s, Dubrovnik 31.5 s → 88 s): commit `f078711` fixed the gauge-fixed camera
   being solved as a free variable and zeroed afterwards. Before it, LM's step-quality
@@ -213,36 +219,35 @@ deliberately inexact.
 
 | Dataset | Solver | Final RMSE | Time (s) | Iters | × Sparse |
 |---|---|---|---|---|---|
-| **Ladybug** | ExplicitSparseSchur / Sparse | 0.874205 | 61.75 ± 0.29 | 21 | 1.00× |
-| | ExplicitSparseSchur / Chunked | 0.874205 | 88.51 ± 0.26 | 21 | 1.43× |
-| | ExplicitSparseSchur / Iterative | 0.874795 | 31.12 ± 0.05 | 21 | 0.50× |
-| | **ImplicitSparseSchur** | 0.874681 | **20.01 ± 0.22** | 21 | **0.32×** |
-| **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.779496 | **3.36 ± 0.02** | 11 | **1.00×** |
-| | ExplicitSparseSchur / Chunked | 0.779496 | 6.10 ± 0.04 | 11 | 1.82× |
-| | ExplicitSparseSchur / Iterative | 0.770103 | 6.83 ± 0.00 | 21 | 2.03× |
-| | ImplicitSparseSchur | 0.772831 | 14.23 ± 0.44 | 21 | 4.23× |
-| **Dubrovnik** | **ExplicitSparseSchur / Sparse** | 0.743998 | **24.65 ± 0.12** | 10 | **1.00×** |
-| | ExplicitSparseSchur / Chunked | 0.743998 | 51.36 ± 0.07 | 10 | 2.08× |
-| | ExplicitSparseSchur / Iterative | 0.743206 | 51.40 ± 0.04 | 21 | 2.09× |
-| | ImplicitSparseSchur | 0.743193 | 88.27 ± 0.04 | 21 | 3.58× |
-| **Venice** | ExplicitSparseSchur / Sparse | 0.736946 | 53.58 ± 0.57 | 2 | 1.00× |
-| | ExplicitSparseSchur / Chunked | 0.736946 | 64.24 ± 0.36 | 2 | 1.20× |
-| | ExplicitSparseSchur / Iterative | 0.745048 | 45.32 ± 0.58 | 2 | 0.85× |
-| | **ImplicitSparseSchur** | 0.745052 | **19.90 ± 0.41** | 2 | **0.37×** |
+| **Ladybug** | ExplicitSparseSchur / Sparse | 0.874205 | 62.35 ± 1.37 | 21 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.874205 | 89.36 ± 1.67 | 21 | 1.43× |
+| | ExplicitSparseSchur / Iterative | 0.874795 | 30.98 ± 0.49 | 21 | 0.50× |
+| | **ImplicitSparseSchur** | 0.874681 | **19.82 ± 0.52** | 21 | **0.32×** |
+| **Trafalgar** | **ExplicitSparseSchur / Sparse** | 0.779496 | **3.39 ± 0.41** | 11 | **1.00×** |
+| | ExplicitSparseSchur / Chunked | 0.779496 | 5.91 ± 0.09 | 11 | 1.74× |
+| | ExplicitSparseSchur / Iterative | 0.770103 | 6.79 ± 0.15 | 21 | 2.00× |
+| | ImplicitSparseSchur | 0.772831 | 13.69 ± 0.41 | 21 | 4.04× |
+| **Dubrovnik** | **ExplicitSparseSchur / Sparse** | 0.743998 | **24.08 ± 1.18** | 10 | **1.00×** |
+| | ExplicitSparseSchur / Chunked | 0.743998 | 49.68 ± 0.44 | 10 | 2.06× |
+| | ExplicitSparseSchur / Iterative | 0.743206 | 51.90 ± 1.67 | 21 | 2.16× |
+| | ImplicitSparseSchur | 0.743193 | 86.74 ± 0.74 | 21 | 3.60× |
+| **Venice** | ExplicitSparseSchur / Sparse | 0.736946 | 55.06 ± 4.25 | 2 | 1.00× |
+| | ExplicitSparseSchur / Chunked | 0.736946 | 63.65 ± 1.41 | 2 | 1.16× |
+| | ExplicitSparseSchur / Iterative | 0.745048 | 43.05 ± 1.37 | 2 | 0.78× |
+| | **ImplicitSparseSchur** | 0.745052 | **16.02 ± 0.19** | 2 | **0.29×** |
 
-- The explicit-sparse path is 1.22× faster than in the previous edition on Ladybug at
-  the same 21 iterations (75.2 → 61.8 s: the optimization program's pattern-cached
-  extraction, bitmap Schur output, CSC gather assembly and symbolic-Cholesky cache).
-  Dubrovnik (41.9 → 24.7 s) also needs fewer iterations now (17 → 10, after `f078711`),
-  so its gain is not purely per-iteration.
+- The explicit-sparse path is 1.21× faster than the pre-optimization-program baseline
+  on Ladybug at the same 21 iterations (75.2 → 62.4 s: pattern-cached extraction, bitmap
+  Schur output, CSC gather assembly with a counting-sort plan, and symbolic-Cholesky
+  cache). Dubrovnik (41.9 → 24.1 s, 1.74×) also needs fewer iterations now (17 → 10,
+  after `f078711`), so its gain is not purely per-iteration.
 - **Read the Trafalgar / Dubrovnik rows with the parameter-tolerance caveat above.**
-  `ExplicitSparseSchur / Sparse` is 3.6–4.2× faster there because its 10th–11th step happens to
+  `ExplicitSparseSchur / Sparse` is 3.6–4.0× faster there because its 10th–11th step happens to
   fall under the ≈ 110 / 40 absolute threshold the degenerate cameras create, while the
   PCG paths' steps stay longer and run to the cap — reaching a lower cost (Trafalgar
-  RMSE 0.7728 vs 0.7795). Per iteration, explicit / Sparse is 0.31 s vs implicit 0.68 s on
-  Trafalgar and 2.5 s vs 4.2 s on Dubrovnik; implicit is 2.7–3.1× faster in total on
-  Ladybug and Venice, where the iteration counts match. (Explicit rows measured at
-  `a3ef66d`; Exp 008 does not touch the explicit path. Implicit rows at `69f717e`.)
+  RMSE 0.7728 vs 0.7795). Per iteration, explicit / Sparse is 0.31 s vs implicit 0.65 s on
+  Trafalgar and 2.4 s vs 4.1 s on Dubrovnik; implicit is 3.1–3.4× faster in total on
+  Ladybug and Venice, where the iteration counts match.
 - These numbers supersede the previous table, which was recorded while
   `APEX_BENCH_SCHUR=sparse|chunked|explicit-iterative` silently ran the implicit
   solver (fixed in `5a912b8`).
