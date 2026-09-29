@@ -5,6 +5,44 @@ All notable changes to `apex-manifolds` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-29
+
+### Added
+- **`SO3::slerp`** — spherical linear interpolation between two rotations.
+- **`SO3::try_from_quaternion_wxyz`** — checked quaternion constructor that rejects
+  non-finite or non-normalizable inputs instead of silently producing a broken rotation.
+- **`ManifoldType::from_name`** — parse a manifold name (`"SE3"`, `"Sim3"`, …) back to its
+  discriminant.
+- **Test batteries**: one-parameter subgroup law tests for every manifold
+  (`exp(aξ)∘exp(bξ) = exp((a+b)ξ)`) and a cross-group Jacobian identity suite.
+
+### Fixed
+- **SE(3) / SE₂(3) right Jacobians used the left convention**; both `right_jacobian*`
+  families (and their inverses) are now consistent with the documented right-perturbation
+  model.
+- **SE(3) / SE₂(3) Q-block Jacobian coupling term** was wrong in the between/compose
+  chains.
+- **SGal(3) exponential is now the group exponential** — the old map dropped the
+  time–velocity coupling (`ρ' = Jl(θ)·ρ + s·M(θ)·ν`), so `exp∘log ≠ id` and the subgroup
+  law failed whenever `s·ν ≠ 0`. `log` inverts the corrected map exactly and the
+  left/right Jacobians (and inverses) are its derivatives by definition.
+- **SGal(3) adjoint** entries were stale relative to the corrected group law (ρ-row/ν-column
+  sign, θ-column `ρ̂R` → `(ρ−tν)̂R`, s-column `−ν` → `+ν`); now verified against
+  `Log(g∘exp(ξ)∘g⁻¹)`.
+- **Sim(3) action, adjoint, and Jacobian differentials** were inconsistent with the group
+  law; the scale-coupled `V` matrix and its inverse are corrected.
+- **Sim(3) `right/left_jacobian_inv` and `V⁻¹` no longer silently fall back to identity**
+  on singular inputs — they use a Tikhonov-regularized inverse and emit a `tracing::warn!`.
+- **`SO3::log` returned the wrong sign near the negative-`w` identity** (small-angle branch
+  returned `+s` for a rotation by `−s`).
+- **`Rn` between-Jacobian was sized 3×3** regardless of the runtime dimension.
+- **`left_plus`'s `jacobian_self`** in the cross-group Jacobian chain (F9).
+- **`is_valid` now checks every state field for finiteness**, not just the rotation part.
+
+### Deprecated
+- **`Rn::DIM` / `Rn::DOF` / `Rn::REP_SIZE`** — `0` sentinels for a dynamic manifold, not
+  dimensions. Use `is_dynamic()` / `tangent_dim()`.
+
 ## [0.3.0] - 2026-07-30
 
 ### Added
