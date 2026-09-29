@@ -15,9 +15,9 @@ homepage = "https://github.com/amin-abouee/apex-solver"
 rust-version = "1.93"
 
 [workspace.dependencies]
-apex-manifolds = { path = "crates/apex-manifolds", version = "0.3.0" }
-apex-io = { path = "crates/apex-io", version = "0.3.0" }
-apex-camera-models = { path = "crates/apex-camera-models", version = "0.3.0" }
+apex-manifolds = { path = "crates/apex-manifolds", version = "0.4.0" }
+apex-io = { path = "crates/apex-io", version = "0.4.0" }
+apex-camera-models = { path = "crates/apex-camera-models", version = "0.4.0" }
 
 # External dependencies (shared versions)
 slotmap = "1.0"
@@ -86,7 +86,7 @@ print_stderr = "deny"
 # apex-solver package (root crate)
 [package]
 name = "apex-solver"
-version = "1.4.0"
+version = "1.5.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -173,7 +173,7 @@ smallvec.workspace = true
 # version strings in sync on release.
 [dependencies.apex-io]
 path = "crates/apex-io"
-version = "0.3.0"
+version = "0.4.0"
 default-features = false
 
 [dependencies.rerun]
