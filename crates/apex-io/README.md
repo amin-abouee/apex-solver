@@ -2,6 +2,17 @@
 
 High-performance file I/O for robotics data — pose graphs (G2O, TORO, BAL) and ROS2 bag files (SQLite3 and MCAP), with optional live DDS topic subscription.
 
+## What's new in 0.4.0 — feature flags & trajectories
+
+- **`rosbag` is now an opt-in feature** (was built unconditionally); `download` and `clap`
+  moved behind the default-on `download` / `cli` features. See the
+  [feature reference](doc/cookbook/src/appendix/features.md) and the [changelog](CHANGELOG.md).
+- **`trajectory` module** — a unified timestamped-pose container with format detection and
+  TUM read/write plus ASL ground-truth loading (`load_trajectory`, `TumLoader`,
+  `AslTrajectoryLoader`).
+- **Pose-graph modules moved into `graph::`** (`g2o`/`toro` under `graph::`; the loaders
+  remain re-exported at the crate root) and `IoError` moved to `graph::IoError`.
+
 ## What's new in 0.3.0 — Cookbook
 
 A complete reference book documenting **every public functionality** of the crate — the
@@ -57,19 +68,19 @@ the `ros2 bag` CLI.
 ```toml
 # Core: pose graphs + dataset registry (no bag I/O, no network)
 [dependencies]
-apex-io = "0.3.0"
+apex-io = "0.4.0"
 
 # With ROS1/ROS2 bag reading & writing (SQLite3 + MCAP, CDR, message types)
-apex-io = { version = "0.3.0", features = ["rosbag"] }
+apex-io = { version = "0.4.0", features = ["rosbag"] }
 
 # Without dataset auto-download (offline builds)
-apex-io = { version = "0.3.0", default-features = false }
+apex-io = { version = "0.4.0", default-features = false }
 
 # With Rerun visualization helpers
-apex-io = { version = "0.3.0", features = ["visualization"] }
+apex-io = { version = "0.4.0", features = ["visualization"] }
 
 # With live DDS topic subscription (requires a DDS runtime)
-apex-io = { version = "0.3.0", features = ["dds"] }
+apex-io = { version = "0.4.0", features = ["dds"] }
 ```
 
 | Feature | Default | Enables | Extra dependencies |
@@ -310,7 +321,7 @@ writer.close()?;
 Enable the `dds` feature and have a running ROS2 node on the same DDS domain.
 
 ```toml
-apex-io = { version = "0.3.0", features = ["dds"] }
+apex-io = { version = "0.4.0", features = ["dds"] }
 ```
 
 ### Subscribe to a single topic
@@ -684,7 +695,7 @@ topic, byte offset) for actionable diagnostics.
 ## Visualization Feature
 
 ```toml
-apex-io = { version = "0.3.0", features = ["visualization"] }
+apex-io = { version = "0.4.0", features = ["visualization"] }
 ```
 
 ```rust

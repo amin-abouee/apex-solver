@@ -5,6 +5,40 @@ All notable changes to `apex-io` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-29
+
+### Breaking
+- **`rosbag` is now an opt-in feature** (was built unconditionally). Depending on `apex-io`
+  no longer compiles `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`,
+  `byteorder`, `hex`. Bag I/O users must opt in:
+  ```toml
+  apex-io = { version = "0.4", features = ["rosbag"] }
+  ```
+  The `bag_*` binaries now require `--features rosbag`.
+- **`download` and `clap` are feature-gated** behind the default-on `download` and `cli`
+  features. `--no-default-features` leaves a lean library; the `ensure_*_dataset` helpers
+  then only serve already-downloaded files. `download_datasets` requires `--features
+  download`.
+- **Pose-graph modules moved into a dedicated `graph` module**: `g2o`/`toro` become
+  `graph::g2o` / `graph::toro` (`G2oLoader` / `ToroLoader` remain re-exported at the crate
+  root), and the crate-root `IoError` moves to `graph::IoError` alongside the `Graph`
+  model (`Graph`, `VertexSE2/3`, `EdgeSE2/3`, `GraphLoader`, `load_graph`).
+
+### Added
+- **`trajectory` module** — a unified timestamped-pose container (`Trajectory`,
+  `TrajectoryPose`, `InertialState`) with format detection (`TrajectoryFormat`),
+  `load_trajectory` / `load_trajectory_as`, time-span and interpolation helpers
+  (`pose_at`, `position_at_seconds`, `se3_at`, …), and TUM read/write
+  (`TumLoader`) plus ASL ground-truth loading (`AslTrajectoryLoader`,
+  `load_mav0_trajectory`, `AslLayout`).
+- **Multi-sensor dataset support**: `ensure_sensor_dataset`, `SENSOR_DATA_DIR`, and CSV
+  utilities backing the NCLT-style odometry + GNSS fusion workflows.
+
+### Fixed
+- **ROS 2 CDR deserialization alignment** in the reader.
+- **ROS1 chunk cache** is bounded to two payloads; reader `close`/`Drop` symmetry.
+- Reader diagnostics now route through `tracing` (no direct prints).
+
 ## [0.3.0] - 2026-07-30
 
 ### Added
