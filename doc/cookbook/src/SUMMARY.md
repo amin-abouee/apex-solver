@@ -34,5 +34,5 @@
 
 - [Visualization with Rerun](./visualization.md)
 - [Benchmarks & Performance](./benchmarks.md)
-- [Migrating from 1.3](./migration.md)
+- [Migrating from 1.4](./migration.md)
 - [Mathematical Cookbooks (crates)](./crate_cookbooks.md)
