@@ -6,7 +6,7 @@ trajectories and Hessian sparsity patterns to a live
 
 ```toml
 [dependencies]
-apex-solver = { version = "1.4.0", features = ["visualization"] }
+apex-solver = { version = "1.5.0", features = ["visualization"] }
 ```
 
 ```rust

@@ -10,6 +10,14 @@ Metrics follow the pose graph optimization literature (SE-Sync, Rosen et al.
 IJRR 2019; Carlone et al. ICRA 2015): solution *cost* and *runtime*. For bundle
 adjustment the analogue is reprojection RMSE and runtime.
 
+Set ``CARRIED_ROWS=1`` to draw every non-apex solver bar from
+``benches/tools/carried/*.csv`` — the 2026-09-27 session means ± std recorded
+in the tables of ``doc/performance.md``. Use it when the surviving per-run CSVs
+do not contain that session (the per-run C++ CSVs for it were not retained and
+older rows predate the GTSAM harness fix, ``14d3c82``); the apex bars always
+come from the fresh runs in ``output/runs/``. Without the variable the tool
+plots only what the run CSVs contain.
+
 Usage:
     uv run --with plotly --with kaleido --with pandas \\
         benches/tools/plot_benchmarks.py
@@ -17,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -29,6 +38,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RUN_DIR = REPO_ROOT / "output" / "runs"
 OUT_DIR = REPO_ROOT / "output"
 PLOT_DIR = REPO_ROOT / "doc" / "plots"
+CARRIED_DIR = REPO_ROOT / "benches" / "tools" / "carried"
 
 # Stable solver order and colours so both figures read the same way.
 SOLVER_ORDER = ["apex-solver", "factrs", "tiny-solver", "Ceres", "GTSAM", "g2o"]
@@ -88,6 +98,30 @@ def aggregate(df: pd.DataFrame, value_cols: list[str]) -> pd.DataFrame:
     for col in value_cols:
         grouped[f"{col}_std"] = grouped[f"{col}_std"].fillna(0.0)
     return grouped
+
+
+def carried_rows(name: str) -> pd.DataFrame:
+    """Non-apex bars from ``benches/tools/carried/<name>.csv`` (CARRIED_ROWS=1).
+
+    The rows hold the 2026-09-27 session means ± std recorded in the tables of
+    ``doc/performance.md``; they replace whatever non-apex rows the run CSVs
+    contain, which is what the figure's provenance note says.
+    """
+    if os.environ.get("CARRIED_ROWS") is None:
+        return pd.DataFrame()
+    path = CARRIED_DIR / f"{name}.csv"
+    if not path.exists():
+        sys.exit(f"CARRIED_ROWS set but {path} is missing")
+    df = pd.read_csv(path)
+    print(f"  carried rows: {len(df)} from {path.relative_to(REPO_ROOT)}")
+    return df
+
+
+def src_note() -> str:
+    if os.environ.get("CARRIED_ROWS") is None:
+        return ""
+    return (" · apex-solver bars: fresh 1.5.0 runs (2026-09-29); other bars: "
+            "2026-09-27 session means as recorded in doc/performance.md")
 
 
 def _bar_traces(agg, datasets, ycol, ecol, showlegend, labels=None):
@@ -156,6 +190,9 @@ def build_odometry() -> None:
     df["norm_cost"] = df["final_cost"].where(dof > 0) / dof.where(dof > 0)
 
     agg = aggregate(df, ["norm_cost", "final_cost", "final_chi2", "elapsed_ms"])
+    carried = carried_rows("odometry")
+    if not carried.empty:
+        agg = pd.concat([agg[agg["solver"] == "apex-solver"], carried], ignore_index=True)
     agg.to_csv(OUT_DIR / "odometry_aggregated.csv", index=False)
     print(f"  wrote output/odometry_aggregated.csv ({len(agg)} rows)")
 
@@ -191,8 +228,8 @@ def build_odometry() -> None:
                      row=2, col=1)
     fig.update_layout(
         title=f"Pose Graph Optimization — cost and runtime (mean ± std; {runs_note(agg)})"
-        "<br><sup>missing bars = solver failed on that dataset · all solvers minimize the "
-        "unweighted objective with unit information, so costs are comparable</sup>",
+        f"<br><sup>missing bars = solver failed on that dataset · all solvers minimize the "
+        f"unweighted objective with unit information, so costs are comparable{src_note()}</sup>",
         barmode="group",
         height=900,
         width=1400,
@@ -209,6 +246,9 @@ def build_ba() -> None:
     df["solver"] = df["solver"].replace({"Apex-Solver": "apex-solver", "Gtsam": "GTSAM"})
 
     agg = aggregate(df, ["final_rmse", "time_seconds"])
+    carried = carried_rows("ba")
+    if not carried.empty:
+        agg = pd.concat([agg[agg["solver"] == "apex-solver"], carried], ignore_index=True)
     agg.to_csv(OUT_DIR / "ba_aggregated.csv", index=False)
     print(f"  wrote output/ba_aggregated.csv ({len(agg)} rows)")
 
@@ -242,9 +282,9 @@ def build_ba() -> None:
     fig.update_xaxes(title_text="BAL dataset", row=2, col=1)
     fig.update_layout(
         title=f"Bundle Adjustment — reprojection RMSE and runtime (mean ± std; {runs_note(agg)})"
-        "<br><sup>missing bars = solver exceeded the 10-minute timeout · apex initializes "
-        "the focal length by self-calibration, so its starting RMSE is closer than the "
-        "C++ rows'</sup>",
+        f"<br><sup>missing bars = solver exceeded the 10-minute timeout · apex initializes "
+        f"the focal length by self-calibration, so its starting RMSE is closer than the "
+        f"C++ rows'{src_note()}</sup>",
         barmode="group",
         height=900,
         width=1400,
