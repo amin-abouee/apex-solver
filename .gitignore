@@ -27,6 +27,9 @@ profiles/
 scripts/
 output/
 *.csv
+# ...but the figure sidecar data behind doc/plots/ (2026-09-27 session means
+# carried by benches/tools/plot_benchmarks.py) must ship with the repository.
+!benches/tools/carried/*.csv
 book/
 analysis/
 
