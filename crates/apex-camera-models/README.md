@@ -2,6 +2,16 @@
 
 Comprehensive camera projection models for bundle adjustment, SLAM, and Structure-from-Motion.
 
+## What's new in 0.4.0 — validation & domain geometry
+
+- **`KannalaBrandtCamera::unproject` rejects out-of-domain and non-converged rays**
+  (`CameraModelError::NumericalError`) instead of silently clamping, matching the
+  validation the f-theta model already performed.
+- **`projection_deficit`** — the signed depth deficit of a camera-frame point outside a
+  model's projection domain, with its gradient; per-model domain geometry (z-forward
+  default, BAL z-backward, double-sphere cone) is now explicit and unit-tested. Not yet
+  charged by the solver. See the [changelog](CHANGELOG.md).
+
 ## What's new in 0.3.0 — Cookbook overhaul
 
 The [cookbook](#cookbook) was rebuilt so every model chapter follows the **same eight-section
@@ -220,7 +230,7 @@ All camera models use a unified `CameraModelError` enum with structured variants
 
 ```toml
 [dependencies]
-apex-camera-models = "0.3.0"
+apex-camera-models = "0.4.0"
 ```
 
 ## Usage
