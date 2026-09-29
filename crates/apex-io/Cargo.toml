@@ -12,7 +12,10 @@ description = "File I/O for pose graphs (G2O, TORO, BAL) and ROS1/ROS2 bags with
 readme = "README.md"
 keywords = ["slam", "pose-graph", "g2o", "ros2", "rosbag"]
 categories = ["parsing", "data-structures"]
-exclude = ["tests/", "benches/", "doc/", "data/", "bin/", "examples/", "datasets.toml"]
+# `datasets.toml` and `bin/` are deliberately NOT excluded: src/utils.rs embeds
+# the former with `include_str!` (excluding it ships a crate that cannot compile),
+# and the `[[bin]]` targets below are the crate's public CLI surface.
+exclude = ["tests/", "benches/", "doc/", "data/", "examples/"]
 
 # Build docs.rs with every feature so the rosbag, DDS and visualization APIs are visible.
 [package.metadata.docs.rs]
