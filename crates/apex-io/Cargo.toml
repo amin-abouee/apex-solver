@@ -62,6 +62,11 @@ path = "tests/rosbag_ros2_integration_tests.rs"
 required-features = ["rosbag"]
 
 [[test]]
+name = "hilti_mcap"
+path = "tests/hilti_mcap.rs"
+required-features = ["rosbag"]
+
+[[test]]
 name = "rosbag_ros1_integration_tests"
 path = "tests/rosbag_ros1_integration_tests.rs"
 required-features = ["rosbag"]

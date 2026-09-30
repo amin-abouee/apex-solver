@@ -1,20 +1,22 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 //! Console output is this CLI's user interface (bag summary tables).
 
-//! Display comprehensive ROS2 bag file information
+//! Display comprehensive bag file information
 //!
-//! Provides detailed information about a ROS2 bag file including:
+//! Provides detailed information about a ROS2 bag directory (via its
+//! `metadata.yaml`) or a bare `.mcap` file (via its MCAP summary section),
+//! including:
 //! - Storage files and sizes
 //! - Duration and timing information
 //! - Topic details with message counts
 //! - Human-readable timestamps
 //!
-//! Optimized for speed by reading only the `metadata.yaml` file
-//! without opening storage files.
+//! Never reads message data: either the summary section or the metadata
+//! file carries everything shown.
 //!
 //! Usage: cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
 
-use apex_io::rosbag::{ReaderError, read_bag_metadata_fast};
+use apex_io::rosbag::{Reader, ReaderError};
 use chrono::TimeZone;
 use std::env;
 use std::path::Path;
@@ -24,72 +26,73 @@ fn main() -> Result<(), ReaderError> {
     if args.len() != 2 {
         eprintln!("Usage: {} <bag_path>", args[0]);
         eprintln!("Example: {} /path/to/rosbag2_directory", args[0]);
+        eprintln!("Example: {} /path/to/recording.mcap", args[0]);
         std::process::exit(1);
     }
 
     let bag_path = Path::new(&args[1]);
 
-    let metadata = read_bag_metadata_fast(bag_path)?;
-    let info = metadata.info();
+    let mut reader = Reader::new(bag_path)?;
+    reader.open()?;
 
-    let storage_files = &info.relative_file_paths;
-    let total_size = calculate_total_size(bag_path, storage_files)?;
-    let storage_id = get_storage_id(info);
+    let total_size = calculate_total_size(bag_path)?;
+    let storage_label = if reader.metadata().is_some() {
+        "mcap (per metadata.yaml)"
+    } else {
+        "mcap (bare file)"
+    };
 
-    let duration_ns = metadata.duration();
+    let duration_ns = reader.duration();
     let duration_s = duration_ns as f64 / 1_000_000_000.0;
-    let start_time_ns = metadata.start_time();
-    let end_time_ns = metadata.end_time();
-    let message_count = metadata.message_count();
+    let start_time_ns = reader.start_time();
+    let end_time_ns = reader.end_time();
+    let message_count = reader.message_count();
 
-    println!("Files:             {}", format_file_list(storage_files));
     println!("Bag size:          {}", format_size(total_size));
-    println!("Storage id:        {storage_id}");
+    println!("Storage id:        {storage_label}");
     println!("Duration:          {duration_s:.9}s");
     println!("Start:             {}", format_timestamp(start_time_ns));
     println!("End:               {}", format_timestamp(end_time_ns));
     println!("Messages:          {message_count}");
 
-    if !info.topics_with_message_count.is_empty() {
-        println!(
-            "Topic information: {}",
-            format_topic(&info.topics_with_message_count[0])
-        );
-        for topic in info.topics_with_message_count.iter().skip(1) {
-            println!("                   {}", format_topic(topic));
+    let topics = reader.topics();
+    if !topics.is_empty() {
+        println!("Topic information: {}", format_topic_info(&topics[0]));
+        for topic in topics.iter().skip(1) {
+            println!("                   {}", format_topic_info(topic));
         }
     }
 
     Ok(())
 }
 
-fn calculate_total_size(bag_path: &Path, files: &[String]) -> Result<u64, ReaderError> {
+fn calculate_total_size(bag_path: &Path) -> Result<u64, ReaderError> {
     let mut total_size = 0u64;
-    for file in files {
-        let file_path = bag_path.join(file);
-        if let Ok(meta) = std::fs::metadata(&file_path) {
+    if bag_path.is_file() {
+        if let Ok(meta) = std::fs::metadata(bag_path) {
             total_size += meta.len();
+        }
+        return Ok(total_size);
+    }
+    if let Ok(entries) = std::fs::read_dir(bag_path) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata()
+                && meta.is_file()
+            {
+                total_size += meta.len();
+            }
         }
     }
     Ok(total_size)
 }
 
-fn get_storage_id(info: &apex_io::rosbag::metadata::BagFileInformation) -> String {
-    if !info.storage_identifier.is_empty() {
-        return info.storage_identifier.clone();
-    }
-    for file in &info.relative_file_paths {
-        if file.ends_with(".db3") {
-            return "sqlite3".to_string();
-        } else if file.ends_with(".mcap") {
-            return "mcap".to_string();
-        }
-    }
-    "unknown".to_string()
-}
-
-fn format_file_list(files: &[String]) -> String {
-    files.join(", ")
+fn format_topic_info(
+    topic: &apex_io::rosbag::types::TopicInfo,
+) -> String {
+    format!(
+        "{} ({}, {} msgs)",
+        topic.name, topic.message_type, topic.message_count
+    )
 }
 
 fn format_size(bytes: u64) -> String {
@@ -123,14 +126,4 @@ fn format_timestamp(timestamp_ns: u64) -> String {
     } else {
         format!("Invalid timestamp ({timestamp_s}.{timestamp_ns_frac:09})")
     }
-}
-
-fn format_topic(topic: &apex_io::rosbag::metadata::TopicWithMessageCount) -> String {
-    format!(
-        "Topic: {} | Type: {} | Count: {} | Serialization Format: {}",
-        topic.topic_metadata.name,
-        topic.topic_metadata.message_type,
-        topic.message_count,
-        topic.topic_metadata.serialization_format
-    )
 }

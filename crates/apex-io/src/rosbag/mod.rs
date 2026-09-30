@@ -7,6 +7,48 @@
 //! [`ros1::Ros1Reader`]/[`ros1::Ros1Writer`] for ROS1. The design mirrors the
 //! upstream Python [`rosbags`](https://gitlab.com/ternaris/rosbags) library.
 //!
+//! ## Bare MCAP files (ROS1-profile bags)
+//!
+//! [`Reader`] accepts either a bag directory (with `metadata.yaml`) or a
+//! bare `.mcap` file. Single-file bags are common for datasets (e.g. the
+//! HILTI SLAM Challenge bags), and many are *ROS1-profile* MCAPs: the
+//! container is MCAP, but payloads are ROS1-serialized (`profile: ros1`,
+//! channel `message_encoding: ros1`, `ros1msg` schemas). The container layer
+//! is shared; only payload decoding differs, so dispatch on the
+//! connection's `serialization_format`:
+//!
+//! ```no_run
+//! use apex_io::rosbag::{Reader, cdr::CdrDeserializer, messages::FromCdr,
+//!                      ros1::deserialize::Ros1Deserializer, ros1::messages::Image as Ros1Image};
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut reader = Reader::new("/data/recording.mcap")?;
+//! reader.open()?;
+//! for message in reader.raw_messages()? {
+//!     let message = message?;
+//!     match message.connection.serialization_format.as_str() {
+//!         "ros1" => {
+//!             let mut d = Ros1Deserializer::new(&message.raw_data);
+//!             let image = Ros1Image::from_ros1(&mut d)?;
+//!             println!("ros1 image {}x{}", image.width, image.height);
+//!         }
+//!         "cdr" => {
+//!             let mut d = CdrDeserializer::new(&message.raw_data)?;
+//!             let image = apex_io::rosbag::messages::Image::from_cdr(&mut d)?;
+//!             println!("cdr image {}x{}", image.width, image.height);
+//!         }
+//!         other => panic!("unknown encoding {other}"),
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! A ros1-profile bag's connections report the schema name (e.g.
+//! `sensor_msgs/Image`) as `message_type` and the channel encoding (`ros1`)
+//! as `serialization_format` -- read from the MCAP summary, never a full
+//! message scan.
+//!
+//!
 //! ## Features
 //!
 //! - Read ROS2 bag files in SQLite3 and MCAP formats

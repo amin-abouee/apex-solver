@@ -5,6 +5,52 @@ All notable changes to `apex-io` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **MCAP reading is bounded-memory and profile-agnostic.** The MCAP storage
+  backend no longer loads whole files into the heap (`fs::read` of a 13 GB bag
+  allocated 13 GB) nor buffers every message into a `Vec` before iterating.
+  It now seeks through the container's summary section (footer → summary) and
+  streams messages chunk-by-chunk, decompressing and holding one chunk at a
+  time; chunks outside a requested time window are skipped without being
+  read. Multi-file iteration is a k-way merge in log-time order.
+  Implementation: the new `ros2::storage::mcap_format` module — a small,
+  seek-based MCAP container parser (summary, chunk indexes, chunk records,
+  zstd/lz4 payloads, chunk CRC validation) that does not need the `mcap`
+  crate's whole-buffer read API. The workspace's `unsafe_code = "forbid"`
+  ruled out memory-mapping.
+- **Topic metadata on MCAP bags is now correct.** Connections built from
+  MCAP summaries report the schema name (e.g. `sensor_msgs/Image`) as
+  `message_type` — previously they reported the channel's *message encoding*
+  (e.g. `cdr`) there — and report the channel encoding as
+  `serialization_format`, instead of a hardcoded `"cdr"`. Per-topic message
+  counts come from the Statistics record rather than a full message scan.
+- **`bag_info` handles bare `.mcap` files** (and reports storage id
+  accordingly) instead of requiring a bag directory.
+- `MCAP` summary discovery no longer walks and decompresses the entire file
+  just to list topics (milliseconds vs. minutes on multi-GB bags).
+
+### Added
+- **`rosbag::Reader` accepts a bare `.mcap` file** (single-file bags such as
+  the HILTI SLAM Challenge recordings) in addition to a bag directory.
+  Topics, message counts, and the time range are read from the MCAP summary
+  on `open()`; `metadata()` returns `None` for such readers, and
+  `duration()`/`start_time()`/`end_time()`/`message_count()` come from the
+  summary. Bare files with an extension other than `.mcap` are rejected
+  (ROS1 `.bag` files belong to `rosbag::ros1::Ros1Reader`).
+- **ROS1-profile MCAP support end to end.** ROS1-serialized payloads inside
+  MCAP containers (`profile: ros1`, `message_encoding: ros1`, `ros1msg`
+  schemas) now flow through `Reader`: connections carry
+  `serialization_format = "ros1"`, so payload decoding dispatches on the
+  encoding — `ros1::deserialize::Ros1Deserializer` + `ros1::messages` for
+  `ros1`, `cdr::CdrDeserializer` + `messages` for `cdr`. Documented with an
+  example in the `rosbag` module docs.
+- Chunk-index time-skip filtering and per-chunk CRC validation (IEEE CRC-32,
+  validated when a chunk declares one).
+- `tests/hilti_mcap.rs`: env-gated (`APEX_HILTI_MCAP`) integration test
+  decoding a real ROS1-profile dataset bag end to end.
+
 ## [0.4.0] - 2026-09-29
 
 ### Breaking

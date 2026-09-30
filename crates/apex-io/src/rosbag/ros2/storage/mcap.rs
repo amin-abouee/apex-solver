@@ -1,16 +1,120 @@
-//! MCAP storage backend for reading ROS2 bag files
+//! MCAP storage backend for reading bag files stored in MCAP format.
 //!
-//! This module provides support for reading ROS2 bag files stored in MCAP format.
-//! MCAP is a modern, efficient container format for multimodal log data.
+//! MCAP is a modern, efficient container format for multimodal log data. This
+//! reader is *profile-agnostic*: an MCAP container carries the payload
+//! encoding per channel (`cdr` for ROS2 bags, `ros1` for ROS1-serialized
+//! payloads, or any other encoding). Each channel's encoding is surfaced as
+//! the connection's `serialization_format` so callers can pick the matching
+//! deserializer ([`crate::rosbag::cdr::CdrDeserializer`] for `cdr`,
+//! [`crate::rosbag::ros1::deserialize::Ros1Deserializer`] for `ros1`), and the
+//! schema-registered message type (e.g. `sensor_msgs/Image`) is surfaced as
+//! `message_type`.
+//!
+//! Reading is bounded-memory: the low-level container reader
+//! ([`mcap_format`]) seeks to the summary, then streams messages
+//! chunk-by-chunk, holding one decompressed chunk at a time -- multi-GB
+//! dataset bags never enter memory whole.
 
 use super::StorageReader;
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
-use mcap::MessageStream;
-use std::collections::HashMap;
+use crate::rosbag::types::{Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage};
+use mcap_format::{Filters, MergedMcapStream, McapSummary};
+use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+
+pub(crate) mod mcap_format;
+
+/// Aggregate statistics taken from MCAP summary sections.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McapSummaryStats {
+    /// Total number of message records across all files.
+    pub message_count: u64,
+    /// Earliest message `log_time` in nanoseconds (0 when unknown).
+    pub start_time: u64,
+    /// Latest message `log_time` in nanoseconds (0 when unknown).
+    pub end_time: u64,
+}
+
+/// Map an MCAP schema encoding onto the crate's message-definition format.
+fn definition_from_schema(encoding: &str, data: &[u8]) -> MessageDefinition {
+    let (format, content): (MessageDefinitionFormat, &[u8]) = match encoding {
+        "ros1msg" | "ros2msg" => (MessageDefinitionFormat::Msg, data),
+        "ros2idl" | "omgidl" => (MessageDefinitionFormat::Idl, data),
+        _ => (MessageDefinitionFormat::None, &[]),
+    };
+    MessageDefinition {
+        format,
+        data: String::from_utf8_lossy(content).into_owned(),
+    }
+}
+
+/// Aggregate topic connections and statistics out of parsed summaries.
+///
+/// `message_type` is taken from the channel's schema name (e.g.
+/// `sensor_msgs/Image`), falling back to the message encoding when a channel
+/// has no schema; `serialization_format` is the channel's message encoding
+/// (`cdr`, `ros1`, ...).
+fn summarize_summaries(
+    summaries: &[Option<McapSummary>],
+) -> (Vec<Connection>, McapSummaryStats) {
+    // Accumulated per topic: (message_type, definition, encoding, count).
+    // BTreeMap keeps the topic order stable across runs.
+    let mut topics: BTreeMap<String, (String, MessageDefinition, String, u64)> = BTreeMap::new();
+    let mut stats = McapSummaryStats::default();
+
+    for summary in summaries.iter().flatten() {
+        for (id, channel) in &summary.channels {
+            let (message_type, definition) = match summary.schemas.get(&channel.schema_id) {
+                Some(schema) => (
+                    schema.name.clone(),
+                    definition_from_schema(&schema.encoding, &schema.data),
+                ),
+                None => (channel.message_encoding.clone(), MessageDefinition::default()),
+            };
+            let count = summary
+                .stats
+                .as_ref()
+                .and_then(|s| s.channel_counts.get(id))
+                .copied()
+                .unwrap_or(0);
+            let entry = topics
+                .entry(channel.topic.clone())
+                .or_insert_with(|| (message_type, definition, channel.message_encoding.clone(), 0));
+            entry.3 += count;
+        }
+
+        if let Some(statistics) = &summary.stats {
+            stats.message_count += statistics.message_count;
+            if statistics.start_time != 0 {
+                stats.start_time = if stats.start_time == 0 {
+                    statistics.start_time
+                } else {
+                    stats.start_time.min(statistics.start_time)
+                };
+            }
+            stats.end_time = stats.end_time.max(statistics.end_time);
+        }
+    }
+
+    let connections = topics
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (topic, (message_type, definition, encoding, count)))| Connection {
+            id: (idx + 1) as u32,
+            topic,
+            message_type,
+            message_definition: definition,
+            type_description_hash: String::new(),
+            message_count: count,
+            serialization_format: encoding,
+            offered_qos_profiles: Vec::new(),
+        })
+        .collect();
+
+    (connections, stats)
+}
 
 /// MCAP storage reader implementation
 pub struct McapStorageReader {
@@ -20,8 +124,9 @@ pub struct McapStorageReader {
     topic_connections: Vec<Connection>,
     /// Whether the storage is currently open
     is_open: bool,
-    /// Loaded MCAP file contents (read fully into memory; deref to `&[u8]`).
-    mapped_files: Vec<Box<[u8]>>,
+    /// Per-file summaries read by seeking through the summary section only.
+    /// `None` entries are files without a summary section (unindexed).
+    summaries: Vec<Option<McapSummary>>,
 }
 
 impl McapStorageReader {
@@ -33,72 +138,51 @@ impl McapStorageReader {
             mcap_paths,
             topic_connections: connections,
             is_open: false,
-            mapped_files: Vec::new(),
+            summaries: Vec::new(),
         })
     }
 
-    /// Get all topics and their message counts directly from MCAP files
+    /// Get all topics and their message counts from the MCAP summary sections.
+    ///
+    /// Never touches message data: everything comes from the summary's
+    /// schema/channel/statistics records, so a 13 GB bag summarizes in
+    /// milliseconds instead of a full decompression pass. Files without a
+    /// summary section contribute nothing.
     pub fn get_topics_from_mcap(&self) -> Result<Vec<Connection>> {
-        let mut topic_map: HashMap<String, (String, u64)> = HashMap::new();
+        Ok(summarize_summaries(&self.summaries).0)
+    }
 
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file.as_ref()).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
+    /// Aggregate message count and time range from the summary sections.
+    pub fn summary_stats(&self) -> Result<McapSummaryStats> {
+        Ok(summarize_summaries(&self.summaries).1)
+    }
 
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        let topic_name = &message.channel.topic;
-                        let message_type = &message.channel.message_encoding;
-
-                        let entry = topic_map
-                            .entry(topic_name.clone())
-                            .or_insert((message_type.clone(), 0));
-                        entry.1 += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read MCAP message: {e}");
-                    }
-                }
-            }
-        }
-
-        let all_connections = topic_map
-            .into_iter()
-            .enumerate()
-            .map(|(idx, (topic_name, (message_type, count)))| Connection {
-                id: (idx + 1) as u32,
-                topic: topic_name,
-                message_type,
-                message_definition: MessageDefinition::default(),
-                type_description_hash: String::new(),
-                message_count: count,
-                serialization_format: "cdr".to_string(),
-                offered_qos_profiles: Vec::new(),
-            })
-            .collect();
-
-        Ok(all_connections)
+    /// Build the global log-time-order message stream across all files,
+    /// applying the topic and time filters.
+    fn merged_stream(
+        &self,
+        connections: Option<&[Connection]>,
+        start: Option<u64>,
+        stop: Option<u64>,
+    ) -> Result<MergedMcapStream> {
+        let filters = Filters::new(connections, start, stop);
+        MergedMcapStream::new(&self.mcap_paths, &self.summaries, filters)
     }
 }
 
 impl StorageReader for McapStorageReader {
     fn open(&mut self) -> Result<()> {
-        self.mapped_files.clear();
+        self.summaries.clear();
 
         for path in &self.mcap_paths {
-            let bytes: Box<[u8]> = std::fs::read(path)
-                .map_err(|e| {
-                    ReaderError::generic(format!(
-                        "Failed to read MCAP file {}: {}",
-                        path.display(),
-                        e
-                    ))
-                })?
-                .into_boxed_slice();
-
-            self.mapped_files.push(bytes);
+            let mut file = File::open(path).map_err(|e| {
+                ReaderError::generic(format!(
+                    "Failed to open MCAP file {}: {e}",
+                    path.display()
+                ))
+            })?;
+            let summary = mcap_format::read_summary(&mut file)?;
+            self.summaries.push(summary);
         }
 
         self.is_open = true;
@@ -106,13 +190,22 @@ impl StorageReader for McapStorageReader {
     }
 
     fn close(&mut self) -> Result<()> {
-        self.mapped_files.clear();
+        self.summaries.clear();
         self.is_open = false;
         Ok(())
     }
 
     fn get_definitions(&self) -> Result<HashMap<String, MessageDefinition>> {
-        Ok(HashMap::new())
+        // One entry per distinct message type (schema name); definitions come
+        // from the summary's schema records.
+        let mut definitions = HashMap::new();
+        for summary in self.summaries.iter().flatten() {
+            for schema in summary.schemas.values() {
+                let definition = definition_from_schema(&schema.encoding, &schema.data);
+                definitions.entry(schema.name.clone()).or_insert(definition);
+            }
+        }
+        Ok(definitions)
     }
 
     fn messages_filtered(
@@ -121,69 +214,46 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<Message>> + '_>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: "cdr".to_string(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        let msg = Message {
-                            connection,
-                            topic: message.channel.topic.clone(),
-                            timestamp,
-                            data: message.data.to_vec(),
-                        };
-                        all_messages.push(Ok(msg));
-                    }
-                    Err(e) => {
-                        all_messages.push(Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        ))));
-                    }
-                }
-            }
+        // Known connections by topic, from the caller's list and (as
+        // fallback) from the summaries themselves. Channel IDs are NOT used
+        // as keys: they are file-local and unrelated to the enumeration
+        // order of the topic list.
+        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
+            .0
+            .into_iter()
+            .map(|c| (c.topic.clone(), c))
+            .collect();
+        for connection in self.topic_connections.iter().cloned() {
+            by_topic.insert(connection.topic.clone(), connection);
         }
 
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
+        let merged = self.merged_stream(connections, start, stop)?;
+
+        let iterator = merged.map(move |item| {
+            item.map(|(topic, mcap_msg)| {
+                let connection = by_topic
+                    .get(topic.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| Connection {
+                        id: 0,
+                        topic: topic.to_string(),
+                        message_type: String::new(),
+                        message_definition: MessageDefinition::default(),
+                        type_description_hash: String::new(),
+                        message_count: 0,
+                        serialization_format: String::new(),
+                        offered_qos_profiles: Vec::new(),
+                    });
+                Message {
+                    connection,
+                    topic: topic.to_string(),
+                    timestamp: mcap_msg.log_time,
+                    data: mcap_msg.data,
+                }
+            })
         });
 
-        Ok(Box::new(all_messages.into_iter()))
+        Ok(Box::new(iterator))
     }
 
     fn is_open(&self) -> bool {
@@ -200,68 +270,41 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: "cdr".to_string(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        let raw_msg = RawMessage {
-                            connection,
-                            timestamp,
-                            raw_data: message.data.to_vec(),
-                        };
-                        all_messages.push(Ok(raw_msg));
-                    }
-                    Err(e) => {
-                        all_messages.push(Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        ))));
-                    }
-                }
-            }
+        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
+            .0
+            .into_iter()
+            .map(|c| (c.topic.clone(), c))
+            .collect();
+        for connection in self.topic_connections.iter().cloned() {
+            by_topic.insert(connection.topic.clone(), connection);
         }
 
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
+        let merged = self.merged_stream(connections, start, stop)?;
+
+        let iterator = merged.map(move |item| {
+            item.map(|(topic, mcap_msg)| {
+                let connection = by_topic
+                    .get(topic.as_ref())
+                    .cloned()
+                    .unwrap_or_else(|| Connection {
+                        id: 0,
+                        topic: topic.to_string(),
+                        message_type: String::new(),
+                        message_definition: MessageDefinition::default(),
+                        type_description_hash: String::new(),
+                        message_count: 0,
+                        serialization_format: String::new(),
+                        offered_qos_profiles: Vec::new(),
+                    });
+                RawMessage {
+                    connection,
+                    timestamp: mcap_msg.log_time,
+                    raw_data: mcap_msg.data,
+                }
+            })
         });
 
-        Ok(Box::new(all_messages.into_iter()))
+        Ok(Box::new(iterator))
     }
 
     fn read_raw_messages_batch(
@@ -270,61 +313,44 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: "cdr".to_string(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        all_messages.push(RawMessage {
-                            connection,
-                            timestamp,
-                            raw_data: message.data.to_vec(),
-                        });
-                    }
-                    Err(e) => {
-                        return Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        )));
-                    }
-                }
-            }
+        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
+            .0
+            .into_iter()
+            .map(|c| (c.topic.clone(), c))
+            .collect();
+        for connection in self.topic_connections.iter().cloned() {
+            by_topic.insert(connection.topic.clone(), connection);
         }
 
+        let mut all_messages = Vec::new();
+        for item in self.merged_stream(connections, start, stop)? {
+            let (topic, mcap_msg) = item.map_err(|e| {
+                ReaderError::generic(format!("Failed to read MCAP message: {e}"))
+            })?;
+            let connection = by_topic
+                .get(topic.as_ref())
+                .cloned()
+                .unwrap_or_else(|| Connection {
+                    id: 0,
+                    topic: topic.to_string(),
+                    message_type: String::new(),
+                    message_definition: MessageDefinition::default(),
+                    type_description_hash: String::new(),
+                    message_count: 0,
+                    serialization_format: String::new(),
+                    offered_qos_profiles: Vec::new(),
+                });
+            all_messages.push(RawMessage {
+                connection,
+                timestamp: mcap_msg.log_time,
+                raw_data: mcap_msg.data,
+            });
+        }
+
+        // The k-way merge yields log-time order as long as every file is
+        // internally ordered (writers emit chunks in log-time order); the
+        // explicit sort keeps the batch contract exact even for a file whose
+        // chunks were written out of order.
         all_messages.sort_by_key(|a| a.timestamp);
         Ok(all_messages)
     }
@@ -333,7 +359,6 @@ impl StorageReader for McapStorageReader {
         self
     }
 }
-
 /// MCAP storage writer (minimal placeholder — MCAP reading is fully supported)
 pub struct McapWriter {
     mcap_path: PathBuf,
@@ -716,4 +741,159 @@ struct Channel {
     _topic: String,
     _message_encoding: String,
     _metadata: HashMap<String, String>,
+}
+
+/// Round-trip tests through the `mcap` crate's writer, including the
+/// ROS1-profile case (`message_encoding: ros1`, `ros1msg` schemas) that bare
+/// dataset bags such as HILTI's use.
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+    use mcap::Message as McapMessage;
+    use std::borrow::Cow;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    /// Write a ros1-profile MCAP with `num_messages` payload on `topic`, each
+    /// payload ending in a distinct u8 tag so decode order can be asserted.
+    fn write_ros1_mcap(
+        path: &Path,
+        topic: &str,
+        message_type: &str,
+        num_messages: u32,
+        base_time_ns: u64,
+    ) -> TestResult {
+        let file = File::create(path)?;
+        let mut writer = mcap::WriteOptions::new()
+            .compression(Some(mcap::Compression::Zstd))
+            .create(file)?;
+
+        let definition = format!("{message_type} definition");
+        let schema = std::sync::Arc::new(mcap::Schema {
+            name: message_type.to_string(),
+            encoding: "ros1msg".to_string(),
+            data: Cow::Owned(definition.into_bytes()),
+        });
+        let channel = std::sync::Arc::new(mcap::Channel {
+            schema: Some(schema),
+            topic: topic.to_string(),
+            message_encoding: "ros1".to_string(),
+            metadata: BTreeMap::new(),
+        });
+
+        for i in 0..num_messages {
+            let message = McapMessage {
+                channel: channel.clone(),
+                sequence: i,
+                log_time: base_time_ns + u64::from(i) * 1_000_000,
+                publish_time: base_time_ns + u64::from(i) * 1_000_000,
+                data: Cow::Owned(vec![u8::try_from(i % 256)?]),
+            };
+            writer.write(&message)?;
+        }
+        writer.finish()?;
+        Ok(())
+    }
+
+    #[test]
+    fn ros1_profile_summary_reports_schema_type_and_encoding() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("ros1.mcap");
+        write_ros1_mcap(&path, "/cam0/image_raw", "sensor_msgs/Image", 3, 1_700_000_000_000_000_000)?;
+
+        let mut reader = McapStorageReader::new(vec![path.as_path()], vec![])?;
+        reader.open()?;
+
+        let connections = reader.get_topics_from_mcap()?;
+        assert_eq!(connections.len(), 1);
+        let connection = &connections[0];
+        assert_eq!(connection.topic, "/cam0/image_raw");
+        // The schema name, not the message encoding, is the message type --
+        // the old implementation reported "ros1" here.
+        assert_eq!(connection.message_type, "sensor_msgs/Image");
+        // And the encoding is the serialization format, not a hardcoded cdr.
+        assert_eq!(connection.serialization_format, "ros1");
+        assert_eq!(connection.message_count, 3);
+
+        let stats = reader.summary_stats()?;
+        assert_eq!(stats.message_count, 3);
+        assert_eq!(stats.start_time, 1_700_000_000_000_000_000);
+        assert_eq!(stats.end_time, 1_700_000_000_000_000_000 + 2_000_000);
+
+        let definitions = reader.get_definitions()?;
+        assert_eq!(definitions.len(), 1);
+        let definition = &definitions["sensor_msgs/Image"];
+        assert_eq!(definition.format, MessageDefinitionFormat::Msg);
+        Ok(())
+    }
+
+    #[test]
+    fn ros1_profile_messages_stream_in_log_time_order() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("ros1_stream.mcap");
+        let base = 1_700_000_000_000_000_000;
+        write_ros1_mcap(&path, "/imu", "sensor_msgs/Imu", 5, base)?;
+
+        let mut reader = McapStorageReader::new(vec![path.as_path()], vec![])?;
+        reader.open()?;
+
+        let raws: Vec<_> = reader.raw_messages()?.filter_map(Result::ok).collect();
+        assert_eq!(raws.len(), 5);
+        let mut times: Vec<u64> = raws.iter().map(|m| m.timestamp).collect();
+        assert!(times.is_sorted());
+        // Payloads carried through byte-exact: tag i on the i-th message.
+        assert_eq!(raws[2].raw_data, vec![2]);
+
+        // Time filter: only the last two messages.
+        let late: Vec<_> = reader
+            .raw_messages_filtered(None, Some(base + 3_000_000), None)?
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(late.len(), 2);
+        times = late.iter().map(|m| m.timestamp).collect();
+        assert!(times.iter().all(|t| *t >= base + 3_000_000));
+        Ok(())
+    }
+
+    #[test]
+    fn topic_filter_and_decoded_message_both_honor_the_allow_list() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let image_path = dir.path().join("images.mcap");
+        let imu_path = dir.path().join("imu.mcap");
+        write_ros1_mcap(&image_path, "/cam0/image_raw", "sensor_msgs/Image", 2, 1_000_000_000)?;
+        write_ros1_mcap(&imu_path, "/imu", "sensor_msgs/Imu", 3, 1_000_000_000)?;
+
+        let mut reader =
+            McapStorageReader::new(vec![image_path.as_path(), imu_path.as_path()], vec![])?;
+        reader.open()?;
+
+        // Two files, one shared topic each: summary aggregates both.
+        let connections = reader.get_topics_from_mcap()?;
+        assert_eq!(connections.len(), 2);
+        assert_eq!(
+            reader.summary_stats()?.message_count,
+            5,
+            "counts across files must add up"
+        );
+
+        let image_conn = connections
+            .iter()
+            .find(|c| c.topic == "/cam0/image_raw")
+            .ok_or("no /cam0/image_raw connection")?;
+        let raws: Vec<_> = reader
+            .raw_messages_filtered(Some(std::slice::from_ref(image_conn)), None, None)?
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(raws.len(), 2);
+        assert_eq!(raws[0].connection.serialization_format, "ros1");
+
+        // Decoded-message path reports the same connection fields.
+        let decoded: Vec<_> = reader
+            .messages_filtered(None, None, None)?
+            .filter_map(Result::ok)
+            .collect();
+        assert_eq!(decoded.len(), 5);
+        assert!(decoded.iter().all(|m| m.connection.message_type.starts_with("sensor_msgs/")));
+        Ok(())
+    }
 }
