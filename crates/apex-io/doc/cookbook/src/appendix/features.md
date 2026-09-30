@@ -41,7 +41,7 @@ In `Cargo.toml`:
 
 ```toml
 [dependencies]
-apex-io = { version = "0.3", features = ["rosbag"] }
+apex-io = { version = "0.4", features = ["rosbag"] }
 ```
 
 ## What always works (no features)

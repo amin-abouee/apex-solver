@@ -5,6 +5,23 @@ All notable changes to `apex-camera-models` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-09-29
+
+### Changed
+- **`KannalaBrandtCamera::unproject` now returns `CameraModelError::NumericalError`** for
+  pixels outside the model's valid domain (`ru > π/2`) and for non-converged Newton
+  iterations; the old code silently clamped `ru` and returned an unconverged ray,
+  matching the validation the f-theta model already performed.
+
+### Added
+- **`projection_deficit` on the camera-model trait** — the signed depth deficit of a
+  camera-frame point outside the projection domain of `project`, plus its gradient
+  (`(deficit, ∂deficit/∂p_cam)`). Per-model domain geometry is now explicit: the default
+  z-forward deficit (`-z`), the BAL z-backward convention (`z < -MIN_DEPTH`), and double
+  sphere's `z > -w₂·‖p_cam‖` cone. *Status: not currently charged by the solver* —
+  `ProjectionFactor` does not apply it yet; the definitions are unit-tested and ready for
+  a barrier formulation that survives the BA benchmarks.
+
 ## [0.3.0] - 2026-07-30
 
 ### Changed

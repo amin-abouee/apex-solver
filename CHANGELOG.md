@@ -5,328 +5,84 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.5.0] - 2026-09-29
 
 ### Breaking Changes
 
-- **`apex-io`: `rosbag` is now an opt-in feature (was built unconditionally).**
-  Depending on `apex-io` no longer compiles `rusqlite` (bundled SQLite),
-  `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`. Bag I/O users
-  must opt in:
+- **`PriorFactor` is now a tangent-space anchor** and generic over the manifold; the old
+  ambient parameter-space factor is renamed **`EuclideanPriorFactor`** (`Rn` only).
+  Struct-literal construction becomes `PriorFactor::new(prior)` /
+  `EuclideanPriorFactor::new(data)`.
+- **`apex-io` `rosbag` is now an opt-in feature** (was built unconditionally), and `download`
+  / `clap` moved behind the default-on `download` / `cli` features. The `apex-solver`
+  bins/examples likewise moved behind the default-on `cli` feature:
   ```toml
-  apex-io = { version = "0.3", features = ["rosbag"] }
-  # via the solver crate:
-  apex-solver = { version = "1.4", features = ["rosbag"] }
+  apex-io = { version = "0.4", features = ["rosbag"] }
+  apex-solver = { version = "1.5", features = ["rosbag"] }
   ```
-  (Use the newest 0.x / 1.x release; the `rosbag` feature name is stable.)
-  `download` (dataset fetching via `ureq`/`bzip2`/`flate2`/`tar`) stays on by
-  default; `--no-default-features` disables it, in which case the
-  `ensure_*_dataset` helpers only serve already-downloaded files.
-  `clap` is now behind the default-on `cli` feature in both crates
-  (bins requiring it declare `required-features`).
-  The `bag_*` binaries now require `--features rosbag`, `download_datasets`
-  requires `--features download`.
-- **`apex-solver` bins/examples moved behind the default-on `cli` feature.**
-  `--no-default-features` builds the library without `clap`; the
-  `pose_graph_g2o` / `bundle_adjustment` binaries and the `clap`-based
-  examples are skipped in that configuration.
+- **`LinearSolver::solve_augmented_equation` takes `&Damping` instead of `lambda: f64`**
+  (`Damping::identity(lambda)` reproduces the old uniform `λI`).
+- **Schur solvers renamed and consolidated** around Ceres-style explicit/implicit naming,
+  with no deprecated aliases: `SparseSchurComplementSolver` → `ExplicitSparseSchur`,
+  `IterativeSchurSolver` → `ImplicitSparseSchur`, new `ExplicitDenseSchur`;
+  `SchurVariant` → `ExplicitSchurVariant`;
+  `LinearSolverType::SparseSchurComplement` → `ExplicitSparseSchur`.
+- **`LevenbergMarquardtConfig::for_bundle_adjustment` now selects `ImplicitSparseSchur`**
+  (2.2× faster across the BAL datasets); pass
+  `.with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)` for the exact reduced
+  solve.
+
+Migration steps: [Migrating from 1.4](doc/cookbook/src/migration.md).
 
 ### Changed
 
-- **Changelog moved from `doc/CHANGELOG.md` to the repository root**
-  (`CHANGELOG.md`), following Keep-a-Changelog conventions. Each sub-crate's
-  changelog moved likewise from `crates/*/doc/CHANGELOG.md` to its crate root
-  (`crates/*/CHANGELOG.md`).
-- **Reference PDFs relocated** from `doc/*.pdf` to `doc/references/`.
+- **Levenberg-Marquardt damps with `λ·D`** (Ceres-style) from `λ = 1e-4`, and both LM and
+  Dog Leg gate step acceptance on `min_relative_decrease`. Iterates change on every problem;
+  measurements: `analysis/ceres-params-validation.md`.
+- **Eleven previously-inert configuration fields now drive behaviour** (diagonal bounds,
+  relative-decrease thresholds, condition-number checks, Marquardt damping policy) or are
+  deprecated.
+- **Ω-weighted objectives end-to-end** — `pose_graph_g2o` and the odometry benchmark weight
+  edges with the parsed information matrices by default (`--no-noise` restores the
+  unweighted solve).
 
 ### Added
 
-- **Factor library expansion** (GTSAM-audited; see `doc/factor-catalog.md` for the full
-  keep/skip rationale):
-  - **IMU**: model-suffixed files (`imu_se23_factors.rs`, `combined_imu_se23_factors.rs`,
-    `imu_sgal3_factors.rs`, `combined_imu_sgal3_factors.rs`) plus `Sgal3ImuFactor` /
-    `Sgal3CombinedImuFactor` — SGal(3)-based kinematic constraint over the same shared
-    `ImuPreintegration` (SGal(3) increment = SE(2)₃ delta + time coordinate; the time row
-    of the log-residual vanishes identically). `ImuPreintegration::delta_sgal3()` added.
-    The SGal(3) FD-Jacobian tests are currently `#[ignore]`d (tangent Jacobian chain under
-    investigation; the zero-residual and group-composition formulation tests pass).
-  - **Visual**: `StereoFactor` (rectified stereo), `InverseDepthFactor` (anchor pixel +
-    inverse-depth landmarks), `EssentialMatrixFactor` / `EssentialMatrixConstraint`
-    (2D–2D epipolar geometry), and `SmartProjectionFactor` — pose-only structure-less
-    multi-view factor with DLT + Gauss-Newton re-triangulation and the exact implicit-Schur
-    (point-marginalized) Jacobian; registers with `NoiseModel::null()` (internal whitening)
-    and falls back to a bounded cheirality penalty on degeneracy.
-  - **LiDAR**: `PoseToPointFactor`, `PointToPlaneFactor` (target plane, no distance field),
-    and `GicpFactor` (plane-to-plane via combined-covariance whitening, frozen at
-    construction with a rotation hint).
-  - **Navigation**: `GpsVelocityFactor`, `PseudorangeFactor`, `DopplerFactor`,
-    `BarometricFactor` (SE3 pose + scalar bias), `AttitudeFactor` (gravity/magnetometer
-    direction constraint).
-  - **Range family**: `PosePoseRangeFactor`, `PosePointRangeFactor`, `BearingRangeFactor`
-    (4D: 3 bearing rows + 1 range row).
-  - **Marginalization**: `MarginalPriorFactor` (GTSAM iSAM2 `LinearContainerFactor`
-    analogue — Gaussian marginal over eliminated variables, manifold-agnostic via a
-    caller-supplied local-log closure) plus `PoseRotationPrior` / `PoseTranslationPrior`
-    partial-pose priors for loop-closure initialization.
-- **Integration suite** (`tests/factor_integration.rs`): a synthetic multi-sensor dataset
-  (circular-climb trajectory with sequentially self-consistent IMU propagation) driving
-  end-to-end LM solves for VIO, monocular BA with cheirality violations, stereo VO,
-  lidar scan matching (point-to-plane + GICP + point correspondences), a GNSS
-  constellation solve (pseudorange + Doppler), marginalization consistency, loop
-  closure with partial priors, pose-only smart-factor BA, and auxiliary barometer/
-  attitude anchoring.
+- **Factor library expansion** — IMU (SE₂(3) / SGal(3)), visual, LiDAR, GNSS/navigation,
+  range & bearing, motion-model and marginalization factors. Full list with variables,
+  residual dimensions and weighting rules: [`doc/factors.md`](doc/factors.md);
+  derivations: the [Factor Reference](doc/cookbook/src/factors/index.md).
+- **Noise model layer** — `NoiseModel` (Null / Diagonal / Dense, sqrt-information domain)
+  registered via `add_residual_block_with_noise`, whitening upstream of the robust corrector.
+- **New Schur solvers** — matrix-free `ImplicitSparseSchur` in `JᵀJ` as well as `S`
+  (5.9–13.4× faster), `ExplicitDenseSchur`, a PCG forcing sequence (Ceres `η`), and shared
+  preconditioner handling across all Schur paths.
+- **Multi-sensor integration suite** (`tests/factor_integration.rs`) and
+  `apex-io` trajectory I/O (TUM / ASL ground truth).
 
 ### Fixed
 
-- **`BearingRangeFactor` never constrained the range** — the residual was bearing-only
-  (3 rows), so range measurements were silently ignored. The residual is now 4D with the
-  range row and its Jacobian (∂d/∂δρ = −q̂ᵀR, point block q̂ᵀ).
-- **`BarometricFactor` took an R³ position** instead of an SE3 pose (GTSAM layout); the
-  z-Jacobian follows the world-to-body retraction (`∂z/∂δρ = R[2,:]`).
-- **`AttitudeFactor` used the wrong hemisphere** of the world-to-body rotation
-  (`Rᵀ·d_world` instead of `R·d_world` for the crate's `T_wc` convention) and a wrong
-  rotation-Jacobian sign.
-- **`Sgal3` adjoint was stale** relative to the corrected group exponential
-  (`apex-manifolds`): the ρ-row ν-column sign, the θ-column (`ρ̂R` instead of
-  `(ρ−tν)̂R`), and the s-column (`−ν` instead of `+ν`) are fixed and now verified against
-  `Log(g∘exp(ξ)∘g⁻¹)` by `adjoint_matches_group_conjugation`.
-- `EuclideanPriorFactor` re-exported at `apex_solver::factors` level (was only reachable
-  via the module path).
+- **Analytic-Jacobian and convention fixes across the manifolds** — SGal(3) group
+  exponential and adjoint, Sim(3) action/adjoint/Jacobians, SE(3)/SE₂(3) right Jacobians,
+  `SO3::log` small-angle sign. Details: [apex-manifolds](crates/apex-manifolds/CHANGELOG.md)
+  and [apex-camera-models](crates/apex-camera-models/CHANGELOG.md) changelogs.
+- **Optimizer fixes** — solver state (`λ`, `ν`, trust-region radius, `μ`) re-seeded per
+  solve; `IterativeSchurSolver::get_gradient` sign convention; `compute_step_quality`
+  rejecting cost-increasing steps; `ExplicitSparseSchur` honouring its preconditioner.
+- **Factor corrections** — `BearingRangeFactor` now constrains the range (4D residual),
+  `BarometricFactor` takes an SE3 pose, `AttitudeFactor` uses the correct hemisphere,
+  `EuclideanPriorFactor` re-exported at `apex_solver::factors`.
 
-### Known limitations
+### Known Limitations
 
-- **`fix_variable` under-corrects free variables** that share factors with the fixed one:
-  the linear solve still treats fixed coordinates as free and their step is discarded
-  after application. Anchor with tight `EuclideanPriorFactor` / `PriorFactor` priors
-  instead (see `tests/factor_integration.rs`); fully-fixed variables can also surface as
-  "structurally empty diagonal" errors in the sparse LM damping.
+- **`fix_variable` under-corrects free variables** that share factors with the fixed one;
+  anchor with tight `EuclideanPriorFactor` / `PriorFactor` priors instead.
 - The SGal(3) IMU factors' analytical Jacobians are pending FD validation (tests
   `#[ignore]`d); the residual formulation itself is exact.
 
+### Notes
 
-### Breaking Changes
-
-- **`PriorFactor` is now a tangent-space anchor and generic over the manifold.**
-  `r = Log(T_prior⁻¹ ∘ X) ∈ ℝ^dof` with the full between-chain Jacobian — no quaternion
-  double-cover ambiguity, no dropped rotation–translation coupling, correct SE(2) angle wrap.
-  The old ambient parameter-space factor is renamed **`EuclideanPriorFactor`** and is
-  restricted to `Rn` variables at registration (anything else returns a
-  `DimensionMismatch` error). Struct-literal construction (`PriorFactor { data }`) becomes
-  `PriorFactor::new(prior)` / `EuclideanPriorFactor::new(data)`.
-  ```rust
-  // before — ambient, SE(3)-incorrect
-  problem.add_residual_block(&[k], Box::new(PriorFactor { data: pose7 }), loss);
-
-  // after — tangent anchor on SE(3)
-  problem.add_residual_block(&[k], Box::new(PriorFactor::<SE3>::new(prior_pose)), loss);
-  ```
-- **`KannalaBrandtCamera::unproject` now returns `NumericalError`** for pixels outside the
-  model's valid domain (`ru > π/2`) and for non-converged Newton iterations; the old code
-  silently clamped `ru` and returned an unconverged ray.
-- **`Rn::DIM` / `Rn::DOF` / `Rn::REP_SIZE` are deprecated** — they are `0` sentinels for a
-  dynamic manifold, not dimensions. Use `is_dynamic()` / `tangent_dim()`.
-
-### Added
-
-- **Noise model layer** — measurement uncertainty per residual block:
-  `NoiseModel` (`Null` identity default | `Diagonal` | `Dense`, sqrt-information domain),
-  registered via `add_residual_block_with_noise` / `try_add_residual_block_with_noise`.
-  Residuals and Jacobians are whitened (`r̃ = S·r`, `J̃ = S·J`) upstream of the robust-loss
-  corrector, so the optimized objective is `Σ ½·ρ(‖S·r‖²)` — the Ω-weighted objective g2o
-  reports. `pose_graph_g2o` and the odometry benchmark weight edges with the parsed
-  information matrices **by default**; `--no-noise` restores the unweighted solve.
-  `NoiseModel::from_information` tolerates rank-deficient/slightly indefinite Ω (negative
-  eigenvalues clamped with a warning) — required by real g2o data such as sphere2500.
-- **One-parameter subgroup law tests for all eight manifolds**
-  (`exp(aξ)∘exp(bξ) = exp((a+b)ξ)`) plus an SGal(3) Jacobian composition check with strong
-  time–velocity coupling.
-
-### Fixed
-
-- **`IterativeSchurSolver` published `−Jᵀr` from `get_gradient`** while every other backend
-  published `+Jᵀr`, the documented contract. Levenberg-Marquardt and Dog Leg build their
-  predicted cost reduction from that vector, so on the implicit-Schur path the step-quality
-  ratio ρ came out sign-inverted. It also cached the *damped* `JᵀJ + λI` as `get_hessian`,
-  which Dog Leg uses for the Cauchy point and the true quadratic model. `tests/
-  linear_solver_contract.rs` now pins both conventions across all six backends.
-
-- **`compute_step_quality` accepted steps that increased the cost.** A negative predicted
-  reduction divided by a negative actual reduction yields ρ > 0, so a step the quadratic model
-  itself expected to make things worse was accepted. Ceres treats a non-positive
-  `model_cost_change` as an invalid step; it is now rejected. The near-zero case is unchanged,
-  since at the solution both reductions legitimately vanish.
-
-- **λ, ν, the trust-region radius and μ were stored in the config and mutated during a solve**,
-  so a second `optimize()` call on the same solver silently started from wherever the previous
-  run finished. They are now solver run state, re-seeded from the configuration on every solve.
-
-
-- **SGal(3) `exp` is now the group exponential.** The old map dropped the time–velocity
-  coupling entirely: `exp(aξ)∘exp(bξ)` differed from `exp((a+b)ξ)` by exactly `a·b·s·ν`,
-  and `exp∘log ≠ id` whenever `s·ν ≠ 0`. `exp` now integrates the subgroup flow
-  (`ρ' = Jl(θ)·ρ + s·M(θ)·ν` with `M(ω) = ½I + α·ω̂ + β·ω̂²`), `log` inverts it exactly, and
-  `right/left_jacobian(±inv)` are computed as the derivative-by-definition of the corrected
-  map (central differences through the crate's own compose/log) — validated by the subgroup
-  law and a coupling-region composition test.
-- **`SO3::log` returned the wrong sign near the negative-`w` identity.** For a rotation by
-  `−s` (`w < 0`, `|s| < 2e-5`) the small-angle branch returned `+s`. Now sign-correct with
-  regression tests.
-- **Sim(3) `right/left_jacobian_inv` and `V⁻¹` no longer silently fall back to identity**
-  on singular inputs; they use a Tikhonov-regularized inverse and emit a `warn!`.
-- **Kannala-Brandt `unproject` validates its Newton iterations** post-loop (finite,
-  converged) and rejects out-of-domain radii, matching `ftheta`.
-
-### Changed
-
-Eleven configuration fields were declared, documented, given builder setters — and never read.
-Each now drives behaviour or is deprecated:
-
-- `min_diagonal` / `max_diagonal` (LM) — the Marquardt damping diagonal, plus the
-  `with_diagonal_bounds` setter they never had.
-- `min_relative_decrease` (LM, Dog Leg) — the step-acceptance threshold.
-- `max_condition_number` (LM, GN, Dog Leg) — checks `κ₂(JᵀJ) ≥ max_j H_jj / min_j H_jj`, a
-  rigorous lower bound computed from the column norms already available, and terminates with
-  `OptimizationStatus::IllConditionedJacobian` — a variant nothing previously constructed.
-  Exceeding the threshold is proof of ill-conditioning; staying below it is not proof of the
-  converse, and the doc says so. Its most useful case is a variable no residual constrains,
-  which gives a zero column and an infinite bound; that previously surfaced as an opaque
-  "JᵀJ has structurally empty diagonal entries" from inside the linear solver.
-- `damping_increase_factor` / `damping_decrease_factor` / `min_step_quality` /
-  `good_step_quality` (LM) — read by the new `DampingUpdate::Marquardt` policy. The default
-  `DampingUpdate::Nielsen` derives both directions from ρ and ignores them, which is why they
-  were inert; each field's doc now names the policy that reads it.
-- `min_diagonal` (GN) — the uniform regularizer its doc-comment always promised, applied as
-  `(JᵀJ + min_diagonal·I)`. Set to `0.0` for the un-regularized normal equations.
-- `trust_region_increase_factor` (Dog Leg) — replaces the hardcoded `3.0` in the radius
-  growth rule (same default, so unchanged behaviour). The radius growth now measures the step
-  in the *scaled* space the radius bounds; previously it mixed the scaled radius with an
-  un-scaled step norm whenever Jacobi scaling was on, which is Dog Leg's default.
-- `min_step_quality` (Dog Leg) and `enable_visualization` (GN, Dog Leg) are `#[deprecated]`:
-  the first duplicates `min_relative_decrease`, the second is superseded by the observer
-  pattern (`solver.add_observer(RerunObserver::new(true)?)`).
-
-Also: Dog Leg's `update_trust_region` return value was discarded, so a rejected step with
-`0 < ρ < 1e-4` took the "moderate" branch and cleared the step-reuse cache as though it had
-been accepted. Levenberg-Marquardt's predicted reduction moved from the `λI`-specific identity
-`½·δᵀ(λδ − g)` to the policy-independent `−δᵀg − ½·δᵀHδ`, shared with Dog Leg.
-
-
-- **Odometry benchmarks now solve the Ω-weighted objective end-to-end** — the optimized
-  number is the χ² the harness reports. Measured impact on eight pose graphs: every final
-  χ² improves (torus3D 1.8×, cubicle 240×, sphere2500 2.5×, mit 12×), five of eight are
-  also faster. Details in [`noise-round-results.md`](noise-round-results.md).
-
-- **`LinearSolver::solve_augmented_equation` takes `&Damping` instead of `lambda: f64`.**
-  Custom `LinearSolver` implementations must update the signature. The augmented system it
-  describes is now `(JᵀJ + λ·D)·dx = −Jᵀr` with `D_jj = clamp(JᵀJ_jj, min_diagonal,
-  max_diagonal)` — Ceres' `LevenbergMarquardtStrategy`. `Damping::identity(lambda)` reproduces
-  the previous uniform `λI` behaviour exactly:
-  ```rust
-  // before
-  solver.solve_augmented_equation(&residuals, &jacobian, lambda)?;
-
-  // after — same numerics
-  solver.solve_augmented_equation(&residuals, &jacobian, &Damping::identity(lambda))?;
-  ```
-
-- **Levenberg-Marquardt now damps with `λ·D` and starts from `λ = 1e-4`** (was `λI` and
-  `1e-3`). Iterates change on every problem. Measurements across ten pose graphs, two BAL
-  datasets and three camera-calibration problems are in
-  [`ceres-params-validation.md`](ceres-params-validation.md): order-of-magnitude wins wherever
-  parameter scales are heterogeneous (calibration, bundle adjustment), bounded constant-factor
-  costs on homogeneous pose graphs. To restore the old behaviour:
-  `LevenbergMarquardtConfig::new().with_diagonal_bounds(1.0, 1.0).with_damping(1e-3)`.
-
-- **Step acceptance is now gated on `min_relative_decrease`** in both Levenberg-Marquardt
-  (was a hardcoded `rho > 0.0`) and Dog Leg (was `rho > 1e-4`). The default of `1e-3` matches
-  Ceres, so marginal steps that used to be accepted are now rejected and the damping raised.
-
-### Breaking Changes
-
-- **`LevenbergMarquardtConfig::for_bundle_adjustment` now selects
-  `ImplicitSparseSchur`** instead of `ExplicitSparseSchur`. Measured over the
-  four BAL datasets (3 runs each) it is 2.2× faster in total — Ladybug 18.8 s vs
-  75.2 s, Dubrovnik 31.3 s vs 41.9 s, Venice 20.2 s vs 51.2 s — with lower final
-  RMSE on Trafalgar and Dubrovnik and at most 0.6% higher on Ladybug and Venice.
-  It is slower only on Trafalgar (6.3 s vs 2.5 s), the smallest dataset. The
-  step is now inexact by construction: pass
-  `.with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)` to restore
-  the exact reduced solve.
-
-### Added
-
-- **PCG forcing sequence** for both Schur PCG paths, following Ceres's
-  `Solver::Options::eta`: the solve stops when the quadratic model's relative
-  improvement per iteration falls below `η/i`, not only when the residual is
-  small. Before this, every PCG solve on Ladybug ran the full iteration cap
-  without the residual rule ever firing. `η` defaults to `1e-2` — deliberately
-  tighter than Ceres's `1e-1`, which measured 9.7% worse on Ladybug — and is set
-  through `with_schur_cg_q_tolerance`; `0.0` disables the rule.
-
-- **`ImplicitSparseSchur` is now matrix-free in `JᵀJ` as well as `S`.** The
-  reduced operator is applied directly from `J` in four passes over its
-  nonzeros, so cost scales with `nnz(J)` rather than `nnz(JᵀJ)` — which for
-  bundle adjustment carries a dense block per co-visible camera pair. Combined
-  with the forcing sequence this is 5.9-13.4× faster than the previous
-  implementation. `get_hessian()` now returns `None` for this solver, as it does
-  for the chunked path; the quadratic model is served exactly through
-  `hessian_vec_product`.
-
-### Fixed
-
-- **`ExplicitSparseSchur` ignored its configured preconditioner.** The
-  `Iterative` variant always ran scalar Jacobi regardless of
-  `with_preconditioner`, so `SchurJacobi` and `BlockDiagonal` were silently
-  equivalent. Both now build the preconditioner they name.
-
-- **Schur complement solvers renamed and consolidated around explicit/implicit,
-  sparse/dense naming that mirrors Ceres** (`SPARSE_SCHUR`/`DENSE_SCHUR`/`ITERATIVE_SCHUR`).
-  No deprecated aliases — old names are gone outright:
-  - `SparseSchurComplementSolver` → **`ExplicitSparseSchur`** (`src/linalg/sparse/schur/explicit.rs`).
-  - `IterativeSchurSolver` → **`ImplicitSparseSchur`** (`src/linalg/sparse/schur/implicit.rs`),
-    generalized off its old `LegacyBlockStructure` (fixed 3-DOF, contiguous columns only) onto
-    the same [`SchurPartition`] every other Schur solver uses — inverse-depth (1-DOF) landmarks,
-    mixed eliminated sizes, and non-contiguous column layouts now all work through the matrix-free
-    path, not just the explicit one.
-  - **`ExplicitDenseSchur`** (`src/linalg/dense/schur/explicit.rs`) — new: the same explicit
-    construction over a dense Hessian, for `JacobianMode::Dense` problems. Equivalent to Ceres's
-    `DENSE_SCHUR`.
-  - `SchurVariant` → **`ExplicitSchurVariant`**, now `ExplicitSparseSchur`-only configuration
-    (`Sparse`, `Iterative` — renamed from `ExplicitIterative`, `Chunked` — renamed from
-    `ChunkedSparse`). The old `SchurVariant::Iterative` — which the optimizers special-cased to
-    construct `IterativeSchurSolver` instead of erroring — no longer exists: `LinearSolverType`
-    now has its own `ImplicitSparseSchur`/`ExplicitDenseSchur` discriminants, so each solver is
-    selected directly instead of through a secondary sub-variant.
-  - Every Schur solver now runs the same automatic eliminated/retained ("group 0"/"group 1")
-    classification (`SchurOrdering`, `Problem::mark_for_elimination`) via the shared
-    `linalg::schur::effective_landmark_keys` — `ImplicitSparseSchur` did not previously support
-    `SchurOrdering::auto_detect` at all.
-  - `SchurPartition`, `EliminatedBlocks`, `SchurOrdering`, `SchurPreconditioner` moved to a new
-    top-level `src/linalg/schur/` module (previously under `src/linalg/sparse/`), reflecting that
-    they are storage-agnostic and shared by both the sparse and dense solvers. The now-unified
-    landmark-block regularization policy drops `implicit_schur.rs`'s old eigenvalue-gated
-    `regularize_landmark_block` in favor of the same `regularization::invert_with_retry_3/dyn`
-    every other Schur solver already used.
-  - The two independent hand-rolled PCG loops (`ExplicitSparseSchur`'s `Iterative` variant and
-    `ImplicitSparseSchur`) now both call one shared primitive, `linalg::schur::pcg`.
-- **`LinearSolverType::SparseSchurComplement` renamed to `ExplicitSparseSchur`**, with
-  `ImplicitSparseSchur` and `ExplicitDenseSchur` added alongside it.
-
-### Added
-
-- Correctness coverage: `tests/schur_math_properties.rs` proves `S` is SPD (via successful
-  Cholesky) and that `ExplicitSparseSchur`, `ExplicitDenseSchur` and `ImplicitSparseSchur` agree
-  on the same step, including on non-contiguous, mixed-DOF partitions. `tests/linear_solver_contract.rs`
-  now covers all three Schur solvers' `get_gradient`/`get_hessian` sign conventions, including the
-  chunked path's graceful `get_hessian() == None` degradation.
-- `benches/micro_kernels.rs`: `ExplicitSparseSchur` (Cholesky-on-`S` and PCG-on-`S`),
-  `ExplicitDenseSchur`, and the shared PCG primitive each get their own micro-benchmark, at
-  matched problem size against the existing `ImplicitSparseSchur` bench.
-- `benches/cpp_comparison`'s `ceres_ba_benchmark` now accepts a `CERES_LINEAR_SOLVER` env var
-  (`sparse_schur`/`dense_schur`/`iterative_schur`) so `bundle_adjustment_benchmark`'s
-  `APEX_BENCH_SCHUR` can drive apex-solver and Ceres through the matching solver on the same
-  dataset for final-cost comparison.
-
+- Sub-crate versions bumped to `0.4.0` (`apex-manifolds`, `apex-io`, `apex-camera-models`).
 ## [1.4.0] - 2026-07-30
 
 ### Breaking Changes

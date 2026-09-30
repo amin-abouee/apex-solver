@@ -49,43 +49,40 @@ A high-performance Rust-based nonlinear least squares optimization library desig
 
 Apex Solver is a comprehensive optimization library that bridges the gap between theoretical robotics and practical implementation. It provides manifold-aware optimization for Lie groups commonly used in computer vision, multiple optimization algorithms with unified interfaces, flexible linear algebra backends supporting both sparse Cholesky and QR decompositions, and industry-standard file format support for seamless integration with existing workflows.
 
-## ⚠️ Upgrading to 1.4.0 — breaking API changes
+## ⚠️ Upgrading to 1.5.0 — breaking API changes
 
-`1.4.0` changes the public API. Code written against `1.3.0` will not compile until you make
-the edits below. Full detail in the [changelog](CHANGELOG.md).
+`1.5.0` changes the public API. Code written against `1.4.0` will not compile until you make
+the edits below. Full detail in the [changelog](CHANGELOG.md) and the
+[migration guide](doc/cookbook/src/migration.md).
 
-**1. `Problem` uses handles instead of string names.** `add_variable` returns a `VarKey`;
-`add_residual_block` takes `&[VarKey]` and returns a `FactorKey` (previously `&[&str]` and
-`usize`). Keep the returned key and pass it where you used to pass a name:
+**1. `PriorFactor` is now a tangent-space anchor** (`r = Log(T_prior⁻¹ ∘ X)`), generic over
+the manifold. The old ambient parameter-space factor is renamed **`EuclideanPriorFactor`**
+and restricted to `Rn` variables; struct-literal construction becomes
+`PriorFactor::new(prior)` / `EuclideanPriorFactor::new(data)`.
 
-```rust
-// 1.3.0
-problem.add_variable("pose_0", ManifoldType::SE3, params);
-problem.add_residual_block(&["pose_0", "pose_1"], factor, loss);
+**2. Feature flags: `apex-io` `rosbag` is opt-in** (was built unconditionally), `download` /
+`clap` moved behind the default-on `download` / `cli` features, and the `apex-solver`
+bins/examples moved behind `cli`. Bag I/O users add `features = ["rosbag"]`.
 
-// 1.4.0
-let k0 = problem.add_variable(ManifoldType::SE3, params);
-let k1 = problem.add_variable(ManifoldType::SE3, params_1);
-problem.add_residual_block(&[k0, k1], factor, loss);
-```
+**3. `LinearSolver::solve_augmented_equation` takes `&Damping` instead of `lambda: f64`**
+(`Damping::identity(lambda)` reproduces the old uniform `λI`).
 
-If you need to look variables up later, keep your own `HashMap<YourId, VarKey>` — the
-[Quick Start](#quick-start) below shows the pattern.
+**4. Schur solvers renamed** to Ceres-style explicit/implicit names, no aliases:
+`SparseSchurComplementSolver` → `ExplicitSparseSchur`, `IterativeSchurSolver` →
+`ImplicitSparseSchur`, new `ExplicitDenseSchur`, and
+`LinearSolverType::SparseSchurComplement` → `ExplicitSparseSchur`.
 
-**2. `Factor::get_dimension` is renamed to `Factor::residual_dim`.** Custom factor
-implementations must rename the method; there is no default implementation.
+**5. `LevenbergMarquardtConfig::for_bundle_adjustment` now selects `ImplicitSparseSchur`**
+(2.2× faster on BAL); pass `.with_linear_solver_type(LinearSolverType::ExplicitSparseSchur)`
+for the exact reduced solve. LM also damps with `λ·D` (Ceres-style) — iterates change on
+every problem.
 
-```rust
-// 1.3.0                              // 1.4.0
-fn get_dimension(&self) -> usize      fn residual_dim(&self) -> usize
-```
+## Key Features (v1.5.0)
 
-**3. `OptimizationStatus` gained a `StalledNoProgress` variant.** Exhaustive `match`
-expressions need a new arm. Treat it as a *successful* termination — it means the solver
-reached a point where the cost can no longer improve.
-
-## Key Features (v1.4.0)
-
+- **Factor Library (~40 factors)**: IMU (SE₂(3)/SGal(3)), visual, LiDAR, GNSS/navigation,
+  range & bearing, motion models and marginalization — see [Factors](#factors) below.
+- **Noise Models**: per-residual-block measurement uncertainty (`NoiseModel`: Null /
+  Diagonal / Dense) whitened upstream of the robust-loss corrector.
 - **Slot-Map Problem Structure (faster)**: Variables and factors are stored in a
   [`slotmap`](https://docs.rs/slotmap)-backed arena and referenced by stable, generational
   `VarKey` / `FactorKey` handles instead of string keys. This gives O(1) access with no
@@ -105,13 +102,26 @@ reached a point where the cost can no longer improve.
 - **Mathematical Cookbooks**: Full derivations and explanations for [apex-manifolds](crates/apex-manifolds/doc/cookbook/src/introduction.md), [apex-camera-models](crates/apex-camera-models/doc/cookbook/src/introduction.md), and [apex-io](crates/apex-io/doc/cookbook/src/introduction.md)
 - **Production-Grade**: Comprehensive error handling, structured tracing, integration test suite
 
+## Factors
+
+`1.5.0` ships a broad factor library grouped by sensor modality — pose & priors, IMU
+(SE₂(3) and SGal(3) preintegration), visual (projection, stereo, inverse-depth, essential
+matrix, smart projection), LiDAR (point/point, point-to-plane, GICP, LOAM edge), GNSS &
+navigation (GPS, pseudorange, Doppler, barometric, attitude), range & bearing, motion
+models, and marginalization.
+
+→ **[Full factor list](doc/factors.md)** — every factor with its connected variables,
+residual dimension, and weighting rules. Derivations in the
+[Factor Reference](doc/cookbook/src/factors/index.md); design rationale in the
+[Factor Catalog](doc/factor-catalog.md).
+
 ---
 
 ## Quick Start
 
 ```toml
 [dependencies]
-apex-solver = "1.4.0"
+apex-solver = "1.5.0"
 ```
 
 ```rust
@@ -312,13 +322,13 @@ mdbook build crates/apex-manifolds/doc/cookbook      # then open book/index.html
 
 ```toml
 [dependencies]
-apex-manifolds = "0.3.0"
+apex-manifolds = "0.4.0"
 
 [dependencies]
-apex-camera-models = "0.3.0"
+apex-camera-models = "0.4.0"
 
 [dependencies]
-apex-io = "0.3.0"
+apex-io = "0.4.0"
 ```
 
 ---

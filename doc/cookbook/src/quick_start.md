@@ -4,14 +4,14 @@
 
 ```toml
 [dependencies]
-apex-solver = "1.4.0"
+apex-solver = "1.5.0"
 ```
 
 Optional feature for live Rerun visualization:
 
 ```toml
 [dependencies]
-apex-solver = { version = "1.4.0", features = ["visualization"] }
+apex-solver = { version = "1.5.0", features = ["visualization"] }
 ```
 
 ## Solving a pose graph from a G2O file

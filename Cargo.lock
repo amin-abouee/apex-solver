@@ -279,7 +279,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apex-camera-models"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apex-manifolds",
  "nalgebra",
@@ -288,7 +288,7 @@ dependencies = [
 
 [[package]]
 name = "apex-io"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "apex-manifolds",
  "byteorder",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "apex-manifolds"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "nalgebra",
  "rand 0.9.5",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "apex-solver"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "apex-camera-models",
  "apex-io",

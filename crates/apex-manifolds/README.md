@@ -3,6 +3,17 @@
 Lie group manifolds (SE2, SE3, SO2, SO3, SE_2(3), SGal(3), Sim(3), Rn) with analytic
 Jacobians for nonlinear optimization.
 
+## What's new in 0.4.0
+
+- **Correctness round on the group calculus** — SE(3)/SE₂(3) right Jacobians (they used
+  the left convention), the SGal(3) group exponential (time–velocity coupling) and its
+  adjoint, Sim(3) action/adjoint/Jacobian differentials, the `SO3::log` small-angle sign,
+  and the `Rn` between-Jacobian dimension. See the
+  [changelog](CHANGELOG.md) for the full list.
+- **`SO3::slerp`** and a checked quaternion constructor (`try_from_quaternion_wxyz`).
+- **`Rn::DIM` / `DOF` / `REP_SIZE` deprecated** in favor of `is_dynamic()` /
+  `tangent_dim()`.
+
 ## What's new in 0.3.0
 
 - **Cookbook** — a complete mathematical reference for every group and every operation
@@ -65,7 +76,7 @@ Sim(3)      | 7   | 8   | (R,t,λ), R∈SO(3), λ∈ℝ>0     | ξ ∈ ℝ⁷   
 
 ```toml
 [dependencies]
-apex-manifolds = "0.3.0"
+apex-manifolds = "0.4.0"
 ```
 
 ## Usage
