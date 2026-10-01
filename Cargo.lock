@@ -302,6 +302,7 @@ dependencies = [
  "image",
  "lz4_flex",
  "mcap 0.8.0",
+ "md5",
  "nalgebra",
  "rayon",
  "rerun",

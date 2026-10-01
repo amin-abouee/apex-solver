@@ -80,6 +80,11 @@ name = "trajectory_integration_tests"
 path = "tests/trajectory_integration_tests.rs"
 
 [[test]]
+name = "transcode_typed_crosscheck"
+path = "tests/transcode_typed_crosscheck.rs"
+required-features = ["rosbag"]
+
+[[test]]
 name = "ros2_cdr_alignment_tests"
 path = "tests/ros2_cdr_alignment_tests.rs"
 required-features = ["rosbag"]
@@ -149,6 +154,10 @@ optional = true
 workspace = true
 optional = true
 
+[dependencies.md5]
+workspace = true
+optional = true
+
 [dependencies.lz4_flex]
 workspace = true
 optional = true
@@ -187,6 +196,7 @@ rosbag = [
     "dep:byteorder",
     "dep:hex",
     "dep:bzip2",
+    "dep:md5",
 ]
 # Dataset download helpers (`download_file`, `decompress_bzip2`, `extract_tar_gz`
 # and the `ensure_*_dataset` network fallback). On by default; `image` stays
