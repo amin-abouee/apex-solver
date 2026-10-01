@@ -95,3 +95,45 @@ pub fn plan_topic(conn: &Connection, to: Dialect) -> std::result::Result<TopicPl
         },
     })
 }
+
+/// A topic that cannot be converted, and why.
+#[derive(Debug, Clone)]
+pub struct Unsupported {
+    /// Topic name.
+    pub topic: String,
+    /// Message type as stored in the source bag.
+    pub message_type: String,
+    /// Human-readable reason.
+    pub reason: String,
+}
+
+/// Plan every connection in `connections` for dialect `to`.
+///
+/// Topics that cannot be converted are returned in the second list and are
+/// reported with a `tracing::warn!` each, so callers never drop data
+/// silently.
+pub fn plan_connections(
+    connections: &[Connection],
+    to: Dialect,
+) -> (Vec<(Connection, TopicPlan)>, Vec<Unsupported>) {
+    let mut planned = Vec::new();
+    let mut unsupported = Vec::new();
+    for c in connections {
+        match plan_topic(c, to) {
+            Ok(plan) => planned.push((c.clone(), plan)),
+            Err(reason) => {
+                tracing::warn!(
+                    topic = %c.topic,
+                    message_type = %c.message_type,
+                    "skipping topic: {reason}"
+                );
+                unsupported.push(Unsupported {
+                    topic: c.topic.clone(),
+                    message_type: c.message_type.clone(),
+                    reason,
+                });
+            }
+        }
+    }
+    (planned, unsupported)
+}

@@ -37,6 +37,11 @@ path = "bin/bag_filter.rs"
 required-features = ["rosbag", "cli"]
 
 [[bin]]
+name = "bag_verify"
+path = "bin/bag_verify.rs"
+required-features = ["rosbag", "cli"]
+
+[[bin]]
 name = "extract_topic_data"
 path = "bin/extract_topic_data.rs"
 required-features = ["rosbag"]
