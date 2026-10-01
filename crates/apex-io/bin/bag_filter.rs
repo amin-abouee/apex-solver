@@ -137,7 +137,7 @@ fn main() -> CliResult<()> {
     for c in &selected {
         let is_ros1 = c.serialization_format == "ros1";
         let compatible = match kind {
-            BagKind::McapFile => true,
+            BagKind::McapFile | BagKind::Vrs => true,
             _ => is_ros1 == wants_ros1_payload,
         };
         if !compatible {

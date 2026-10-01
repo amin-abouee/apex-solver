@@ -38,6 +38,13 @@ pub fn catalog_definition(message_type: &str, dialect: Dialect) -> Option<String
     cat.render(&root, dialect).ok()
 }
 
+/// ROS1 md5sum of a type from the built-in catalog.
+pub fn catalog_md5(message_type: &str) -> Option<String> {
+    let root = normalize_type_name(message_type);
+    let cat = catalog().ok()?;
+    cat.contains(&root).then(|| cat.md5(&root).ok()).flatten()
+}
+
 /// Payload dialect named by a connection's `serialization_format`.
 pub fn dialect_of(serialization_format: &str) -> Option<Dialect> {
     match serialization_format {

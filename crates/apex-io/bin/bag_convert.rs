@@ -83,7 +83,9 @@ struct Args {
     verbose: bool,
 }
 
-fn target_dialect(kind: BagKind, encoding: Option<&str>) -> CliResult<Dialect> {
+/// Payload encoding to write, or `None` to keep every message as it is
+/// (containers that can hold either encoding and no `--encoding` given).
+fn target_dialect(kind: BagKind, encoding: Option<&str>) -> CliResult<Option<Dialect>> {
     let requested = match encoding {
         Some(e) => {
             Some(dialect_of(e).ok_or_else(|| format!("unknown encoding '{e}' (ros1 or cdr)"))?)
@@ -97,10 +99,11 @@ fn target_dialect(kind: BagKind, encoding: Option<&str>) -> CliResult<Dialect> {
         (BagKind::Ros2Sqlite | BagKind::Ros2Mcap, Some(Dialect::Ros1)) => {
             Err("ROS2 bag directories can only hold cdr payloads".into())
         }
-        (BagKind::Ros1Bag, _) => Ok(Dialect::Ros1),
-        (BagKind::Ros2Sqlite | BagKind::Ros2Mcap, _) => Ok(Dialect::Ros2),
-        (BagKind::McapFile, Some(d)) => Ok(d),
-        (BagKind::McapFile, None) => Ok(Dialect::Ros2),
+        (BagKind::Ros1Bag, _) => Ok(Some(Dialect::Ros1)),
+        (BagKind::Ros2Sqlite | BagKind::Ros2Mcap, _) => Ok(Some(Dialect::Ros2)),
+        (BagKind::McapFile, d) => Ok(Some(d.unwrap_or(Dialect::Ros2))),
+        // VRS stores raw message bytes: keep them unless asked to re-encode.
+        (BagKind::Vrs, d) => Ok(d),
     }
 }
 
@@ -168,11 +171,17 @@ fn main() -> CliResult<()> {
     let compression = parse_compression(&args.compression)?;
 
     // Split topics into pass-through and to-be-converted.
-    let (same, different): (Vec<_>, Vec<_>) = selected
-        .iter()
-        .cloned()
-        .partition(|c| dialect_of(&c.serialization_format) == Some(to));
-    let (planned, unsupported) = plan_connections(&different, to);
+    let (same, different): (Vec<_>, Vec<_>) = match to {
+        Some(to) => selected
+            .iter()
+            .cloned()
+            .partition(|c| dialect_of(&c.serialization_format) == Some(to)),
+        None => (selected.clone(), Vec::new()),
+    };
+    let (planned, unsupported) = match to {
+        Some(to) => plan_connections(&different, to),
+        None => (Vec::new(), Vec::new()),
+    };
     if args.strict && !unsupported.is_empty() {
         return Err(format!(
             "{} topic(s) cannot be converted (see warnings above); rerun without --strict to skip them",

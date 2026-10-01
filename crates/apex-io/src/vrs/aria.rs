@@ -419,7 +419,7 @@ impl AriaRecording {
     pub fn next_sample(&mut self, cursor: &mut Cursor) -> Result<Option<Sample>> {
         let mut buf = std::mem::take(&mut self.buf);
         let result = match self.vrs.next_record_into(cursor, &mut buf) {
-            Ok(Some(meta)) => self.decode(meta, &buf).map(Some),
+            Ok(Some(meta)) => self.decode_record(meta, &buf).map(Some),
             Ok(None) => Ok(None),
             Err(e) => Err(e),
         };
@@ -431,7 +431,7 @@ impl AriaRecording {
     pub fn sample_at(&mut self, index: usize) -> Result<Sample> {
         let mut buf = std::mem::take(&mut self.buf);
         let result = match self.vrs.read_record_into(index, &mut buf) {
-            Ok(meta) => self.decode(meta, &buf),
+            Ok(meta) => self.decode_record(meta, &buf),
             Err(e) => Err(e),
         };
         self.buf = buf;
@@ -507,7 +507,9 @@ impl AriaRecording {
 
     // ---- decoding ---------------------------------------------------------------
 
-    fn decode(&self, meta: RecordMeta, payload: &[u8]) -> Result<Sample> {
+    /// Decode a data record that was read with [`VrsReader::read_record_into`]
+    /// or [`VrsReader::next_record_into`] into a typed [`Sample`].
+    pub fn decode_record(&self, meta: RecordMeta, payload: &[u8]) -> Result<Sample> {
         let layout = self
             .vrs
             .record_layout(meta.stream, RecordType::Data, meta.format_version)

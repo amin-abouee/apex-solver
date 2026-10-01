@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 const ROS1_MAGIC: &[u8] = b"#ROSBAG V2.0\n";
 const MCAP_MAGIC: &[u8] = b"\x89MCAP0\r\n";
+const VRS_MAGIC: &[u8] = b"VisionRe";
 
 /// Container flavour of a bag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,8 @@ pub enum BagKind {
     Ros2Mcap,
     /// A single bare `.mcap` file (no `metadata.yaml`).
     McapFile,
+    /// A Meta VRS file (Project Aria recording); needs the `vrs` feature.
+    Vrs,
 }
 
 impl BagKind {
@@ -52,6 +55,7 @@ impl BagKind {
             "sqlite3" | "db3" => Some(Self::Ros2Sqlite),
             "mcap" => Some(Self::Ros2Mcap),
             "mcap-file" | "mcap_file" => Some(Self::McapFile),
+            "vrs" => Some(Self::Vrs),
             _ => None,
         }
     }
@@ -62,6 +66,7 @@ impl BagKind {
         match path.extension().and_then(|e| e.to_str()) {
             Some(e) if e.eq_ignore_ascii_case("bag") => Self::Ros1Bag,
             Some(e) if e.eq_ignore_ascii_case("mcap") => Self::McapFile,
+            Some(e) if e.eq_ignore_ascii_case("vrs") => Self::Vrs,
             _ => default,
         }
     }
@@ -73,6 +78,7 @@ impl BagKind {
             Self::Ros2Sqlite => "sqlite3",
             Self::Ros2Mcap => "mcap",
             Self::McapFile => "mcap-file",
+            Self::Vrs => "vrs",
         }
     }
 }
@@ -93,11 +99,11 @@ pub fn detect_kind(path: &Path) -> Result<BagKind> {
         if magic[..n].starts_with(MCAP_MAGIC) {
             return Ok(BagKind::McapFile);
         }
+        if magic[..n].starts_with(VRS_MAGIC) {
+            return Ok(BagKind::Vrs);
+        }
         return Err(BagError::UnsupportedStorageFormat {
-            format: format!(
-                "'{}' is neither a ROS1 bag nor an MCAP file",
-                path.display()
-            ),
+            format: format!("'{}' is not a ROS1 bag, MCAP or VRS file", path.display()),
         });
     }
     let metadata = path.join("metadata.yaml");
@@ -153,6 +159,8 @@ impl Selection {
 enum ReaderImpl {
     Ros1(Box<Ros1Reader>),
     Ros2(Box<Reader>),
+    #[cfg(feature = "vrs")]
+    Vrs(Box<super::vrs_bag::VrsBagReader>),
 }
 
 /// Reader over any [`BagKind`].
@@ -182,6 +190,26 @@ impl BagReader {
                     message_count: r.message_count(),
                     inner: ReaderImpl::Ros1(Box::new(r)),
                 })
+            }
+            BagKind::Vrs => {
+                #[cfg(feature = "vrs")]
+                {
+                    let r = super::vrs_bag::VrsBagReader::open(path)?;
+                    Ok(Self {
+                        kind,
+                        connections: r.connections().to_vec(),
+                        start_ns: r.start_ns(),
+                        end_ns: r.end_ns(),
+                        message_count: r.message_count(),
+                        inner: ReaderImpl::Vrs(Box::new(r)),
+                    })
+                }
+                #[cfg(not(feature = "vrs"))]
+                {
+                    Err(BagError::UnsupportedStorageFormat {
+                        format: "VRS (rebuild apex-io with the `vrs` feature)".into(),
+                    })
+                }
             }
             _ => {
                 let mut r = Reader::new(path)?;
@@ -261,6 +289,8 @@ impl BagReader {
                 }
                 Ok(())
             }
+            #[cfg(feature = "vrs")]
+            ReaderImpl::Vrs(r) => r.for_each(connections, selection.start_ns, selection.end_ns, f),
         }
     }
 }
@@ -327,6 +357,8 @@ enum WriterImpl {
     Ros1(Box<Ros1Writer>),
     Ros2(Box<Writer>),
     McapFile(Box<McapWriter>),
+    #[cfg(feature = "vrs")]
+    Vrs(Box<super::vrs_bag::VrsBagWriter>),
 }
 
 /// Writer for any [`BagKind`].
@@ -382,6 +414,21 @@ impl BagWriter {
                 }
                 w.open()?;
                 WriterImpl::Ros2(Box::new(w))
+            }
+            BagKind::Vrs => {
+                #[cfg(feature = "vrs")]
+                {
+                    WriterImpl::Vrs(Box::new(super::vrs_bag::VrsBagWriter::create(
+                        &path,
+                        compression,
+                    )?))
+                }
+                #[cfg(not(feature = "vrs"))]
+                {
+                    return Err(BagError::UnsupportedStorageFormat {
+                        format: "VRS (rebuild apex-io with the `vrs` feature)".into(),
+                    });
+                }
             }
             BagKind::McapFile => {
                 if path.exists() {
@@ -466,6 +513,27 @@ impl BagWriter {
                 w.add_connection(&connection, "")?;
                 connection
             }
+            #[cfg(feature = "vrs")]
+            WriterImpl::Vrs(w) => {
+                w.add_stream(
+                    &new.topic,
+                    &new.message_type,
+                    &new.definition,
+                    &new.serialization_format,
+                    &new.type_hash,
+                )?;
+                Connection {
+                    id: u32::try_from(self.connections.len() + 1)
+                        .map_err(|_| BagError::writer("too many connections"))?,
+                    topic: new.topic.clone(),
+                    message_type: new.message_type.clone(),
+                    message_definition: definition,
+                    type_description_hash: new.type_hash.clone(),
+                    message_count: 0,
+                    serialization_format: new.serialization_format.clone(),
+                    offered_qos_profiles: new.qos.clone(),
+                }
+            }
         };
         self.connections.push(connection);
         Ok(ConnectionHandle(self.connections.len() - 1))
@@ -486,6 +554,8 @@ impl BagWriter {
             WriterImpl::Ros1(w) => w.write(connection, timestamp_ns, data),
             WriterImpl::Ros2(w) => w.write_raw_message(connection, timestamp_ns, data),
             WriterImpl::McapFile(w) => w.write(connection, timestamp_ns, data),
+            #[cfg(feature = "vrs")]
+            WriterImpl::Vrs(w) => w.write(handle.0, timestamp_ns, data),
         }
     }
 
@@ -499,6 +569,8 @@ impl BagWriter {
             WriterImpl::Ros1(w) => w.close(),
             WriterImpl::Ros2(w) => w.close(),
             WriterImpl::McapFile(w) => w.close(0, ""),
+            #[cfg(feature = "vrs")]
+            WriterImpl::Vrs(w) => w.finish(),
         }
     }
 }
@@ -524,12 +596,15 @@ mod tests {
     /// Every kind can be written, sniffed, and read back identically.
     #[test]
     fn every_kind_round_trips() -> TestResult {
-        let cases = [
+        #[allow(unused_mut)]
+        let mut cases = vec![
             (BagKind::Ros1Bag, "out.bag", "pkg/Type", "ros1"),
             (BagKind::Ros2Sqlite, "sq", "pkg/msg/Type", "cdr"),
             (BagKind::Ros2Mcap, "mc", "pkg/msg/Type", "cdr"),
             (BagKind::McapFile, "out.mcap", "pkg/msg/Type", "cdr"),
         ];
+        #[cfg(feature = "vrs")]
+        cases.push((BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"));
         for (kind, name, ty, fmt) in cases {
             let dir = tempdir()?;
             let path = dir.path().join(name);

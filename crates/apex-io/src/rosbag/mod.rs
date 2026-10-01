@@ -125,6 +125,9 @@ pub mod bag;
 /// Schema-driven ROS1 <-> ROS2 payload conversion.
 pub mod transcode;
 
+#[cfg(feature = "vrs")]
+pub(crate) mod vrs_bag;
+
 /// Core data types and structures.
 pub mod types;
 

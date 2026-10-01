@@ -40,6 +40,7 @@ fn main() -> Result<(), ReaderError> {
         BagKind::Ros2Sqlite => "sqlite3 (ROS2 directory)",
         BagKind::Ros2Mcap => "mcap (ROS2 directory)",
         BagKind::McapFile => "mcap (bare file)",
+        BagKind::Vrs => "vrs (Project Aria)",
     };
 
     let duration_ns = reader.end_time().saturating_sub(reader.start_time());

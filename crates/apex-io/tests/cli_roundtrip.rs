@@ -174,3 +174,57 @@ fn convert_filter_info_verify_round_trip() {
     assert!(!bad.status.success());
     assert!(String::from_utf8_lossy(&bad.stderr).contains("bag_convert"));
 }
+
+/// ROS bag -> VRS -> ROS bag keeps every message, whatever the type, and the
+/// unconvertible topic survives too (VRS stores raw bytes).
+#[cfg(feature = "vrs")]
+#[test]
+fn vrs_round_trip_is_lossless() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let (src, vrs, back) = (p("src.bag"), p("out.vrs"), p("back.bag"));
+    make_ros1_bag(Path::new(&src));
+
+    let to_vrs = run(env!("CARGO_BIN_EXE_bag_convert"), &[&src, &vrs]);
+    assert!(
+        to_vrs.status.success(),
+        "{}",
+        String::from_utf8_lossy(&to_vrs.stderr)
+    );
+
+    let info = run(env!("CARGO_BIN_EXE_vrs_info"), &[&vrs, "--verify-index"]);
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(info.status.success(), "{text}");
+    assert!(
+        text.contains("/imu") && text.contains("IDENTICAL"),
+        "{text}"
+    );
+
+    let to_bag = run(env!("CARGO_BIN_EXE_bag_convert"), &[&vrs, &back]);
+    assert!(
+        to_bag.status.success(),
+        "{}",
+        String::from_utf8_lossy(&to_bag.stderr)
+    );
+
+    // All three topics, including /odd (no definition), come back unchanged.
+    let verify = run(
+        env!("CARGO_BIN_EXE_bag_verify"),
+        &[&src, &back, "-t", "/imu,/str"],
+    );
+    assert!(
+        verify.status.success(),
+        "{}",
+        String::from_utf8_lossy(&verify.stdout)
+    );
+    let info = run(env!("CARGO_BIN_EXE_bag_info"), &[&back]);
+    let text = String::from_utf8_lossy(&info.stdout);
+    assert!(
+        text.contains("/odd (vendor_msgs/Mystery, ros1, 1 msgs"),
+        "{text}"
+    );
+    assert!(
+        text.contains("/imu (sensor_msgs/Imu, ros1, 50 msgs"),
+        "{text}"
+    );
+}
