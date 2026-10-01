@@ -128,31 +128,9 @@ fn le_u64(bytes: &[u8]) -> Result<u64, ReaderError> {
     Ok(u64::from_le_bytes(array))
 }
 
-/// IEEE CRC-32 (the polynomial MCAP and zlib share).
+/// IEEE CRC-32 (the polynomial MCAP and zlib share), SIMD-accelerated.
 pub(crate) fn crc32(data: &[u8]) -> u32 {
-    // Table-driven, computed once into a static: 256 entries of u32.
-    use std::sync::OnceLock;
-    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-    let table = *TABLE.get_or_init(|| {
-        let mut table = [0u32; 256];
-        for (i, entry) in table.iter_mut().enumerate() {
-            let mut c = i as u32;
-            for _ in 0..8 {
-                c = if c & 1 != 0 {
-                    0xEDB8_8320 ^ (c >> 1)
-                } else {
-                    c >> 1
-                };
-            }
-            *entry = c;
-        }
-        table
-    });
-    let mut crc = 0xFFFF_FFFFu32;
-    for &byte in data {
-        crc = table[((crc ^ u32::from(byte)) & 0xFF) as usize] ^ (crc >> 8);
-    }
-    crc ^ 0xFFFF_FFFF
+    crc32fast::hash(data)
 }
 
 /// Cursor over an in-memory record stream: little-endian fixed-width reads

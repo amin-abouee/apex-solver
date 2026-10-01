@@ -56,6 +56,7 @@ rusqlite   = { version = "0.31", features = ["bundled"] }
 zstd       = "0.13"
 mcap       = "0.8"
 md5        = "0.7"
+crc32fast  = "1.5"
 lz4_flex   = { version = "0.11", default-features = false, features = ["std", "safe-decode", "safe-encode", "frame"] }
 
 # DDS support
