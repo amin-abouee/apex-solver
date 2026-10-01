@@ -12,6 +12,7 @@ pub mod description;
 pub mod error;
 pub mod format;
 pub mod index;
+pub mod readahead;
 pub mod reader;
 pub mod recordformat;
 pub mod writer;
@@ -25,6 +26,7 @@ pub use format::{
     RecordType, StreamId,
 };
 pub use index::{IndexSource, RecordInfo};
-pub use reader::{Cursor, Record, RecordFilter, RecordMeta, VrsReader};
+pub use readahead::SequentialReader;
+pub use reader::{Cursor, Record, RecordFilter, RecordMeta, StoredRecord, VrsReader};
 pub use recordformat::{Block, BlockSpec, ImageFormat, ImageSpec, RecordFormat, RecordLayout};
 pub use writer::{VrsWriteOptions, VrsWriter, WriteSummary};

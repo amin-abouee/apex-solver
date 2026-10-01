@@ -5,6 +5,7 @@
 //! the selected streams are always kept; data records are filtered by
 //! stream and time window and written in capture-time order.
 
+use super::codec;
 use super::error::Result;
 use super::format::{Compression, RecordType, StreamId};
 use super::reader::{RecordFilter, VrsReader};
@@ -45,6 +46,7 @@ pub fn copy_filtered(
     if let Some(c) = options.compression {
         write_opts.compression = c;
     }
+    let target = write_opts.compression;
     let mut out = VrsWriter::create(dst, write_opts)?;
     for (k, v) in src.file_tags() {
         out.set_file_tag(k.clone(), v.clone())?;
@@ -84,15 +86,46 @@ pub fn copy_filtered(
     filter.start = options.start;
     filter.end = options.end;
     let mut cursor = src.cursor(&filter);
-    while let Some(meta) = src.next_record_into(&mut cursor, &mut buf)? {
-        debug_assert_eq!(meta.record_type, RecordType::Data);
-        out.write_record(
-            meta.stream,
-            meta.record_type,
-            meta.format_version,
-            meta.timestamp,
-            &buf,
-        )?;
+    let mut de = codec::Decompressor::new();
+    let mut raw = Vec::new();
+    let mut payload = Vec::new();
+    while let Some(index) = src.next_index(&mut cursor) {
+        // Read the record as stored, then take the cheapest route to the
+        // target compression: verbatim passthrough when it already matches,
+        // direct compression of the stored bytes when the source is stored,
+        // and a decompress round-trip only when both sides differ.
+        let stored = src.read_stored_record_into(index, &mut raw)?;
+        debug_assert_eq!(stored.meta.record_type, RecordType::Data);
+        if stored.compression == target {
+            out.write_record_raw(
+                stored.meta,
+                &stored.body,
+                target,
+                stored.uncompressed_size,
+            )?;
+        } else if stored.compression == Compression::None {
+            out.write_record(
+                stored.meta.stream,
+                stored.meta.record_type,
+                stored.meta.format_version,
+                stored.meta.timestamp,
+                &stored.body,
+            )?;
+        } else {
+            de.decompress(
+                stored.compression,
+                &stored.body,
+                stored.uncompressed_size as usize,
+                &mut payload,
+            )?;
+            out.write_record(
+                stored.meta.stream,
+                stored.meta.record_type,
+                stored.meta.format_version,
+                stored.meta.timestamp,
+                &payload,
+            )?;
+        }
     }
     out.finish()
 }
@@ -127,6 +160,55 @@ mod tests {
             }
         }
         w.finish().unwrap();
+    }
+
+    #[test]
+    fn passthrough_and_transcodes_preserve_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let src_path = dir.path().join("src.vrs");
+        {
+            let id = StreamId::new(700, 1);
+            let mut w =
+                VrsWriter::create(&src_path, VrsWriteOptions::default()).unwrap();
+            w.add_stream(id, StreamTags::default()).unwrap();
+            // Small (stored) and large (compressed) records, both kinds.
+            for i in 0..40u32 {
+                let payload: Vec<u8> = if i % 2 == 0 {
+                    vec![i as u8; 16]
+                } else {
+                    (0..4000u32).map(|k| (k % 251) as u8).collect()
+                };
+                w.write_record(id, RecordType::Data, 1, f64::from(i) * 0.1, &payload)
+                    .unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let payloads = |path: &Path| -> Vec<(f64, Vec<u8>)> {
+            let mut r = VrsReader::open(path).unwrap();
+            let mut cur = r.cursor(&RecordFilter::all());
+            let mut buf = Vec::new();
+            let mut out = Vec::new();
+            while let Some(meta) = r.next_record_into(&mut cur, &mut buf).unwrap() {
+                out.push((meta.timestamp, buf.clone()));
+            }
+            out
+        };
+        let reference = payloads(&src_path);
+
+        for target in [
+            Compression::Zstd, // same as source: exercises verbatim passthrough
+            Compression::None, // decompress and store
+            Compression::Lz4,  // decompress and recompress
+        ] {
+            let dst = dir.path().join(format!("{target:?}.vrs"));
+            let mut src = VrsReader::open(&src_path).unwrap();
+            let opts = CopyOptions {
+                compression: Some(target),
+                ..CopyOptions::default()
+            };
+            copy_filtered(&mut src, &dst, &opts).unwrap();
+            assert_eq!(payloads(&dst), reference, "{target:?}");
+        }
     }
 
     #[test]

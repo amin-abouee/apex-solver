@@ -32,7 +32,8 @@ use super::codec;
 use super::description::{Description, StreamTags, TagMap};
 use super::error::{Result, VrsError};
 use super::format::{
-    FILE_HEADER_SIZE, FileHeader, RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
+    Compression, FILE_HEADER_SIZE, FileHeader, RECORD_HEADER_SIZE, RecordHeader, RecordType,
+    StreamId,
 };
 use super::index::{IndexSource, RecordInfo, read_index, read_special_record, rebuild_index};
 use super::recordformat::RecordLayout;
@@ -120,6 +121,20 @@ impl Cursor {
     pub fn remaining_upper_bound(&self) -> usize {
         self.end.saturating_sub(self.pos)
     }
+}
+
+/// A record exactly as stored on disk: header metadata plus the still
+/// (optionally) compressed payload bytes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredRecord {
+    /// Record identity and timing.
+    pub meta: RecordMeta,
+    /// How the payload below is compressed.
+    pub compression: Compression,
+    /// Decompressed payload size (0 for stored payloads).
+    pub uncompressed_size: u32,
+    /// Stored payload (the bytes right after the record header).
+    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Default)]
@@ -391,21 +406,7 @@ impl VrsReader {
     /// Read record `index`, decompressing its payload into `buf` (cleared
     /// first, so one buffer can be reused for the whole file).
     pub fn read_record_into(&mut self, index: usize, buf: &mut Vec<u8>) -> Result<RecordMeta> {
-        let info = *self
-            .records
-            .get(index)
-            .ok_or_else(|| VrsError::Usage(format!("record index {index} out of range")))?;
-        self.file.seek(SeekFrom::Start(info.offset))?;
-        self.raw.resize(info.size as usize, 0);
-        self.file.read_exact(&mut self.raw)?;
-
-        let header = RecordHeader::parse(&self.raw)?;
-        if header.record_size != info.size || header.stream_id() != info.stream {
-            return Err(VrsError::corrupt(format!(
-                "record {index} at offset {} does not match the index",
-                info.offset
-            )));
-        }
+        let (info, header) = read_raw_record(&mut self.file, &self.records, index, &mut self.raw)?;
         self.codec.decompress(
             header.compression,
             &self.raw[RECORD_HEADER_SIZE..],
@@ -428,6 +429,29 @@ impl VrsReader {
         Ok(Record { meta, payload })
     }
 
+    /// Read record `index` as stored on disk, without decompressing it.
+    /// Copy operations use this to move payload bytes through verbatim.
+    pub fn read_stored_record_into(
+        &mut self,
+        index: usize,
+        raw: &mut Vec<u8>,
+    ) -> Result<StoredRecord> {
+        let (info, header) = read_raw_record(&mut self.file, &self.records, index, raw)?;
+        let meta = RecordMeta {
+            index,
+            stream: info.stream,
+            record_type: info.record_type,
+            timestamp: info.timestamp,
+            format_version: header.format_version,
+        };
+        Ok(StoredRecord {
+            meta,
+            compression: header.compression,
+            uncompressed_size: header.uncompressed_size,
+            body: raw[RECORD_HEADER_SIZE..].to_vec(),
+        })
+    }
+
     // ---- sequential access ----------------------------------------------------
 
     /// A cursor over the data records matching `filter`, in timestamp order.
@@ -444,6 +468,28 @@ impl VrsReader {
             pos,
             end: end.max(pos),
         }
+    }
+
+    /// A time-ordered scan with a background thread reading and
+    /// decompressing ahead of the consumer. Yields exactly the records of
+    /// the equivalent synchronous cursor loop.
+    pub fn sequential(&mut self, filter: &RecordFilter) -> Result<super::readahead::SequentialReader<'_>> {
+        super::readahead::SequentialReader::new(self, filter)
+    }
+
+    /// Advance `cursor` to the next matching record and return its index
+    /// into [`Self::records`] without reading the payload. Returns `None` at
+    /// the end. Raw-read consumers (copy, prefetch) build on this.
+    pub fn next_index(&self, cursor: &mut Cursor) -> Option<usize> {
+        while cursor.pos < cursor.end {
+            let index = self.data_order[cursor.pos] as usize;
+            cursor.pos += 1;
+            let stream = self.records[index].stream;
+            if cursor.filter.streams.is_empty() || cursor.filter.streams.contains(&stream) {
+                return Some(index);
+            }
+        }
+        None
     }
 
     /// Advance `cursor` and read the next matching record into `buf`.
@@ -479,4 +525,36 @@ impl VrsReader {
         let rebuilt = rebuild_index(&mut self.file, &self.header, self.file_len)?;
         Ok(rebuilt == self.records)
     }
+
+    /// The underlying file handle (used by the read-ahead worker to take its
+    /// own copy).
+    pub(crate) fn file_handle(&self) -> &File {
+        &self.file
+    }
+}
+
+/// Read the on-disk record `index` (header + stored payload) into `raw` and
+/// validate it against the index. Shared by the decompressing and raw read
+/// paths.
+fn read_raw_record(
+    file: &mut File,
+    records: &[RecordInfo],
+    index: usize,
+    raw: &mut Vec<u8>,
+) -> Result<(RecordInfo, RecordHeader)> {
+    let info = *records
+        .get(index)
+        .ok_or_else(|| VrsError::Usage(format!("record index {index} out of range")))?;
+    file.seek(SeekFrom::Start(info.offset))?;
+    raw.resize(info.size as usize, 0);
+    file.read_exact(raw)?;
+
+    let header = RecordHeader::parse(raw)?;
+    if header.record_size != info.size || header.stream_id() != info.stream {
+        return Err(VrsError::corrupt(format!(
+            "record {index} at offset {} does not match the index",
+            info.offset
+        )));
+    }
+    Ok((info, header))
 }

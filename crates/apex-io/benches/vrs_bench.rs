@@ -70,6 +70,18 @@ fn bench_read(c: &mut Criterion) {
             })
         });
     }
+    g.bench_function("full_read_ahead", |b| {
+        b.iter(|| {
+            let mut r = VrsReader::open(&f.vrs.path).unwrap();
+            let mut seq = r.sequential(black_box(&both)).unwrap();
+            let mut buf = Vec::new();
+            let mut bytes = 0u64;
+            while seq.next_into(&mut buf).unwrap().is_some() {
+                bytes += buf.len() as u64;
+            }
+            black_box(bytes);
+        })
+    });
     g.finish();
 }
 
@@ -160,6 +172,18 @@ fn bench_real_vrs(c: &mut Criterion) {
             let mut buf = Vec::new();
             let mut n = 0u64;
             while r.next_record_into(&mut cur, &mut buf).unwrap().is_some() {
+                n += 1;
+            }
+            black_box(n);
+        })
+    });
+    g.bench_function("read_full_raw_read_ahead", |b| {
+        b.iter(|| {
+            let mut r = VrsReader::open(&path).unwrap();
+            let mut seq = r.sequential(&RecordFilter::all()).unwrap();
+            let mut buf = Vec::new();
+            let mut n = 0u64;
+            while seq.next_into(&mut buf).unwrap().is_some() {
                 n += 1;
             }
             black_box(n);

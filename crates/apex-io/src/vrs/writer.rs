@@ -19,6 +19,7 @@ use super::format::{
     Compression, DESCRIPTION_TYPE_ID, FILE_HEADER_SIZE, FileHeader, INDEX_TYPE_ID, IndexEntry,
     RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
+use super::reader::RecordMeta;
 use std::collections::BTreeMap;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -258,6 +259,49 @@ impl VrsWriter {
             timestamp,
             record_size: header.record_size,
             record_type,
+            stream,
+        });
+        Ok(())
+    }
+
+    /// Write one record whose `body` is already in its stored form
+    /// (compressed exactly as `compression` says, or plain when
+    /// [`Compression::None`]). Copy operations use this to move payloads
+    /// through without decompressing and recompressing them. Identity and
+    /// timing come from `meta` (as read from the source).
+    pub fn write_record_raw(
+        &mut self,
+        meta: RecordMeta,
+        body: &[u8],
+        compression: Compression,
+        uncompressed_size: u32,
+    ) -> Result<()> {
+        let stream = meta.stream;
+        if !self.description.streams.contains_key(&stream) {
+            return Err(VrsError::Usage(format!("stream {stream} was not declared")));
+        }
+        self.start()?;
+
+        let header = RecordHeader {
+            record_size: record_size(body.len())?,
+            previous_record_size: self.prev_size,
+            type_id: stream.type_id,
+            format_version: meta.format_version,
+            timestamp: meta.timestamp,
+            instance: stream.instance,
+            record_type: meta.record_type,
+            compression,
+            uncompressed_size: if compression == Compression::None {
+                0
+            } else {
+                uncompressed_size
+            },
+        };
+        self.write_framed(&header, body)?;
+        self.entries.push(IndexEntry {
+            timestamp: meta.timestamp,
+            record_size: header.record_size,
+            record_type: meta.record_type,
             stream,
         });
         Ok(())
