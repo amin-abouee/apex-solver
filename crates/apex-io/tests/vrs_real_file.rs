@@ -282,3 +282,42 @@ mod aria {
         let _: Option<VrsReader> = None;
     }
 }
+
+#[test]
+fn rewritten_copy_is_byte_identical_per_record() {
+    use apex_io::vrs::{Compression, CopyOptions, copy_filtered};
+    let Some(mut src) = sample() else { return };
+    let ids = src.streams();
+    let first = ids
+        .iter()
+        .filter_map(|s| src.stream_time_range(*s).map(|r| r.0))
+        .fold(f64::INFINITY, f64::min);
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("copy.vrs");
+    let opts = CopyOptions {
+        start: Some(first + 30.0),
+        end: Some(first + 35.0),
+        compression: Some(Compression::Zstd),
+        ..CopyOptions::default()
+    };
+    copy_filtered(&mut src, &out, &opts).unwrap();
+
+    let mut copy = VrsReader::open(&out).unwrap();
+    assert_eq!(copy.streams(), ids);
+    assert_eq!(copy.file_tags(), src.file_tags());
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    for id in ids {
+        assert_eq!(copy.stream_tags(id), src.stream_tags(id), "{id} tags");
+        let expect = src
+            .data_records_between(id, first + 30.0, first + 35.0)
+            .to_vec();
+        let got = copy.data_records(id).to_vec();
+        assert_eq!(got.len(), expect.len(), "{id} record count");
+        for (g, e) in got.iter().zip(&expect) {
+            let m1 = src.read_record_into(*e as usize, &mut a).unwrap();
+            let m2 = copy.read_record_into(*g as usize, &mut b).unwrap();
+            assert_eq!(m1.timestamp, m2.timestamp);
+            assert_eq!(a, b, "{id} payload differs");
+        }
+    }
+}

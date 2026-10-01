@@ -42,6 +42,16 @@ path = "bin/bag_verify.rs"
 required-features = ["rosbag", "cli"]
 
 [[bin]]
+name = "vrs_copy"
+path = "bin/vrs_copy.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
+name = "vrs_dump"
+path = "bin/vrs_dump.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
 name = "vrs_info"
 path = "bin/vrs_info.rs"
 required-features = ["vrs", "cli"]

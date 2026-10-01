@@ -8,8 +8,8 @@
 use super::codec;
 use super::error::{Result, VrsError};
 use super::format::{
-    Compression, FileHeader, INDEX_ENTRY_SIZE, INDEX_TYPE_ID, IndexEntry, RECORD_HEADER_SIZE,
-    RecordHeader, RecordType, StreamId,
+    Compression, DESCRIPTION_TYPE_ID, FileHeader, INDEX_ENTRY_SIZE, INDEX_TYPE_ID, IndexEntry,
+    RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
@@ -236,13 +236,18 @@ pub fn rebuild_index(
         if end > file_len {
             break; // truncated tail
         }
-        infos.push(RecordInfo {
-            timestamp: h.timestamp,
-            offset: pos,
-            size: h.record_size,
-            record_type: h.record_type,
-            stream: h.stream_id(),
-        });
+        // Special records (description, and an index written at the end of
+        // the file) are not stream records.
+        let special = h.type_id == INDEX_TYPE_ID || h.type_id == DESCRIPTION_TYPE_ID;
+        if !special {
+            infos.push(RecordInfo {
+                timestamp: h.timestamp,
+                offset: pos,
+                size: h.record_size,
+                record_type: h.record_type,
+                stream: h.stream_id(),
+            });
+        }
         reader.seek_relative(i64::from(h.record_size) - RECORD_HEADER_SIZE as i64)?;
         pos = end;
     }
