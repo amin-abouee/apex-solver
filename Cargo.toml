@@ -150,6 +150,8 @@ visualization = ["dep:rerun", "apex-io/visualization"]
 cli = ["dep:clap"]
 # ROS1/ROS2 bag I/O pass-through (opt-in; pulls bundled SQLite + codecs).
 rosbag = ["apex-io/rosbag"]
+# Meta VRS (Project Aria) reader/writer pass-through (opt-in; reuses zstd/lz4).
+vrs = ["apex-io/vrs"]
 # Dataset download helpers pass-through (on by default).
 download = ["apex-io/download"]
 

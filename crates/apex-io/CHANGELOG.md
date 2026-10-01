@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (VRS)
+- **`vrs` feature: Meta VRS / Project Aria reader and writer**, implemented from scratch in safe Rust (no crate
+  existed). `VrsReader` (index with rebuild fallback, description tags, `DataLayout`/`RecordFormat`, time-ordered
+  `Cursor`, nearest/range lookups, zero-allocation reads), `VrsWriter` + `LayoutWriter`, `copy_filtered`, and typed
+  `aria::AriaRecording` (IMU, magnetometer, barometer, GPS, JPEG camera frames, configs, calibration) with one-by-one
+  and by-timestamp access suited to embedding in a VIO pipeline.
+- `BagKind::Vrs`: VRS in `BagReader`/`BagWriter` and every `bag_*` tool. Aria streams read as standard ROS topics;
+  ROS topics write losslessly (raw bytes + type/definition/encoding tags).
+- Tools `vrs_info`, `vrs_copy`, `vrs_dump`; `scripts/vrs_sweep.sh` and `scripts/vrs_crosscheck.py` (Meta reader).
+
 ### Breaking
 - `rosbag::Message::connection` and `RawMessage::connection` are now
   `Arc<Connection>` (was an owned `Connection` cloned per message, including its

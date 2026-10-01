@@ -86,6 +86,7 @@ apex-io = { version = "0.4.0", features = ["dds"] }
 
 | Feature | Default | Enables | Extra dependencies |
 |---|:---:|---|---|
+| `vrs` | ✗ | Meta VRS (Project Aria) reader/writer, `vrs_*` binaries, VRS in the `bag_*` tools | `zstd`, `lz4_flex` (no new dependencies) |
 | `download` | ✓ | Dataset auto-download (`download_file`, `decompress_bzip2`, `extract_tar_gz`, `ensure_*_dataset` network fallback, `download_datasets` binary) | `ureq`, `bzip2`, `flate2`, `tar` |
 | `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
 | `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2`, `md5`, `crc32fast` |
@@ -503,6 +504,51 @@ for obs in &dataset.observations {
 ```
 
 ---
+
+## VRS / Project Aria (`vrs` feature)
+
+A from-scratch, safe-Rust implementation of Meta's **VRS** container (`VisionRecordVRS2`), as used by
+Project Aria recordings such as the LaMaria dataset. No FFI, no memory mapping; opening a 20 GB file reads
+only the header, tags and index. Enable with `--features vrs` (it only needs `zstd`/`lz4_flex`, which `rosbag` already uses).
+
+```rust
+use apex_io::vrs::aria::{AriaRecording, AriaSensor, Sample};
+
+let mut rec = AriaRecording::open("recording.vrs")?;
+
+// 1) Pull samples one by one, merged in capture-time order across sensors.
+let mut cursor = rec.cursor(&[AriaSensor::SlamLeft, AriaSensor::ImuRight]);
+while let Some(sample) = rec.next_sample(&mut cursor)? {
+    match sample {
+        Sample::Imu(imu) => { /* imu.time_s, imu.accel, imu.gyro */ }
+        Sample::Image(img) => { /* img.jpeg (original bytes), exposure, gain */ }
+        _ => {}
+    }
+}
+
+// 2) Or ask by time.
+let (t0, _) = rec.time_range(AriaSensor::ImuRight).unwrap();
+let imu = rec.imu_between(AriaSensor::ImuRight, t0 + 10.0, t0 + 10.5)?;
+let frame = rec.image_nearest(AriaSensor::SlamLeft, t0 + 10.0)?;
+```
+
+* **Generic layer** (`apex_io::vrs`): `VrsReader` (index, tags, `DataLayout`/`RecordFormat` decoding, time-ordered
+  `Cursor`, `find_nearest` / range queries, zero-allocation `read_record_into`), `VrsWriter` (streams, tags, per-record
+  zstd/lz4, index written at close) and `LayoutWriter` for building typed record headers.
+* **Aria layer**: typed `ImuSample`, `BaroSample`, `GpsSample`, `ImageFrame` (JPEG passed through undecoded),
+  camera/IMU configs and the factory calibration JSON. ~500k IMU samples/s, so a recording pulls far faster than real time.
+* **Bag tools**: VRS is a first-class container in `bag_info`, `bag_filter`, `bag_convert` and `bag_verify`.
+  Reading maps Aria streams to ROS topics (`/aria/imu_right` `sensor_msgs/Imu`, `/aria/camera_slam_left/compressed`
+  `sensor_msgs/CompressedImage`, magnetometer, barometer, GPS); Wi-Fi/Bluetooth/clock streams are listed and reported
+  as unsupported. Writing stores each ROS topic as a VRS stream holding the raw message bytes plus topic/type/definition/encoding,
+  so *any* bag survives ROS → VRS → ROS byte for byte.
+* **Tools**: `vrs_info` (streams, rates, tags, `--verify-index`), `vrs_copy` (trim by stream/time, re-compress),
+  `vrs_dump` (CSV for IMU/baro/GPS, JPEG extraction for cameras).
+
+Validated against Meta's own reader (`projectaria-tools`) with `scripts/vrs_crosscheck.py`: decoded IMU/barometer
+values match and Meta reads files written by `VrsWriter` identically to the originals. Format notes (derived from real
+files; the upstream header comments are partly outdated): file header 80 B, record header 32 B, index entries 19 B
+`{ts, size, type, stream}` with offsets implied by cumulative sizes, var-size layout pieces stored as `(offset, length)` pairs.
 
 ## CLI Binaries
 
