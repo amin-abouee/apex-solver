@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Breaking
+- `rosbag::Message::connection` and `RawMessage::connection` are now
+  `Arc<Connection>` (was an owned `Connection` cloned per message, including its
+  message definition). Field access is unchanged through `Deref`.
+- `Ros1Reader::raw_messages_filtered` keeps returning a `Vec`, but streaming
+  callers should use the new `for_each_raw_filtered` (borrowed slices, no
+  per-message allocation).
+- `bag_filter`: `--standard-copy`, `--buffer-size-mb`, `--batch-size`,
+  `--compression-mode`/`--compression-format` were removed (writes are always
+  streamed); use `--compression none|zstd|lz4|bz2` and `--format`.
+- Time windows are consistently `[start, end)` for every backend (the MCAP
+  reader previously included `end`).
+- `Writer::configure_buffer`'s `buffer_size_mb` is ignored; `Writer::write*`
+  write straight through to the storage backend.
+
+### Added
+- **`BagReader` / `BagWriter`**: one streaming API over ROS1 `.bag`, ROS2
+  sqlite3, ROS2 MCAP directories and bare `.mcap` files, with `detect_kind`.
+- **`rosbag::transcode`**: schema-driven ROS1 <-> CDR converter compiled from
+  the message definition. Handles every type with a definition (including
+  user-defined ones), block-copies byte arrays, and ships a catalog of 161
+  standard interface types (std/geometry/sensor/nav/shape/stereo/trajectory/
+  visualization/diagnostic msgs, tf2_msgs, builtin_interfaces, rcl_interfaces,
+  rosgraph_msgs, ...) for ROS2 sqlite bags that carry no schema. Includes
+  genmsg-compatible md5sum computation and definition rendering for both
+  dialects. Unsupported topics are reported with `tracing::warn!`.
+- `bag_convert` rewritten on the transcoder (any container to any container,
+  streaming, `--strict`, `--list-topics`); new `bag_verify` tool;
+  `scripts/dataset_sweep.sh` runs info/filter/convert/verify over a dataset tree.
+- `bag_info` reads ROS1 `.bag`, sqlite3 and MCAP; adds per-topic encoding, rate
+  and a "not convertible" marker.
+- Real `McapWriter` (chunked, optional zstd, summary + statistics).
+
+### Fixed
+- **`McapWriter` was a stub** that wrote only the file magic, so
+  `--format mcap` outputs were empty.
+- **ROS1 `lz4` chunks used the wrong format** (size-prefixed LZ4 block) and were
+  unreadable by ROS tools; they are now LZ4 frames like `rosbag` writes. Older
+  block-format bags still read.
+- SQLite reader materialised the whole result set in memory; it now streams with
+  keyset pagination. Messages on topics missing from `metadata.yaml` were dropped
+  silently; they are now read.
+- `Ros1Reader::open` read every chunk payload just to index the bag; it now
+  seeks past them.
+- `Reader::topics()` order is deterministic (sorted by name).
+
+### Performance
+- Allocation-free ROS1 message path (reader and writer); sqlite writer uses one
+  rolling transaction, no journal, and builds the timestamp index at close.
+- SIMD CRC-32 for MCAP chunk validation (reads ~2.4x faster, CPU-bound case).
+
 ### Fixed
 - **MCAP reading is bounded-memory and profile-agnostic.** The MCAP storage
   backend no longer loads whole files into the heap (`fs::read` of a 13 GB bag

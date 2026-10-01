@@ -52,11 +52,12 @@
 //! ## Features
 //!
 //! - Read ROS2 bag files in SQLite3 and MCAP formats
-//! - Write ROS2 bag files with SQLite3 storage
+//! - Write ROS1 bags, and ROS2 bags with SQLite3 or MCAP storage
 //! - Parse `metadata.yaml` files with full validation
 //! - Filter messages by topic and time range
 //! - Compression support (zstd)
-//! - 94+ ROS2 message types with CDR deserialization
+//! - Schema-driven ROS1 <-> ROS2 payload conversion ([`transcode`]) for every type with a definition
+//! - One streaming reader/writer over all containers ([`bag::BagReader`], [`bag::BagWriter`])
 //! - Cross-compatible with Python rosbags library
 //!
 //! ## Quick Start

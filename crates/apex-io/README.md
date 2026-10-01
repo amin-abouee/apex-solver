@@ -49,9 +49,10 @@ the `ros2 bag` CLI.
 - **ROS2 bag reading** — SQLite3 and MCAP formats, topic + time-range filtering, raw and deserialized APIs
 - **ROS2 bag writing** — SQLite3 and MCAP with optional zstd compression
 - **Live DDS subscription** — async topic listener for running ROS2 systems (optional `dds` feature)
-- **94+ ROS2 message types** — CDR deserialization for `geometry_msgs`, `sensor_msgs`, `nav_msgs`, `std_msgs`, `tf2_msgs`, and more
+- **Every standard message, ROS1 ⇄ ROS2** — a schema-driven transcoder re-encodes ROS1 ⇄ CDR payloads for any type with a definition (embedded in the bag, or from a built-in catalog of the `std`/`geometry`/`sensor`/`nav`/`tf2`/`visualization`/… interface packages) without typed structs; typed CDR decoding is available for the common sensor messages
 - **Safe, fast I/O + parallel parsing** — buffered reads (`std::fs::read[_to_string]`) and `rayon`; **no `unsafe` and no memory-mapping** as of v0.2.0
-- **CLI binaries** — `bag_info`, `bag_filter`, `extract_topic_data`, `write_dummy_bag`, `dds_multi_listener`
+- **Format-agnostic `BagReader` / `BagWriter`** — one streaming API over ROS1 `.bag`, ROS2 sqlite3, ROS2 MCAP directories and bare `.mcap` files (ROS1- or ROS2-profile)
+- **CLI binaries** — `bag_info`, `bag_filter`, `bag_convert`, `bag_verify`, `extract_topic_data`, `write_dummy_bag`, `dds_multi_listener`
 
 ## Supported Formats
 
@@ -87,7 +88,7 @@ apex-io = { version = "0.4.0", features = ["dds"] }
 |---|:---:|---|---|
 | `download` | ✓ | Dataset auto-download (`download_file`, `decompress_bzip2`, `extract_tar_gz`, `ensure_*_dataset` network fallback, `download_datasets` binary) | `ureq`, `bzip2`, `flate2`, `tar` |
 | `cli` | ✓ | CLI parsing for `download_datasets`, `bag_filter`, `bag_convert` | `clap` |
-| `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2` |
+| `rosbag` | ✗ | ROS1/ROS2 bag read/write, `bag_*` binaries | `rusqlite` (bundled SQLite), `mcap`, `zstd`, `lz4_flex`, `serde_yaml`, `byteorder`, `hex`, `bzip2`, `md5`, `crc32fast` |
 | `visualization` | ✗ | `to_rerun_*` conversions | `rerun` |
 | `dds` | ✗ | Live DDS subscription, `dds_multi_listener` binary | `rustdds`, `tokio`, `futures` |
 
@@ -511,40 +512,58 @@ All binaries ship with the crate. Run them via:
 cargo run -p apex-io --bin <name> -- <args>
 ```
 
-### `bag_info` — inspect bag metadata (fast, no storage file opened)
+### `bag_info` — inspect a bag (index/summary only, never reads messages)
 
 ```bash
-cargo run -p apex-io --bin bag_info -- path/to/my_bag
+cargo run --release -p apex-io --bin bag_info -- path/to/bag_or_file   # .bag | .mcap | ROS2 dir
 ```
 
-Reads only `metadata.yaml`. Output: version, storage format, compression, file sizes, duration,
-start/end timestamps, message count, and per-topic breakdown.
+Output: container, size, duration, start/end, message count and a per-topic table (type,
+payload encoding, count, rate). Topics that `bag_convert` cannot re-encode are flagged and logged
+with a warning.
 
-### `bag_filter` — copy and filter a bag
+### `bag_filter` — copy / filter a bag (raw bytes, streaming)
+
+Reads any container and writes any container whose payload encoding matches; message bytes are
+copied verbatim (nothing is deserialized). Memory use is independent of bag size.
 
 ```bash
-# Filter by topic
-cargo run -p apex-io --bin bag_filter -- input_bag output_bag \
-    --topics /camera/image_raw,/imu/data
+# Keep topics, write a bare MCAP with zstd chunks
+bag_filter in.bag out.mcap --topics /imu0,/cam0/image_raw --compression zstd
 
-# Filter by time range (nanoseconds since epoch)
-cargo run -p apex-io --bin bag_filter -- input_bag output_bag \
-    --start 1700000000000000000 \
-    --end   1700000010000000000
+# Time window: ns since epoch (--start inclusive, --end exclusive) or seconds from the first message
+bag_filter in.mcap out_dir --start 1700000000000000000 --end 1700000010000000000
+bag_filter in.mcap out_dir --start-offset 20 --end-offset 30 --format sqlite3
 
-# Convert SQLite3 → MCAP
-cargo run -p apex-io --bin bag_filter -- input_bag output_bag \
-    --storage mcap
-
-# All options combined with compression
-cargo run -p apex-io --bin bag_filter -- input_bag output_bag \
-    --topics /lidar/points \
-    --start 1700000000000000000 \
-    --end   1700000060000000000 \
-    --storage mcap \
-    --compression-mode file \
-    --compression-format zstd
+# Everything except some topics
+bag_filter in.mcap out.bag --exclude /cam1/image_raw --compression lz4
 ```
+
+`--format` is `bag`, `sqlite3`, `mcap` (ROS2 directory) or `mcap-file`; by default it follows the
+output extension (`.bag`, `.mcap`) and otherwise writes an MCAP directory.
+
+### `bag_convert` — ROS1 ⇄ ROS2, any container
+
+```bash
+bag_convert hilti.mcap out_ros2_dir --format mcap      # ROS1-profile MCAP -> ROS2 (CDR) bag
+bag_convert ros2_dir out.bag --compression lz4         # ROS2 -> ROS1 .bag
+bag_convert in.bag out.mcap --encoding cdr             # .bag -> bare ROS2-profile MCAP
+bag_convert in.bag --list-topics                       # which topics are convertible
+```
+
+Payloads are re-encoded by a converter compiled from each topic's message definition (from the bag,
+or the built-in catalog for ROS2 sqlite bags that store none); byte arrays such as images are
+block-copied. Topics with no usable definition are skipped with a `WARN` (`--strict` makes that an
+error). The ROS1 output carries real md5sums and full definitions, and ROS1 `seq` is regenerated as 0.
+
+### `bag_verify` — prove two bags hold the same messages
+
+```bash
+bag_verify original.mcap converted_dir     # per-topic count + digest; exit 0 if identical
+```
+
+The digest covers `(timestamp, canonical CDR payload)`, so it ignores container, encoding and ROS1
+`seq` and validates `bag_filter` / `bag_convert` output.
 
 ### `extract_topic_data` — export to CSV or PNG
 
