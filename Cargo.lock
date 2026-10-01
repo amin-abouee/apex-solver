@@ -297,6 +297,7 @@ dependencies = [
  "chrono",
  "clap",
  "crc32fast",
+ "criterion",
  "flate2",
  "futures",
  "hex",

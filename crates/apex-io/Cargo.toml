@@ -241,7 +241,20 @@ vrs = ["dep:zstd", "dep:lz4_flex"]
 download = ["dep:ureq", "dep:bzip2", "dep:flate2", "dep:tar"]
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
+
+[[bench]]
+name = "rosbag_bench"
+path = "benches/rosbag_bench.rs"
+harness = false
+required-features = ["rosbag"]
+
+[[bench]]
+name = "vrs_bench"
+path = "benches/vrs_bench.rs"
+harness = false
+required-features = ["vrs"]
 
 [lints]
 workspace = true
