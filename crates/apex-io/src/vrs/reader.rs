@@ -35,6 +35,7 @@ use super::format::{
     FILE_HEADER_SIZE, FileHeader, RECORD_HEADER_SIZE, RecordHeader, RecordType, StreamId,
 };
 use super::index::{IndexSource, RecordInfo, read_index, read_special_record, rebuild_index};
+use super::recordformat::RecordLayout;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -141,6 +142,8 @@ pub struct VrsReader {
     by_stream: BTreeMap<StreamId, StreamIndex>,
     /// All data records sorted by (timestamp, file order).
     data_order: Vec<u32>,
+    /// Parsed `RF:`/`DL:` tags per (stream, record type, version).
+    layouts: BTreeMap<(StreamId, RecordType, u32), RecordLayout>,
     raw: Vec<u8>,
 }
 
@@ -179,9 +182,11 @@ impl VrsReader {
             index_source,
             by_stream: BTreeMap::new(),
             data_order: Vec::new(),
+            layouts: BTreeMap::new(),
             raw: Vec::new(),
         };
         reader.build_time_indexes();
+        reader.build_layouts();
         Ok(reader)
     }
 
@@ -219,6 +224,44 @@ impl VrsReader {
         });
         self.by_stream = by_stream;
         self.data_order = all;
+    }
+
+    fn build_layouts(&mut self) {
+        for (&stream, tags) in &self.description.streams {
+            for record_type in [
+                RecordType::Configuration,
+                RecordType::State,
+                RecordType::Data,
+            ] {
+                let prefix = format!("RF:{}:", record_type.name());
+                for key in tags.vrs.keys().filter(|k| k.starts_with(&prefix)) {
+                    let Ok(version) = key[prefix.len()..].parse::<u32>() else {
+                        continue;
+                    };
+                    match RecordLayout::from_tags(tags, record_type, version) {
+                        Some(Ok(layout)) => {
+                            self.layouts.insert((stream, record_type, version), layout);
+                        }
+                        Some(Err(e)) => tracing::warn!(
+                            %stream,
+                            "ignoring undecodable record format {key}: {e}"
+                        ),
+                        None => {}
+                    }
+                }
+            }
+        }
+    }
+
+    /// Layout of the records of `stream` with this type and format version,
+    /// as announced in the stream tags.
+    pub fn record_layout(
+        &self,
+        stream: StreamId,
+        record_type: RecordType,
+        version: u32,
+    ) -> Option<&RecordLayout> {
+        self.layouts.get(&(stream, record_type, version))
     }
 
     // ---- file level -------------------------------------------------------

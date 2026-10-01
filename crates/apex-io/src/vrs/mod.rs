@@ -4,13 +4,17 @@
 //! from-scratch, safe-Rust implementation of the `VRS2` file format derived
 //! from the published documentation and verified against real Aria files.
 
+pub mod aria;
 pub mod codec;
+pub mod datalayout;
 pub mod description;
 pub mod error;
 pub mod format;
 pub mod index;
 pub mod reader;
+pub mod recordformat;
 
+pub use datalayout::{DataLayout, LayoutView, Piece, PieceKind, Scalar};
 pub use description::{Description, StreamTags, TagMap};
 pub use error::{Result, VrsError};
 pub use format::{
@@ -19,3 +23,4 @@ pub use format::{
 };
 pub use index::{IndexSource, RecordInfo};
 pub use reader::{Cursor, Record, RecordFilter, RecordMeta, VrsReader};
+pub use recordformat::{Block, BlockSpec, ImageFormat, ImageSpec, RecordFormat, RecordLayout};
