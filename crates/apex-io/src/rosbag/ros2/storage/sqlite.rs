@@ -499,9 +499,31 @@ pub struct SqliteWriter {
     is_open: bool,
     /// Connection ID mapping: topic -> database topic_id
     topic_id_map: HashMap<String, i32>,
+    /// Messages inserted since the last COMMIT.
+    pending: usize,
+    /// Messages per transaction.
+    commit_interval: usize,
 }
 
 impl SqliteWriter {
+    fn begin(&mut self) -> Result<()> {
+        if let Some(conn) = &self.connection {
+            conn.execute_batch("BEGIN")?;
+        }
+        self.pending = 0;
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<()> {
+        if let Some(conn) = &self.connection
+            && !conn.is_autocommit()
+        {
+            conn.execute_batch("COMMIT")?;
+        }
+        self.pending = 0;
+        Ok(())
+    }
+
     /// Create a new SQLite writer
     pub fn new(
         path: &Path,
@@ -525,6 +547,8 @@ impl SqliteWriter {
             _compression_mode: compression_mode,
             is_open: false,
             topic_id_map: HashMap::new(),
+            pending: 0,
+            commit_interval: 20_000,
         })
     }
 
@@ -563,7 +587,6 @@ impl SqliteWriter {
                 timestamp INTEGER NOT NULL,
                 data BLOB NOT NULL
             );
-            CREATE INDEX timestamp_idx ON messages (timestamp ASC);
             INSERT INTO schema(schema_version, ros_distro) VALUES (4, 'rosbags');
         "#;
 
@@ -579,9 +602,17 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         }
 
         let connection = SqliteConnection::open(&self.db_path)?;
+        // A freshly written bag needs no crash safety: skip the journal and
+        // fsyncs, keep a large page cache, and insert inside one long
+        // transaction. The timestamp index is built once at close.
+        connection.execute_batch(
+            "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; \
+             PRAGMA locking_mode=EXCLUSIVE; PRAGMA cache_size=-65536;",
+        )?;
         self.connection = Some(connection);
 
         self.create_schema()?;
+        self.begin()?;
 
         self.is_open = true;
         Ok(())
@@ -597,7 +628,9 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
                 "INSERT INTO metadata(metadata_version, metadata) VALUES (?1, ?2)",
                 (version, metadata),
             )?;
+            conn.execute_batch("CREATE INDEX timestamp_idx ON messages (timestamp ASC);")?;
         }
+        self.commit()?;
 
         self.connection = None;
         self.is_open = false;
@@ -672,47 +705,19 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
 
         let conn = self.connection.as_ref().ok_or(BagError::BagNotOpen)?;
 
-        conn.execute(
-            "INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)",
-            (topic_id, timestamp as i64, data),
-        )?;
+        conn.prepare_cached("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?
+            .execute((topic_id, timestamp as i64, data))?;
 
+        self.pending += 1;
+        if self.pending >= self.commit_interval {
+            self.commit()?;
+            self.begin()?;
+        }
         Ok(())
     }
 
-    fn write_batch(&mut self, messages: &[(Connection, u64, Vec<u8>)]) -> Result<()> {
-        if !self.is_open {
-            return Err(BagError::BagNotOpen);
-        }
-
-        if messages.is_empty() {
-            return Ok(());
-        }
-
-        // Take the connection temporarily to avoid borrow conflicts during transaction
-        let mut conn = self.connection.take().ok_or(BagError::BagNotOpen)?;
-
-        let tx = conn.transaction()?;
-
-        {
-            let mut stmt =
-                tx.prepare("INSERT INTO messages(topic_id, timestamp, data) VALUES (?1, ?2, ?3)")?;
-
-            for (connection, timestamp, data) in messages {
-                let topic_id = self
-                    .topic_id_map
-                    .get(&connection.topic)
-                    .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
-
-                stmt.execute((topic_id, *timestamp as i64, data))?;
-            }
-        }
-
-        tx.commit()?;
-
-        self.connection = Some(conn);
-
-        Ok(())
+    fn set_commit_interval(&mut self, messages: usize) {
+        self.commit_interval = messages.max(1);
     }
 
     fn is_open(&self) -> bool {

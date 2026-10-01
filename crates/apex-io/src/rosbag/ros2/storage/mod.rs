@@ -82,6 +82,9 @@ pub trait StorageWriter: std::any::Any {
         Ok(())
     }
 
+    /// Hint: number of messages per commit/transaction. Default: ignored.
+    fn set_commit_interval(&mut self, _messages: usize) {}
+
     /// Check if the storage is open
     fn is_open(&self) -> bool;
 
