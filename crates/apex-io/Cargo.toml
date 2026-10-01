@@ -213,6 +213,8 @@ rosbag = [
     "dep:md5",
     "dep:crc32fast",
 ]
+# Meta VRS container (Project Aria) reader/writer.
+vrs = ["dep:zstd", "dep:lz4_flex"]
 # Dataset download helpers (`download_file`, `decompress_bzip2`, `extract_tar_gz`
 # and the `ensure_*_dataset` network fallback). On by default; `image` stays
 # mandatory regardless (ASL streaming API returns `image::DynamicImage`).
