@@ -412,6 +412,20 @@ impl BagWriter {
 
     /// Register a topic. Returns a handle for [`Self::write`].
     pub fn add_connection(&mut self, new: &NewConnection) -> Result<ConnectionHandle> {
+        // Bags such as rosbag2 sqlite store no schema; fill it in for
+        // standard types so the output is self-describing.
+        let mut new = std::borrow::Cow::Borrowed(new);
+        if new.definition.is_empty() {
+            let dialect = if new.serialization_format == "ros1" {
+                super::transcode::Dialect::Ros1
+            } else {
+                super::transcode::Dialect::Ros2
+            };
+            if let Some(text) = super::transcode::catalog_definition(&new.message_type, dialect) {
+                new.to_mut().definition = text;
+            }
+        }
+        let new = new.as_ref();
         let definition = MessageDefinition {
             format: if new.definition.is_empty() {
                 MessageDefinitionFormat::None
@@ -581,6 +595,23 @@ mod tests {
             })?;
             assert_eq!(n, 1000, "{name}");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn standard_types_get_a_definition_when_the_source_has_none() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("d.mcap");
+        let mut w = BagWriter::create(&path, BagKind::McapFile, OutputCompression::None)?;
+        w.add_connection(&conn("/imu", "sensor_msgs/msg/Imu", "cdr"))?;
+        w.add_connection(&conn("/custom", "my_pkg/msg/Thing", "cdr"))?;
+        w.close()?;
+        let r = BagReader::open(&path)?;
+        let by_topic = |t: &str| r.connections().iter().find(|c| c.topic == t).cloned();
+        let imu = by_topic("/imu").ok_or("imu")?;
+        assert!(imu.message_definition.data.contains("angular_velocity"));
+        let custom = by_topic("/custom").ok_or("custom")?;
+        assert!(custom.message_definition.data.is_empty());
         Ok(())
     }
 

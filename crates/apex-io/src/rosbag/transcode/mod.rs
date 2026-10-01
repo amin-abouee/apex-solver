@@ -27,6 +27,17 @@ pub struct TopicPlan {
     pub target: NewConnection,
 }
 
+/// Definition text for `message_type` in `dialect` from the built-in catalog,
+/// or `None` for types outside it.
+pub fn catalog_definition(message_type: &str, dialect: Dialect) -> Option<String> {
+    let root = normalize_type_name(message_type);
+    let cat = catalog().ok()?;
+    if !cat.contains(&root) {
+        return None;
+    }
+    cat.render(&root, dialect).ok()
+}
+
 /// Payload dialect named by a connection's `serialization_format`.
 pub fn dialect_of(serialization_format: &str) -> Option<Dialect> {
     match serialization_format {
@@ -136,4 +147,66 @@ pub fn plan_connections(
         }
     }
     (planned, unsupported)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rosbag::types::{MessageDefinition, MessageDefinitionFormat};
+
+    fn conn(topic: &str, ty: &str, fmt: &str, def: &str) -> Connection {
+        Connection {
+            id: 1,
+            topic: topic.into(),
+            message_type: ty.into(),
+            message_definition: MessageDefinition {
+                format: MessageDefinitionFormat::Msg,
+                data: def.into(),
+            },
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: fmt.into(),
+            offered_qos_profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn standard_ros2_type_without_embedded_definition_uses_the_catalog() {
+        let c = conn("/imu", "sensor_msgs/msg/Imu", "cdr", "");
+        let plan = plan_topic(&c, Dialect::Ros1).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(plan.target.message_type, "sensor_msgs/Imu");
+        assert_eq!(plan.target.type_hash, "6a62c6daae103f4ff57a132d6f95cec2");
+        assert!(plan.target.definition.starts_with("Header header"));
+        assert_eq!(plan.target.serialization_format, "ros1");
+    }
+
+    #[test]
+    fn user_defined_types_convert_from_their_embedded_definition() {
+        let c = conn(
+            "/mine",
+            "my_pkg/Thing",
+            "ros1",
+            "Header header\nint16 id\nstring[] tags\n",
+        );
+        let plan = plan_topic(&c, Dialect::Ros2).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(plan.target.message_type, "my_pkg/msg/Thing");
+        assert!(
+            plan.target
+                .definition
+                .contains("builtin_interfaces/Time stamp")
+        );
+    }
+
+    #[test]
+    fn unknown_types_without_a_definition_are_reported_not_dropped_silently() {
+        let known = conn("/ok", "std_msgs/String", "ros1", "string data\n");
+        let unknown = conn("/odd", "vendor_msgs/Mystery", "cdr", "");
+        let weird = conn("/weird", "std_msgs/String", "json", "");
+        let (planned, unsupported) = plan_connections(&[known, unknown, weird], Dialect::Ros1);
+        assert_eq!(planned.len(), 1);
+        assert_eq!(planned[0].0.topic, "/ok");
+        assert_eq!(unsupported.len(), 2);
+        assert!(unsupported[0].reason.contains("no message definition"));
+        assert!(unsupported[1].reason.contains("payload encoding"));
+    }
 }

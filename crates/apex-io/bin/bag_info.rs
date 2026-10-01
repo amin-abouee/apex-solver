@@ -16,6 +16,7 @@
 //!
 //! Usage: cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
 
+use apex_io::rosbag::transcode::{Dialect, dialect_of, plan_connections};
 use apex_io::rosbag::{BagKind, BagReader, ReaderError};
 use chrono::TimeZone;
 use std::env;
@@ -29,6 +30,7 @@ fn main() -> Result<(), ReaderError> {
         std::process::exit(1);
     }
 
+    apex_io::init_logger();
     let bag_path = Path::new(&args[1]);
     let reader = BagReader::open(bag_path)?;
 
@@ -55,6 +57,18 @@ fn main() -> Result<(), ReaderError> {
 
     let mut connections = reader.connections().to_vec();
     connections.sort_by(|a, b| a.topic.cmp(&b.topic));
+
+    // Which topics `bag_convert` could re-encode to the other ROS version?
+    // (Unsupported ones are reported with a warning by the library.)
+    let ros1_payload = connections
+        .iter()
+        .any(|c| dialect_of(&c.serialization_format) == Some(Dialect::Ros1));
+    let to = if ros1_payload {
+        Dialect::Ros2
+    } else {
+        Dialect::Ros1
+    };
+    let (_, unsupported) = plan_connections(&connections, to);
     for (i, c) in connections.iter().enumerate() {
         let label = if i == 0 {
             "Topic information:"
@@ -66,8 +80,13 @@ fn main() -> Result<(), ReaderError> {
         } else {
             "-".to_string()
         };
+        let note = if unsupported.iter().any(|u| u.topic == c.topic) {
+            " [not convertible]"
+        } else {
+            ""
+        };
         println!(
-            "{label} {} ({}, {}, {} msgs, {hz})",
+            "{label} {} ({}, {}, {} msgs, {hz}){note}",
             c.topic, c.message_type, c.serialization_format, c.message_count
         );
     }
