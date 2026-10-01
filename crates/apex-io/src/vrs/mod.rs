@@ -4,11 +4,18 @@
 //! from-scratch, safe-Rust implementation of the `VRS2` file format derived
 //! from the published documentation and verified against real Aria files.
 
+pub mod codec;
+pub mod description;
 pub mod error;
 pub mod format;
+pub mod index;
+pub mod reader;
 
+pub use description::{Description, StreamTags, TagMap};
 pub use error::{Result, VrsError};
 pub use format::{
     Compression, FILE_HEADER_SIZE, FileHeader, IndexEntry, RECORD_HEADER_SIZE, RecordHeader,
     RecordType, StreamId,
 };
+pub use index::{IndexSource, RecordInfo};
+pub use reader::{Cursor, Record, RecordFilter, RecordMeta, VrsReader};

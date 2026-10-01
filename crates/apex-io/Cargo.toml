@@ -42,6 +42,11 @@ path = "bin/bag_verify.rs"
 required-features = ["rosbag", "cli"]
 
 [[bin]]
+name = "vrs_info"
+path = "bin/vrs_info.rs"
+required-features = ["vrs", "cli"]
+
+[[bin]]
 name = "extract_topic_data"
 path = "bin/extract_topic_data.rs"
 required-features = ["rosbag"]
@@ -93,6 +98,11 @@ required-features = ["rosbag"]
 name = "cli_roundtrip"
 path = "tests/cli_roundtrip.rs"
 required-features = ["rosbag", "cli"]
+
+[[test]]
+name = "vrs_real_file"
+path = "tests/vrs_real_file.rs"
+required-features = ["vrs"]
 
 [[test]]
 name = "ros2_cdr_alignment_tests"
