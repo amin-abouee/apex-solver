@@ -1011,3 +1011,53 @@ fn mcap_writer_round_trip_through_reader() -> std::result::Result<(), Box<dyn st
     assert_eq!(msgs[0].connection.topic, "/imu");
     Ok(())
 }
+
+/// The sqlite reader pages through results; a bag larger than one page with
+/// interleaved topics and duplicate timestamps must come back complete, in
+/// order, and honour topic/time filters.
+#[test]
+fn sqlite_reader_streams_across_pages() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use apex_io::rosbag::{Reader, StoragePlugin, Writer};
+
+    let dir = tempfile::tempdir()?;
+    let bag = dir.path().join("sqlite_bag");
+    let mut writer = Writer::new(&bag, None, Some(StoragePlugin::Sqlite3))?;
+    writer.configure_buffer(1, 700)?; // several commits
+    writer.open()?;
+    let a = writer.add_connection("/a".into(), "t/msg/A".into(), None, None, None, None)?;
+    let b = writer.add_connection("/b".into(), "t/msg/B".into(), None, None, None, None)?;
+    const N: u64 = 5_000;
+    for i in 0..N {
+        // two messages per timestamp: exercises the (timestamp, id) keyset
+        writer.write(&a, 1_000 + i / 2, &i.to_le_bytes())?;
+        writer.write(&b, 1_000 + i / 2, &[1u8; 4])?;
+    }
+    writer.close()?;
+
+    let mut reader = Reader::new(&bag)?;
+    reader.open()?;
+    assert_eq!(reader.message_count(), 2 * N);
+
+    let all = reader
+        .raw_messages()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(all.len() as u64, 2 * N);
+    assert!(all.windows(2).all(|p| p[0].timestamp <= p[1].timestamp));
+
+    let only_a: Vec<_> = reader
+        .connections()
+        .iter()
+        .filter(|c| c.topic == "/a")
+        .cloned()
+        .collect();
+    let windowed = reader
+        .raw_messages_filtered(Some(&only_a), Some(1_100), Some(1_200))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(windowed.len(), 200); // 100 timestamps x 2 messages on /a
+    assert!(
+        windowed
+            .iter()
+            .all(|m| m.connection.topic == "/a" && (1_100..1_200).contains(&m.timestamp))
+    );
+    Ok(())
+}

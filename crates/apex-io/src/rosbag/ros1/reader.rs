@@ -300,22 +300,13 @@ impl Ros1Reader {
         stop_ns: Option<u64>,
     ) -> Result<Vec<Message>> {
         let raws = self.raw_messages_filtered(connections, start_ns, stop_ns)?;
-        let conn_by_id: HashMap<u32, Connection> =
-            self.connections.iter().map(|c| (c.id, c.clone())).collect();
         Ok(raws
             .into_iter()
-            .map(|r| {
-                let connection = conn_by_id
-                    .get(&r.connection.id)
-                    .cloned()
-                    .unwrap_or(r.connection.clone());
-                let topic = connection.topic.clone();
-                Message {
-                    connection,
-                    topic,
-                    timestamp: r.timestamp,
-                    data: r.raw_data,
-                }
+            .map(|r| Message {
+                topic: r.connection.topic.clone(),
+                connection: r.connection,
+                timestamp: r.timestamp,
+                data: r.raw_data,
             })
             .collect())
     }
@@ -330,10 +321,19 @@ impl Ros1Reader {
         start_ns: Option<u64>,
         stop_ns: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
+        let shared: HashMap<u32, std::sync::Arc<Connection>> = self
+            .connections
+            .iter()
+            .map(|c| (c.id, std::sync::Arc::new(c.clone())))
+            .collect();
         let mut out = Vec::new();
         self.for_each_raw_filtered(connections, start_ns, stop_ns, |conn, ts, data| {
+            let connection = shared
+                .get(&conn.id)
+                .cloned()
+                .unwrap_or_else(|| conn.clone().into());
             out.push(RawMessage {
-                connection: conn.clone(),
+                connection,
                 timestamp: ts,
                 raw_data: data.to_vec(),
             });

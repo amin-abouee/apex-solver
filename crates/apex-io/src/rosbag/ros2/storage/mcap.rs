@@ -24,6 +24,7 @@ use mcap_format::{Filters, McapSummary, MergedMcapStream};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 pub(crate) mod mcap_format;
 mod writer;
@@ -227,33 +228,31 @@ impl StorageReader for McapStorageReader {
         // fallback) from the summaries themselves. Channel IDs are NOT used
         // as keys: they are file-local and unrelated to the enumeration
         // order of the topic list.
-        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
+        let mut by_topic: HashMap<String, Arc<Connection>> = summarize_summaries(&self.summaries)
             .0
             .into_iter()
-            .map(|c| (c.topic.clone(), c))
+            .map(|c| (c.topic.clone(), Arc::new(c)))
             .collect();
         for connection in self.topic_connections.iter().cloned() {
-            by_topic.insert(connection.topic.clone(), connection);
+            by_topic.insert(connection.topic.clone(), Arc::new(connection));
         }
 
         let merged = self.merged_stream(connections, start, stop)?;
 
         let iterator = merged.map(move |item| {
             item.map(|(topic, mcap_msg)| {
-                let connection =
-                    by_topic
-                        .get(topic.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| Connection {
-                            id: 0,
-                            topic: topic.to_string(),
-                            message_type: String::new(),
-                            message_definition: MessageDefinition::default(),
-                            type_description_hash: String::new(),
-                            message_count: 0,
-                            serialization_format: String::new(),
-                            offered_qos_profiles: Vec::new(),
-                        });
+                let connection = by_topic.get(topic.as_ref()).cloned().unwrap_or_else(|| {
+                    Arc::new(Connection {
+                        id: 0,
+                        topic: topic.to_string(),
+                        message_type: String::new(),
+                        message_definition: MessageDefinition::default(),
+                        type_description_hash: String::new(),
+                        message_count: 0,
+                        serialization_format: String::new(),
+                        offered_qos_profiles: Vec::new(),
+                    })
+                });
                 Message {
                     connection,
                     topic: topic.to_string(),
@@ -280,33 +279,31 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
+        let mut by_topic: HashMap<String, Arc<Connection>> = summarize_summaries(&self.summaries)
             .0
             .into_iter()
-            .map(|c| (c.topic.clone(), c))
+            .map(|c| (c.topic.clone(), Arc::new(c)))
             .collect();
         for connection in self.topic_connections.iter().cloned() {
-            by_topic.insert(connection.topic.clone(), connection);
+            by_topic.insert(connection.topic.clone(), Arc::new(connection));
         }
 
         let merged = self.merged_stream(connections, start, stop)?;
 
         let iterator = merged.map(move |item| {
             item.map(|(topic, mcap_msg)| {
-                let connection =
-                    by_topic
-                        .get(topic.as_ref())
-                        .cloned()
-                        .unwrap_or_else(|| Connection {
-                            id: 0,
-                            topic: topic.to_string(),
-                            message_type: String::new(),
-                            message_definition: MessageDefinition::default(),
-                            type_description_hash: String::new(),
-                            message_count: 0,
-                            serialization_format: String::new(),
-                            offered_qos_profiles: Vec::new(),
-                        });
+                let connection = by_topic.get(topic.as_ref()).cloned().unwrap_or_else(|| {
+                    Arc::new(Connection {
+                        id: 0,
+                        topic: topic.to_string(),
+                        message_type: String::new(),
+                        message_definition: MessageDefinition::default(),
+                        type_description_hash: String::new(),
+                        message_count: 0,
+                        serialization_format: String::new(),
+                        offered_qos_profiles: Vec::new(),
+                    })
+                });
                 RawMessage {
                     connection,
                     timestamp: mcap_msg.log_time,
@@ -324,43 +321,12 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
-        let mut by_topic: HashMap<String, Connection> = summarize_summaries(&self.summaries)
-            .0
-            .into_iter()
-            .map(|c| (c.topic.clone(), c))
-            .collect();
-        for connection in self.topic_connections.iter().cloned() {
-            by_topic.insert(connection.topic.clone(), connection);
-        }
-
-        let mut all_messages = Vec::new();
-        for item in self.merged_stream(connections, start, stop)? {
-            let (topic, mcap_msg) = item
-                .map_err(|e| ReaderError::generic(format!("Failed to read MCAP message: {e}")))?;
-            let connection = by_topic
-                .get(topic.as_ref())
-                .cloned()
-                .unwrap_or_else(|| Connection {
-                    id: 0,
-                    topic: topic.to_string(),
-                    message_type: String::new(),
-                    message_definition: MessageDefinition::default(),
-                    type_description_hash: String::new(),
-                    message_count: 0,
-                    serialization_format: String::new(),
-                    offered_qos_profiles: Vec::new(),
-                });
-            all_messages.push(RawMessage {
-                connection,
-                timestamp: mcap_msg.log_time,
-                raw_data: mcap_msg.data,
-            });
-        }
-
+        let mut all_messages = self
+            .raw_messages_filtered(connections, start, stop)?
+            .collect::<Result<Vec<_>>>()?;
         // The k-way merge yields log-time order as long as every file is
-        // internally ordered (writers emit chunks in log-time order); the
-        // explicit sort keeps the batch contract exact even for a file whose
-        // chunks were written out of order.
+        // internally ordered; the explicit (stable) sort keeps the batch
+        // contract exact even for a file whose chunks are out of order.
         all_messages.sort_by_key(|a| a.timestamp);
         Ok(all_messages)
     }
