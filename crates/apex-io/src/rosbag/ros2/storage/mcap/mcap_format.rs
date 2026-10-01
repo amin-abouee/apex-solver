@@ -631,7 +631,7 @@ impl ChunkMessageStream {
         while let Some(chunk) = self.chunk_queue.pop_front() {
             // Chunk-level time skip: nothing inside can pass the filter.
             if filters.start.is_some_and(|t| chunk.message_end_time < t)
-                || filters.stop.is_some_and(|t| chunk.message_start_time > t)
+                || filters.stop.is_some_and(|t| chunk.message_start_time >= t)
             {
                 continue;
             }
@@ -737,7 +737,7 @@ impl ChunkMessageStream {
                     let data = content[22..].to_vec();
 
                     if filters.start.is_some_and(|t| log_time < t)
-                        || filters.stop.is_some_and(|t| log_time > t)
+                        || filters.stop.is_some_and(|t| log_time >= t)
                     {
                         continue;
                     }
@@ -817,7 +817,7 @@ impl ChunkMessageStream {
                     let data = content[22..].to_vec();
 
                     if filters.start.is_some_and(|t| log_time < t)
-                        || filters.stop.is_some_and(|t| log_time > t)
+                        || filters.stop.is_some_and(|t| log_time >= t)
                     {
                         continue;
                     }

@@ -1,0 +1,607 @@
+//! Format-agnostic bag access.
+//!
+//! One reader and one writer over every supported container, so tools (and
+//! users) can copy, filter and convert without caring which backend sits
+//! behind a path:
+//!
+//! | [`BagKind`]  | On disk                         | Payload encoding |
+//! |--------------|---------------------------------|------------------|
+//! | `Ros1Bag`    | `*.bag` (ROS1 v2.0)             | `ros1`           |
+//! | `Ros2Sqlite` | directory + `metadata.yaml`     | `cdr`            |
+//! | `Ros2Mcap`   | directory + `metadata.yaml`     | `cdr`            |
+//! | `McapFile`   | bare `*.mcap` (ROS2 or ROS1 profile) | per channel |
+//!
+//! Both sides stream: messages reach the callback as borrowed slices and the
+//! writers write straight through, so memory use does not grow with bag size.
+
+use super::error::{BagError, Result};
+use super::ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
+use super::ros2::reader::Reader;
+use super::ros2::storage::StorageWriter;
+use super::ros2::storage::mcap::McapWriter;
+use super::ros2::writer::Writer;
+use super::types::{
+    CompressionFormat, CompressionMode, Connection, MessageDefinition, MessageDefinitionFormat,
+    QosProfile, StoragePlugin,
+};
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+const ROS1_MAGIC: &[u8] = b"#ROSBAG V2.0\n";
+const MCAP_MAGIC: &[u8] = b"\x89MCAP0\r\n";
+
+/// Container flavour of a bag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BagKind {
+    /// ROS1 `.bag` file.
+    Ros1Bag,
+    /// ROS2 bag directory with sqlite3 storage.
+    Ros2Sqlite,
+    /// ROS2 bag directory with MCAP storage.
+    Ros2Mcap,
+    /// A single bare `.mcap` file (no `metadata.yaml`).
+    McapFile,
+}
+
+impl BagKind {
+    /// Parse a user-facing name: `bag`, `sqlite3`, `mcap` (directory) or
+    /// `mcap-file`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "bag" | "ros1" => Some(Self::Ros1Bag),
+            "sqlite3" | "db3" => Some(Self::Ros2Sqlite),
+            "mcap" => Some(Self::Ros2Mcap),
+            "mcap-file" | "mcap_file" => Some(Self::McapFile),
+            _ => None,
+        }
+    }
+
+    /// Guess the kind to create at `path` from its extension: `.bag` →
+    /// ROS1, `.mcap` → bare MCAP, anything else → `default` (a directory).
+    pub fn from_output_path(path: &Path, default: Self) -> Self {
+        match path.extension().and_then(|e| e.to_str()) {
+            Some(e) if e.eq_ignore_ascii_case("bag") => Self::Ros1Bag,
+            Some(e) if e.eq_ignore_ascii_case("mcap") => Self::McapFile,
+            _ => default,
+        }
+    }
+
+    /// Short name, as accepted by [`BagKind::parse`].
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ros1Bag => "bag",
+            Self::Ros2Sqlite => "sqlite3",
+            Self::Ros2Mcap => "mcap",
+            Self::McapFile => "mcap-file",
+        }
+    }
+}
+
+/// Identify an existing bag by looking at the file magic / directory layout.
+pub fn detect_kind(path: &Path) -> Result<BagKind> {
+    if !path.exists() {
+        return Err(BagError::BagNotFound {
+            path: path.to_path_buf(),
+        });
+    }
+    if path.is_file() {
+        let mut magic = [0u8; 13];
+        let n = std::fs::File::open(path)?.read(&mut magic)?;
+        if magic[..n].starts_with(ROS1_MAGIC) {
+            return Ok(BagKind::Ros1Bag);
+        }
+        if magic[..n].starts_with(MCAP_MAGIC) {
+            return Ok(BagKind::McapFile);
+        }
+        return Err(BagError::UnsupportedStorageFormat {
+            format: format!(
+                "'{}' is neither a ROS1 bag nor an MCAP file",
+                path.display()
+            ),
+        });
+    }
+    let metadata = path.join("metadata.yaml");
+    if metadata.exists() {
+        let meta = super::ros2::metadata::BagMetadata::from_file(&metadata)?;
+        return match meta.info().storage_identifier.as_str() {
+            "mcap" => Ok(BagKind::Ros2Mcap),
+            "sqlite3" => Ok(BagKind::Ros2Sqlite),
+            other => Err(BagError::UnsupportedStorageFormat {
+                format: other.to_string(),
+            }),
+        };
+    }
+    let has_ext = |ext: &str| {
+        std::fs::read_dir(path)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| e.path().extension().is_some_and(|x| x == ext))
+    };
+    if has_ext("db3") {
+        Ok(BagKind::Ros2Sqlite)
+    } else if has_ext("mcap") {
+        Ok(BagKind::Ros2Mcap)
+    } else {
+        Err(BagError::UnsupportedStorageFormat {
+            format: format!("'{}' contains no bag", path.display()),
+        })
+    }
+}
+
+/// Which messages to read.
+#[derive(Debug, Clone, Default)]
+pub struct Selection {
+    /// Topics to include; empty means all.
+    pub include: Vec<String>,
+    /// Topics to exclude.
+    pub exclude: Vec<String>,
+    /// First timestamp (ns, inclusive).
+    pub start_ns: Option<u64>,
+    /// Last timestamp (ns, exclusive).
+    pub end_ns: Option<u64>,
+}
+
+impl Selection {
+    /// Does `topic` pass the include/exclude lists?
+    pub fn accepts_topic(&self, topic: &str) -> bool {
+        (self.include.is_empty() || self.include.iter().any(|t| t == topic))
+            && !self.exclude.iter().any(|t| t == topic)
+    }
+}
+
+enum ReaderImpl {
+    Ros1(Box<Ros1Reader>),
+    Ros2(Box<Reader>),
+}
+
+/// Reader over any [`BagKind`].
+pub struct BagReader {
+    kind: BagKind,
+    inner: ReaderImpl,
+    connections: Vec<Connection>,
+    start_ns: u64,
+    end_ns: u64,
+    message_count: u64,
+}
+
+impl BagReader {
+    /// Detect the container at `path` and open it.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        let kind = detect_kind(path)?;
+        match kind {
+            BagKind::Ros1Bag => {
+                let mut r = Ros1Reader::new(path)?;
+                r.open()?;
+                Ok(Self {
+                    kind,
+                    connections: r.connections().to_vec(),
+                    start_ns: r.start_time(),
+                    end_ns: r.end_time(),
+                    message_count: r.message_count(),
+                    inner: ReaderImpl::Ros1(Box::new(r)),
+                })
+            }
+            _ => {
+                let mut r = Reader::new(path)?;
+                r.open()?;
+                Ok(Self {
+                    kind,
+                    connections: r.connections().to_vec(),
+                    start_ns: r.start_time(),
+                    end_ns: r.end_time(),
+                    message_count: r.message_count(),
+                    inner: ReaderImpl::Ros2(Box::new(r)),
+                })
+            }
+        }
+    }
+
+    /// Container flavour.
+    pub fn kind(&self) -> BagKind {
+        self.kind
+    }
+
+    /// All connections (one per topic/type pair).
+    pub fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+
+    /// Earliest message time (ns).
+    pub fn start_time(&self) -> u64 {
+        self.start_ns
+    }
+
+    /// Latest message time (ns).
+    pub fn end_time(&self) -> u64 {
+        self.end_ns
+    }
+
+    /// Total number of messages.
+    pub fn message_count(&self) -> u64 {
+        self.message_count
+    }
+
+    /// Connections that pass `selection`'s topic lists.
+    pub fn selected_connections(&self, selection: &Selection) -> Vec<Connection> {
+        self.connections
+            .iter()
+            .filter(|c| selection.accepts_topic(&c.topic))
+            .cloned()
+            .collect()
+    }
+
+    /// Stream the messages of `connections` inside `selection`'s time window
+    /// in timestamp order. `f` receives `(connection, timestamp_ns, payload)`.
+    pub fn for_each<F>(
+        &mut self,
+        connections: &[Connection],
+        selection: &Selection,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Connection, u64, &[u8]) -> Result<()>,
+    {
+        if connections.is_empty() {
+            return Ok(());
+        }
+        match &mut self.inner {
+            ReaderImpl::Ros1(r) => {
+                r.for_each_raw_filtered(Some(connections), selection.start_ns, selection.end_ns, f)
+            }
+            ReaderImpl::Ros2(r) => {
+                for msg in r.raw_messages_filtered(
+                    Some(connections),
+                    selection.start_ns,
+                    selection.end_ns,
+                )? {
+                    let msg = msg?;
+                    f(&msg.connection, msg.timestamp, &msg.raw_data)?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// A connection to create in an output bag.
+#[derive(Debug, Clone)]
+pub struct NewConnection {
+    /// Topic name.
+    pub topic: String,
+    /// Type name in the *target* convention (`pkg/Type` for ROS1,
+    /// `pkg/msg/Type` for ROS2).
+    pub message_type: String,
+    /// Message definition text (`.msg` style); may be empty.
+    pub definition: String,
+    /// ROS1: md5sum; ROS2: type description hash. May be empty.
+    pub type_hash: String,
+    /// Payload encoding: `ros1` or `cdr`.
+    pub serialization_format: String,
+    /// QoS profiles (ROS2 only).
+    pub qos: Vec<QosProfile>,
+}
+
+impl NewConnection {
+    /// Copy a source connection unchanged.
+    pub fn from_connection(c: &Connection) -> Self {
+        Self {
+            topic: c.topic.clone(),
+            message_type: c.message_type.clone(),
+            definition: c.message_definition.data.clone(),
+            type_hash: c.type_description_hash.clone(),
+            serialization_format: c.serialization_format.clone(),
+            qos: c.offered_qos_profiles.clone(),
+        }
+    }
+}
+
+/// Output compression, applied where the container supports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputCompression {
+    /// Store uncompressed.
+    None,
+    /// zstd: MCAP chunks, or the whole file for sqlite3 bags.
+    Zstd,
+    /// LZ4 chunks (ROS1 only).
+    Lz4,
+    /// bzip2 chunks (ROS1 only).
+    Bz2,
+}
+
+impl OutputCompression {
+    /// Parse `none|zstd|lz4|bz2`.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "none" => Some(Self::None),
+            "zstd" => Some(Self::Zstd),
+            "lz4" => Some(Self::Lz4),
+            "bz2" => Some(Self::Bz2),
+            _ => None,
+        }
+    }
+}
+
+enum WriterImpl {
+    Ros1(Box<Ros1Writer>),
+    Ros2(Box<Writer>),
+    McapFile(Box<McapWriter>),
+}
+
+/// Writer for any [`BagKind`].
+pub struct BagWriter {
+    kind: BagKind,
+    inner: WriterImpl,
+    connections: Vec<Connection>,
+    closed: bool,
+}
+
+/// Handle to a connection added with [`BagWriter::add_connection`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionHandle(usize);
+
+impl BagWriter {
+    /// Create a new bag of `kind` at `path` (which must not exist).
+    pub fn create(
+        path: impl AsRef<Path>,
+        kind: BagKind,
+        compression: OutputCompression,
+    ) -> Result<Self> {
+        let path: PathBuf = path.as_ref().to_path_buf();
+        let unsupported =
+            |what: &str| BagError::writer(format!("{} does not support {what}", kind.name()));
+        let inner = match kind {
+            BagKind::Ros1Bag => {
+                let mut w = Ros1Writer::new(&path)?;
+                w.set_compression(match compression {
+                    OutputCompression::None => Ros1Compression::None,
+                    OutputCompression::Lz4 => Ros1Compression::Lz4,
+                    OutputCompression::Bz2 => Ros1Compression::Bz2,
+                    OutputCompression::Zstd => return Err(unsupported("zstd compression")),
+                })?;
+                w.open()?;
+                WriterImpl::Ros1(Box::new(w))
+            }
+            BagKind::Ros2Sqlite | BagKind::Ros2Mcap => {
+                let plugin = if kind == BagKind::Ros2Mcap {
+                    StoragePlugin::Mcap
+                } else {
+                    StoragePlugin::Sqlite3
+                };
+                let mut w = Writer::new(&path, None, Some(plugin))?;
+                match (compression, kind) {
+                    (OutputCompression::None, _) => {}
+                    (OutputCompression::Zstd, BagKind::Ros2Mcap) => {
+                        w.set_compression(CompressionMode::Storage, CompressionFormat::Zstd)?;
+                    }
+                    (OutputCompression::Zstd, _) => {
+                        w.set_compression(CompressionMode::File, CompressionFormat::Zstd)?;
+                    }
+                    _ => return Err(unsupported("lz4/bz2 compression")),
+                }
+                w.open()?;
+                WriterImpl::Ros2(Box::new(w))
+            }
+            BagKind::McapFile => {
+                if path.exists() {
+                    return Err(BagError::BagAlreadyExists { path });
+                }
+                let mode = match compression {
+                    OutputCompression::None => CompressionMode::None,
+                    OutputCompression::Zstd => CompressionMode::Storage,
+                    _ => return Err(unsupported("lz4/bz2 compression")),
+                };
+                let mut w = McapWriter::with_file(path, "ros2", mode);
+                w.open()?;
+                WriterImpl::McapFile(Box::new(w))
+            }
+        };
+        Ok(Self {
+            kind,
+            inner,
+            connections: Vec::new(),
+            closed: false,
+        })
+    }
+
+    /// Container flavour being written.
+    pub fn kind(&self) -> BagKind {
+        self.kind
+    }
+
+    /// Register a topic. Returns a handle for [`Self::write`].
+    pub fn add_connection(&mut self, new: &NewConnection) -> Result<ConnectionHandle> {
+        let definition = MessageDefinition {
+            format: if new.definition.is_empty() {
+                MessageDefinitionFormat::None
+            } else {
+                MessageDefinitionFormat::Msg
+            },
+            data: new.definition.clone(),
+        };
+        let connection = match &mut self.inner {
+            WriterImpl::Ros1(w) => w.add_connection(
+                new.topic.clone(),
+                new.message_type.clone(),
+                new.type_hash.clone(),
+                new.definition.clone(),
+                false,
+            )?,
+            WriterImpl::Ros2(w) => w.add_connection(
+                new.topic.clone(),
+                new.message_type.clone(),
+                Some(definition),
+                Some(new.type_hash.clone()),
+                Some(new.serialization_format.clone()),
+                Some(new.qos.clone()),
+            )?,
+            WriterImpl::McapFile(w) => {
+                let connection = Connection {
+                    id: u32::try_from(self.connections.len() + 1)
+                        .map_err(|_| BagError::writer("too many connections"))?,
+                    topic: new.topic.clone(),
+                    message_type: new.message_type.clone(),
+                    message_definition: definition,
+                    type_description_hash: new.type_hash.clone(),
+                    message_count: 0,
+                    serialization_format: new.serialization_format.clone(),
+                    offered_qos_profiles: new.qos.clone(),
+                };
+                w.add_msgtype(&connection)?;
+                w.add_connection(&connection, "")?;
+                connection
+            }
+        };
+        self.connections.push(connection);
+        Ok(ConnectionHandle(self.connections.len() - 1))
+    }
+
+    /// Write one message verbatim.
+    pub fn write(
+        &mut self,
+        handle: ConnectionHandle,
+        timestamp_ns: u64,
+        data: &[u8],
+    ) -> Result<()> {
+        let connection = self
+            .connections
+            .get(handle.0)
+            .ok_or_else(|| BagError::connection_not_found(format!("handle {}", handle.0)))?;
+        match &mut self.inner {
+            WriterImpl::Ros1(w) => w.write(connection, timestamp_ns, data),
+            WriterImpl::Ros2(w) => w.write_raw_message(connection, timestamp_ns, data),
+            WriterImpl::McapFile(w) => w.write(connection, timestamp_ns, data),
+        }
+    }
+
+    /// Finish the bag (index/summary/metadata). Idempotent.
+    pub fn close(&mut self) -> Result<()> {
+        if self.closed {
+            return Ok(());
+        }
+        self.closed = true;
+        match &mut self.inner {
+            WriterImpl::Ros1(w) => w.close(),
+            WriterImpl::Ros2(w) => w.close(),
+            WriterImpl::McapFile(w) => w.close(0, ""),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    fn conn(topic: &str, ty: &str, fmt: &str) -> NewConnection {
+        NewConnection {
+            topic: topic.into(),
+            message_type: ty.into(),
+            definition: String::new(),
+            type_hash: String::new(),
+            serialization_format: fmt.into(),
+            qos: Vec::new(),
+        }
+    }
+
+    /// Every kind can be written, sniffed, and read back identically.
+    #[test]
+    fn every_kind_round_trips() -> TestResult {
+        let cases = [
+            (BagKind::Ros1Bag, "out.bag", "pkg/Type", "ros1"),
+            (BagKind::Ros2Sqlite, "sq", "pkg/msg/Type", "cdr"),
+            (BagKind::Ros2Mcap, "mc", "pkg/msg/Type", "cdr"),
+            (BagKind::McapFile, "out.mcap", "pkg/msg/Type", "cdr"),
+        ];
+        for (kind, name, ty, fmt) in cases {
+            let dir = tempdir()?;
+            let path = dir.path().join(name);
+            let mut w = BagWriter::create(&path, kind, OutputCompression::None)?;
+            let a = w.add_connection(&conn("/a", ty, fmt))?;
+            let b = w.add_connection(&conn("/b", ty, fmt))?;
+            for i in 0..300u64 {
+                w.write(a, 10 + i, &i.to_le_bytes())?;
+                w.write(b, 10 + i, &[7u8; 5])?;
+            }
+            w.close()?;
+
+            assert_eq!(detect_kind(&path)?, kind, "{kind:?}");
+            let mut r = BagReader::open(&path)?;
+            assert_eq!(r.message_count(), 600, "{kind:?}");
+            let sel = Selection {
+                include: vec!["/a".into()],
+                start_ns: Some(110),
+                end_ns: Some(210),
+                ..Selection::default()
+            };
+            let conns = r.selected_connections(&sel);
+            assert_eq!(conns.len(), 1);
+            let mut got = Vec::new();
+            r.for_each(&conns, &sel, |c, ts, d| {
+                assert_eq!(c.topic, "/a");
+                got.push((ts, d.to_vec()));
+                Ok(())
+            })?;
+            assert_eq!(got.len(), 100, "{kind:?}");
+            assert_eq!(got[0], (110, 100u64.to_le_bytes().to_vec()), "{kind:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn compressed_outputs_read_back() -> TestResult {
+        for (kind, name, c) in [
+            (BagKind::Ros1Bag, "z.bag", OutputCompression::Lz4),
+            (BagKind::Ros1Bag, "b.bag", OutputCompression::Bz2),
+            (BagKind::McapFile, "z.mcap", OutputCompression::Zstd),
+        ] {
+            let dir = tempdir()?;
+            let path = dir.path().join(name);
+            let fmt = if kind == BagKind::Ros1Bag {
+                "ros1"
+            } else {
+                "cdr"
+            };
+            let mut w = BagWriter::create(&path, kind, c)?;
+            let h = w.add_connection(&conn("/t", "pkg/Type", fmt))?;
+            for i in 0..1000u64 {
+                w.write(h, i, &[i as u8; 64])?;
+            }
+            w.close()?;
+            let mut r = BagReader::open(&path)?;
+            let conns = r.connections().to_vec();
+            let mut n = 0u64;
+            r.for_each(&conns, &Selection::default(), |_, ts, d| {
+                assert_eq!(d, &[ts as u8; 64][..]);
+                n += 1;
+                Ok(())
+            })?;
+            assert_eq!(n, 1000, "{name}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_combinations_are_rejected() {
+        let dir = tempdir().unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            BagWriter::create(
+                dir.path().join("a.bag"),
+                BagKind::Ros1Bag,
+                OutputCompression::Zstd
+            )
+            .is_err()
+        );
+        assert!(
+            BagWriter::create(
+                dir.path().join("b.mcap"),
+                BagKind::McapFile,
+                OutputCompression::Bz2
+            )
+            .is_err()
+        );
+    }
+}

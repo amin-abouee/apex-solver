@@ -118,6 +118,9 @@
 /// Error types for bag I/O operations.
 pub mod error;
 
+/// Format-agnostic reader/writer over every supported container.
+pub mod bag;
+
 /// Core data types and structures.
 pub mod types;
 
@@ -143,6 +146,10 @@ pub use types::{
     CompressionFormat, CompressionMode, Connection, Message, StoragePlugin, TopicInfo,
 };
 
+pub use bag::{
+    BagKind, BagReader, BagWriter, ConnectionHandle, NewConnection, OutputCompression, Selection,
+    detect_kind,
+};
 pub use ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 
 /// Read bag metadata from `metadata.yaml` without opening storage files.

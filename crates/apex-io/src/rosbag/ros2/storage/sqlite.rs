@@ -350,11 +350,7 @@ impl<'a> SqliteMessageIter<'a> {
         })?;
         for row in rows {
             let (id, name, message_type, serialization_format) = row?;
-            if self
-                .topics
-                .as_ref()
-                .is_some_and(|t| !t.contains(&name))
-            {
+            if self.topics.as_ref().is_some_and(|t| !t.contains(&name)) {
                 continue;
             }
             let connection = self
