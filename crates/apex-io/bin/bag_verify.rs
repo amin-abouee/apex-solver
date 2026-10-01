@@ -9,7 +9,7 @@
 //! the comparison ignores container, payload encoding and the ROS1 header
 //! `seq`. Use it to validate `bag_convert` / `bag_filter` output.
 //!
-//! Usage: `bag_verify <A> <B> [--topics a,b]`
+//! Usage: `bag_verify <A> <B> [--topics a,b] [--start NS] [--end NS]`
 //! Exit status: 0 identical, 1 differences, 2 error.
 
 mod common;
@@ -29,6 +29,12 @@ struct Args {
     /// Only compare these topics (comma-separated)
     #[arg(short, long, value_delimiter = ',')]
     topics: Vec<String>,
+    /// Only compare messages at or after this time (ns since epoch)
+    #[arg(short, long)]
+    start: Option<u64>,
+    /// Only compare messages before this time (ns since epoch)
+    #[arg(short, long)]
+    end: Option<u64>,
 }
 
 #[derive(Default, PartialEq, Eq, Debug)]
@@ -48,10 +54,12 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
     h
 }
 
-fn digest(path: &PathBuf, topics: &[String]) -> CliResult<BTreeMap<String, Digest>> {
+fn digest(path: &PathBuf, args: &Args) -> CliResult<BTreeMap<String, Digest>> {
     let mut reader = BagReader::open(path)?;
     let selection = Selection {
-        include: topics.to_vec(),
+        include: args.topics.clone(),
+        start_ns: args.start,
+        end_ns: args.end,
         ..Selection::default()
     };
     let conns = reader.selected_connections(&selection);
@@ -104,7 +112,7 @@ fn digest(path: &PathBuf, topics: &[String]) -> CliResult<BTreeMap<String, Diges
 
 fn main() -> CliResult<()> {
     let args = Args::parse();
-    let (a, b) = match (digest(&args.a, &args.topics), digest(&args.b, &args.topics)) {
+    let (a, b) = match (digest(&args.a, &args), digest(&args.b, &args)) {
         (Ok(a), Ok(b)) => (a, b),
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("error: {e}");
