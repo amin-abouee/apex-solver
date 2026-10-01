@@ -36,10 +36,9 @@ fn main() -> Result<(), ReaderError> {
     reader.open()?;
 
     let total_size = calculate_total_size(bag_path)?;
-    let storage_label = if reader.metadata().is_some() {
-        "mcap (per metadata.yaml)"
-    } else {
-        "mcap (bare file)"
+    let storage_label = match reader.metadata() {
+        Some(m) => format!("{} (per metadata.yaml)", m.info().storage_identifier),
+        None => "mcap (bare file)".to_string(),
     };
 
     let duration_ns = reader.duration();
@@ -86,9 +85,7 @@ fn calculate_total_size(bag_path: &Path) -> Result<u64, ReaderError> {
     Ok(total_size)
 }
 
-fn format_topic_info(
-    topic: &apex_io::rosbag::types::TopicInfo,
-) -> String {
+fn format_topic_info(topic: &apex_io::rosbag::types::TopicInfo) -> String {
     format!(
         "{} ({}, {} msgs)",
         topic.name, topic.message_type, topic.message_count

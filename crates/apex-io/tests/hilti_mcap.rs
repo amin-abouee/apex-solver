@@ -71,9 +71,12 @@ fn hilti_ros1_mcap_summary_and_decode() {
     assert_eq!(image.step, 720);
     assert_eq!(image.data.len(), 720 * 540);
     let stamp_ns = image.header.stamp_ns;
-    assert_eq!(
-        stamp_ns, first.timestamp,
-        "header stamp should match MCAP log_time (writer sets them equal)"
+    // The recorder's log time trails the sensor stamp (tens of ms on real
+    // data); they only need to agree to within a second.
+    assert!(
+        stamp_ns.abs_diff(first.timestamp) < 1_000_000_000,
+        "header stamp {stamp_ns} too far from MCAP log_time {}",
+        first.timestamp
     );
 
     // IMU decode: angular velocity/linear acceleration are f64 triples in

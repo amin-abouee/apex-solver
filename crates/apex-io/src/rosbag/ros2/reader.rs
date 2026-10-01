@@ -13,8 +13,8 @@
 //!   as `message_type`; [`Reader::metadata`] returns `None`.
 
 use super::metadata::BagMetadata;
-use super::storage::{StorageReader, create_storage_reader};
 use super::storage::mcap::{McapStorageReader, McapSummaryStats};
+use super::storage::{StorageReader, create_storage_reader};
 use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, TopicInfo};
 use std::collections::HashMap;
@@ -96,14 +96,10 @@ impl Reader {
         // of truth for topics, counts, and the time range.
         if self.metadata.is_none() {
             let file_path = self.bag_path.clone();
-            let mut storage =
-                create_storage_reader("mcap", vec![file_path.as_path()], Vec::new())?;
+            let mut storage = create_storage_reader("mcap", vec![file_path.as_path()], Vec::new())?;
             storage.open()?;
 
-            if let Some(mcap_storage) = storage
-                .as_any()
-                .downcast_ref::<McapStorageReader>()
-            {
+            if let Some(mcap_storage) = storage.as_any().downcast_ref::<McapStorageReader>() {
                 self.connections = mcap_storage.get_topics_from_mcap()?;
                 self.standalone_stats = Some(mcap_storage.summary_stats()?);
             }
@@ -292,7 +288,9 @@ impl Reader {
             topic_info.connections.push(connection.clone());
         }
 
-        topic_map.into_values().collect()
+        let mut topics: Vec<TopicInfo> = topic_map.into_values().collect();
+        topics.sort_by(|a, b| a.name.cmp(&b.name));
+        topics
     }
 
     /// Get all connections

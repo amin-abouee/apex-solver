@@ -17,8 +17,10 @@
 
 use super::StorageReader;
 use crate::rosbag::error::{BagError, ReaderError, Result};
-use crate::rosbag::types::{Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage};
-use mcap_format::{Filters, MergedMcapStream, McapSummary};
+use crate::rosbag::types::{
+    Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
+};
+use mcap_format::{Filters, McapSummary, MergedMcapStream};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::io::Write;
@@ -56,9 +58,7 @@ fn definition_from_schema(encoding: &str, data: &[u8]) -> MessageDefinition {
 /// `sensor_msgs/Image`), falling back to the message encoding when a channel
 /// has no schema; `serialization_format` is the channel's message encoding
 /// (`cdr`, `ros1`, ...).
-fn summarize_summaries(
-    summaries: &[Option<McapSummary>],
-) -> (Vec<Connection>, McapSummaryStats) {
+fn summarize_summaries(summaries: &[Option<McapSummary>]) -> (Vec<Connection>, McapSummaryStats) {
     // Accumulated per topic: (message_type, definition, encoding, count).
     // BTreeMap keeps the topic order stable across runs.
     let mut topics: BTreeMap<String, (String, MessageDefinition, String, u64)> = BTreeMap::new();
@@ -71,7 +71,10 @@ fn summarize_summaries(
                     schema.name.clone(),
                     definition_from_schema(&schema.encoding, &schema.data),
                 ),
-                None => (channel.message_encoding.clone(), MessageDefinition::default()),
+                None => (
+                    channel.message_encoding.clone(),
+                    MessageDefinition::default(),
+                ),
             };
             let count = summary
                 .stats
@@ -79,9 +82,14 @@ fn summarize_summaries(
                 .and_then(|s| s.channel_counts.get(id))
                 .copied()
                 .unwrap_or(0);
-            let entry = topics
-                .entry(channel.topic.clone())
-                .or_insert_with(|| (message_type, definition, channel.message_encoding.clone(), 0));
+            let entry = topics.entry(channel.topic.clone()).or_insert_with(|| {
+                (
+                    message_type,
+                    definition,
+                    channel.message_encoding.clone(),
+                    0,
+                )
+            });
             entry.3 += count;
         }
 
@@ -101,16 +109,18 @@ fn summarize_summaries(
     let connections = topics
         .into_iter()
         .enumerate()
-        .map(|(idx, (topic, (message_type, definition, encoding, count)))| Connection {
-            id: (idx + 1) as u32,
-            topic,
-            message_type,
-            message_definition: definition,
-            type_description_hash: String::new(),
-            message_count: count,
-            serialization_format: encoding,
-            offered_qos_profiles: Vec::new(),
-        })
+        .map(
+            |(idx, (topic, (message_type, definition, encoding, count)))| Connection {
+                id: (idx + 1) as u32,
+                topic,
+                message_type,
+                message_definition: definition,
+                type_description_hash: String::new(),
+                message_count: count,
+                serialization_format: encoding,
+                offered_qos_profiles: Vec::new(),
+            },
+        )
         .collect();
 
     (connections, stats)
@@ -176,10 +186,7 @@ impl StorageReader for McapStorageReader {
 
         for path in &self.mcap_paths {
             let mut file = File::open(path).map_err(|e| {
-                ReaderError::generic(format!(
-                    "Failed to open MCAP file {}: {e}",
-                    path.display()
-                ))
+                ReaderError::generic(format!("Failed to open MCAP file {}: {e}", path.display()))
             })?;
             let summary = mcap_format::read_summary(&mut file)?;
             self.summaries.push(summary);
@@ -231,19 +238,20 @@ impl StorageReader for McapStorageReader {
 
         let iterator = merged.map(move |item| {
             item.map(|(topic, mcap_msg)| {
-                let connection = by_topic
-                    .get(topic.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| Connection {
-                        id: 0,
-                        topic: topic.to_string(),
-                        message_type: String::new(),
-                        message_definition: MessageDefinition::default(),
-                        type_description_hash: String::new(),
-                        message_count: 0,
-                        serialization_format: String::new(),
-                        offered_qos_profiles: Vec::new(),
-                    });
+                let connection =
+                    by_topic
+                        .get(topic.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| Connection {
+                            id: 0,
+                            topic: topic.to_string(),
+                            message_type: String::new(),
+                            message_definition: MessageDefinition::default(),
+                            type_description_hash: String::new(),
+                            message_count: 0,
+                            serialization_format: String::new(),
+                            offered_qos_profiles: Vec::new(),
+                        });
                 Message {
                     connection,
                     topic: topic.to_string(),
@@ -283,19 +291,20 @@ impl StorageReader for McapStorageReader {
 
         let iterator = merged.map(move |item| {
             item.map(|(topic, mcap_msg)| {
-                let connection = by_topic
-                    .get(topic.as_ref())
-                    .cloned()
-                    .unwrap_or_else(|| Connection {
-                        id: 0,
-                        topic: topic.to_string(),
-                        message_type: String::new(),
-                        message_definition: MessageDefinition::default(),
-                        type_description_hash: String::new(),
-                        message_count: 0,
-                        serialization_format: String::new(),
-                        offered_qos_profiles: Vec::new(),
-                    });
+                let connection =
+                    by_topic
+                        .get(topic.as_ref())
+                        .cloned()
+                        .unwrap_or_else(|| Connection {
+                            id: 0,
+                            topic: topic.to_string(),
+                            message_type: String::new(),
+                            message_definition: MessageDefinition::default(),
+                            type_description_hash: String::new(),
+                            message_count: 0,
+                            serialization_format: String::new(),
+                            offered_qos_profiles: Vec::new(),
+                        });
                 RawMessage {
                     connection,
                     timestamp: mcap_msg.log_time,
@@ -324,9 +333,8 @@ impl StorageReader for McapStorageReader {
 
         let mut all_messages = Vec::new();
         for item in self.merged_stream(connections, start, stop)? {
-            let (topic, mcap_msg) = item.map_err(|e| {
-                ReaderError::generic(format!("Failed to read MCAP message: {e}"))
-            })?;
+            let (topic, mcap_msg) = item
+                .map_err(|e| ReaderError::generic(format!("Failed to read MCAP message: {e}")))?;
             let connection = by_topic
                 .get(topic.as_ref())
                 .cloned()
@@ -799,7 +807,13 @@ mod roundtrip_tests {
     fn ros1_profile_summary_reports_schema_type_and_encoding() -> TestResult {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("ros1.mcap");
-        write_ros1_mcap(&path, "/cam0/image_raw", "sensor_msgs/Image", 3, 1_700_000_000_000_000_000)?;
+        write_ros1_mcap(
+            &path,
+            "/cam0/image_raw",
+            "sensor_msgs/Image",
+            3,
+            1_700_000_000_000_000_000,
+        )?;
 
         let mut reader = McapStorageReader::new(vec![path.as_path()], vec![])?;
         reader.open()?;
@@ -860,7 +874,13 @@ mod roundtrip_tests {
         let dir = tempfile::tempdir()?;
         let image_path = dir.path().join("images.mcap");
         let imu_path = dir.path().join("imu.mcap");
-        write_ros1_mcap(&image_path, "/cam0/image_raw", "sensor_msgs/Image", 2, 1_000_000_000)?;
+        write_ros1_mcap(
+            &image_path,
+            "/cam0/image_raw",
+            "sensor_msgs/Image",
+            2,
+            1_000_000_000,
+        )?;
         write_ros1_mcap(&imu_path, "/imu", "sensor_msgs/Imu", 3, 1_000_000_000)?;
 
         let mut reader =
@@ -893,7 +913,11 @@ mod roundtrip_tests {
             .filter_map(Result::ok)
             .collect();
         assert_eq!(decoded.len(), 5);
-        assert!(decoded.iter().all(|m| m.connection.message_type.starts_with("sensor_msgs/")));
+        assert!(
+            decoded
+                .iter()
+                .all(|m| m.connection.message_type.starts_with("sensor_msgs/"))
+        );
         Ok(())
     }
 }

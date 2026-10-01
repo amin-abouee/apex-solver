@@ -138,7 +138,11 @@ pub(crate) fn crc32(data: &[u8]) -> u32 {
         for (i, entry) in table.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *entry = c;
         }
@@ -210,7 +214,11 @@ impl<'a> Buf<'a> {
 }
 
 /// Parse one summary-section record into the summary accumulator.
-fn parse_summary_record(op: u8, content: &[u8], summary: &mut McapSummary) -> Result<(), ReaderError> {
+fn parse_summary_record(
+    op: u8,
+    content: &[u8],
+    summary: &mut McapSummary,
+) -> Result<(), ReaderError> {
     match op {
         OP_SCHEMA => {
             let mut buf = Buf::new(content);
@@ -219,7 +227,14 @@ fn parse_summary_record(op: u8, content: &[u8], summary: &mut McapSummary) -> Re
             let encoding = buf.read_str()?;
             let len = buf.read_u32()? as usize;
             let data = buf.take(len)?.to_vec();
-            summary.schemas.insert(id, SchemaInfo { name, encoding, data });
+            summary.schemas.insert(
+                id,
+                SchemaInfo {
+                    name,
+                    encoding,
+                    data,
+                },
+            );
         }
         OP_CHANNEL => {
             let mut buf = Buf::new(content);
@@ -230,7 +245,11 @@ fn parse_summary_record(op: u8, content: &[u8], summary: &mut McapSummary) -> Re
             buf.skip_map()?;
             summary.channels.insert(
                 id,
-                ChannelInfo { schema_id, topic, message_encoding },
+                ChannelInfo {
+                    schema_id,
+                    topic,
+                    message_encoding,
+                },
             );
         }
         OP_STATISTICS => {
@@ -389,9 +408,7 @@ pub(crate) fn read_summary(file: &mut File) -> Result<Option<McapSummary>, Reade
         cursor += 9;
         let end = cursor + len as usize;
         if end > section.len() {
-            return Err(ReaderError::generic(
-                "Summary section truncated mid-record",
-            ));
+            return Err(ReaderError::generic("Summary section truncated mid-record"));
         }
         parse_summary_record(op, &section[cursor..end], &mut summary)?;
         cursor = end;
@@ -436,9 +453,9 @@ fn decompress_chunk_records(
         "lz4" => {
             let mut reader = lz4_flex::frame::FrameDecoder::new(std::io::Cursor::new(compressed));
             let mut out = Vec::with_capacity(expected);
-            reader
-                .read_to_end(&mut out)
-                .map_err(|e| ReaderError::generic(format!("Failed to decompress lz4 MCAP chunk: {e}")))?;
+            reader.read_to_end(&mut out).map_err(|e| {
+                ReaderError::generic(format!("Failed to decompress lz4 MCAP chunk: {e}"))
+            })?;
             out
         }
         other => {
@@ -522,7 +539,9 @@ impl ChunkMessageStream {
         };
 
         if let Some(summary) = &stream.summary {
-            stream.chunk_queue.extend(summary.chunk_indexes.iter().cloned());
+            stream
+                .chunk_queue
+                .extend(summary.chunk_indexes.iter().cloned());
             // Seed the per-channel caches from the summary so lookups do not
             // depend on chunk-embedded Channel records.
             let channels = summary.channels.clone();
@@ -595,9 +614,11 @@ impl ChunkMessageStream {
                 let encoding = buf.read_str()?;
                 let len = buf.read_u32()? as usize;
                 let data = buf.take(len)?.to_vec();
-                self.local_schemas
-                    .entry(id)
-                    .or_insert(SchemaInfo { name, encoding, data });
+                self.local_schemas.entry(id).or_insert(SchemaInfo {
+                    name,
+                    encoding,
+                    data,
+                });
             }
             _ => {}
         }
@@ -615,10 +636,8 @@ impl ChunkMessageStream {
                 continue;
             }
 
-            let record_len = 8 + 8 + 8 + 4
-                + 4 + chunk.compression.len() as u64
-                + 8
-                + chunk.compressed_size;
+            let record_len =
+                8 + 8 + 8 + 4 + 4 + chunk.compression.len() as u64 + 8 + chunk.compressed_size;
             let end = chunk
                 .chunk_start_offset
                 .checked_add(9 + record_len)
@@ -670,8 +689,12 @@ impl ChunkMessageStream {
                 )));
             }
 
-            self.inner =
-                decompress_chunk_records(&compression, compressed, uncompressed_size, uncompressed_crc)?;
+            self.inner = decompress_chunk_records(
+                &compression,
+                compressed,
+                uncompressed_size,
+                uncompressed_crc,
+            )?;
             self.cursor = 0;
             return Ok(true);
         }
@@ -680,7 +703,10 @@ impl ChunkMessageStream {
 
     /// Parse the next message record out of `inner`, registering any
     /// schema/channel records that precede it.
-    fn next_inner_message(&mut self, filters: &Filters) -> Result<Option<RawMcapMessage>, ReaderError> {
+    fn next_inner_message(
+        &mut self,
+        filters: &Filters,
+    ) -> Result<Option<RawMcapMessage>, ReaderError> {
         loop {
             if self.cursor + 9 > self.inner.len() {
                 self.inner = Vec::new();
@@ -716,13 +742,11 @@ impl ChunkMessageStream {
                         continue;
                     }
                     if let Some(topics) = &filters.topics {
-                        let topic = self
-                            .topic(channel_id)
-                            .ok_or_else(|| {
-                                ReaderError::generic(format!(
-                                    "MCAP message references unknown channel id {channel_id}"
-                                ))
-                            })?;
+                        let topic = self.topic(channel_id).ok_or_else(|| {
+                            ReaderError::generic(format!(
+                                "MCAP message references unknown channel id {channel_id}"
+                            ))
+                        })?;
                         if !topics.contains(topic.as_ref()) {
                             continue;
                         }
@@ -766,7 +790,9 @@ impl ChunkMessageStream {
                     return Ok(None);
                 }
                 Err(e) => {
-                    return Err(ReaderError::generic(format!("Failed to read MCAP record: {e}")));
+                    return Err(ReaderError::generic(format!(
+                        "Failed to read MCAP record: {e}"
+                    )));
                 }
             }
             let op = prefix[0];
@@ -777,12 +803,12 @@ impl ChunkMessageStream {
             match op {
                 OP_MESSAGE => {
                     let mut content = vec![0u8; len as usize];
-                    self.file
-                        .seek(SeekFrom::Start(offset - len))
-                        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP message: {e}")))?;
-                    self.file
-                        .read_exact(&mut content)
-                        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP message: {e}")))?;
+                    self.file.seek(SeekFrom::Start(offset - len)).map_err(|e| {
+                        ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
+                    })?;
+                    self.file.read_exact(&mut content).map_err(|e| {
+                        ReaderError::generic(format!("Failed to read MCAP message: {e}"))
+                    })?;
                     let mut buf = Buf::new(&content);
                     let channel_id = buf.read_u16()?;
                     let sequence = buf.read_u32()?;
@@ -796,13 +822,11 @@ impl ChunkMessageStream {
                         continue;
                     }
                     if let Some(topics) = &filters.topics {
-                        let topic = self
-                            .topic(channel_id)
-                            .ok_or_else(|| {
-                                ReaderError::generic(format!(
-                                    "MCAP message references unknown channel id {channel_id}"
-                                ))
-                            })?;
+                        let topic = self.topic(channel_id).ok_or_else(|| {
+                            ReaderError::generic(format!(
+                                "MCAP message references unknown channel id {channel_id}"
+                            ))
+                        })?;
                         if !topics.contains(topic.as_ref()) {
                             continue;
                         }
@@ -817,12 +841,12 @@ impl ChunkMessageStream {
                 }
                 OP_SCHEMA | OP_CHANNEL => {
                     let mut content = vec![0u8; len as usize];
-                    self.file
-                        .seek(SeekFrom::Start(offset - len))
-                        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP record: {e}")))?;
-                    self.file
-                        .read_exact(&mut content)
-                        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP record: {e}")))?;
+                    self.file.seek(SeekFrom::Start(offset - len)).map_err(|e| {
+                        ReaderError::generic(format!("Failed to seek MCAP record: {e}"))
+                    })?;
+                    self.file.read_exact(&mut content).map_err(|e| {
+                        ReaderError::generic(format!("Failed to read MCAP record: {e}"))
+                    })?;
                     self.register_record(op, &content)?;
                 }
                 OP_CHUNK => {
@@ -832,10 +856,12 @@ impl ChunkMessageStream {
                     let mut content = vec![0u8; len as usize];
                     self.file
                         .seek(SeekFrom::Start(chunk_start + 9))
-                        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP chunk: {e}")))?;
-                    self.file
-                        .read_exact(&mut content)
-                        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
+                        .map_err(|e| {
+                            ReaderError::generic(format!("Failed to seek MCAP chunk: {e}"))
+                        })?;
+                    self.file.read_exact(&mut content).map_err(|e| {
+                        ReaderError::generic(format!("Failed to read MCAP chunk: {e}"))
+                    })?;
                     let mut buf = Buf::new(&content);
                     let _message_start_time = buf.read_u64()?;
                     let _message_end_time = buf.read_u64()?;
@@ -898,8 +924,7 @@ impl Filters {
         stop: Option<u64>,
     ) -> Self {
         Self {
-            topics: connections
-                .map(|conns| conns.iter().map(|c| c.topic.clone()).collect()),
+            topics: connections.map(|conns| conns.iter().map(|c| c.topic.clone()).collect()),
             start,
             stop,
         }
@@ -954,7 +979,9 @@ impl MergedMcapStream {
         };
         match stream.next_filtered(&self.filters) {
             Ok(Some(message)) => {
-                let topic = stream.topic(message.channel_id).unwrap_or_else(|| Rc::from(""));
+                let topic = stream
+                    .topic(message.channel_id)
+                    .unwrap_or_else(|| Rc::from(""));
                 self.heap.push(std::cmp::Reverse((message.log_time, idx)));
                 self.heads[idx] = Some((topic, message));
                 Ok(())
