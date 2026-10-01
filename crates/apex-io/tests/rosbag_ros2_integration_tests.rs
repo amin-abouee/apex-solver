@@ -976,3 +976,38 @@ fn test_reader_read_raw_messages_batch_mcap() -> TestResult {
     assert_eq!(batch.len(), 2);
     Ok(())
 }
+
+/// End to end through the high-level `Writer`: an MCAP-backed ROS2 bag
+/// directory must carry every written message and re-open via metadata.yaml.
+#[test]
+fn mcap_writer_round_trip_through_reader() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    use apex_io::rosbag::{Reader, StoragePlugin, Writer};
+
+    let dir = tempfile::tempdir()?;
+    let bag = dir.path().join("mcap_bag");
+    let mut writer = Writer::new(&bag, None, Some(StoragePlugin::Mcap))?;
+    writer.open()?;
+    let imu = writer.add_connection(
+        "/imu".into(),
+        "sensor_msgs/msg/Imu".into(),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    for i in 0..1_000u64 {
+        writer.write(&imu, 1_000_000 + i, &i.to_le_bytes())?;
+    }
+    writer.close()?;
+
+    let mut reader = Reader::new(&bag)?;
+    reader.open()?;
+    assert_eq!(reader.message_count(), 1_000);
+    let msgs = reader
+        .raw_messages()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(msgs.len(), 1_000);
+    assert_eq!(msgs[999].raw_data, 999u64.to_le_bytes());
+    assert_eq!(msgs[0].connection.topic, "/imu");
+    Ok(())
+}
