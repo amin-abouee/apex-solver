@@ -90,6 +90,11 @@ path = "tests/transcode_typed_crosscheck.rs"
 required-features = ["rosbag"]
 
 [[test]]
+name = "cli_roundtrip"
+path = "tests/cli_roundtrip.rs"
+required-features = ["rosbag", "cli"]
+
+[[test]]
 name = "ros2_cdr_alignment_tests"
 path = "tests/ros2_cdr_alignment_tests.rs"
 required-features = ["rosbag"]
