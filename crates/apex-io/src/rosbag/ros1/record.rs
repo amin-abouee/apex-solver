@@ -15,7 +15,7 @@
 use crate::rosbag::error::{BagError, Result};
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use super::format::OpCode;
 
@@ -230,6 +230,45 @@ pub fn read_record<R: Read>(r: &mut R) -> Result<Option<Record>> {
     let mut data = vec![0u8; data_len];
     r.read_exact(&mut data)?;
     Ok(Some(Record { header, data }))
+}
+
+/// Read one record's header and skip its data without loading it.
+///
+/// Returns the header and the data length; the stream is left positioned
+/// after the record. Used to hop over large chunk payloads while indexing.
+pub fn read_record_skip_data<R: Read + Seek>(r: &mut R) -> Result<Option<(RecordHeader, u32)>> {
+    let header_len = match r.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(BagError::Io(e)),
+    };
+    let mut header_bytes = vec![0u8; header_len];
+    r.read_exact(&mut header_bytes)?;
+    let header = parse_header(&header_bytes)?;
+    let data_len = r.read_u32::<LittleEndian>()?;
+    r.seek(SeekFrom::Current(i64::from(data_len)))?;
+    Ok(Some((header, data_len)))
+}
+
+/// Return the payload of the record starting at `buf[0]` as a sub-slice,
+/// without parsing its header (the index already supplies conn and time).
+pub fn record_data_slice(buf: &[u8]) -> Result<&[u8]> {
+    let malformed = |reason: &str| BagError::Ros1MalformedRecord {
+        reason: reason.into(),
+    };
+    let header_len = buf
+        .get(..4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(|| malformed("truncated record header length"))?;
+    let data_off = 4usize
+        .checked_add(header_len)
+        .ok_or_else(|| malformed("header length overflow"))?;
+    let data_len = buf
+        .get(data_off..data_off + 4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or_else(|| malformed("truncated record data length"))?;
+    buf.get(data_off + 4..data_off + 4 + data_len)
+        .ok_or_else(|| malformed("truncated record data"))
 }
 
 /// Write a record (header + data) to `w`.

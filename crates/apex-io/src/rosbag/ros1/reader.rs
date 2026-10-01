@@ -16,7 +16,9 @@ use std::io::{BufReader, Cursor, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use super::format::{MAGIC, OpCode, Ros1Compression};
-use super::record::{RecordHeader, parse_header, read_record};
+use super::record::{
+    RecordHeader, parse_header, read_record, read_record_skip_data, record_data_slice,
+};
 
 /// One indexed message: which connection, when, where to find it.
 #[derive(Debug, Clone, Copy)]
@@ -149,11 +151,11 @@ impl Ros1Reader {
         let mut index = Vec::new();
         for chunk_pos in &chunk_positions {
             reader.seek(SeekFrom::Start(*chunk_pos))?;
-            let chunk_rec =
-                read_record(&mut reader)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
+            let (chunk_header, _) =
+                read_record_skip_data(&mut reader)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
                     reason: format!("chunk at {chunk_pos} truncated"),
                 })?;
-            if chunk_rec.header.op()? != OpCode::Chunk {
+            if chunk_header.op()? != OpCode::Chunk {
                 return Err(BagError::Ros1IndexCorrupt {
                     reason: format!("expected chunk record at {chunk_pos}"),
                 });
@@ -318,93 +320,106 @@ impl Ros1Reader {
             .collect())
     }
 
-    /// Filtered raw-message iteration (no deserialization).
+    /// Filtered raw-message collection (no deserialization).
+    ///
+    /// Materialises every selected message; prefer
+    /// [`Self::for_each_raw_filtered`] for large bags.
     pub fn raw_messages_filtered(
         &mut self,
         connections: Option<&[Connection]>,
         start_ns: Option<u64>,
         stop_ns: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
+        let mut out = Vec::new();
+        self.for_each_raw_filtered(connections, start_ns, stop_ns, |conn, ts, data| {
+            out.push(RawMessage {
+                connection: conn.clone(),
+                timestamp: ts,
+                raw_data: data.to_vec(),
+            });
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Stream selected messages in timestamp order to `f` as borrowed slices.
+    ///
+    /// No per-message allocation or `Connection` clone: `data` points into the
+    /// cached decompressed chunk. `start_ns` is inclusive, `stop_ns` exclusive.
+    pub fn for_each_raw_filtered<F>(
+        &mut self,
+        connections: Option<&[Connection]>,
+        start_ns: Option<u64>,
+        stop_ns: Option<u64>,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Connection, u64, &[u8]) -> Result<()>,
+    {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }
         let id_filter: Option<std::collections::HashSet<u32>> =
             connections.map(|cs| cs.iter().map(|c| c.id).collect());
-        let conn_by_id: HashMap<u32, Connection> =
-            self.connections.iter().map(|c| (c.id, c.clone())).collect();
-
-        let mut out = Vec::new();
-        // Take the entries we need into a local Vec so the borrow of self.index
-        // ends before we reborrow self mutably for read_chunk.
-        let selected: Vec<IndexEntry> = self
-            .index
+        let conn_index: HashMap<u32, usize> = self
+            .connections
             .iter()
-            .copied()
-            .filter(|e| {
-                id_filter.as_ref().is_none_or(|s| s.contains(&e.conn_id))
-                    && start_ns.is_none_or(|s| e.time_ns >= s)
-                    && stop_ns.is_none_or(|s| e.time_ns < s)
-            })
+            .enumerate()
+            .map(|(i, c)| (c.id, i))
             .collect();
 
-        for e in selected {
-            let payload = self.read_message_payload(e.chunk_pos, e.offset)?;
-            let conn =
-                conn_by_id
+        // Index is time-sorted: skip to the window with a binary search.
+        let lo = start_ns.map_or(0, |s| self.index.partition_point(|e| e.time_ns < s));
+        let hi = stop_ns.map_or(self.index.len(), |s| {
+            self.index.partition_point(|e| e.time_ns < s)
+        });
+
+        // Move the cache out so the closure can borrow `self.connections`.
+        let mut cache = std::mem::take(&mut self.chunk_cache);
+        let result = (|| -> Result<()> {
+            for e in &self.index[lo..hi.max(lo)] {
+                if id_filter.as_ref().is_some_and(|s| !s.contains(&e.conn_id)) {
+                    continue;
+                }
+                let ci = *conn_index
                     .get(&e.conn_id)
-                    .cloned()
                     .ok_or_else(|| BagError::Ros1IndexCorrupt {
                         reason: format!("index references unknown conn id {}", e.conn_id),
                     })?;
-            out.push(RawMessage {
-                connection: conn,
-                timestamp: e.timestamp_ns_or_self(e.time_ns),
-                raw_data: payload,
-            });
-        }
-        Ok(out)
-    }
-
-    /// Decompress the chunk at `chunk_pos` (cached) and return the payload of
-    /// the message-data record starting at `offset`.
-    fn read_message_payload(&mut self, chunk_pos: u64, offset: u32) -> Result<Vec<u8>> {
-        // Move a hit to the back (most recent); on a miss, inflate and evict
-        // the least recently used entry once at capacity.
-        if let Some(idx) = self
-            .chunk_cache
-            .iter()
-            .position(|(pos, _)| *pos == chunk_pos)
-        {
-            let entry = self.chunk_cache.remove(idx);
-            self.chunk_cache.push(entry);
-        } else {
-            let inflated = self.inflate_chunk(chunk_pos)?;
-            if self.chunk_cache.len() >= CHUNK_CACHE_CAPACITY {
-                self.chunk_cache.remove(0);
+                let pos = match cache.iter().position(|(p, _)| *p == e.chunk_pos) {
+                    Some(i) => {
+                        let entry = cache.remove(i);
+                        cache.push(entry);
+                        cache.len() - 1
+                    }
+                    None => {
+                        let inflated = Self::inflate_chunk_at(&mut self.file, e.chunk_pos)?;
+                        if cache.len() >= CHUNK_CACHE_CAPACITY {
+                            cache.remove(0);
+                        }
+                        cache.push((e.chunk_pos, inflated));
+                        cache.len() - 1
+                    }
+                };
+                let buf = &cache[pos].1;
+                let tail =
+                    buf.get(e.offset as usize..)
+                        .ok_or_else(|| BagError::Ros1IndexCorrupt {
+                            reason: format!(
+                                "message offset {} out of bounds in chunk at {}",
+                                e.offset, e.chunk_pos
+                            ),
+                        })?;
+                f(&self.connections[ci], e.time_ns, record_data_slice(tail)?)?;
             }
-            self.chunk_cache.push((chunk_pos, inflated));
-        }
-        // The requested chunk is now the most recent entry.
-        let buf = &self.chunk_cache[self.chunk_cache.len() - 1].1;
-        if offset as usize >= buf.len() {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: format!("message offset {offset} out of bounds in chunk at {chunk_pos}"),
-            });
-        }
-        let mut cur = Cursor::new(&buf[offset as usize..]);
-        let rec = read_record(&mut cur)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
-            reason: "truncated message record".into(),
-        })?;
-        if rec.header.op()? != OpCode::MessageData {
-            return Err(BagError::Ros1IndexCorrupt {
-                reason: "expected message-data record at index offset".into(),
-            });
-        }
-        Ok(rec.data)
+            Ok(())
+        })();
+        self.chunk_cache = cache;
+        result
     }
 
-    fn inflate_chunk(&mut self, chunk_pos: u64) -> Result<Vec<u8>> {
-        let file = self.file.as_mut().ok_or(BagError::BagNotOpen)?;
+    fn inflate_chunk_at(file: &mut Option<BufReader<File>>, chunk_pos: u64) -> Result<Vec<u8>> {
+        let file = file.as_mut().ok_or(BagError::BagNotOpen)?;
         file.seek(SeekFrom::Start(chunk_pos))?;
         let rec = read_record(file)?.ok_or_else(|| BagError::Ros1IndexCorrupt {
             reason: format!("chunk at {chunk_pos} missing"),
@@ -465,12 +480,6 @@ impl Ros1Reader {
 impl Drop for Ros1Reader {
     fn drop(&mut self) {
         let _ = self.close();
-    }
-}
-
-impl IndexEntry {
-    fn timestamp_ns_or_self(&self, t: u64) -> u64 {
-        t
     }
 }
 
@@ -608,16 +617,5 @@ mod tests {
         let result = r.messages_filtered(None, None, None);
         assert!(matches!(result, Err(BagError::BagNotOpen)));
         Ok(())
-    }
-
-    #[test]
-    fn index_entry_timestamp_ns_or_self() {
-        let entry = IndexEntry {
-            conn_id: 0,
-            time_ns: 12345,
-            chunk_pos: 0,
-            offset: 0,
-        };
-        assert_eq!(entry.timestamp_ns_or_self(12345), 12345);
     }
 }

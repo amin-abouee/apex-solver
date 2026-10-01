@@ -75,7 +75,7 @@ pub struct Ros1Writer {
     chunk_end_ns: u64,
     chunk_indices: HashMap<u32, Vec<IndexEntry>>,
     /// Connections already emitted inside the current chunk.
-    chunk_emitted_conns: HashMap<u32, ()>,
+    chunk_emitted_conns: Vec<bool>,
 
     chunks: Vec<ChunkInfo>,
     bag_header_pos: u64,
@@ -100,7 +100,7 @@ impl Ros1Writer {
             chunk_start_ns: None,
             chunk_end_ns: 0,
             chunk_indices: HashMap::new(),
-            chunk_emitted_conns: HashMap::new(),
+            chunk_emitted_conns: Vec::new(),
             chunks: Vec::new(),
             bag_header_pos: 0,
         })
@@ -205,28 +205,32 @@ impl Ros1Writer {
         if !self.is_open {
             return Err(BagError::BagNotOpen);
         }
+        // Ids are assigned sequentially from 0, so the id is the index.
+        let slot = connection.id as usize;
         let descriptor = self
             .connections
-            .iter()
-            .find(|c| c.id == connection.id)
-            .cloned()
+            .get(slot)
+            .filter(|c| c.id == connection.id)
             .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
+        let descriptor_id = descriptor.id;
 
         // Emit the connection record into the chunk on first use within this chunk.
-        if !self.chunk_emitted_conns.contains_key(&descriptor.id) {
-            let offset = encode_connection_record(&mut self.chunk_buf, &descriptor)?;
-            self.chunk_emitted_conns.insert(descriptor.id, ());
-            let _ = offset; // connection records are not indexed
+        if self.chunk_emitted_conns.len() <= slot {
+            self.chunk_emitted_conns.resize(slot + 1, false);
+        }
+        if !self.chunk_emitted_conns[slot] {
+            encode_connection_record(&mut self.chunk_buf, descriptor)?;
+            self.chunk_emitted_conns[slot] = true;
         }
 
         let offset = self.chunk_buf.len();
         if offset > u32::MAX as usize {
             return Err(BagError::writer("chunk exceeds 4 GiB uncompressed"));
         }
-        encode_message_data_record(&mut self.chunk_buf, descriptor.id, timestamp_ns, data)?;
+        encode_message_data_record(&mut self.chunk_buf, descriptor_id, timestamp_ns, data)?;
 
         self.chunk_indices
-            .entry(descriptor.id)
+            .entry(descriptor_id)
             .or_default()
             .push(IndexEntry {
                 time_ns: timestamp_ns,
@@ -457,14 +461,27 @@ fn encode_message_data_record(
     timestamp_ns: u64,
     data: &[u8],
 ) -> Result<()> {
-    let mut header = RecordHeader::new();
+    // Fixed-shape header (fields in sorted order: conn, op, time), written
+    // without allocating a `RecordHeader`: 13 + 8 + 17 = 38 bytes.
+    let data_len =
+        u32::try_from(data.len()).map_err(|_| BagError::writer("message larger than 4 GiB"))?;
     let secs = (timestamp_ns / 1_000_000_000) as u32;
     let nsecs = (timestamp_ns % 1_000_000_000) as u32;
-    header
-        .put_op(OpCode::MessageData)
-        .put_u32("conn", conn_id)
-        .put_time("time", secs, nsecs);
-    write_record(buf, &header, data)
+    buf.reserve(46 + data.len());
+    buf.extend_from_slice(&38u32.to_le_bytes());
+    buf.extend_from_slice(&9u32.to_le_bytes());
+    buf.extend_from_slice(b"conn=");
+    buf.extend_from_slice(&conn_id.to_le_bytes());
+    buf.extend_from_slice(&4u32.to_le_bytes());
+    buf.extend_from_slice(b"op=");
+    buf.push(OpCode::MessageData.as_u8());
+    buf.extend_from_slice(&13u32.to_le_bytes());
+    buf.extend_from_slice(b"time=");
+    buf.extend_from_slice(&secs.to_le_bytes());
+    buf.extend_from_slice(&nsecs.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(data);
+    Ok(())
 }
 
 #[cfg(test)]
