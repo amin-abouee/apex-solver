@@ -55,11 +55,11 @@ impl Scenario {
 
         let cam_bytes = (CAM_WIDTH * CAM_HEIGHT) as usize;
         for cam in 0..2u32 {
-            let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15 ^ u64::from(cam + 1) * 0x1000_001);
+            let mut rng = Rng::new(0x9E37_79B9_7F4A_7C15 ^ (u64::from(cam + 1) * 0x0100_0001));
             let mut frame = vec![0u8; cam_bytes];
             for i in 0..(DURATION_S * CAMERA_HZ) as u32 {
                 rng.fill_bytes(&mut frame);
-                let ts = T0_NS + u64::from(i) * NS_PER_S / u64::from(CAMERA_HZ);
+                let ts = T0_NS + u64::from(i) * NS_PER_S / CAMERA_HZ;
                 messages.push(Message {
                     topic_idx: cam as usize,
                     timestamp_ns: ts,
@@ -70,7 +70,7 @@ impl Scenario {
         }
 
         for i in 0..(DURATION_S * IMU_HZ) as u32 {
-            let ts = T0_NS + u64::from(i) * NS_PER_S / u64::from(IMU_HZ);
+            let ts = T0_NS + u64::from(i) * NS_PER_S / IMU_HZ;
             messages.push(Message {
                 topic_idx: 2,
                 timestamp_ns: ts,
@@ -81,7 +81,7 @@ impl Scenario {
 
         let mut rng = Rng::new(0xDEAD_BEEF_CAFE_F00D);
         for i in 0..(DURATION_S * LIDAR_HZ) as u32 {
-            let ts = T0_NS + u64::from(i) * NS_PER_S / u64::from(LIDAR_HZ);
+            let ts = T0_NS + u64::from(i) * NS_PER_S / LIDAR_HZ;
             messages.push(Message {
                 topic_idx: 3,
                 timestamp_ns: ts,

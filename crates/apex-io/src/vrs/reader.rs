@@ -145,6 +145,9 @@ pub struct VrsReader {
     /// Parsed `RF:`/`DL:` tags per (stream, record type, version).
     layouts: BTreeMap<(StreamId, RecordType, u32), RecordLayout>,
     raw: Vec<u8>,
+    /// Reused decompression context (a fresh zstd `DCtx` per record would
+    /// dominate the cost of pulling small, high-rate records).
+    codec: codec::Decompressor,
 }
 
 impl VrsReader {
@@ -184,6 +187,7 @@ impl VrsReader {
             data_order: Vec::new(),
             layouts: BTreeMap::new(),
             raw: Vec::new(),
+            codec: codec::Decompressor::new(),
         };
         reader.build_time_indexes();
         reader.build_layouts();
@@ -402,7 +406,7 @@ impl VrsReader {
                 info.offset
             )));
         }
-        codec::decompress(
+        self.codec.decompress(
             header.compression,
             &self.raw[RECORD_HEADER_SIZE..],
             header.uncompressed_size as usize,

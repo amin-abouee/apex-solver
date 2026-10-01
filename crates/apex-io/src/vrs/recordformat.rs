@@ -204,6 +204,19 @@ impl RecordLayout {
     /// Split `payload` into its blocks.
     pub fn split<'a>(&'a self, payload: &'a [u8]) -> Result<Vec<Block<'a>>> {
         let mut out = Vec::with_capacity(self.format.blocks.len());
+        self.split_into(payload, &mut out)?;
+        Ok(out)
+    }
+
+    /// Split `payload` into `blocks` (cleared first), so callers in hot loops
+    /// can reuse the same vector for every record.
+    pub fn split_into<'a>(
+        &'a self,
+        payload: &'a [u8],
+        blocks: &mut Vec<Block<'a>>,
+    ) -> Result<()> {
+        blocks.clear();
+        let out = blocks;
         let mut pos = 0usize;
         let mut layout_i = 0usize;
         let last = self.format.blocks.len().saturating_sub(1);
@@ -257,7 +270,7 @@ impl RecordLayout {
                 }
             }
         }
-        Ok(out)
+        Ok(())
     }
 }
 

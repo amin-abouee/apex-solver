@@ -68,6 +68,9 @@ pub struct VrsWriter {
     prev_size: u32,
     first_user_offset: u64,
     entries: Vec<IndexEntry>,
+    /// Reused compression context (a fresh zstd `CCtx` per record would
+    /// dominate the cost of writing many small records).
+    compressor: codec::Compressor,
 }
 
 impl VrsWriter {
@@ -90,6 +93,7 @@ impl VrsWriter {
             prev_size: 0,
             first_user_offset: 0,
             entries: Vec::new(),
+            compressor: codec::Compressor::new(),
         })
     }
 
@@ -226,7 +230,7 @@ impl VrsWriter {
         let mut stored = None;
         let mut used = Compression::None;
         if compression != Compression::None && payload.len() >= self.options.min_compress_size {
-            let packed = codec::compress(compression, payload)?;
+            let packed = self.compressor.compress(compression, payload)?;
             if packed.len() < payload.len() {
                 stored = Some(packed);
                 used = compression;
@@ -273,7 +277,7 @@ impl VrsWriter {
         prefix.extend_from_slice(&(self.entries.len() as u32).to_le_bytes());
         let entries: Vec<u8> = self.entries.iter().flat_map(|e| e.to_bytes()).collect();
         let mut payload = prefix.clone();
-        payload.extend_from_slice(&codec::compress(Compression::Zstd, &entries)?);
+        payload.extend_from_slice(&self.compressor.compress(Compression::Zstd, &entries)?);
 
         let index_offset = self.pos;
         let header = RecordHeader {
