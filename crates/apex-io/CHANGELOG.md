@@ -57,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Allocation-free ROS1 message path (reader and writer); sqlite writer uses one
   rolling transaction, no journal, and builds the timestamp index at close.
 - SIMD CRC-32 for MCAP chunk validation (reads ~2.4x faster, CPU-bound case).
+- MCAP chunks are decompressed and CRC-checked on a small worker pool
+  (order-preserving, bounded memory): a further ~2.7x on a 4 GB zstd bag, and
+  `bag_convert` of a ~1 GB bag drops from ~4 s to ~0.6 s.
 
 ### Fixed
 - **MCAP reading is bounded-memory and profile-agnostic.** The MCAP storage

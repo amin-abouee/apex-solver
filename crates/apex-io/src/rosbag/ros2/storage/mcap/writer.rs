@@ -357,4 +357,48 @@ mod tests {
         assert_eq!(summary.stats.ok_or("no stats")?.message_count, 10);
         Ok(())
     }
+
+    /// Enough chunks to engage the parallel decompression pool: order must be
+    /// exact, windows honoured, and abandoning the iterator must not hang.
+    #[test]
+    fn many_chunk_file_reads_in_order_through_parallel_decompression() -> TestResult {
+        let dir = tempdir()?;
+        let path = dir.path().join("big.mcap");
+        let mut w = McapWriter::with_file(path.clone(), "ros2", CompressionMode::Storage);
+        w.open()?;
+        let c = conn(1, "/big", "t/msg/Big", "cdr");
+        w.add_msgtype(&c)?;
+        w.add_connection(&c, "")?;
+        // ~48 MiB over 4 MiB chunks => >10 chunks.
+        let n = 240u64;
+        for i in 0..n {
+            let mut payload = vec![(i % 251) as u8; 200 * 1024];
+            payload[..8].copy_from_slice(&i.to_le_bytes());
+            w.write(&c, 1_000 + i, &payload)?;
+        }
+        w.close(0, "")?;
+
+        let mut r = McapStorageReader::new(vec![path.as_path()], vec![])?;
+        r.open()?;
+        let all = r
+            .raw_messages()?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(all.len() as u64, n);
+        for (i, m) in all.iter().enumerate() {
+            assert_eq!(m.timestamp, 1_000 + i as u64);
+            assert_eq!(&m.raw_data[..8], &(i as u64).to_le_bytes());
+        }
+
+        let windowed = r
+            .raw_messages_filtered(None, Some(1_100), Some(1_150))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(windowed.len(), 50);
+        assert_eq!(windowed[0].timestamp, 1_100);
+
+        // Drop the iterator after one message: workers must shut down.
+        let mut it = r.raw_messages()?;
+        assert!(it.next().is_some());
+        drop(it);
+        Ok(())
+    }
 }

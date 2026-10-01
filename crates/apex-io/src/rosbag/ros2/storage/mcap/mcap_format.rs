@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crate::rosbag::error::ReaderError;
@@ -456,6 +456,175 @@ fn decompress_chunk_records(
     Ok(records)
 }
 
+/// Read one chunk record from `file` and return its decompressed, CRC-checked
+/// message records. Self-contained so it can run on any thread with its own
+/// file handle.
+fn read_chunk_records(
+    file: &mut File,
+    file_len: u64,
+    chunk: &ChunkIndexLite,
+) -> Result<Vec<u8>, ReaderError> {
+    let record_len = 8 + 8 + 8 + 4 + 4 + chunk.compression.len() as u64 + 8 + chunk.compressed_size;
+    let end = chunk
+        .chunk_start_offset
+        .checked_add(9 + record_len)
+        .ok_or_else(|| ReaderError::generic("MCAP chunk offset overflow"))?;
+    if end > file_len {
+        return Err(ReaderError::generic(format!(
+            "MCAP chunk at {} extends past end of file",
+            chunk.chunk_start_offset
+        )));
+    }
+
+    file.seek(SeekFrom::Start(chunk.chunk_start_offset))
+        .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP chunk: {e}")))?;
+    let mut prefix = [0u8; 9];
+    file.read_exact(&mut prefix)
+        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
+    if prefix[0] != OP_CHUNK {
+        return Err(ReaderError::generic(format!(
+            "Chunk index points to opcode 0x{:02x}, expected a Chunk record",
+            prefix[0]
+        )));
+    }
+    let mut content = vec![0u8; record_len as usize];
+    file.read_exact(&mut content)
+        .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
+
+    let mut buf = Buf::new(&content);
+    let _message_start_time = buf.read_u64()?;
+    let _message_end_time = buf.read_u64()?;
+    let uncompressed_size = buf.read_u64()?;
+    let uncompressed_crc = buf.read_u32()?;
+    let compression = buf.read_str()?;
+    let records_len = buf.read_u64()? as usize;
+    let compressed = buf.take(records_len)?;
+
+    if compression != chunk.compression {
+        return Err(ReaderError::generic(format!(
+            "Chunk declares compression {compression:?}, its index said {:?}",
+            chunk.compression
+        )));
+    }
+    if uncompressed_size != chunk.uncompressed_size {
+        return Err(ReaderError::generic(format!(
+            "Chunk decompressed size {uncompressed_size} disagrees with its index ({})",
+            chunk.uncompressed_size
+        )));
+    }
+
+    decompress_chunk_records(
+        &compression,
+        compressed,
+        uncompressed_size,
+        uncompressed_crc,
+    )
+}
+
+/// Fewer chunks than this are read inline: thread start-up would not pay off.
+const PREFETCH_MIN_CHUNKS: usize = 4;
+/// Decompressed chunks each worker may hold ready ahead of the consumer.
+const PREFETCH_DEPTH: usize = 2;
+
+/// Order-preserving parallel chunk decompression.
+///
+/// Worker `w` of `W` handles chunks `w, w + W, w + 2W, ...` on its own file
+/// handle and sends them through a bounded channel; the consumer takes chunk
+/// `i` from worker `i % W`. Order is therefore exact without any reordering
+/// buffer, and memory is bounded by `W * (PREFETCH_DEPTH + 1)` chunks.
+struct Prefetch {
+    receivers: Vec<std::sync::mpsc::Receiver<Result<Vec<u8>, ReaderError>>>,
+    handles: Vec<std::thread::JoinHandle<()>>,
+    next: usize,
+    total: usize,
+}
+
+impl Prefetch {
+    /// Start the workers, or `None` if no thread could be started (the
+    /// caller then reads inline).
+    fn spawn(path: &Path, file_len: u64, chunks: Vec<ChunkIndexLite>) -> Option<Self> {
+        let total = chunks.len();
+        let cores = std::thread::available_parallelism().map_or(2, |n| n.get());
+        let workers = cores.saturating_sub(1).clamp(1, 6).min(total);
+
+        let mut receivers = Vec::with_capacity(workers);
+        let mut handles = Vec::with_capacity(workers);
+        for w in 0..workers {
+            let (tx, rx) = std::sync::mpsc::sync_channel(PREFETCH_DEPTH);
+            let mine: Vec<ChunkIndexLite> =
+                chunks.iter().skip(w).step_by(workers).cloned().collect();
+            let path = path.to_path_buf();
+            let spawned = std::thread::Builder::new()
+                .name(format!("mcap-chunk-{w}"))
+                .spawn(move || {
+                    let mut file = match File::open(&path) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            let _ = tx.send(Err(ReaderError::generic(format!(
+                                "Failed to open MCAP file {}: {e}",
+                                path.display()
+                            ))));
+                            return;
+                        }
+                    };
+                    for chunk in &mine {
+                        let result = read_chunk_records(&mut file, file_len, chunk);
+                        let failed = result.is_err();
+                        // A closed channel means the reader was dropped.
+                        if tx.send(result).is_err() || failed {
+                            return;
+                        }
+                    }
+                });
+            match spawned {
+                Ok(handle) => {
+                    receivers.push(rx);
+                    handles.push(handle);
+                }
+                Err(_) => {
+                    // Cannot start this worker: abandon the pool.
+                    drop(rx);
+                    drop(receivers);
+                    for h in handles {
+                        let _ = h.join();
+                    }
+                    return None;
+                }
+            }
+        }
+        Some(Self {
+            receivers,
+            handles,
+            next: 0,
+            total,
+        })
+    }
+
+    fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, ReaderError> {
+        if self.next >= self.total {
+            return Ok(None);
+        }
+        let worker = self.next % self.receivers.len();
+        self.next += 1;
+        match self.receivers[worker].recv() {
+            Ok(result) => result.map(Some),
+            Err(_) => Err(ReaderError::generic(
+                "MCAP chunk worker stopped unexpectedly",
+            )),
+        }
+    }
+}
+
+impl Drop for Prefetch {
+    fn drop(&mut self) {
+        // Closing the channels unblocks workers waiting to send.
+        self.receivers.clear();
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
 /// Streaming message reader over a single MCAP file.
 ///
 /// Indexed files (with chunk indexes) are read chunk-by-chunk: each chunk is
@@ -464,6 +633,7 @@ fn decompress_chunk_records(
 /// requested time range are skipped without being read at all. Unindexed
 /// files fall back to a linear data-section walk.
 pub(crate) struct ChunkMessageStream {
+    path: PathBuf,
     file: File,
     file_len: u64,
     summary: Option<McapSummary>,
@@ -489,6 +659,10 @@ pub(crate) struct ChunkMessageStream {
     /// Unindexed-fallback state: next offset to read from the data section,
     /// `Some` only when walking a file with no chunk indexes.
     section_cursor: Option<u64>,
+
+    /// Parallel chunk decompression, started on the first chunk load.
+    prefetch: Option<Prefetch>,
+    prefetch_tried: bool,
 }
 
 impl ChunkMessageStream {
@@ -503,6 +677,7 @@ impl ChunkMessageStream {
             .len();
 
         let mut stream = Self {
+            path: path.to_path_buf(),
             file,
             file_len,
             summary,
@@ -514,6 +689,8 @@ impl ChunkMessageStream {
             inner: Vec::new(),
             cursor: 0,
             section_cursor: None,
+            prefetch: None,
+            prefetch_tried: false,
         };
 
         if let Some(summary) = &stream.summary {
@@ -605,7 +782,40 @@ impl ChunkMessageStream {
 
     /// Pull the next eligible chunk's records into `inner`, skipping chunks
     /// outside the time filter entirely.
+    ///
+    /// With enough chunks to read, decompression runs on a small worker pool
+    /// (see [`Prefetch`]); otherwise it happens inline.
     fn load_next_chunk(&mut self, filters: &Filters) -> Result<bool, ReaderError> {
+        if self.prefetch.is_none() && !self.prefetch_tried {
+            self.prefetch_tried = true;
+            let eligible: Vec<ChunkIndexLite> = self
+                .chunk_queue
+                .iter()
+                .filter(|c| {
+                    !(filters.start.is_some_and(|t| c.message_end_time < t)
+                        || filters.stop.is_some_and(|t| c.message_start_time >= t))
+                })
+                .cloned()
+                .collect();
+            if eligible.len() >= PREFETCH_MIN_CHUNKS {
+                self.prefetch = Prefetch::spawn(&self.path, self.file_len, eligible);
+                if self.prefetch.is_some() {
+                    self.chunk_queue.clear();
+                }
+            }
+        }
+
+        if let Some(prefetch) = &mut self.prefetch {
+            return match prefetch.next_chunk()? {
+                Some(records) => {
+                    self.inner = records;
+                    self.cursor = 0;
+                    Ok(true)
+                }
+                None => Ok(false),
+            };
+        }
+
         while let Some(chunk) = self.chunk_queue.pop_front() {
             // Chunk-level time skip: nothing inside can pass the filter.
             if filters.start.is_some_and(|t| chunk.message_end_time < t)
@@ -613,66 +823,7 @@ impl ChunkMessageStream {
             {
                 continue;
             }
-
-            let record_len =
-                8 + 8 + 8 + 4 + 4 + chunk.compression.len() as u64 + 8 + chunk.compressed_size;
-            let end = chunk
-                .chunk_start_offset
-                .checked_add(9 + record_len)
-                .ok_or_else(|| ReaderError::generic("MCAP chunk offset overflow"))?;
-            if end > self.file_len {
-                return Err(ReaderError::generic(format!(
-                    "MCAP chunk at {} extends past end of file",
-                    chunk.chunk_start_offset
-                )));
-            }
-
-            self.file
-                .seek(SeekFrom::Start(chunk.chunk_start_offset))
-                .map_err(|e| ReaderError::generic(format!("Failed to seek MCAP chunk: {e}")))?;
-            let mut prefix = [0u8; 9];
-            self.file
-                .read_exact(&mut prefix)
-                .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
-            if prefix[0] != OP_CHUNK {
-                return Err(ReaderError::generic(format!(
-                    "Chunk index points to opcode 0x{:02x}, expected a Chunk record",
-                    prefix[0]
-                )));
-            }
-            let mut content = vec![0u8; record_len as usize];
-            self.file
-                .read_exact(&mut content)
-                .map_err(|e| ReaderError::generic(format!("Failed to read MCAP chunk: {e}")))?;
-
-            let mut buf = Buf::new(&content);
-            let _message_start_time = buf.read_u64()?;
-            let _message_end_time = buf.read_u64()?;
-            let uncompressed_size = buf.read_u64()?;
-            let uncompressed_crc = buf.read_u32()?;
-            let compression = buf.read_str()?;
-            let records_len = buf.read_u64()? as usize;
-            let compressed = buf.take(records_len)?;
-
-            if compression != chunk.compression {
-                return Err(ReaderError::generic(format!(
-                    "Chunk declares compression {compression:?}, its index said {:?}",
-                    chunk.compression
-                )));
-            }
-            if uncompressed_size != chunk.uncompressed_size {
-                return Err(ReaderError::generic(format!(
-                    "Chunk decompressed size {uncompressed_size} disagrees with its index ({})",
-                    chunk.uncompressed_size
-                )));
-            }
-
-            self.inner = decompress_chunk_records(
-                &compression,
-                compressed,
-                uncompressed_size,
-                uncompressed_crc,
-            )?;
+            self.inner = read_chunk_records(&mut self.file, self.file_len, &chunk)?;
             self.cursor = 0;
             return Ok(true);
         }
