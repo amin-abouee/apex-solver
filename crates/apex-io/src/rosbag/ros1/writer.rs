@@ -330,16 +330,25 @@ impl Ros1Writer {
         let uncompressed = std::mem::take(&mut self.chunk_buf);
         let uncompressed_size = uncompressed.len() as u32;
 
-        let payload = match self.compression {
-            Ros1Compression::None => uncompressed.clone(),
+        // ROS1's `lz4` chunk compression is the LZ4 *frame* format (what
+        // `rosbag`/roslz4 read and write), not the raw block format.
+        let payload: std::borrow::Cow<[u8]> = match self.compression {
+            Ros1Compression::None => std::borrow::Cow::Borrowed(&uncompressed),
             Ros1Compression::Bz2 => {
                 let mut out = Vec::new();
                 let mut enc = bzip2::write::BzEncoder::new(&mut out, bzip2::Compression::default());
                 enc.write_all(&uncompressed)?;
                 enc.finish()?;
-                out
+                std::borrow::Cow::Owned(out)
             }
-            Ros1Compression::Lz4 => lz4_flex::block::compress_prepend_size(&uncompressed),
+            Ros1Compression::Lz4 => {
+                let mut enc = lz4_flex::frame::FrameEncoder::new(Vec::new());
+                enc.write_all(&uncompressed)?;
+                std::borrow::Cow::Owned(
+                    enc.finish()
+                        .map_err(|e| BagError::compression(format!("lz4 encode: {e}")))?,
+                )
+            }
         };
 
         let mut chunk_header = RecordHeader::new();
@@ -348,6 +357,7 @@ impl Ros1Writer {
             .put_str("compression", self.compression.as_str())
             .put_u32("size", uncompressed_size);
         write_record(file, &chunk_header, &payload)?;
+        drop(payload);
 
         // IndexData records, one per connection in this chunk.
         let mut conn_ids: Vec<u32> = self.chunk_indices.keys().copied().collect();
@@ -487,6 +497,27 @@ fn encode_message_data_record(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    /// ROS1 tools read `lz4` chunks as LZ4 frames; make sure we emit that.
+    #[test]
+    fn lz4_chunks_are_lz4_frames() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("lz4.bag");
+        let mut w = Ros1Writer::new(&path).unwrap();
+        w.set_compression(Ros1Compression::Lz4).unwrap();
+        w.open().unwrap();
+        let c = w
+            .add_connection("/t", "std_msgs/String", "hash", "", false)
+            .unwrap();
+        w.write(&c, 1, &[0u8; 4096]).unwrap();
+        w.close().unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let magic = [0x04u8, 0x22, 0x4D, 0x18];
+        assert!(
+            bytes.windows(4).any(|w| w == magic),
+            "no LZ4 frame magic found"
+        );
+    }
+
     use super::*;
     use tempfile::tempdir;
 

@@ -16,7 +16,7 @@
 //!
 //! Usage: cargo run -p apex-io --features rosbag --bin bag_info -- <bag_path>
 
-use apex_io::rosbag::{Reader, ReaderError};
+use apex_io::rosbag::{BagKind, BagReader, ReaderError};
 use chrono::TimeZone;
 use std::env;
 use std::path::Path;
@@ -25,41 +25,51 @@ fn main() -> Result<(), ReaderError> {
     let args: Vec<String> = env::args().collect();
     if args.len() != 2 {
         eprintln!("Usage: {} <bag_path>", args[0]);
-        eprintln!("Example: {} /path/to/rosbag2_directory", args[0]);
-        eprintln!("Example: {} /path/to/recording.mcap", args[0]);
+        eprintln!("Accepts a ROS1 .bag, a ROS2 bag directory (sqlite3/mcap), or a bare .mcap");
         std::process::exit(1);
     }
 
     let bag_path = Path::new(&args[1]);
-
-    let mut reader = Reader::new(bag_path)?;
-    reader.open()?;
+    let reader = BagReader::open(bag_path)?;
 
     let total_size = calculate_total_size(bag_path)?;
-    let storage_label = match reader.metadata() {
-        Some(m) => format!("{} (per metadata.yaml)", m.info().storage_identifier),
-        None => "mcap (bare file)".to_string(),
+    let storage_label = match reader.kind() {
+        BagKind::Ros1Bag => "ros1 bag",
+        BagKind::Ros2Sqlite => "sqlite3 (ROS2 directory)",
+        BagKind::Ros2Mcap => "mcap (ROS2 directory)",
+        BagKind::McapFile => "mcap (bare file)",
     };
 
-    let duration_ns = reader.duration();
+    let duration_ns = reader.end_time().saturating_sub(reader.start_time());
     let duration_s = duration_ns as f64 / 1_000_000_000.0;
-    let start_time_ns = reader.start_time();
-    let end_time_ns = reader.end_time();
-    let message_count = reader.message_count();
 
     println!("Bag size:          {}", format_size(total_size));
     println!("Storage id:        {storage_label}");
     println!("Duration:          {duration_s:.9}s");
-    println!("Start:             {}", format_timestamp(start_time_ns));
-    println!("End:               {}", format_timestamp(end_time_ns));
-    println!("Messages:          {message_count}");
+    println!(
+        "Start:             {}",
+        format_timestamp(reader.start_time())
+    );
+    println!("End:               {}", format_timestamp(reader.end_time()));
+    println!("Messages:          {}", reader.message_count());
 
-    let topics = reader.topics();
-    if !topics.is_empty() {
-        println!("Topic information: {}", format_topic_info(&topics[0]));
-        for topic in topics.iter().skip(1) {
-            println!("                   {}", format_topic_info(topic));
-        }
+    let mut connections = reader.connections().to_vec();
+    connections.sort_by(|a, b| a.topic.cmp(&b.topic));
+    for (i, c) in connections.iter().enumerate() {
+        let label = if i == 0 {
+            "Topic information:"
+        } else {
+            "                  "
+        };
+        let hz = if duration_s > 0.0 {
+            format!("{:.1} Hz", c.message_count as f64 / duration_s)
+        } else {
+            "-".to_string()
+        };
+        println!(
+            "{label} {} ({}, {}, {} msgs, {hz})",
+            c.topic, c.message_type, c.serialization_format, c.message_count
+        );
     }
 
     Ok(())
@@ -83,13 +93,6 @@ fn calculate_total_size(bag_path: &Path) -> Result<u64, ReaderError> {
         }
     }
     Ok(total_size)
-}
-
-fn format_topic_info(topic: &apex_io::rosbag::types::TopicInfo) -> String {
-    format!(
-        "{} ({}, {} msgs)",
-        topic.name, topic.message_type, topic.message_count
-    )
 }
 
 fn format_size(bytes: u64) -> String {

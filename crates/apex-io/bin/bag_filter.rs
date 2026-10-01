@@ -1,56 +1,39 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
-//! Console output is this CLI's user interface (piped topic lists, progress).
+//! Console output is this CLI's user interface (topic lists, progress).
 
-//! Copy and filter ROS2 bag files
+//! Copy a bag, keeping only selected topics and/or a time window.
 //!
-//! Reads an existing ROS2 bag file and writes it to a new location with optional
-//! topic and time-range filtering. Supports both SQLite3 and MCAP formats.
+//! Reads any supported container (ROS1 `.bag`, ROS2 sqlite3/MCAP directory,
+//! bare `.mcap`) and writes any container whose payload encoding matches:
+//! message bytes are copied verbatim -- nothing is deserialized, so the
+//! speed is bounded by I/O and (optional) compression. To change the payload
+//! encoding (ROS1 <-> ROS2) use `bag_convert`.
 //!
 //! Usage:
-//!   `cargo run -p apex-io --features rosbag --bin bag_filter -- \`
-//!       <input_bag> <output_bag> [--topics topic1,topic2,...] [--start NS] [--end NS]
+//!   `bag_filter <INPUT> <OUTPUT> [--topics a,b] [--exclude c] [--start NS] [--end NS]
+//!               [--format bag|sqlite3|mcap|mcap-file] [--compression none|zstd|lz4|bz2]`
 //!
-//! Examples:
-//!   # Copy entire bag
-//!   `cargo run -p apex-io --features rosbag --bin bag_filter -- ./input ./output`
-//!
-//!   # Copy only specific topics
-//!   `cargo run -p apex-io --features rosbag --bin bag_filter -- \`
-//!       ./input ./output --topics /camera/image_raw,/imu/data
-//!
-//!   # Copy with time filtering
-//!   `cargo run -p apex-io --features rosbag --bin bag_filter -- \`
-//!       ./input ./output --start 1000000000 --end 2000000000
+//! `--start` is inclusive and `--end` exclusive, in nanoseconds since the
+//! epoch; `--start-offset`/`--end-offset` take seconds relative to the first
+//! message instead.
 
-use apex_io::rosbag::types::{CompressionFormat, CompressionMode, Connection, StoragePlugin};
-use apex_io::rosbag::{Reader, Writer};
+mod common;
+
+use apex_io::rosbag::{BagKind, BagReader, BagWriter, NewConnection, Selection};
 use clap::Parser;
-use std::collections::HashMap;
+use common::{CliResult, parse_compression, resolve_output_kind, throughput};
 use std::path::PathBuf;
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
-
-/// Arguments for copy helper functions
-struct CopyArgs<'a> {
-    connections: &'a [Connection],
-    conn_map: &'a HashMap<String, Connection>,
-    start: Option<u64>,
-    end: Option<u64>,
-    batch_size: usize,
-    verbose: bool,
-}
-
-/// Copy a ROS2 bag file with optional topic filtering
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Input bag directory
+    /// Input bag (ROS1 `.bag`, ROS2 directory, or `.mcap`)
     input: PathBuf,
 
-    /// Output bag directory
-    output: PathBuf,
+    /// Output bag path (must not exist)
+    output: Option<PathBuf>,
 
-    /// Topics to include (comma-separated; if empty, all topics are included)
+    /// Topics to include (comma-separated; default: all)
     #[arg(short, long, value_delimiter = ',')]
     topics: Vec<String>,
 
@@ -58,262 +41,147 @@ struct Args {
     #[arg(short = 'x', long = "exclude", value_delimiter = ',')]
     exclude_topics: Vec<String>,
 
-    /// Start time (nanoseconds since epoch)
+    /// First timestamp to keep, ns since epoch (inclusive)
     #[arg(short, long)]
     start: Option<u64>,
 
-    /// End time (nanoseconds since epoch)
+    /// Timestamp to stop at, ns since epoch (exclusive)
     #[arg(short, long)]
     end: Option<u64>,
 
-    /// Storage plugin for output (`sqlite3` or `mcap`)
-    #[arg(long, default_value = "sqlite3")]
-    storage: String,
-
-    /// Compression mode (`none`, `file`, or `message`)
-    #[arg(long, default_value = "none")]
-    compression_mode: String,
-
-    /// Compression format (`none` or `zstd`)
-    #[arg(long, default_value = "none")]
-    compression_format: String,
-
-    /// Use standard (slower) copy with deserialization/serialization instead of raw copy
+    /// Keep messages from this many seconds after the first message
     #[arg(long)]
-    standard_copy: bool,
+    start_offset: Option<f64>,
 
-    /// Buffer size in MB for raw copy mode (default: 50 MB)
-    #[arg(long, default_value = "50")]
-    buffer_size_mb: usize,
+    /// Stop this many seconds after the first message
+    #[arg(long)]
+    end_offset: Option<f64>,
 
-    /// Batch size for bulk operations in raw copy mode
-    #[arg(long, default_value = "1000")]
-    batch_size: usize,
+    /// Output container: bag, sqlite3, mcap (directory) or mcap-file.
+    /// Default: from the output extension (.bag/.mcap), else mcap.
+    #[arg(long, alias = "storage")]
+    format: Option<String>,
 
-    /// List all topics in the bag and exit
+    /// Output compression: none, zstd (mcap / sqlite3), lz4 or bz2 (bag)
+    #[arg(long, default_value = "none")]
+    compression: String,
+
+    /// List the topics of the input and exit
     #[arg(long)]
     list_topics: bool,
 
-    /// Enable verbose output
+    /// Verbose output
     #[arg(short, long)]
     verbose: bool,
 }
 
-fn main() -> Result<()> {
+fn main() -> CliResult<()> {
     let args = Args::parse();
-
     let mut reader =
-        Reader::new(&args.input).map_err(|e| format!("Failed to create reader: {e}"))?;
-    reader
-        .open()
-        .map_err(|e| format!("Failed to open input bag: {e}"))?;
-
-    let connections = reader.connections();
+        BagReader::open(&args.input).map_err(|e| format!("cannot open input bag: {e}"))?;
 
     if args.list_topics {
-        println!("Available topics in bag:");
-        for (i, conn) in connections.iter().enumerate() {
-            println!("  {}: {} ({})", i + 1, conn.topic, conn.message_type);
-        }
-        println!("\nTotal topics: {}", connections.len());
-        return Ok(());
-    }
-
-    if args.verbose {
         println!(
-            "Copying bag from {} to {}",
+            "Topics in {} ({}):",
             args.input.display(),
-            args.output.display()
+            reader.kind().name()
         );
-        if !args.standard_copy {
+        for (i, c) in reader.connections().iter().enumerate() {
             println!(
-                "Using raw copy mode (buffer: {}MB, batch: {})",
-                args.buffer_size_mb, args.batch_size
+                "  {}: {} ({}, {}, {} msgs)",
+                i + 1,
+                c.topic,
+                c.message_type,
+                c.serialization_format,
+                c.message_count
             );
         }
-    }
-
-    let storage_plugin = match args.storage.as_str() {
-        "sqlite3" => StoragePlugin::Sqlite3,
-        "mcap" => StoragePlugin::Mcap,
-        other => {
-            return Err(
-                format!("Unsupported storage plugin: '{other}'. Use 'sqlite3' or 'mcap'").into(),
-            );
-        }
-    };
-
-    let compression_mode = match args.compression_mode.as_str() {
-        "none" => CompressionMode::None,
-        "file" => CompressionMode::File,
-        "message" => CompressionMode::Message,
-        "storage" => CompressionMode::Storage,
-        other => return Err(format!(
-            "Unsupported compression mode: '{other}'. Use 'none', 'file', 'message', or 'storage'"
-        )
-        .into()),
-    };
-
-    let compression_format = match args.compression_format.as_str() {
-        "none" => CompressionFormat::None,
-        "zstd" => CompressionFormat::Zstd,
-        other => {
-            return Err(
-                format!("Unsupported compression format: '{other}'. Use 'none' or 'zstd'").into(),
-            );
-        }
-    };
-
-    let mut writer = Writer::new(&args.output, None, Some(storage_plugin))
-        .map_err(|e| format!("Failed to create writer: {e}"))?;
-    writer.set_compression(compression_mode, compression_format)?;
-
-    if !args.standard_copy {
-        writer.configure_buffer(args.buffer_size_mb, args.batch_size)?;
-    }
-
-    writer
-        .open()
-        .map_err(|e| format!("Failed to open output bag: {e}"))?;
-
-    let filtered_connections: Vec<_> = connections
-        .iter()
-        .filter(|conn| {
-            let include = args.topics.is_empty() || args.topics.contains(&conn.topic);
-            let exclude = args.exclude_topics.contains(&conn.topic);
-            include && !exclude
-        })
-        .cloned()
-        .collect();
-
-    if filtered_connections.is_empty() {
-        println!("No topics match the filter criteria");
         return Ok(());
     }
 
-    if args.verbose {
-        println!("Selected {} topics:", filtered_connections.len());
-        for conn in &filtered_connections {
-            println!("  {} ({})", conn.topic, conn.message_type);
+    let output = args.output.as_ref().ok_or("an OUTPUT path is required")?;
+    let kind = resolve_output_kind(args.format.as_deref(), output, BagKind::Ros2Mcap)?;
+    let compression = parse_compression(&args.compression)?;
+
+    let start_ns = match (args.start, args.start_offset) {
+        (Some(ns), _) => Some(ns),
+        (None, Some(s)) => Some(reader.start_time().saturating_add((s * 1e9) as u64)),
+        _ => None,
+    };
+    let end_ns = match (args.end, args.end_offset) {
+        (Some(ns), _) => Some(ns),
+        (None, Some(s)) => Some(reader.start_time().saturating_add((s * 1e9) as u64)),
+        _ => None,
+    };
+    let selection = Selection {
+        include: args.topics.clone(),
+        exclude: args.exclude_topics.clone(),
+        start_ns,
+        end_ns,
+    };
+
+    let selected = reader.selected_connections(&selection);
+    for topic in &selection.include {
+        if !reader.connections().iter().any(|c| &c.topic == topic) {
+            tracing::warn!(topic = %topic, "requested topic not found in input bag");
+            eprintln!("WARN: requested topic '{topic}' not found in input bag");
+        }
+    }
+    if selected.is_empty() {
+        eprintln!("No topics match the filter criteria");
+        return Ok(());
+    }
+
+    // Raw copy cannot change the payload encoding.
+    let wants_ros1_payload = matches!(kind, BagKind::Ros1Bag);
+    for c in &selected {
+        let is_ros1 = c.serialization_format == "ros1";
+        let compatible = match kind {
+            BagKind::McapFile => true,
+            _ => is_ros1 == wants_ros1_payload,
+        };
+        if !compatible {
+            return Err(format!(
+                "topic {} carries '{}' payloads, which a {} bag cannot hold as-is; \
+                 use bag_convert to change the encoding",
+                c.topic,
+                c.serialization_format,
+                kind.name()
+            )
+            .into());
         }
     }
 
-    let mut conn_map = HashMap::new();
-    for r_conn in &filtered_connections {
-        let w_conn = writer.add_connection(
-            r_conn.topic.clone(),
-            r_conn.message_type.clone(),
-            Some(r_conn.message_definition.clone()),
-            Some(r_conn.type_description_hash.clone()),
-            Some(r_conn.serialization_format.clone()),
-            Some(r_conn.offered_qos_profiles.clone()),
-        )?;
-        conn_map.insert(r_conn.topic.clone(), w_conn);
+    let mut writer = BagWriter::create(output, kind, compression)
+        .map_err(|e| format!("cannot create output bag: {e}"))?;
+    let mut handles = std::collections::HashMap::new();
+    for c in &selected {
+        if args.verbose {
+            println!("  {} ({})", c.topic, c.message_type);
+        }
+        handles.insert(
+            c.id,
+            writer.add_connection(&NewConnection::from_connection(c))?,
+        );
     }
 
-    let copy_args = CopyArgs {
-        connections: &filtered_connections,
-        conn_map: &conn_map,
-        start: args.start,
-        end: args.end,
-        batch_size: args.batch_size,
-        verbose: args.verbose,
-    };
-
-    if args.standard_copy {
-        copy_messages(&mut reader, &mut writer, &copy_args)?;
-    } else {
-        copy_raw_messages(&mut reader, &mut writer, &copy_args)?;
-    }
-
-    writer
-        .close()
-        .map_err(|e| format!("Failed to close output bag: {e}"))?;
-    reader
-        .close()
-        .map_err(|e| format!("Failed to close input bag: {e}"))?;
-
-    println!("Bag copy completed successfully");
-    Ok(())
-}
-
-fn copy_raw_messages(reader: &mut Reader, writer: &mut Writer, args: &CopyArgs) -> Result<()> {
-    if args.verbose {
-        println!("Starting high-performance raw copy...");
-    }
     let t0 = std::time::Instant::now();
+    let (mut messages, mut bytes) = (0u64, 0u64);
+    reader.for_each(&selected, &selection, |c, ts, data| {
+        let handle = handles
+            .get(&c.id)
+            .ok_or_else(|| apex_io::rosbag::BagError::connection_not_found(&c.topic))?;
+        writer.write(*handle, ts, data)?;
+        messages += 1;
+        bytes += data.len() as u64;
+        Ok(())
+    })?;
+    writer.close()?;
 
-    let raw_messages = reader
-        .read_raw_messages_batch(Some(args.connections), args.start, args.end)
-        .map_err(|e| format!("Failed to read raw messages: {e}"))?;
-
-    if args.verbose {
-        println!("Read {} messages in {:?}", raw_messages.len(), t0.elapsed());
-    }
-
-    let t1 = std::time::Instant::now();
-    let batch: Result<Vec<(Connection, u64, Vec<u8>)>> = raw_messages
-        .into_iter()
-        .map(|msg| {
-            let w_conn = args
-                .conn_map
-                .get(&msg.connection.topic)
-                .ok_or_else(|| {
-                    format!(
-                        "Connection for topic '{}' not found in writer",
-                        msg.connection.topic
-                    )
-                })?
-                .clone();
-            Ok((w_conn, msg.timestamp, msg.raw_data))
-        })
-        .collect();
-
-    let mut total_written = 0;
-    for chunk in batch?.chunks(args.batch_size) {
-        writer
-            .write_raw_messages_batch(chunk)
-            .map_err(|e| format!("Failed to write raw message batch: {e}"))?;
-        total_written += chunk.len();
-    }
-
-    if args.verbose {
-        println!("Wrote {total_written} messages in {:?}", t1.elapsed());
-        println!("Total time: {:?}", t0.elapsed());
-    }
-    Ok(())
-}
-
-fn copy_messages(reader: &mut Reader, writer: &mut Writer, args: &CopyArgs) -> Result<()> {
-    if args.verbose {
-        println!("Starting standard copy...");
-    }
-    let t0 = std::time::Instant::now();
-
-    let messages = reader
-        .messages_filtered(Some(args.connections), args.start, args.end)
-        .map_err(|e| format!("Failed to get message iterator: {e}"))?;
-
-    let mut count = 0;
-    for message_result in messages {
-        let message = message_result.map_err(|e| format!("Failed to read message: {e}"))?;
-        let w_conn = args
-            .conn_map
-            .get(&message.connection.topic)
-            .ok_or_else(|| {
-                format!(
-                    "Connection for topic '{}' not found in writer",
-                    message.connection.topic
-                )
-            })?;
-        writer
-            .write(w_conn, message.timestamp, &message.data)
-            .map_err(|e| format!("Failed to write message: {e}"))?;
-        count += 1;
-    }
-
-    if args.verbose {
-        println!("Copied {count} messages in {:?}", t0.elapsed());
-    }
+    println!(
+        "Copied {} -> {}",
+        throughput(messages, bytes, t0.elapsed()),
+        output.display()
+    );
     Ok(())
 }

@@ -445,8 +445,22 @@ impl Ros1Reader {
                 dec.read_to_end(&mut out)?;
                 out
             }
-            Ros1Compression::Lz4 => lz4_flex::block::decompress_size_prepended(&rec.data)
-                .map_err(|e| BagError::compression(format!("lz4 decode: {e}")))?,
+            Ros1Compression::Lz4 => {
+                const LZ4_FRAME_MAGIC: [u8; 4] = [0x04, 0x22, 0x4D, 0x18];
+                if rec.data.starts_with(&LZ4_FRAME_MAGIC) {
+                    // What `rosbag`/roslz4 write: an LZ4 frame stream.
+                    let mut out = Vec::with_capacity(uncompressed_size);
+                    lz4_flex::frame::FrameDecoder::new(&rec.data[..])
+                        .read_to_end(&mut out)
+                        .map_err(|e| BagError::compression(format!("lz4 frame decode: {e}")))?;
+                    out
+                } else {
+                    // Bags written by earlier versions of this crate used a
+                    // size-prefixed raw block.
+                    lz4_flex::block::decompress_size_prepended(&rec.data)
+                        .map_err(|e| BagError::compression(format!("lz4 decode: {e}")))?
+                }
+            }
         };
         if inflated.len() != uncompressed_size {
             return Err(BagError::Ros1IndexCorrupt {
