@@ -215,6 +215,67 @@ pub struct TimeDomainSample {
     pub real_ns: i64,
 }
 
+/// The device's monotonic-to-UTC clock map (stream `285-1`), sorted by
+/// monotonic time.
+///
+/// Sensor timestamps in Aria files are on the device's monotonic clock
+/// (seconds since boot). This map converts them to wall-clock time by
+/// interpolating the monotonic-to-real offset between the bracketing samples
+/// (exact integer arithmetic: the offsets are ~1.7e18 ns, beyond `f64`).
+/// Opt-in: nothing in the reader applies it automatically.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TimeDomainMap {
+    samples: Vec<TimeDomainSample>,
+}
+
+impl TimeDomainMap {
+    /// Build from samples in any order.
+    pub fn from_samples(mut samples: Vec<TimeDomainSample>) -> Self {
+        samples.sort_by_key(|s| s.monotonic_ns);
+        Self { samples }
+    }
+
+    /// The samples, sorted by monotonic time.
+    pub fn samples(&self) -> &[TimeDomainSample] {
+        &self.samples
+    }
+
+    /// Number of mapping samples.
+    pub fn len(&self) -> usize {
+        self.samples.len()
+    }
+
+    /// True when the file has no clock map.
+    pub fn is_empty(&self) -> bool {
+        self.samples.is_empty()
+    }
+
+    fn offset(s: &TimeDomainSample) -> i128 {
+        i128::from(s.real_ns) - i128::from(s.monotonic_ns)
+    }
+
+    /// UTC time (ns since the Unix epoch) for a monotonic device time.
+    /// Outside the sampled range the nearest offset is held constant.
+    pub fn monotonic_to_real_ns(&self, monotonic_ns: i64) -> Option<i64> {
+        let first = self.samples.first()?;
+        let last = self.samples.last()?;
+        let offset = if monotonic_ns <= first.monotonic_ns {
+            Self::offset(first)
+        } else if monotonic_ns >= last.monotonic_ns {
+            Self::offset(last)
+        } else {
+            let hi = self
+                .samples
+                .partition_point(|s| s.monotonic_ns <= monotonic_ns);
+            let (a, b) = (&self.samples[hi - 1], &self.samples[hi]);
+            let span = i128::from(b.monotonic_ns) - i128::from(a.monotonic_ns);
+            let into = i128::from(monotonic_ns) - i128::from(a.monotonic_ns);
+            Self::offset(a) + (Self::offset(b) - Self::offset(a)) * into / span
+        };
+        i64::try_from(i128::from(monotonic_ns) + offset).ok()
+    }
+}
+
 /// One decoded data record.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Sample {
@@ -396,6 +457,21 @@ impl AriaRecording {
         })();
         self.buf = buf;
         result
+    }
+
+    /// The device clock map (`285-1`); empty when the file has none.
+    pub fn time_domain_map(&mut self) -> Result<TimeDomainMap> {
+        let indices: Vec<u32> = self
+            .vrs
+            .data_records(AriaSensor::TimeDomain.stream_id())
+            .to_vec();
+        let mut samples = Vec::with_capacity(indices.len());
+        for i in indices {
+            if let Sample::TimeDomain(s) = self.sample_at(i as usize)? {
+                samples.push(s);
+            }
+        }
+        Ok(TimeDomainMap::from_samples(samples))
     }
 
     // ---- sequential access ------------------------------------------------
@@ -590,5 +666,66 @@ impl AriaRecording {
                 payload: payload.to_vec(),
             }),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    /// Offset (real - monotonic) of the first sample; the second drifts +100 ns.
+    const OFF: i64 = 1_733_000_000_000_001_000;
+
+    fn map() -> TimeDomainMap {
+        // Deliberately given out of order: the constructor sorts.
+        TimeDomainMap::from_samples(vec![
+            TimeDomainSample {
+                monotonic_ns: 2_000_000_000,
+                real_ns: 2_000_000_000 + OFF + 100,
+            },
+            TimeDomainSample {
+                monotonic_ns: 1_000_000_000,
+                real_ns: 1_000_000_000 + OFF,
+            },
+        ])
+    }
+
+    #[test]
+    fn exact_at_the_samples_and_linear_between_them() {
+        let m = map();
+        assert_eq!(m.len(), 2);
+        // offsets: 1_733_000_000_000_001_000 at 1 s, ..._001_100 at 2 s
+        let off0 = OFF;
+        assert_eq!(
+            m.monotonic_to_real_ns(1_000_000_000),
+            Some(1_000_000_000 + off0)
+        );
+        assert_eq!(
+            m.monotonic_to_real_ns(2_000_000_000),
+            Some(2_000_000_000 + off0 + 100)
+        );
+        // halfway: offset grows by 50 ns, with no f64 rounding of 1.7e18
+        assert_eq!(
+            m.monotonic_to_real_ns(1_500_000_000),
+            Some(1_500_000_000 + off0 + 50)
+        );
+    }
+
+    #[test]
+    fn outside_the_range_the_nearest_offset_is_held() {
+        let m = map();
+        let off0 = OFF;
+        assert_eq!(m.monotonic_to_real_ns(0), Some(off0));
+        assert_eq!(
+            m.monotonic_to_real_ns(10_000_000_000),
+            Some(10_000_000_000 + off0 + 100)
+        );
+    }
+
+    #[test]
+    fn an_empty_map_converts_nothing() {
+        assert!(TimeDomainMap::default().monotonic_to_real_ns(5).is_none());
+        assert!(TimeDomainMap::default().is_empty());
     }
 }

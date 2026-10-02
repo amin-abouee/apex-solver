@@ -132,7 +132,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if ok { "IDENTICAL" } else { "MISMATCH" },
             t0.elapsed().as_secs_f64()
         );
-        if !ok {
+        let chain = vrs.verify_record_chain()?;
+        match chain {
+            None => println!("Record chain:       INTACT (sizes, streams, previous_record_size)"),
+            Some(b) => println!(
+                "Record chain:       BROKEN at record {} (offset {}): {} expected {}, found {}",
+                b.record_index, b.offset, b.field, b.expected, b.found
+            ),
+        }
+        if !ok || chain.is_some() {
             std::process::exit(1);
         }
     }

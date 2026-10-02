@@ -27,6 +27,6 @@ pub use format::{
 };
 pub use index::{IndexSource, RecordInfo};
 pub use readahead::SequentialReader;
-pub use reader::{Cursor, Record, RecordFilter, RecordMeta, StoredRecord, VrsReader};
+pub use reader::{ChainBreak, Cursor, Record, RecordFilter, RecordMeta, StoredRecord, VrsReader};
 pub use recordformat::{Block, BlockSpec, ImageFormat, ImageSpec, RecordFormat, RecordLayout};
 pub use writer::{VrsWriteOptions, VrsWriter, WriteSummary};

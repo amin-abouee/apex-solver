@@ -594,4 +594,34 @@ mod tests {
         assert_eq!(r.index_source(), IndexSource::File);
         assert_eq!(r.records().len(), 1);
     }
+
+    #[test]
+    fn record_chain_is_intact_for_written_files_and_detects_tampering() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("chain.vrs");
+        write_sample(&path, 50);
+
+        let mut r = VrsReader::open(&path).unwrap();
+        assert_eq!(r.verify_record_chain().unwrap(), None);
+        let victim = r.records()[40];
+        drop(r);
+
+        // Corrupt previous_record_size (bytes 4..8 of the header) of record 40.
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+            f.seek(SeekFrom::Start(victim.offset + 4)).unwrap();
+            f.write_all(&1234u32.to_le_bytes()).unwrap();
+        }
+        let mut r = VrsReader::open(&path).unwrap();
+        let broken = r
+            .verify_record_chain()
+            .unwrap()
+            .expect("tampering must be found");
+        assert_eq!(broken.record_index, 40);
+        assert_eq!(broken.offset, victim.offset);
+        assert_eq!(broken.field, "previous_record_size");
+        assert_eq!(broken.found, 1234);
+        assert_eq!(broken.expected, r.records()[39].size);
+    }
 }

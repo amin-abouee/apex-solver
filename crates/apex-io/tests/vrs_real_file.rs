@@ -172,6 +172,27 @@ mod aria {
     }
 
     #[test]
+    fn clock_map_converts_device_time_to_wall_clock() {
+        let Some(mut rec) = recording() else { return };
+        let map = rec.time_domain_map().unwrap();
+        assert!(map.len() > 10, "{} clock samples", map.len());
+        let epoch: i64 = rec
+            .vrs()
+            .file_tags()
+            .get("capture_time_epoch")
+            .and_then(|s| s.parse().ok())
+            .expect("capture_time_epoch tag");
+        let (t0, _) = rec.time_range(AriaSensor::ImuRight).unwrap();
+        let utc_ns = map.monotonic_to_real_ns((t0 * 1e9) as i64).unwrap();
+        // The recording started at the tagged epoch second (within a few s).
+        assert!(
+            (utc_ns / 1_000_000_000 - epoch).abs() < 10,
+            "utc {} vs tag {epoch}",
+            utc_ns / 1_000_000_000
+        );
+    }
+
+    #[test]
     fn configs_and_calibration() {
         let Some(mut rec) = recording() else { return };
         let cam = rec.camera_config(AriaSensor::SlamLeft).unwrap();

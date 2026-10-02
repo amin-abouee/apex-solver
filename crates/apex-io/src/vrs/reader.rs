@@ -99,6 +99,21 @@ impl RecordFilter {
     }
 }
 
+/// Where the `previous_record_size` chain of the file first breaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChainBreak {
+    /// Position in [`VrsReader::records`] of the offending record.
+    pub record_index: usize,
+    /// File offset of its header.
+    pub offset: u64,
+    /// Which header field disagreed with the index.
+    pub field: &'static str,
+    /// Value the index implies.
+    pub expected: u32,
+    /// Value found in the record header.
+    pub found: u32,
+}
+
 /// A position in the time-ordered sequence of data records.
 ///
 /// Holds no reference to the reader, so it can be stored next to it.
@@ -527,6 +542,50 @@ impl VrsReader {
     pub fn index_matches_scan(&mut self) -> Result<bool> {
         let rebuilt = rebuild_index(&mut self.file, &self.header, self.file_len)?;
         Ok(rebuilt == self.records)
+    }
+
+    /// Walk every record header in file order and check it against the
+    /// index: `record_size` and stream must match, and `previous_record_size`
+    /// must equal the size of the record before. Returns the first
+    /// inconsistency, or `None` when the file is intact.
+    ///
+    /// Sequential and header-only (the payloads are skipped), so it costs one
+    /// small read per record; the hot random-access path never pays for it.
+    pub fn verify_record_chain(&mut self) -> Result<Option<ChainBreak>> {
+        let Some(first) = self.records.first() else {
+            return Ok(None);
+        };
+        self.file.seek(SeekFrom::Start(first.offset))?;
+        let mut reader = std::io::BufReader::with_capacity(64 * 1024, &mut self.file);
+        let mut head = [0u8; RECORD_HEADER_SIZE];
+        for (i, info) in self.records.iter().enumerate() {
+            reader.read_exact(&mut head)?;
+            let h = RecordHeader::parse(&head)?;
+            let mismatch = if h.record_size != info.size {
+                Some(("record_size", info.size, h.record_size))
+            } else if h.stream_id() != info.stream {
+                Some(("stream", 0, 0))
+            } else if i > 0 && h.previous_record_size != self.records[i - 1].size {
+                Some((
+                    "previous_record_size",
+                    self.records[i - 1].size,
+                    h.previous_record_size,
+                ))
+            } else {
+                None
+            };
+            if let Some((field, expected, found)) = mismatch {
+                return Ok(Some(ChainBreak {
+                    record_index: i,
+                    offset: info.offset,
+                    field,
+                    expected,
+                    found,
+                }));
+            }
+            reader.seek_relative(i64::from(info.size) - RECORD_HEADER_SIZE as i64)?;
+        }
+        Ok(None)
     }
 
     /// The underlying file handle (used by the read-ahead worker to take its
