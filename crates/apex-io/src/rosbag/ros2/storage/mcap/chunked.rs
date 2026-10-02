@@ -110,10 +110,25 @@ struct ChunkBuilder {
     count: u64,
 }
 
+impl ChunkBuilder {
+    fn with_buffer(records: Vec<u8>) -> Self {
+        Self {
+            records,
+            ..Self::default()
+        }
+    }
+}
+
 /// A compressed chunk ready to be written, plus what the summary needs.
 struct DoneChunk {
-    /// Chunk record followed by its message-index records, as written.
-    chunk_record: Vec<u8>,
+    /// Chunk record up to (and including) the length prefix of its payload.
+    head: Vec<u8>,
+    /// The (possibly compressed) payload; for uncompressed chunks this is the
+    /// message buffer itself, moved rather than copied.
+    body: Vec<u8>,
+    /// Uncompressed message buffer to reuse for the next chunk, when the
+    /// body is not that buffer.
+    recycle: Option<Vec<u8>>,
     /// `(channel, message index record bytes)`, in channel order.
     message_indexes: Vec<(u16, Vec<u8>)>,
     start: u64,
@@ -134,24 +149,57 @@ struct ChunkIndexRec {
     uncompressed_size: u64,
 }
 
+thread_local! {
+    /// One zstd compression context per worker thread, reused for every
+    /// chunk it compresses (creating a context per chunk is wasteful).
+    static ZSTD: std::cell::RefCell<Option<zstd::bulk::Compressor<'static>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn compress_zstd(data: &[u8]) -> Result<Vec<u8>> {
+    ZSTD.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(
+                zstd::bulk::Compressor::new(ZSTD_LEVEL)
+                    .map_err(|e| BagError::writer(format!("zstd init: {e}")))?,
+            );
+        }
+        match slot.as_mut() {
+            Some(c) => c
+                .compress(data)
+                .map_err(|e| BagError::writer(format!("zstd: {e}"))),
+            None => Err(BagError::writer("zstd compressor unavailable")),
+        }
+    })
+}
+
 fn build_chunk(b: ChunkBuilder, compression: ChunkCompression) -> Result<DoneChunk> {
     let uncompressed_size = b.records.len() as u64;
     let crc = crc32fast::hash(&b.records);
-    let compressed: Vec<u8> = match compression {
-        ChunkCompression::None => b.records,
-        ChunkCompression::Zstd => zstd::bulk::compress(&b.records, ZSTD_LEVEL)
-            .map_err(|e| BagError::writer(format!("zstd: {e}")))?,
+    let (body, recycle) = match compression {
+        ChunkCompression::None => (b.records, None),
+        ChunkCompression::Zstd => {
+            let packed = compress_zstd(&b.records)?;
+            let mut spent = b.records;
+            spent.clear();
+            (packed, Some(spent))
+        }
     };
 
-    let mut content = Vec::with_capacity(compressed.len() + 64);
-    put_u64(&mut content, b.start);
-    put_u64(&mut content, b.end);
-    put_u64(&mut content, uncompressed_size);
-    put_u32(&mut content, crc);
-    put_str(&mut content, compression.name());
-    put_u64(&mut content, compressed.len() as u64);
-    content.extend_from_slice(&compressed);
-    let chunk_record = record(OP_CHUNK, &content);
+    // Chunk record = op, u64 content length, then the content: the fixed
+    // fields, a u64 payload length, and the payload (written separately).
+    let name = compression.name();
+    let fixed_len = 8 + 8 + 8 + 4 + (4 + name.len()) + 8;
+    let mut head = Vec::with_capacity(9 + fixed_len);
+    head.push(OP_CHUNK);
+    put_u64(&mut head, (fixed_len + body.len()) as u64);
+    put_u64(&mut head, b.start);
+    put_u64(&mut head, b.end);
+    put_u64(&mut head, uncompressed_size);
+    put_u32(&mut head, crc);
+    put_str(&mut head, name);
+    put_u64(&mut head, body.len() as u64);
 
     let message_indexes = b
         .index
@@ -169,12 +217,14 @@ fn build_chunk(b: ChunkBuilder, compression: ChunkCompression) -> Result<DoneChu
         .collect();
 
     Ok(DoneChunk {
-        chunk_record,
+        compressed_size: body.len() as u64,
+        head,
+        body,
+        recycle,
         message_indexes,
         start: b.start,
         end: b.end,
         uncompressed_size,
-        compressed_size: compressed.len() as u64,
     })
 }
 
@@ -188,6 +238,9 @@ pub(super) struct ChunkedWriter {
     channels: Vec<ChannelRec>,
     current: ChunkBuilder,
     chunk_indexes: Vec<ChunkIndexRec>,
+    /// Emptied chunk buffers kept for reuse (avoids reallocating and
+    /// regrowing a multi-MiB buffer for every chunk).
+    spare: Vec<Vec<u8>>,
 
     // Parallel pipeline: finished chunks come back tagged with their sequence
     // number and are written strictly in order.
@@ -231,17 +284,18 @@ impl ChunkedWriter {
             chunk_size: chunk_size.max(1),
             schemas: Vec::new(),
             channels: Vec::new(),
-            current: ChunkBuilder::default(),
+            current: ChunkBuilder::with_buffer(Vec::with_capacity(chunk_size + chunk_size / 4)),
             chunk_indexes: Vec::new(),
+            spare: Vec::new(),
             tx,
             rx,
             next_seq: 0,
             next_to_write: 0,
             ready: BTreeMap::new(),
             inflight: 0,
-            // Enough queued work to keep every core busy, bounded memory:
-            // at most `max_inflight` chunks wait uncompressed.
-            max_inflight: (workers * 2).max(2),
+            // Enough queued work to keep every core busy with a small backlog;
+            // at most `max_inflight` chunks are in memory in compression.
+            max_inflight: workers + 2,
             message_count: 0,
             channel_counts: BTreeMap::new(),
             time_range: None,
@@ -349,7 +403,11 @@ impl ChunkedWriter {
         if self.current.count == 0 {
             return Ok(());
         }
-        let builder = std::mem::take(&mut self.current);
+        let fresh = self
+            .spare
+            .pop()
+            .unwrap_or_else(|| Vec::with_capacity(self.chunk_size + self.chunk_size / 4));
+        let builder = std::mem::replace(&mut self.current, ChunkBuilder::with_buffer(fresh));
         let seq = self.next_seq;
         self.next_seq += 1;
 
@@ -409,8 +467,9 @@ impl ChunkedWriter {
         while let Some(done) = self.ready.remove(&self.next_to_write) {
             self.next_to_write += 1;
             let chunk_start_offset = self.pos;
-            self.write_raw(&done.chunk_record)?;
-            let chunk_length = done.chunk_record.len() as u64;
+            self.write_raw(&done.head)?;
+            self.write_raw(&done.body)?;
+            let chunk_length = (done.head.len() + done.body.len()) as u64;
 
             let mut offsets = BTreeMap::new();
             let mut index_len = 0u64;
@@ -418,6 +477,16 @@ impl ChunkedWriter {
                 offsets.insert(*channel, self.pos);
                 self.write_raw(rec)?;
                 index_len += rec.len() as u64;
+            }
+            // Hand an emptied message buffer back for the next chunk.
+            let mut spare = match done.recycle {
+                Some(buf) => buf,
+                None if self.compression == ChunkCompression::None => done.body,
+                None => Vec::new(),
+            };
+            spare.clear();
+            if spare.capacity() > 0 && self.spare.len() < 4 {
+                self.spare.push(spare);
             }
             self.chunk_indexes.push(ChunkIndexRec {
                 start: done.start,
