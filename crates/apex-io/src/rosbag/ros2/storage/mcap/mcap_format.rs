@@ -648,6 +648,8 @@ pub(crate) struct ChunkMessageStream {
     /// Schemas seen only in chunk/data-section records (unindexed files
     /// carry no summary, so their schemas arrive inline).
     local_schemas: BTreeMap<u16, SchemaInfo>,
+    /// Topic-filter decision per channel ID, memoized on first message.
+    wanted: BTreeMap<u16, bool>,
 
     /// Remaining indexed chunks, in file (log-time) order.
     chunk_queue: std::collections::VecDeque<ChunkIndexLite>,
@@ -685,6 +687,7 @@ impl ChunkMessageStream {
             encodings: BTreeMap::new(),
             types: BTreeMap::new(),
             local_schemas: BTreeMap::new(),
+            wanted: BTreeMap::new(),
             chunk_queue: std::collections::VecDeque::new(),
             inner: Vec::new(),
             cursor: 0,
@@ -733,7 +736,12 @@ impl ChunkMessageStream {
 
     /// Register schema/channel records encountered while draining a chunk
     /// (files may embed them rather than relying on the summary).
-    fn register_record(&mut self, op: u8, content: &[u8]) -> Result<(), ReaderError> {
+    fn register_record(
+        &mut self,
+        op: u8,
+        content: &[u8],
+        filters: &Filters,
+    ) -> Result<(), ReaderError> {
         match op {
             OP_CHANNEL => {
                 let mut buf = Buf::new(content);
@@ -761,6 +769,12 @@ impl ChunkMessageStream {
                 self.types
                     .entry(id)
                     .or_insert_with(|| Rc::from(message_type.as_str()));
+                // Memoize the topic-filter decision for this channel.
+                let wanted = filters
+                    .topics
+                    .as_ref()
+                    .is_none_or(|set| set.contains(&topic));
+                self.wanted.entry(id).or_insert(wanted);
             }
             OP_SCHEMA => {
                 let mut buf = Buf::new(content);
@@ -850,36 +864,59 @@ impl ChunkMessageStream {
                     "MCAP chunk records truncated mid-record",
                 ));
             }
-            // Own the record content before touching `self` again: the slice
-            // borrows `self.inner`, and the arms below register records (a
-            // `&mut self` call) or copy data out.
-            let content = self.inner[self.cursor + 9..end].to_vec();
-            self.cursor = end;
 
             match op {
                 OP_MESSAGE => {
-                    let mut buf = Buf::new(&content);
-                    let channel_id = buf.read_u16()?;
-                    let sequence = buf.read_u32()?;
-                    let log_time = buf.read_u64()?;
-                    let publish_time = buf.read_u64()?;
-                    let data = content[22..].to_vec();
+                    // Everything a message needs is immutable state, so the
+                    // fields parse in place and the payload copies out
+                    // exactly once (this is the per-message hot path).
+                    let base = self.cursor + 9;
+                    if base + 22 > end {
+                        return Err(ReaderError::generic(
+                            "MCAP message record shorter than its fixed header",
+                        ));
+                    }
+                    let channel_id = u16::from_le_bytes([
+                        self.inner[base],
+                        self.inner[base + 1],
+                    ]);
+                    let sequence = u32::from_le_bytes([
+                        self.inner[base + 2],
+                        self.inner[base + 3],
+                        self.inner[base + 4],
+                        self.inner[base + 5],
+                    ]);
+                    let log_time = u64::from_le_bytes([
+                        self.inner[base + 6],
+                        self.inner[base + 7],
+                        self.inner[base + 8],
+                        self.inner[base + 9],
+                        self.inner[base + 10],
+                        self.inner[base + 11],
+                        self.inner[base + 12],
+                        self.inner[base + 13],
+                    ]);
+                    let publish_time = u64::from_le_bytes([
+                        self.inner[base + 14],
+                        self.inner[base + 15],
+                        self.inner[base + 16],
+                        self.inner[base + 17],
+                        self.inner[base + 18],
+                        self.inner[base + 19],
+                        self.inner[base + 20],
+                        self.inner[base + 21],
+                    ]);
 
                     if filters.start.is_some_and(|t| log_time < t)
                         || filters.stop.is_some_and(|t| log_time >= t)
+                        || !self.channel_wanted(channel_id, filters)?
                     {
+                        self.cursor = end;
                         continue;
                     }
-                    if let Some(topics) = &filters.topics {
-                        let topic = self.topic(channel_id).ok_or_else(|| {
-                            ReaderError::generic(format!(
-                                "MCAP message references unknown channel id {channel_id}"
-                            ))
-                        })?;
-                        if !topics.contains(topic.as_ref()) {
-                            continue;
-                        }
-                    }
+                    let data = self.inner[base + 22..end].to_vec();
+                    self.cursor = end;
+
                     return Ok(Some(RawMcapMessage {
                         channel_id,
                         sequence,
@@ -888,12 +925,36 @@ impl ChunkMessageStream {
                         data,
                     }));
                 }
-                OP_SCHEMA | OP_CHANNEL => self.register_record(op, &content)?,
+                OP_SCHEMA | OP_CHANNEL => {
+                    // Registering mutates `self`: own the record content
+                    // first so the borrow of `self.inner` ends here.
+                    let content = self.inner[self.cursor + 9..end].to_vec();
+                    self.cursor = end;
+                    self.register_record(op, &content, filters)?;
+                }
                 // Chunks nest records of these kinds per spec; anything else
                 // is skipped.
-                _ => {}
+                _ => self.cursor = end,
             }
         }
+    }
+
+    /// Does channel `id` pass the topic filter? Decided once per channel and
+    /// memoized, so the per-message cost is one small map lookup instead of
+    /// a topic string clone plus a hash lookup.
+    fn channel_wanted(&mut self, id: u16, filters: &Filters) -> Result<bool, ReaderError> {
+        if let Some(wanted) = self.wanted.get(&id) {
+            return Ok(*wanted);
+        }
+        let topic = self.topics.get(&id).ok_or_else(|| {
+            ReaderError::generic(format!("MCAP message references unknown channel id {id}"))
+        })?;
+        let wanted = filters
+            .topics
+            .as_ref()
+            .is_none_or(|set| set.contains(&**topic));
+        self.wanted.insert(id, wanted);
+        Ok(wanted)
     }
 
     /// Parse the next record out of the data section for the unindexed walk.
@@ -931,35 +992,48 @@ impl ChunkMessageStream {
 
             match op {
                 OP_MESSAGE => {
-                    let mut content = vec![0u8; len as usize];
-                    self.file.seek(SeekFrom::Start(offset - len)).map_err(|e| {
-                        ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
-                    })?;
-                    self.file.read_exact(&mut content).map_err(|e| {
+                    // Read the 22-byte message header, then the payload
+                    // straight into its final buffer: one allocation, no
+                    // extra copy (this is the per-message hot path).
+                    if len < 22 {
+                        return Err(ReaderError::generic(
+                            "MCAP message record shorter than its fixed header",
+                        ));
+                    }
+                    let record_start = offset - len;
+                    let mut head = [0u8; 22];
+                    self.file
+                        .seek(SeekFrom::Start(record_start))
+                        .map_err(|e| {
+                            ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
+                        })?;
+                    self.file.read_exact(&mut head).map_err(|e| {
                         ReaderError::generic(format!("Failed to read MCAP message: {e}"))
                     })?;
-                    let mut buf = Buf::new(&content);
-                    let channel_id = buf.read_u16()?;
-                    let sequence = buf.read_u32()?;
-                    let log_time = buf.read_u64()?;
-                    let publish_time = buf.read_u64()?;
-                    let data = content[22..].to_vec();
-
+                    let channel_id = u16::from_le_bytes([head[0], head[1]]);
+                    let sequence = u32::from_le_bytes([
+                        head[2], head[3], head[4], head[5],
+                    ]);
+                    let log_time = u64::from_le_bytes([
+                        head[6], head[7], head[8], head[9], head[10], head[11], head[12],
+                        head[13],
+                    ]);
+                    let publish_time = u64::from_le_bytes([
+                        head[14], head[15], head[16], head[17], head[18], head[19], head[20],
+                        head[21],
+                    ]);
+                    // The filter needs only the header: rejected messages
+                    // never read their payload off disk.
                     if filters.start.is_some_and(|t| log_time < t)
                         || filters.stop.is_some_and(|t| log_time >= t)
+                        || !self.channel_wanted(channel_id, filters)?
                     {
                         continue;
                     }
-                    if let Some(topics) = &filters.topics {
-                        let topic = self.topic(channel_id).ok_or_else(|| {
-                            ReaderError::generic(format!(
-                                "MCAP message references unknown channel id {channel_id}"
-                            ))
-                        })?;
-                        if !topics.contains(topic.as_ref()) {
-                            continue;
-                        }
-                    }
+                    let mut data = vec![0u8; len as usize - 22];
+                    self.file.read_exact(&mut data).map_err(|e| {
+                        ReaderError::generic(format!("Failed to read MCAP message: {e}"))
+                    })?;
                     return Ok(Some(RawMcapMessage {
                         channel_id,
                         sequence,
@@ -976,7 +1050,7 @@ impl ChunkMessageStream {
                     self.file.read_exact(&mut content).map_err(|e| {
                         ReaderError::generic(format!("Failed to read MCAP record: {e}"))
                     })?;
-                    self.register_record(op, &content)?;
+                    self.register_record(op, &content, filters)?;
                 }
                 OP_CHUNK => {
                     // Read the whole chunk record, decompress, and drain it

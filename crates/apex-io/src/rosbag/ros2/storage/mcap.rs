@@ -21,6 +21,7 @@ use crate::rosbag::types::{
     Connection, Message, MessageDefinition, MessageDefinitionFormat, RawMessage,
 };
 use mcap_format::{Filters, McapSummary, MergedMcapStream};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -140,6 +141,9 @@ pub struct McapStorageReader {
     /// Per-file summaries read by seeking through the summary section only.
     /// `None` entries are files without a summary section (unindexed).
     summaries: Vec<Option<McapSummary>>,
+    /// Aggregated connections + stats, computed once per `open` (rebuilding
+    /// it per call cost one full summary walk each time).
+    aggregated: Option<(Vec<Connection>, McapSummaryStats)>,
 }
 
 impl McapStorageReader {
@@ -152,7 +156,17 @@ impl McapStorageReader {
             topic_connections: connections,
             is_open: false,
             summaries: Vec::new(),
+            aggregated: None,
         })
+    }
+
+    /// Aggregated connections + stats. Filled once by [`Self::open`]; the
+    /// fallback recomputes for callers that inspect a not-yet-open reader.
+    fn aggregated(&self) -> Cow<'_, (Vec<Connection>, McapSummaryStats)> {
+        match &self.aggregated {
+            Some(agg) => Cow::Borrowed(agg),
+            None => Cow::Owned(summarize_summaries(&self.summaries)),
+        }
     }
 
     /// Get all topics and their message counts from the MCAP summary sections.
@@ -162,12 +176,12 @@ impl McapStorageReader {
     /// milliseconds instead of a full decompression pass. Files without a
     /// summary section contribute nothing.
     pub fn get_topics_from_mcap(&self) -> Result<Vec<Connection>> {
-        Ok(summarize_summaries(&self.summaries).0)
+        Ok(self.aggregated().0.clone())
     }
 
     /// Aggregate message count and time range from the summary sections.
     pub fn summary_stats(&self) -> Result<McapSummaryStats> {
-        Ok(summarize_summaries(&self.summaries).1)
+        Ok(self.aggregated().1)
     }
 
     /// Build the global log-time-order message stream across all files,
@@ -194,6 +208,7 @@ impl StorageReader for McapStorageReader {
             let summary = mcap_format::read_summary(&mut file)?;
             self.summaries.push(summary);
         }
+        self.aggregated = Some(summarize_summaries(&self.summaries));
 
         self.is_open = true;
         Ok(())
@@ -201,6 +216,7 @@ impl StorageReader for McapStorageReader {
 
     fn close(&mut self) -> Result<()> {
         self.summaries.clear();
+        self.aggregated = None;
         self.is_open = false;
         Ok(())
     }
@@ -228,10 +244,11 @@ impl StorageReader for McapStorageReader {
         // fallback) from the summaries themselves. Channel IDs are NOT used
         // as keys: they are file-local and unrelated to the enumeration
         // order of the topic list.
-        let mut by_topic: HashMap<String, Arc<Connection>> = summarize_summaries(&self.summaries)
+        let mut by_topic: HashMap<String, Arc<Connection>> = self
+            .aggregated()
             .0
-            .into_iter()
-            .map(|c| (c.topic.clone(), Arc::new(c)))
+            .iter()
+            .map(|c| (c.topic.clone(), Arc::new(c.clone())))
             .collect();
         for connection in self.topic_connections.iter().cloned() {
             by_topic.insert(connection.topic.clone(), Arc::new(connection));
@@ -279,10 +296,11 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        let mut by_topic: HashMap<String, Arc<Connection>> = summarize_summaries(&self.summaries)
+        let mut by_topic: HashMap<String, Arc<Connection>> = self
+            .aggregated()
             .0
-            .into_iter()
-            .map(|c| (c.topic.clone(), Arc::new(c)))
+            .iter()
+            .map(|c| (c.topic.clone(), Arc::new(c.clone())))
             .collect();
         for connection in self.topic_connections.iter().cloned() {
             by_topic.insert(connection.topic.clone(), Arc::new(connection));
