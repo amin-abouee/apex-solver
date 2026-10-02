@@ -271,6 +271,54 @@ pub fn record_data_slice(buf: &[u8]) -> Result<&[u8]> {
         .ok_or_else(|| malformed("truncated record data"))
 }
 
+/// Walk the `name=value` fields of an encoded header without allocating.
+///
+/// `f` receives each `(name, value)` pair. This is the hot-path alternative
+/// to [`parse_header`] for records whose few fields of interest are known.
+pub fn scan_header_fields<'a>(
+    mut bytes: &'a [u8],
+    mut f: impl FnMut(&'a [u8], &'a [u8]),
+) -> Result<()> {
+    while !bytes.is_empty() {
+        if bytes.len() < 4 {
+            return Err(BagError::Ros1MalformedRecord {
+                reason: "truncated header field length".into(),
+            });
+        }
+        let len = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
+        bytes = &bytes[4..];
+        let field = bytes
+            .get(..len)
+            .ok_or_else(|| BagError::Ros1MalformedRecord {
+                reason: format!("header field truncated (need {len}, have {})", bytes.len()),
+            })?;
+        bytes = &bytes[len..];
+        let eq =
+            field
+                .iter()
+                .position(|&b| b == b'=')
+                .ok_or_else(|| BagError::Ros1MalformedRecord {
+                    reason: "header field missing `=`".into(),
+                })?;
+        f(&field[..eq], &field[eq + 1..]);
+    }
+    Ok(())
+}
+
+/// Read a record's raw header bytes into `header` and return the length of
+/// its data, leaving the stream at the start of the data. `None` on clean EOF.
+pub fn read_record_prefix<R: Read>(r: &mut R, header: &mut Vec<u8>) -> Result<Option<u32>> {
+    let header_len = match r.read_u32::<LittleEndian>() {
+        Ok(v) => v as usize,
+        Err(ref e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(e) => return Err(BagError::Io(e)),
+    };
+    header.clear();
+    header.resize(header_len, 0);
+    r.read_exact(header)?;
+    Ok(Some(r.read_u32::<LittleEndian>()?))
+}
+
 /// Write a record (header + data) to `w`.
 pub fn write_record<W: Write>(w: &mut W, header: &RecordHeader, data: &[u8]) -> Result<()> {
     let header_bytes = header.encode();
