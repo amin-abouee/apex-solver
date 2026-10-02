@@ -125,6 +125,17 @@ impl StorageReader for SqliteReader {
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
             )?;
 
+            // Read-path tuning: mmap mapped pages for the keyset pagination
+            // scans and a roomy page cache. Read-only, so durability is
+            // untouched.
+            for pragma in
+                ["PRAGMA mmap_size = 268435456", "PRAGMA cache_size = -65536"]
+            {
+                if let Err(e) = conn.execute_batch(pragma) {
+                    tracing::debug!("sqlite pragma '{pragma}' failed on {}: {e}", path.display());
+                }
+            }
+
             {
                 let mut stmt = conn.prepare(
                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('messages', 'topics')"
@@ -238,8 +249,14 @@ impl SqliteReader {
         let mut all_connections = Vec::new();
 
         for db_conn in &self.connections {
+            // One GROUP BY over `messages` counts every topic in a single
+            // pass; the old form ran one COUNT(*) query per topic, so a bag
+            // with 94 topics paid 94 table scans on every open.
             let mut stmt = db_conn.prepare(
-                "SELECT id, name, type, serialization_format, offered_qos_profiles FROM topics ORDER BY id"
+                "SELECT t.id, t.name, t.type, t.serialization_format, t.offered_qos_profiles, \
+                 COUNT(m.id) \
+                 FROM topics t LEFT JOIN messages m ON m.topic_id = t.id \
+                 GROUP BY t.id ORDER BY t.id",
             )?;
 
             let topic_rows = stmt.query_map([], |row| {
@@ -248,25 +265,20 @@ impl SqliteReader {
                 let message_type: String = row.get(2)?;
                 let serialization_format: String = row.get(3)?;
                 let offered_qos_profiles: String = row.get(4)?;
+                let message_count: i64 = row.get(5)?;
                 Ok((
                     id,
                     name,
                     message_type,
                     serialization_format,
                     offered_qos_profiles,
+                    message_count,
                 ))
             })?;
 
             for topic_result in topic_rows {
-                let (topic_id, name, message_type, serialization_format, _qos_profiles) =
+                let (_topic_id, name, message_type, serialization_format, _qos_profiles, count) =
                     topic_result?;
-
-                let mut count_stmt =
-                    db_conn.prepare("SELECT COUNT(*) FROM messages WHERE topic_id = ?")?;
-                let message_count: u64 = count_stmt.query_row([topic_id], |row| {
-                    let count: i64 = row.get(0)?;
-                    Ok(count as u64)
-                })?;
 
                 let connection = Connection {
                     id: (all_connections.len() + 1) as u32,
@@ -274,7 +286,7 @@ impl SqliteReader {
                     message_type,
                     message_definition: MessageDefinition::default(),
                     type_description_hash: String::new(),
-                    message_count,
+                    message_count: count.max(0) as u64,
                     serialization_format,
                     offered_qos_profiles: Vec::new(),
                 };
@@ -295,17 +307,17 @@ const PAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Streaming, bounded-memory message iterator over the db files of a bag.
 ///
-/// Pages through `messages` with a `(timestamp, id)` keyset instead of
-/// materialising the result set: memory is one page, whatever the bag size.
+/// Pages through each file's `messages` with a `(timestamp, id)` keyset
+/// instead of materialising the result set, and merges the files by their
+/// head keys, so messages come out in global timestamp order whatever the
+/// number of files. Memory is one page per file, whatever the bag size.
 struct SqliteMessageIter<'a> {
     reader: &'a SqliteReader,
     topics: Option<Vec<String>>,
     start: i64,
     stop: i64,
-    file: usize,
     /// Per-file state, built lazily when a file is first visited.
-    file_state: Option<FileState>,
-    page: std::collections::VecDeque<Result<RawMessage>>,
+    states: Vec<Option<FileState>>,
     failed: bool,
 }
 
@@ -314,6 +326,8 @@ struct FileState {
     /// `topic_id IN (...)` clause, empty when every topic is wanted.
     topic_clause: String,
     last: Option<(i64, i64)>,
+    /// Page of fetched messages with their `(timestamp, id)` sort keys.
+    page: std::collections::VecDeque<((i64, i64), Result<RawMessage>)>,
     done: bool,
 }
 
@@ -329,9 +343,7 @@ impl<'a> SqliteMessageIter<'a> {
             topics,
             start: start.map_or(i64::MIN, |s| i64::try_from(s).unwrap_or(i64::MAX)),
             stop: stop.map_or(i64::MAX, |s| i64::try_from(s).unwrap_or(i64::MAX)),
-            file: 0,
-            file_state: None,
-            page: std::collections::VecDeque::new(),
+            states: Vec::new(),
             failed: false,
         }
     }
@@ -386,18 +398,17 @@ impl<'a> SqliteMessageIter<'a> {
             topic_map,
             topic_clause,
             last: None,
+            page: std::collections::VecDeque::new(),
             done: false,
         })
     }
 
-    /// Fetch the next page of the current file into `self.page`.
-    fn fill_page(&mut self) -> Result<()> {
-        let db = &self.reader.connections[self.file];
-        let state = match self.file_state.take() {
-            Some(s) => s,
-            None => self.init_file(db)?,
+    /// Fetch the next page of file `idx` into its queue.
+    fn fill_page(&mut self, idx: usize) -> Result<()> {
+        let db = &self.reader.connections[idx];
+        let Some(state) = self.states[idx].as_mut() else {
+            return Ok(());
         };
-        let mut state = state;
         let (last_ts, last_id) = state.last.unwrap_or((i64::MIN, i64::MIN));
         let sql = format!(
             "SELECT id, topic_id, timestamp, data FROM messages \
@@ -408,8 +419,8 @@ impl<'a> SqliteMessageIter<'a> {
         );
         let mut stmt = db.prepare_cached(&sql)?;
         let mut rows = stmt.query((last_ts, last_id, self.start, self.stop))?;
-        let mut bytes = 0usize;
         let mut fetched = 0usize;
+        let mut bytes = 0usize;
         while let Some(row) = rows.next()? {
             let id: i64 = row.get(0)?;
             let topic_id: i64 = row.get(1)?;
@@ -419,11 +430,14 @@ impl<'a> SqliteMessageIter<'a> {
             fetched += 1;
             bytes += data.len();
             if let Some(connection) = state.topic_map.get(&topic_id) {
-                self.page.push_back(Ok(RawMessage {
-                    connection: connection.clone(),
-                    timestamp: timestamp as u64,
-                    raw_data: data,
-                }));
+                state.page.push_back((
+                    (timestamp, id),
+                    Ok(RawMessage {
+                        connection: connection.clone(),
+                        timestamp: timestamp as u64,
+                        raw_data: data,
+                    }),
+                ));
             }
             if bytes >= PAGE_BYTES {
                 break;
@@ -432,8 +446,36 @@ impl<'a> SqliteMessageIter<'a> {
         if fetched == 0 {
             state.done = true;
         }
-        self.file_state = Some(state);
         Ok(())
+    }
+
+    /// Make sure file `idx` has a state and a filled page. After this
+    /// returns `Ok`, the file's head message is available unless the file is
+    /// done.
+    fn ensure_head(&mut self, idx: usize) -> Result<()> {
+        if self.states.len() <= idx {
+            self.states.resize_with(idx + 1, || None);
+        }
+        if self.states[idx].is_none() {
+            self.states[idx] = Some(self.init_file(&self.reader.connections[idx])?);
+        }
+        let Some(state) = self.states[idx].as_mut() else {
+            return Ok(());
+        };
+        if state.page.is_empty() && !state.done {
+            self.fill_page(idx)?;
+        }
+        Ok(())
+    }
+
+    /// The `(timestamp, id)` sort key of file `idx`'s head message.
+    fn head_key(&self, idx: usize) -> Option<(i64, i64)> {
+        self.states
+            .get(idx)?
+            .as_ref()?
+            .page
+            .front()
+            .map(|(key, _)| *key)
     }
 }
 
@@ -441,22 +483,35 @@ impl Iterator for SqliteMessageIter<'_> {
     type Item = Result<RawMessage>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            if let Some(item) = self.page.pop_front() {
-                return Some(item);
-            }
-            if self.failed || self.file >= self.reader.connections.len() {
-                return None;
-            }
-            if self.file_state.as_ref().is_some_and(|s| s.done) {
-                self.file += 1;
-                self.file_state = None;
-                continue;
-            }
-            if let Err(e) = self.fill_page() {
+        if self.failed {
+            return None;
+        }
+        // K-way merge by head key: pick the file whose front message has the
+        // smallest (timestamp, id); earlier files win ties so equal
+        // timestamps interleave in file order.
+        let mut best: Option<(usize, i64, i64)> = None;
+        for idx in 0..self.reader.connections.len() {
+            if let Err(e) = self.ensure_head(idx) {
                 self.failed = true;
                 return Some(Err(e));
             }
+            let Some((ts, id)) = self.head_key(idx) else {
+                continue;
+            };
+            if best.is_none_or(|(_, bts, bid)| ts < bts || (ts == bts && id < bid)) {
+                best = Some((idx, ts, id));
+            }
+        }
+        let (idx, _, _) = best?;
+        match self
+            .states
+            .get_mut(idx)
+            .and_then(|s| s.as_mut())
+            .and_then(|s| s.page.pop_front())
+        {
+            Some((_, msg)) => Some(msg),
+            // Unreachable: `best` came from a checked head.
+            None => None,
         }
     }
 }
@@ -1047,6 +1102,53 @@ mod tests {
             offered_qos_profiles: Vec::new(),
         };
         assert!(writer.write(&unknown_conn, 0, &[]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn multi_file_streams_in_global_timestamp_order() -> TestResult {
+        use crate::rosbag::types::CompressionMode;
+        let dir = tempfile::tempdir()?;
+
+        // Two single-file bags with interleaved timestamps: file A holds
+        // 100/102/104 ns, file B holds 101/103/105 ns on the same topic.
+        let mut db_paths = Vec::new();
+        let connection = Connection {
+            id: 1,
+            topic: "/t".into(),
+            message_type: "std_msgs/msg/Int32".into(),
+            message_definition: MessageDefinition::default(),
+            type_description_hash: String::new(),
+            message_count: 0,
+            serialization_format: "cdr".into(),
+            offered_qos_profiles: Vec::new(),
+        };
+        for (name, times) in [
+            ("a", [100u64, 102, 104]),
+            ("b", [101u64, 103, 105]),
+        ] {
+            let bag = dir.path().join(name);
+            std::fs::create_dir(&bag)?;
+            let mut w = SqliteWriter::new(&bag, CompressionMode::None)?;
+            w.open()?;
+            w.add_connection(&connection, "")?;
+            for ts in times {
+                w.write(&connection, ts, &ts.to_le_bytes())?;
+            }
+            w.close(4, "")?;
+            db_paths.push(bag.join(format!("{name}.db3")));
+        }
+
+        let path_refs: Vec<&std::path::Path> =
+            db_paths.iter().map(|p| p.as_path()).collect();
+        let mut reader = SqliteReader::new(path_refs, vec![])?;
+        reader.open()?;
+        let timestamps: Vec<u64> = reader
+            .raw_messages()?
+            .collect::<Result<Vec<_>>>()?
+            .into_iter()
+            .map(|m| m.timestamp)
+            .collect();
+        assert_eq!(timestamps, vec![100, 101, 102, 103, 104, 105]);
         Ok(())
     }
 }

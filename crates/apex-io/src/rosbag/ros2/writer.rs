@@ -385,8 +385,13 @@ impl Writer {
         Ok(yaml.trim().to_string())
     }
 
-    /// Compress storage file (for file-level compression)
+    /// Compress storage file (for file-level compression).
+    ///
+    /// Streams through a bounded buffer instead of reading the whole storage
+    /// file into memory: bag-level zstd must not need the file size in RAM.
     fn compress_storage_file(&self) -> Result<()> {
+        use std::io::{BufReader, BufWriter, Write};
+
         let bag_file_name = self
             .bag_path
             .file_name()
@@ -406,9 +411,11 @@ impl Writer {
         let compressed_file =
             storage_file.with_extension(format!("{}.{}", ext, self.compression_format.as_str()));
 
-        let input_data = std::fs::read(&storage_file)?;
-        let compressed_data = zstd::encode_all(input_data.as_slice(), 0)?;
-        std::fs::write(&compressed_file, compressed_data)?;
+        let mut input = BufReader::with_capacity(4 << 20, std::fs::File::open(&storage_file)?);
+        let output = BufWriter::with_capacity(1 << 20, std::fs::File::create(&compressed_file)?);
+        let mut writer = zstd::stream::Encoder::new(output, 0)?;
+        std::io::copy(&mut input, &mut writer)?;
+        writer.finish()?.flush()?;
         std::fs::remove_file(&storage_file)?;
 
         Ok(())
