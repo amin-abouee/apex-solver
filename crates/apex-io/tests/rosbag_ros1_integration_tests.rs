@@ -347,4 +347,50 @@ mod lazy_index {
         assert!(result.is_err(), "inconsistent counts must not be trusted");
         Ok(())
     }
+
+    /// Hundreds of tiny compressed chunks finish out of order on the pool;
+    /// the file must still hold them in write order with a correct index.
+    #[test]
+    fn parallel_chunk_compression_preserves_order_and_content() -> TestResult {
+        for comp in [Ros1Compression::Bz2, Ros1Compression::Lz4] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("p.bag");
+            let mut w = Ros1Writer::new(&path)?;
+            w.set_compression(comp)?;
+            w.set_chunk_threshold(400)?; // ~3 messages per chunk
+            w.open()?;
+            let a = w.add_connection("/a", "t/A", "x", "", false)?;
+            let b = w.add_connection("/b", "t/B", "x", "", false)?;
+            let n = 1_500u64;
+            for i in 0..n {
+                // varied sizes/compressibility so chunk jobs take uneven time
+                let len = 40 + (i as usize * 53) % 300;
+                let payload: Vec<u8> = (0..len).map(|k| ((k as u64 * 7 + i) % 253) as u8).collect();
+                w.write(
+                    if i.is_multiple_of(2) { &a } else { &b },
+                    1_000 + i,
+                    &payload,
+                )?;
+            }
+            w.close()?;
+
+            let mut r = Ros1Reader::new(&path)?;
+            r.open()?;
+            assert_eq!(r.message_count(), n, "{comp:?}");
+            let msgs = r.raw_messages()?;
+            assert_eq!(msgs.len() as u64, n);
+            for (i, m) in msgs.iter().enumerate() {
+                let i = i as u64;
+                assert_eq!(m.timestamp, 1_000 + i, "{comp:?}");
+                let len = 40 + (i as usize * 53) % 300;
+                let want: Vec<u8> = (0..len).map(|k| ((k as u64 * 7 + i) % 253) as u8).collect();
+                assert_eq!(m.raw_data, want, "{comp:?} message {i}");
+                assert_eq!(
+                    m.connection.topic,
+                    if i.is_multiple_of(2) { "/a" } else { "/b" }
+                );
+            }
+        }
+        Ok(())
+    }
 }
