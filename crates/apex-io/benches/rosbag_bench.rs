@@ -75,10 +75,7 @@ fn bench_open_info(c: &mut Criterion) {
     g.finish();
 }
 
-fn scan(
-    path: &Path,
-    selection: &Selection,
-) -> apex_io::rosbag::Result<u64> {
+fn scan(path: &Path, selection: &Selection) -> apex_io::rosbag::Result<u64> {
     let mut r = BagReader::open(path)?;
     let conns = r.selected_connections(selection);
     let mut bytes = 0u64;
@@ -92,7 +89,10 @@ fn scan(
 fn bench_read(c: &mut Criterion) {
     let f = fixtures();
     let vio = Selection {
-        include: helpers::Scenario::vio_topics().iter().map(|s| s.to_string()).collect(),
+        include: helpers::Scenario::vio_topics()
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
         ..Selection::default()
     };
     let (start, end) = helpers::Scenario::window();
@@ -155,8 +155,7 @@ fn bench_write(c: &mut Criterion) {
 }
 
 fn write_bag_zstd(scenario: &helpers::Scenario, path: &Path) {
-    let mut w =
-        BagWriter::create(path, BagKind::McapFile, OutputCompression::Zstd).unwrap();
+    let mut w = BagWriter::create(path, BagKind::McapFile, OutputCompression::Zstd).unwrap();
     let handles: Vec<_> = scenario
         .topics
         .iter()
@@ -177,7 +176,8 @@ fn write_bag_zstd(scenario: &helpers::Scenario, path: &Path) {
         })
         .collect();
     for m in &scenario.messages {
-        w.write(handles[m.topic_idx], m.timestamp_ns, &m.cdr).unwrap();
+        w.write(handles[m.topic_idx], m.timestamp_ns, &m.cdr)
+            .unwrap();
     }
     w.close().unwrap();
 }
@@ -193,7 +193,11 @@ fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
     let mut reader = BagReader::open(input).unwrap();
     let selection = Selection::default();
     let selected = reader.selected_connections(&selection);
-    let to = if kind == BagKind::Ros1Bag { Dialect::Ros1 } else { Dialect::Ros2 };
+    let to = if kind == BagKind::Ros1Bag {
+        Dialect::Ros1
+    } else {
+        Dialect::Ros2
+    };
     let (same, different): (Vec<Connection>, Vec<Connection>) = selected
         .iter()
         .cloned()
@@ -204,7 +208,9 @@ fn convert_once(input: &Path, kind: BagKind, out: &Path) -> u64 {
     let mut actions: HashMap<u32, Action> = HashMap::new();
     let mut readable = Vec::new();
     for c in &same {
-        let h = writer.add_connection(&NewConnection::from_connection(c)).unwrap();
+        let h = writer
+            .add_connection(&NewConnection::from_connection(c))
+            .unwrap();
         actions.insert(c.id, Action::Copy(h));
         readable.push(c.clone());
     }
@@ -266,9 +272,24 @@ fn bench_transcode(c: &mut Criterion) {
 
     let cases = [
         ("imu_ros1_to_cdr", "/imu0", Dialect::Ros1, Dialect::Ros2),
-        ("image_ros1_to_cdr", "/cam0/image_raw", Dialect::Ros1, Dialect::Ros2),
-        ("pointcloud2_ros1_to_cdr", "/lidar/points", Dialect::Ros1, Dialect::Ros2),
-        ("image_cdr_to_ros1", "/cam0/image_raw", Dialect::Ros2, Dialect::Ros1),
+        (
+            "image_ros1_to_cdr",
+            "/cam0/image_raw",
+            Dialect::Ros1,
+            Dialect::Ros2,
+        ),
+        (
+            "pointcloud2_ros1_to_cdr",
+            "/lidar/points",
+            Dialect::Ros1,
+            Dialect::Ros2,
+        ),
+        (
+            "image_cdr_to_ros1",
+            "/cam0/image_raw",
+            Dialect::Ros2,
+            Dialect::Ros1,
+        ),
     ];
     for (name, topic, from, to) in cases {
         let spec = f
@@ -285,7 +306,13 @@ fn bench_transcode(c: &mut Criterion) {
             .iter()
             .filter(|m| f.scenario.topics[m.topic_idx].topic == topic)
             .take(10)
-            .map(|m| if from == Dialect::Ros1 { &m.ros1 } else { &m.cdr })
+            .map(|m| {
+                if from == Dialect::Ros1 {
+                    &m.ros1
+                } else {
+                    &m.cdr
+                }
+            })
             .collect();
         let mut out = Vec::new();
         g.bench_function(name, |b| {

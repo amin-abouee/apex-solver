@@ -52,18 +52,18 @@ fn bench_read(c: &mut Criterion) {
     let both = RecordFilter::all();
     let imu_only = RecordFilter::streams([f.vrs.imu_stream]);
     let images_only = RecordFilter::streams([f.vrs.image_stream]);
-    for (name, filter) in [("full", &both), ("imu_only", &imu_only), ("images_only", &images_only)] {
+    for (name, filter) in [
+        ("full", &both),
+        ("imu_only", &imu_only),
+        ("images_only", &images_only),
+    ] {
         g.bench_function(name, |b| {
             b.iter(|| {
                 let mut r = VrsReader::open(&f.vrs.path).unwrap();
                 let mut cur = r.cursor(black_box(filter));
                 let mut buf = Vec::new();
                 let mut bytes = 0u64;
-                while r
-                    .next_record_into(&mut cur, &mut buf)
-                    .unwrap()
-                    .is_some()
-                {
+                while r.next_record_into(&mut cur, &mut buf).unwrap().is_some() {
                     bytes += buf.len() as u64;
                 }
                 black_box(bytes);
@@ -111,9 +111,12 @@ fn bench_copy(c: &mut Criterion) {
             || helpers::scratch_dir("bench"),
             |s| {
                 let mut src = VrsReader::open(&f.vrs.path).unwrap();
-                let summary =
-                    copy_filtered(black_box(&mut src), s.0.join("copy.vrs"), &CopyOptions::default())
-                        .unwrap();
+                let summary = copy_filtered(
+                    black_box(&mut src),
+                    s.0.join("copy.vrs"),
+                    &CopyOptions::default(),
+                )
+                .unwrap();
                 black_box(summary.bytes);
             },
             BatchSize::PerIteration,
@@ -129,7 +132,8 @@ fn bench_copy(c: &mut Criterion) {
                     end: Some(7.0),
                     ..CopyOptions::default()
                 };
-                let summary = copy_filtered(black_box(&mut src), s.0.join("trim.vrs"), &opts).unwrap();
+                let summary =
+                    copy_filtered(black_box(&mut src), s.0.join("trim.vrs"), &opts).unwrap();
                 black_box(summary.bytes);
             },
             BatchSize::PerIteration,
@@ -204,8 +208,7 @@ fn bench_real_vrs(c: &mut Criterion) {
     g.bench_function("decode_imu_window", |b| {
         b.iter(|| {
             let mut rec = AriaRecording::open(&path).unwrap();
-            let mut cur =
-                rec.cursor_between(&imus, black_box(window.0), black_box(window.1));
+            let mut cur = rec.cursor_between(&imus, black_box(window.0), black_box(window.1));
             let mut n = 0u64;
             while let Some(Sample::Imu(s)) = rec.next_sample(&mut cur).unwrap() {
                 black_box(s.capture_ns);

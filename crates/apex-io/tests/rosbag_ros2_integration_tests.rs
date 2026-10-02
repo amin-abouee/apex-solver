@@ -1165,3 +1165,43 @@ mod message_compression {
         Ok(())
     }
 }
+
+/// Large message blobs spill into overflow-page chains; 32 KiB pages make
+/// writing camera/lidar-heavy sqlite bags about twice as fast as the 4 KiB
+/// default, and the result is an ordinary SQLite file any reader opens.
+#[test]
+fn sqlite_writer_uses_large_pages_and_stays_readable()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    use apex_io::rosbag::{Reader, StoragePlugin, Writer};
+
+    let dir = tempfile::tempdir()?;
+    let bag = dir.path().join("pg");
+    let mut w = Writer::new(&bag, None, Some(StoragePlugin::Sqlite3))?;
+    w.open()?;
+    let c = w.add_connection(
+        "/img".into(),
+        "sensor_msgs/msg/Image".into(),
+        None,
+        None,
+        None,
+        None,
+    )?;
+    for i in 0..20u64 {
+        w.write(&c, 1_000 + i, &vec![i as u8; 100_000])?;
+    }
+    w.close()?;
+
+    let db = rusqlite::Connection::open(bag.join("pg.db3"))?;
+    let page_size: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    assert_eq!(page_size, 32768);
+    drop(db);
+
+    let mut r = Reader::new(&bag)?;
+    r.open()?;
+    let msgs = r
+        .raw_messages()?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    assert_eq!(msgs.len(), 20);
+    assert_eq!(msgs[7].raw_data, vec![7u8; 100_000]);
+    Ok(())
+}

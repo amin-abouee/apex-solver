@@ -46,10 +46,22 @@ impl Scenario {
     /// clouds (5 Hz, 10k points) — about 48 MB per encoding.
     pub fn build() -> Self {
         let topics = vec![
-            TopicSpec { topic: "/cam0/image_raw", ros1_type: "sensor_msgs/Image" },
-            TopicSpec { topic: "/cam1/image_raw", ros1_type: "sensor_msgs/Image" },
-            TopicSpec { topic: "/imu0", ros1_type: "sensor_msgs/Imu" },
-            TopicSpec { topic: "/lidar/points", ros1_type: "sensor_msgs/PointCloud2" },
+            TopicSpec {
+                topic: "/cam0/image_raw",
+                ros1_type: "sensor_msgs/Image",
+            },
+            TopicSpec {
+                topic: "/cam1/image_raw",
+                ros1_type: "sensor_msgs/Image",
+            },
+            TopicSpec {
+                topic: "/imu0",
+                ros1_type: "sensor_msgs/Imu",
+            },
+            TopicSpec {
+                topic: "/lidar/points",
+                ros1_type: "sensor_msgs/PointCloud2",
+            },
         ];
         let mut messages = Vec::new();
 
@@ -130,10 +142,17 @@ pub fn ros2_type(ros1_type: &str) -> String {
 /// Write the scenario as `kind`, payloads encoded `ros1` (ROS1 bag) or
 /// `cdr` (everything else).
 pub fn write_bag(scenario: &Scenario, kind: BagKind, path: &Path) {
-    let fmt = if kind == BagKind::Ros1Bag { "ros1" } else { "cdr" };
-    let dialect = if fmt == "ros1" { Dialect::Ros1 } else { Dialect::Ros2 };
-    let mut w =
-        BagWriter::create(path, kind, OutputCompression::None).expect("create output bag");
+    let fmt = if kind == BagKind::Ros1Bag {
+        "ros1"
+    } else {
+        "cdr"
+    };
+    let dialect = if fmt == "ros1" {
+        Dialect::Ros1
+    } else {
+        Dialect::Ros2
+    };
+    let mut w = BagWriter::create(path, kind, OutputCompression::None).expect("create output bag");
     let handles: Vec<_> = scenario
         .topics
         .iter()
@@ -187,11 +206,24 @@ fn image_ros1(seq: u32, ts_ns: u64, data: &[u8]) -> Vec<u8> {
 fn imu_ros1(seq: u32, ts_ns: u64) -> Vec<u8> {
     let imu = r1::Imu {
         header: header(seq, ts_ns, "imu_link"),
-        orientation: r1::Quaternion { x: 0.0, y: 0.0, z: 0.0, w: 1.0 },
+        orientation: r1::Quaternion {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 1.0,
+        },
         orientation_covariance: [-1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        angular_velocity: r1::Vector3 { x: 0.01, y: -0.02, z: 0.03 },
+        angular_velocity: r1::Vector3 {
+            x: 0.01,
+            y: -0.02,
+            z: 0.03,
+        },
         angular_velocity_covariance: [0.0; 9],
-        linear_acceleration: r1::Vector3 { x: 9.81, y: 0.0, z: -0.1 },
+        linear_acceleration: r1::Vector3 {
+            x: 9.81,
+            y: 0.0,
+            z: -0.1,
+        },
         linear_acceleration_covariance: [0.01; 9],
     };
     let mut s = Ros1Serializer::new();
@@ -200,7 +232,8 @@ fn imu_ros1(seq: u32, ts_ns: u64) -> Vec<u8> {
 }
 
 /// Hand-rolled ROS1 `sensor_msgs/PointCloud2` (xyz + intensity, f32).
-fn point_cloud2_ros1(seq: u32, ts_ns: u64, n: u32, rng: &mut Rng) -> Vec<u8> {    const POINT_STEP: u32 = 16;
+fn point_cloud2_ros1(seq: u32, ts_ns: u64, n: u32, rng: &mut Rng) -> Vec<u8> {
+    const POINT_STEP: u32 = 16;
     let mut s = Ros1Serializer::new();
     s.write_u32(seq);
     s.write_u32(u32::try_from(ts_ns / NS_PER_S).expect("stamp sec"));
@@ -234,4 +267,3 @@ fn point_cloud2_ros1(seq: u32, ts_ns: u64, n: u32, rng: &mut Rng) -> Vec<u8> {  
     s.write_u8(1); // is_dense
     s.into_bytes()
 }
-

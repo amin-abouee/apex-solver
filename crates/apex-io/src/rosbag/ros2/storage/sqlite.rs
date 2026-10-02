@@ -629,7 +629,7 @@ impl crate::rosbag::storage::StorageWriter for SqliteWriter {
         // fsyncs, keep a large page cache, and insert inside one long
         // transaction. The timestamp index is built once at close.
         connection.execute_batch(
-            "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; \
+            "PRAGMA page_size=32768; PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; \
              PRAGMA locking_mode=EXCLUSIVE; PRAGMA cache_size=-65536;",
         )?;
         self.connection = Some(connection);
