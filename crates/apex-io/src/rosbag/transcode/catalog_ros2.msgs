@@ -1132,3 +1132,86 @@ string raw_file_contents
 ================================================================================
 MSG: unique_identifier_msgs/UUID
 uint8[16] uuid
+================================================================================
+MSG: lifecycle_msgs/State
+uint8 PRIMARY_STATE_UNKNOWN = 0
+uint8 PRIMARY_STATE_UNCONFIGURED = 1
+uint8 PRIMARY_STATE_INACTIVE = 2
+uint8 PRIMARY_STATE_ACTIVE = 3
+uint8 PRIMARY_STATE_FINALIZED = 4
+uint8 TRANSITION_STATE_CONFIGURING = 10
+uint8 TRANSITION_STATE_CLEANINGUP = 11
+uint8 TRANSITION_STATE_SHUTTINGDOWN = 12
+uint8 TRANSITION_STATE_ACTIVATING = 13
+uint8 TRANSITION_STATE_DEACTIVATING = 14
+uint8 TRANSITION_STATE_ERRORPROCESSING = 15
+uint8 id
+string label
+================================================================================
+MSG: lifecycle_msgs/Transition
+uint8 TRANSITION_CREATE = 0
+uint8 TRANSITION_CONFIGURE = 1
+uint8 TRANSITION_CLEANUP = 2
+uint8 TRANSITION_ACTIVATE = 3
+uint8 TRANSITION_DEACTIVATE = 4
+uint8 TRANSITION_UNCONFIGURED_SHUTDOWN  = 5
+uint8 TRANSITION_INACTIVE_SHUTDOWN = 6
+uint8 TRANSITION_ACTIVE_SHUTDOWN = 7
+uint8 TRANSITION_DESTROY = 8
+uint8 TRANSITION_ON_CONFIGURE_SUCCESS = 10
+uint8 TRANSITION_ON_CONFIGURE_FAILURE = 11
+uint8 TRANSITION_ON_CONFIGURE_ERROR = 12
+uint8 TRANSITION_ON_CLEANUP_SUCCESS = 20
+uint8 TRANSITION_ON_CLEANUP_FAILURE = 21
+uint8 TRANSITION_ON_CLEANUP_ERROR = 22
+uint8 TRANSITION_ON_ACTIVATE_SUCCESS = 30
+uint8 TRANSITION_ON_ACTIVATE_FAILURE = 31
+uint8 TRANSITION_ON_ACTIVATE_ERROR = 32
+uint8 TRANSITION_ON_DEACTIVATE_SUCCESS = 40
+uint8 TRANSITION_ON_DEACTIVATE_FAILURE = 41
+uint8 TRANSITION_ON_DEACTIVATE_ERROR = 42
+uint8 TRANSITION_ON_SHUTDOWN_SUCCESS = 50
+uint8 TRANSITION_ON_SHUTDOWN_FAILURE = 51
+uint8 TRANSITION_ON_SHUTDOWN_ERROR = 52
+uint8 TRANSITION_ON_ERROR_SUCCESS = 60
+uint8 TRANSITION_ON_ERROR_FAILURE = 61
+uint8 TRANSITION_ON_ERROR_ERROR = 62
+uint8 TRANSITION_CALLBACK_SUCCESS = 97
+uint8 TRANSITION_CALLBACK_FAILURE = 98
+uint8 TRANSITION_CALLBACK_ERROR = 99
+uint8 id
+string label
+================================================================================
+MSG: lifecycle_msgs/TransitionDescription
+Transition transition
+State start_state
+State goal_state
+================================================================================
+MSG: lifecycle_msgs/TransitionEvent
+builtin_interfaces/Time stamp
+Transition transition
+State start_state
+State goal_state
+================================================================================
+MSG: actionlib_msgs/GoalID
+time stamp
+string id
+================================================================================
+MSG: actionlib_msgs/GoalStatus
+GoalID goal_id
+uint8 status
+uint8 PENDING         = 0
+uint8 ACTIVE          = 1
+uint8 PREEMPTED       = 2
+uint8 SUCCEEDED       = 3
+uint8 ABORTED         = 4
+uint8 REJECTED        = 5
+uint8 PREEMPTING      = 6
+uint8 RECALLING       = 7
+uint8 RECALLED        = 8
+uint8 LOST            = 9
+string text
+================================================================================
+MSG: actionlib_msgs/GoalStatusArray
+Header header
+GoalStatus[] status_list

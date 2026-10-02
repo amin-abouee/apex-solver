@@ -35,4 +35,37 @@ mod tests {
             );
         }
     }
+
+    /// Known ROS1 md5sums (from the ROS distribution): the actionlib types
+    /// every ROS1 action server publishes.
+    #[test]
+    fn actionlib_msgs_match_the_ros1_md5sums() {
+        let cat = catalog().unwrap_or_else(|e| panic!("catalog: {e}"));
+        for (name, md5) in [
+            ("actionlib_msgs/GoalID", "302881f31927c1df708a2dbab0e80ee8"),
+            (
+                "actionlib_msgs/GoalStatus",
+                "d388f9b87b3c471f784434d671988d4a",
+            ),
+            (
+                "actionlib_msgs/GoalStatusArray",
+                "8b2b82f13216d0a8ea88bd3af735e619",
+            ),
+        ] {
+            assert_eq!(cat.md5(name).unwrap_or_default(), md5, "{name}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_msgs_are_present_and_convert() {
+        let cat = catalog().unwrap_or_else(|e| panic!("catalog: {e}"));
+        for name in [
+            "lifecycle_msgs/State",
+            "lifecycle_msgs/Transition",
+            "lifecycle_msgs/TransitionDescription",
+            "lifecycle_msgs/TransitionEvent",
+        ] {
+            assert!(cat.contains(name), "{name}");
+        }
+    }
 }
