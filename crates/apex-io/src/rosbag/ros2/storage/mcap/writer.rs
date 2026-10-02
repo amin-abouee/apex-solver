@@ -1,50 +1,49 @@
 //! MCAP storage backend for writing bag files.
 //!
-//! Wraps the `mcap` crate's chunked writer: one schema per message type, one
-//! channel per [`Connection`], and a summary section (statistics, chunk
-//! indexes) on [`close`](StorageWriter::close) so the file is seekable by
-//! [`McapStorageReader`](super::McapStorageReader) and by third-party tools.
+//! One schema per message type, one channel per [`Connection`], and a summary
+//! section (statistics, chunk indexes) on [`close`](StorageWriter::close) so
+//! the file is seekable by [`McapStorageReader`](super::McapStorageReader) and
+//! by third-party tools. Chunks are compressed on several cores, in order
+//! (see [`chunked`](super::chunked)).
 //!
 //! Message payloads are written verbatim, so the channel's
 //! `message_encoding` follows the connection's `serialization_format`
 //! (`cdr` for ROS2 payloads, `ros1` for ROS1 payloads).
 
+use super::chunked::{ChunkCompression, ChunkedWriter};
 use crate::rosbag::error::{BagError, Result};
 use crate::rosbag::storage::StorageWriter;
 use crate::rosbag::types::{CompressionMode, Connection};
-use mcap::records::MessageHeader;
-use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-/// Uncompressed chunk target. The `mcap` default (768 KiB) is smaller than a
-/// single camera frame; larger chunks amortise per-chunk index and
-/// compression overhead.
-const CHUNK_SIZE: u64 = 4 * 1024 * 1024;
-
-type McapFileWriter = mcap::Writer<'static, BufWriter<File>>;
-
-fn mcap_err(e: mcap::McapError) -> BagError {
-    BagError::writer(format!("mcap: {e}"))
-}
+/// Uncompressed chunk target. Larger than a single camera frame so per-chunk
+/// index and compression overhead amortise; small enough that readers (which
+/// hold a few decompressed chunks per worker) stay light.
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// Per-connection write state.
 struct ChannelState {
-    mcap_id: u16,
+    id: u16,
     sequence: u32,
+}
+
+/// A schema declared by `add_msgtype`, registered in the file on first use.
+struct PendingSchema {
+    encoding: &'static str,
+    data: Vec<u8>,
 }
 
 /// Writer producing a single `.mcap` file.
 pub struct McapWriter {
     mcap_path: PathBuf,
     profile: &'static str,
-    compression: Option<mcap::Compression>,
-    writer: Option<McapFileWriter>,
-    /// Schemas registered by `add_msgtype`, keyed by message type name.
-    schemas: HashMap<String, Arc<mcap::Schema<'static>>>,
+    compression: ChunkCompression,
+    writer: Option<ChunkedWriter>,
+    /// Schemas declared by `add_msgtype`, keyed by message type name.
+    pending_schemas: HashMap<String, PendingSchema>,
+    /// Ids of schemas already written to the file.
+    schema_ids: HashMap<String, u16>,
     /// Channels registered by `add_connection`, keyed by connection id.
     channels: HashMap<u32, ChannelState>,
 }
@@ -73,15 +72,16 @@ impl McapWriter {
         compression_mode: CompressionMode,
     ) -> Self {
         let compression = match compression_mode {
-            CompressionMode::Storage => Some(mcap::Compression::Zstd),
-            _ => None,
+            CompressionMode::Storage => ChunkCompression::Zstd,
+            _ => ChunkCompression::None,
         };
         Self {
             mcap_path,
             profile,
             compression,
             writer: None,
-            schemas: HashMap::new(),
+            pending_schemas: HashMap::new(),
+            schema_ids: HashMap::new(),
             channels: HashMap::new(),
         }
     }
@@ -92,22 +92,21 @@ impl StorageWriter for McapWriter {
         if self.writer.is_some() {
             return Err(BagError::BagAlreadyOpen);
         }
-        let file = BufWriter::with_capacity(1 << 20, File::create(&self.mcap_path)?);
-        let writer = mcap::WriteOptions::new()
-            .compression(self.compression)
-            .profile(self.profile)
-            .chunk_size(Some(CHUNK_SIZE))
-            .create(file)
-            .map_err(mcap_err)?;
-        self.writer = Some(writer);
+        self.writer = Some(ChunkedWriter::create(
+            &self.mcap_path,
+            self.profile,
+            self.compression,
+            CHUNK_SIZE,
+        )?);
         Ok(())
     }
 
     fn close(&mut self, _version: u32, _metadata: &str) -> Result<()> {
         if let Some(mut writer) = self.writer.take() {
-            writer.finish().map_err(mcap_err)?;
+            writer.finish()?;
         }
-        self.schemas.clear();
+        self.pending_schemas.clear();
+        self.schema_ids.clear();
         self.channels.clear();
         Ok(())
     }
@@ -121,13 +120,12 @@ impl StorageWriter for McapWriter {
         } else {
             "ros2msg"
         };
-        self.schemas.insert(
+        self.pending_schemas.insert(
             connection.message_type.clone(),
-            Arc::new(mcap::Schema {
-                name: connection.message_type.clone(),
-                encoding: encoding.to_string(),
-                data: Cow::Owned(connection.message_definition.data.clone().into_bytes()),
-            }),
+            PendingSchema {
+                encoding,
+                data: connection.message_definition.data.clone().into_bytes(),
+            },
         );
         Ok(())
     }
@@ -138,6 +136,19 @@ impl StorageWriter for McapWriter {
         offered_qos_profiles: &str,
     ) -> Result<()> {
         let writer = self.writer.as_mut().ok_or(BagError::BagNotOpen)?;
+
+        // Register the schema the first time a channel needs it.
+        let schema_id = match self.schema_ids.get(&connection.message_type) {
+            Some(&id) => id,
+            None => match self.pending_schemas.get(&connection.message_type) {
+                Some(s) => {
+                    let id = writer.add_schema(&connection.message_type, s.encoding, &s.data)?;
+                    self.schema_ids.insert(connection.message_type.clone(), id);
+                    id
+                }
+                None => 0,
+            },
+        };
 
         let mut metadata = BTreeMap::new();
         if !offered_qos_profiles.is_empty() {
@@ -157,20 +168,9 @@ impl StorageWriter for McapWriter {
         } else {
             connection.serialization_format.as_str()
         };
-        let channel = mcap::Channel {
-            schema: self.schemas.get(&connection.message_type).cloned(),
-            topic: connection.topic.clone(),
-            message_encoding: encoding.to_string(),
-            metadata,
-        };
-        let mcap_id = writer.add_channel(&channel).map_err(mcap_err)?;
-        self.channels.insert(
-            connection.id,
-            ChannelState {
-                mcap_id,
-                sequence: 0,
-            },
-        );
+        let id = writer.add_channel(schema_id, &connection.topic, encoding, metadata)?;
+        self.channels
+            .insert(connection.id, ChannelState { id, sequence: 0 });
         Ok(())
     }
 
@@ -180,16 +180,9 @@ impl StorageWriter for McapWriter {
             .channels
             .get_mut(&connection.id)
             .ok_or_else(|| BagError::connection_not_found(&connection.topic))?;
-        let header = MessageHeader {
-            channel_id: channel.mcap_id,
-            sequence: channel.sequence,
-            log_time: timestamp,
-            publish_time: timestamp,
-        };
+        let sequence = channel.sequence;
         channel.sequence = channel.sequence.wrapping_add(1);
-        writer
-            .write_to_known_channel(&header, data)
-            .map_err(mcap_err)
+        writer.write_message(channel.id, sequence, timestamp, timestamp, data)
     }
 
     fn is_open(&self) -> bool {

@@ -27,6 +27,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod chunked;
 pub(crate) mod mcap_format;
 mod writer;
 
