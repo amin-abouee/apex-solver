@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (verified optimisation pass)
+- **`BagReader::iter(&Selection)`**: a pull iterator (`BagIterator`: `next_into`, `next_message`, `Iterator`) over *every*
+  container (ROS1, sqlite3, MCAP, VRS) yielding exactly what `for_each` yields, for consumers such as a VIO front end that keep
+  state between samples. `BagReader::params()` returns a `ContainerParams` (ROS2 `metadata.yaml` facts; for VRS the file tags,
+  factory calibration JSON and typed camera/IMU configs).
+- `VrsReader::verify_record_chain()` (also in `vrs_info --verify-index`), `VrsReader::data_ordinal()`, and an opt-in device-clock
+  to UTC `aria::TimeDomainMap` with exact integer interpolation.
+- `lifecycle_msgs` (ROS2) and `actionlib_msgs` (ROS1) in the standard-message catalog (168 types); ROS1 md5sums verified against
+  the distribution's values.
+- `doc/perf_accuracy_review.md`: the claim-by-claim verification behind this pass.
+
+### Changed (performance)
+- **ROS1 reader** opens from the tail only and indexes lazily per query: open 2.8 ms -> 0.05 ms, 2 s window read -92 %, full read
+  -45 % on the synthetic fixture. Index metadata is validated (`IndexData` `ver` = 1 per the bag 2.0 spec, header counts, per-chunk
+  message counts against the chunk infos).
+- **MCAP writer** is an own chunked encoder with order-preserving parallel chunk compression: zstd writes ~2.5x faster, and the
+  uncompressed path no longer copies chunks (peak memory 335 -> 68 MiB on a 1.3 GB bag). Output validated with the `mcap` crate
+  and Python `mcap` (CRCs, index-driven reads).
+- **ROS1 writer** compresses bz2/lz4 chunks on all cores, in order: bz2 bag output 25 -> 163 MiB/s.
+- **sqlite writer** uses 32 KiB pages: camera/lidar-heavy writes ~2x faster, reads unchanged within noise.
+- `Reader` decodes rosbag2 **MESSAGE**-compressed payloads (sqlite and MCAP-directory bags) with a reused zstd context;
+  previously such bags read back as zstd garbage.
+
+### Fixed
+- VRS-as-bag message `seq` is the record's ordinal within its stream (was a per-reader counter, so repeating a query changed the bytes).
+- `CdrDeserializer::read_i64/read_u64` added; `read_sequence` no longer pre-allocates from a corrupt length.
+
 ### Added (VRS)
 - **`vrs` feature: Meta VRS / Project Aria reader and writer**, implemented from scratch in safe Rust (no crate
   existed). `VrsReader` (index with rebuild fallback, description tags, `DataLayout`/`RecordFormat`, time-ordered

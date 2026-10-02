@@ -505,6 +505,26 @@ for obs in &dataset.observations {
 
 ---
 
+### Reading for VIO: one pull API over every container
+
+```rust
+use apex_io::rosbag::{BagReader, Selection};
+
+let mut bag = BagReader::open("recording.mcap")?;          // .bag | ROS2 dir | .mcap | .vrs
+let params = bag.params()?;                                // metadata / calibration / sensor configs
+let sel = Selection { include: vec!["/imu0".into(), "/cam0/image_raw".into()], ..Selection::default() };
+
+let mut it = bag.iter(&sel)?;                              // time-ordered, bounded memory
+let mut buf = Vec::new();
+while let Some((conn_id, t_ns)) = it.next_into(&mut buf)? {
+    let topic = &it.connection(conn_id).unwrap().topic;    // dispatch on topic / type
+    /* decode `buf` ... */
+}
+```
+
+`BagReader::for_each` is the zero-cost callback form (used by the copy/convert tools); `iter` yields the same stream one
+message at a time. For Aria recordings the typed `vrs::aria::AriaRecording` additionally offers by-timestamp queries.
+
 ## VRS / Project Aria (`vrs` feature)
 
 A from-scratch, safe-Rust implementation of Meta's **VRS** container (`VisionRecordVRS2`), as used by
