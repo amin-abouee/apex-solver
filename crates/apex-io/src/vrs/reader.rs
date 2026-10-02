@@ -388,6 +388,20 @@ impl VrsReader {
         &d[lo..hi.max(lo)]
     }
 
+    /// Position of data record `index` within its stream's time-ordered data
+    /// records (0 for the first). Stable across queries, so it is a good
+    /// message sequence number. `None` for non-data records.
+    pub fn data_ordinal(&self, index: usize) -> Option<usize> {
+        let info = self.records.get(index)?;
+        let data = self.data_records(info.stream);
+        let target = (info.timestamp, info.offset);
+        let pos = data.partition_point(|&i| {
+            let r = &self.records[i as usize];
+            (r.timestamp, r.offset).partial_cmp(&target) == Some(std::cmp::Ordering::Less)
+        });
+        (data.get(pos) == Some(&(index as u32))).then_some(pos)
+    }
+
     /// First data record with `timestamp >= t`.
     pub fn find_at_or_after(&self, stream: StreamId, t: f64) -> Option<usize> {
         let d = self.data_records(stream);

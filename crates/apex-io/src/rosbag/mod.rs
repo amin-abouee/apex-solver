@@ -154,8 +154,8 @@ pub use types::{
 };
 
 pub use bag::{
-    BagKind, BagReader, BagWriter, ConnectionHandle, NewConnection, OutputCompression, Selection,
-    detect_kind,
+    BagIterator, BagKind, BagMessage, BagReader, BagWriter, ConnectionHandle, ContainerParams,
+    NewConnection, OutputCompression, Selection, SensorConfig, SensorParams, detect_kind,
 };
 pub use ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 

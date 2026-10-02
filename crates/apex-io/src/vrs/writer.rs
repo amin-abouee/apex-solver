@@ -624,4 +624,18 @@ mod tests {
         assert_eq!(broken.found, 1234);
         assert_eq!(broken.expected, r.records()[39].size);
     }
+
+    #[test]
+    fn data_ordinal_is_the_position_within_the_stream() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("o.vrs");
+        write_sample(&path, 30);
+        let r = VrsReader::open(&path).unwrap();
+        for stream in r.streams() {
+            for (n, &i) in r.data_records(stream).iter().enumerate() {
+                assert_eq!(r.data_ordinal(i as usize), Some(n), "{stream} #{n}");
+            }
+        }
+        assert_eq!(r.data_ordinal(usize::MAX), None);
+    }
 }

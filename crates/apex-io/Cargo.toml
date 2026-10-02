@@ -115,6 +115,11 @@ path = "tests/vrs_real_file.rs"
 required-features = ["vrs"]
 
 [[test]]
+name = "bag_pull_real"
+path = "tests/bag_pull_real.rs"
+required-features = ["rosbag", "vrs"]
+
+[[test]]
 name = "ros2_cdr_alignment_tests"
 path = "tests/ros2_cdr_alignment_tests.rs"
 required-features = ["rosbag"]

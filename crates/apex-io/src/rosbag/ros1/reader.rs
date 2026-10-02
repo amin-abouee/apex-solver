@@ -474,24 +474,10 @@ impl Ros1Reader {
                     .ok_or_else(|| BagError::Ros1IndexCorrupt {
                         reason: format!("index references unknown conn id {}", e.conn_id),
                     })?;
-                let pos = match cache.iter().position(|(p, _)| *p == e.chunk_pos) {
-                    Some(i) => {
-                        let entry = cache.remove(i);
-                        cache.push(entry);
-                        cache.len() - 1
-                    }
-                    None => {
-                        let inflated = Self::inflate_chunk_at(&mut self.file, e.chunk_pos)?;
-                        if cache.len() >= CHUNK_CACHE_CAPACITY {
-                            cache.remove(0);
-                        }
-                        cache.push((e.chunk_pos, inflated));
-                        cache.len() - 1
-                    }
-                };
-                let buf = &cache[pos].1;
+                let chunk = Self::cached_chunk(&mut cache, &mut self.file, e.chunk_pos)?;
                 let tail =
-                    buf.get(e.offset as usize..)
+                    chunk
+                        .get(e.offset as usize..)
                         .ok_or_else(|| BagError::Ros1IndexCorrupt {
                             reason: format!(
                                 "message offset {} out of bounds in chunk at {}",
@@ -504,6 +490,52 @@ impl Ros1Reader {
         })();
         self.chunk_cache = cache;
         result
+    }
+
+    /// The inflated payload of the chunk at `chunk_pos`, via a small
+    /// most-recently-used cache (an LRU of [`CHUNK_CACHE_CAPACITY`] chunks).
+    fn cached_chunk<'c>(
+        cache: &'c mut Vec<(u64, Vec<u8>)>,
+        file: &mut Option<BufReader<File>>,
+        chunk_pos: u64,
+    ) -> Result<&'c [u8]> {
+        let idx = match cache.iter().position(|(p, _)| *p == chunk_pos) {
+            Some(i) => {
+                let entry = cache.remove(i);
+                cache.push(entry);
+                cache.len() - 1
+            }
+            None => {
+                let inflated = Self::inflate_chunk_at(file, chunk_pos)?;
+                if cache.len() >= CHUNK_CACHE_CAPACITY {
+                    cache.remove(0);
+                }
+                cache.push((chunk_pos, inflated));
+                cache.len() - 1
+            }
+        };
+        Ok(&cache[idx].1)
+    }
+
+    /// Pull-style iteration: the same messages, in the same order, as
+    /// [`Self::for_each_raw_filtered`], one `next_into` call at a time.
+    pub fn raw_iter(
+        &mut self,
+        connections: Option<&[Connection]>,
+        start_ns: Option<u64>,
+        stop_ns: Option<u64>,
+    ) -> Result<Ros1MessageIter<'_>> {
+        if !self.is_open {
+            return Err(BagError::BagNotOpen);
+        }
+        let id_filter: Option<HashSet<u32>> =
+            connections.map(|cs| cs.iter().map(|c| c.id).collect());
+        let entries = self.build_index(id_filter.as_ref(), start_ns, stop_ns)?;
+        Ok(Ros1MessageIter {
+            reader: self,
+            entries,
+            pos: 0,
+        })
     }
 
     fn inflate_chunk_at(file: &mut Option<BufReader<File>>, chunk_pos: u64) -> Result<Vec<u8>> {
@@ -576,6 +608,46 @@ impl Ros1Reader {
         self.chunk_cache.shrink_to_fit();
         self.is_open = false;
         Ok(())
+    }
+}
+
+/// A pull iterator over one query of a [`Ros1Reader`]; see
+/// [`Ros1Reader::raw_iter`].
+pub struct Ros1MessageIter<'a> {
+    reader: &'a mut Ros1Reader,
+    entries: Vec<IndexEntry>,
+    pos: usize,
+}
+
+impl Ros1MessageIter<'_> {
+    /// Messages still to come.
+    pub fn remaining(&self) -> usize {
+        self.entries.len() - self.pos
+    }
+
+    /// Copy the next message's payload into `buf` (cleared first) and return
+    /// `(connection id, timestamp in ns)`; `None` at the end.
+    pub fn next_into(&mut self, buf: &mut Vec<u8>) -> Result<Option<(u32, u64)>> {
+        let Some(e) = self.entries.get(self.pos).copied() else {
+            return Ok(None);
+        };
+        self.pos += 1;
+        let chunk = Ros1Reader::cached_chunk(
+            &mut self.reader.chunk_cache,
+            &mut self.reader.file,
+            e.chunk_pos,
+        )?;
+        let tail = chunk
+            .get(e.offset as usize..)
+            .ok_or_else(|| BagError::Ros1IndexCorrupt {
+                reason: format!(
+                    "message offset {} out of bounds in chunk at {}",
+                    e.offset, e.chunk_pos
+                ),
+            })?;
+        buf.clear();
+        buf.extend_from_slice(record_data_slice(tail)?);
+        Ok(Some((e.conn_id, e.time_ns)))
     }
 }
 

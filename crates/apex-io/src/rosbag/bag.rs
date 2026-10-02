@@ -15,6 +15,7 @@
 //! writers write straight through, so memory use does not grow with bag size.
 
 use super::error::{BagError, Result};
+use super::ros1::reader::Ros1MessageIter;
 use super::ros1::{Ros1Compression, Ros1Reader, Ros1Writer};
 use super::ros2::reader::Reader;
 use super::ros2::storage::StorageWriter;
@@ -24,6 +25,7 @@ use super::types::{
     CompressionFormat, CompressionMode, Connection, MessageDefinition, MessageDefinitionFormat,
     QosProfile, StoragePlugin,
 };
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -156,6 +158,170 @@ impl Selection {
     }
 }
 
+/// Configuration of one sensor stream (cameras and IMUs of a VRS file).
+#[derive(Debug, Clone, PartialEq)]
+pub enum SensorConfig {
+    /// A camera.
+    Camera {
+        /// Image width in pixels.
+        width: u32,
+        /// Image height in pixels.
+        height: u32,
+        /// Row stride in bytes.
+        stride: u32,
+        /// Nominal frame rate in Hz.
+        nominal_rate_hz: f64,
+    },
+    /// An IMU or magnetometer unit.
+    Imu {
+        /// Nominal sampling rate in Hz.
+        nominal_rate_hz: f64,
+        /// Has an accelerometer.
+        has_accelerometer: bool,
+        /// Has a gyroscope.
+        has_gyroscope: bool,
+        /// Has a magnetometer.
+        has_magnetometer: bool,
+    },
+}
+
+/// One sensor's configuration, keyed by the topic it is exposed as.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SensorParams {
+    /// Topic the sensor's messages appear on.
+    pub topic: String,
+    /// `frame_id` used in the messages' headers.
+    pub frame_id: String,
+    /// Device/sensor serial number, when known.
+    pub serial: String,
+    /// The configuration.
+    pub config: SensorConfig,
+}
+
+/// Parameters carried by a container, gathered without reading messages.
+///
+/// Only the fields the container actually has are filled; the rest stay
+/// empty. Calibration is passed through as JSON so nothing is lost when a
+/// vendor adds fields.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ContainerParams {
+    /// ROS2 directory bags: storage plugin (`sqlite3`/`mcap`).
+    pub storage_identifier: Option<String>,
+    /// ROS2 directory bags: ROS distribution, when recorded.
+    pub ros_distro: Option<String>,
+    /// ROS2 directory bags: compression as `mode/format`, when compressed.
+    pub compression: Option<String>,
+    /// ROS2 directory bags: the `custom_data` map of `metadata.yaml`.
+    pub custom_data: BTreeMap<String, String>,
+    /// VRS: file-level tags (device, session id, capture time, ...).
+    pub file_tags: BTreeMap<String, String>,
+    /// VRS: factory calibration (cameras, IMUs, extrinsics) as JSON.
+    pub calibration: Option<serde_json::Value>,
+    /// VRS: camera and IMU configurations.
+    pub sensors: Vec<SensorParams>,
+}
+
+/// One message pulled from a [`BagIterator`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct BagMessage {
+    /// Id of the message's connection (see [`BagIterator::connection`]).
+    pub connection_id: u32,
+    /// Timestamp in nanoseconds.
+    pub timestamp_ns: u64,
+    /// Serialized payload.
+    pub data: Vec<u8>,
+}
+
+enum IterImpl<'a> {
+    Ros1(Ros1MessageIter<'a>),
+    Ros2(Box<dyn Iterator<Item = Result<super::types::RawMessage>> + 'a>),
+    #[cfg(feature = "vrs")]
+    Vrs {
+        reader: &'a mut super::vrs_bag::VrsBagReader,
+        state: super::vrs_bag::VrsPull,
+    },
+    Empty,
+}
+
+/// Pulls the messages of a [`Selection`] one at a time, in timestamp order,
+/// from any container. Created by [`BagReader::iter`].
+///
+/// Unlike [`BagReader::for_each`] it keeps its own position, so a consumer
+/// can interleave pulls with its own state:
+///
+/// ```no_run
+/// # use apex_io::rosbag::{BagReader, Selection};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut bag = BagReader::open("recording.bag")?;
+/// let selection = Selection { include: vec!["/imu0".into()], ..Selection::default() };
+/// let mut it = bag.iter(&selection)?;
+/// let mut buf = Vec::new();
+/// while let Some((conn, t_ns)) = it.next_into(&mut buf)? {
+///     let _topic = &it.connection(conn).map(|c| c.topic.clone());
+///     let _ = (t_ns, buf.len());
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub struct BagIterator<'a> {
+    inner: IterImpl<'a>,
+    connections: Vec<Connection>,
+}
+
+impl BagIterator<'_> {
+    /// The connections this iterator draws from.
+    pub fn connections(&self) -> &[Connection] {
+        &self.connections
+    }
+
+    /// Look up a connection by the id returned with each message.
+    pub fn connection(&self, id: u32) -> Option<&Connection> {
+        self.connections.iter().find(|c| c.id == id)
+    }
+
+    /// Move the next message's payload into `buf` (its previous contents are
+    /// replaced) and return `(connection id, timestamp ns)`; `None` at the
+    /// end. Reuses the caller's buffer where the backend allows.
+    pub fn next_into(&mut self, buf: &mut Vec<u8>) -> Result<Option<(u32, u64)>> {
+        match &mut self.inner {
+            IterImpl::Empty => Ok(None),
+            IterImpl::Ros1(it) => it.next_into(buf),
+            IterImpl::Ros2(it) => match it.next() {
+                Some(msg) => {
+                    let msg = msg?;
+                    *buf = msg.raw_data;
+                    Ok(Some((msg.connection.id, msg.timestamp)))
+                }
+                None => Ok(None),
+            },
+            #[cfg(feature = "vrs")]
+            IterImpl::Vrs { reader, state } => Ok(reader
+                .pull(state, buf)?
+                .map(|(i, ts)| (reader.connection_at(i).id, ts))),
+        }
+    }
+
+    /// Pull the next message as an owned value.
+    pub fn next_message(&mut self) -> Result<Option<BagMessage>> {
+        let mut data = Vec::new();
+        Ok(self
+            .next_into(&mut data)?
+            .map(|(connection_id, timestamp_ns)| BagMessage {
+                connection_id,
+                timestamp_ns,
+                data,
+            }))
+    }
+}
+
+impl Iterator for BagIterator<'_> {
+    type Item = Result<BagMessage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_message().transpose()
+    }
+}
+
 enum ReaderImpl {
     Ros1(Box<Ros1Reader>),
     Ros2(Box<Reader>),
@@ -258,6 +424,66 @@ impl BagReader {
             .filter(|c| selection.accepts_topic(&c.topic))
             .cloned()
             .collect()
+    }
+
+    /// Pull the messages of `selection` one at a time in timestamp order.
+    /// See [`BagIterator`].
+    pub fn iter(&mut self, selection: &Selection) -> Result<BagIterator<'_>> {
+        let connections = self.selected_connections(selection);
+        if connections.is_empty() {
+            return Ok(BagIterator {
+                inner: IterImpl::Empty,
+                connections,
+            });
+        }
+        let inner = match &mut self.inner {
+            ReaderImpl::Ros1(r) => IterImpl::Ros1(r.raw_iter(
+                Some(&connections),
+                selection.start_ns,
+                selection.end_ns,
+            )?),
+            ReaderImpl::Ros2(r) => IterImpl::Ros2(r.raw_messages_filtered(
+                Some(&connections),
+                selection.start_ns,
+                selection.end_ns,
+            )?),
+            #[cfg(feature = "vrs")]
+            ReaderImpl::Vrs(r) => {
+                let state = r.begin(&connections, selection.start_ns, selection.end_ns);
+                IterImpl::Vrs { reader: r, state }
+            }
+        };
+        Ok(BagIterator { inner, connections })
+    }
+
+    /// Parameters the container carries: ROS2 `metadata.yaml` facts, or for
+    /// VRS the file tags, factory calibration and sensor configurations.
+    pub fn params(&mut self) -> Result<ContainerParams> {
+        let mut params = ContainerParams::default();
+        match &mut self.inner {
+            ReaderImpl::Ros1(_) => {}
+            ReaderImpl::Ros2(r) => {
+                if let Some(meta) = r.metadata() {
+                    let info = meta.info();
+                    params.storage_identifier = Some(info.storage_identifier.clone());
+                    params.ros_distro = info.ros_distro.clone();
+                    if !info.compression_mode.is_empty() {
+                        params.compression = Some(format!(
+                            "{}/{}",
+                            info.compression_mode.to_lowercase(),
+                            info.compression_format
+                        ));
+                    }
+                    if let Some(custom) = &info.custom_data {
+                        params.custom_data =
+                            custom.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    }
+                }
+            }
+            #[cfg(feature = "vrs")]
+            ReaderImpl::Vrs(r) => r.fill_params(&mut params)?,
+        }
+        Ok(params)
     }
 
     /// Stream the messages of `connections` inside `selection`'s time window
@@ -576,6 +802,7 @@ impl BagWriter {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
@@ -709,5 +936,118 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    /// `(connection id, stamp, payload)` triples via the callback API.
+    fn via_for_each(r: &mut BagReader, sel: &Selection) -> Vec<(u32, u64, Vec<u8>)> {
+        let conns = r.selected_connections(sel);
+        let mut out = Vec::new();
+        r.for_each(&conns, sel, |c, ts, d| {
+            out.push((c.id, ts, d.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        out
+    }
+
+    /// The pull iterator is the same stream as `for_each`, for every
+    /// container, whatever the filter.
+    #[test]
+    fn pull_iterator_matches_for_each_for_every_kind() -> TestResult {
+        #[allow(unused_mut)]
+        let mut cases = vec![
+            (BagKind::Ros1Bag, "out.bag", "pkg/Type", "ros1"),
+            (BagKind::Ros2Sqlite, "sq", "pkg/msg/Type", "cdr"),
+            (BagKind::Ros2Mcap, "mc", "pkg/msg/Type", "cdr"),
+            (BagKind::McapFile, "out.mcap", "pkg/msg/Type", "cdr"),
+        ];
+        #[cfg(feature = "vrs")]
+        cases.push((BagKind::Vrs, "out.vrs", "pkg/msg/Type", "cdr"));
+
+        for (kind, name, ty, fmt) in cases {
+            let dir = tempdir()?;
+            let path = dir.path().join(name);
+            let mut w = BagWriter::create(&path, kind, OutputCompression::None)?;
+            let a = w.add_connection(&conn("/a", ty, fmt))?;
+            let b = w.add_connection(&conn("/b", ty, fmt))?;
+            for i in 0..400u64 {
+                w.write(a, 1_000 + i * 10, &i.to_le_bytes())?;
+                if i % 3 == 0 {
+                    w.write(b, 1_005 + i * 10, &vec![i as u8; 1 + (i as usize % 50)])?;
+                }
+            }
+            w.close()?;
+
+            let mut r = BagReader::open(&path)?;
+            let selections = [
+                Selection::default(),
+                Selection {
+                    include: vec!["/b".into()],
+                    ..Selection::default()
+                },
+                Selection {
+                    start_ns: Some(2_000),
+                    end_ns: Some(3_000),
+                    ..Selection::default()
+                },
+                Selection {
+                    exclude: vec!["/a".into()],
+                    start_ns: Some(1_500),
+                    ..Selection::default()
+                },
+            ];
+            for sel in &selections {
+                let expect = via_for_each(&mut r, sel);
+                let mut pulled = Vec::new();
+                let mut it = r.iter(sel)?;
+                let mut buf = Vec::new();
+                while let Some((id, ts)) = it.next_into(&mut buf)? {
+                    assert!(it.connection(id).is_some(), "{kind:?}: unknown id {id}");
+                    pulled.push((id, ts, buf.clone()));
+                }
+                assert_eq!(pulled, expect, "{kind:?} {sel:?}");
+                assert!(!expect.is_empty(), "{kind:?} {sel:?} selected nothing");
+            }
+
+            // owned-message and Iterator forms agree too
+            let all = Selection::default();
+            let via_iter: Vec<_> = r.iter(&all)?.collect::<Result<Vec<_>>>()?;
+            let expect = via_for_each(&mut r, &all);
+            assert_eq!(via_iter.len(), expect.len(), "{kind:?}");
+            assert_eq!(via_iter[7].data, expect[7].2, "{kind:?}");
+
+            // nothing selected => an empty iterator, not an error
+            let none = Selection {
+                include: vec!["/nope".into()],
+                ..Selection::default()
+            };
+            assert!(r.iter(&none)?.next_message()?.is_none());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn ros2_directory_params_expose_metadata() -> TestResult {
+        use super::super::types::{CompressionFormat, CompressionMode};
+        let dir = tempdir()?;
+        let path = dir.path().join("p");
+        let mut w = Writer::new(&path, None, Some(StoragePlugin::Mcap))?;
+        w.set_compression(CompressionMode::Message, CompressionFormat::Zstd)?;
+        w.set_custom_data("operator".into(), "amin".into())?;
+        w.open()?;
+        let c = w.add_connection("/t".into(), "pkg/msg/T".into(), None, None, None, None)?;
+        w.write(&c, 5, b"x")?;
+        w.close()?;
+
+        let mut r = BagReader::open(&path)?;
+        let p = r.params()?;
+        assert_eq!(p.storage_identifier.as_deref(), Some("mcap"));
+        assert_eq!(p.compression.as_deref(), Some("message/zstd"));
+        assert_eq!(
+            p.custom_data.get("operator").map(String::as_str),
+            Some("amin")
+        );
+        assert!(p.sensors.is_empty() && p.calibration.is_none());
+        Ok(())
     }
 }

@@ -21,7 +21,7 @@
 //! message bytes together with topic, type, definition and encoding, so a
 //! bag survives a round trip through VRS byte for byte, whatever the types.
 
-use super::bag::OutputCompression;
+use super::bag::{ContainerParams, OutputCompression, SensorConfig, SensorParams};
 use super::error::{BagError, Result};
 use super::transcode::{Dialect, catalog_definition, catalog_md5};
 use super::types::{Connection, MessageDefinition, MessageDefinitionFormat};
@@ -100,7 +100,6 @@ struct Entry {
     stream: StreamId,
     source: Source,
     frame_id: &'static str,
-    seq: u32,
 }
 
 /// Reader side: an Aria (or ROS-in-VRS) file seen as a bag.
@@ -168,7 +167,6 @@ impl VrsBagReader {
                 stream,
                 source,
                 frame_id,
-                seq: 0,
             });
             start = start.min(first);
             end = end.max(last);
@@ -205,16 +203,13 @@ impl VrsBagReader {
         self.message_count
     }
 
-    pub(crate) fn for_each<F>(
+    /// Start a query: which connections, and the time window in ns.
+    pub(crate) fn begin(
         &mut self,
         connections: &[Connection],
         start_ns: Option<u64>,
         end_ns: Option<u64>,
-        mut f: F,
-    ) -> Result<()>
-    where
-        F: FnMut(&Connection, u64, &[u8]) -> Result<()>,
-    {
+    ) -> VrsPull {
         let wanted: Vec<usize> = connections
             .iter()
             .filter_map(|c| (c.id as usize).checked_sub(1))
@@ -229,49 +224,152 @@ impl VrsBagReader {
         let mut filter = RecordFilter::streams(by_stream.keys().copied());
         filter.start = start_ns.map(|s| s as f64 / 1e9 - 1e-6);
         filter.end = end_ns.map(|e| e as f64 / 1e9 + 1e-6);
-        let mut cursor: Cursor = self.rec.vrs().cursor(&filter);
+        VrsPull {
+            cursor: self.rec.vrs().cursor(&filter),
+            by_stream,
+            start_ns,
+            end_ns,
+            raw: Vec::new(),
+        }
+    }
 
-        let mut buf = Vec::new();
-        let mut out = Vec::new();
+    /// Advance a query: decode the next message into `out` (cleared first)
+    /// and return `(connection index, stamp ns)`; `None` at the end.
+    pub(crate) fn pull(
+        &mut self,
+        st: &mut VrsPull,
+        out: &mut Vec<u8>,
+    ) -> Result<Option<(usize, u64)>> {
         while let Some(meta) = self
             .rec
             .vrs_mut()
-            .next_record_into(&mut cursor, &mut buf)
+            .next_record_into(&mut st.cursor, &mut st.raw)
             .map_err(vrs_err)?
         {
-            let Some(&i) = by_stream.get(&meta.stream) else {
+            let Some(&i) = st.by_stream.get(&meta.stream) else {
                 continue;
             };
             out.clear();
             let ts_ns = match self.entries[i].source {
-                Source::Native => match native_message(&self.rec, &meta, &buf, &mut out)? {
+                Source::Native => match native_message(&self.rec, &meta, &st.raw, out)? {
                     Some(ts) => ts,
                     None => continue,
                 },
                 Source::Aria(_) => {
-                    let sample = self.rec.decode_record(meta, &buf).map_err(vrs_err)?;
-                    let seq = {
-                        let e = &mut self.entries[i];
-                        e.seq += 1;
-                        e.seq - 1
-                    };
-                    match aria_message(&sample, seq, self.entries[i].frame_id, &mut out) {
+                    let sample = self.rec.decode_record(meta, &st.raw).map_err(vrs_err)?;
+                    // Message `seq` = ordinal within the stream: the same message
+                    // gets the same bytes whichever query returns it.
+                    let seq = self.rec.vrs().data_ordinal(meta.index).unwrap_or(0) as u32;
+                    match aria_message(&sample, seq, self.entries[i].frame_id, out) {
                         Some(ts) => ts,
                         None => continue,
                     }
                 }
                 Source::Raw => {
-                    out.extend_from_slice(&buf);
+                    out.extend_from_slice(&st.raw);
                     (meta.timestamp.max(0.0) * 1e9).round() as u64
                 }
             };
-            if start_ns.is_some_and(|s| ts_ns < s) || end_ns.is_some_and(|e| ts_ns >= e) {
+            if st.start_ns.is_some_and(|s| ts_ns < s) || st.end_ns.is_some_and(|e| ts_ns >= e) {
                 continue;
             }
-            f(&self.connections[i], ts_ns, &out)?;
+            return Ok(Some((i, ts_ns)));
+        }
+        Ok(None)
+    }
+
+    /// Fill VRS file tags, calibration and per-sensor configuration.
+    pub(crate) fn fill_params(&mut self, params: &mut ContainerParams) -> Result<()> {
+        params.file_tags = self
+            .rec
+            .vrs()
+            .file_tags()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        params.calibration = self
+            .rec
+            .calibration_json()
+            .and_then(|j| serde_json::from_str(j).ok());
+
+        let sensors: Vec<(usize, AriaSensor, &'static str)> = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| match e.source {
+                Source::Aria(s) => Some((i, s, e.frame_id)),
+                _ => None,
+            })
+            .collect();
+        for (i, sensor, frame_id) in sensors {
+            let topic = self.connections[i].topic.clone();
+            let (config, serial) = match sensor {
+                AriaSensor::Rgb | AriaSensor::SlamLeft | AriaSensor::SlamRight => {
+                    let c = self.rec.camera_config(sensor).map_err(vrs_err)?;
+                    (
+                        SensorConfig::Camera {
+                            width: c.width,
+                            height: c.height,
+                            stride: c.stride,
+                            nominal_rate_hz: c.nominal_rate,
+                        },
+                        c.device_serial,
+                    )
+                }
+                AriaSensor::ImuRight | AriaSensor::ImuLeft | AriaSensor::Magnetometer => {
+                    let c = self.rec.imu_config(sensor).map_err(vrs_err)?;
+                    (
+                        SensorConfig::Imu {
+                            nominal_rate_hz: c.nominal_rate,
+                            has_accelerometer: c.has_accelerometer,
+                            has_gyroscope: c.has_gyroscope,
+                            has_magnetometer: c.has_magnetometer,
+                        },
+                        String::new(),
+                    )
+                }
+                _ => continue,
+            };
+            params.sensors.push(SensorParams {
+                topic,
+                frame_id: frame_id.to_string(),
+                serial,
+                config,
+            });
         }
         Ok(())
     }
+
+    pub(crate) fn connection_at(&self, index: usize) -> &Connection {
+        &self.connections[index]
+    }
+
+    pub(crate) fn for_each<F>(
+        &mut self,
+        connections: &[Connection],
+        start_ns: Option<u64>,
+        end_ns: Option<u64>,
+        mut f: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Connection, u64, &[u8]) -> Result<()>,
+    {
+        let mut st = self.begin(connections, start_ns, end_ns);
+        let mut out = Vec::new();
+        while let Some((i, ts)) = self.pull(&mut st, &mut out)? {
+            f(&self.connections[i], ts, &out)?;
+        }
+        Ok(())
+    }
+}
+
+/// State of one in-progress query over a VRS file.
+pub(crate) struct VrsPull {
+    cursor: Cursor,
+    by_stream: BTreeMap<StreamId, usize>,
+    start_ns: Option<u64>,
+    end_ns: Option<u64>,
+    raw: Vec<u8>,
 }
 
 fn connection(
