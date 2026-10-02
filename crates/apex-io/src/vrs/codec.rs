@@ -103,15 +103,16 @@ impl Compressor {
             Compression::None => Ok(src.to_vec()),
             Compression::Zstd => match self.zstd.as_mut() {
                 Some(ctx) => {
-                    let mut out =
-                        Vec::with_capacity(zstd::zstd_safe::compress_bound(src.len()));
+                    let mut out = Vec::with_capacity(zstd::zstd_safe::compress_bound(src.len()));
                     let n = ctx
                         .compress_to_buffer(src, &mut out)
                         .map_err(|e| VrsError::Decompress(e.to_string()))?;
                     out.truncate(n);
                     Ok(out)
                 }
-                None => zstd::bulk::compress(src, 1).map_err(|e| VrsError::Decompress(e.to_string())),
+                None => {
+                    zstd::bulk::compress(src, 1).map_err(|e| VrsError::Decompress(e.to_string()))
+                }
             },
             Compression::Lz4 => {
                 use std::io::Write;
@@ -207,7 +208,8 @@ mod tests {
         assert_eq!(out, data);
         // A second, smaller record also fully replaces the buffer.
         let small = compress(Compression::Zstd, &[1u8; 10]).unwrap();
-        de.decompress(Compression::Zstd, &small, 10, &mut out).unwrap();
+        de.decompress(Compression::Zstd, &small, 10, &mut out)
+            .unwrap();
         assert_eq!(out, vec![1u8; 10]);
     }
 

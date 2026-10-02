@@ -20,6 +20,52 @@ use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage, T
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// Largest frame we pre-size a decode buffer for (guards corrupt headers).
+const MAX_MESSAGE_FRAME: u64 = 1 << 30;
+
+/// Decodes rosbag2 MESSAGE-compressed payloads with one reused zstd context.
+struct MessageDecoder {
+    decompressor: zstd::bulk::Decompressor<'static>,
+}
+
+impl MessageDecoder {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            decompressor: zstd::bulk::Decompressor::new()
+                .map_err(|e| ReaderError::generic(format!("zstd init failed: {e}")))?,
+        })
+    }
+
+    /// Decode one payload. A payload that is not a zstd frame is a corrupt
+    /// bag and an error -- never silently passed through.
+    fn decode(&mut self, data: Vec<u8>) -> Result<Vec<u8>> {
+        let fail =
+            |e: std::io::Error| ReaderError::generic(format!("MESSAGE-compressed payload: {e}"));
+        match zstd::zstd_safe::get_frame_content_size(&data) {
+            // Fast path: the frame announces its size (rosbag2 one-shot compress).
+            Ok(Some(size)) if size <= MAX_MESSAGE_FRAME => self
+                .decompressor
+                .decompress(&data, size as usize)
+                .map_err(fail),
+            // Streaming frames carry no size; let the decoder grow the output.
+            Ok(_) => zstd::stream::decode_all(&data[..]).map_err(fail),
+            Err(_) => Err(ReaderError::generic(
+                "MESSAGE-compressed payload does not start with a zstd frame",
+            )),
+        }
+    }
+
+    fn raw(&mut self, mut m: RawMessage) -> Result<RawMessage> {
+        m.raw_data = self.decode(std::mem::take(&mut m.raw_data))?;
+        Ok(m)
+    }
+
+    fn message(&mut self, mut m: Message) -> Result<Message> {
+        m.data = self.decode(std::mem::take(&mut m.data))?;
+        Ok(m)
+    }
+}
+
 /// Main reader for ROS2 bag files
 pub struct Reader {
     /// Path to the bag directory, or to the bare bag file itself
@@ -34,6 +80,9 @@ pub struct Reader {
     is_open: bool,
     /// Summary-derived aggregates for bare-file bags (no metadata.yaml).
     standalone_stats: Option<McapSummaryStats>,
+    /// rosbag2 MESSAGE compression: every payload is a zstd frame
+    /// (declared only in metadata.yaml), decoded transparently on read.
+    message_compression: bool,
 }
 
 impl Reader {
@@ -70,6 +119,7 @@ impl Reader {
                 connections: Vec::new(),
                 is_open: false,
                 standalone_stats: None,
+                message_compression: false,
             });
         }
 
@@ -83,6 +133,7 @@ impl Reader {
             connections: Vec::new(),
             is_open: false,
             standalone_stats: None,
+            message_compression: false,
         })
     }
 
@@ -111,6 +162,15 @@ impl Reader {
 
         let metadata = self.metadata.as_ref().ok_or(BagError::BagNotOpen)?;
         let info = metadata.info();
+
+        // MESSAGE compression: payloads are zstd frames. Anything else is
+        // rejected loudly rather than handing out compressed bytes.
+        let message_compressed = info.compression_mode.eq_ignore_ascii_case("message");
+        if message_compressed && info.compression_format != "zstd" {
+            return Err(ReaderError::UnsupportedCompressionFormat {
+                format: info.compression_format.clone(),
+            });
+        }
 
         self.connections = info
             .topics_with_message_count
@@ -155,6 +215,7 @@ impl Reader {
         )?;
 
         storage.open()?;
+        self.message_compression = message_compressed;
 
         // Get actual topics from the storage (may be more complete than metadata)
         if let Some(sqlite_storage) = storage
@@ -316,6 +377,12 @@ impl Reader {
 
         let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
         let iterator = storage.messages_filtered(connections, start, stop)?;
+        if self.message_compression {
+            let mut decoder = MessageDecoder::new()?;
+            return Ok(Box::new(
+                iterator.map(move |m| m.and_then(|m| decoder.message(m))),
+            ));
+        }
         Ok(iterator)
     }
 
@@ -327,6 +394,12 @@ impl Reader {
 
         let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
         let iterator = storage.raw_messages()?;
+        if self.message_compression {
+            let mut decoder = MessageDecoder::new()?;
+            return Ok(Box::new(
+                iterator.map(move |m| m.and_then(|m| decoder.raw(m))),
+            ));
+        }
         Ok(iterator)
     }
 
@@ -343,6 +416,12 @@ impl Reader {
 
         let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
         let iterator = storage.raw_messages_filtered(connections, start, stop)?;
+        if self.message_compression {
+            let mut decoder = MessageDecoder::new()?;
+            return Ok(Box::new(
+                iterator.map(move |m| m.and_then(|m| decoder.raw(m))),
+            ));
+        }
         Ok(iterator)
     }
 
@@ -358,7 +437,12 @@ impl Reader {
         }
 
         let storage = self.storage.as_ref().ok_or(BagError::BagNotOpen)?;
-        storage.read_raw_messages_batch(connections, start, stop)
+        let batch = storage.read_raw_messages_batch(connections, start, stop)?;
+        if self.message_compression {
+            let mut decoder = MessageDecoder::new()?;
+            return batch.into_iter().map(|m| decoder.raw(m)).collect();
+        }
+        Ok(batch)
     }
 
     /// Check if the bag is open

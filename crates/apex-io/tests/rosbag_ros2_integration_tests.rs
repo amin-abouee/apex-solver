@@ -1061,3 +1061,107 @@ fn sqlite_reader_streams_across_pages() -> std::result::Result<(), Box<dyn std::
     );
     Ok(())
 }
+
+mod message_compression {
+    use apex_io::rosbag::types::{CompressionFormat, CompressionMode};
+    use apex_io::rosbag::{Reader, StoragePlugin, Writer};
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    /// Payloads of very different sizes/compressibility.
+    fn payloads() -> Vec<Vec<u8>> {
+        let mut x = 0x9E37_79B9_7F4A_7C15u64;
+        let mut noise = |n: usize| -> Vec<u8> {
+            (0..n)
+                .map(|_| {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    (x >> 24) as u8
+                })
+                .collect()
+        };
+        vec![
+            vec![],
+            vec![7],
+            vec![1u8; 100_000],
+            noise(3_000),
+            noise(1_500_000),
+        ]
+    }
+
+    fn write(path: &std::path::Path, plugin: StoragePlugin) -> TestResult {
+        let mut w = Writer::new(path, None, Some(plugin))?;
+        w.set_compression(CompressionMode::Message, CompressionFormat::Zstd)?;
+        w.open()?;
+        let c = w.add_connection("/t".into(), "t/msg/T".into(), None, None, None, None)?;
+        for (i, p) in payloads().iter().enumerate() {
+            w.write(&c, 1_000 + i as u64, p)?;
+        }
+        w.close()?;
+        Ok(())
+    }
+
+    fn check(path: &std::path::Path) -> TestResult {
+        let mut r = Reader::new(path)?;
+        r.open()?;
+        let want = payloads();
+        let got = r
+            .raw_messages()?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(got.len(), want.len());
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(&g.raw_data, w);
+        }
+        // every read path decodes
+        let batch = r.read_raw_messages_batch(None, None, None)?;
+        assert_eq!(batch[2].raw_data, want[2]);
+        let typed = r.messages()?.collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(typed[4].data, want[4]);
+        let filtered = r
+            .raw_messages_filtered(None, Some(1_002), Some(1_004))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered[1].raw_data, want[3]);
+        Ok(())
+    }
+
+    #[test]
+    fn sqlite_round_trips() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let bag = dir.path().join("sq");
+        write(&bag, StoragePlugin::Sqlite3)?;
+        check(&bag)
+    }
+
+    #[test]
+    fn mcap_directory_round_trips() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let bag = dir.path().join("mc");
+        write(&bag, StoragePlugin::Mcap)?;
+        check(&bag)
+    }
+
+    #[test]
+    fn a_blob_that_is_not_zstd_is_an_error_not_garbage() -> TestResult {
+        let dir = tempfile::tempdir()?;
+        let bag = dir.path().join("bad");
+        write(&bag, StoragePlugin::Sqlite3)?;
+        let db = bag.join("bad.db3");
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute(
+            "UPDATE messages SET data = x'0102030405' WHERE timestamp = 1003",
+            [],
+        )?;
+        drop(conn);
+
+        let mut r = Reader::new(&bag)?;
+        r.open()?;
+        let results: Vec<_> = r.raw_messages()?.collect();
+        assert!(
+            results.iter().any(|m| m.is_err()),
+            "corrupt blob must surface as an error"
+        );
+        Ok(())
+    }
+}

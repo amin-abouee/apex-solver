@@ -128,9 +128,7 @@ impl StorageReader for SqliteReader {
             // Read-path tuning: mmap mapped pages for the keyset pagination
             // scans and a roomy page cache. Read-only, so durability is
             // untouched.
-            for pragma in
-                ["PRAGMA mmap_size = 268435456", "PRAGMA cache_size = -65536"]
-            {
+            for pragma in ["PRAGMA mmap_size = 268435456", "PRAGMA cache_size = -65536"] {
                 if let Err(e) = conn.execute_batch(pragma) {
                     tracing::debug!("sqlite pragma '{pragma}' failed on {}: {e}", path.display());
                 }
@@ -503,16 +501,12 @@ impl Iterator for SqliteMessageIter<'_> {
             }
         }
         let (idx, _, _) = best?;
-        match self
-            .states
+        // `best` came from a checked head, so the pop cannot come back empty.
+        self.states
             .get_mut(idx)
             .and_then(|s| s.as_mut())
             .and_then(|s| s.page.pop_front())
-        {
-            Some((_, msg)) => Some(msg),
-            // Unreachable: `best` came from a checked head.
-            None => None,
-        }
+            .map(|(_, msg)| msg)
     }
 }
 
@@ -1122,10 +1116,7 @@ mod tests {
             serialization_format: "cdr".into(),
             offered_qos_profiles: Vec::new(),
         };
-        for (name, times) in [
-            ("a", [100u64, 102, 104]),
-            ("b", [101u64, 103, 105]),
-        ] {
+        for (name, times) in [("a", [100u64, 102, 104]), ("b", [101u64, 103, 105])] {
             let bag = dir.path().join(name);
             std::fs::create_dir(&bag)?;
             let mut w = SqliteWriter::new(&bag, CompressionMode::None)?;
@@ -1138,8 +1129,7 @@ mod tests {
             db_paths.push(bag.join(format!("{name}.db3")));
         }
 
-        let path_refs: Vec<&std::path::Path> =
-            db_paths.iter().map(|p| p.as_path()).collect();
+        let path_refs: Vec<&std::path::Path> = db_paths.iter().map(|p| p.as_path()).collect();
         let mut reader = SqliteReader::new(path_refs, vec![])?;
         reader.open()?;
         let timestamps: Vec<u64> = reader

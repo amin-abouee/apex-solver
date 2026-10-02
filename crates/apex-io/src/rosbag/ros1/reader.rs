@@ -84,7 +84,9 @@ impl Ros1Reader {
             return Err(BagError::BagAlreadyOpen);
         }
         let file = File::open(&self.path)?;
-        let mut reader = BufReader::new(file);
+        // Roomy buffer: opening walks the file tail and index records with
+        // many small reads; 1 MiB keeps that off the syscall path.
+        let mut reader = BufReader::with_capacity(1 << 20, file);
 
         // Magic line.
         let mut magic_buf = [0u8; 13];
@@ -119,6 +121,8 @@ impl Ros1Reader {
                     .into(),
             });
         }
+        let header_conn_count = bag_header.header.get_u32("conn_count")?;
+        let header_chunk_count = bag_header.header.get_u32("chunk_count")?;
 
         // Parse the tail: connections + chunk-info records starting at index_pos.
         // We also need IndexData records, which appear *after each chunk* in the
@@ -148,6 +152,14 @@ impl Ros1Reader {
         // For each chunk, jump past its chunk record and read the following
         // IndexData records (until we hit either another Chunk or index_pos).
         chunk_positions.sort();
+        if header_chunk_count != 0 && chunk_positions.len() as u32 > header_chunk_count {
+            return Err(BagError::Ros1IndexCorrupt {
+                reason: format!(
+                    "bag header claims {header_chunk_count} chunks but the index holds {}",
+                    chunk_positions.len()
+                ),
+            });
+        }
         let mut index = Vec::new();
         for chunk_pos in &chunk_positions {
             reader.seek(SeekFrom::Start(*chunk_pos))?;
@@ -177,6 +189,13 @@ impl Ros1Reader {
                     break;
                 }
                 let conn_id = rec.header.get_u32("conn")?;
+                // The bag 2.0 spec fixes IndexData `ver` at 1.
+                let ver = rec.header.get_u32("ver")?;
+                if ver != 1 {
+                    return Err(BagError::Ros1IndexCorrupt {
+                        reason: format!("unsupported IndexData version {ver} (want 1)"),
+                    });
+                }
                 let count = rec.header.get_u32("count")? as usize;
                 if rec.data.len() < count * 12 {
                     return Err(BagError::Ros1IndexCorrupt {
@@ -212,6 +231,14 @@ impl Ros1Reader {
             v.sort_by_key(|c| c.id);
             v
         };
+        if header_conn_count != 0 && connections_vec.len() as u32 != header_conn_count {
+            return Err(BagError::Ros1IndexCorrupt {
+                reason: format!(
+                    "bag header claims {header_conn_count} connections but the index holds {}",
+                    connections_vec.len()
+                ),
+            });
+        }
 
         // Build topic info + message counts.
         let mut counts: HashMap<u32, u64> = HashMap::new();

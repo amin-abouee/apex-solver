@@ -876,10 +876,7 @@ impl ChunkMessageStream {
                             "MCAP message record shorter than its fixed header",
                         ));
                     }
-                    let channel_id = u16::from_le_bytes([
-                        self.inner[base],
-                        self.inner[base + 1],
-                    ]);
+                    let channel_id = u16::from_le_bytes([self.inner[base], self.inner[base + 1]]);
                     let sequence = u32::from_le_bytes([
                         self.inner[base + 2],
                         self.inner[base + 3],
@@ -1002,21 +999,16 @@ impl ChunkMessageStream {
                     }
                     let record_start = offset - len;
                     let mut head = [0u8; 22];
-                    self.file
-                        .seek(SeekFrom::Start(record_start))
-                        .map_err(|e| {
-                            ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
-                        })?;
+                    self.file.seek(SeekFrom::Start(record_start)).map_err(|e| {
+                        ReaderError::generic(format!("Failed to seek MCAP message: {e}"))
+                    })?;
                     self.file.read_exact(&mut head).map_err(|e| {
                         ReaderError::generic(format!("Failed to read MCAP message: {e}"))
                     })?;
                     let channel_id = u16::from_le_bytes([head[0], head[1]]);
-                    let sequence = u32::from_le_bytes([
-                        head[2], head[3], head[4], head[5],
-                    ]);
+                    let sequence = u32::from_le_bytes([head[2], head[3], head[4], head[5]]);
                     let log_time = u64::from_le_bytes([
-                        head[6], head[7], head[8], head[9], head[10], head[11], head[12],
-                        head[13],
+                        head[6], head[7], head[8], head[9], head[10], head[11], head[12], head[13],
                     ]);
                     let publish_time = u64::from_le_bytes([
                         head[14], head[15], head[16], head[17], head[18], head[19], head[20],

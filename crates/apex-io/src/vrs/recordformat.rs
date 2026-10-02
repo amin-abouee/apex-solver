@@ -210,11 +210,7 @@ impl RecordLayout {
 
     /// Split `payload` into `blocks` (cleared first), so callers in hot loops
     /// can reuse the same vector for every record.
-    pub fn split_into<'a>(
-        &'a self,
-        payload: &'a [u8],
-        blocks: &mut Vec<Block<'a>>,
-    ) -> Result<()> {
+    pub fn split_into<'a>(&'a self, payload: &'a [u8], blocks: &mut Vec<Block<'a>>) -> Result<()> {
         blocks.clear();
         let out = blocks;
         let mut pos = 0usize;

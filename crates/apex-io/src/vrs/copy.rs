@@ -97,12 +97,7 @@ pub fn copy_filtered(
         let stored = src.read_stored_record_into(index, &mut raw)?;
         debug_assert_eq!(stored.meta.record_type, RecordType::Data);
         if stored.compression == target {
-            out.write_record_raw(
-                stored.meta,
-                &stored.body,
-                target,
-                stored.uncompressed_size,
-            )?;
+            out.write_record_raw(stored.meta, &stored.body, target, stored.uncompressed_size)?;
         } else if stored.compression == Compression::None {
             out.write_record(
                 stored.meta.stream,
@@ -168,8 +163,7 @@ mod tests {
         let src_path = dir.path().join("src.vrs");
         {
             let id = StreamId::new(700, 1);
-            let mut w =
-                VrsWriter::create(&src_path, VrsWriteOptions::default()).unwrap();
+            let mut w = VrsWriter::create(&src_path, VrsWriteOptions::default()).unwrap();
             w.add_stream(id, StreamTags::default()).unwrap();
             // Small (stored) and large (compressed) records, both kinds.
             for i in 0..40u32 {

@@ -473,7 +473,10 @@ impl VrsReader {
     /// A time-ordered scan with a background thread reading and
     /// decompressing ahead of the consumer. Yields exactly the records of
     /// the equivalent synchronous cursor loop.
-    pub fn sequential(&mut self, filter: &RecordFilter) -> Result<super::readahead::SequentialReader<'_>> {
+    pub fn sequential(
+        &mut self,
+        filter: &RecordFilter,
+    ) -> Result<super::readahead::SequentialReader<'_>> {
         super::readahead::SequentialReader::new(self, filter)
     }
 

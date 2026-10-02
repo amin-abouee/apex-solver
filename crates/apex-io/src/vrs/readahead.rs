@@ -282,9 +282,9 @@ impl Drop for SequentialReader<'_> {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::*;
     use super::super::writer::{VrsWriteOptions, VrsWriter, stream_tags};
     use super::super::{DataLayout, LayoutWriter};
+    use super::*;
     use std::collections::BTreeMap;
 
     /// 300 small records + 30 large ones across two streams.
@@ -297,7 +297,8 @@ mod tests {
         let b = StreamId::new(601, 1);
         let mut w = VrsWriter::create(path, VrsWriteOptions::default()).unwrap();
         for (id, name) in [(a, "A"), (b, "B")] {
-            w.add_stream(id, stream_tags(name, BTreeMap::new())).unwrap();
+            w.add_stream(id, stream_tags(name, BTreeMap::new()))
+                .unwrap();
             w.define_record_format(id, RecordType::Data, 1, "data_layout+custom", &[&layout])
                 .unwrap();
         }
@@ -341,7 +342,10 @@ mod tests {
 
         for depth in [1, 3, 16, 64] {
             let mut r = VrsReader::open(&path).unwrap();
-            let mut seq = r.sequential(&RecordFilter::all()).unwrap().with_depth(depth);
+            let mut seq = r
+                .sequential(&RecordFilter::all())
+                .unwrap()
+                .with_depth(depth);
             let mut buf = Vec::new();
             let mut got = Vec::new();
             while let Some(meta) = seq.next_into(&mut buf).unwrap() {
