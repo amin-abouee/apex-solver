@@ -12,6 +12,7 @@ pub mod inverse_depth_se23;
 pub mod projection;
 pub mod smart_projection;
 pub mod stereo;
+pub mod stereo_inverse_range;
 pub mod time_offset_projection;
 
 pub use depth::{DepthFactor, OneSidedDepthFactor, RegularDepthFactor};
@@ -24,6 +25,7 @@ pub use inverse_depth_se23::InverseDepthSe23Factor;
 pub use projection::{OptimizationConfig, ProjectionFactor};
 pub use smart_projection::{SmartProjectionFactor, TriangulationStatus};
 pub use stereo::{StereoCalibration, StereoFactor, StereoPoint2};
+pub use stereo_inverse_range::{InverseRangeProjectionSe23Factor, StereoInverseRangeFactor};
 pub use time_offset_projection::TimeOffsetProjectionFactor;
 
 #[cfg(test)]
