@@ -46,7 +46,7 @@ use crate::core::variable::ManifoldVariable;
 use crate::core::{CoreError, FactorKey, VarKey};
 use crate::factors::marginal::{LocalLogFn, MarginalPriorFactor};
 use crate::linearizer::LinearizerError;
-use crate::linearizer::compute_block_into;
+use crate::linearizer::{JacobianEvaluation, compute_block_into_with};
 
 use super::problem::Problem;
 
@@ -242,11 +242,16 @@ impl Marginalizer {
             let (rows, cols) = block.factor.jacobian_shape();
             let mut block_jacobian = vec![0.0f64; rows * cols];
             let mut block_residual = vec![0.0f64; block.factor.residual_dim()];
-            let (layout, _) = compute_block_into(
+            // The problem's own evaluation mode: under first-estimate Jacobians
+            // a variable an earlier marginal already linearized keeps that
+            // linearization here too, so successive marginals agree on it and
+            // no information leaks into the unobservable directions.
+            let (layout, _) = compute_block_into_with(
                 block,
                 problem.variables(),
                 &mut block_residual,
                 Some(&mut block_jacobian),
+                problem.jacobian_evaluation(),
             )?;
 
             for (index, value) in block_residual.iter().enumerate() {
@@ -305,13 +310,27 @@ impl Marginalizer {
             self.factor_information(&prior_information)?;
         let offset = -(pseudo * &prior_gradient);
 
-        let linearization_point = kept
+        // A kept variable that is already frozen keeps its first estimate as
+        // the new prior's linearization point; recording the current value
+        // instead would move the "first" estimate every marginalization and
+        // undo the consistency first-estimate Jacobians exist for.
+        let linearization_point: Vec<DVector<f64>> = kept
             .iter()
             .map(|key| {
-                problem
-                    .variable_params(*key)
-                    .map(DVector::from_column_slice)
-                    .unwrap_or_else(|| DVector::zeros(0))
+                let frozen = match problem.jacobian_evaluation() {
+                    JacobianEvaluation::FirstEstimate => problem
+                        .variables()
+                        .get(*key)
+                        .and_then(|variable| variable.linearization_point())
+                        .map(DVector::from_column_slice),
+                    JacobianEvaluation::CurrentEstimate => None,
+                };
+                frozen.unwrap_or_else(|| {
+                    problem
+                        .variable_params(*key)
+                        .map(DVector::from_column_slice)
+                        .unwrap_or_else(|| DVector::zeros(0))
+                })
             })
             .collect();
         let manifolds = kept
@@ -322,6 +341,38 @@ impl Marginalizer {
                     .ok_or(MarginalizationError::UnknownVariable(*key))
             })
             .collect::<MarginalizationResult<Vec<_>>>()?;
+
+        // The quadratic above is expanded at the **current** estimate — its
+        // residuals were evaluated there — while a frozen block's prior is
+        // anchored at its first estimate `x₀`. Measured from `x₀`, the
+        // minimizer `Δ = −Λ⁺g` of the current-point expansion sits at
+        // `d − Λ⁺g` with `d = x_current ⊟ x₀`, so the offset carries `d`. It is
+        // zero for every block whose `x₀` is its current value.
+        let mut offset = offset;
+        let mut row = 0usize;
+        let first_estimate = matches!(
+            problem.jacobian_evaluation(),
+            JacobianEvaluation::FirstEstimate
+        );
+        for (index, key) in kept.iter().enumerate().filter(|_| first_estimate) {
+            let (Some(manifold), Some(x0), Some(&dim)) = (
+                manifolds.get(index),
+                linearization_point.get(index),
+                dims.get(index),
+            ) else {
+                continue;
+            };
+            if let Some(current) = problem.variable_params(*key) {
+                let mut shift = vec![0.0; dim];
+                block_local_log(*manifold, x0.as_slice())(current, &mut shift);
+                for (offset_row, value) in shift.iter().enumerate() {
+                    if let Some(slot) = offset.get_mut(row + offset_row) {
+                        *slot += value;
+                    }
+                }
+            }
+            row += dim;
+        }
 
         Ok(Marginal {
             kept,
@@ -753,6 +804,34 @@ mod tests {
             "prior minimizer {predicted:.6} != conditional optimum {solved_x1:.6}; \
              a flipped sign would land near {:.6}",
             x1[0] - marginal.offset[0]
+        );
+        Ok(())
+    }
+
+    /// First-estimate Jacobians: a kept variable already frozen at `x₀` keeps
+    /// `x₀` as the new prior's linearization point, and the offset is shifted
+    /// so the prior's minimizer — measured from `x₀` — is still the
+    /// conditional optimum. The model is linear, so the frozen Jacobians equal
+    /// the current ones and only the bookkeeping is under test.
+    #[test]
+    fn a_frozen_kept_variable_keeps_its_first_estimate() -> TestResult {
+        let (mut problem, keys, _blocks) = linear_chain([2.0, 5.0, 9.0]);
+        let first_estimate = [4.2, 0.3];
+        problem.set_linearization_point(keys[1], &first_estimate)?;
+        problem.set_jacobian_evaluation(JacobianEvaluation::FirstEstimate);
+        let marginal = Marginalizer::new().compute(&problem, &[keys[0]])?;
+
+        let recorded = marginal.linearization_point.first().ok_or("no block")?;
+        assert_eq!(recorded.as_slice(), &first_estimate);
+
+        let predicted = first_estimate[0] + marginal.offset[0];
+        let mut full = problem;
+        full.set_jacobian_evaluation(JacobianEvaluation::CurrentEstimate);
+        let result = solver().optimize(&mut full)?;
+        let solved_x1 = result.parameters[keys[1]].as_param_slice()[0];
+        assert!(
+            (predicted - solved_x1).abs() < 1e-6,
+            "prior minimizer {predicted:.6} != conditional optimum {solved_x1:.6}"
         );
         Ok(())
     }
