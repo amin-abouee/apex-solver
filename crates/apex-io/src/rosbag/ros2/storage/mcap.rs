@@ -50,11 +50,9 @@ impl McapStorageReader {
                 match message_result {
                     Ok(message) => {
                         let topic_name = &message.channel.topic;
-                        let message_type = &message.channel.message_encoding;
-
                         let entry = topic_map
                             .entry(topic_name.clone())
-                            .or_insert((message_type.clone(), 0));
+                            .or_insert((channel_type(&message.channel), 0));
                         entry.1 += 1;
                     }
                     Err(e) => {
@@ -153,11 +151,11 @@ impl StorageReader for McapStorageReader {
                             .unwrap_or_else(|| Connection {
                                 id: 1,
                                 topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
+                                message_type: channel_type(&message.channel),
                                 message_definition: MessageDefinition::default(),
                                 type_description_hash: String::new(),
                                 message_count: 0,
-                                serialization_format: "cdr".to_string(),
+                                serialization_format: message.channel.message_encoding.clone(),
                                 offered_qos_profiles: Vec::new(),
                             });
 
@@ -232,11 +230,11 @@ impl StorageReader for McapStorageReader {
                             .unwrap_or_else(|| Connection {
                                 id: 1,
                                 topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
+                                message_type: channel_type(&message.channel),
                                 message_definition: MessageDefinition::default(),
                                 type_description_hash: String::new(),
                                 message_count: 0,
-                                serialization_format: "cdr".to_string(),
+                                serialization_format: message.channel.message_encoding.clone(),
                                 offered_qos_profiles: Vec::new(),
                             });
 
@@ -302,11 +300,11 @@ impl StorageReader for McapStorageReader {
                             .unwrap_or_else(|| Connection {
                                 id: 1,
                                 topic: message.channel.topic.clone(),
-                                message_type: message.channel.message_encoding.clone(),
+                                message_type: channel_type(&message.channel),
                                 message_definition: MessageDefinition::default(),
                                 type_description_hash: String::new(),
                                 message_count: 0,
-                                serialization_format: "cdr".to_string(),
+                                serialization_format: message.channel.message_encoding.clone(),
                                 offered_qos_profiles: Vec::new(),
                             });
 
@@ -485,6 +483,16 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+/// The message type a channel carries — its schema name, e.g.
+/// `geometry_msgs/TransformStamped` — falling back to the encoding for a
+/// channel recorded without a schema.
+fn channel_type(channel: &mcap::Channel<'_>) -> String {
+    channel
+        .schema
+        .as_ref()
+        .map_or_else(|| channel.message_encoding.clone(), |schema| schema.name.clone())
 }
 
 #[cfg(test)]

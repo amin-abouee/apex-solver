@@ -19,7 +19,6 @@ use std::path::Path;
 
 use nalgebra::Vector3;
 
-use apex_manifolds::so3::SO3;
 
 use super::error::{Result, TrajectoryError};
 use super::types::{NANOS_PER_SEC, NANOS_PER_SECOND};
@@ -79,7 +78,7 @@ impl TumLoader {
             let qy = parse_field(row, 5, "qy", path, line)?;
             let qz = parse_field(row, 6, "qz", path, line)?;
             let qw = parse_field(row, 7, "qw", path, line)?;
-            let orientation = SO3::try_from_quaternion_wxyz(qw, qx, qy, qz).ok_or_else(|| {
+            let orientation = super::text_orientation(qw, qx, qy, qz).ok_or_else(|| {
                 TrajectoryError::InvalidQuaternion {
                     path: path.to_path_buf(),
                     line,
