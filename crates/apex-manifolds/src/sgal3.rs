@@ -377,7 +377,11 @@ impl LieGroup for SGal3 {
             jac_self
                 .fixed_view_mut::<3, 3>(0, 6)
                 .copy_from(&(-rotation_matrix * SO3Tangent::new(*vector).hat()));
-            jac_self.fixed_view_mut::<3, 1>(0, 9).copy_from(&velocity);
+            // X·Exp(0,0,0,s) = (R, p + s·v, v, t + s): a time step moves the
+            // point once through the translation and once through t·v.
+            jac_self
+                .fixed_view_mut::<3, 1>(0, 9)
+                .copy_from(&(2.0 * velocity));
         }
 
         if let Some(jac_vector) = jacobian_vector {
@@ -1649,6 +1653,36 @@ mod tests {
         assert!(result.norm() > 0.0);
         assert!(jac_self.norm() > 0.0);
         assert!(jac_point.norm() > 0.0);
+    }
+
+    #[test]
+    fn test_sgal3_act_jacobian_matches_finite_differences() {
+        const EPS: f64 = 1e-6;
+        let sgal3 = SGal3::new(
+            Vector3::new(1.0, -2.0, 0.5),
+            Vector3::new(0.3, 0.1, -0.2),
+            UnitQuaternion::from_euler_angles(0.1, -0.3, 0.7),
+            0.4,
+        );
+        let point = Vector3::new(4.0, -1.5, 0.8);
+        let mut jac_self = Matrix10::zeros();
+        sgal3.act(&point, Some(&mut jac_self), None);
+        for axis in 0..10 {
+            let mut delta = [0.0; 10];
+            delta[axis] = EPS;
+            let plus = sgal3.right_plus(&SGal3Tangent::from_slice(&delta), None, None);
+            delta[axis] = -EPS;
+            let minus = sgal3.right_plus(&SGal3Tangent::from_slice(&delta), None, None);
+            let fd = (plus.act(&point, None, None) - minus.act(&point, None, None)) / (2.0 * EPS);
+            for row in 0..3 {
+                assert!(
+                    (fd[row] - jac_self[(row, axis)]).abs() < 1e-6,
+                    "column {axis} row {row}: fd {} vs {}",
+                    fd[row],
+                    jac_self[(row, axis)]
+                );
+            }
+        }
     }
 
     #[test]
