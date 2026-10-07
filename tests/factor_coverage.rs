@@ -32,7 +32,8 @@ use apex_solver::factors::imu::{
     se23, sgal3,
 };
 use apex_solver::factors::lidar::{
-    IcpFactor, LidarEdgeFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
+    IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, Plane, PrecomputedPlane,
+    lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
@@ -1163,6 +1164,96 @@ fn icp_and_lidar_plane_factors_align_two_scans() {
     let hat = se3_of(result.parameters[key_b].as_param_slice());
     let err = (hat.translation() - t_wb.translation()).norm();
     assert!(err < 0.02, "scan pose translation error {err:.4}");
+}
+
+/// A LiDAR scan registered to a map of planes on a navigation state: points
+/// on the six walls of a room pull a perturbed `SE₂(3)` state back to truth
+/// through a fixed LiDAR extrinsic. The velocity sees no LiDAR constraint and
+/// is held fixed.
+#[test]
+fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
+    let truth = SE23::new(
+        Vector3::new(0.4, -0.3, 1.2),
+        Vector3::new(0.5, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.05, -0.02, 0.6),
+    );
+    let t_sl = SE3::new(
+        Vector3::new(0.02, -0.01, 0.08),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
+    );
+    // Walls of a 6 × 4 × 3 m room: (unit normal, offset) with nᵀx + d = 0.
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.2, -0.15, 0.1, 0.03, -0.02, 0.05, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let key_x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key_x, velocity_axis);
+    }
+    let key_e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sl.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_e, &t_sl);
+
+    let world_to_lidar = |w: &Vector3<f64>| {
+        let s = truth.rotation_matrix().transpose() * (w - truth.translation());
+        t_sl.inverse(None).act(&s, None, None)
+    };
+    let mut count = 0;
+    for (normal, offset) in &walls {
+        let plane = Plane::new(*normal, *offset).unwrap_or_else(|e| panic!("{e}"));
+        let foot = -*offset * *normal;
+        let tangent_a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let tangent_b = normal.cross(&tangent_a);
+        for i in 0..4 {
+            for j in 0..4 {
+                let on_wall = foot
+                    + tangent_a * (0.4 * f64::from(i) - 0.6)
+                    + tangent_b * (0.4 * f64::from(j) - 0.6);
+                problem.add_residual_block(
+                    &[key_x, key_e],
+                    Box::new(
+                        LidarMapPlaneFactor::<SE23>::new(
+                            world_to_lidar(&on_wall),
+                            plane.clone(),
+                            0.02,
+                        )
+                        .unwrap_or_else(|e| panic!("{e}")),
+                    ),
+                    None,
+                );
+                count += 1;
+            }
+        }
+    }
+    assert_eq!(count, 96);
+
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("LiDAR map registration failed: {e}"));
+
+    let hat = SE23::from_param_slice(result.parameters[key_x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-6, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
 }
 
 // ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
