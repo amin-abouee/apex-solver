@@ -11,6 +11,7 @@ pub mod edge;
 pub mod gicp;
 pub mod plane;
 pub mod point_to_point;
+pub mod se23;
 
 pub use distance_field::{DistanceField, IcpFactor};
 pub use edge::LidarEdgeFactor;
@@ -19,3 +20,6 @@ pub use plane::{
     LidarPlaneFactor, Plane, PointToPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
 pub use point_to_point::PoseToPointFactor;
+pub use se23::{
+    LidarPointChain, LidarPointToPlaneSe23Factor, lidar_point_chain, point_to_plane_sigma,
+};
