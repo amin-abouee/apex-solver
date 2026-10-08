@@ -2,7 +2,7 @@
 //!
 //! The other LiDAR factors in this module act on bare `SE3` poses. Here the
 //! world pose `X` is generic: any [`LieGroup`] whose action moves a 3-D point
-//! — `SE3`, `SE₂(3)` (pose + velocity), `Sim3`, `SGal3`, `SO3` — while the
+//! — `SE3`, `SE₂(3)` (pose + velocity), `Sim3`, `SO3` — while the
 //! LiDAR extrinsic `T_SL` stays a rigid `SE3`:
 //!
 //! ```text
@@ -20,10 +20,11 @@
 //! ∂w/∂δρₑ = (∂w/∂s)·R_SL      ∂w/∂δθₑ = −(∂w/∂s)·R_SL·[l]×
 //! ```
 //!
-//! So `SE₂(3)` gets exact zero velocity columns, `Sim3` a scale column (the
-//! LiDAR then constrains scale), `SGal3` its time column — none of it written
-//! by hand here. Groups that act in 2-D (`SE2`, `SO2`) or have a runtime
-//! dimension (`Rn`) are rejected at construction.
+//! So `SE₂(3)` gets exact zero velocity columns and `Sim3` a scale column (the
+//! LiDAR then constrains scale), none of it written by hand here. Groups
+//! without a 3-D point action — see
+//! [`acts_on_points`](crate::factors::common::group_point::acts_on_points) —
+//! are rejected at construction.
 
 use faer::prelude::ReborrowMut;
 use nalgebra::{Matrix3, SMatrix, Vector3};
@@ -34,16 +35,11 @@ use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
+use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::math::skew;
 use crate::factors::common::validate::expect_manifolds;
 
 use super::plane::Plane;
-
-/// Whether group `G` can carry a LiDAR point: it acts on 3-D points and has a
-/// fixed-size tangent.
-pub fn acts_on_points<G: LieGroup>() -> bool {
-    !G::TangentVector::is_dynamic() && !matches!(G::NAME, "SE2" | "SO2")
-}
 
 /// A LiDAR point carried to the world, with its derivatives.
 #[derive(Clone, Debug)]
@@ -295,7 +291,6 @@ mod tests {
     use apex_manifolds::se2::SE2;
     use apex_manifolds::se3::SE3Tangent;
     use apex_manifolds::se23::SE23;
-    use apex_manifolds::sgal3::SGal3;
     use apex_manifolds::sim3::Sim3;
     use apex_manifolds::so3::SO3;
     use faer::Mat;
@@ -415,16 +410,6 @@ mod tests {
     #[test]
     fn sim3_similarities() -> Result<(), String> {
         check_group(Sim3::new(Vector3::new(1.0, -2.0, 0.5), rotation(), 1.3))
-    }
-
-    #[test]
-    fn sgal3_galilean_poses() -> Result<(), String> {
-        check_group(SGal3::new(
-            Vector3::new(1.0, -2.0, 0.5),
-            Vector3::new(0.3, 0.1, -0.2),
-            rotation(),
-            0.4,
-        ))
     }
 
     #[test]

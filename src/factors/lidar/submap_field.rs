@@ -21,7 +21,7 @@
 //! from [`LieGroup`], so every group with a point action gets it for free.
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, Vector3};
+use nalgebra::Vector3;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -33,47 +33,11 @@ use crate::factors::Factor;
 use crate::factors::common::validate::expect_manifolds;
 
 use super::distance_field::DistanceField;
-use super::map_plane::{acts_on_points, lidar_point_chain};
+use super::map_plane::lidar_point_chain;
+use crate::factors::common::group_point::{acts_on_points, into_anchor};
 
 /// Gradients below this norm carry no direction: the point is ignored.
 const MIN_GRADIENT: f64 = 1e-9;
-
-/// A world point carried into an anchor's frame, with its derivatives.
-#[derive(Clone, Debug)]
-pub struct AnchorChain {
-    /// The point in the anchor frame, `p_A = X_a⁻¹ ⊙ w`.
-    pub point: Vector3<f64>,
-    /// `∂p_A/∂X_a`, `3 × dof(G)`, one `[x, y, z]` column per tangent axis.
-    pub d_anchor: Vec<[f64; 3]>,
-    /// `∂p_A/∂w`.
-    pub d_world: Matrix3<f64>,
-}
-
-/// Carry world point `world` into the frame of `anchor`.
-pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain {
-    let mut d_inverse = G::zero_jacobian();
-    let inverse = anchor.inverse(Some(&mut d_inverse));
-    let mut d_act = G::zero_jacobian();
-    let mut d_world = Matrix3::zeros();
-    let point = inverse.act(world, Some(&mut d_act), Some(&mut d_world));
-    let dof = anchor.tangent_dim();
-    let d_anchor = (0..dof)
-        .map(|col| {
-            let mut column = [0.0; 3];
-            for (row, value) in column.iter_mut().enumerate() {
-                *value = (0..dof)
-                    .map(|k| d_act[(row, k)] * d_inverse[(k, col)])
-                    .sum();
-            }
-            column
-        })
-        .collect();
-    AnchorChain {
-        point,
-        d_anchor,
-        d_world,
-    }
-}
 
 /// The OKVIS2-X residual scale `√(L_min²/9 + σ_d²·‖∇L‖²)`: the field's own
 /// uncertainty (a third of the occupancy clamp `L_min`) plus the point's range
@@ -366,7 +330,6 @@ mod tests {
     use super::*;
     use apex_manifolds::se2::SE2;
     use apex_manifolds::se23::SE23;
-    use apex_manifolds::sgal3::SGal3;
     use apex_manifolds::sim3::Sim3;
     use apex_manifolds::so3::SO3;
     use faer::Mat;
@@ -515,24 +478,6 @@ mod tests {
     }
 
     #[test]
-    fn sgal3_galilean_poses() -> Result<(), String> {
-        check_group(
-            SGal3::new(
-                Vector3::new(0.2, 0.1, -0.1),
-                Vector3::new(1.0, 0.0, 0.2),
-                rotation(0.1),
-                0.2,
-            ),
-            SGal3::new(
-                Vector3::new(0.5, -0.3, 0.2),
-                Vector3::new(0.3, 0.1, -0.2),
-                rotation(0.3),
-                0.5,
-            ),
-        )
-    }
-
-    #[test]
     fn so3_rotations() -> Result<(), String> {
         check_group(SO3::new(rotation(0.1)), SO3::new(rotation(0.3)))
     }
@@ -638,18 +583,5 @@ mod tests {
         assert_eq!(submap.jacobian_shape(), (1, 18));
         assert!(submap.whitens_internally());
         Ok(())
-    }
-
-    /// `into_anchor` inverts the group action, and `∂p_A/∂w` undoes its linear
-    /// part — here with a scale.
-    #[test]
-    fn into_anchor_inverts_the_action() {
-        let anchor = Sim3::new(Vector3::new(0.2, 0.1, -0.1), rotation(0.1), 1.3);
-        let local = Vector3::new(1.0, 2.0, -0.5);
-        let chain = into_anchor(&anchor, &anchor.act(&local, None, None));
-        assert!((chain.point - local).norm() < 1e-12);
-        let step =
-            anchor.act(&Vector3::x(), None, None) - anchor.act(&Vector3::zeros(), None, None);
-        assert!((chain.d_world * step - Vector3::x()).norm() < 1e-12);
     }
 }

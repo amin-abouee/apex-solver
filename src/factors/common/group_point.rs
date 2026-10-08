@@ -1,0 +1,127 @@
+//! Moving 3-D points with a generic pose group, derivatives from the group.
+//!
+//! Factors generic over a [`LieGroup`] carry points through `X ⊙ p` and
+//! `X⁻¹ ⊙ p`; both, with their Jacobians in the group's own chart, come from
+//! the group's `act` and `inverse`.
+
+use nalgebra::{Matrix3, Vector3};
+
+use apex_manifolds::{LieGroup, Tangent};
+
+/// Whether group `G` moves 3-D points: a fixed-size tangent and an `act` that
+/// is a group action on 3-D points, so `X⁻¹ ⊙ (X ⊙ x) = x`.
+///
+/// Excluded: `SE2`/`SO2` act in the plane, `Rn` has a runtime dimension, and
+/// `SGal3::act` adds `t·v` — not a group action, so its inverse does not undo
+/// it.
+pub fn acts_on_points<G: LieGroup>() -> bool {
+    !G::TangentVector::is_dynamic() && !matches!(G::NAME, "SE2" | "SO2" | "SGal3")
+}
+
+/// A world point carried into an anchor's frame, with its derivatives.
+#[derive(Clone, Debug)]
+pub struct AnchorChain {
+    /// The point in the anchor frame, `p_A = X_a⁻¹ ⊙ w`.
+    pub point: Vector3<f64>,
+    /// `∂p_A/∂X_a`, `3 × dof(G)`, one `[x, y, z]` column per tangent axis.
+    pub d_anchor: Vec<[f64; 3]>,
+    /// `∂p_A/∂w`.
+    pub d_world: Matrix3<f64>,
+}
+
+/// Carry world point `world` into the frame of `anchor`.
+pub fn into_anchor<G: LieGroup>(anchor: &G, world: &Vector3<f64>) -> AnchorChain {
+    let mut d_inverse = G::zero_jacobian();
+    let inverse = anchor.inverse(Some(&mut d_inverse));
+    let mut d_act = G::zero_jacobian();
+    let mut d_world = Matrix3::zeros();
+    let point = inverse.act(world, Some(&mut d_act), Some(&mut d_world));
+    let dof = anchor.tangent_dim();
+    let d_anchor = (0..dof)
+        .map(|col| {
+            let mut column = [0.0; 3];
+            for (row, value) in column.iter_mut().enumerate() {
+                *value = (0..dof)
+                    .map(|k| d_act[(row, k)] * d_inverse[(k, col)])
+                    .sum();
+            }
+            column
+        })
+        .collect();
+    AnchorChain {
+        point,
+        d_anchor,
+        d_world,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apex_manifolds::rn::Rn;
+    use apex_manifolds::se2::SE2;
+    use apex_manifolds::se3::SE3;
+    use apex_manifolds::se23::SE23;
+    use apex_manifolds::sgal3::SGal3;
+    use apex_manifolds::sim3::Sim3;
+    use apex_manifolds::so2::SO2;
+    use apex_manifolds::so3::SO3;
+    use nalgebra::UnitQuaternion;
+
+    fn rotation(roll: f64) -> UnitQuaternion<f64> {
+        UnitQuaternion::from_euler_angles(roll, -0.3, 0.7)
+    }
+
+    /// `into_anchor` inverts the group action, and `∂p_A/∂w` undoes its linear
+    /// part — here with a scale.
+    #[test]
+    fn into_anchor_inverts_the_action() {
+        let anchor = Sim3::new(Vector3::new(0.2, 0.1, -0.1), rotation(0.1), 1.3);
+        let local = Vector3::new(1.0, 2.0, -0.5);
+        let chain = into_anchor(&anchor, &anchor.act(&local, None, None));
+        assert!((chain.point - local).norm() < 1e-12);
+        let step =
+            anchor.act(&Vector3::x(), None, None) - anchor.act(&Vector3::zeros(), None, None);
+        assert!((chain.d_world * step - Vector3::x()).norm() < 1e-12);
+    }
+
+    /// The law that admits a group: its inverse undoes its action.
+    fn inverse_undoes_act<G: LieGroup>(g: &G) -> bool {
+        let x = Vector3::new(1.0, 2.0, -0.5);
+        (into_anchor(g, &g.act(&x, None, None)).point - x).norm() < 1e-12
+    }
+
+    #[test]
+    fn admitted_groups_are_actions_and_sgal3_is_not() {
+        let r = rotation(0.2);
+        assert!(inverse_undoes_act(&SE3::new(
+            Vector3::new(1.0, 0.0, 2.0),
+            r
+        )));
+        assert!(inverse_undoes_act(&SE23::new(
+            Vector3::new(1.0, 0.0, 2.0),
+            Vector3::new(0.5, 0.1, 0.0),
+            r
+        )));
+        assert!(inverse_undoes_act(&Sim3::new(
+            Vector3::new(1.0, 0.0, 2.0),
+            r,
+            1.4
+        )));
+        assert!(inverse_undoes_act(&SO3::new(r)));
+        let sgal3 = SGal3::new(
+            Vector3::new(1.0, 0.0, 2.0),
+            Vector3::new(0.5, 0.1, 0.0),
+            r,
+            0.3,
+        );
+        assert!(!inverse_undoes_act(&sgal3));
+        assert!(!acts_on_points::<SGal3>());
+    }
+
+    #[test]
+    fn only_three_dimensional_fixed_size_groups_move_points() {
+        assert!(acts_on_points::<SE3>() && acts_on_points::<Sim3>());
+        assert!(!acts_on_points::<SE2>() && !acts_on_points::<SO2>() && !acts_on_points::<Rn>());
+    }
+}

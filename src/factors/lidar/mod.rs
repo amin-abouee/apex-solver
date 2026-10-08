@@ -18,11 +18,11 @@ pub use distance_field::{DistanceField, IcpFactor};
 pub use edge::LidarEdgeFactor;
 pub use gicp::GicpFactor;
 pub use map_plane::LidarMapPlaneFactor;
-pub use map_plane::{LidarPointChain, acts_on_points, lidar_point_chain, point_to_plane_sigma};
+pub use map_plane::{LidarPointChain, lidar_point_chain, point_to_plane_sigma};
 pub use plane::{
     LidarPlaneFactor, Plane, PointToPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
 pub use point_to_point::PoseToPointFactor;
 pub use submap_field::LidarSubmapFieldFactor;
 pub use submap_field::SubmapAlignmentFactor;
-pub use submap_field::{AnchorChain, into_anchor, occupancy_sigma};
+pub use submap_field::occupancy_sigma;
