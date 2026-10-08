@@ -42,6 +42,7 @@ use apex_solver::factors::visual::{
     DepthFactor, EssentialMatrixConstraint, EssentialMatrixFactor, HomogeneousPointFactor,
     OneSidedDepthFactor,
 };
+use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
 use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
@@ -1377,6 +1378,103 @@ fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
         );
         assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
     }
+}
+
+/// FAST-LIVO2's visual update: LiDAR map points with reference patches pull a
+/// perturbed navigation state back through direct photometric residuals in one
+/// textured image (a photometric PnP). The reference patches carry a
+/// brightness offset the zero-mean residual must ignore.
+#[test]
+fn photometric_patch_factor_recovers_a_navigation_state() {
+    use apex_camera_models::{CameraModel, PinholeCamera};
+
+    let texture = |x: f64, y: f64| {
+        100.0 + 40.0 * (0.15 * x).sin() + 30.0 * (0.11 * y).cos() + 20.0 * (0.05 * (x + y)).sin()
+    };
+    let image = std::sync::Arc::new(
+        IntensityImage::from_fn(640, 480, |x, y| texture(x as f64, y as f64) as f32)
+            .unwrap_or_else(|e| panic!("{e}")),
+    );
+    let camera = PinholeCamera::from([500.0, 500.0, 320.0, 240.0]);
+    let truth = SE23::new(
+        Vector3::new(1.0, -0.5, 0.3),
+        Vector3::new(0.4, 0.1, 0.0),
+        UnitQuaternion::from_euler_angles(0.1, -0.2, 0.4),
+    );
+    let t_sc = SE3::new(
+        Vector3::new(0.05, -0.02, 0.01),
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.03),
+    );
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.01, -0.008, 0.006, 0.003, -0.002, 0.004, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let key_x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key_x, velocity_axis);
+    }
+    let key_c = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sc.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_c, &t_sc);
+
+    let offsets = PhotometricPatchFactor::<SE23, PinholeCamera>::square_offsets(4, 1.0);
+    for i in 0..6 {
+        for j in 0..5 {
+            // A LiDAR map point at 3–5 m, spread over the image.
+            let depth = 3.0 + 0.4 * f64::from((i + j) % 5);
+            let c = Vector3::new(
+                (f64::from(i) - 2.5) * 0.12 * depth,
+                (f64::from(j) - 2.0) * 0.12 * depth,
+                depth,
+            );
+            let centre = camera.project(&c).unwrap_or_else(|e| panic!("{e}"));
+            let reference: Vec<f64> = offsets
+                .iter()
+                .map(|o| {
+                    let (value, _) = image
+                        .sample(centre.x + o.x, centre.y + o.y)
+                        .unwrap_or_else(|| panic!("reference patch off the image"));
+                    value + 12.0
+                })
+                .collect();
+            let point_w = truth.act(&t_sc.act(&c, None, None), None, None);
+            problem.add_residual_block(
+                &[key_x, key_c],
+                Box::new(
+                    PhotometricPatchFactor::<SE23, _>::new(
+                        camera,
+                        image.clone(),
+                        point_w,
+                        offsets.clone(),
+                        &reference,
+                        2.0,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+        }
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("photometric alignment failed: {e}"));
+
+    let hat = SE23::from_param_slice(result.parameters[key_x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-5, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-5, "rotation error {rotation_err:.2e}");
+    assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
 }
 
 // ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
