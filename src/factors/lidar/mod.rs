@@ -12,6 +12,7 @@ pub mod gicp;
 pub mod map_plane;
 pub mod plane;
 pub mod point_to_point;
+pub mod submap_field;
 
 pub use distance_field::{DistanceField, IcpFactor};
 pub use edge::LidarEdgeFactor;
@@ -22,3 +23,6 @@ pub use plane::{
     LidarPlaneFactor, Plane, PointToPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };
 pub use point_to_point::PoseToPointFactor;
+pub use submap_field::LidarSubmapFieldFactor;
+pub use submap_field::SubmapAlignmentFactor;
+pub use submap_field::{AnchorChain, into_anchor, occupancy_sigma};

@@ -32,8 +32,8 @@ use apex_solver::factors::imu::{
     se23, sgal3,
 };
 use apex_solver::factors::lidar::{
-    IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, Plane, PrecomputedPlane,
-    lidar_plane_factor_isotropic,
+    DistanceField, IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, LidarSubmapFieldFactor, Plane,
+    PrecomputedPlane, SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
@@ -1254,6 +1254,129 @@ fn lidar_map_plane_factor_registers_a_scan_on_a_navigation_state() {
     assert!(position_err < 1e-6, "position error {position_err:.2e}");
     assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+}
+
+/// `L(p) = pᵀ·A·p − 1`: an ellipsoid with semi-axes 3, 2, 1 m, standing in
+/// for an occupancy submap (negative inside, positive outside).
+struct EllipsoidField;
+
+impl DistanceField for EllipsoidField {
+    fn query(&self, point: &Vector3<f64>) -> Option<(f64, Vector3<f64>)> {
+        let ap = Vector3::new(1.0 / 9.0, 1.0 / 4.0, 1.0).component_mul(point);
+        (point.norm() < 10.0).then(|| (point.dot(&ap) - 1.0, 2.0 * ap))
+    }
+}
+
+/// OKVIS2-X LiDAR factors on navigation states: a submap anchored at a fixed
+/// keyframe `X_a`; a scan at `X_k` (frame-to-submap, through `T_SL`) and a
+/// second submap anchored at `X_b` (submap-to-submap) both start perturbed and
+/// are pulled back onto the field's zero level set.
+#[test]
+fn lidar_submap_field_factors_register_a_scan_and_a_submap() {
+    let x_a = SE23::new(
+        Vector3::new(0.1, 0.2, 0.0),
+        Vector3::new(0.4, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 0.2),
+    );
+    let x_k = SE23::new(
+        Vector3::new(0.3, 0.1, 0.05),
+        Vector3::new(0.4, 0.1, 0.0),
+        UnitQuaternion::from_euler_angles(0.02, -0.01, 0.35),
+    );
+    let x_b = SE23::new(
+        Vector3::new(0.5, -0.1, 0.1),
+        Vector3::new(0.3, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(-0.03, 0.02, 0.5),
+    );
+    let t_sl = SE3::new(
+        Vector3::new(0.02, -0.01, 0.08),
+        UnitQuaternion::from_euler_angles(0.0, 0.0, 1.5),
+    );
+    let field = std::sync::Arc::new(EllipsoidField);
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let add_state = |problem: &mut Problem, state: &SE23, nudge: [f64; 9]| {
+        let start = state.right_plus(&SE23Tangent::from_slice(&nudge), None, None);
+        let key = problem.add_variable(
+            ManifoldType::SE23,
+            DVector::from_column_slice(start.as_param_slice()),
+        );
+        for velocity_axis in 6..9 {
+            problem.fix_variable(key, velocity_axis);
+        }
+        key
+    };
+    let key_a = add_state(&mut problem, &x_a, [0.0; 9]);
+    anchor_se23(&mut problem, key_a, &x_a);
+    let key_k = add_state(
+        &mut problem,
+        &x_k,
+        [0.08, -0.05, 0.04, 0.02, -0.015, 0.03, 0.0, 0.0, 0.0],
+    );
+    let key_b = add_state(
+        &mut problem,
+        &x_b,
+        [-0.06, 0.05, -0.03, -0.02, 0.02, -0.025, 0.0, 0.0, 0.0],
+    );
+    let key_e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sl.as_param_slice()),
+    );
+    anchor_se3(&mut problem, key_e, &t_sl);
+
+    for i in 0..12 {
+        for j in 1..6 {
+            let azimuth = std::f64::consts::TAU * f64::from(i) / 12.0;
+            let polar = std::f64::consts::PI * f64::from(j) / 6.0;
+            // A point on the surface, in the submap (anchor) frame.
+            let surface = Vector3::new(
+                3.0 * azimuth.cos() * polar.sin(),
+                2.0 * azimuth.sin() * polar.sin(),
+                polar.cos(),
+            );
+            let world = x_a.act(&surface, None, None);
+            let body_k = x_k.inverse(None).act(&world, None, None);
+            let point_l = t_sl.inverse(None).act(&body_k, None, None);
+            problem.add_residual_block(
+                &[key_a, key_k, key_e],
+                Box::new(
+                    LidarSubmapFieldFactor::<SE23, _>::new(field.clone(), point_l, 0.05)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+            let point_b = x_b.inverse(None).act(&world, None, None);
+            problem.add_residual_block(
+                &[key_a, key_b],
+                Box::new(
+                    SubmapAlignmentFactor::<SE23, _>::new(field.clone(), point_b, 0.05)
+                        .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+            );
+        }
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("submap registration failed: {e}"));
+
+    for (name, key, truth) in [("scan", key_k, &x_k), ("submap", key_b, &x_b)] {
+        let hat = SE23::from_param_slice(result.parameters[key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(
+            position_err < 1e-6,
+            "{name} position error {position_err:.2e}"
+        );
+        assert!(
+            rotation_err < 1e-6,
+            "{name} rotation error {rotation_err:.2e}"
+        );
+        assert!((hat.velocity() - truth.velocity()).norm() < 1e-12);
+    }
 }
 
 // ── 9. Motion constraints: a stopped, ground-bound vehicle ───────────────────
