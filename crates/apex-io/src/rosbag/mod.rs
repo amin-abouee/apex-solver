@@ -75,6 +75,7 @@
 
 /// Error types for bag I/O operations.
 pub mod error;
+pub mod point_cloud;
 
 /// Core data types and structures.
 pub mod types;
