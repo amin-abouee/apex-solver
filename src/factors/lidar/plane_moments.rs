@@ -12,9 +12,20 @@
 //! Σ_k (nᵀw_k + d)² = cᵀ·M·c,     M = Σ_k s̃_k·s̃_kᵀ   (4 × 4, the moments)
 //! ```
 //!
-//! and with `M = L·Lᵀ` the frame's four residuals `r = Lᵀc / σ` carry exactly
-//! the per-point cost. World points of frames already outside the window
-//! ("fixed") add their own `M` with `c = (n, d)` and no Jacobian.
+//! Centred on the frame's mean `μ` (scatter `S = Σ(s_k−μ)(s_k−μ)ᵀ`), the cross
+//! term vanishes and the sum splits into
+//!
+//! ```text
+//! Σ_k (nᵀw_k + d)² = (Aᵀn)ᵀ·S·(Aᵀn) + N·(nᵀ(Aμ + b) + d)²
+//! ```
+//!
+//! so with `S = L·Lᵀ` the frame's four residuals `[Lᵀ·Aᵀn, √N·(nᵀ(Aμ+b)+d)] / σ`
+//! carry exactly the per-point cost. Centring is what keeps this exact: the
+//! raw 4 × 4 moment matrix of points tens of metres away spans ten orders of
+//! magnitude, and a square root of it is only accurate to ~1e-4 relative —
+//! residuals in the thousands for a plane whose true cost is ~1e-2. World
+//! points of frames already outside the window ("fixed") add the same four
+//! residuals with `A = I`, `b = 0` and no Jacobian.
 //!
 //! The plane is the best fit to all the points, re-solved on every
 //! evaluation: the cost is `N·λ_min/σ²` of the merged scatter, and by the
@@ -30,7 +41,7 @@
 use std::marker::PhantomData;
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{Matrix3, Matrix4, SymmetricEigen, Vector3, Vector4};
+use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 
 use apex_manifolds::{LieGroup, Tangent};
 
@@ -130,29 +141,32 @@ impl PointMoments {
         Some((normal, -normal.dot(&mean), values))
     }
 
-    /// The homogeneous moment matrix `Σ s̃·s̃ᵀ`, `s̃ = (s, 1)`.
-    fn homogeneous(&self) -> Matrix4<f64> {
-        let mut m = Matrix4::zeros();
-        m.fixed_view_mut::<3, 3>(0, 0).copy_from(&self.outer);
-        m.fixed_view_mut::<3, 1>(0, 3).copy_from(&self.sum);
-        m.fixed_view_mut::<1, 3>(3, 0)
-            .copy_from(&self.sum.transpose());
-        m[(3, 3)] = self.count;
-        m
-    }
-
-    /// `Lᵀ` with `L·Lᵀ = Σ s̃·s̃ᵀ`, from the eigen-decomposition (the matrix
-    /// is singular for coplanar points, which a Cholesky factor would refuse).
-    fn root(&self) -> Matrix4<f64> {
-        let eigen = SymmetricEigen::new(self.homogeneous());
-        let mut root = Matrix4::zeros();
-        for k in 0..4 {
+    /// The moments centred on their mean: `(N, μ, Lᵀ)` with `L·Lᵀ` the
+    /// centred scatter `Σ(s−μ)(s−μ)ᵀ`. `None` without points.
+    fn centred(&self) -> Option<Centred> {
+        let (mean, scatter) = self.mean_and_scatter()?;
+        let eigen = SymmetricEigen::new(scatter * self.count);
+        let mut root = Matrix3::zeros();
+        for k in 0..3 {
             let scale = eigen.eigenvalues[k].max(0.0).sqrt();
             root.row_mut(k)
                 .copy_from(&(eigen.eigenvectors.column(k).transpose() * scale));
         }
-        root
+        Some(Centred {
+            count: self.count,
+            mean,
+            root,
+        })
     }
+}
+
+/// A point set centred on its mean, with the square root of its scatter.
+#[derive(Clone, Copy, Debug)]
+struct Centred {
+    count: f64,
+    mean: Vector3<f64>,
+    /// `Lᵀ` with `L·Lᵀ = Σ(s−μ)(s−μ)ᵀ`.
+    root: Matrix3<f64>,
 }
 
 /// One plane over several frames, from per-frame point moments; see the
@@ -165,10 +179,8 @@ impl PointMoments {
 /// Whitens internally: register with `NoiseModel::null()`.
 #[derive(Clone)]
 pub struct LidarPlaneMomentFactor<G: LieGroup> {
-    frames: Vec<PointMoments>,
-    roots: Vec<Matrix4<f64>>,
-    fixed: PointMoments,
-    fixed_root: Matrix4<f64>,
+    frames: Vec<Centred>,
+    fixed: Option<Centred>,
     sigma: f64,
     group: PhantomData<fn() -> G>,
 }
@@ -207,11 +219,14 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
                 "{name}: sigma must be finite and positive, got {sigma}"
             ));
         }
+        let frames = frames
+            .iter()
+            .map(PointMoments::centred)
+            .collect::<Option<Vec<_>>>()
+            .ok_or_else(|| format!("{name}: a frame without points"))?;
         Ok(Self {
-            roots: frames.iter().map(PointMoments::root).collect(),
             frames,
-            fixed_root: fixed.root(),
-            fixed,
+            fixed: fixed.centred(),
             sigma,
             group: PhantomData,
         })
@@ -224,8 +239,19 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
 
     /// Total number of points, free and fixed.
     pub fn points(&self) -> f64 {
-        self.frames.iter().map(|m| m.count).sum::<f64>() + self.fixed.count
+        self.frames.iter().map(|m| m.count).sum::<f64>() + self.fixed.map_or(0.0, |f| f.count)
     }
+}
+
+/// Unit eigenvector of the smallest eigenvalue of a symmetric `scatter`;
+/// `None` when the two smallest are not separated.
+fn smallest_axis(scatter: &Matrix3<f64>) -> Option<Vector3<f64>> {
+    let eigen = SymmetricEigen::new(*scatter);
+    let mut order = [0, 1, 2];
+    order.sort_by(|&a, &b| eigen.eigenvalues[a].total_cmp(&eigen.eigenvalues[b]));
+    let gap = eigen.eigenvalues[order[1]] - eigen.eigenvalues[order[0]];
+    (gap > MIN_EIGEN_GAP * eigen.eigenvalues[order[2]].abs().max(1.0))
+        .then(|| eigen.eigenvectors.column(order[0]).into_owned())
 }
 
 /// The affine map `s ↦ A·s + b` of `state`'s action, and the action's
@@ -260,10 +286,6 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
             .iter()
             .map(|param| affine_action(&G::from_param_slice(param)))
             .collect();
-        let mut total = self.fixed;
-        for ((a, b, _), moments) in actions.iter().zip(&self.frames) {
-            total.merge(&moments.transformed(a, b));
-        }
         let mut jac = jacobian;
         if let Some(jac) = jac.as_mut() {
             for row in 0..jac.nrows() {
@@ -272,40 +294,78 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
                 }
             }
         }
-        let Some((normal, offset, _)) = total.plane() else {
+        // The best-fit plane of every point, from the centred parts: each
+        // frame's mean carried to the world, its scatter rotated.
+        let parts: Vec<(f64, Vector3<f64>, Matrix3<f64>)> = actions
+            .iter()
+            .zip(&self.frames)
+            .map(|((a, b, _), frame)| {
+                let scatter = a * frame.root.transpose() * frame.root * a.transpose();
+                (frame.count, a * frame.mean + b, scatter)
+            })
+            .chain(
+                self.fixed
+                    .iter()
+                    .map(|f| (f.count, f.mean, f.root.transpose() * f.root)),
+            )
+            .collect();
+        let total: f64 = parts.iter().map(|p| p.0).sum();
+        let mean = parts.iter().map(|p| p.1 * p.0).sum::<Vector3<f64>>() / total;
+        let scatter = parts
+            .iter()
+            .map(|(count, centre, scatter)| {
+                scatter + (centre - mean) * (centre - mean).transpose() * *count
+            })
+            .sum::<Matrix3<f64>>();
+        let Some(normal) = smallest_axis(&scatter) else {
             residual.fill(0.0);
             return;
         };
+        let offset = -normal.dot(&mean);
         let information = 1.0 / self.sigma;
-        for (block, ((a, b, columns), root)) in actions.iter().zip(&self.roots).enumerate() {
+        for (block, ((a, b, columns), frame)) in actions.iter().zip(&self.frames).enumerate() {
             let a_n = a.transpose() * normal;
-            let c = Vector4::new(a_n.x, a_n.y, a_n.z, normal.dot(b) + offset);
-            let r = root * c * information;
-            residual[4 * block..4 * block + 4].copy_from_slice(r.as_slice());
+            let spread = frame.root * a_n * information;
+            let root_n = frame.count.sqrt();
+            let along = normal.dot(&(a * frame.mean + b)) + offset;
+            residual[4 * block..4 * block + 3].copy_from_slice(spread.as_slice());
+            residual[4 * block + 3] = root_n * along * information;
             if let Some(jac) = jac.as_mut() {
                 let [j0, jx, jy, jz] = columns;
                 for col in 0..dof {
-                    let origin = normal.dot(&j0[col]);
-                    let dc = Vector4::new(
-                        normal.dot(&jx[col]) - origin,
-                        normal.dot(&jy[col]) - origin,
-                        normal.dot(&jz[col]) - origin,
-                        origin,
+                    let origin = j0[col];
+                    let axes = [jx[col] - origin, jy[col] - origin, jz[col] - origin];
+                    let d_an = Vector3::new(
+                        normal.dot(&axes[0]),
+                        normal.dot(&axes[1]),
+                        normal.dot(&axes[2]),
                     );
-                    let dr = root * dc * information;
-                    for k in 0..4 {
-                        *jac.rb_mut().get_mut(4 * block + k, block * dof + col) = dr[k];
+                    let d_spread = frame.root * d_an * information;
+                    let at_mean = origin
+                        + axes[0] * frame.mean.x
+                        + axes[1] * frame.mean.y
+                        + axes[2] * frame.mean.z;
+                    for k in 0..3 {
+                        *jac.rb_mut().get_mut(4 * block + k, block * dof + col) = d_spread[k];
                     }
+                    *jac.rb_mut().get_mut(4 * block + 3, block * dof + col) =
+                        root_n * normal.dot(&at_mean) * information;
                 }
             }
         }
         // The fixed points' residuals count too (no Jacobian): only a cost
         // over every point has the fitted plane as its minimizer, which is
         // what makes `Jᵀr` exact.
-        let c = Vector4::new(normal.x, normal.y, normal.z, offset);
-        let r = self.fixed_root * c * information;
         let fixed_row = 4 * self.frames.len();
-        residual[fixed_row..fixed_row + 4].copy_from_slice(r.as_slice());
+        match &self.fixed {
+            Some(fixed) => {
+                let spread = fixed.root * normal * information;
+                residual[fixed_row..fixed_row + 3].copy_from_slice(spread.as_slice());
+                residual[fixed_row + 3] =
+                    fixed.count.sqrt() * (normal.dot(&fixed.mean) + offset) * information;
+            }
+            None => residual[fixed_row..fixed_row + 4].fill(0.0),
+        }
     }
 
     fn residual_dim(&self) -> usize {
@@ -512,6 +572,58 @@ mod tests {
         let (normal, offset, values) = carried.plane().ok_or("no plane")?;
         assert!(values[0] < 1e-4 && values[1] > 1e-3, "{values:?}");
         assert!((normal.norm() - 1.0).abs() < 1e-12 && offset.is_finite());
+        Ok(())
+    }
+
+    /// A plane of twelve points ~40 m from the body (Hilti site1_handheld_2,
+    /// where the raw 4 × 4 moment form gave residuals in the thousands): the
+    /// cost is `N·λ_min/σ²` to the digit.
+    #[test]
+    fn far_planes_keep_their_exact_cost() -> Result<(), String> {
+        let moments = PointMoments {
+            count: 12.0,
+            sum: Vector3::new(-241.60453252371218, -418.42991819175455, -6.515154650408839),
+            outer: Matrix3::new(
+                4865.230606534443,
+                8424.235208972244,
+                131.19023951308878,
+                8424.235208972244,
+                14590.428639648177,
+                227.2076983279844,
+                131.19023951308878,
+                227.2076983279844,
+                4.641707333357514,
+            ),
+        };
+        let rotation = Matrix3::from_column_slice(&[
+            0.63635359169571,
+            -0.7686413783581207,
+            0.06515011751100691,
+            -0.7695277019895543,
+            -0.638419895487932,
+            -0.015721097794173737,
+            0.053677017490220025,
+            -0.04013064316587261,
+            -0.9977516270457535,
+        ]);
+        let translation = Vector3::new(0.5839251212596093, 0.7700903523873233, 0.9106204756308878);
+        let state = SE3::new(translation, UnitQuaternion::from_matrix(&rotation));
+        let sigma = 0.012247448713915891;
+        let factor =
+            LidarPlaneMomentFactor::<SE3>::new(vec![moments], PointMoments::default(), sigma)?;
+        let mut residual = vec![0.0; factor.residual_dim()];
+        factor.linearize(&[state.as_param_slice()], &mut residual, None);
+        let world = moments.transformed(
+            &state.rotation_so3().rotation_matrix(),
+            &state.translation(),
+        );
+        let (_, _, values) = world.plane().ok_or("no plane")?;
+        let expected = 12.0 * values[0] / (sigma * sigma);
+        let cost = cost(&residual);
+        assert!(
+            (cost - expected).abs() < 1e-6 * expected,
+            "{cost} vs {expected}"
+        );
         Ok(())
     }
 
