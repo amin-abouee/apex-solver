@@ -78,6 +78,8 @@ pub struct PhotometricTwoViewFactor<G: LieGroup, CAM: CameraModel> {
     offsets: Vec<Vector2<f64>>,
     gain: f64,
     sigma: f64,
+    /// The reference body pose is a variable (block 1) rather than held.
+    free_reference: bool,
     group: PhantomData<fn() -> G>,
 }
 
@@ -127,8 +129,18 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
             offsets,
             gain,
             sigma,
+            free_reference: false,
             group: PhantomData,
         })
+    }
+
+    /// Make the reference body pose a variable: blocks become
+    /// `[X, X_ref ∈ G, T_SC ∈ SE3]`, and both poses and the extrinsic move
+    /// together — the consistent form when the reference frame is itself
+    /// being estimated.
+    pub fn with_free_reference(mut self) -> Self {
+        self.free_reference = true;
+        self
     }
 
     /// Offsets of a `size × size` patch centred on the projected point, one
@@ -154,9 +166,9 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
 
     /// The residual at `(body, t_sc)`, or `None` if the patch leaves either
     /// image or the geometry degenerates.
-    fn residual_at(&self, body: &G, t_sc: &SE3) -> Option<Vec<f64>> {
+    fn residual_at(&self, body: &G, reference: &G, t_sc: &SE3) -> Option<Vec<f64>> {
         let (origin, rotation) = Self::camera_pose(body, t_sc)?;
-        let (r_origin, r_rotation) = Self::camera_pose(&self.reference_body, t_sc)?;
+        let (r_origin, r_rotation) = Self::camera_pose(reference, t_sc)?;
         let in_camera = rotation.transpose() * (self.point - origin);
         if in_camera.z <= 0.0 {
             return None;
@@ -211,7 +223,11 @@ where
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let body = G::from_param_slice(params[0]);
-        let t_sc = SE3::from_param_slice(params[1]);
+        let reference = match self.free_reference {
+            true => G::from_param_slice(params[1]),
+            false => self.reference_body.clone(),
+        };
+        let t_sc = SE3::from_param_slice(params[if self.free_reference { 2 } else { 1 }]);
         let mut jac = jacobian;
         if let Some(jac) = jac.as_mut() {
             for row in 0..jac.nrows() {
@@ -220,7 +236,7 @@ where
                 }
             }
         }
-        let Some(at) = self.residual_at(&body, &t_sc) else {
+        let Some(at) = self.residual_at(&body, &reference, &t_sc) else {
             residual.fill(0.0);
             return;
         };
@@ -228,45 +244,40 @@ where
         let Some(jac) = jac.as_mut() else {
             return;
         };
+        // Forward differences on each block's tangent.
         let dof = G::TangentVector::DIM;
-        let column = |plus: Option<Vec<f64>>, minus: Option<Vec<f64>>| -> Option<Vec<f64>> {
-            let (p, m) = (plus?, minus?);
-            Some(
-                p.iter()
-                    .zip(&m)
-                    .map(|(a, b)| (a - b) / (2.0 * STEP))
-                    .collect(),
-            )
+        let mut write = |column: usize, moved: Option<Vec<f64>>| {
+            if let Some(values) = moved {
+                for (row, (value, base)) in values.iter().zip(&at).enumerate() {
+                    *jac.rb_mut().get_mut(row, column) = (value - base) / STEP;
+                }
+            }
+        };
+        let unit = |n: usize, k: usize| {
+            let mut t = vec![0.0; n];
+            t[k] = STEP;
+            t
         };
         for k in 0..dof {
-            let step = |sign: f64| {
-                let mut t = vec![0.0; dof];
-                t[k] = sign * STEP;
-                let moved = body.right_plus(&G::TangentVector::from_slice(&t), None, None);
-                self.residual_at(&moved, &t_sc)
-            };
-            if let Some(values) = column(step(1.0), step(-1.0)) {
-                for (row, value) in values.iter().enumerate() {
-                    *jac.rb_mut().get_mut(row, k) = *value;
-                }
+            let moved = body.right_plus(&G::TangentVector::from_slice(&unit(dof, k)), None, None);
+            write(k, self.residual_at(&moved, &reference, &t_sc));
+        }
+        let mut column = dof;
+        if self.free_reference {
+            for k in 0..dof {
+                let moved =
+                    reference.right_plus(&G::TangentVector::from_slice(&unit(dof, k)), None, None);
+                write(column + k, self.residual_at(&body, &moved, &t_sc));
             }
+            column += dof;
         }
         for k in 0..SE3::DOF {
-            let step = |sign: f64| {
-                let mut t = [0.0; 6];
-                t[k] = sign * STEP;
-                let moved = t_sc.right_plus(
-                    &<SE3 as LieGroup>::TangentVector::from_slice(&t),
-                    None,
-                    None,
-                );
-                self.residual_at(&body, &moved)
-            };
-            if let Some(values) = column(step(1.0), step(-1.0)) {
-                for (row, value) in values.iter().enumerate() {
-                    *jac.rb_mut().get_mut(row, dof + k) = *value;
-                }
-            }
+            let moved = t_sc.right_plus(
+                &<SE3 as LieGroup>::TangentVector::from_slice(&unit(SE3::DOF, k)),
+                None,
+                None,
+            );
+            write(column + k, self.residual_at(&body, &reference, &moved));
         }
     }
 
@@ -275,7 +286,8 @@ where
     }
 
     fn jacobian_shape(&self) -> (usize, usize) {
-        (self.offsets.len(), G::TangentVector::DIM + SE3::DOF)
+        let poses = if self.free_reference { 2 } else { 1 };
+        (self.offsets.len(), poses * G::TangentVector::DIM + SE3::DOF)
     }
 
     fn whitens_internally(&self) -> bool {
@@ -283,11 +295,18 @@ where
     }
 
     fn validate_variables(&self, variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
-        expect_manifolds(
-            variables,
-            &[G::NAME, SE3::NAME],
-            "PhotometricTwoViewFactor expects [state, camera extrinsic]",
-        )
+        match self.free_reference {
+            true => expect_manifolds(
+                variables,
+                &[G::NAME, G::NAME, SE3::NAME],
+                "PhotometricTwoViewFactor expects [state, reference state, camera extrinsic]",
+            ),
+            false => expect_manifolds(
+                variables,
+                &[G::NAME, SE3::NAME],
+                "PhotometricTwoViewFactor expects [state, camera extrinsic]",
+            ),
+        }
     }
 }
 
@@ -460,6 +479,61 @@ mod tests {
             None,
         );
         assert!(cost(&f, &truth, &off) < 0.5 * cost(&f, &pose_error, &t_sc));
+        Ok(())
+    }
+
+    /// With the reference pose free the factor spans both poses and the
+    /// extrinsic: zero residual at the truth, and a nudged reference shows in
+    /// the residual and in its own Jacobian columns.
+    #[test]
+    fn a_free_reference_is_a_third_block() -> Result<(), String> {
+        let t_sc = extrinsic();
+        let f = factor(&t_sc)?.with_free_reference();
+        let (reference, current) = (body(0.0, 0.0), body(0.12, 0.05));
+        let (rows, cols) = f.jacobian_shape();
+        assert_eq!(cols, 9 + 9 + 6);
+        let eval = |r: &SE23| {
+            let mut out = vec![0.0; rows];
+            f.linearize(
+                &[
+                    current.as_param_slice(),
+                    r.as_param_slice(),
+                    t_sc.as_param_slice(),
+                ],
+                &mut out,
+                None,
+            );
+            out.iter().map(|v| v * v).sum::<f64>()
+        };
+        let at_truth = eval(&reference);
+        assert!(
+            at_truth / 64.0 < 0.05,
+            "mean squared residual at truth {at_truth}"
+        );
+        let nudged = reference.right_plus(
+            &<SE23 as LieGroup>::TangentVector::from_slice(&[
+                0.01, 0.0, 0.0, 0.0, 0.004, 0.0, 0.0, 0.0, 0.0,
+            ]),
+            None,
+            None,
+        );
+        assert!(eval(&nudged) > 10.0 * at_truth.max(1.0));
+        let mut r = vec![0.0; rows];
+        let mut jac = faer::Mat::<f64>::zeros(rows, cols);
+        f.linearize(
+            &[
+                current.as_param_slice(),
+                nudged.as_param_slice(),
+                t_sc.as_param_slice(),
+            ],
+            &mut r,
+            Some(jac.as_mut()),
+        );
+        let reference_columns: f64 = (0..rows)
+            .flat_map(|row| (9..18).map(move |c| (row, c)))
+            .map(|(row, c)| jac[(row, c)].abs())
+            .sum();
+        assert!(reference_columns > 0.0);
         Ok(())
     }
 
