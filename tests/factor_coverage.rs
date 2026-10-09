@@ -33,8 +33,8 @@ use apex_solver::factors::imu::{
 };
 use apex_solver::factors::lidar::{
     DistanceField, IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, LidarPlaneBundleFactor,
-    LidarSubmapFieldFactor, Plane, PrecomputedPlane, SubmapAlignmentFactor,
-    lidar_plane_factor_isotropic,
+    LidarPlaneMomentFactor, LidarSubmapFieldFactor, Plane, PointMoments, PrecomputedPlane,
+    SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
@@ -1570,6 +1570,110 @@ fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
     let result = solver
         .optimize(&mut problem)
         .unwrap_or_else(|e| panic!("plane bundle adjustment failed: {e}"));
+    for (key, truth) in keys.iter().zip(&truths) {
+        let hat = SE23::from_param_slice(result.parameters[*key].as_param_slice());
+        let position_err = (hat.translation() - truth.translation()).norm();
+        let rotation_err =
+            (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+        assert!(position_err < 1e-6, "position error {position_err:.2e}");
+        assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
+    }
+}
+
+/// The moment form of the plane bundle: the same three frames in a room,
+/// each wall a plane over every frame's point moments, anchored by a few
+/// fixed world points — the nudged frames come back exactly.
+#[test]
+fn lidar_plane_moment_factor_aligns_frames_through_shared_planes() {
+    let truths = [
+        SE23::new(
+            Vector3::new(0.0, 0.0, 1.2),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.1),
+        ),
+        SE23::new(
+            Vector3::new(0.6, 0.2, 1.25),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.02, -0.01, 0.4),
+        ),
+        SE23::new(
+            Vector3::new(1.1, -0.3, 1.15),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(-0.02, 0.01, 0.8),
+        ),
+    ];
+    let nudges = [
+        [0.0; 9],
+        [0.06, -0.04, 0.03, 0.01, -0.015, 0.02, 0.0, 0.0, 0.0],
+        [-0.05, 0.05, -0.02, -0.02, 0.01, -0.025, 0.0, 0.0, 0.0],
+    ];
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let keys: Vec<_> = truths
+        .iter()
+        .zip(&nudges)
+        .map(|(truth, nudge)| {
+            let start = truth.right_plus(&SE23Tangent::from_slice(nudge), None, None);
+            let key = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(start.as_param_slice()),
+            );
+            for velocity_axis in 6..9 {
+                problem.fix_variable(key, velocity_axis);
+            }
+            key
+        })
+        .collect();
+    anchor_se23(&mut problem, keys[0], &truths[0]);
+
+    let walls = [
+        (Vector3::x(), 3.0),
+        (-Vector3::x(), 3.0),
+        (Vector3::y(), 2.0),
+        (-Vector3::y(), 2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        let patch = |shift: f64| -> Vec<Vector3<f64>> {
+            (0..9)
+                .map(|k| {
+                    foot + a * (0.3 * f64::from(k % 3) - 0.3 + shift)
+                        + b * (0.3 * f64::from(k / 3) - 0.3)
+                })
+                .collect()
+        };
+        let frames: Vec<PointMoments> = truths
+            .iter()
+            .enumerate()
+            .map(|(f, truth)| {
+                let body: Vec<Vector3<f64>> = patch(0.05 * f as f64)
+                    .iter()
+                    .map(|w| truth.rotation_matrix().transpose() * (w - truth.translation()))
+                    .collect();
+                PointMoments::from_points(&body)
+            })
+            .collect();
+        problem.add_residual_block(
+            &keys,
+            Box::new(
+                LidarPlaneMomentFactor::<SE23>::new(
+                    frames,
+                    PointMoments::from_points(&patch(-0.2)),
+                    0.02,
+                )
+                .unwrap_or_else(|e| panic!("{e}")),
+            ),
+            None,
+        );
+    }
+
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("plane moment adjustment failed: {e}"));
     for (key, truth) in keys.iter().zip(&truths) {
         let hat = SE23::from_param_slice(result.parameters[*key].as_param_slice());
         let position_err = (hat.translation() - truth.translation()).norm();

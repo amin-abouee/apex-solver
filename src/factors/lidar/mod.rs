@@ -12,6 +12,7 @@ pub mod gicp;
 pub mod map_plane;
 pub mod plane;
 pub mod plane_bundle;
+pub mod plane_moments;
 pub mod point_to_point;
 pub mod submap_field;
 
@@ -25,6 +26,7 @@ pub use plane::{
 };
 pub use plane_bundle::LidarPlaneBundleFactor;
 pub use plane_bundle::fit_plane_pca;
+pub use plane_moments::{LidarPlaneMomentFactor, PointMoments};
 pub use point_to_point::PoseToPointFactor;
 pub use submap_field::LidarSubmapFieldFactor;
 pub use submap_field::SubmapAlignmentFactor;
