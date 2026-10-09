@@ -25,6 +25,7 @@
 use faer::Mat;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use rayon::prelude::*;
 
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
@@ -105,43 +106,60 @@ impl AggregateFactor {
     /// `H`, `g` and `c` of the parts at `params`.
     fn normal_equations(&self, params: &[&[f64]]) -> (DMatrix<f64>, DVector<f64>, f64) {
         let n = self.width();
-        let mut hessian = DMatrix::zeros(n, n);
-        let mut gradient = DVector::zeros(n);
-        let mut cost = 0.0;
-        for part in &self.parts {
-            let (rows, cols) = part.factor.jacobian_shape();
-            let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
-            let mut residual = vec![0.0; rows];
-            let mut jacobian = Mat::<f64>::zeros(rows, cols);
-            part.factor
-                .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
-            cost += residual.iter().map(|r| r * r).sum::<f64>();
-            // Global column of each of the part's columns.
-            let columns: Vec<usize> = part
-                .blocks
-                .iter()
-                .flat_map(|&b| (0..self.dofs[b]).map(move |k| (b, k)))
-                .map(|(b, k)| self.offsets[b] + k)
-                .collect();
-            for (a, &ga) in columns.iter().enumerate() {
-                let mut g = 0.0;
-                for row in 0..rows {
-                    g += jacobian[(row, a)] * residual[row];
-                }
-                gradient[ga] += g;
-                for (b, &gb) in columns.iter().enumerate().skip(a) {
-                    let mut h = 0.0;
-                    for row in 0..rows {
-                        h += jacobian[(row, a)] * jacobian[(row, b)];
+        let zero = || (DMatrix::zeros(n, n), DVector::zeros(n), 0.0);
+        self.parts
+            .par_iter()
+            .fold(zero, |(mut hessian, mut gradient, mut cost), part| {
+                let (rows, cols) = part.factor.jacobian_shape();
+                let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
+                let mut residual = vec![0.0; rows];
+                let mut jacobian = Mat::<f64>::zeros(rows, cols);
+                part.factor
+                    .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
+                let j = DMatrix::from_fn(rows, cols, |r, c| jacobian[(r, c)]);
+                let r = DVector::from_column_slice(&residual);
+                cost += r.norm_squared();
+                let jt = j.transpose();
+                let h = &jt * &j;
+                let g = &jt * &r;
+                // Scatter by block: the part's block `k` sits at its own
+                // column offset and at the aggregate's.
+                let mut local = 0;
+                let starts: Vec<(usize, usize, usize)> = part
+                    .blocks
+                    .iter()
+                    .map(|&block| {
+                        let start = (local, self.offsets[block], self.dofs[block]);
+                        local += self.dofs[block];
+                        start
+                    })
+                    .collect();
+                for &(la, ga, da) in &starts {
+                    let mut target = gradient.rows_mut(ga, da);
+                    target += g.rows(la, da);
+                    for &(lb, gb, db) in &starts {
+                        let mut target = hessian.view_mut((ga, gb), (da, db));
+                        target += h.view((la, lb), (da, db));
                     }
-                    hessian[(ga, gb)] += h;
-                    if gb != ga {
-                        hessian[(gb, ga)] += h;
-                    }
                 }
-            }
-        }
-        (hessian, gradient, cost)
+                (hessian, gradient, cost)
+            })
+            .reduce(zero, |(h1, g1, c1), (h2, g2, c2)| {
+                (h1 + h2, g1 + g2, c1 + c2)
+            })
+    }
+
+    /// The parts' summed cost alone.
+    fn cost(&self, params: &[&[f64]]) -> f64 {
+        self.parts
+            .par_iter()
+            .map(|part| {
+                let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
+                let mut residual = vec![0.0; part.factor.residual_dim()];
+                part.factor.linearize(&part_params, &mut residual, None);
+                residual.iter().map(|r| r * r).sum::<f64>()
+            })
+            .sum()
     }
 }
 
@@ -153,12 +171,17 @@ impl Factor for AggregateFactor {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let n = self.width();
+        let Some(mut jac) = jacobian else {
+            // A cost evaluation (a trial step): only `‖r'‖² = c` matters.
+            residual.fill(0.0);
+            residual[n] = self.cost(params).sqrt();
+            return;
+        };
         let (hessian, gradient, cost) = self.normal_equations(params);
         let eigen = SymmetricEigen::new(hessian);
         let largest = eigen.eigenvalues.iter().fold(0.0_f64, |m, v| m.max(*v));
         let null = largest * RELATIVE_NULL;
         let mut explained = 0.0;
-        let mut jac = jacobian;
         for (k, (value, out)) in eigen
             .eigenvalues
             .iter()
@@ -173,17 +196,13 @@ impl Factor for AggregateFactor {
                 0.0
             };
             explained += *out * *out;
-            if let Some(jac) = jac.as_mut() {
-                for col in 0..n {
-                    *jac.rb_mut().get_mut(k, col) = root * axis[col];
-                }
+            for (col, value) in axis.iter().enumerate() {
+                *jac.rb_mut().get_mut(k, col) = root * value;
             }
         }
         residual[n] = (cost - explained).max(0.0).sqrt();
-        if let Some(jac) = jac.as_mut() {
-            for col in 0..n {
-                *jac.rb_mut().get_mut(n, col) = 0.0;
-            }
+        for col in 0..n {
+            *jac.rb_mut().get_mut(n, col) = 0.0;
         }
     }
 
@@ -319,6 +338,10 @@ mod tests {
             "{} vs {cost}",
             rd.norm_squared()
         );
+        let mut cost_only = vec![0.0; rows];
+        aggregate.linearize(&params, &mut cost_only, None);
+        let norm: f64 = cost_only.iter().map(|v| v * v).sum();
+        assert!((norm - cost).abs() < 1e-9 * cost.max(1.0));
         assert_eq!(aggregate.parts(), 3);
         Ok(())
     }
