@@ -72,6 +72,78 @@ fn state_of(pose: &SE3, sb: &SpeedAndBias) -> SE23 {
 /// walk edge; `se23::CombinedImuFactor` embeds that walk. Both formulations
 /// should land on the same trajectory — that equivalence is the whole reason
 /// two factors exist, so it is worth asserting rather than documenting.
+/// A trajectory expressed in a world tilted against gravity — what a map
+/// started with a slightly wrong tilt is. With the states and biases held,
+/// the gravity-frame IMU factor recovers gravity's direction in that world.
+#[test]
+fn gravity_frame_imu_factor_recovers_a_tilted_world() {
+    use apex_solver::apex_manifolds::so3::SO3;
+    use apex_solver::factors::imu::{ImuMeasurement, ImuSensorReadings};
+    // A rig yawing at 0.4 rad/s while accelerating at a constant rate, in a
+    // world whose gravity is tilted: the specific force is `Rᵀ(a − g_w)`.
+    let tilt = UnitQuaternion::from_euler_angles(0.015, -0.01, 0.0);
+    let gravity = tilt * Vector3::new(0.0, 0.0, -imu_params().g);
+    let accel = Vector3::new(0.3, -0.2, 0.05);
+    let rate = Vector3::new(0.0, 0.0, 0.4);
+    let attitude = |t: f64| UnitQuaternion::from_scaled_axis(rate * t);
+    let state_at = |t: f64| SE23::new(accel * (0.5 * t * t), accel * t, attitude(t));
+    let key_times: Vec<f64> = (0..=6).map(|k| k as f64 * 0.5).collect();
+
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let rotation = problem.add_variable(
+        ManifoldType::SO3,
+        DVector::from_column_slice(SO3::identity().as_param_slice()),
+    );
+    let keys: Vec<_> = key_times
+        .iter()
+        .map(|t| {
+            let state = problem.add_variable(
+                ManifoldType::SE23,
+                DVector::from_column_slice(state_at(*t).as_param_slice()),
+            );
+            let bias = problem.add_variable(ManifoldType::RN, DVector::zeros(6));
+            for i in 0..9 {
+                problem.fix_variable(state, i);
+            }
+            for i in 0..6 {
+                problem.fix_variable(bias, i);
+            }
+            (state, bias)
+        })
+        .collect();
+    for k in 0..keys.len() - 1 {
+        let (t0, t1) = (key_times[k], key_times[k + 1]);
+        let samples: Vec<ImuMeasurement> = (0..=500)
+            .map(|i| {
+                let t = t0 + (t1 - t0) * f64::from(i) / 500.0;
+                ImuMeasurement::new(
+                    t,
+                    ImuSensorReadings {
+                        gyroscopes: rate,
+                        accelerometers: attitude(t).inverse() * (accel - gravity),
+                    },
+                )
+            })
+            .collect();
+        let preint = ImuPreintegration::new(samples, imu_params(), t0, t1, &SpeedAndBias::zeros());
+        problem.add_residual_block(
+            &[keys[k].0, keys[k].1, keys[k + 1].0, keys[k + 1].1, rotation],
+            Box::new(se23::GravityFrameImuFactor::new(
+                se23::CombinedImuFactor::new(preint),
+            )),
+            None,
+        );
+    }
+    let mut solver = lm_solver(100);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("gravity estimation failed: {e}"));
+    let estimated = SO3::from_param_slice(result.parameters[rotation].as_param_slice());
+    let up = estimated.rotation_matrix() * Vector3::z();
+    let error = up.angle(&(tilt * Vector3::z()));
+    assert!(error < 2e-5, "gravity direction error {error:.2e} rad");
+}
+
 #[test]
 fn shared_bias_imu_form_matches_the_combined_form() {
     let key_times: Vec<f64> = (0..=5).map(|k| k as f64 * 0.5).collect();

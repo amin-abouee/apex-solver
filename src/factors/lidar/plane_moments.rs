@@ -377,10 +377,7 @@ mod tests {
             .collect::<Vec<_>>();
         let sigma = 0.02;
         let factor = LidarPlaneMomentFactor::<G>::new(
-            frames
-                .iter()
-                .map(PointMoments::from_points)
-                .collect(),
+            frames.iter().map(PointMoments::from_points).collect(),
             PointMoments::from_points(&fixed_points),
             sigma,
         )?;
