@@ -47,6 +47,7 @@
 use crate::core::variable::ManifoldVariable;
 use thiserror::Error;
 
+pub mod aggregate;
 pub mod common;
 pub mod held;
 pub mod imu;
