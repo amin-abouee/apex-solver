@@ -10,6 +10,7 @@ pub mod distance_field;
 pub mod edge;
 pub mod gicp;
 pub mod map_plane;
+pub mod map_planes;
 pub mod plane;
 pub mod plane_bundle;
 pub mod plane_moments;
@@ -21,6 +22,7 @@ pub use edge::LidarEdgeFactor;
 pub use gicp::GicpFactor;
 pub use map_plane::LidarMapPlaneFactor;
 pub use map_plane::{LidarPointChain, lidar_point_chain, point_to_plane_sigma};
+pub use map_planes::{LidarMapPlanesFactor, PlaneMatch};
 pub use plane::{
     LidarPlaneFactor, Plane, PointToPlaneFactor, PrecomputedPlane, lidar_plane_factor_isotropic,
 };

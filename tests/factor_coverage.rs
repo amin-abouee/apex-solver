@@ -32,9 +32,9 @@ use apex_solver::factors::imu::{
     se23, sgal3,
 };
 use apex_solver::factors::lidar::{
-    DistanceField, IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, LidarPlaneBundleFactor,
-    LidarPlaneMomentFactor, LidarSubmapFieldFactor, Plane, PointMoments, PrecomputedPlane,
-    SubmapAlignmentFactor, lidar_plane_factor_isotropic,
+    DistanceField, IcpFactor, LidarEdgeFactor, LidarMapPlaneFactor, LidarMapPlanesFactor,
+    LidarPlaneBundleFactor, LidarPlaneMomentFactor, LidarSubmapFieldFactor, Plane, PlaneMatch,
+    PointMoments, PrecomputedPlane, SubmapAlignmentFactor, lidar_plane_factor_isotropic,
 };
 use apex_solver::factors::navigation::{GpsAsyncFactor, GpsFactor};
 use apex_solver::factors::ranging::bearing::{BearingFactor, BearingFactorSe23};
@@ -1650,6 +1650,67 @@ fn lidar_plane_bundle_factor_aligns_frames_through_shared_planes() {
         assert!(position_err < 1e-6, "position error {position_err:.2e}");
         assert!(rotation_err < 1e-6, "rotation error {rotation_err:.2e}");
     }
+}
+
+/// A whole sweep's point-to-plane matches in one factor: a nudged pose
+/// comes back exactly from points on the six walls of a room.
+#[test]
+fn lidar_map_planes_factor_registers_a_sweep_to_a_room() {
+    let truth = SE23::new(
+        Vector3::new(0.4, -0.3, 1.2),
+        Vector3::new(0.5, 0.0, 0.0),
+        UnitQuaternion::from_euler_angles(0.03, -0.02, 0.6),
+    );
+    let walls = [
+        (Vector3::x(), -3.0),
+        (-Vector3::x(), -3.0),
+        (Vector3::y(), -2.0),
+        (-Vector3::y(), -2.0),
+        (Vector3::z(), 0.0),
+        (-Vector3::z(), 3.0),
+    ];
+    let mut matches = Vec::new();
+    for (normal, offset) in &walls {
+        let foot = -*offset * *normal;
+        let a = normal.cross(&Vector3::new(0.3, 0.5, 0.7)).normalize();
+        let b = normal.cross(&a);
+        for k in 0..9 {
+            let w = foot + a * (0.4 * f64::from(k % 3) - 0.4) + b * (0.4 * f64::from(k / 3) - 0.4);
+            matches.push(PlaneMatch {
+                point: truth.inverse(None).act(&w, None, None),
+                plane: Plane::new(*normal, *offset).unwrap_or_else(|e| panic!("{e}")),
+                sigma: 0.01,
+            });
+        }
+    }
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.05, -0.04, 0.03, 0.02, -0.01, 0.015, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let key = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for velocity_axis in 6..9 {
+        problem.fix_variable(key, velocity_axis);
+    }
+    problem.add_residual_block_with_noise(
+        &[key],
+        Box::new(LidarMapPlanesFactor::<SE23>::new(matches).unwrap_or_else(|e| panic!("{e}"))),
+        None,
+        NoiseModel::null(),
+    );
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("sweep registration failed: {e}"));
+    let hat = SE23::from_param_slice(result.parameters[key].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-8, "position error {position_err:.2e}");
+    assert!(rotation_err < 1e-8, "rotation error {rotation_err:.2e}");
 }
 
 /// The moment form of the plane bundle: the same three frames in a room,
