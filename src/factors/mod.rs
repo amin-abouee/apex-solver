@@ -55,6 +55,7 @@ pub mod lidar;
 pub mod marginal;
 pub mod motion;
 pub mod navigation;
+pub mod offset;
 pub mod pose;
 pub mod ranging;
 pub mod visual;
