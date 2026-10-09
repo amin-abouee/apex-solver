@@ -45,6 +45,7 @@ use apex_solver::factors::visual::{
 };
 use apex_solver::factors::visual::{IntensityImage, PhotometricPatchFactor};
 use apex_solver::factors::visual::{InverseDepthBearingSe23Factor, InverseDepthSe23Factor};
+use apex_solver::factors::visual::{PhotometricTwoViewFactor, PlanePoint, ReferenceView};
 use nalgebra::{DVector, UnitQuaternion, Vector2, Vector3, Vector4};
 
 /// Perturb an SE3 pose in its tangent so the optimizer has work to do.
@@ -142,6 +143,106 @@ fn gravity_frame_imu_factor_recovers_a_tilted_world() {
     let up = estimated.rotation_matrix() * Vector3::z();
     let error = up.angle(&(tilt * Vector3::z()));
     assert!(error < 2e-5, "gravity direction error {error:.2e} rad");
+}
+
+/// Two views of a textured wall through one camera extrinsic: from a nudged
+/// start, the current body pose comes back, the extrinsic held.
+#[test]
+fn photometric_two_view_factor_recovers_a_pose() {
+    use apex_solver::apex_camera_models::{CameraModel, PinholeCamera};
+    use std::sync::Arc;
+    let camera = PinholeCamera::from([400.0, 400.0, 320.0, 240.0]);
+    let t_sc = SE3::new(
+        Vector3::new(0.05, -0.02, 0.03),
+        UnitQuaternion::from_euler_angles(0.01, -0.02, 0.015),
+    );
+    let texture = |x: f64, y: f64| {
+        128.0 + 50.0 * (40.0 * x).sin() * (35.0 * y).cos() + 30.0 * (70.0 * x + 50.0 * y).sin()
+    };
+    let render = |body: &SE23| {
+        let pose =
+            SE3::new(body.translation(), body.rotation_quaternion()).compose(&t_sc, None, None);
+        let rotation = pose.rotation_so3().rotation_matrix();
+        Arc::new(
+            IntensityImage::from_fn(640, 480, |x, y| {
+                let Ok(ray) = camera.unproject(&Vector2::new(x as f64, y as f64)) else {
+                    return 0.0;
+                };
+                let ray = rotation * ray;
+                let hit = pose.translation() + ray * ((3.0 - pose.translation().z) / ray.z);
+                texture(hit.x, hit.y) as f32
+            })
+            .unwrap_or_else(|e| panic!("{e}")),
+        )
+    };
+    let reference = SE23::new(
+        Vector3::new(0.0, 0.05, 0.0),
+        Vector3::zeros(),
+        UnitQuaternion::from_euler_angles(0.02, -0.03, 0.0),
+    );
+    let truth = SE23::new(
+        Vector3::new(0.12, 0.05, 0.0),
+        Vector3::zeros(),
+        UnitQuaternion::from_euler_angles(0.02, -0.03, 0.05),
+    );
+    let (reference_image, current_image) = (render(&reference), render(&truth));
+    let start = truth.right_plus(
+        &SE23Tangent::from_slice(&[0.004, -0.003, 0.002, 0.002, -0.001, 0.002, 0.0, 0.0, 0.0]),
+        None,
+        None,
+    );
+    let mut problem = Problem::new(JacobianMode::Sparse);
+    let x = problem.add_variable(
+        ManifoldType::SE23,
+        DVector::from_column_slice(start.as_param_slice()),
+    );
+    for i in 6..9 {
+        problem.fix_variable(x, i);
+    }
+    let e = problem.add_variable(
+        ManifoldType::SE3,
+        DVector::from_column_slice(t_sc.as_param_slice()),
+    );
+    for i in 0..6 {
+        problem.fix_variable(e, i);
+    }
+    for i in 0..6 {
+        for j in 0..4 {
+            let point = Vector3::new(f64::from(i) * 0.25 - 0.6, f64::from(j) * 0.25 - 0.4, 3.0);
+            problem.add_residual_block_with_noise(
+                &[x, e],
+                Box::new(
+                    PhotometricTwoViewFactor::<SE23, PinholeCamera>::new(
+                        camera,
+                        current_image.clone(),
+                        ReferenceView {
+                            image: reference_image.clone(),
+                            body: reference.clone(),
+                        },
+                        PlanePoint {
+                            point,
+                            normal: Vector3::new(0.0, 0.0, -1.0),
+                        },
+                        PhotometricTwoViewFactor::<SE23, PinholeCamera>::offsets_square(8),
+                        1.0,
+                        10.0,
+                    )
+                    .unwrap_or_else(|e| panic!("{e}")),
+                ),
+                None,
+                NoiseModel::null(),
+            );
+        }
+    }
+    let mut solver = lm_solver(50);
+    let result = solver
+        .optimize(&mut problem)
+        .unwrap_or_else(|e| panic!("two-view solve failed: {e}"));
+    let hat = SE23::from_param_slice(result.parameters[x].as_param_slice());
+    let position_err = (hat.translation() - truth.translation()).norm();
+    let rotation_err = (hat.rotation_quaternion().inverse() * truth.rotation_quaternion()).angle();
+    assert!(position_err < 1e-3, "position error {position_err:.2e}");
+    assert!(rotation_err < 2e-4, "rotation error {rotation_err:.2e}");
 }
 
 #[test]
