@@ -113,8 +113,7 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarMapPlanesFactor<G> {
             let information = 1.0 / m.sigma;
             residual[row] = (m.plane.normal.dot(&world) + m.plane.offset) * information;
             if let Some(jac) = jac.as_mut() {
-                for col in 0..dof {
-                    let origin = j0[col];
+                for (col, origin) in j0.iter().enumerate() {
                     let column = origin
                         + (axes[0].1[col] - origin) * s.x
                         + (axes[1].1[col] - origin) * s.y
