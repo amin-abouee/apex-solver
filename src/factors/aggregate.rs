@@ -30,6 +30,9 @@ use rayon::prelude::*;
 use crate::core::variable::ManifoldVariable;
 use crate::factors::Factor;
 
+/// Parts per deterministic summation chunk.
+const CHUNK: usize = 64;
+
 /// Eigenvalues of `H` below this fraction of the largest are treated as null.
 const RELATIVE_NULL: f64 = 1e-14;
 
@@ -104,54 +107,77 @@ impl AggregateFactor {
     }
 
     /// `H`, `g` and `c` of the parts at `params`.
+    /// Add one part's `JᵀJ` and `Jᵀr` into `hessian` and `gradient`;
+    /// returns its cost.
+    fn accumulate(
+        &self,
+        part: &AggregatePart,
+        params: &[&[f64]],
+        hessian: &mut DMatrix<f64>,
+        gradient: &mut DVector<f64>,
+    ) -> f64 {
+        let (rows, cols) = part.factor.jacobian_shape();
+        let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
+        let mut residual = vec![0.0; rows];
+        let mut jacobian = Mat::<f64>::zeros(rows, cols);
+        part.factor
+            .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
+        let j = DMatrix::from_fn(rows, cols, |r, c| jacobian[(r, c)]);
+        let r = DVector::from_column_slice(&residual);
+        let jt = j.transpose();
+        let h = &jt * &j;
+        let g = &jt * &r;
+        // Scatter by block: the part's block sits at its own column offset
+        // and at the aggregate's.
+        let mut local = 0;
+        let starts: Vec<(usize, usize, usize)> = part
+            .blocks
+            .iter()
+            .map(|&block| {
+                let start = (local, self.offsets[block], self.dofs[block]);
+                local += self.dofs[block];
+                start
+            })
+            .collect();
+        for &(la, ga, da) in &starts {
+            let mut target = gradient.rows_mut(ga, da);
+            target += g.rows(la, da);
+            for &(lb, gb, db) in &starts {
+                let mut target = hessian.view_mut((ga, gb), (da, db));
+                target += h.view((la, lb), (da, db));
+            }
+        }
+        r.norm_squared()
+    }
+
+    /// `H`, `g` and `c` of the parts at `params`. Fixed chunks, each summed
+    /// in order, then the chunks in order: the same floating-point result
+    /// whatever the thread count or schedule.
     fn normal_equations(&self, params: &[&[f64]]) -> (DMatrix<f64>, DVector<f64>, f64) {
         let n = self.width();
         let zero = || (DMatrix::zeros(n, n), DVector::zeros(n), 0.0);
-        self.parts
-            .par_iter()
-            .fold(zero, |(mut hessian, mut gradient, mut cost), part| {
-                let (rows, cols) = part.factor.jacobian_shape();
-                let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
-                let mut residual = vec![0.0; rows];
-                let mut jacobian = Mat::<f64>::zeros(rows, cols);
-                part.factor
-                    .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
-                let j = DMatrix::from_fn(rows, cols, |r, c| jacobian[(r, c)]);
-                let r = DVector::from_column_slice(&residual);
-                cost += r.norm_squared();
-                let jt = j.transpose();
-                let h = &jt * &j;
-                let g = &jt * &r;
-                // Scatter by block: the part's block `k` sits at its own
-                // column offset and at the aggregate's.
-                let mut local = 0;
-                let starts: Vec<(usize, usize, usize)> = part
-                    .blocks
-                    .iter()
-                    .map(|&block| {
-                        let start = (local, self.offsets[block], self.dofs[block]);
-                        local += self.dofs[block];
-                        start
-                    })
-                    .collect();
-                for &(la, ga, da) in &starts {
-                    let mut target = gradient.rows_mut(ga, da);
-                    target += g.rows(la, da);
-                    for &(lb, gb, db) in &starts {
-                        let mut target = hessian.view_mut((ga, gb), (da, db));
-                        target += h.view((la, lb), (da, db));
-                    }
+        let chunks: Vec<(DMatrix<f64>, DVector<f64>, f64)> = self
+            .parts
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                let (mut hessian, mut gradient, mut cost) = zero();
+                for part in chunk {
+                    cost += self.accumulate(part, params, &mut hessian, &mut gradient);
                 }
                 (hessian, gradient, cost)
             })
-            .reduce(zero, |(h1, g1, c1), (h2, g2, c2)| {
+            .collect();
+        chunks
+            .into_iter()
+            .fold(zero(), |(h1, g1, c1), (h2, g2, c2)| {
                 (h1 + h2, g1 + g2, c1 + c2)
             })
     }
 
     /// The parts' summed cost alone.
     fn cost(&self, params: &[&[f64]]) -> f64 {
-        self.parts
+        let costs: Vec<f64> = self
+            .parts
             .par_iter()
             .map(|part| {
                 let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
@@ -159,7 +185,8 @@ impl AggregateFactor {
                 part.factor.linearize(&part_params, &mut residual, None);
                 residual.iter().map(|r| r * r).sum::<f64>()
             })
-            .sum()
+            .collect();
+        costs.iter().sum()
     }
 }
 
