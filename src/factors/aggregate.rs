@@ -28,7 +28,7 @@ use nalgebra::{DMatrix, DVector, SymmetricEigen};
 use rayon::prelude::*;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::factors::{Factor, NormalBlocks};
 
 /// Parts per deterministic summation chunk.
 const CHUNK: usize = 64;
@@ -52,6 +52,8 @@ pub struct AggregateFactor {
     dofs: Vec<usize>,
     /// Column offset of each aggregate block.
     offsets: Vec<usize>,
+    /// Column offset of each part's blocks, per part.
+    part_offsets: Vec<Vec<usize>>,
 }
 
 impl AggregateFactor {
@@ -89,11 +91,16 @@ impl AggregateFactor {
                 *offset += dof;
                 Some(start)
             })
+            .collect::<Vec<usize>>();
+        let part_offsets = parts
+            .iter()
+            .map(|part| part.blocks.iter().map(|&b| offsets[b]).collect())
             .collect();
         Ok(Self {
             parts,
             dofs,
             offsets,
+            part_offsets,
         })
     }
 
@@ -115,16 +122,22 @@ impl AggregateFactor {
     fn accumulate(
         &self,
         part: &AggregatePart,
-        params: &[&[f64]],
+        part_offsets: &[usize],
+        part_params: &[&[f64]],
         hessian: &mut DMatrix<f64>,
         gradient: &mut DVector<f64>,
     ) -> f64 {
+        if let Some(cost) = part.factor.accumulate_normal(
+            part_params,
+            Some(&mut NormalBlocks::new(hessian, gradient, part_offsets)),
+        ) {
+            return cost;
+        }
         let (rows, cols) = part.factor.jacobian_shape();
-        let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
         let mut residual = vec![0.0; rows];
         let mut jacobian = Mat::<f64>::zeros(rows, cols);
         part.factor
-            .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
+            .linearize(part_params, &mut residual, Some(jacobian.as_mut()));
         // (part column, aggregate column, width) of each block.
         let mut local = 0;
         let starts: Vec<(usize, usize, usize)> = part
@@ -136,6 +149,22 @@ impl AggregateFactor {
                 start
             })
             .collect();
+        if let [(la, ga, da)] = starts[..] {
+            // One block: every row is in it.
+            for (row, &r) in residual.iter().enumerate() {
+                for i in 0..da {
+                    let v = jacobian[(row, la + i)];
+                    if v == 0.0 {
+                        continue;
+                    }
+                    gradient[ga + i] += v * r;
+                    for k in 0..da {
+                        hessian[(ga + i, ga + k)] += v * jacobian[(row, la + k)];
+                    }
+                }
+            }
+            return residual.iter().map(|r| r * r).sum();
+        }
         let mut active = Vec::with_capacity(starts.len());
         for (row, &r) in residual.iter().enumerate() {
             active.clear();
@@ -171,10 +200,20 @@ impl AggregateFactor {
         let chunks: Vec<(DMatrix<f64>, DVector<f64>, f64)> = self
             .parts
             .par_chunks(CHUNK)
-            .map(|chunk| {
+            .zip(self.part_offsets.par_chunks(CHUNK))
+            .map(|(chunk, offsets)| {
                 let (mut hessian, mut gradient, mut cost) = zero();
-                for part in chunk {
-                    cost += self.accumulate(part, params, &mut hessian, &mut gradient);
+                let mut part_params: Vec<&[f64]> = Vec::new();
+                for (part, part_offsets) in chunk.iter().zip(offsets) {
+                    part_params.clear();
+                    part_params.extend(part.blocks.iter().map(|&b| params[b]));
+                    cost += self.accumulate(
+                        part,
+                        part_offsets,
+                        &part_params,
+                        &mut hessian,
+                        &mut gradient,
+                    );
                 }
                 (hessian, gradient, cost)
             })
@@ -188,17 +227,27 @@ impl AggregateFactor {
 
     /// The parts' summed cost alone.
     fn cost(&self, params: &[&[f64]]) -> f64 {
-        let costs: Vec<f64> = self
+        let costs: Vec<Vec<f64>> = self
             .parts
-            .par_iter()
-            .map(|part| {
-                let part_params: Vec<&[f64]> = part.blocks.iter().map(|&b| params[b]).collect();
-                let mut residual = vec![0.0; part.factor.residual_dim()];
-                part.factor.linearize(&part_params, &mut residual, None);
-                residual.iter().map(|r| r * r).sum::<f64>()
+            .par_chunks(CHUNK)
+            .map(|chunk| {
+                let mut part_params: Vec<&[f64]> = Vec::new();
+                chunk
+                    .iter()
+                    .map(|part| {
+                        part_params.clear();
+                        part_params.extend(part.blocks.iter().map(|&b| params[b]));
+                        if let Some(cost) = part.factor.accumulate_normal(&part_params, None) {
+                            return cost;
+                        }
+                        let mut residual = vec![0.0; part.factor.residual_dim()];
+                        part.factor.linearize(&part_params, &mut residual, None);
+                        residual.iter().map(|r| r * r).sum::<f64>()
+                    })
+                    .collect()
             })
             .collect();
-        costs.iter().sum()
+        costs.iter().flatten().sum()
     }
 }
 
@@ -385,12 +434,12 @@ mod tests {
         Ok(())
     }
 
-    /// The block-sparse sum equals the dense `Σ JᵢᵀJᵢ`, `Σ Jᵢᵀrᵢ`: plane
-    /// parts (rows on one block each) and a between factor (rows coupling
-    /// two blocks, read in reverse block order).
+    /// The block-sparse sum equals the dense `Σ JᵢᵀJᵢ`, `Σ Jᵢᵀrᵢ`: a plane
+    /// part (its own normal equations), a between factor (rows coupling two
+    /// blocks, read in reverse block order) and a prior (one block).
     #[test]
     fn sparse_accumulation_matches_the_dense_sum() -> Result<(), String> {
-        use crate::factors::pose::BetweenFactor;
+        use crate::factors::pose::{BetweenFactor, PriorFactor};
         let poses: Vec<SE3> = (0..3).map(|i| pose(f64::from(i))).collect();
         let normal = Vector3::new(0.1, 0.2, 1.0).normalize();
         let plane = LidarPlaneMomentFactor::<SE3>::new(
@@ -410,6 +459,10 @@ mod tests {
             AggregatePart {
                 factor: Box::new(between),
                 blocks: vec![2, 1],
+            },
+            AggregatePart {
+                factor: Box::new(PriorFactor::new(pose(0.4))),
+                blocks: vec![1],
             },
         ];
         let blocks: Vec<Vec<usize>> = parts.iter().map(|p| p.blocks.clone()).collect();
@@ -440,9 +493,12 @@ mod tests {
             dense_c += rd.norm_squared();
         }
         assert!(dense_h.fixed_view::<6, 6>(6, 12).norm() > 0.0);
-        assert!((hessian - &dense_h).norm() < 1e-12 * dense_h.norm());
-        assert!((gradient - &dense_g).norm() < 1e-12 * (1.0 + dense_g.norm()));
-        assert!((cost - dense_c).abs() < 1e-12 * dense_c.max(1.0));
+        // The plane part comes from its scatter directly; the Jacobian here
+        // from the scatter's eigen square root, good to ~1e-8 relative.
+        let tolerance = 1e-6;
+        assert!((hessian - &dense_h).norm() < tolerance * dense_h.norm());
+        assert!((gradient - &dense_g).norm() < tolerance * (1.0 + dense_g.norm()));
+        assert!((cost - dense_c).abs() < tolerance * dense_c.max(1.0));
         Ok(())
     }
 

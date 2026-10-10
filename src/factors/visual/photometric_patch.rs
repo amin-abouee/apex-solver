@@ -26,7 +26,7 @@
 //! leaving the image contributes nothing: zero residuals, zero Jacobian.
 
 use faer::prelude::ReborrowMut;
-use nalgebra::{SMatrix, Vector2, Vector3};
+use nalgebra::{DMatrix, Matrix2, SMatrix, Vector2, Vector3};
 use std::marker::PhantomData;
 use std::sync::Arc;
 
@@ -35,9 +35,9 @@ use apex_manifolds::se3::SE3;
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
 use crate::factors::common::group_point::{acts_on_points, into_anchor};
 use crate::factors::common::validate::expect_manifolds;
+use crate::factors::{Factor, NormalBlocks};
 
 /// A single-channel image, row-major, sampled bilinearly with pixel centres
 /// at integer coordinates.
@@ -137,7 +137,7 @@ pub struct PhotometricPatchFactor<G: LieGroup, CAM: CameraModel> {
     camera: CAM,
     image: Arc<IntensityImage>,
     point_w: Vector3<f64>,
-    offsets: Vec<Vector2<f64>>,
+    offsets: Arc<[Vector2<f64>]>,
     /// The reference patch, made zero-mean at construction.
     reference: Vec<f64>,
     /// Intensity noise standard deviation.
@@ -160,10 +160,11 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
         camera: CAM,
         image: Arc<IntensityImage>,
         point_w: Vector3<f64>,
-        offsets: Vec<Vector2<f64>>,
+        offsets: impl Into<Arc<[Vector2<f64>]>>,
         reference: &[f64],
         sigma: f64,
     ) -> Result<Self, String> {
+        let offsets = offsets.into();
         if !acts_on_points::<G>() {
             return Err(format!(
                 "PhotometricPatchFactor: {} does not act on 3-D points",
@@ -213,6 +214,63 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
     }
 }
 
+/// A patch sampled at a state: each sample's intensity and image gradient,
+/// their means, and the pixel's derivative `∂c/∂[X, T_SC]` (one column per
+/// tangent axis, the state's then the extrinsic's).
+struct Patch {
+    samples: Vec<(f64, Vector2<f64>)>,
+    mean_value: f64,
+    mean_gradient: Vector2<f64>,
+    d_pixel: Vec<Vector2<f64>>,
+}
+
+impl<G: LieGroup, CAM: CameraModel> PhotometricPatchFactor<G, CAM> {
+    /// The patch at `params`; `None` when the point does not project or a
+    /// sample leaves the image.
+    fn patch(&self, params: &[&[f64]], with_derivative: bool) -> Option<Patch> {
+        let state = G::from_param_slice(params[0]);
+        let extrinsic = SE3::from_param_slice(params[1]);
+        let body = into_anchor(&state, &self.point_w);
+        let cam = into_anchor(&extrinsic, &body.point);
+        let centre = self.camera.project(&cam.point).ok()?;
+        let samples: Vec<(f64, Vector2<f64>)> = self
+            .offsets
+            .iter()
+            .map(|offset| self.image.sample(centre.x + offset.x, centre.y + offset.y))
+            .collect::<Option<_>>()?;
+        let count = samples.len() as f64;
+        let mean_value = samples.iter().map(|(value, _)| value).sum::<f64>() / count;
+        let mean_gradient = samples
+            .iter()
+            .fold(Vector2::zeros(), |sum, (_, gradient)| sum + gradient)
+            / count;
+        let d_pixel = if with_derivative {
+            let d = self.camera.jacobian_point(&cam.point);
+            let d = SMatrix::<f64, 2, 3>::from_fn(|row, col| d[(row, col)]);
+            // ∂c/∂X = ∂c/∂s · ∂s/∂X, then ∂c/∂T_SC.
+            body.d_anchor
+                .iter()
+                .map(|column| cam.d_world * Vector3::from(*column))
+                .chain(cam.d_anchor.iter().map(|column| Vector3::from(*column)))
+                .map(|column| d * column)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(Patch {
+            samples,
+            mean_value,
+            mean_gradient,
+            d_pixel,
+        })
+    }
+
+    /// Sample `k`'s whitened residual.
+    fn residual(&self, patch: &Patch, k: usize) -> f64 {
+        (patch.samples[k].0 - patch.mean_value - self.reference[k]) / self.sigma
+    }
+}
+
 /// No usable patch: zero residuals and an all-zero Jacobian.
 fn zero_out(residual: &mut [f64], jacobian: Option<faer::mat::MatMut<'_, f64>>) {
     residual.fill(0.0);
@@ -236,54 +294,57 @@ where
         residual: &mut [f64],
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
-        let state = G::from_param_slice(params[0]);
-        let extrinsic = SE3::from_param_slice(params[1]);
-        let body = into_anchor(&state, &self.point_w);
-        let cam = into_anchor(&extrinsic, &body.point);
-        let Ok(centre) = self.camera.project(&cam.point) else {
+        let Some(patch) = self.patch(params, jacobian.is_some()) else {
             zero_out(residual, jacobian);
             return;
         };
-        let samples: Option<Vec<(f64, Vector2<f64>)>> = self
-            .offsets
-            .iter()
-            .map(|offset| self.image.sample(centre.x + offset.x, centre.y + offset.y))
-            .collect();
-        let Some(samples) = samples else {
-            zero_out(residual, jacobian);
-            return;
-        };
-
-        let count = samples.len() as f64;
-        let mean_value = samples.iter().map(|(value, _)| value).sum::<f64>() / count;
-        let mean_gradient = samples
-            .iter()
-            .fold(Vector2::zeros(), |sum, (_, gradient)| sum + gradient)
-            / count;
-        for (r, ((value, _), reference)) in
-            residual.iter_mut().zip(samples.iter().zip(&self.reference))
-        {
-            *r = (value - mean_value - reference) / self.sigma;
+        for (k, r) in residual.iter_mut().enumerate() {
+            *r = self.residual(&patch, k);
         }
-
         let Some(mut jac) = jacobian else {
             return;
         };
-        let d_pixel = self.camera.jacobian_point(&cam.point);
-        let d_pixel = SMatrix::<f64, 2, 3>::from_fn(|row, col| d_pixel[(row, col)]);
-        // ∂c/∂X = ∂c/∂s · ∂s/∂X, then ∂c/∂T_SC: 3 × (dof + 6) columns.
-        let d_cam = body
-            .d_anchor
-            .iter()
-            .map(|column| cam.d_world * Vector3::from(*column))
-            .chain(cam.d_anchor.iter().map(|column| Vector3::from(*column)));
-        let d_pixel_columns: Vec<Vector2<f64>> = d_cam.map(|column| d_pixel * column).collect();
-        for (row, (_, gradient)) in samples.iter().enumerate() {
-            let weight = (gradient - mean_gradient) / self.sigma;
-            for (col, column) in d_pixel_columns.iter().enumerate() {
+        for (row, (_, gradient)) in patch.samples.iter().enumerate() {
+            let weight = (gradient - patch.mean_gradient) / self.sigma;
+            for (col, column) in patch.d_pixel.iter().enumerate() {
                 *jac.rb_mut().get_mut(row, col) = weight.dot(column);
             }
         }
+    }
+
+    /// Every row is `wᵣᵀ·D` with `wᵣ` the sample's centred gradient over σ
+    /// and `D = ∂c/∂[X, T_SC]` shared: `JᵀJ = Dᵀ(Σ wᵣwᵣᵀ)D`,
+    /// `Jᵀr = Dᵀ(Σ wᵣrᵣ)` — a 2 × 2 sum instead of the patch's rows.
+    fn accumulate_normal(
+        &self,
+        params: &[&[f64]],
+        blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        let Some(patch) = self.patch(params, blocks.is_some()) else {
+            return Some(0.0);
+        };
+        let mut cost = 0.0;
+        let mut spread = Matrix2::zeros();
+        let mut pull = Vector2::zeros();
+        for (k, (_, gradient)) in patch.samples.iter().enumerate() {
+            let r = self.residual(&patch, k);
+            cost += r * r;
+            let weight = (gradient - patch.mean_gradient) / self.sigma;
+            spread += weight * weight.transpose();
+            pull += weight * r;
+        }
+        if let Some(blocks) = blocks {
+            let d = DMatrix::from_fn(2, patch.d_pixel.len(), |r, c| patch.d_pixel[c][r]);
+            let dof = G::TangentVector::DIM;
+            let parts = [d.columns(0, dof), d.columns(dof, d.ncols() - dof)];
+            for (a, da) in parts.iter().enumerate() {
+                blocks.add_gradient(a, &(da.transpose() * pull));
+                for (b, db) in parts.iter().enumerate() {
+                    blocks.add_hessian(a, b, &(da.transpose() * spread * db));
+                }
+            }
+        }
+        Some(cost)
     }
 
     fn residual_dim(&self) -> usize {
@@ -431,6 +492,12 @@ mod tests {
                 );
             }
         }
+        crate::factors::assert_normal_equations_match(
+            &factor,
+            &[off.as_param_slice(), extrinsic().as_param_slice()],
+            &[dof, 6],
+            1e-9,
+        );
         for axis in 0..6 {
             let fd = central_difference(&extrinsic(), axis, |e| evaluate(&factor, &off, e).0);
             for (row, value) in fd.iter().enumerate() {
@@ -442,6 +509,38 @@ mod tests {
                 );
             }
         }
+        Ok(())
+    }
+
+    /// The odometry's stack — the extrinsic held, the image's state offset
+    /// from the sweep's — keeps exact normal equations through both
+    /// wrappers.
+    #[test]
+    fn the_wrapped_patch_keeps_its_normal_equations() -> Result<(), String> {
+        use crate::factors::held::HeldBlocks;
+        use crate::factors::offset::RightOffset;
+        let state = SE23::new(
+            Vector3::new(1.0, -0.5, 0.3),
+            Vector3::new(0.4, 0.1, 0.0),
+            rotation(),
+        );
+        let delta = SE23::new(
+            Vector3::new(0.01, -0.004, 0.002),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.003, -0.002, 0.01),
+        );
+        let nudge = [2e-3, -1e-3, 1e-3, 0.0, 0.0, 0.0, 3e-3, 1e-3, -2e-3];
+        let off = state.right_plus(
+            &<SE23 as LieGroup>::TangentVector::from_slice(&nudge),
+            None,
+            None,
+        );
+        let stack = HeldBlocks::new(
+            RightOffset::new(factor(&state, 7.0)?, 0, 0, delta)?,
+            vec![SE23::DOF, 6],
+            vec![None, Some(extrinsic().as_param_slice().to_vec())],
+        )?;
+        crate::factors::assert_normal_equations_match(&stack, &[off.as_param_slice()], &[9], 1e-9);
         Ok(())
     }
 

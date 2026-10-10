@@ -229,6 +229,242 @@ pub trait Factor: Send + Sync {
     fn validate_variables(&self, _variables: &[&dyn ManifoldVariable]) -> Result<(), String> {
         Ok(())
     }
+
+    /// Add this factor's `JᵀJ` and `Jᵀr` into `blocks` and return its cost
+    /// `‖r‖²`, without forming `J` — or, with `blocks` `None`, the cost
+    /// alone. For factors whose structure makes the normal equations far
+    /// cheaper than the Jacobian (a plane over many frames: a few small
+    /// diagonal blocks of a mostly-zero `J`).
+    ///
+    /// `None`, the default, means not provided: use [`Factor::linearize`].
+    fn accumulate_normal(
+        &self,
+        _params: &[&[f64]],
+        _blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        None
+    }
+}
+
+/// Where [`Factor::accumulate_normal`] adds its normal equations: a larger
+/// system's `H` and `g`, with the column offset of each of the factor's
+/// blocks in it.
+///
+/// A wrapping factor hands its inner factor a view of these blocks:
+/// [`NormalBlocks::remapped`] when the inner blocks are a subset or
+/// permutation of its own (held blocks are dropped), and
+/// [`NormalBlocks::transformed`] when the wrapper's Jacobian of a block is
+/// the inner one right-multiplied, `J·T`; then `H_ab += T_aᵀ·M·T_b` and
+/// `g_a += T_aᵀ·v`.
+pub struct NormalBlocks<'a> {
+    hessian: &'a mut nalgebra::DMatrix<f64>,
+    gradient: &'a mut nalgebra::DVector<f64>,
+    offsets: Offsets<'a>,
+    /// Per block, `T` (none: identity); empty when no block has one.
+    transforms: Vec<Option<nalgebra::DMatrix<f64>>>,
+}
+
+enum Offsets<'a> {
+    Borrowed(&'a [usize]),
+    Owned(Vec<Option<usize>>),
+}
+
+impl<'a> NormalBlocks<'a> {
+    /// Blocks of `hessian` and `gradient` at `offsets` (one per factor
+    /// block).
+    pub fn new(
+        hessian: &'a mut nalgebra::DMatrix<f64>,
+        gradient: &'a mut nalgebra::DVector<f64>,
+        offsets: &'a [usize],
+    ) -> Self {
+        Self {
+            hessian,
+            gradient,
+            offsets: Offsets::Borrowed(offsets),
+            transforms: Vec::new(),
+        }
+    }
+
+    fn blocks(&self) -> usize {
+        match &self.offsets {
+            Offsets::Borrowed(offsets) => offsets.len(),
+            Offsets::Owned(offsets) => offsets.len(),
+        }
+    }
+
+    fn offset(&self, a: usize) -> Option<usize> {
+        match &self.offsets {
+            Offsets::Borrowed(offsets) => offsets.get(a).copied(),
+            Offsets::Owned(offsets) => offsets.get(a).copied().flatten(),
+        }
+    }
+
+    fn transform(&self, a: usize) -> Option<&nalgebra::DMatrix<f64>> {
+        self.transforms.get(a).and_then(Option::as_ref)
+    }
+
+    /// The blocks of an inner factor whose block `i` is this factor's block
+    /// `map[i]`, or is dropped when `None`.
+    pub fn remapped(&mut self, map: &[Option<usize>]) -> NormalBlocks<'_> {
+        let offsets = map.iter().map(|m| m.and_then(|j| self.offset(j))).collect();
+        let transforms = if self.transforms.is_empty() {
+            Vec::new()
+        } else {
+            map.iter()
+                .map(|m| m.and_then(|j| self.transform(j).cloned()))
+                .collect()
+        };
+        NormalBlocks {
+            hessian: &mut *self.hessian,
+            gradient: &mut *self.gradient,
+            offsets: Offsets::Owned(offsets),
+            transforms,
+        }
+    }
+
+    /// The blocks of an inner factor whose block `a` Jacobian this factor
+    /// right-multiplies by `t`.
+    pub fn transformed(&mut self, a: usize, t: nalgebra::DMatrix<f64>) -> NormalBlocks<'_> {
+        let blocks = self.blocks();
+        let offsets = (0..blocks).map(|i| self.offset(i)).collect();
+        let transforms = (0..blocks)
+            .map(|i| match (i == a, self.transform(i)) {
+                (true, Some(outer)) => Some(&t * outer),
+                (true, None) => Some(t.clone()),
+                (false, outer) => outer.cloned(),
+            })
+            .collect();
+        NormalBlocks {
+            hessian: &mut *self.hessian,
+            gradient: &mut *self.gradient,
+            offsets: Offsets::Owned(offsets),
+            transforms,
+        }
+    }
+
+    /// `H[a, b] += block` for the factor's blocks `a` and `b`.
+    pub fn add_hessian<R, C, S>(
+        &mut self,
+        a: usize,
+        b: usize,
+        block: &nalgebra::Matrix<f64, R, C, S>,
+    ) where
+        R: nalgebra::Dim,
+        C: nalgebra::Dim,
+        S: nalgebra::Storage<f64, R, C>,
+    {
+        let (Some(ra), Some(cb)) = (self.offset(a), self.offset(b)) else {
+            return;
+        };
+        let (ta, tb) = (self.transform(a), self.transform(b));
+        if ta.is_none() && tb.is_none() {
+            for col in 0..block.ncols() {
+                for row in 0..block.nrows() {
+                    self.hessian[(ra + row, cb + col)] += block[(row, col)];
+                }
+            }
+            return;
+        }
+        let mut m = nalgebra::DMatrix::from_fn(block.nrows(), block.ncols(), |r, c| block[(r, c)]);
+        if let Some(t) = ta {
+            m = t.transpose() * m;
+        }
+        if let Some(t) = tb {
+            m *= t;
+        }
+        let mut target = self.hessian.view_mut((ra, cb), m.shape());
+        target += m;
+    }
+
+    /// `g[a] += block` for the factor's block `a`.
+    pub fn add_gradient<R, S>(
+        &mut self,
+        a: usize,
+        block: &nalgebra::Matrix<f64, R, nalgebra::U1, S>,
+    ) where
+        R: nalgebra::Dim,
+        S: nalgebra::Storage<f64, R, nalgebra::U1>,
+    {
+        let Some(ra) = self.offset(a) else {
+            return;
+        };
+        match self.transform(a) {
+            None => {
+                for row in 0..block.nrows() {
+                    self.gradient[ra + row] += block[row];
+                }
+            }
+            Some(t) => {
+                let v = nalgebra::DVector::from_fn(block.nrows(), |r, _| block[r]);
+                let v = t.transpose() * v;
+                let mut target = self.gradient.rows_mut(ra, v.nrows());
+                target += v;
+            }
+        }
+    }
+}
+
+/// Test support: a factor's [`Factor::accumulate_normal`] equals `JᵀJ`,
+/// `Jᵀr` and `‖r‖²` from its own [`Factor::linearize`] at `params`, blocks of
+/// tangent dimensions `dofs` placed with a gap between them.
+#[cfg(test)]
+pub(crate) fn assert_normal_equations_match(
+    factor: &dyn Factor,
+    params: &[&[f64]],
+    dofs: &[usize],
+    tolerance: f64,
+) {
+    use nalgebra::{DMatrix, DVector};
+    let gap = 2;
+    let offsets: Vec<usize> = dofs
+        .iter()
+        .scan(gap, |at, dof| {
+            let start = *at;
+            *at += dof + gap;
+            Some(start)
+        })
+        .collect();
+    let width = offsets.last().copied().unwrap_or(0) + dofs.last().copied().unwrap_or(0) + gap;
+    let (mut hessian, mut gradient) = (DMatrix::zeros(width, width), DVector::zeros(width));
+    let cost = factor.accumulate_normal(
+        params,
+        Some(&mut NormalBlocks::new(
+            &mut hessian,
+            &mut gradient,
+            &offsets,
+        )),
+    );
+    let Some(cost) = cost else {
+        panic!("the factor has no normal equations");
+    };
+    assert_eq!(factor.accumulate_normal(params, None), Some(cost));
+    let (rows, cols) = factor.jacobian_shape();
+    let mut residual = vec![0.0; rows];
+    let mut jacobian = faer::Mat::<f64>::zeros(rows, cols);
+    factor.linearize(params, &mut residual, Some(jacobian.as_mut()));
+    let mut j = DMatrix::zeros(rows, width);
+    let mut column = 0;
+    for (&offset, &dof) in offsets.iter().zip(dofs) {
+        for c in 0..dof {
+            for r in 0..rows {
+                j[(r, offset + c)] = jacobian[(r, column + c)];
+            }
+        }
+        column += dof;
+    }
+    let r = DVector::from_column_slice(&residual);
+    let expected_h = j.transpose() * &j;
+    let expected_g = j.transpose() * &r;
+    let scale = expected_h.norm().max(1.0);
+    assert!(
+        (&hessian - &expected_h).norm() < tolerance * scale,
+        "H {hessian} vs {expected_h}"
+    );
+    assert!(
+        (&gradient - &expected_g).norm() < tolerance * expected_g.norm().max(1.0),
+        "g {gradient} vs {expected_g}"
+    );
+    assert!((r.norm_squared() - cost).abs() < tolerance * cost.max(1.0));
 }
 
 #[cfg(test)]

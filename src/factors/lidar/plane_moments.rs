@@ -41,19 +41,18 @@
 use std::marker::PhantomData;
 
 use faer::prelude::ReborrowMut;
-use std::any::TypeId;
-use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::rc::Rc;
 
-use nalgebra::{Matrix3, SymmetricEigen, Vector3};
+use nalgebra::{Matrix3, SMatrix, SymmetricEigen, Vector3};
 
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
 use crate::factors::common::group_point::acts_on_points;
 use crate::factors::common::validate::expect_manifolds;
+use crate::factors::{Factor, NormalBlocks};
+
+use super::action::{Action, ActionJacobian, MAX_DOF, cached_action};
 
 /// Smallest gap between the two smallest scatter eigenvalues for a defined
 /// normal.
@@ -146,32 +145,39 @@ impl PointMoments {
         Some((normal, -normal.dot(&mean), values))
     }
 
-    /// The moments centred on their mean: `(N, μ, Lᵀ)` with `L·Lᵀ` the
-    /// centred scatter `Σ(s−μ)(s−μ)ᵀ`. `None` without points.
+    /// The moments centred on their mean: `(N, μ, S)` with `S` the centred
+    /// scatter `Σ(s−μ)(s−μ)ᵀ`. `None` without points.
     fn centred(&self) -> Option<Centred> {
         let (mean, scatter) = self.mean_and_scatter()?;
-        let eigen = SymmetricEigen::new(scatter * self.count);
+        Some(Centred {
+            count: self.count,
+            mean,
+            scatter: scatter * self.count,
+        })
+    }
+}
+
+/// A point set centred on its mean, with its scatter.
+#[derive(Clone, Copy, Debug)]
+struct Centred {
+    count: f64,
+    mean: Vector3<f64>,
+    /// `S = Σ(s−μ)(s−μ)ᵀ`.
+    scatter: Matrix3<f64>,
+}
+
+impl Centred {
+    /// `Lᵀ` with `L·Lᵀ = S`: the residual rows of [`Factor::linearize`].
+    fn root(&self) -> Matrix3<f64> {
+        let eigen = SymmetricEigen::new(self.scatter);
         let mut root = Matrix3::zeros();
         for k in 0..3 {
             let scale = eigen.eigenvalues[k].max(0.0).sqrt();
             root.row_mut(k)
                 .copy_from(&(eigen.eigenvectors.column(k).transpose() * scale));
         }
-        Some(Centred {
-            count: self.count,
-            mean,
-            root,
-        })
+        root
     }
-}
-
-/// A point set centred on its mean, with the square root of its scatter.
-#[derive(Clone, Copy, Debug)]
-struct Centred {
-    count: f64,
-    mean: Vector3<f64>,
-    /// `Lᵀ` with `L·Lᵀ = Σ(s−μ)(s−μ)ᵀ`.
-    root: Matrix3<f64>,
 }
 
 /// One plane over several frames, from per-frame point moments; see the
@@ -201,7 +207,7 @@ impl<G: LieGroup> LidarPlaneMomentFactor<G> {
     /// is not finite and positive.
     pub fn new(frames: Vec<PointMoments>, fixed: PointMoments, sigma: f64) -> Result<Self, String> {
         let name = "LidarPlaneMomentFactor";
-        if !acts_on_points::<G>() {
+        if !acts_on_points::<G>() || G::TangentVector::DIM > MAX_DOF {
             return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
         }
         if frames.is_empty() || frames.iter().any(|m| m.count <= 0.0) {
@@ -259,60 +265,62 @@ fn smallest_axis(scatter: &Matrix3<f64>) -> Option<Vector3<f64>> {
         .then(|| eigen.eigenvectors.column(order[0]).into_owned())
 }
 
-/// A state's affine map and action Jacobians; see [`affine_action`].
-type Action = (Matrix3<f64>, Vector3<f64>, [Vec<Vector3<f64>>; 4]);
+/// A fitted plane `(n, d)` with `nᵀp + d = 0`.
+type Fitted = (Vector3<f64>, f64);
 
-/// Recent states' actions per thread, keyed by group and exact parameters.
-const ACTION_CACHE: usize = 32;
-
-/// A cached action: its group, the state's parameters, the action.
-type CachedAction = (TypeId, Vec<f64>, Rc<Action>);
-
-thread_local! {
-    static ACTIONS: RefCell<VecDeque<CachedAction>> =
-        RefCell::new(VecDeque::with_capacity(ACTION_CACHE));
-}
-
-/// The affine map `s ↦ A·s + b` of `state`'s action, and the action's
-/// Jacobian `∂(X⊙s)/∂X` (3 × dof) at the origin and at each unit axis.
-fn affine_action<G: LieGroup>(state: &G) -> Action {
-    let dof = state.tangent_dim();
-    let at = |s: &Vector3<f64>| {
-        let mut jacobian = G::zero_jacobian();
-        let world = state.act(s, Some(&mut jacobian), None);
-        let columns = (0..dof)
-            .map(|col| Vector3::new(jacobian[(0, col)], jacobian[(1, col)], jacobian[(2, col)]))
-            .collect::<Vec<_>>();
-        (world, columns)
-    };
-    let (b, j0) = at(&Vector3::zeros());
-    let (x, jx) = at(&Vector3::x());
-    let (y, jy) = at(&Vector3::y());
-    let (z, jz) = at(&Vector3::z());
-    let a = Matrix3::from_columns(&[x - b, y - b, z - b]);
-    (a, b, [j0, jx, jy, jz])
-}
-
-/// [`affine_action`] of the state stored as `param`, shared by every plane
-/// a window state sees: a window has a handful of states and thousands of
-/// planes, all linearized at the same parameters.
-fn cached_action<G: LieGroup + 'static>(param: &[f64]) -> Rc<Action> {
-    let group = TypeId::of::<G>();
-    ACTIONS.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some((_, _, action)) = cache
+impl<G: LieGroup + Send + Sync + 'static> LidarPlaneMomentFactor<G> {
+    /// The states' actions and the best-fit plane `(n, d)` of every point:
+    /// each frame's mean carried to the world, its scatter rotated. `None`
+    /// when the plane has no unique normal.
+    fn fit(&self, params: &[&[f64]]) -> (Vec<Rc<Action>>, Option<Fitted>) {
+        let actions: Vec<Rc<Action>> = params
             .iter()
-            .find(|(g, key, _)| *g == group && key.as_slice() == param)
-        {
-            return Rc::clone(action);
+            .map(|param| cached_action::<G>(param))
+            .collect();
+        let centre = |action: &Action, frame: &Centred| action.0 * frame.mean + action.1;
+        let mut total = 0.0;
+        let mut weighted = Vector3::zeros();
+        for (action, frame) in actions.iter().zip(&self.frames) {
+            total += frame.count;
+            weighted += centre(action, frame) * frame.count;
         }
-        let action = Rc::new(affine_action(&G::from_param_slice(param)));
-        if cache.len() == ACTION_CACHE {
-            cache.pop_front();
+        if let Some(fixed) = &self.fixed {
+            total += fixed.count;
+            weighted += fixed.mean * fixed.count;
         }
-        cache.push_back((group, param.to_vec(), Rc::clone(&action)));
-        action
-    })
+        let mean = weighted / total;
+        let mut scatter = Matrix3::zeros();
+        for (action, frame) in actions.iter().zip(&self.frames) {
+            let a = &action.0;
+            let offset = centre(action, frame) - mean;
+            scatter +=
+                a * frame.scatter * a.transpose() + offset * offset.transpose() * frame.count;
+        }
+        if let Some(fixed) = &self.fixed {
+            let offset = fixed.mean - mean;
+            scatter += fixed.scatter + offset * offset.transpose() * fixed.count;
+        }
+        let plane = smallest_axis(&scatter).map(|normal| (normal, -normal.dot(&mean)));
+        (actions, plane)
+    }
+
+    /// `∂(Aᵀn)/∂X` (3 × dof) and `∂(nᵀ(Aμ + b))/∂X` (1 × dof) of a frame,
+    /// zero past the group's dimension.
+    fn derivatives(
+        jacobian: &ActionJacobian,
+        normal: &Vector3<f64>,
+        mean: &Vector3<f64>,
+    ) -> (SMatrix<f64, 3, MAX_DOF>, SMatrix<f64, 1, MAX_DOF>) {
+        let n = normal.transpose();
+        let mut d_an = SMatrix::<f64, 3, MAX_DOF>::zeros();
+        let mut d_along = n * jacobian.origin;
+        for (k, axis) in jacobian.axes.iter().enumerate() {
+            let row = n * axis;
+            d_an.set_row(k, &row);
+            d_along += row * mean[k];
+        }
+        (d_an, d_along)
+    }
 }
 
 impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
@@ -323,10 +331,6 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let dof = G::TangentVector::DIM;
-        let actions: Vec<Rc<Action>> = params
-            .iter()
-            .map(|param| cached_action::<G>(param))
-            .collect();
         let mut jac = jacobian;
         if let Some(jac) = jac.as_mut() {
             for row in 0..jac.nrows() {
@@ -335,64 +339,31 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
                 }
             }
         }
-        // The best-fit plane of every point, from the centred parts: each
-        // frame's mean carried to the world, its scatter rotated.
-        let parts: Vec<(f64, Vector3<f64>, Matrix3<f64>)> = actions
-            .iter()
-            .zip(&self.frames)
-            .map(|(action, frame)| {
-                let (a, b, _) = &**action;
-                let scatter = a * frame.root.transpose() * frame.root * a.transpose();
-                (frame.count, a * frame.mean + b, scatter)
-            })
-            .chain(
-                self.fixed
-                    .iter()
-                    .map(|f| (f.count, f.mean, f.root.transpose() * f.root)),
-            )
-            .collect();
-        let total: f64 = parts.iter().map(|p| p.0).sum();
-        let mean = parts.iter().map(|p| p.1 * p.0).sum::<Vector3<f64>>() / total;
-        let scatter = parts
-            .iter()
-            .map(|(count, centre, scatter)| {
-                scatter + (centre - mean) * (centre - mean).transpose() * *count
-            })
-            .sum::<Matrix3<f64>>();
-        let Some(normal) = smallest_axis(&scatter) else {
+        let (actions, plane) = self.fit(params);
+        let Some((normal, offset)) = plane else {
             residual.fill(0.0);
             return;
         };
-        let offset = -normal.dot(&mean);
         let information = 1.0 / self.sigma;
         for (block, (action, frame)) in actions.iter().zip(&self.frames).enumerate() {
             let (a, b, columns) = &**action;
+            let root = frame.root();
             let a_n = a.transpose() * normal;
-            let spread = frame.root * a_n * information;
+            let spread = root * a_n * information;
             let root_n = frame.count.sqrt();
             let along = normal.dot(&(a * frame.mean + b)) + offset;
             residual[4 * block..4 * block + 3].copy_from_slice(spread.as_slice());
             residual[4 * block + 3] = root_n * along * information;
             if let Some(jac) = jac.as_mut() {
-                let [j0, jx, jy, jz] = columns;
+                let (d_an, d_along) = Self::derivatives(columns, &normal, &frame.mean);
+                let d_spread = root * d_an * information;
                 for col in 0..dof {
-                    let origin = j0[col];
-                    let axes = [jx[col] - origin, jy[col] - origin, jz[col] - origin];
-                    let d_an = Vector3::new(
-                        normal.dot(&axes[0]),
-                        normal.dot(&axes[1]),
-                        normal.dot(&axes[2]),
-                    );
-                    let d_spread = frame.root * d_an * information;
-                    let at_mean = origin
-                        + axes[0] * frame.mean.x
-                        + axes[1] * frame.mean.y
-                        + axes[2] * frame.mean.z;
                     for k in 0..3 {
-                        *jac.rb_mut().get_mut(4 * block + k, block * dof + col) = d_spread[k];
+                        *jac.rb_mut().get_mut(4 * block + k, block * dof + col) =
+                            d_spread[(k, col)];
                     }
                     *jac.rb_mut().get_mut(4 * block + 3, block * dof + col) =
-                        root_n * normal.dot(&at_mean) * information;
+                        root_n * d_along[col] * information;
                 }
             }
         }
@@ -402,13 +373,55 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         let fixed_row = 4 * self.frames.len();
         match &self.fixed {
             Some(fixed) => {
-                let spread = fixed.root * normal * information;
+                let spread = fixed.root() * normal * information;
                 residual[fixed_row..fixed_row + 3].copy_from_slice(spread.as_slice());
                 residual[fixed_row + 3] =
                     fixed.count.sqrt() * (normal.dot(&fixed.mean) + offset) * information;
             }
             None => residual[fixed_row..fixed_row + 4].fill(0.0),
         }
+    }
+
+    /// Per frame, from its scatter `S` and the derivatives `D = ∂(Aᵀn)/∂X`,
+    /// `m = ∂(nᵀ(Aμ+b))/∂X`: `H += (DᵀSD + N·mᵀm)/σ²`,
+    /// `g += (DᵀS·Aᵀn + N·mᵀ·e)/σ²` and cost `(nᵀASAᵀn + N·e²)/σ²` with `e`
+    /// the mean's distance — what [`Factor::linearize`]'s rows sum to, with
+    /// no square root of `S` and no Jacobian.
+    fn accumulate_normal(
+        &self,
+        params: &[&[f64]],
+        mut blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        let (actions, plane) = self.fit(params);
+        let Some((normal, offset)) = plane else {
+            return Some(0.0);
+        };
+        let weight = 1.0 / (self.sigma * self.sigma);
+        let mut cost = 0.0;
+        let dof = G::TangentVector::DIM;
+        for (block, (action, frame)) in actions.iter().zip(&self.frames).enumerate() {
+            let (a, b, columns) = &**action;
+            let a_n = a.transpose() * normal;
+            let s_an = frame.scatter * a_n;
+            let along = normal.dot(&(a * frame.mean + b)) + offset;
+            cost += (a_n.dot(&s_an) + frame.count * along * along) * weight;
+            if let Some(blocks) = blocks.as_deref_mut() {
+                let (d_an, d_along) = Self::derivatives(columns, &normal, &frame.mean);
+                let hessian = (d_an.transpose() * frame.scatter * d_an
+                    + d_along.transpose() * d_along * frame.count)
+                    * weight;
+                let gradient = (d_an.transpose() * s_an
+                    + d_along.transpose() * (frame.count * along))
+                    * weight;
+                blocks.add_hessian(block, block, &hessian.view((0, 0), (dof, dof)));
+                blocks.add_gradient(block, &gradient.rows(0, dof));
+            }
+        }
+        if let Some(fixed) = &self.fixed {
+            let along = normal.dot(&fixed.mean) + offset;
+            cost += (normal.dot(&(fixed.scatter * normal)) + fixed.count * along * along) * weight;
+        }
+        Some(cost)
     }
 
     fn residual_dim(&self) -> usize {
@@ -442,35 +455,73 @@ mod tests {
     use apex_manifolds::se23::SE23;
     use apex_manifolds::sim3::Sim3;
     use faer::Mat;
-    use nalgebra::UnitQuaternion;
+    use nalgebra::{DMatrix, DVector, UnitQuaternion};
 
-    /// The cache returns exactly the computed action, keeps groups with the
-    /// same parameter length apart, and survives eviction.
+    /// The normal equations straight from the scatter: the cost's gradient
+    /// (by central differences) and the Jacobian path's `JᵀJ`, `Jᵀr`, cost.
     #[test]
-    fn cached_actions_equal_computed_ones() {
-        let state = |i: usize| {
-            SE3::new(
-                Vector3::new(0.1 * i as f64, 0.2, -0.3),
-                UnitQuaternion::from_euler_angles(0.01 * i as f64, 0.2, -0.1),
+    fn normal_equations_match_the_cost_and_the_jacobian() -> Result<(), String> {
+        let poses = [pose(0.0), pose(1.0)];
+        let factor = LidarPlaneMomentFactor::<SE3>::new(
+            poses
+                .iter()
+                .enumerate()
+                .map(|(seed, p)| PointMoments::from_points(&plane_points(p, seed)))
+                .collect(),
+            PointMoments::from_points(&plane_points(&SE3::identity(), 7)),
+            0.01,
+        )?;
+        let params: Vec<&[f64]> = poses.iter().map(|p| p.as_param_slice()).collect();
+        let (mut hessian, mut gradient) = (DMatrix::zeros(12, 12), DVector::zeros(12));
+        let cost = factor
+            .accumulate_normal(
+                &params,
+                Some(&mut NormalBlocks::new(&mut hessian, &mut gradient, &[0, 6])),
             )
-        };
-        for i in 0..2 * ACTION_CACHE {
-            let s = state(i);
-            let cached = cached_action::<SE3>(s.as_param_slice());
-            assert_eq!(*cached, affine_action(&s));
-            assert_eq!(*cached_action::<SE3>(s.as_param_slice()), affine_action(&s));
+            .ok_or("no normal equations")?;
+        assert_eq!(factor.accumulate_normal(&params, None), Some(cost));
+
+        let (rows, cols) = factor.jacobian_shape();
+        let mut r = vec![0.0; rows];
+        let mut j = Mat::<f64>::zeros(rows, cols);
+        factor.linearize(&params, &mut r, Some(j.as_mut()));
+        let j = DMatrix::from_fn(rows, cols, |a, b| j[(a, b)]);
+        let r = DVector::from_column_slice(&r);
+        assert!((j.transpose() * &j - &hessian).norm() < 1e-6 * hessian.norm());
+        assert!((j.transpose() * &r - &gradient).norm() < 1e-6 * gradient.norm());
+        assert!((r.norm_squared() - cost).abs() < 1e-6 * cost);
+
+        // Holding the plane is exact at the optimum plane (envelope): the
+        // cost's derivative is 2g.
+        let step = 1e-6;
+        for k in 0..12 {
+            let cost_at = |s: f64| -> Option<f64> {
+                let mut t = [0.0; 6];
+                t[k % 6] = s;
+                let moved: Vec<SE3> = poses
+                    .iter()
+                    .enumerate()
+                    .map(|(i, p)| match i == k / 6 {
+                        true => p.right_plus(
+                            &<SE3 as LieGroup>::TangentVector::from_slice(&t),
+                            None,
+                            None,
+                        ),
+                        false => p.clone(),
+                    })
+                    .collect();
+                let params: Vec<&[f64]> = moved.iter().map(|p| p.as_param_slice()).collect();
+                factor.accumulate_normal(&params, None)
+            };
+            let numeric =
+                (cost_at(step).ok_or("cost")? - cost_at(-step).ok_or("cost")?) / (4.0 * step);
+            assert!(
+                (numeric - gradient[k]).abs() < 1e-5 * (1.0 + gradient.norm()),
+                "{k}: {numeric} vs {}",
+                gradient[k]
+            );
         }
-        let first = state(0);
-        assert_eq!(
-            *cached_action::<SE3>(first.as_param_slice()),
-            affine_action(&first)
-        );
-        // A different group at the same pose: a distinct entry.
-        let sim = Sim3::new(first.translation(), first.rotation_quaternion(), 1.5);
-        assert_eq!(
-            *cached_action::<Sim3>(sim.as_param_slice()),
-            affine_action(&sim)
-        );
+        Ok(())
     }
 
     /// Body-frame points of a tilted plane `n·w = 2`, as seen from `state`,

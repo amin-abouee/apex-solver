@@ -6,6 +6,7 @@
 //! ([`plane`], [`point_to_point`], [`gicp`]) treats the body-frame point as a
 //! variable.
 
+mod action;
 pub mod distance_field;
 pub mod edge;
 pub mod gicp;

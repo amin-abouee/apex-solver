@@ -11,7 +11,7 @@ use faer::Mat;
 use faer::prelude::ReborrowMut;
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with some parameter blocks fixed to given values.
 pub struct HeldBlocks<F: Factor> {
@@ -109,6 +109,39 @@ impl<F: Factor> Factor for HeldBlocks<F> {
         }
     }
 
+    /// The inner normal equations, held blocks dropped.
+    fn accumulate_normal(
+        &self,
+        params: &[&[f64]],
+        blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        let mut free = params.iter();
+        let full: Vec<&[f64]> = self
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Some(values) => Some(values.as_slice()),
+                None => free.next().copied(),
+            })
+            .collect();
+        let Some(blocks) = blocks else {
+            return self.inner.accumulate_normal(&full, None);
+        };
+        let mut next = 0;
+        let map: Vec<Option<usize>> = self
+            .blocks
+            .iter()
+            .map(|block| {
+                block.is_none().then(|| {
+                    next += 1;
+                    next - 1
+                })
+            })
+            .collect();
+        self.inner
+            .accumulate_normal(&full, Some(&mut blocks.remapped(&map)))
+    }
+
     fn residual_dim(&self) -> usize {
         self.inner.residual_dim()
     }
@@ -199,6 +232,18 @@ mod tests {
         other.linearize(&[&e], &mut residual_only, None);
         assert_eq!(residual_only[0], full_residual[0]);
         assert_eq!(other.inner().sigma(), 0.05);
+        Ok(())
+    }
+
+    /// Without inner normal equations there are none: use the Jacobian.
+    #[test]
+    fn no_inner_normal_equations_means_none() -> Result<(), String> {
+        let e = extrinsic().as_param_slice().to_vec();
+        let held = HeldBlocks::new(factor()?, vec![9, 6], vec![None, Some(e)])?;
+        assert_eq!(
+            held.accumulate_normal(&[state().as_param_slice()], None),
+            None
+        );
         Ok(())
     }
 

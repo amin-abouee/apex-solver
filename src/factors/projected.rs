@@ -21,7 +21,7 @@ use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector};
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with its Jacobian right-multiplied by a projection.
 pub struct ProjectedFactor<F: Factor> {
@@ -90,6 +90,25 @@ impl<F: Factor> Factor for ProjectedFactor<F> {
                     .sum();
                 *jac.rb_mut().get_mut(row, col) = value;
             }
+        }
+    }
+
+    /// The inner normal equations projected, `PᵀHP`, `Pᵀg` — for a factor
+    /// on one block (a projection across blocks is not block-wise).
+    fn accumulate_normal(
+        &self,
+        params: &[&[f64]],
+        blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        if params.len() != 1 {
+            return None;
+        }
+        match blocks {
+            None => self.inner.accumulate_normal(params, None),
+            Some(blocks) => self.inner.accumulate_normal(
+                params,
+                Some(&mut blocks.transformed(0, self.projection.clone())),
+            ),
         }
     }
 
@@ -169,6 +188,26 @@ mod tests {
             (across.transpose() * &info1 * &across)[0],
         );
         assert!((a0 - a1).abs() < 1e-6 * a0, "{a0} vs {a1}");
+        Ok(())
+    }
+
+    /// Its normal equations are the inner ones projected, `PᵀHP`.
+    #[test]
+    fn projected_normal_equations_match_its_jacobian() -> Result<(), String> {
+        let state = SE3::new(
+            Vector3::new(0.1, 0.4, 0.0),
+            UnitQuaternion::from_euler_angles(0.0, 0.0, 0.02),
+        );
+        let mut direction = DVector::zeros(6);
+        direction[1] = 1.0;
+        direction[3] = 0.5;
+        let projected = ProjectedFactor::new(corridor()?, &[direction])?;
+        crate::factors::assert_normal_equations_match(
+            &projected,
+            &[state.as_param_slice()],
+            &[6],
+            1e-9,
+        );
         Ok(())
     }
 

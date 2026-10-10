@@ -75,7 +75,7 @@ pub struct PhotometricTwoViewFactor<G: LieGroup, CAM: CameraModel> {
     reference_body: G,
     point: Vector3<f64>,
     normal: Vector3<f64>,
-    offsets: Vec<Vector2<f64>>,
+    offsets: Arc<[Vector2<f64>]>,
     gain: f64,
     sigma: f64,
     /// The reference body pose is a variable (block 1) rather than held.
@@ -97,7 +97,7 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         current: Arc<IntensityImage>,
         reference: ReferenceView<G>,
         plane: PlanePoint,
-        offsets: Vec<Vector2<f64>>,
+        offsets: impl Into<Arc<[Vector2<f64>]>>,
         gain: f64,
         sigma: f64,
     ) -> Result<Self, String> {
@@ -106,6 +106,7 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         if !acts_on_points::<G>() {
             return Err(format!("{name}: {} does not act on 3-D points", G::NAME));
         }
+        let offsets = offsets.into();
         if offsets.len() < 2 {
             return Err(format!("{name}: need at least two patch offsets"));
         }
@@ -176,7 +177,7 @@ impl<G: LieGroup, CAM: CameraModel> PhotometricTwoViewFactor<G, CAM> {
         let centre = self.camera.project(&in_camera).ok()?;
         let mut current = Vec::with_capacity(self.offsets.len());
         let mut reference = Vec::with_capacity(self.offsets.len());
-        for offset in &self.offsets {
+        for offset in self.offsets.iter() {
             let u = centre + offset;
             let ray = rotation * self.camera.unproject(&u).ok()?;
             let along = ray.dot(&self.normal);

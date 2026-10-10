@@ -12,13 +12,14 @@
 //!
 //! so the block's Jacobian columns are the inner ones times `Ad(Δ⁻¹)`.
 
-use faer::Mat;
+use faer::prelude::Reborrow;
 use faer::prelude::ReborrowMut;
+use nalgebra::DMatrix;
 
 use apex_manifolds::{LieGroup, Tangent};
 
 use crate::core::variable::ManifoldVariable;
-use crate::factors::Factor;
+use crate::factors::{Factor, NormalBlocks};
 
 /// `inner` with block `block` (of group `G`) evaluated at `X·Δ`.
 pub struct RightOffset<F: Factor, G: LieGroup> {
@@ -80,24 +81,39 @@ impl<F: Factor, G: LieGroup + Send + Sync + 'static> Factor for RightOffset<F, G
             self.inner.linearize(&shifted, residual, None);
             return;
         };
-        let (rows, cols) = self.inner.jacobian_shape();
-        let mut inner = Mat::<f64>::zeros(rows, cols);
-        self.inner
-            .linearize(&shifted, residual, Some(inner.as_mut()));
+        // The inner factor writes straight into `jac`; the block's columns are
+        // then right-multiplied by `Ad(Δ⁻¹)` in place, a row at a time.
+        self.inner.linearize(&shifted, residual, Some(jac.rb_mut()));
         let dof = G::TangentVector::DIM;
-        for row in 0..rows {
-            for col in 0..cols {
-                let value = if (self.column..self.column + dof).contains(&col) {
-                    let k = col - self.column;
-                    (0..dof)
-                        .map(|m| inner[(row, self.column + m)] * self.adjoint[m * dof + k])
-                        .sum()
-                } else {
-                    inner[(row, col)]
-                };
-                *jac.rb_mut().get_mut(row, col) = value;
+        let mut row_values = vec![0.0; dof];
+        for row in 0..jac.nrows() {
+            for (k, value) in row_values.iter_mut().enumerate() {
+                *value = (0..dof)
+                    .map(|m| *jac.rb().get(row, self.column + m) * self.adjoint[m * dof + k])
+                    .sum();
+            }
+            for (k, value) in row_values.iter().enumerate() {
+                *jac.rb_mut().get_mut(row, self.column + k) = *value;
             }
         }
+    }
+
+    /// The inner normal equations, the block's carried by `Ad(Δ⁻¹)`.
+    fn accumulate_normal(
+        &self,
+        params: &[&[f64]],
+        blocks: Option<&mut NormalBlocks<'_>>,
+    ) -> Option<f64> {
+        let moved = G::from_param_slice(params[self.block]).compose(&self.offset, None, None);
+        let mut shifted: Vec<&[f64]> = params.to_vec();
+        shifted[self.block] = moved.as_param_slice();
+        let Some(blocks) = blocks else {
+            return self.inner.accumulate_normal(&shifted, None);
+        };
+        let dof = G::TangentVector::DIM;
+        let adjoint = DMatrix::from_row_slice(dof, dof, &self.adjoint);
+        self.inner
+            .accumulate_normal(&shifted, Some(&mut blocks.transformed(self.block, adjoint)))
     }
 
     fn residual_dim(&self) -> usize {
@@ -122,6 +138,7 @@ mod tests {
     use super::*;
     use crate::factors::lidar::{LidarMapPlanesFactor, Plane, PlaneMatch};
     use apex_manifolds::se23::SE23;
+    use faer::Mat;
     use nalgebra::{UnitQuaternion, Vector3};
 
     fn factor() -> Result<LidarMapPlanesFactor<SE23>, String> {
@@ -136,6 +153,29 @@ mod tests {
             })
             .collect::<Result<Vec<_>, String>>()?;
         LidarMapPlanesFactor::new(matches)
+    }
+
+    /// Its normal equations are the inner ones carried by `Ad(Δ⁻¹)`.
+    #[test]
+    fn offset_normal_equations_match_its_jacobian() -> Result<(), String> {
+        let state = SE23::new(
+            Vector3::new(0.4, -1.2, 0.3),
+            Vector3::new(0.5, 0.1, -0.2),
+            UnitQuaternion::from_euler_angles(0.2, -0.1, 0.7),
+        );
+        let offset = SE23::new(
+            Vector3::new(0.012, -0.004, 0.002),
+            Vector3::zeros(),
+            UnitQuaternion::from_euler_angles(0.01, 0.005, -0.02),
+        );
+        let wrapped = RightOffset::new(factor()?, 0, 0, offset)?;
+        crate::factors::assert_normal_equations_match(
+            &wrapped,
+            &[state.as_param_slice()],
+            &[9],
+            1e-9,
+        );
+        Ok(())
     }
 
     /// The offset factor equals the inner one at `X·Δ`, and its Jacobian
