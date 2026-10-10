@@ -57,6 +57,7 @@ pub mod motion;
 pub mod navigation;
 pub mod offset;
 pub mod pose;
+pub mod projected;
 pub mod ranging;
 pub mod visual;
 
