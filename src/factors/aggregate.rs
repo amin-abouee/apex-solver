@@ -106,9 +106,12 @@ impl AggregateFactor {
         self.dofs.iter().sum()
     }
 
-    /// `H`, `g` and `c` of the parts at `params`.
     /// Add one part's `JᵀJ` and `Jᵀr` into `hessian` and `gradient`;
     /// returns its cost.
+    ///
+    /// Row by row, over the blocks the row touches: a plane factor's rows
+    /// each read one frame, so its `JᵀJ` is a few small diagonal blocks, not
+    /// the dense product of a mostly-zero Jacobian.
     fn accumulate(
         &self,
         part: &AggregatePart,
@@ -122,13 +125,7 @@ impl AggregateFactor {
         let mut jacobian = Mat::<f64>::zeros(rows, cols);
         part.factor
             .linearize(&part_params, &mut residual, Some(jacobian.as_mut()));
-        let j = DMatrix::from_fn(rows, cols, |r, c| jacobian[(r, c)]);
-        let r = DVector::from_column_slice(&residual);
-        let jt = j.transpose();
-        let h = &jt * &j;
-        let g = &jt * &r;
-        // Scatter by block: the part's block sits at its own column offset
-        // and at the aggregate's.
+        // (part column, aggregate column, width) of each block.
         let mut local = 0;
         let starts: Vec<(usize, usize, usize)> = part
             .blocks
@@ -139,15 +136,30 @@ impl AggregateFactor {
                 start
             })
             .collect();
-        for &(la, ga, da) in &starts {
-            let mut target = gradient.rows_mut(ga, da);
-            target += g.rows(la, da);
-            for &(lb, gb, db) in &starts {
-                let mut target = hessian.view_mut((ga, gb), (da, db));
-                target += h.view((la, lb), (da, db));
+        let mut active = Vec::with_capacity(starts.len());
+        for (row, &r) in residual.iter().enumerate() {
+            active.clear();
+            active.extend(
+                starts
+                    .iter()
+                    .filter(|(la, _, da)| (*la..la + da).any(|c| jacobian[(row, c)] != 0.0)),
+            );
+            for &&(la, ga, da) in &active {
+                for i in 0..da {
+                    let v = jacobian[(row, la + i)];
+                    if v == 0.0 {
+                        continue;
+                    }
+                    gradient[ga + i] += v * r;
+                    for &&(lb, gb, db) in &active {
+                        for k in 0..db {
+                            hessian[(ga + i, gb + k)] += v * jacobian[(row, lb + k)];
+                        }
+                    }
+                }
             }
         }
-        r.norm_squared()
+        residual.iter().map(|r| r * r).sum()
     }
 
     /// `H`, `g` and `c` of the parts at `params`. Fixed chunks, each summed
@@ -370,6 +382,67 @@ mod tests {
         let norm: f64 = cost_only.iter().map(|v| v * v).sum();
         assert!((norm - cost).abs() < 1e-9 * cost.max(1.0));
         assert_eq!(aggregate.parts(), 3);
+        Ok(())
+    }
+
+    /// The block-sparse sum equals the dense `Σ JᵢᵀJᵢ`, `Σ Jᵢᵀrᵢ`: plane
+    /// parts (rows on one block each) and a between factor (rows coupling
+    /// two blocks, read in reverse block order).
+    #[test]
+    fn sparse_accumulation_matches_the_dense_sum() -> Result<(), String> {
+        use crate::factors::pose::BetweenFactor;
+        let poses: Vec<SE3> = (0..3).map(|i| pose(f64::from(i))).collect();
+        let normal = Vector3::new(0.1, 0.2, 1.0).normalize();
+        let plane = LidarPlaneMomentFactor::<SE3>::new(
+            vec![
+                points(&poses[0], normal, 2.0, 0),
+                points(&poses[2], normal, 2.0, 1),
+            ],
+            PointMoments::default(),
+            0.01,
+        )?;
+        let between = BetweenFactor::new(pose(0.7));
+        let parts = vec![
+            AggregatePart {
+                factor: Box::new(plane),
+                blocks: vec![0, 2],
+            },
+            AggregatePart {
+                factor: Box::new(between),
+                blocks: vec![2, 1],
+            },
+        ];
+        let blocks: Vec<Vec<usize>> = parts.iter().map(|p| p.blocks.clone()).collect();
+        let aggregate = AggregateFactor::new(parts, vec![6, 6, 6])?;
+        let params: Vec<&[f64]> = poses.iter().map(|p| p.as_param_slice()).collect();
+        let (hessian, gradient, cost) = aggregate.normal_equations(&params);
+
+        let mut dense_h = DMatrix::<f64>::zeros(18, 18);
+        let mut dense_g = DVector::<f64>::zeros(18);
+        let mut dense_c = 0.0;
+        for (part, blocks) in aggregate.parts.iter().zip(&blocks) {
+            let (rows, cols) = part.factor.jacobian_shape();
+            let mine: Vec<&[f64]> = blocks.iter().map(|&b| params[b]).collect();
+            let mut r = vec![0.0; rows];
+            let mut j = Mat::<f64>::zeros(rows, cols);
+            part.factor.linearize(&mine, &mut r, Some(j.as_mut()));
+            let mut full = DMatrix::<f64>::zeros(rows, 18);
+            for (local, &block) in blocks.iter().enumerate() {
+                for c in 0..6 {
+                    for row in 0..rows {
+                        full[(row, 6 * block + c)] = j[(row, 6 * local + c)];
+                    }
+                }
+            }
+            let rd = DVector::from_column_slice(&r);
+            dense_h += full.transpose() * &full;
+            dense_g += full.transpose() * &rd;
+            dense_c += rd.norm_squared();
+        }
+        assert!(dense_h.fixed_view::<6, 6>(6, 12).norm() > 0.0);
+        assert!((hessian - &dense_h).norm() < 1e-12 * dense_h.norm());
+        assert!((gradient - &dense_g).norm() < 1e-12 * (1.0 + dense_g.norm()));
+        assert!((cost - dense_c).abs() < 1e-12 * dense_c.max(1.0));
         Ok(())
     }
 

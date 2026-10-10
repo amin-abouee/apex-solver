@@ -41,6 +41,11 @@
 use std::marker::PhantomData;
 
 use faer::prelude::ReborrowMut;
+use std::any::TypeId;
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+
 use nalgebra::{Matrix3, SymmetricEigen, Vector3};
 
 use apex_manifolds::{LieGroup, Tangent};
@@ -254,9 +259,23 @@ fn smallest_axis(scatter: &Matrix3<f64>) -> Option<Vector3<f64>> {
         .then(|| eigen.eigenvectors.column(order[0]).into_owned())
 }
 
+/// A state's affine map and action Jacobians; see [`affine_action`].
+type Action = (Matrix3<f64>, Vector3<f64>, [Vec<Vector3<f64>>; 4]);
+
+/// Recent states' actions per thread, keyed by group and exact parameters.
+const ACTION_CACHE: usize = 32;
+
+/// A cached action: its group, the state's parameters, the action.
+type CachedAction = (TypeId, Vec<f64>, Rc<Action>);
+
+thread_local! {
+    static ACTIONS: RefCell<VecDeque<CachedAction>> =
+        RefCell::new(VecDeque::with_capacity(ACTION_CACHE));
+}
+
 /// The affine map `s ↦ A·s + b` of `state`'s action, and the action's
 /// Jacobian `∂(X⊙s)/∂X` (3 × dof) at the origin and at each unit axis.
-fn affine_action<G: LieGroup>(state: &G) -> (Matrix3<f64>, Vector3<f64>, [Vec<Vector3<f64>>; 4]) {
+fn affine_action<G: LieGroup>(state: &G) -> Action {
     let dof = state.tangent_dim();
     let at = |s: &Vector3<f64>| {
         let mut jacobian = G::zero_jacobian();
@@ -274,6 +293,28 @@ fn affine_action<G: LieGroup>(state: &G) -> (Matrix3<f64>, Vector3<f64>, [Vec<Ve
     (a, b, [j0, jx, jy, jz])
 }
 
+/// [`affine_action`] of the state stored as `param`, shared by every plane
+/// a window state sees: a window has a handful of states and thousands of
+/// planes, all linearized at the same parameters.
+fn cached_action<G: LieGroup + 'static>(param: &[f64]) -> Rc<Action> {
+    let group = TypeId::of::<G>();
+    ACTIONS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, _, action)) = cache
+            .iter()
+            .find(|(g, key, _)| *g == group && key.as_slice() == param)
+        {
+            return Rc::clone(action);
+        }
+        let action = Rc::new(affine_action(&G::from_param_slice(param)));
+        if cache.len() == ACTION_CACHE {
+            cache.pop_front();
+        }
+        cache.push_back((group, param.to_vec(), Rc::clone(&action)));
+        action
+    })
+}
+
 impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
     fn linearize(
         &self,
@@ -282,9 +323,9 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let dof = G::TangentVector::DIM;
-        let actions: Vec<_> = params
+        let actions: Vec<Rc<Action>> = params
             .iter()
-            .map(|param| affine_action(&G::from_param_slice(param)))
+            .map(|param| cached_action::<G>(param))
             .collect();
         let mut jac = jacobian;
         if let Some(jac) = jac.as_mut() {
@@ -299,7 +340,8 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         let parts: Vec<(f64, Vector3<f64>, Matrix3<f64>)> = actions
             .iter()
             .zip(&self.frames)
-            .map(|((a, b, _), frame)| {
+            .map(|(action, frame)| {
+                let (a, b, _) = &**action;
                 let scatter = a * frame.root.transpose() * frame.root * a.transpose();
                 (frame.count, a * frame.mean + b, scatter)
             })
@@ -323,7 +365,8 @@ impl<G: LieGroup + Send + Sync + 'static> Factor for LidarPlaneMomentFactor<G> {
         };
         let offset = -normal.dot(&mean);
         let information = 1.0 / self.sigma;
-        for (block, ((a, b, columns), frame)) in actions.iter().zip(&self.frames).enumerate() {
+        for (block, (action, frame)) in actions.iter().zip(&self.frames).enumerate() {
+            let (a, b, columns) = &**action;
             let a_n = a.transpose() * normal;
             let spread = frame.root * a_n * information;
             let root_n = frame.count.sqrt();
@@ -400,6 +443,35 @@ mod tests {
     use apex_manifolds::sim3::Sim3;
     use faer::Mat;
     use nalgebra::UnitQuaternion;
+
+    /// The cache returns exactly the computed action, keeps groups with the
+    /// same parameter length apart, and survives eviction.
+    #[test]
+    fn cached_actions_equal_computed_ones() {
+        let state = |i: usize| {
+            SE3::new(
+                Vector3::new(0.1 * i as f64, 0.2, -0.3),
+                UnitQuaternion::from_euler_angles(0.01 * i as f64, 0.2, -0.1),
+            )
+        };
+        for i in 0..2 * ACTION_CACHE {
+            let s = state(i);
+            let cached = cached_action::<SE3>(s.as_param_slice());
+            assert_eq!(*cached, affine_action(&s));
+            assert_eq!(*cached_action::<SE3>(s.as_param_slice()), affine_action(&s));
+        }
+        let first = state(0);
+        assert_eq!(
+            *cached_action::<SE3>(first.as_param_slice()),
+            affine_action(&first)
+        );
+        // A different group at the same pose: a distinct entry.
+        let sim = Sim3::new(first.translation(), first.rotation_quaternion(), 1.5);
+        assert_eq!(
+            *cached_action::<Sim3>(sim.as_param_slice()),
+            affine_action(&sim)
+        );
+    }
 
     /// Body-frame points of a tilted plane `n·w = 2`, as seen from `state`,
     /// with millimetres of off-plane noise.
