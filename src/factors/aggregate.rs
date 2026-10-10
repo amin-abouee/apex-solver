@@ -25,6 +25,8 @@
 use faer::Mat;
 use faer::prelude::ReborrowMut;
 use nalgebra::{DMatrix, DVector, SymmetricEigen};
+use std::sync::Mutex;
+
 use rayon::prelude::*;
 
 use crate::core::variable::ManifoldVariable;
@@ -54,6 +56,17 @@ pub struct AggregateFactor {
     offsets: Vec<usize>,
     /// Column offset of each part's blocks, per part.
     part_offsets: Vec<Vec<usize>>,
+    /// The normal equations of the last trial point, by its parameters: a
+    /// trial step's cost evaluation builds them, and the optimizer's next
+    /// linearization — at the accepted step, the same parameters — reuses
+    /// them instead of a second pass over the parts.
+    trial: Mutex<Option<Trial>>,
+}
+
+/// Normal equations `(H, g, c)` at the parameters they were built at.
+struct Trial {
+    params: Vec<f64>,
+    equations: (DMatrix<f64>, DVector<f64>, f64),
 }
 
 impl AggregateFactor {
@@ -101,6 +114,7 @@ impl AggregateFactor {
             dofs,
             offsets,
             part_offsets,
+            trial: Mutex::new(None),
         })
     }
 
@@ -224,31 +238,6 @@ impl AggregateFactor {
                 (h1 + h2, g1 + g2, c1 + c2)
             })
     }
-
-    /// The parts' summed cost alone.
-    fn cost(&self, params: &[&[f64]]) -> f64 {
-        let costs: Vec<Vec<f64>> = self
-            .parts
-            .par_chunks(CHUNK)
-            .map(|chunk| {
-                let mut part_params: Vec<&[f64]> = Vec::new();
-                chunk
-                    .iter()
-                    .map(|part| {
-                        part_params.clear();
-                        part_params.extend(part.blocks.iter().map(|&b| params[b]));
-                        if let Some(cost) = part.factor.accumulate_normal(&part_params, None) {
-                            return cost;
-                        }
-                        let mut residual = vec![0.0; part.factor.residual_dim()];
-                        part.factor.linearize(&part_params, &mut residual, None);
-                        residual.iter().map(|r| r * r).sum::<f64>()
-                    })
-                    .collect()
-            })
-            .collect();
-        costs.iter().flatten().sum()
-    }
 }
 
 impl Factor for AggregateFactor {
@@ -259,13 +248,32 @@ impl Factor for AggregateFactor {
         jacobian: Option<faer::mat::MatMut<'_, f64>>,
     ) {
         let n = self.width();
+        let flat: Vec<f64> = params.iter().flat_map(|p| p.iter().copied()).collect();
         let Some(mut jac) = jacobian else {
-            // A cost evaluation (a trial step): only `‖r'‖² = c` matters.
+            // A cost evaluation (a trial step): only `‖r'‖² = c` matters, but
+            // the step is usually accepted and linearized next, so the
+            // normal equations are built now and kept.
+            let equations = self.normal_equations(params);
             residual.fill(0.0);
-            residual[n] = self.cost(params).sqrt();
+            residual[n] = equations.2.sqrt();
+            if let Ok(mut trial) = self.trial.lock() {
+                *trial = Some(Trial {
+                    params: flat,
+                    equations,
+                });
+            }
             return;
         };
-        let (hessian, gradient, cost) = self.normal_equations(params);
+        let kept = self
+            .trial
+            .lock()
+            .ok()
+            .and_then(|mut trial| trial.take())
+            .filter(|trial| trial.params == flat);
+        let (hessian, gradient, cost) = match kept {
+            Some(trial) => trial.equations,
+            None => self.normal_equations(params),
+        };
         let eigen = SymmetricEigen::new(hessian);
         let largest = eigen.eigenvalues.iter().fold(0.0_f64, |m, v| m.max(*v));
         let null = largest * RELATIVE_NULL;
@@ -499,6 +507,57 @@ mod tests {
         assert!((hessian - &dense_h).norm() < tolerance * dense_h.norm());
         assert!((gradient - &dense_g).norm() < tolerance * (1.0 + dense_g.norm()));
         assert!((cost - dense_c).abs() < tolerance * dense_c.max(1.0));
+        Ok(())
+    }
+
+    /// A trial's cost evaluation keeps its normal equations; linearizing at
+    /// the same point reuses them and equals a fresh linearization, and a
+    /// different point does not.
+    #[test]
+    fn a_trial_point_is_linearized_once() -> Result<(), String> {
+        use crate::factors::pose::PriorFactor;
+        let make = || -> Result<AggregateFactor, String> {
+            AggregateFactor::new(
+                vec![
+                    AggregatePart {
+                        factor: Box::new(PriorFactor::new(pose(0.4))),
+                        blocks: vec![0],
+                    },
+                    AggregatePart {
+                        factor: Box::new(PriorFactor::new(pose(0.9))),
+                        blocks: vec![1],
+                    },
+                ],
+                vec![6, 6],
+            )
+        };
+        let (a, b) = (pose(0.1), pose(0.7));
+        let params = [a.as_param_slice(), b.as_param_slice()];
+        let (rows, cols) = make()?.jacobian_shape();
+        let linearized = |factor: &AggregateFactor, params: &[&[f64]]| {
+            let mut r = vec![0.0; rows];
+            let mut j = Mat::<f64>::zeros(rows, cols);
+            factor.linearize(params, &mut r, Some(j.as_mut()));
+            (r, DMatrix::from_fn(rows, cols, |x, y| j[(x, y)]))
+        };
+        let fresh = linearized(&make()?, &params);
+
+        let reused = make()?;
+        let mut cost = vec![0.0; rows];
+        reused.linearize(&params, &mut cost, None);
+        assert!(reused.trial.lock().map_err(|e| e.to_string())?.is_some());
+        let total: f64 = fresh.0.iter().map(|v| v * v).sum();
+        assert!((cost[rows - 1].powi(2) - total).abs() < 1e-12 * total.max(1.0));
+        assert_eq!(linearized(&reused, &params), fresh);
+        assert!(reused.trial.lock().map_err(|e| e.to_string())?.is_none());
+
+        let moved = pose(0.2);
+        reused.linearize(
+            &[moved.as_param_slice(), b.as_param_slice()],
+            &mut cost,
+            None,
+        );
+        assert_eq!(linearized(&reused, &params), fresh);
         Ok(())
     }
 
