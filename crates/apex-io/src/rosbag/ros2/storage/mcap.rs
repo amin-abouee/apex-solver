@@ -1,15 +1,141 @@
-//! MCAP storage backend for reading ROS2 bag files
+//! MCAP storage backend for ROS2 bag files.
 //!
-//! This module provides support for reading ROS2 bag files stored in MCAP format.
-//! MCAP is a modern, efficient container format for multimodal log data.
+//! Reading streams: [`McapMessageStream`] pulls the file through mcap's
+//! sans-io [`LinearReader`](mcap::sans_io::linear_reader::LinearReader) a
+//! record at a time, so memory holds the chunk being read, not the file — a
+//! Hilti recording is 5-20 GB. Messages come out in file order, which is
+//! log-time order for a file written in time order, as recorders and
+//! [`McapWriter`] write them.
 
 use super::StorageReader;
 use crate::rosbag::error::{BagError, ReaderError, Result};
 use crate::rosbag::types::{Connection, Message, MessageDefinition, RawMessage};
-use mcap::MessageStream;
+use mcap::sans_io::linear_reader::{LinearReadEvent, LinearReader};
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+
+/// One message read from an MCAP file, with what its channel says about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamedMessage {
+    /// Its channel's topic.
+    pub topic: String,
+    /// Its schema's name — the message type, e.g. `sensor_msgs/msg/Imu` —
+    /// or the channel's encoding when it has no schema.
+    pub message_type: String,
+    /// Its channel's message encoding, e.g. `cdr` or `ros1`.
+    pub encoding: String,
+    /// Log time \[ns\].
+    pub log_time: u64,
+    /// The serialized message.
+    pub data: Vec<u8>,
+}
+
+/// The messages of one MCAP file, read a record at a time.
+pub struct McapMessageStream {
+    file: File,
+    reader: LinearReader,
+    /// Schema names by ID.
+    schemas: HashMap<u16, String>,
+    /// Topic, message type and encoding by channel ID.
+    channels: HashMap<u16, (String, String, String)>,
+    finished: bool,
+}
+
+impl McapMessageStream {
+    /// Stream the MCAP file at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`ReaderError`] if the file cannot be opened.
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = File::open(path).map_err(|e| {
+            ReaderError::generic(format!("Failed to open MCAP file {}: {e}", path.display()))
+        })?;
+        Ok(Self {
+            file,
+            reader: LinearReader::new(),
+            schemas: HashMap::new(),
+            channels: HashMap::new(),
+            finished: false,
+        })
+    }
+
+    fn fail(&mut self, error: impl std::fmt::Display) -> Option<Result<StreamedMessage>> {
+        self.finished = true;
+        Some(Err(ReaderError::generic(format!(
+            "Failed to read MCAP message: {error}"
+        ))))
+    }
+}
+
+impl Iterator for McapMessageStream {
+    type Item = Result<StreamedMessage>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.finished {
+            return None;
+        }
+        loop {
+            let event = match self.reader.next_event() {
+                None => {
+                    self.finished = true;
+                    return None;
+                }
+                Some(Err(error)) => return self.fail(error),
+                Some(Ok(event)) => event,
+            };
+            let (opcode, data) = match event {
+                LinearReadEvent::ReadRequest(need) => {
+                    let read = match self.file.read(self.reader.insert(need)) {
+                        Ok(read) => read,
+                        Err(error) => return self.fail(error),
+                    };
+                    self.reader.notify_read(read);
+                    continue;
+                }
+                LinearReadEvent::Record { opcode, data } => (opcode, data),
+            };
+            let record = match mcap::parse_record(opcode, data) {
+                Ok(record) => record,
+                Err(error) => return self.fail(error),
+            };
+            match record {
+                mcap::records::Record::Schema { header, .. } => {
+                    self.schemas.insert(header.id, header.name);
+                }
+                mcap::records::Record::Channel(channel) => {
+                    let message_type = self
+                        .schemas
+                        .get(&channel.schema_id)
+                        .cloned()
+                        .unwrap_or_else(|| channel.message_encoding.clone());
+                    self.channels.insert(
+                        channel.id,
+                        (channel.topic, message_type, channel.message_encoding),
+                    );
+                }
+                mcap::records::Record::Message { header, data } => {
+                    let Some((topic, message_type, encoding)) =
+                        self.channels.get(&header.channel_id)
+                    else {
+                        return self
+                            .fail(format!("message on unknown channel {}", header.channel_id));
+                    };
+                    return Some(Ok(StreamedMessage {
+                        topic: topic.clone(),
+                        message_type: message_type.clone(),
+                        encoding: encoding.clone(),
+                        log_time: header.log_time,
+                        data: data.into_owned(),
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+}
 
 /// MCAP storage reader implementation
 pub struct McapStorageReader {
@@ -19,8 +145,6 @@ pub struct McapStorageReader {
     topic_connections: Vec<Connection>,
     /// Whether the storage is currently open
     is_open: bool,
-    /// Loaded MCAP file contents (read fully into memory; deref to `&[u8]`).
-    mapped_files: Vec<Box<[u8]>>,
 }
 
 impl McapStorageReader {
@@ -32,32 +156,22 @@ impl McapStorageReader {
             mcap_paths,
             topic_connections: connections,
             is_open: false,
-            mapped_files: Vec::new(),
         })
     }
 
-    /// Get all topics and their message counts directly from MCAP files
+    /// Get all topics and their message counts directly from MCAP files —
+    /// one streaming pass over every file.
     pub fn get_topics_from_mcap(&self) -> Result<Vec<Connection>> {
         let mut topic_map: HashMap<String, (String, u64)> = HashMap::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file.as_ref()).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        let topic_name = &message.channel.topic;
-                        let entry = topic_map
-                            .entry(topic_name.clone())
-                            .or_insert((channel_type(&message.channel), 0));
-                        entry.1 += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read MCAP message: {e}");
-                    }
+        for message in self.stream(None, None, None)? {
+            match message {
+                Ok(message) => {
+                    topic_map
+                        .entry(message.topic)
+                        .or_insert((message.message_type, 0))
+                        .1 += 1;
                 }
+                Err(e) => tracing::warn!("Failed to read MCAP message: {e}"),
             }
         }
 
@@ -78,32 +192,69 @@ impl McapStorageReader {
 
         Ok(all_connections)
     }
+
+    /// Every file's messages in turn, those on `connections`' topics in
+    /// `[start, stop]` \[ns\] (all when `None`).
+    fn stream(
+        &self,
+        connections: Option<&[Connection]>,
+        start: Option<u64>,
+        stop: Option<u64>,
+    ) -> Result<impl Iterator<Item = Result<StreamedMessage>> + use<>> {
+        if !self.is_open {
+            return Err(ReaderError::BagNotOpen);
+        }
+        let topics: Option<Vec<String>> =
+            connections.map(|cs| cs.iter().map(|c| c.topic.clone()).collect());
+        let streams = self
+            .mcap_paths
+            .iter()
+            .map(|path| McapMessageStream::open(path))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(streams.into_iter().flatten().filter(move |message| {
+            let Ok(message) = message else {
+                return true;
+            };
+            topics.as_ref().is_none_or(|t| t.contains(&message.topic))
+                && start.is_none_or(|t| message.log_time >= t)
+                && stop.is_none_or(|t| message.log_time <= t)
+        }))
+    }
+
+    /// The connection a message on `topic` belongs to.
+    fn connection(&self, message: &StreamedMessage) -> Connection {
+        self.topic_connections
+            .iter()
+            .find(|c| c.topic == message.topic)
+            .cloned()
+            .unwrap_or_else(|| Connection {
+                id: 1,
+                topic: message.topic.clone(),
+                message_type: message.message_type.clone(),
+                message_definition: MessageDefinition::default(),
+                type_description_hash: String::new(),
+                message_count: 0,
+                serialization_format: message.encoding.clone(),
+                offered_qos_profiles: Vec::new(),
+            })
+    }
 }
 
 impl StorageReader for McapStorageReader {
     fn open(&mut self) -> Result<()> {
-        self.mapped_files.clear();
-
         for path in &self.mcap_paths {
-            let bytes: Box<[u8]> = std::fs::read(path)
-                .map_err(|e| {
-                    ReaderError::generic(format!(
-                        "Failed to read MCAP file {}: {}",
-                        path.display(),
-                        e
-                    ))
-                })?
-                .into_boxed_slice();
-
-            self.mapped_files.push(bytes);
+            if !path.is_file() {
+                return Err(ReaderError::generic(format!(
+                    "Failed to read MCAP file {}: not a file",
+                    path.display()
+                )));
+            }
         }
-
         self.is_open = true;
         Ok(())
     }
 
     fn close(&mut self) -> Result<()> {
-        self.mapped_files.clear();
         self.is_open = false;
         Ok(())
     }
@@ -118,69 +269,16 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<Message>> + '_>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: channel_type(&message.channel),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: message.channel.message_encoding.clone(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        let msg = Message {
-                            connection,
-                            topic: message.channel.topic.clone(),
-                            timestamp,
-                            data: message.data.to_vec(),
-                        };
-                        all_messages.push(Ok(msg));
-                    }
-                    Err(e) => {
-                        all_messages.push(Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        ))));
-                    }
-                }
-            }
-        }
-
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
-        });
-
-        Ok(Box::new(all_messages.into_iter()))
+        let stream = self.stream(connections, start, stop)?;
+        Ok(Box::new(stream.map(move |message| {
+            let message = message?;
+            Ok(Message {
+                connection: self.connection(&message),
+                topic: message.topic,
+                timestamp: message.log_time,
+                data: message.data,
+            })
+        })))
     }
 
     fn is_open(&self) -> bool {
@@ -197,68 +295,15 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Box<dyn Iterator<Item = Result<RawMessage>> + '_>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: channel_type(&message.channel),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: message.channel.message_encoding.clone(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        let raw_msg = RawMessage {
-                            connection,
-                            timestamp,
-                            raw_data: message.data.to_vec(),
-                        };
-                        all_messages.push(Ok(raw_msg));
-                    }
-                    Err(e) => {
-                        all_messages.push(Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        ))));
-                    }
-                }
-            }
-        }
-
-        all_messages.sort_by(|a, b| match (a, b) {
-            (Ok(msg_a), Ok(msg_b)) => msg_a.timestamp.cmp(&msg_b.timestamp),
-            _ => std::cmp::Ordering::Equal,
-        });
-
-        Ok(Box::new(all_messages.into_iter()))
+        let stream = self.stream(connections, start, stop)?;
+        Ok(Box::new(stream.map(move |message| {
+            let message = message?;
+            Ok(RawMessage {
+                connection: self.connection(&message),
+                timestamp: message.log_time,
+                raw_data: message.data,
+            })
+        })))
     }
 
     fn read_raw_messages_batch(
@@ -267,61 +312,9 @@ impl StorageReader for McapStorageReader {
         start: Option<u64>,
         stop: Option<u64>,
     ) -> Result<Vec<RawMessage>> {
-        let mut all_messages = Vec::new();
-
-        for mapped_file in &self.mapped_files {
-            let message_stream = MessageStream::new(mapped_file).map_err(|e| {
-                ReaderError::generic(format!("Failed to create message stream: {e}"))
-            })?;
-
-            for message_result in message_stream {
-                match message_result {
-                    Ok(message) => {
-                        if let Some(conns) = connections
-                            && !conns.iter().any(|c| c.topic == message.channel.topic)
-                        {
-                            continue;
-                        }
-
-                        let timestamp = message.log_time;
-                        if start.is_some_and(|t| timestamp < t) {
-                            continue;
-                        }
-                        if stop.is_some_and(|t| timestamp > t) {
-                            continue;
-                        }
-
-                        let connection = self
-                            .topic_connections
-                            .iter()
-                            .find(|c| c.topic == message.channel.topic)
-                            .cloned()
-                            .unwrap_or_else(|| Connection {
-                                id: 1,
-                                topic: message.channel.topic.clone(),
-                                message_type: channel_type(&message.channel),
-                                message_definition: MessageDefinition::default(),
-                                type_description_hash: String::new(),
-                                message_count: 0,
-                                serialization_format: message.channel.message_encoding.clone(),
-                                offered_qos_profiles: Vec::new(),
-                            });
-
-                        all_messages.push(RawMessage {
-                            connection,
-                            timestamp,
-                            raw_data: message.data.to_vec(),
-                        });
-                    }
-                    Err(e) => {
-                        return Err(ReaderError::generic(format!(
-                            "Failed to read MCAP message: {e}"
-                        )));
-                    }
-                }
-            }
-        }
-
+        let mut all_messages = self
+            .raw_messages_filtered(connections, start, stop)?
+            .collect::<Result<Vec<_>>>()?;
         all_messages.sort_by_key(|a| a.timestamp);
         Ok(all_messages)
     }
@@ -343,9 +336,9 @@ impl StorageReader for McapStorageReader {
 pub struct McapWriter {
     mcap_path: PathBuf,
     compression_mode: crate::rosbag::types::CompressionMode,
-    writer: Option<mcap::Writer<'static, std::io::BufWriter<File>>>,
-    /// Schemas added, by message type.
-    schemas: HashMap<String, std::sync::Arc<mcap::Schema<'static>>>,
+    writer: Option<mcap::Writer<std::io::BufWriter<File>>>,
+    /// Schema IDs, by message type.
+    schemas: HashMap<String, u16>,
     /// Channel ID and next sequence number, by topic.
     channels: HashMap<String, (u16, u32)>,
 }
@@ -407,20 +400,19 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
     }
 
     fn add_msgtype(&mut self, connection: &Connection) -> Result<()> {
-        if self.writer.is_none() {
+        let Some(writer) = self.writer.as_mut() else {
             return Err(BagError::BagNotOpen);
+        };
+        if !self.schemas.contains_key(&connection.message_type) {
+            let id = writer
+                .add_schema(
+                    &connection.message_type,
+                    "ros2msg",
+                    connection.message_definition.data.as_bytes(),
+                )
+                .map_err(mcap_error)?;
+            self.schemas.insert(connection.message_type.clone(), id);
         }
-        self.schemas
-            .entry(connection.message_type.clone())
-            .or_insert_with(|| {
-                std::sync::Arc::new(mcap::Schema {
-                    name: connection.message_type.clone(),
-                    encoding: "ros2msg".to_string(),
-                    data: std::borrow::Cow::Owned(
-                        connection.message_definition.data.as_bytes().to_vec(),
-                    ),
-                })
-            });
         Ok(())
     }
 
@@ -432,13 +424,20 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
         let Some(writer) = self.writer.as_mut() else {
             return Err(BagError::BagNotOpen);
         };
-        let channel = mcap::Channel {
-            topic: connection.topic.clone(),
-            schema: self.schemas.get(&connection.message_type).cloned(),
-            message_encoding: "cdr".to_string(),
-            metadata: std::collections::BTreeMap::new(),
-        };
-        let id = writer.add_channel(&channel).map_err(mcap_error)?;
+        // Schema 0 is MCAP's "no schema", for a type never added.
+        let schema_id = self
+            .schemas
+            .get(&connection.message_type)
+            .copied()
+            .unwrap_or(0);
+        let id = writer
+            .add_channel(
+                schema_id,
+                &connection.topic,
+                "cdr",
+                &std::collections::BTreeMap::new(),
+            )
+            .map_err(mcap_error)?;
         self.channels.insert(connection.topic.clone(), (id, 0));
         Ok(())
     }
@@ -470,16 +469,6 @@ impl crate::rosbag::storage::StorageWriter for McapWriter {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-}
-
-/// The message type a channel carries — its schema name, e.g.
-/// `geometry_msgs/TransformStamped` — falling back to the encoding for a
-/// channel recorded without a schema.
-fn channel_type(channel: &mcap::Channel<'_>) -> String {
-    channel.schema.as_ref().map_or_else(
-        || channel.message_encoding.clone(),
-        |schema| schema.name.clone(),
-    )
 }
 
 #[cfg(test)]
